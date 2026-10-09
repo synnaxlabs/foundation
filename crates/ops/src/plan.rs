@@ -3,20 +3,22 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
+use document::Source;
 use document::diagnostic::Diagnostic;
-use document::{Source, Span};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use spec::definition::{Definition, Kind};
 use types::name::Name;
 
-use crate::error::{Error, Note, Place, Problem};
+use crate::error::{Error, Place, Problem};
 use crate::front_end::{self, File, FrontEnd};
 
 #[cfg(test)]
 mod tests;
 
-/// The change from the files to the spec at `base`. `Source(i)` is `files[i]`.
+/// The change from the files to the spec at `base`, and the plan that `apply` takes.
+/// `Source(i)` is `files[i]`.
 ///
 /// # Errors
 ///
@@ -33,12 +35,12 @@ pub(crate) fn plan(
     members: &BTreeSet<Name>,
     front_ends: &BTreeMap<&'static str, FrontEnd>,
     kinds: &connector::kind::Table,
-) -> Result<Output, Error> {
+) -> Result<(Output, config::plan::Plan), Error> {
     let paths: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
     let failed = |diagnostics: Vec<Diagnostic>| {
         let problems = diagnostics
             .into_iter()
-            .map(|diagnostic| problem(diagnostic, &paths))
+            .map(|diagnostic| Problem::of(diagnostic, &paths))
             .collect();
         Error::Config(problems)
     };
@@ -52,51 +54,46 @@ pub(crate) fn plan(
         .collect();
     changes.sort_by(|(a, _), (b, _)| a.cmp(b));
     let changes: Vec<Change> = changes.into_iter().map(|(_, change)| change).collect();
-    let count = |action| {
-        changes
-            .iter()
-            .filter(|change| change.action == action)
-            .count()
-    };
-    Ok(Output {
-        base: Base {
-            version: plan.base.version,
-            root: plan.base.root.to_string(),
-        },
-        added: count(Action::Add),
-        changed: count(Action::Change),
-        removed: count(Action::Remove),
+    let output = Output {
+        base: Pointer::from(plan.base),
+        counts: Counts::of(changes.iter().map(|change| change.action)),
         homes: plan
             .homes
             .iter()
             .map(|(index, home)| (index.to_string(), home.to_string()))
             .collect(),
         changes,
-    })
+    };
+    Ok((output, plan))
 }
 
 /// The change from the files to the spec, as `plan` gives it.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub(crate) struct Output {
     /// The spec that the plan changes.
-    pub(crate) base: Base,
+    pub(crate) base: Pointer,
     /// Each change: the adds and changes in file order, then the removals.
     pub(crate) changes: Vec<Change>,
     /// The home node of each index of the files, as the placements give it, by index
     /// name. The apply gives this home only to an index with no home, so an index with
     /// a home keeps it.
     pub(crate) homes: BTreeMap<String, String>,
-    /// The count of changes with this action.
-    pub(crate) added: usize,
-    /// The count of changes with this action.
-    pub(crate) changed: usize,
-    /// The count of changes with this action.
-    pub(crate) removed: usize,
+    #[serde(flatten)]
+    pub(crate) counts: Counts,
 }
 
 impl Output {
+    /// The output as JSON.
+    pub(crate) fn json(&self) -> Value {
+        serde_json::to_value(self).expect("invariant: an output is plain JSON data")
+    }
+
     /// One line for each change, with a `key` line under it for each fingerprint, then
     /// the counts.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the table entries of #1744 call it")
+    )]
     pub(crate) fn text(&self) -> String {
         let lines: Vec<String> = self
             .changes
@@ -114,20 +111,60 @@ impl Output {
         format!(
             "{}{} to add, {} to change, {} to remove.\n",
             lines.concat(),
-            self.added,
-            self.changed,
-            self.removed
+            self.counts.added,
+            self.counts.changed,
+            self.counts.removed
         )
+    }
+}
+
+/// The count of changes with each action.
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub(crate) struct Counts {
+    /// The count of new definitions.
+    pub(crate) added: usize,
+    /// The count of definitions that stay with a new value.
+    pub(crate) changed: usize,
+    /// The count of definitions that go.
+    pub(crate) removed: usize,
+}
+
+impl Counts {
+    /// The count of each action in `actions`.
+    pub(crate) fn of(actions: impl Iterator<Item = Action>) -> Self {
+        let mut counts = Self {
+            added: 0,
+            changed: 0,
+            removed: 0,
+        };
+        for action in actions {
+            let count = match action {
+                Action::Add => &mut counts.added,
+                Action::Change => &mut counts.changed,
+                Action::Remove => &mut counts.removed,
+            };
+            *count += 1;
+        }
+        counts
     }
 }
 
 /// The version of a spec, and the root of its tree in lower-case hex.
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub(crate) struct Base {
+pub(crate) struct Pointer {
     /// The version of the spec: 0 before its first apply.
     pub(crate) version: u64,
     /// The root of the spec's tree, in lower-case hex.
     pub(crate) root: String,
+}
+
+impl From<spec::Pointer> for Pointer {
+    fn from(pointer: spec::Pointer) -> Self {
+        Self {
+            version: pointer.version,
+            root: pointer.root.to_string(),
+        }
+    }
 }
 
 /// One change of a plan.
@@ -166,17 +203,12 @@ impl Change {
                 config::Definition::Channel(_) => (Kind::Channel, None),
                 _ => unreachable!("invariant: `ops` knows each kind of definition"),
             };
-            let action = if change.old.is_some() {
-                Action::Change
-            } else {
-                Action::Add
-            };
-            (action, kind, entry.label_span, definition)
+            (Action::of(change), kind, entry.label_span, definition)
         } else {
             let stored = applied
                 .get(name)
                 .expect("invariant: a removal is of an applied definition");
-            (Action::Remove, stored.kind(), None, Some(stored))
+            (Action::of(change), stored.kind(), None, Some(stored))
         };
         let fingerprints = match definition {
             Some(Definition::Subject(subject)) => subject
@@ -195,7 +227,7 @@ impl Change {
             action,
             kind: kind.as_str().to_owned(),
             name: label.to_string(),
-            place: span.map(|span| place(span, paths)),
+            place: span.map(|span| Place::of(span, paths)),
             fingerprints,
         };
         (order, change)
@@ -211,45 +243,25 @@ pub(crate) enum Action {
 }
 
 impl Action {
+    /// What `change` does: it removes with no new definition, else changes with an
+    /// old one, else adds.
+    pub(crate) const fn of(change: &config::plan::Change) -> Self {
+        match (&change.old, &change.new) {
+            (_, None) => Self::Remove,
+            (Some(_), Some(_)) => Self::Change,
+            (None, Some(_)) => Self::Add,
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the table entries of #1744 call it")
+    )]
     const fn symbol(self) -> char {
         match self {
             Self::Add => '+',
             Self::Change => '~',
             Self::Remove => '-',
         }
-    }
-}
-
-/// The start of `span`, in the file of its source.
-fn place(span: Span, paths: &[PathBuf]) -> Place {
-    let path = usize::try_from(span.source().0)
-        .ok()
-        .and_then(|source| paths.get(source))
-        .expect("invariant: a span is in a file of the plan");
-    let start = span.start();
-    Place {
-        file: path
-            .to_str()
-            .expect("invariant: `read` refuses a path that is not UTF-8")
-            .to_owned(),
-        line: start.line + 1,
-        column: start.column + 1,
-    }
-}
-
-fn problem(diagnostic: Diagnostic, paths: &[PathBuf]) -> Problem {
-    Problem {
-        code: diagnostic.code.as_str().to_owned(),
-        message: diagnostic.message,
-        fix: diagnostic.fix,
-        place: diagnostic.span.map(|span| place(span, paths)),
-        notes: diagnostic
-            .notes
-            .into_iter()
-            .map(|note| Note {
-                text: note.text,
-                place: place(note.span, paths),
-            })
-            .collect(),
     }
 }

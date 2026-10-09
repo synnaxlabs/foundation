@@ -4,6 +4,7 @@
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV6};
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -11,12 +12,14 @@ use std::sync::mpsc;
 use std::task::{Context, Poll, Wake, Waker};
 use std::time::Duration;
 
-use env::net::{Error, Listener, Net, Tcp, tcp, udp};
+use env::net::{Error, Listener, Net, Tcp, tcp};
 use env::shards::Config;
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
 use crate::common::assert_joins;
+
+mod udp;
 
 const LOCALHOST: Ipv4Addr = Ipv4Addr::LOCALHOST;
 /// The bound of each wait in these tests.
@@ -30,7 +33,7 @@ fn options() -> tcp::Options {
     tcp::Options {
         send_buffer_bytes: 1 << 16,
         recv_buffer_bytes: 1 << 16,
-        unsent_bytes_max: 1 << 14,
+        unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
         delayed: false,
     }
 }
@@ -174,7 +177,7 @@ fn a_vectored_write_with_an_empty_first_part_takes_bytes() {
     on_thread("net-write-empty-first", || async {
         let net = net();
         let (_listener, mut client, mut server) = create_pair(&net).await;
-        let big = vec![7; 2 * options().unsent_bytes_max];
+        let big = vec![7; 2 * options().unsent_bytes_max.get()];
         let written = write(&mut client, &[&[], &big]).await;
         assert!(matches!(written, Ok(1..)), "{written:?}");
         let mut received = [0; 1];
@@ -315,7 +318,7 @@ fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
             assert!(written < 1 << 20, "the send buffer never fills: {written}");
         }
         if cfg!(target_os = "macos") {
-            let max = config.options.unsent_bytes_max;
+            let max = config.options.unsent_bytes_max.get();
             assert!(written <= 2 * max, "a write waits for the event: {written}");
         } else {
             assert!(
@@ -391,7 +394,7 @@ fn a_full_send_buffer_below_the_bound_makes_a_write_wait() {
         let net = net();
         let mut listener = listen(&net);
         let mut config = connect_config(listener.local());
-        config.options.send_buffer_bytes = config.options.unsent_bytes_max;
+        config.options.send_buffer_bytes = config.options.unsent_bytes_max.get();
         let mut client = net.connect(&config).await.expect("the listener accepts");
         let _server = accept(&mut listener).await;
         let bytes = vec![7; 1 << 20];
@@ -412,7 +415,7 @@ fn a_write_takes_at_most_the_unsent_bound() {
     on_thread("net-cap", || async {
         let net = net();
         let mut config = listen_config(SocketAddr::new(LOCALHOST.into(), 0));
-        config.options.unsent_bytes_max = 1 << 13;
+        config.options.unsent_bytes_max = NonZeroUsize::new(1 << 13).unwrap();
         let mut listener = net.listen(&config).expect("the loopback has a free port");
         let mut client = connect(&net, listener.local()).await;
         let mut server = accept(&mut listener).await;
@@ -429,7 +432,7 @@ fn a_write_after_a_small_write_takes_the_rest_of_the_unsent_bound() {
     on_thread("net-rest", || async {
         let net = net();
         let (_listener, mut client, _server) = create_pair(&net).await;
-        let max = options().unsent_bytes_max;
+        let max = options().unsent_bytes_max.get();
         assert_eq!(write(&mut client, &[&[7; 64]]).await, Ok(64));
         assert_eq!(write(&mut client, &[&vec![7; 1 << 20]]).await, Ok(max - 64));
     });
@@ -458,9 +461,9 @@ fn whole_parts_that_fill_the_unsent_bound_go_in_one_write() {
     on_thread("net-fill", || async {
         let net = net();
         let (_listener, mut client, _server) = create_pair(&net).await;
-        let half = vec![7; options().unsent_bytes_max / 2];
+        let half = vec![7; options().unsent_bytes_max.get() / 2];
         let written = write(&mut client, &[&half, &half, &[1]]).await;
-        assert_eq!(written, Ok(options().unsent_bytes_max));
+        assert_eq!(written, Ok(options().unsent_bytes_max.get()));
     });
 }
 
@@ -472,7 +475,7 @@ fn small_writes_below_the_unsent_bound_wait_for_no_event() {
         let net = net();
         let (_listener, mut client, _server) = create_pair(&net).await;
         assert_eq!(write(&mut client, &[&[7; 64]]).await, Ok(64));
-        for _ in 2..options().unsent_bytes_max / 64 {
+        for _ in 2..options().unsent_bytes_max.get() / 64 {
             assert_eq!(write_once(&mut client, &[7; 64]), Poll::Ready(64));
         }
     });
@@ -810,12 +813,12 @@ fn an_unsent_bound_past_a_c_int_fails_the_listen_and_the_connect() {
         let net = net();
         let listener = listen(&net);
         let mut config = connect_config(listener.local());
-        config.options.unsent_bytes_max = usize::MAX;
+        config.options.unsent_bytes_max = NonZeroUsize::MAX;
         let invalid = Err(Error::Io { code: 22 });
         let outcome = net.connect(&config).await.map(|_| ());
         assert_eq!(outcome, invalid);
         let mut config = listen_config(SocketAddr::new(LOCALHOST.into(), 0));
-        config.options.unsent_bytes_max = usize::MAX;
+        config.options.unsent_bytes_max = NonZeroUsize::MAX;
         assert_eq!(net.listen(&config).map(|_| ()), invalid);
     });
 }
@@ -1095,17 +1098,6 @@ fn an_accepted_stream_moves_to_another_thread_before_its_first_poll() {
         read_exact(&mut server, &mut received).await;
         assert_eq!(&received, b"moved");
     });
-}
-
-#[test]
-#[should_panic(expected = "os::net has no UDP driver yet")]
-fn udp_panics() {
-    let config = udp::Config {
-        local: SocketAddr::new(LOCALHOST.into(), 0),
-        send_buffer_bytes: 1 << 16,
-        recv_buffer_bytes: 1 << 16,
-    };
-    drop(net().udp(&config));
 }
 
 /// Polls a lookup of `host` with a counted waker and no runtime, so a `spawn_blocking`

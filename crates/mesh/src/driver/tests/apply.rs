@@ -16,7 +16,12 @@ use crate::change::HOMES_MAX;
 impl Cluster {
     /// Node `node` proposes the spec change of `definitions` on `base` at its next
     /// tick, with each node as a holder.
-    fn apply(&self, node: u8, base: Pointer, definitions: &BTreeMap<Name, Definition>) {
+    pub(super) fn apply(
+        &self,
+        node: u8,
+        base: Pointer,
+        definitions: &BTreeMap<Name, Definition>,
+    ) {
         self.apply_held(node, base, definitions, IDS.into(), BTreeMap::new());
     }
 
@@ -70,7 +75,10 @@ pub(super) fn create_subjects(
 }
 
 /// The pointer after `version` changes, at the tree of `definitions`.
-fn pointer(version: u64, definitions: &BTreeMap<Name, Definition>) -> Pointer {
+pub(super) fn pointer(
+    version: u64,
+    definitions: &BTreeMap<Name, Definition>,
+) -> Pointer {
     let update = spec::region::tree(&mut Chunks::default(), definitions);
     Pointer {
         version,
@@ -98,7 +106,7 @@ async fn open_kept(
 }
 
 /// The pointer of a region with no founding definitions.
-fn base() -> Pointer {
+pub(super) fn base() -> Pointer {
     Pointer {
         version: 0,
         root: tree::empty(),
@@ -313,9 +321,11 @@ fn of_two_applies_from_one_base_one_gives_the_pointer_and_the_other_stale() {
         cluster.script(|_| home(9));
         cluster.run(seconds(5));
         let board = cluster.board();
-        let [(_, _, Ok(moved)), (loser, _, Err(stale))] = board.applied.as_slice()
-        else {
-            panic!("run {run}: the calls gave {:?}", board.applied);
+        // The two calls end on two nodes, in either order.
+        let mut applied = board.applied.clone();
+        applied.sort_by_key(|(_, _, result)| result.is_err());
+        let [(_, _, Ok(moved)), (loser, _, Err(stale))] = applied.as_slice() else {
+            panic!("run {run}: the calls gave {applied:?}");
         };
         assert!(
             [pointer(1, &a), pointer(1, &b)].contains(moved),
@@ -400,6 +410,26 @@ fn two_calls_of_one_change_from_one_base_give_one_pointer() {
     for id in IDS {
         assert_eq!(board.pointers[&id], moved, "node {id}");
     }
+}
+
+// The second call finds the pointer that it makes, so the pointer moves once.
+#[test]
+fn a_lone_voter_gives_two_calls_of_one_change_from_one_base_one_pointer() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let definitions = create_subjects(&["plant.a"], 1);
+        let moved = pointer(1, &definitions);
+        assert_eq!(
+            mesh.apply(base(), definitions.clone(), BTreeMap::new())
+                .await,
+            Ok(moved)
+        );
+        assert_eq!(
+            mesh.apply(base(), definitions, BTreeMap::new()).await,
+            Ok(moved)
+        );
+        assert_eq!(mesh.pointer(), moved);
+    });
 }
 
 #[test]
@@ -749,6 +779,30 @@ fn a_failed_read_of_the_base_tree_gives_the_error_of_the_store() {
     assert_eq!(specs(&entries).len(), 1);
 }
 
+#[test]
+fn the_base_tree_comes_from_the_store_when_it_is_the_tree_in_use() {
+    let first = create_subjects(&["plant.a"], 1);
+    let moved = pointer(1, &first);
+    solo(move |node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        assert_eq!(mesh.apply(base(), first, BTreeMap::new()).await, Ok(moved));
+        assert_eq!(mesh.spec().await.unwrap().pointer, Some(moved));
+        let path = Path::new(BLOB).join(moved.root.to_string());
+        node.fail_file(&path, Operation::Open);
+        let second = create_subjects(&["plant.b"], 1);
+        let cause = files::Error::Io {
+            path,
+            operation: Operation::Open,
+            code: 5,
+        };
+        let failed = Error::Blob(blob::Error::Files(cause));
+        assert_eq!(
+            mesh.apply(moved, second, BTreeMap::new()).await,
+            Err(failed)
+        );
+    });
+}
+
 /// The spec changes of `entries`, in order.
 fn specs(entries: &[Entry]) -> Vec<Change> {
     let change = |entry: &Entry| match &entry.data {
@@ -928,6 +982,62 @@ fn two_equal_calls_with_a_kept_home_give_ok() {
         let one = mesh.apply(moved, b.clone(), both.clone()).await;
         let two = mesh.apply(moved, b, both).await;
         assert_eq!((one, two), (Ok(next), Ok(next)));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+        assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
+    });
+}
+
+// `INDEX` has a home, so the change leaves the pointer, and a later apply on it
+// applies.
+#[test]
+fn an_apply_of_the_tree_of_its_base_with_each_index_homed_gives_the_base() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let a = create_indexes(1);
+        let moved = pointer(1, &a);
+        let first = create_homes(1, "plant.node1");
+        assert_eq!(mesh.apply(base(), a.clone(), first).await, Ok(moved));
+        let other = create_homes(1, "plant.node2");
+        assert_eq!(mesh.apply(moved, a, other).await, Ok(moved));
+        assert_eq!(mesh.pointer(), moved);
+        assert_eq!(mesh.spec().await.unwrap().pointer, Some(moved));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+        let b = create_indexes(2);
+        let next = pointer(2, &b);
+        assert_eq!(mesh.apply(moved, b, BTreeMap::new()).await, Ok(next));
+    });
+}
+
+// The second call gives `INDEX` a home, so the pointer moves to the root of `moved`
+// at the next version, and the third call, which leaves the pointer, finds it.
+#[test]
+fn an_apply_of_the_tree_of_a_replaced_base_gives_stale() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let a = create_indexes(1);
+        let moved = pointer(1, &a);
+        let applied = mesh.apply(base(), a.clone(), BTreeMap::new()).await;
+        assert_eq!(applied, Ok(moved));
+        let homes = create_homes(1, "plant.node1");
+        let next = pointer(2, &a);
+        assert_eq!(mesh.apply(moved, a.clone(), homes).await, Ok(next));
+        let stale = Error::Stale {
+            base: moved,
+            pointer: next,
+        };
+        assert_eq!(mesh.apply(moved, a, BTreeMap::new()).await, Err(stale));
+    });
+}
+
+#[test]
+fn an_apply_at_the_root_of_its_base_that_gives_a_home_moves_the_pointer() {
+    solo(|node, tasks| async move {
+        let mesh = open_founded(&node, &tasks, 1).await;
+        let definitions = create_indexes(2);
+        let founded = pointer(0, &definitions);
+        let moved = pointer(1, &definitions);
+        let homes = create_homes(2, "plant.node2");
+        assert_eq!(mesh.apply(founded, definitions, homes).await, Ok(moved));
         assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
         assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
     });

@@ -42,7 +42,8 @@ pub(crate) enum Error {
     Algorithm(&'static str),
     /// It is more than one line.
     Lines,
-    /// The base64 does not decode to an Ed25519 key.
+    /// The base64 does not decode to an Ed25519 key, or is not the base64 that
+    /// `ssh-key` writes for that key.
     NotEd25519,
     /// The key is a point of small order.
     SmallOrder(types::ed25519::SmallOrder),

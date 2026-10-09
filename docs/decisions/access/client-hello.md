@@ -23,8 +23,9 @@
   a bad signature, which tell about the spec and so share one code (`Signature` too:
   `admit` checks it only for a listed key); each other step its own code, `UNSYNCED`
   21, `STALE` 22, `VIA` 23, `EXPIRED` 24, `CAPPED` 25, `CHANGED` 26. `hub` maps each
-  `access::proof::Error` to its code in one exhaustive `match`, and `serve` returns the
-  exact error for the node's log. `connection::Key` writes as UUID text in byte order.
+  `access::proof::Error` to its `Refusal` in one exhaustive `match`, and `serve` returns
+  the exact error for the node's log. `connection::Key` writes as UUID text in byte
+  order.
   Lost: one `REFUSED` for each refusal, which hides an unsynced node from a program;
   and a verify before the spec lookup, so that each refusal costs the same, which costs
   a verify for each hello from an unknown client. Decided by `laptop.architect` at

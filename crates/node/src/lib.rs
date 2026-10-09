@@ -6,6 +6,9 @@
 #[doc(hidden)]
 pub mod bench;
 mod directory;
+#[cfg(feature = "sim")]
+#[doc(hidden)]
+pub mod fuzz;
 mod handoff;
 mod identity;
 mod route;
@@ -21,6 +24,7 @@ mod task;
 #[cfg(not(loom))]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::iter;
@@ -31,7 +35,10 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
+use document::diagnostic::Diagnostic;
+use document::{Document, Source};
 use env::thread::Handle;
+use types::ed25519::PrivateKey;
 use types::frame::key_set::Interner;
 use types::time::{Span, Stamp};
 
@@ -78,12 +85,13 @@ pub struct Config<M> {
     /// has the node's key, and its card holds the public half of the node's private
     /// key, both from the file `node.key` in the data directory. Only `node` reads that
     /// file, so until the node founds its region itself (#1744), only the tests of
-    /// `node` give `Some`. Give the same value at each start: the node keeps no copy of
-    /// it, and until the mesh stores it (#1209), a log opened with another value checks
-    /// proofs against the wrong voters and starts at another spec. A patch until the
-    /// node keeps its region in its data directory when it founds or joins one, and
-    /// reads it at each start (#1744). The hub of each task knows each channel of the
-    /// founding's `definitions`. Give only a founding that `spec::region::check`
+    /// `node`, and the `acceptance` lab, which writes the file first with
+    /// [`create_key`], give `Some`. Give the same value at each start: the node keeps
+    /// no copy of it, and until the mesh stores it (#1209), a log opened with another
+    /// value checks proofs against the wrong voters and starts at another spec. A patch
+    /// until the node keeps its region in its data directory when it founds or joins
+    /// one, and reads it at each start (#1744). The hub of each task knows each channel
+    /// of the founding's `definitions`. Give only a founding that `spec::region::check`
     /// accepts. One with a data channel whose index is not an index of it, or with two
     /// channels of one key, makes shard 0 panic, and [`Node::join`] gives
     /// [`Error::Panicked`].
@@ -113,6 +121,8 @@ pub struct Node {
     failed: Option<Error>,
     /// The tasks for shard 0's hub.
     queue: task::Queue<task::Task>,
+    /// The node has a region, so shard 0 has an `ops::Node`.
+    regional: bool,
 }
 
 /// A started shard, with its error once it fails.
@@ -151,20 +161,20 @@ impl Node {
     /// the disk budget; shard 0 also takes each remainder. Unless the node stops first,
     /// shard 0 locks the data directory with the file `lock`, which it holds until each
     /// shard has closed its ring and each task of the mesh has ended, then records the
-    /// shard count in the data directory, or checks the one there, and each shard
-    /// opens its buffer in directory `shard-<i>` of its files, and makes it there when
-    /// it is not there. The shards open their buffers one after another, in order of
-    /// core. Once each buffer has opened, shard 0 reads the node's key and private key
-    /// from the file `node.key` in the data directory, and makes the file at the first
-    /// start once it has mesh time, then opens the mesh of [`Config::region`] when it
-    /// has one, then serves the port and admits every peer that proves its key, until
-    /// its transport or the mesh's group stops, which stops the node. Returns once each
-    /// shard runs or one has failed to start. When the disk budget holds no ring on
-    /// each shard, no shard starts, and [`Node::join`] gives [`Error::Disk`] with the
-    /// budget, the shard count, and the least budget. A failed start, a shard with no
-    /// memory, a data directory that another node holds or that was made for another
-    /// shard count, a key file that is not valid, or a buffer or a mesh that does not
-    /// open stops the node, and [`Node::join`] returns its error.
+    /// shard count in the data directory, or checks the one there, and each shard opens
+    /// its buffer in directory `shard-<i>` of its files, and makes it there when it is
+    /// not there. The shards open their buffers one after another, in order of core.
+    /// Once each buffer has opened, shard 0 reads the node's key and private key from
+    /// the file `node.key` in the data directory, and makes the file at the first start
+    /// once it has mesh time, unless [`create_key`] made it, then opens the mesh of
+    /// [`Config::region`] when it has one, then serves the port and admits every peer
+    /// that proves its key, until its transport or the mesh's group stops, which stops
+    /// the node. Returns once each shard runs or one has failed to start. When the disk
+    /// budget holds no ring on each shard, no shard starts, and [`Node::join`] gives
+    /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
+    /// start, a shard with no memory, a data directory that another node holds or that
+    /// was made for another shard count, a key file that is not valid, or a buffer or a
+    /// mesh that does not open stops the node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -173,16 +183,20 @@ impl Node {
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let cores = config.shards.cores().get();
+        let regional = config.region.is_some();
         let parts = match parts(config.budget, config.disk, cores) {
             Ok(parts) => parts,
             Err(small) => {
                 let count =
                     u64::try_from(cores).expect("invariant: a core count fits a u64");
-                return Self::failed(Error::Disk {
+                let min =
+                    types::byte::Size::from_bytes(small.min.saturating_mul(count));
+                let error = Error::Disk {
                     disk: config.disk,
                     cores,
-                    min: types::byte::Size::from_bytes(small.min.saturating_mul(count)),
-                });
+                    min,
+                };
+                return Self::failed(error, regional);
             }
         };
         let Ok(count) = u32::try_from(cores) else {
@@ -192,7 +206,7 @@ impl Node {
             Ok(bound) => bound.split(NonZeroUsize::MIN).pop(),
             Err(error) => {
                 let listen = config.listen;
-                return Self::failed(Error::Port { listen, error });
+                return Self::failed(Error::Port { listen, error }, regional);
             }
         };
         let endpoint = Endpoint {
@@ -204,13 +218,15 @@ impl Node {
         Self::launch(config, endpoint, parts.into_iter().zip(0..count))
     }
 
-    /// A node that failed with `error` before any shard started.
-    fn failed(error: Error) -> Self {
+    /// A node that failed with `error` before any shard started. `regional` is whether
+    /// its config has a region.
+    fn failed(error: Error, regional: bool) -> Self {
         Self {
             stop: Stop::default(),
             shards: Vec::new(),
             failed: Some(error),
             queue: task::pair().0,
+            regional,
         }
     }
 
@@ -234,6 +250,7 @@ impl Node {
         let cores = shards.cores().get();
         let handoff::Chain { first, last, links } = handoff::chain(cores);
         let (queue, inbox) = task::pair();
+        let regional = endpoint.region.is_some();
         let (mesh, clock) = clock::Clock::new(monotonic.clone());
         let serve = Serve {
             interner: last,
@@ -289,6 +306,7 @@ impl Node {
             shards: started,
             failed: error,
             queue,
+            regional,
         }
     }
 
@@ -307,7 +325,29 @@ impl Node {
     where
         F: Future<Output = ()> + 'static,
     {
-        self.queue.push(Box::new(move |hub| Box::pin(task(hub))));
+        self.queue
+            .push(Box::new(move |handles| Box::pin(task(handles.hub.clone()))));
+    }
+
+    /// Calls `task` with the operations on the node's mesh on shard 0, in the order
+    /// and with the guarantees of [`Node::spawn`]. Each new channel that an apply
+    /// makes gets a UUIDv7 key at mesh time.
+    ///
+    /// # Panics
+    ///
+    /// When [`Config::region`] is `None`: the node has no mesh.
+    pub fn operate<F>(&self, task: impl FnOnce(Rc<ops::Node>) -> F + Send + 'static)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        assert!(self.regional, "`operate` on a node with no region");
+        self.queue.push(Box::new(move |handles| {
+            let ops = handles
+                .ops
+                .as_ref()
+                .expect("invariant: a node with a region opens its mesh");
+            Box::pin(task(Rc::clone(ops)))
+        }));
     }
 
     /// Asks every shard to end. A shard then starts no claim of the data directory
@@ -340,6 +380,24 @@ impl Node {
         });
         error(self.failed, shards.collect())
     }
+}
+
+/// Makes the file `node.key` in `files`, the data directory of a node that has not
+/// started, with `key` and `private_key`, and makes it durable. Each start of the node
+/// then uses them. For tests and tools that must know a node's key before its first
+/// start; a node that starts with no file makes its own key.
+///
+/// # Errors
+///
+/// [`Error::Directory`] with [`env::files::Error::Exists`] when the file is there and
+/// holds a key, and [`Error::Directory`] for a file call that fails. It writes nothing
+/// over a key.
+pub async fn create_key(
+    files: &env::files::Files,
+    key: types::node::Key,
+    private_key: PrivateKey,
+) -> Result<(), Error> {
+    identity::store(files, &identity::Identity { key, private_key }).await
 }
 
 /// The error of [`Node::join`]: `failed`, else the first shard error by core, else
@@ -674,12 +732,14 @@ impl Serve {
     /// Loads the node's identity ([`identity::load`]) and opens the endpoint, then
     /// runs each task given with a hub over `home` that knows each channel of the
     /// region's founding spec, and serves the node's port, until `guard` completes,
-    /// the transport stops, or the mesh's group stops. A transport or a group that
-    /// stops goes into `failed` before any task drops. Then drops the tasks, the hub,
-    /// `home`, `guard`, each session and stream future, and the mesh, and waits for
-    /// each task of the mesh to end, the last of which drops the transport. Runs no
-    /// task and takes no session when a shard did not open, or when the identity did
-    /// not load or the mesh did not open, which goes into `failed`.
+    /// the transport stops, or the mesh's group stops, by the rank of [`end`]. A
+    /// transport or a group that ends it goes into `failed` before it drops the tasks
+    /// given that still run. Before it returns, it drops the tasks, the hub, `home`,
+    /// `guard`, each session and stream future, and the mesh, and, with a mesh, waits
+    /// for each task of the mesh to end. The transport drops with the last of the
+    /// port's future and the tasks of the mesh. Runs no task and takes no session when
+    /// a shard did not open, or when the identity did not load or the mesh did not
+    /// open, which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -717,6 +777,9 @@ impl Serve {
             Ok(opened) => opened,
             Err(error) => return fail(error),
         };
+        let ops = mesh.as_ref().map(|mesh| {
+            Rc::new(operations(mesh.clone(), self.time.clone(), entropy.clone()))
+        });
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
@@ -726,25 +789,13 @@ impl Serve {
             entropy,
             mesh: mesh.clone(),
         });
-        hub.define(definitions.iter().flatten());
+        hub.set_definitions(definitions.iter().flatten());
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
-        // `next` gives the stop of the group on a watch of any index.
-        let watch = mesh
-            .as_ref()
-            .map(|mesh| mesh.watch(types::channel::Key::from_u128(0)));
-        let group = async move {
-            let Some(mut watch) = watch else {
-                return std::future::pending().await;
-            };
-            loop {
-                if let Err(stopped) = watch.next().await {
-                    return stopped;
-                }
-            }
-        };
+        let group = stopped(mesh.as_ref());
         // The port's future holds the mesh, so it drops before the wait.
         {
-            let mut port = pin!(route::accept(transport, mesh, tasks.clone()));
+            let port = route::accept(transport, mesh, hub.clone(), tasks.clone());
+            let mut port = pin!(port);
             let mut group = pin!(group);
             let mut guard = pin!(guard);
             let stop = poll_fn(|cx| {
@@ -757,10 +808,65 @@ impl Serve {
                 // a task's drop.
                 ended.map(|error| error.map_or((), fail))
             });
-            self.inbox.serve(hub, tasks, stop).await;
+            self.inbox
+                .serve(task::Handles { hub, ops }, tasks, stop)
+                .await;
         }
         if let Some(ended) = ended {
             ended.await;
+        }
+    }
+}
+
+/// A new channel key: a UUIDv7 at mesh time read through `time`, with random bits
+/// from `entropy`.
+fn channel_key(
+    time: &clock::Reader,
+    entropy: &env::entropy::Entropy,
+) -> types::channel::Key {
+    // The time only orders keys, so a key before mesh time or 1970 has the time 0.
+    // Not an edge or the midpoint of the interval: an edge moves back when the error
+    // changes, and the midpoint when one edge stops at the end of the stamp range.
+    let at = match time.status() {
+        clock::Status::Synced(mesh) | clock::Status::Holdover(mesh, _) => {
+            mesh.time().max(Stamp::EPOCH)
+        }
+        clock::Status::Unsynced(_) => Stamp::EPOCH,
+    };
+    let mut random = [0; 16];
+    entropy.fill(&mut random);
+    types::channel::Key::v7(at, u128::from_le_bytes(random))
+}
+
+/// The operations on `mesh`, whose keys [`channel_key`] makes.
+fn operations(
+    mesh: mesh::Mesh,
+    time: clock::Reader,
+    entropy: env::entropy::Entropy,
+) -> ops::Node {
+    let key = move || channel_key(&time, &entropy);
+    let front_ends = BTreeMap::from([("hcl", ops::FrontEnd { read: hcl })]);
+    ops::Node::new(mesh, key, front_ends, connector::kind::Table::new())
+}
+
+/// The HCL front end.
+fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
+    config_hcl::read(source, text)
+        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
+}
+
+/// Resolves with the stop of the group of `mesh`, or never when the node has no mesh.
+fn stopped(mesh: Option<&mesh::Mesh>) -> impl Future<Output = mesh::Stopped> + use<> {
+    // `next` gives the stop of the group on a watch of any index.
+    let watch = mesh.map(|mesh| mesh.watch(types::channel::Key::from_u128(0)));
+    async move {
+        let Some(mut watch) = watch else {
+            return std::future::pending().await;
+        };
+        loop {
+            if let Err(stopped) = watch.next().await {
+                return stopped;
+            }
         }
     }
 }
@@ -837,8 +943,9 @@ pub enum Error {
     /// The chunk store did not open. The node took no session.
     Blob(blob::Error),
     /// The file `node.key` in the data directory is not a key that a node wrote:
-    /// another length, tag, or checksum. The node took no session and does not write
-    /// over the file, because a new key is a new node to its region.
+    /// another length that is not 0, or another tag or checksum. The node took no
+    /// session and does not write over the file, because a new key is a new node to its
+    /// region.
     Key,
     /// The node's port did not bind. No shard started.
     Port {
