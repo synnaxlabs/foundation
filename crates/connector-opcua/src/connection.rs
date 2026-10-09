@@ -34,10 +34,9 @@ const OPTIONS: tcp::Options = tcp::Options {
 const READ_BYTES: usize = 1 << 16;
 
 /// The most sends that wait on one connection. A send past it closes the connection.
-/// open62541 allocates each at most at the send buffer size of its channel. Sends
-/// wait from one pass to the next, so an owner keeps the chunks that it gives between
-/// two passes at most this: its requests in flight times the chunks of a message,
-/// plus what a stream has not taken yet.
+/// open62541 allocates each at most at the send buffer size of its channel. Sends wait
+/// from one pass to the next, and longer while a stream is full, so an owner keeps the
+/// chunks of its messages in flight at most this.
 const SENDS: usize = 256;
 
 /// The most sends that one write takes.
@@ -110,10 +109,10 @@ impl Manager {
     /// Moves the connections on and calls `run` until `run` gives a value, and gives
     /// it. `run` runs the loop with a timeout of 0, alone or through its client or
     /// server, and may poll its own sources with the context it gets. Between calls,
-    /// the drive sleeps until the next timer of the loop or a wake, also from a send
-    /// or a close that `run` or another task asks for. Before it gives the value, it
-    /// passes again while a connect, a send, or a close of the last call waits, so
-    /// it can also read and call open62541 back after that call.
+    /// the drive sleeps until the next timer of the loop or a wake, also from a send or
+    /// a close that `run` or another task asks for. Before it gives the value, it
+    /// passes again after each connect, send, or close that the last call or such a
+    /// pass asks for, so it can also read and call open62541 back after that call.
     ///
     /// # Panics
     ///
