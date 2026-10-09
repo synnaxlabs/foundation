@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use connector::kind::Table;
 use document::Source;
 use mesh::Mesh;
-use serde_json::json;
+use serde_json::{Value, json};
 use types::channel::Key;
 
 use super::Node;
 use crate::apply::Applied;
-use crate::common::{NODE, Reader, front_ends, placed_site, solo};
+use crate::common::{NODE, PLANT, Reader, front_ends, placed_site, solo};
 use crate::error::{Error, Problem};
-use crate::front_end;
+use crate::front_end::{self, File};
 use crate::plan::{self, Counts};
 
 /// The node of `mesh`, whose channel keys count from 1.
@@ -22,8 +22,26 @@ fn create_node(mesh: Mesh) -> Node {
         made.set(made.get() + 1);
         Key::from_u128(made.get())
     };
-    let kinds = Table::new().with("influx", Reader).with("opcua", Reader);
-    Node::new(mesh, key, front_ends(), kinds)
+    Node::new(mesh, key, front_ends(), kinds())
+}
+
+fn kinds() -> Table {
+    Table::new().with("influx", Reader).with("opcua", Reader)
+}
+
+/// The JSON output of `plan::plan` of `files` on `mesh`.
+async fn planned(mesh: &Mesh, files: Vec<(PathBuf, String)>) -> Value {
+    let spec = mesh.spec().await.expect("a spec");
+    let files: Vec<File> = files
+        .into_iter()
+        .map(|(path, text)| File { path, text })
+        .collect();
+    let base = spec.pointer.expect("a spec in use");
+    let names = mesh.names();
+    plan::plan(&files, base, &spec.definitions, &names, &front_ends(), &kinds())
+        .expect("a plan")
+        .0
+        .json()
 }
 
 fn site() -> Vec<(PathBuf, String)> {
@@ -47,8 +65,10 @@ fn refuses_an_empty_table_of_front_ends() {
 fn plans_and_applies_in_the_json_of_the_cli() {
     solo(|mesh| async move {
         let node = create_node(mesh.clone());
+        let expected = planned(&mesh, site()).await;
         let (plan, output) = node.plan(site()).await.expect("a plan");
         assert_eq!(output["added"], 3, "{output}");
+        assert_eq!(output, expected);
         let applied = node.apply(Path::new("site.plan"), &plan).await;
         let pointer = mesh.pointer();
         let expected = Applied {
@@ -71,6 +91,17 @@ fn plans_and_applies_in_the_json_of_the_cli() {
             panic!("a channel at site.time");
         };
         assert_eq!(mesh.watch(time.key).next().await, Ok(Some(NODE)));
+    });
+}
+
+#[test]
+fn plans_with_each_connector_kind_of_the_node() {
+    solo(|mesh| async move {
+        let node = create_node(mesh.clone());
+        let files = vec![(PathBuf::from("plant.hcl"), PLANT.to_owned())];
+        let expected = planned(&mesh, files.clone()).await;
+        let (_, output) = node.plan(files).await.expect("a plan");
+        assert_eq!(output, expected);
     });
 }
 

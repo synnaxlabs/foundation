@@ -202,6 +202,7 @@ fn gives_a_stale_plan_when_another_apply_commits_first() {
             ends => panic!("no apply in {ends:?}"),
         };
         assert_eq!(won.pointer, plan::Pointer::from(pointer));
+        assert_eq!(lost.as_ref().map_err(Error::status), Err(1));
         assert_eq!(lost, Err(stale));
     });
 }
@@ -280,6 +281,7 @@ fn refuses_bytes_that_are_not_a_plan_and_proposes_nothing() {
             .expect_err("no plan");
         let version = config::plan::Error::Version { found: b'p' };
         assert_eq!(error, Error::Plan(version));
+        assert_eq!(error.status(), 2);
         assert_eq!(
             error.text(),
             "error[ops.bad-plan]: the plan has format version 112, and this build \
@@ -294,6 +296,7 @@ fn refuses_bytes_that_are_not_a_plan_and_proposes_nothing() {
             .expect_err("a cut plan");
         let malformed = config::plan::Error::Malformed { at: 1 };
         assert_eq!(error, Error::Plan(malformed));
+        assert_eq!(error.status(), 2);
         assert_eq!(mesh.pointer(), base);
     });
 }
@@ -349,6 +352,7 @@ fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
             )
         );
         assert_eq!(error, Error::Apply(cause));
+        assert_eq!(error.status(), 1);
         assert_eq!(mesh.pointer(), pointer);
     });
 }
