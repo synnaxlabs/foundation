@@ -93,8 +93,9 @@ pub struct Region {
 struct State {
     home: ::home::Shard,
     interner: Interner,
-    channels: hash::Map<Name, Channel>,
-    /// Each channel in `channels`, by key.
+    /// The key of each channel in `defined`, by name.
+    channels: hash::Map<Name, Key>,
+    /// Each defined channel, by key.
     defined: hash::Map<Key, Channel>,
     /// Each open writer, by its home key.
     writers: Sessions<::home::writer::Key>,
@@ -378,14 +379,14 @@ impl State {
         let removed: hash::Set<Key> = self
             .channels
             .iter()
-            .filter(|&(name, known)| channels.get(name) != Some(&&known.0))
-            .map(|(_, known)| known.key())
+            .filter(|&(name, key)| channels.get(name) != Some(&&self.known(*key).0))
+            .map(|(_, &key)| key)
             .collect();
         let index = |channel: &spec::channel::Channel| {
             matches!(channel.kind, Kind::Index { .. }).then_some(channel.key)
         };
         let before: hash::Set<Key> = self
-            .channels
+            .defined
             .values()
             .filter_map(|known| index(&known.0))
             .collect();
@@ -400,8 +401,7 @@ impl State {
             let slot = self.interner.slots().index(key);
             self.home.shed(slot);
         }
-        self.channels
-            .retain(|_, known| !removed.contains(&known.key()));
+        self.channels.retain(|_, key| !removed.contains(key));
         self.defined.retain(|key, _| !removed.contains(key));
         let mut new: Vec<_> = channels
             .iter()
@@ -453,9 +453,24 @@ impl State {
 
     /// Makes `channel` known to sessions as `name`.
     fn define(&mut self, name: &Name, channel: &spec::channel::Channel) {
-        let channel = Channel(channel.clone());
-        self.defined.insert(channel.key(), channel.clone());
-        self.channels.insert(name.clone(), channel);
+        self.channels.insert(name.clone(), channel.key);
+        self.defined.insert(channel.key, Channel(channel.clone()));
+    }
+
+    /// The defined channel `key`.
+    ///
+    /// # Panics
+    ///
+    /// When `key` is not defined: each caller holds a defined key.
+    fn known(&self, key: Key) -> &Channel {
+        let channel = self.defined.get(&key);
+        channel.unwrap_or_else(|| panic!("invariant: channel {key} is defined"))
+    }
+
+    /// The defined channel named `name`, if any.
+    fn channel(&self, name: &Name) -> Option<&Channel> {
+        let key = self.channels.get(name)?;
+        Some(self.known(*key))
     }
 
     /// A block of `len` bytes from the home's pool.
