@@ -63,6 +63,8 @@
   that the caller drops while it waits keeps the registration until the next send of
   that sender ends. Supersedes "the next send that succeeds deregisters it" of item 3
   of https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541.
+  Decided by `laptop.architect-2` (2026-10-09 00:34 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071816983).
   The first poll of a UDP half binds it to its thread, whatever its result. A failed
   `dup` or registration gives `Io` for that poll alone, and the next poll tries again;
   nothing stores a failure. For a source that is not local or is of the other family,
