@@ -314,7 +314,8 @@ fn send_all(
     // datagram at a time and turns GSO off for the socket.
     if bound.state.max_gso_segments().get() > 1 {
         match send(&datagram(contents, Some(segment))) {
-            // Each full segment is over the path MTU, but a short last one can fit.
+            // A transmit holds at most `TRANSMIT_BYTES_MAX`, so each full segment is
+            // over the path MTU; a short last one can fit.
             Err(e) if errno(&e) == Errno::MSGSIZE => *next = contents.len() / segment,
             outcome => return sent(outcome, remote),
         }
