@@ -244,8 +244,9 @@
   closes its side, so that the drop sends no reset. It drops the stream with a warning
   10 s after the first close, so that a peer that reads slowly or never closes cannot
   hold it. Each connect, read, write, or close error gives a warning through the logger
-  of the loop, and `CLOSING` if no close gave it. The wake of a send on the thread of
-  the drive: decided by `laptop.architect-2`
+  of the loop. The first close, or an error before it, gives `CLOSING` once, at the next
+  run of the loop. The wake of a send on the thread of the drive: decided by
+  `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6074418284,
   2026-10-09 04:43 UTC). The rest, before the send bound and the context of `run`:
   approved by `laptop.architect-2`
@@ -259,5 +260,7 @@
   2026-10-09 17:46 UTC). The moves of the woken connections alone before the value:
   approved by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086285343,
-  2026-10-09 17:51 UTC). After each `run`, and `CLOSING` if no close gave it: approval
-  owed.
+  2026-10-09 17:51 UTC). The moves after each `run`, and the `CLOSING` of the first
+  close or an error before it: approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086768731,
+  2026-10-09).
