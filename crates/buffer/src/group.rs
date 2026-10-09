@@ -334,9 +334,7 @@ mod tests {
     }
 
     fn block(pool: &Pool, bytes: &[u8]) -> Block {
-        let mut unique = pool.alloc(bytes.len()).expect("the pool has room");
-        unique.copy_from_slice(bytes);
-        unique.freeze()
+        pool.copy(bytes).expect("the pool has room")
     }
 
     fn key(value: u128) -> channel::Key {

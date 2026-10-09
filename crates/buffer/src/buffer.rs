@@ -743,9 +743,7 @@ async fn create_header(
     layout: Layout,
 ) -> Result<Header, Error> {
     let header = Header::new(layout, random(entropy));
-    let mut block = pool.alloc(ALIGN)?;
-    block.copy_from_slice(&header.encode());
-    let block = block.freeze();
+    let block = pool.copy(&header.encode())?;
     file.write_at(0, &[block.clone(), block]).await?;
     file.sync().await?;
     Ok(header)
