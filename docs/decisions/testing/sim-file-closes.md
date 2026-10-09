@@ -6,7 +6,8 @@
   of the node, a leaked one too, in the order that their opens started. An open whose
   future dropped made no descriptor and adds nothing. A test asserts from it the order
   of two closes in one poll, which no probe can see. Lost: a close stamp per path, since
-  two closes in one poll have the same instant (#1835, decided by `laptop.architect-2`, 2026-10-09 04:51 UTC:
+  two closes in one poll have the same instant (#1835, decided by `laptop.architect-2`,
+  2026-10-09 04:51 UTC:
   https://github.com/synnaxlabs/foundation/issues/1835#issuecomment-6074501894; a crash
   of a held descriptor, 04:58 UTC:
   https://github.com/synnaxlabs/foundation/issues/1835#issuecomment-6074586228; the
