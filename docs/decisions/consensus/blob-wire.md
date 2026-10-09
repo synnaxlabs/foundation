@@ -63,11 +63,11 @@
   ends with bytes to come. This is the shape of CLIENT HELLO, and the counter is one
   crate-private type in `wire::common::body` that the hub bodies also use. Supersedes
   the body check, `body` of each decoder, and `FromServer` of
-  https://github.com/synnaxlabs/foundation/issues/1227#issuecomment-6046483057, and
-  `FromRequester::Body`. Lost: decoders that give a head or a body (a head-or-body enum
-  where the caller knows which comes, lost in CLIENT HELLO); one public body type for
-  `hub` and `blob` (each caller matches a third error type, and the texts of
-  `hub::Error` change). Decided by `laptop.architect` (2026-10-09T01:57:16Z):
+  https://github.com/synnaxlabs/foundation/issues/1227#issuecomment-6046483057.
+  `FromRequester` holds only gets and puts. Lost: decoders that give a head or a body (a
+  head-or-body enum where the caller knows which comes, lost in CLIENT HELLO); one
+  public body type for `hub` and `blob` (each caller matches a third error type, and the
+  texts of `hub::Error` change). Decided by `laptop.architect` (2026-10-09T01:57:16Z):
   https://github.com/synnaxlabs/foundation/issues/1681#issuecomment-6072682474, under
   the OK of 2026-10-08T16:52:55Z:
   https://github.com/synnaxlabs/foundation/pull/1918#issuecomment-6064815697.
