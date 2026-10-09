@@ -779,7 +779,15 @@ fn rogue(kind: &str, config: &str) -> BTreeMap<Name, Stored> {
 #[test]
 fn check_refuses_only_a_connector_of_a_kind_that_the_build_lacks() {
     let members = BTreeSet::from([name("n")]);
-    let found = config::plan::check(&rogue("nothing", ""), &members, &kinds());
+    let select = Selector::new(["rogue"]).expect("a selector");
+    let nodes = spec::placement::Nodes {
+        home: Some(name("n")),
+        ..spec::placement::Nodes::default()
+    };
+    let policy = spec::placement::Policy::new(select, nodes).expect("a policy");
+    let mut definitions = rogue("nothing", "");
+    definitions.insert(name("rogue.@placement"), Stored::Placement(policy));
+    let found = config::plan::check(&definitions, &members, &kinds());
     let expected = (
         "connector.unknown-kind",
         None,
