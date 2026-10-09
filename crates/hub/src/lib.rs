@@ -218,10 +218,11 @@ impl Hub {
     /// At the home of another node, each open reader holds one stream of the one
     /// session to it, so it also waits while that home allows this node no more
     /// streams, until another reader there drops. It gets each frame of the index, as
-    /// a view of only its channels and their index. A complete reader gets each live
-    /// frame written after the returned future resolves, until it misses one
+    /// a view of only its channels and their index. An unnamed complete reader gets
+    /// each live frame written after the returned future resolves, until it misses one
     /// ([`reader::Mode::Complete`]). A named reader takes over the open session of its
-    /// subject and name, which ends with [`reader::Ended::Replaced`].
+    /// subject and name, which ends with [`reader::Ended::Replaced`], and a named
+    /// complete one resumes as [`reader::Config::name`] says.
     ///
     /// # Errors
     ///

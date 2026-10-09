@@ -82,6 +82,28 @@ fn ends_a_replaced_reader_with_replaced_after_a_removal_of_its_channel() {
 }
 
 #[test]
+fn ends_a_named_complete_reader_behind_when_it_resumes_before_a_released_frame() {
+    for (seed, closed) in [(11, false), (12, true)] {
+        run(seed, move |test| async move {
+            let open = named("a", "r", Mode::Complete, Span::SECOND);
+            let mut first = test.hub.reader(open).await.expect("opens");
+            let mut writer = test.writer("w", &["value"]).await;
+            let now = test.now();
+            write(&mut writer, &[now], &[7]);
+            let received = first.next().await.expect("a frame");
+            assert_eq!(samples(&received, 2), [7]);
+            let first = (!closed).then_some(first);
+            let open = named("a", "r", Mode::Complete, Span::SECOND);
+            let mut reader = test.hub.reader(open).await.expect("opens");
+            write(&mut writer, &[now + 1], &[8]);
+            let ended = reader.next().await.expect_err("behind");
+            assert_eq!(ended, Ended::Behind, "closed: {closed}");
+            drop(first);
+        });
+    }
+}
+
+#[test]
 fn opens_a_named_reader_of_each_subject_and_name_on_its_own() {
     run(5, |test| async move {
         let mut readers = Vec::new();

@@ -290,7 +290,10 @@
   the open gives `ManyIndexes` with the least matched name and the least name on
   another index. A named reader has one session for each subject and name at the home
   of its index: a later open takes over the session, which ends with
-  `Ended::Replaced`. A named open before mesh time gives `Unsynced`. A hold on an
+  `Ended::Replaced`. A named complete reader that opens while the home holds its
+  position resumes where its last complete session opened, and ends with
+  `Ended::Behind` once a frame since then was released. A named open before mesh time
+  gives `Unsynced`. A hold on an
   unnamed or latest reader panics (#1742 plan:
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). A
   named reader whose index has its home at another node gives

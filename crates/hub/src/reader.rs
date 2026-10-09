@@ -56,7 +56,9 @@ pub struct Config {
     pub subject: Name,
     /// The reader's name, or `None`. A named reader has at most one session: an open
     /// takes over the session of the same subject and name. A named complete reader
-    /// that opens again starts past its last ack while it holds a position.
+    /// that opens while the home holds its position resumes where its last complete
+    /// session opened, and ends with [`Ended::Behind`] once a frame since then was
+    /// released.
     pub name: Option<Name>,
     /// How long the home holds a named complete reader's position after its session
     /// closes. Zero or more. It must be zero when the reader is unnamed or latest.
