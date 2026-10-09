@@ -101,6 +101,12 @@ struct State {
     remotes: reader::remote::Sessions,
     /// The waker of each reader that waits for a frame.
     wakers: hash::Map<::home::reader::Key, Waker>,
+    /// Each served open from its first key to its session, by a key from `opened`.
+    opens: Sessions<u64>,
+    /// The waker of each open in `opens`.
+    waiting: hash::Map<u64, Waker>,
+    /// The count of served opens.
+    opened: u64,
     /// The readers that [`::home::Shard::woken`] gave last.
     woken: Vec<::home::reader::Key>,
     commit: commit::Signal,
@@ -144,6 +150,9 @@ impl Hub {
             readers: Sessions::default(),
             remotes: reader::remote::Sessions::default(),
             wakers: hash::Map::default(),
+            opens: Sessions::default(),
+            waiting: hash::Map::default(),
+            opened: 0,
             woken: Vec::new(),
             commit: commit::Signal::default(),
             failed: None,
@@ -277,15 +286,15 @@ fn checked<'d>(
     named
 }
 
-/// The open sessions of one kind, by home key, with the channels of each. A session
-/// is open while it is here.
+/// The open sessions of one kind, by key, with the channels of each. A session is
+/// open while it is here.
 #[derive(Debug)]
 struct Sessions<K>(hash::Map<K, Open>);
 
 /// The channels of an open session, and its removal.
 #[derive(Debug)]
 struct Open {
-    keys: Box<[Key]>,
+    keys: Vec<Key>,
     removal: Removal,
 }
 
@@ -312,12 +321,29 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
     fn add(&mut self, key: K, keys: Box<[Key]>) -> Removal {
         let removal = Removal::default();
         let open = Open {
-            keys,
+            keys: keys.into_vec(),
             removal: removal.clone(),
         };
         let added = self.0.insert(key, open);
-        assert!(added.is_none(), "invariant: the home gives each key once");
+        assert!(added.is_none(), "invariant: each key is added once");
         removal
+    }
+
+    /// The channels of the open session `key`, to add to.
+    fn keys_mut(&mut self, key: K) -> &mut Vec<Key> {
+        &mut self
+            .0
+            .get_mut(&key)
+            .expect("invariant: the session is open")
+            .keys
+    }
+
+    /// Makes the open session `key` not open, and gives its channels.
+    fn take(&mut self, key: K) -> Vec<Key> {
+        self.0
+            .remove(&key)
+            .expect("invariant: the session is open")
+            .keys
     }
 
     /// Returns whether the session `key` was open, and makes it not open.
@@ -397,6 +423,12 @@ impl State {
         }
         for key in self.readers.end(removed) {
             if let Some(waker) = self.close_reader(key) {
+                waker.wake();
+            }
+        }
+        for key in self.opens.end(removed) {
+            self.opens.remove(key);
+            if let Some(waker) = self.waiting.remove(&key) {
                 waker.wake();
             }
         }
@@ -504,8 +536,8 @@ enum Away {
 }
 
 /// Waits until the mesh names this node the home of `index`. With no mesh, this node
-/// is the home. It changes no state, so the caller checks its channels again after
-/// it, then carries `index` with no `await` between.
+/// is the home. It changes no state, so the caller checks its channels again, or reads
+/// its removal, after it, then carries `index` with no `await` between.
 async fn home(
     state: &Rc<RefCell<State>>,
     index: types::channel::Key,

@@ -193,15 +193,17 @@
   (`serve::Error::Removed`). Each names the key of the first channel of the session that
   was removed. Each per-call check of a session (`Writer::write`, `Session::take`,
   `Credit::grant`) reads only a cell that the session shares with the hub, never a map,
-  so its cost stays the same while other sessions end. The hub finds a session by its
-  home key, as the shard never gives a key twice. The home stops carrying an index only
-  when its key is not an index of the new definitions (`Shard::shed`, HOME SURFACE), and
-  carries it again when it returns. A key holds at most two slots (`channel::Slots`):
-  its slot as an index, which never changes, as the buffer keys its tails by slot (X42),
-  and its slot as a data channel, which the hub retires at each removal. So a channel
-  defined later at a key gets a new slot, and a reader takes no series written under the
-  old definition. An index continues its seq after its key was a data channel, also
-  after a restart (`laptop.architect`, 2026-10-09T01:25:59Z:
+  so its cost stays the same while other sessions end. The hub finds a local writer or
+  reader by its home key, as the shard never gives a key twice, a remote reader by a
+  scan of its keys, and a served open by a count of the opens. The home stops carrying
+  an index only when its key is not an index
+  of the new definitions (`Shard::shed`, HOME SURFACE), and carries it again when it
+  returns. A key holds at most two slots (`channel::Slots`): its slot as an index, which
+  never changes, as the buffer keys its tails by slot (X42), and its slot as a data
+  channel, which the hub retires at each removal. So a channel defined later at a key
+  gets a new slot, and a reader takes no series written under the old definition. An
+  index continues its seq after its key was a data channel, also after a restart
+  (`laptop.architect`, 2026-10-09T01:25:59Z:
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072361464). So a slot
   names one definition of a data channel, and the newest frame of an index stays the
   current value of each other channel on it (B4). Lost: a drop of the newest frame of
@@ -211,18 +213,29 @@
   frame in each session, a cost per frame for a change that comes at an apply
   (`laptop.architect`, 2026-10-09T00:41:53Z:
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071897947). A served
-  open checks each key as its message arrives, and checks all of them again after it
-  waits for the home of its index, as a call between two messages of its keys run, or
-  during the wait, can remove one. Each open checks its names or keys again after it
-  waits for the home, and then carries each index and opens with no `await` between.
-  When the check gives another result, the open waits again (`laptop.architect`,
+  open checks each key as its message arrives, and is a session on each channel whose
+  key it checked, from that check. A removal of one of them ends it at once, in the
+  call, with `serve::Error::Removed` of the first channel of the open that a call
+  removed, and code `UNKNOWN`: also a rename, a move to another index, another data type
+  at the same key, and a removal that a later call undoes. While it reads its keys and
+  while it waits for the home, the call wakes it, as a peer can send nothing more and a
+  removed index can get no home. It reads its removal before it checks each later key
+  and after the wait, and then carries the index and opens with no `await` between. So
+  its index changes only at a removal, and it waits once. A key that a call changes
+  before the open checks it is checked against the new definitions. A local open by name
+  checks its names again after it waits for the home, then carries each index and opens
+  with no `await` between, and when the check gives another index, it waits again
+  (`laptop.architect`, 2026-10-09T05:24:32Z:
+  https://github.com/synnaxlabs/foundation/issues/2112#issuecomment-6074871156;
   2026-10-09T00:55:16Z:
-  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072038723). The call
-  checks the definitions before it changes anything: two channels with one key or one
-  name, or a data channel whose index is not an index of the definitions, panic. This
-  changes "A known key or name panics", "The hub keeps the key, the sample type, and the
-  index of each", and "The PR that defines channels at each new spec decides what a
-  known, renamed, or removed channel does" in
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072038723). This
+  changes "After it waits for each index, the open (writer, reader, and served) runs
+  its check again" in the second comment: a served open reads its removal in place of
+  that check. The call checks the definitions before it changes anything: two channels
+  with one key or one name, or a data channel whose index is not an index of the
+  definitions, panic. This changes "A known key or name panics", "The hub keeps the
+  key, the sample type, and the index of each", and "The PR that defines channels at
+  each new spec decides what a known, renamed, or removed channel does" in
   https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349. Lost: a
   session ends at its next call, under which a writer keeps the control of a removed
   index until it calls, and a reader that waits in `next` needs a wake anyway; and the
