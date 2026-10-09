@@ -256,30 +256,27 @@ impl Files {
     /// file that a rename to it moves there.
     fn left(&self, node: usize, path: &Path) -> Monotonic {
         let path = disk::normal(path);
-        let left = || {
-            self.queue
-                .iter()
-                .rev()
-                .map(|(at, key)| (*at, &self.flights[key]))
-        };
-        let left =
-            || left().filter(|(_, flight)| flight.node == node && flight.dropped);
-        let mut inodes: BTreeSet<_> =
-            self.disks[node].inode(&path).into_iter().collect();
-        for (_, flight) in left() {
-            if let Call::Rename { handle, to } = &flight.call
-                && disk::normal(to) == path
-            {
-                inodes.insert(handle.inode);
+        let dropped: Vec<_> = (self.queue.iter().rev())
+            .map(|(at, key)| (*at, &self.flights[key]))
+            .filter(|(_, flight)| flight.node == node && flight.dropped)
+            .collect();
+        let moved = dropped.iter().filter_map(|(_, flight)| match &flight.call {
+            Call::Rename { handle, to } if disk::normal(to) == path => {
+                Some(handle.inode)
             }
-        }
-        let on = |flight: &Flight| match flight.call.handle() {
-            Some(handle) => inodes.contains(&handle.inode),
-            None => disk::normal(&flight.path) == path,
-        };
-        left()
-            .find(|(_, flight)| on(flight))
-            .map_or(Monotonic::default(), |(at, _)| at)
+            _ => None,
+        });
+        let inodes: BTreeSet<_> = self.disks[node]
+            .inode(&path)
+            .into_iter()
+            .chain(moved)
+            .collect();
+        (dropped.iter())
+            .find(|(_, flight)| match flight.call.handle() {
+                Some(handle) => inodes.contains(&handle.inode),
+                None => disk::normal(&flight.path) == path,
+            })
+            .map_or(Monotonic::default(), |(at, _)| *at)
     }
 
     /// The true time at which the first call in flight ends.
