@@ -172,27 +172,33 @@ where
     }
 }
 
-/// The count of tasks that hold a [`Held`], with the waker of the one wait for zero.
+/// The tasks that [`Live::ended`] waits for.
 #[derive(Default)]
-struct Live(Rc<RefCell<(usize, Option<Waker>)>>);
+struct Live(Rc<RefCell<Count>>);
+
+#[derive(Default)]
+struct Count {
+    held: usize,
+    waiter: Option<Waker>,
+}
 
 /// One task that [`Live::ended`] waits for, until it drops.
-struct Held(Rc<RefCell<(usize, Option<Waker>)>>);
+struct Held(Rc<RefCell<Count>>);
 
 impl Live {
     fn hold(&self) -> Held {
-        self.0.borrow_mut().0 += 1;
+        self.0.borrow_mut().held += 1;
         Held(Rc::clone(&self.0))
     }
 
     /// Ends when no [`Held`] is left.
     async fn ended(&self) {
         std::future::poll_fn(|cx| {
-            let mut live = self.0.borrow_mut();
-            if live.0 == 0 {
+            let mut count = self.0.borrow_mut();
+            if count.held == 0 {
                 return Poll::Ready(());
             }
-            live.1 = Some(cx.waker().clone());
+            count.waiter = Some(cx.waker().clone());
             Poll::Pending
         })
         .await;
@@ -201,10 +207,10 @@ impl Live {
 
 impl Drop for Held {
     fn drop(&mut self) {
-        let mut live = self.0.borrow_mut();
-        live.0 -= 1;
-        if live.0 == 0
-            && let Some(waker) = live.1.take()
+        let mut count = self.0.borrow_mut();
+        count.held -= 1;
+        if count.held == 0
+            && let Some(waker) = count.waiter.take()
         {
             waker.wake();
         }
