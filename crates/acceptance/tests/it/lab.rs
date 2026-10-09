@@ -261,6 +261,10 @@ impl Lab {
                 net: host.net(),
                 listen: listen(host),
                 region: member.region.clone(),
+                name: member
+                    .name
+                    .parse()
+                    .expect("lab failure: a node name is a name"),
             });
             member.node = Some(node);
         }
