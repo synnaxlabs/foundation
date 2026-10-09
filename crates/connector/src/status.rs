@@ -275,16 +275,21 @@ impl Writer {
         Ok((writer, status))
     }
 
-    /// Writes `state` 0, with one more restart after the first start.
-    pub(crate) async fn start(&self) {
-        self.set(|session| {
+    /// Writes `state` 0, with one more restart after the first start, and returns
+    /// `true`. Returns `false` with no write when `cancel` is cancelled.
+    pub(crate) async fn start(&self) -> bool {
+        self.applied().await;
+        if self.cancel.cancelled() {
+            return false;
+        }
+        self.change(|session| {
             if session.started {
                 session.restarts = session.restarts.strict_add(1);
             }
             session.started = true;
             session.state = State::Running;
-        })
-        .await;
+        });
+        true
     }
 
     /// Writes `state` 3 with the class of a run that ended with `end`.
@@ -310,6 +315,13 @@ impl Writer {
     /// change before it or `cancel` is cancelled, so that no state replaces a state
     /// that the home did not apply.
     async fn set(&self, change: impl FnOnce(&mut Session)) {
+        self.applied().await;
+        self.change(change);
+    }
+
+    /// Waits until the home applied the last change of state or `cancel` is
+    /// cancelled.
+    async fn applied(&self) {
         self.cancel
             .race(async {
                 while self.session.borrow().unapplied {
@@ -317,6 +329,10 @@ impl Writer {
                 }
             })
             .await;
+    }
+
+    /// Writes the change of state that `change` makes.
+    fn change(&self, change: impl FnOnce(&mut Session)) {
         let mut session = self.session.borrow_mut();
         change(&mut session);
         session.unapplied = true;

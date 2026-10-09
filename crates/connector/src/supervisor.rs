@@ -149,8 +149,7 @@ impl Supervisor {
             ..
         } = &*self.0;
         let mut backoff = retry::Backoff::new(clock, entropy.rng(), RESTART);
-        while !cancel.cancelled() {
-            writer.start().await;
+        while writer.start().await {
             let token = Ended(cancel.child());
             let live = Rc::new(Live::default());
             let count = Count {
@@ -1565,6 +1564,63 @@ mod tests {
         assert_eq!(
             states, want,
             "`state` 3 written again 1 s after the run returned"
+        );
+    }
+
+    #[test]
+    fn starts_no_run_after_a_cancel_while_the_start_waits() {
+        let runs = run_on(|node, tasks| async move {
+            let script = Script {
+                steps: Mutex::new([Step::Hold(ms(1_000))].into()),
+                ..Script::default()
+            };
+            let runs = Arc::clone(&script.runs);
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let hub = inputs.hub.clone();
+            let (token, clock) = (Token::new(), node.clock());
+            let (canceller, sleeper) = (token.clone(), clock.clone());
+            tasks.spawn(async move {
+                sleeper.sleep(ms(500)).await;
+                let channels = ["state", "class", "restarts"]
+                    .map(|c| name(&format!("plant.script.status.{c}")))
+                    .into();
+                let hog = hub::writer::Config {
+                    subject: name("plant.other"),
+                    authority: Authority(1),
+                    lease: None,
+                    channels,
+                };
+                let hog = hub.writer(hog).await.expect("opens");
+                let series: Vec<_> = (hog.set().entries().iter().enumerate())
+                    .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
+                    .collect();
+                let mut held = Vec::new();
+                while let Ok(draft) = hog.draft(Form::Raw, &series) {
+                    held.push(draft);
+                }
+                sleeper.sleep(ms(2_000)).await;
+                canceller.cancel();
+                sleeper.sleep(ms(5_000)).await;
+                drop(held);
+            });
+            let (supervisor, start) = (Supervisor::new(inputs), clock.now());
+            let name = name("plant.script");
+            let result = supervisor.run("script", name, &config(), &token).await;
+            result.expect("ok after a cancel");
+            let runs: Vec<_> = runs
+                .lock()
+                .expect("no panic under the lock")
+                .iter()
+                .map(|(from, _)| *from - start)
+                .collect();
+            runs
+        });
+        assert_eq!(
+            runs,
+            [Span::ZERO],
+            "no run starts after the cancel at 2.5 s"
         );
     }
 
