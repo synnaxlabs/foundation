@@ -12,7 +12,7 @@ struct Run {
     sent: Vec<u64>,
     /// What the reader on node B got.
     received: Vec<Sample>,
-    /// What the home on node A holds.
+    /// What the home on node A holds. Until #274, what a reader on node A got.
     stored: Vec<Sample>,
     digest: u64,
 }
@@ -42,7 +42,8 @@ fn check(key: u64, link: sim::link::Config) -> Run {
 }
 
 /// Asserts that the home stored every value in order, with rising times, and that
-/// the reader got exactly what the home stored.
+/// the reader got exactly what the home stored. The lab stamps each sample, so the
+/// times check only that the home kept their order.
 fn assert_delivered(key: u64, run: &Run) {
     let stored: Vec<u64> = run.stored.iter().map(|s| s.value.to_bits()).collect();
     assert_eq!(
