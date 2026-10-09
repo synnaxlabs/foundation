@@ -275,8 +275,7 @@ impl Local {
                             charge,
                         )
                         .map_err(|::home::reader::Unsynced| Error::Unsynced)?;
-                    state.replace(opened.replaced);
-                    opened.key
+                    state.take_over(opened)
                 };
                 let (session, credit) = Session::with_credit(state, key, channels);
                 (session, Some(credit))
@@ -289,8 +288,7 @@ impl Local {
                         .home
                         .open_named_latest(channels.index, named)
                         .map_err(|::home::reader::Unsynced| Error::Unsynced)?;
-                    state.replace(opened.replaced);
-                    opened.key
+                    state.take_over(opened)
                 };
                 (Session::new(state, key, channels), None)
             }

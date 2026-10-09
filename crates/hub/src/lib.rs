@@ -380,12 +380,6 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
         self.0.remove(&key).is_some()
     }
 
-    /// Makes the open session `key` not open, and ends it with [`End::Replaced`].
-    fn replace(&mut self, key: K) {
-        let open = self.0.remove(&key).expect("invariant: the session is open");
-        open.ending.0.set(Some(End::Replaced));
-    }
-
     /// Ends each session on a channel of `removed` with the first such channel.
     /// Returns their keys in order, to close.
     fn end(&self, removed: &hash::Set<Key>) -> Vec<K> {
@@ -400,6 +394,15 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
             .collect();
         ended.sort_unstable();
         ended
+    }
+}
+
+impl Sessions<::home::reader::Key> {
+    /// Makes the open reader session `key` not open, and ends it with
+    /// [`End::Replaced`].
+    fn replace(&mut self, key: ::home::reader::Key) {
+        let open = self.0.remove(&key).expect("invariant: the session is open");
+        open.ending.0.set(Some(End::Replaced));
     }
 }
 
@@ -452,16 +455,16 @@ impl State {
         waker
     }
 
-    /// Ends the session `replaced`, which the home closed when a later open of its name
-    /// took it over, with [`reader::Ended::Replaced`].
-    fn replace(&mut self, replaced: Option<::home::reader::Key>) {
-        let Some(key) = replaced else {
-            return;
-        };
-        self.readers.replace(key);
-        if let Some(waker) = self.wakers.remove(&key) {
-            waker.wake();
+    /// Ends the session that `opened` took over, which the home closed, with
+    /// [`reader::Ended::Replaced`]. Returns the key of the new session.
+    fn take_over<K>(&mut self, opened: ::home::reader::Opened<K>) -> K {
+        if let Some(key) = opened.replaced {
+            self.readers.replace(key);
+            if let Some(waker) = self.wakers.remove(&key) {
+                waker.wake();
+            }
         }
+        opened.key
     }
 
     /// A block of `len` bytes from the home's pool.
