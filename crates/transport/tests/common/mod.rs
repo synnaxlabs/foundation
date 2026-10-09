@@ -1,11 +1,11 @@
-//! The keys, transport config, port part, and messages that the transport test
-//! binaries share.
+//! The keys, transport config, port part, messages, and pool fill that the transport
+//! test binaries share.
 
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
 
-use block::{Block, Heap, Pool};
+use block::{Block, Heap, Pool, Unique};
 use sim::node::Node;
 use transport::{Config, Port};
 use types::ed25519::PrivateKey;
@@ -46,4 +46,15 @@ pub(crate) fn filled(pool: &Pool, len: usize) -> Block {
     let mut block = pool.alloc(len).expect("the pool has room");
     block.fill(0x5a);
     block.freeze()
+}
+
+/// Takes every block of `pool` that could hold a message of `len` bytes.
+pub(crate) fn fill(pool: &Pool, len: usize) -> Vec<Unique> {
+    let mut full = Vec::new();
+    for len in [pool.largest(), len] {
+        while let Ok(block) = pool.alloc(len) {
+            full.push(block);
+        }
+    }
+    full
 }

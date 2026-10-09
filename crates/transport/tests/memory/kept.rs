@@ -20,8 +20,7 @@ use transport::{Address, Class, Error, Transport};
 use types::time::Span;
 
 use crate::ALLOCATOR;
-use crate::common::{CLIENT, PORT, SERVER, config, filled, part};
-use crate::fill;
+use crate::common::{CLIENT, PORT, SERVER, config, fill, filled, part};
 
 /// The most heap that the drop of the receiver gives back: a list of 64 chunks, since
 /// each slot is 32 bytes.
