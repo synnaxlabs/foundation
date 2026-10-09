@@ -1716,6 +1716,24 @@ fn a_rename_gives_its_path_only_to_its_own_descriptor() {
 }
 
 #[test]
+fn a_rename_of_a_removed_name_keeps_the_path_of_its_open() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    sim.run_on(&node, |node, _| async move {
+        let mut file = create(&node, "a", 0).await;
+        node.files().remove(Path::new("a")).await.unwrap();
+        let found = file.rename(Path::new("b")).await;
+        assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        drop(file);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), [PathBuf::from("a")]);
+}
+
+#[test]
 fn a_rename_onto_a_taken_name_keeps_the_path_of_its_open() {
     let mut sim = sim(0);
     let node = sim.node(node::Config {
