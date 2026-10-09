@@ -7,6 +7,7 @@
 #![cfg(target_os = "linux")]
 
 #[path = "common/mask.rs"]
+#[expect(dead_code, reason = "this binary only adds to the mask")]
 mod mask;
 #[path = "common/seccomp.rs"]
 mod seccomp;
@@ -16,7 +17,7 @@ mod seccomp;
 #[test]
 fn an_interrupt_whose_thread_cannot_start_keeps_the_mask() {
     let signals = [libc::SIGINT, libc::SIGTERM];
-    mask::block(libc::SIG_BLOCK, &[libc::SIGTERM]);
+    mask::block(&[libc::SIGTERM]);
     assert_eq!(
         mask::blocked(&signals),
         [libc::SIGTERM],

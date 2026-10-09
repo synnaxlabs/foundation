@@ -28,21 +28,21 @@ fn main() {
     // called `interrupt`.
     match std::env::args_os().nth(1) {
         Some(arg) if arg == "child" => {
-            mask::block(libc::SIG_SETMASK, &[]);
+            mask::set(&[]);
             child();
         }
         Some(arg) if arg == "blocked" => {
-            mask::block(libc::SIG_SETMASK, &[libc::SIGTERM]);
+            mask::set(&[libc::SIGTERM]);
             child();
         }
         #[cfg(target_os = "linux")]
         Some(arg) if arg == "early" => {
-            mask::block(libc::SIG_SETMASK, &[]);
+            mask::set(&[]);
             early(false);
         }
         #[cfg(target_os = "linux")]
         Some(arg) if arg == "early-waiting" => {
-            mask::block(libc::SIG_SETMASK, &[]);
+            mask::set(&[]);
             early(true);
         }
         _ => {
