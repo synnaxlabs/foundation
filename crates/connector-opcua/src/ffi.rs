@@ -315,7 +315,5 @@ pub(crate) mod test {
             data: *mut c_void,
             key: *mut u32,
         ) -> u32;
-
-        pub(crate) fn UA_UInt32_random() -> u32;
     }
 }
