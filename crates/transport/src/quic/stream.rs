@@ -4746,13 +4746,25 @@ mod tests {
         raw(pair.client.connection(), Dir::Uni, bytes, true);
         pair.run(RUN);
         let mut incoming = accept(&mut pair.server);
-        let now = pair.now();
-        let read = next(&mut pair.server, now, &mut incoming.receiver);
-        let broken = Error::Broken {
+        assert_each_read_broken(pair, &mut incoming.receiver, reason);
+    }
+
+    /// Asserts that each read of `receiver` on the server, before and after the
+    /// connection closes, gives the fault of `reason`, and that the reader holds no
+    /// bytes after it.
+    fn assert_each_read_broken(pair: &mut Pair, receiver: &mut Receiver, reason: &str) {
+        let broken = Err(Error::Broken {
             reason: reason.into(),
-        };
-        assert_eq!(read, Err(broken));
+        });
+        for _ in 0..2 {
+            let now = pair.now();
+            assert_eq!(next(&mut pair.server, now, receiver), broken);
+            // Private: a message outside the pool shows in no public count.
+            assert_eq!(receiver.reader.held(), (None, 0));
+        }
         assert_broken(pair, true, reason);
+        let now = pair.now();
+        assert_eq!(next(&mut pair.server, now, receiver), broken);
     }
 
     #[test]
@@ -4774,6 +4786,32 @@ mod tests {
                 misframe(&mut pair, &bytes, "the stream ended inside a message");
             });
         }
+    }
+
+    #[test]
+    fn that_end_inside_a_held_message_break_the_connection() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let connection = pair.client.connection();
+            let id = raw(
+                connection,
+                Dir::Uni,
+                &[byte(Class::Complete), 5, 1, 2],
+                false,
+            );
+            pair.run(RUN);
+            let mut receiver = accept(&mut pair.server).receiver;
+            let now = pair.now();
+            let read = next(&mut pair.server, now, &mut receiver);
+            assert_eq!(read, Ok(Poll::Pending));
+            // Private: a message outside the pool shows in no public count.
+            assert_eq!(receiver.reader.held(), (Some((2, 5)), 0));
+            let mut send = pair.client.connection().send_stream(id);
+            send.finish().expect("finished");
+            pair.run(RUN);
+            let reason = "the stream ended inside a message";
+            assert_each_read_broken(&mut pair, &mut receiver, reason);
+        });
     }
 
     #[test]
