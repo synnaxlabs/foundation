@@ -634,6 +634,19 @@ mod start {
         );
     }
 
+    #[test]
+    fn line_escapes_the_data_directory_as_an_error_does() {
+        let start = Start {
+            data: PathBuf::from("a.\nnode cloud runs in b\\c"),
+            json: false,
+            name: None,
+        };
+        assert_eq!(
+            start.line(&edge()),
+            "node edge runs in a.\\nnode cloud runs in b\\\\c. Stop it with Ctrl-C.\n"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn line_gives_a_data_directory_that_is_not_utf8_lossily() {

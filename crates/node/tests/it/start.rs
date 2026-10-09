@@ -36,6 +36,20 @@ fn a_node_prints_that_it_runs_as_json() {
 }
 
 #[test]
+fn a_data_directory_with_a_newline_prints_one_line() {
+    let mut rig = Rig::new();
+    rig.start_with(&["--name", "edge", "--data", "a\nb"]);
+    assert_eq!(
+        ended(&rig.stop()),
+        (
+            Some(0),
+            "node edge runs in a\\nb. Stop it with Ctrl-C.\n",
+            ""
+        )
+    );
+}
+
+#[test]
 fn a_restart_reads_the_name_from_the_data_directory() {
     let mut rig = Rig::new();
     rig.start();

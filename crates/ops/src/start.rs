@@ -5,7 +5,7 @@ use document::diagnostic::Code;
 use serde_json::Value;
 use types::name::Name;
 
-use crate::error::Error;
+use crate::error::{self, Error};
 
 /// The arguments of `foundation start`.
 #[derive(Debug, PartialEq, Eq)]
@@ -32,9 +32,10 @@ pub struct Failure {
 }
 
 impl Start {
-    /// The line that tells that the node `name` runs in [`Start::data`], as text or JSON,
-    /// with its newline. JSON gives the data directory with each byte that is not UTF-8
-    /// as U+FFFD.
+    /// The line that tells that the node `name` runs in [`Start::data`], as text or
+    /// JSON, with its newline. Text escapes the data directory as [`Start::fail`] does,
+    /// so the line stays one line. JSON gives it with each byte that is not UTF-8 as
+    /// U+FFFD.
     #[must_use]
     pub fn line(&self, name: &Name) -> String {
         if self.json {
@@ -43,7 +44,7 @@ impl Start {
             let data = Value::from(self.data.to_string_lossy());
             format!("{{\"name\":{name},\"data\":{data}}}\n")
         } else {
-            let data = self.data.display();
+            let data = error::escape(&self.data.to_string_lossy());
             format!("node {name} runs in {data}. Stop it with Ctrl-C.\n")
         }
     }

@@ -10,7 +10,8 @@
   thread of `main` writes `Start::line`: `node edge runs in foundation-data. Stop it
   with Ctrl-C.`, or `{"name":"edge","data":"foundation-data"}` with `--json`. `data` is
   the path as given, and a path that is not UTF-8 is written lossily, as `Path::display`
-  does. A write that fails changes nothing. A node that stops before the thread writes
+  does. The text form escapes `data` as `Start::fail` does, so a newline in it adds no
+  line. A write that fails changes nothing. A node that stops before the thread writes
   can exit with no line. `Start::fail` writes an `ops::Failure { code, message, fix }`
   as `cli` writes its own errors, and gives exit status 1. So `ops` keeps the one output
   form, and `main` gives the facts. The codes: `node.busy`, `node.data`, `node.unnamed`,
