@@ -203,7 +203,9 @@
   sample type. So a reader takes no series of its key of another type, and a rename or
   a move of index keeps the history of the channel (A4) (`laptop.architect`,
   2026-10-09T02:59:13Z:
-  https://github.com/synnaxlabs/foundation/issues/274#issuecomment-6073342524). An
+  https://github.com/synnaxlabs/foundation/issues/274#issuecomment-6073342524).
+  Supersedes the retire at each removal in item 1 of
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072361464. An
   index continues its seq after its key was a data channel, also after a restart
   (`laptop.architect`, 2026-10-09T01:25:59Z:
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072361464). So a slot
