@@ -766,6 +766,36 @@ mod tests {
             });
         }
 
+        /// No public call sees where a send starts: the public `Sender` cannot turn
+        /// GSO off on loopback, and with GSO on every send starts at 0.
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn a_different_transmit_after_pending_loses_the_datagrams_that_went_out() {
+            runtime().block_on(async {
+                let udp = loopback();
+                turn_gso_off(&udp.bound);
+                let full = Outcome::Fails(Errno::AGAIN);
+                let mut recorded = Recorded::new(&[Outcome::Sent, Outcome::Sent, full]);
+                let fd = udp.bound.socket.try_clone().unwrap();
+                let mut writer = idle(fd);
+                let mut cx = Context::from_waker(std::task::Waker::noop());
+                let dropped = batch(b"abcdefgh", 2);
+                let pending =
+                    writer.poll_transmit(&mut cx, &udp.bound, &dropped, |_, d| {
+                        recorded.send(d)
+                    });
+                assert_eq!(pending, Poll::Pending);
+                let other = batch(b"ABCDEFGH", 2);
+                let sent = writer.poll_transmit(&mut cx, &udp.bound, &other, |_, d| {
+                    recorded.send(d)
+                });
+                assert_eq!(sent, Poll::Ready(Ok(())));
+                let attempts: Vec<_> =
+                    recorded.sends.iter().map(|s| &s.0[..]).collect();
+                assert_eq!(attempts, [b"ab", b"cd", b"ef", b"EF", b"GH"]);
+            });
+        }
+
         #[test]
         #[cfg(target_os = "linux")]
         fn a_datagram_over_the_path_mtu_counts_as_sent() {
