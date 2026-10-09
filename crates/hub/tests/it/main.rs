@@ -526,6 +526,22 @@ fn without(names: &[&str]) -> BTreeMap<Name, Definition> {
 }
 
 #[test]
+fn gives_the_entry_of_each_channel_of_the_config_in_its_order() {
+    run(4, |test| async move {
+        let names = ["value-c", "value-b", "time", "value-b", "value"];
+        let writer = test.writer("a", &names).await;
+        let keys: Vec<_> = writer
+            .entries()
+            .iter()
+            .map(|&entry| writer.set().entries()[entry].key.as_u128())
+            .collect();
+        assert_eq!(keys, [5, 4, 1, 4, 2]);
+        let time = writer.set().groups()[0];
+        assert_eq!(writer.entries()[2], time, "the entry of the index");
+    });
+}
+
+#[test]
 fn opens_no_session_on_an_unknown_name() {
     run(2, |test| async move {
         let writer = test.hub.writer(config("a", &["value", "nope"])).await;
@@ -592,20 +608,67 @@ fn gives_a_latest_reader_a_frame_before_its_commit_and_a_complete_reader_after()
 fn opens_a_writer_once_the_node_has_mesh_time_and_a_reader_before() {
     unsynced(5, |mut test| async move {
         let mut reader = test.reader(&["value"], Mode::Complete).await;
-        let error = test
-            .hub
-            .writer(config("a", &["value"]))
-            .await
-            .expect_err("an error");
-        let unsynced = hub::home::writer::Error::Unsynced;
-        assert_eq!(error, writer::Error::Home(unsynced));
-        assert_eq!(error.to_string(), "the node has no mesh time yet");
+        let hub = test.hub.clone();
+        let mut opening = pin!(hub.writer(config("a", &["value"])));
+        test.clock.sleep(Span::SECOND).await;
+        assert!(poll_once(opening.as_mut()).is_pending());
         test.sync().await;
-        let mut writer = test.writer("a", &["value"]).await;
-        let now = test.now();
-        assert_eq!(write(&mut writer, &[now], &[1]), [applied(0)]);
+        let synced = test.clock.now();
+        let mut writer = opening.await.expect("opens");
+        let waited = test.clock.now() - synced;
+        assert!(
+            waited <= Span::SECOND,
+            "opened {waited} after sync, more than 1 s"
+        );
+        let now = writer.now();
+        assert_eq!(now.nanos(), test.now());
+        assert_eq!(write(&mut writer, &[now.nanos()], &[1]), [applied(0)]);
         let received = reader.next().await.expect("a frame");
         assert_eq!(samples(&received, 2), [1]);
+    });
+}
+
+#[test]
+fn opens_no_writer_with_a_lease_of_zero() {
+    run(9, |test| async move {
+        let config = writer::Config {
+            lease: Some(Span::ZERO),
+            ..config("a", &["value"])
+        };
+        let error = test.hub.writer(config).await.expect_err("a lease of zero");
+        let lease = hub::home::writer::Error::Lease { span: Span::ZERO };
+        assert_eq!(error, writer::Error::Home(lease));
+        let want =
+            format!("control lease must be longer than zero, got {}", Span::ZERO);
+        assert_eq!(error.to_string(), want);
+    });
+}
+
+/// A writer on an unknown channel fails before the node has mesh time.
+#[test]
+fn opens_no_writer_on_an_unknown_name_before_the_node_has_mesh_time() {
+    unsynced(10, |test| async move {
+        let Poll::Ready(opened) = poll_once(test.hub.writer(config("a", &["nothing"])))
+        else {
+            panic!("the open fails before mesh time");
+        };
+        let error = opened.expect_err("no channel is named nothing");
+        assert_eq!(error, writer::Error::Unknown(name("nothing")));
+    });
+}
+
+/// A writer that waits for mesh time finds a channel that a call removed meanwhile
+/// unknown.
+#[test]
+fn opens_no_writer_on_a_channel_removed_while_it_waits_for_mesh_time() {
+    unsynced(8, |mut test| async move {
+        let hub = test.hub.clone();
+        let mut opening = pin!(hub.writer(config("a", &["value"])));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        hub.set_definitions(&without(&["value"]));
+        test.sync().await;
+        let error = opening.await.expect_err("value was removed");
+        assert_eq!(error, writer::Error::Unknown(name("value")));
     });
 }
 

@@ -301,9 +301,13 @@ pub struct Config {
     /// may have open to this node at once, per session. Size it near the rate of new
     /// streams times the time each takes to deliver.
     pub streams_max: NonZeroU32,
-    /// A session whose peer is silent this long ends with [`Error::TimedOut`].
-    /// Sessions send keep-alives, so a live peer is never silent this long. Must be
-    /// positive.
+    /// A session whose peer is silent this long, or 3 PTO when that is longer, ends
+    /// with [`Error::TimedOut`]. The count starts again at each packet from the peer,
+    /// and at this side's first send after it that asks for an ack, such as a
+    /// keep-alive. One whose peer has sent no hello twice that long after the handshake
+    /// ends with [`Error::Broken`], or with [`Error::TimedOut`] when the idle timeout
+    /// was due by the check. Sessions send keep-alives, so a live peer is never silent
+    /// this long. Must be positive.
     pub idle: Span,
     /// The monotonic clock for timeouts, pacing, and keep-alives.
     pub clock: env::clock::Clock,

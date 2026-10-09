@@ -12,7 +12,7 @@ use types::frame::{self, Draft, Form, Label};
 use types::hash;
 use types::name::Name;
 use types::sample::Type;
-use types::time::Span;
+use types::time::{Span, Stamp};
 
 use crate::{Away, Removal, State};
 
@@ -130,6 +130,23 @@ fn resolve(
     Ok((keys, groups))
 }
 
+/// The entry in `set` of each of `keys`, in their order.
+fn entries(set: &KeySet, keys: &[channel::Key]) -> Box<[usize]> {
+    let entry_of: hash::Map<channel::Key, usize> = set
+        .entries()
+        .iter()
+        .enumerate()
+        .map(|(at, entry)| (entry.key, at))
+        .collect();
+    keys.iter()
+        .map(|key| {
+            let entry = entry_of.get(key).copied();
+            entry
+                .unwrap_or_else(|| panic!("invariant: the key set holds channel {key}"))
+        })
+        .collect()
+}
+
 /// A writer session. Dropping it closes the session.
 #[derive(Debug)]
 pub struct Writer {
@@ -138,6 +155,8 @@ pub struct Writer {
     /// The channel whose removal ended the writer.
     removed: Removal,
     set: Arc<KeySet>,
+    /// The entry in `set` of each channel of the config, in its order.
+    entries: Box<[usize]>,
     /// The outcomes of the last write.
     outcomes: Vec<::home::Outcome>,
 }
@@ -157,17 +176,23 @@ impl Writer {
         if channels.is_empty() {
             return Err(Error::Empty);
         }
+        let indexes = |groups: &[Indexed]| -> Vec<channel::Key> {
+            groups.iter().map(|&(index, _)| index).collect()
+        };
+        // An unknown name fails before the wait. Each mesh time reaches the first
+        // stamp, so once the node has mesh time, the wait is ready at once.
+        resolve(&state.borrow(), &channels)?;
+        let time = state.borrow().time.reach(Stamp::from_nanos(i64::MIN));
+        time.await;
         let (mut keys, groups) = loop {
             let (_, groups) = resolve(&state.borrow(), &channels)?;
-            for (index, _) in &groups {
-                crate::home(state, *index).await?;
-            }
-            // A call of `set_definitions` while the open waits can change a channel.
+            let checked = indexes(&groups);
+            let homed = crate::homes(state, &checked).await;
+            // A call of `set_definitions` while the open waits can change a channel,
+            // and then the home of an index it left does not matter.
             let (keys, again) = resolve(&state.borrow(), &channels)?;
-            let indexes = |groups: &[Indexed]| -> Vec<channel::Key> {
-                groups.iter().map(|&(index, _)| index).collect()
-            };
-            if indexes(&again) == indexes(&groups) {
+            if indexes(&again) == checked {
+                homed?;
                 break (keys, again);
             }
         };
@@ -184,6 +209,7 @@ impl Writer {
             })
             .collect();
         let set = borrowed.interner.intern(&groups);
+        let entries = entries(&set, &keys);
         let writer = ::home::writer::Writer {
             subject,
             authority,
@@ -199,6 +225,7 @@ impl Writer {
             key,
             removed,
             set,
+            entries,
             outcomes: Vec::new(),
         })
     }
@@ -207,6 +234,28 @@ impl Writer {
     #[must_use]
     pub fn set(&self) -> &Arc<KeySet> {
         &self.set
+    }
+
+    /// The entry of each channel of [`Config::channels`], in that order: its
+    /// position in the entries of [`Self::set`], as [`Self::draft`] and
+    /// [`Draft::series_mut`] take it. A channel named twice has the same entry twice.
+    #[must_use]
+    pub fn entries(&self) -> &[usize] {
+        &self.entries
+    }
+
+    /// Mesh time now, as the home stamps each entry and checks each stamp: it never
+    /// goes back, and two calls can give the same stamp. Each stamp of a path must be
+    /// after the one before it
+    /// ([`order::Error::Backwards`](crate::home::order::Error::Backwards)).
+    #[must_use]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "a writer opens only after mesh time, which stays"
+    )]
+    pub fn now(&self) -> Stamp {
+        let now = self.state.borrow().home.now();
+        now.expect("invariant: mesh time stays once known")
     }
 
     /// A frame of the writer's key set to fill, from the shard's pool, as
