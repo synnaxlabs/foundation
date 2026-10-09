@@ -138,6 +138,20 @@ mod tests {
     }
 
     #[test]
+    fn asan_panics_when_the_tool_cannot_preprocess() {
+        let tool = tool(cc::Build::new(), "false");
+        let panic = std::panic::catch_unwind(|| compiler::asan(&tool)).unwrap_err();
+        let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("build/asan.c");
+        assert_eq!(
+            panic.downcast_ref::<String>(),
+            Some(&format!(
+                "connector-opcua: false cannot preprocess {}: ",
+                probe.display()
+            ))
+        );
+    }
+
+    #[test]
     fn asan_is_true_only_with_address_sanitizer_in_cflags() {
         let (asan, other) = (
             "tests::asan_is_true_in_a_child_process",
