@@ -2718,12 +2718,20 @@ impl Connection {
     ///
     /// A later [`Connection::largest_acked`] at or above it proves that the peer got a
     /// packet sent after this call. Foundation patch.
+    ///
+    /// # Panics
+    ///
+    /// When multipath removed [`PathId::ZERO`].
     pub fn next_packet_number(&self) -> u64 {
         self.spaces[SpaceId::Data].number_spaces[&PathId::ZERO].next_packet_number
     }
 
     /// The largest packet number that the peer acknowledged in the Data space on
     /// [`PathId::ZERO`], if any. Foundation patch.
+    ///
+    /// # Panics
+    ///
+    /// When multipath removed [`PathId::ZERO`].
     pub fn largest_acked(&self) -> Option<u64> {
         self.spaces[SpaceId::Data].number_spaces[&PathId::ZERO].largest_acked_packet_pn
     }
