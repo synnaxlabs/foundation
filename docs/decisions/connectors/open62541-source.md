@@ -271,8 +271,11 @@
   `env` gives both as `Error::Io`. This holds only while the one server is the test
   server: before a server serves users, the manager must keep listening after an error
   of one stream. Lost: the manager binds its own listener with `Net::listen` from the
-  parameters, which puts the bind address, backlog, and socket options of a node into
-  parameters that open62541 fills; and a second constructor `Manager::listening`, which
-  adds a surface for one field. Decided by `laptop.architect-2`
+  parameters. `address` is a host name and `Net::listen` takes a socket address, so the
+  open would resolve in a hook that must give `ESTABLISHED` before it returns, and an
+  owner that binds port 0 could not learn the port before it builds the URL of its
+  server. Also lost: a second constructor `Manager::listening`, two constructors that
+  differ in one value; the `Option` keeps one path, and a client gives `None`. Decided
+  by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286,
   2026-10-09 20:26 UTC).
