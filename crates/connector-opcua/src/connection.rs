@@ -77,6 +77,8 @@ impl Manager {
             held: Cell::new(false),
             ahead: Cell::new(usize::MAX),
             again: RefCell::new(Vec::new()),
+            #[cfg(feature = "sim")]
+            moves: Cell::new(0),
             ends: RefCell::new(VecDeque::new()),
             closed: UnsafeCell::new(ffi::DelayedCallback {
                 next: ptr::null_mut(),
@@ -226,6 +228,9 @@ struct State {
     /// The connections that a hook asks to move on again during a drive, once the
     /// running pass has gone past them.
     again: RefCell<Vec<usize>>,
+    /// The calls of `move_on`, for tests of the work of a drive.
+    #[cfg(feature = "sim")]
+    moves: Cell<usize>,
     /// The connections whose `CLOSING` the next run of the loop gives.
     ends: RefCell<VecDeque<usize>>,
     /// The delayed callback that gives each `CLOSING`. C writes its `next`.
@@ -332,6 +337,8 @@ impl State {
 
     /// Moves connection `id` on until it waits, and calls C with no borrow held.
     fn move_on(&self, id: usize, cx: &mut Context<'_>) {
+        #[cfg(feature = "sim")]
+        self.moves.set(self.moves.get() + 1);
         loop {
             let step = match self.table.borrow_mut().get_mut(&id) {
                 Some(connection) => connection.step(cx),

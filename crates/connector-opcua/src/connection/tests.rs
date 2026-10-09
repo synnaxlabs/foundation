@@ -923,37 +923,86 @@ fn a_send_from_the_run_that_ends_a_drive_goes_out() {
     assert_eq!(parts, [(due + DELAY, &b"late"[..])]);
 }
 
-/// Sends from one `run` on one connection ask for one move of it.
+/// Sends from one `run` on one connection ask for one move of it. The test counts the
+/// moves, since a second move of a waiting connection shows nothing to a caller or a
+/// peer.
+#[cfg(feature = "sim")]
 #[test]
 fn sends_from_one_run_on_one_connection_ask_for_one_move() {
     let mut network = Network::new();
     let reads = network.serve(None);
     let remote = network.remote();
-    let (woken, sent) = network
+    let (moves, sent) = network
         .sim
         .run_on(&network.local.clone(), move |node, _| async move {
             let side = Side::new(&node);
             assert_eq!(side.connect(remote), Status::GOOD);
             side.drive(Span::from_nanos(100_000_000)).await;
-            let mut woken = Vec::new();
+            let state = side.manager.state();
+            let before = state.moves.get();
             side.manager
                 .drive(|_| {
                     for bytes in [&b"a"[..], b"b", b"c"] {
                         assert_eq!(side.send(1, bytes), Status::GOOD);
                     }
-                    woken = side.manager.state().again.borrow().clone();
                     Poll::Ready(())
                 })
                 .await;
+            let moves = state.moves.get() - before;
             let sent = side.clock.now();
             side.drive(Span::SECOND).await;
-            (woken, sent)
+            (moves, sent)
         })
         .expect("the run ends");
-    assert_eq!(woken, [1]);
+    // One in the pass and one after `run`.
+    assert_eq!(moves, 2);
     let reads = reads.lock().expect("no panic under the lock");
     let parts: Vec<_> = reads.parts.iter().map(|(at, b)| (*at, &b[..])).collect();
     assert_eq!(parts, [(sent + DELAY, &b"abc"[..])]);
+}
+
+/// A `run` that sends and gives no value makes the drive move on only that
+/// connection before it calls `run` again, with no second pass. The test counts the
+/// moves, since a step of a waiting connection shows nothing to a caller or a peer.
+#[cfg(feature = "sim")]
+#[test]
+fn a_send_from_a_run_with_no_value_moves_on_only_its_connection() {
+    let mut network = Network::new();
+    let reads = network.serve(None);
+    let remote = network.remote();
+    let (moves, runs, sent) = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::from_nanos(100_000_000)).await;
+            assert_eq!(side.connections(), 2);
+            let state = side.manager.state();
+            let before = state.moves.get();
+            let mut runs = 0;
+            side.manager
+                .drive(|_| {
+                    runs += 1;
+                    if runs == 1 {
+                        assert_eq!(side.send(1, b"a"), Status::GOOD);
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
+            let moves = state.moves.get() - before;
+            let sent = side.clock.now();
+            side.drive(Span::SECOND).await;
+            (moves, runs, sent)
+        })
+        .expect("the run ends");
+    // Two in the pass and one after the first `run`.
+    assert_eq!((moves, runs), (3, 2));
+    let reads = reads.lock().expect("no panic under the lock");
+    let parts: Vec<_> = reads.parts.iter().map(|(at, b)| (*at, &b[..])).collect();
+    assert_eq!(parts, [(sent + DELAY, &b"a"[..])]);
 }
 
 /// `run` polls its own source with the context it gets, and the wake of that source
