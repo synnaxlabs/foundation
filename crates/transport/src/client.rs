@@ -153,6 +153,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use std::mem::ManuallyDrop;
+    use std::net::IpAddr;
     use std::num::NonZeroUsize;
     use std::pin::pin;
 
@@ -308,6 +309,26 @@ mod tests {
             end(&node, session).await;
             node.clock().sleep(spans(IDLE, 3)).await;
             assert_eq!(Port::bind(shard.net(), any(FREE)).err(), None);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn a_client_dials_a_node_at_an_ipv4_mapped_address() {
+        let (mut sim, program, node) = nodes(0);
+        serve(&node, 1);
+        let IpAddr::V4(ip) = node.addresses()[0] else {
+            panic!("{:?} is not IPv4", node.addresses()[0]);
+        };
+        let at = [Address::Udp(SocketAddr::new(
+            ip.to_ipv6_mapped().into(),
+            PORT,
+        ))];
+        testing::start(&program, move |shard, node| async move {
+            let client = client(&shard);
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
+            echo(&shard, &session).await;
+            end(&node, session).await;
         });
         assert_eq!(sim.run(), Ok(()));
     }

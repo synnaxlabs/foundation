@@ -132,7 +132,7 @@ impl Dial<'_> {
     /// [`Error::Network`] when the socket broke.
     fn start(&mut self, index: usize) -> Result<(), Error> {
         match self.addresses[index] {
-            Address::Udp(remote) if routable(remote) => {
+            Address::Udp(remote) if let Some(remote) = route(remote) => {
                 let session = self.dialer.dial(self.peer, remote)?;
                 self.flying.push((index, session));
                 self.causes.push(None);
@@ -158,9 +158,13 @@ impl Dial<'_> {
     }
 }
 
-/// Whether a datagram can go to `remote`: its port is not 0 and its IP is specified.
-fn routable(remote: SocketAddr) -> bool {
-    remote.port() != 0 && !remote.ip().is_unspecified()
+/// Where a datagram to `remote` goes, or `None` when its port is 0 or its IP is
+/// unspecified. An IPv4-mapped IP becomes IPv4, the form in which a socket at `[::]`
+/// gives the source of each reply: a mapped remote would see each reply come from an
+/// unknown peer.
+fn route(remote: SocketAddr) -> Option<SocketAddr> {
+    let remote = SocketAddr::new(remote.ip().to_canonical(), remote.port());
+    (remote.port() != 0 && !remote.ip().is_unspecified()).then_some(remote)
 }
 
 #[cfg(test)]
@@ -641,16 +645,20 @@ mod tests {
             at: a,
         };
         let unspecified = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4433);
+        let mapped = Ipv4Addr::UNSPECIFIED.to_ipv6_mapped();
+        let mapped = SocketAddr::new(IpAddr::V6(mapped), 4433);
         let addresses = vec![
             relay,
             Address::Tcp(b),
             Address::Udp(PORT_ZERO),
             Address::Tcp(a),
             Address::Udp(unspecified),
+            Address::Udp(mapped),
         ];
         let attempts = vec![
             (Address::Udp(PORT_ZERO), Error::Unroutable),
             (Address::Udp(unspecified), Error::Unroutable),
+            (Address::Udp(mapped), Error::Unroutable),
             (Address::Tcp(b), Error::Unroutable),
             (Address::Tcp(a), Error::Unroutable),
             (relay, Error::Unroutable),
