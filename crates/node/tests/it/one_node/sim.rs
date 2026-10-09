@@ -121,13 +121,15 @@ impl Influx {
 
 impl Drop for Influx {
     fn drop(&mut self) {
-        let joined = self.halt();
-        // A second panic aborts the test binary.
-        if !std::thread::panicking() {
-            joined
-                .transpose()
-                .expect("the simulated InfluxDB serves with no panic");
+        // While the thread panics, a join can block and a second panic aborts the
+        // test binary. The server stops on its own.
+        if std::thread::panicking() {
+            if let Some((stop, _)) = self.serving.take() {
+                stop.cancel();
+            }
+            return;
         }
+        (self.halt().transpose()).expect("the simulated InfluxDB serves with no panic");
     }
 }
 
@@ -194,16 +196,16 @@ fn a_dropped_influx_ends_its_shard() {
 }
 
 #[test]
-fn a_dropped_influx_ends_its_shard_when_the_test_panics() {
+fn a_dropped_influx_stops_its_server_when_the_test_panics() {
     let mut influx = Influx::default();
     influx.serve();
-    let store = Arc::clone(&influx.store);
+    let stop = influx.serving.as_ref().expect("it serves").0.clone();
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let _influx = influx;
         panic!("the test broke");
     }));
     unwound.expect_err("the test panics");
-    assert_eq!(Arc::strong_count(&store), 1, "the shard holds no store");
+    assert!(stop.cancelled(), "the server serves on");
 }
 
 #[test]
