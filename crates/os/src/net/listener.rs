@@ -102,12 +102,17 @@ fn stop(fd: BorrowedFd<'_>) {
 }
 
 /// Registers `listener` with the I/O driver of this thread. A failed registration
-/// closes the socket, so it stops the listen first.
+/// closes the socket, so on Linux it stops the listen first, through a copy. With no
+/// free descriptor for the copy, the registration still runs.
 fn register(listener: std::net::TcpListener) -> std::io::Result<TcpListener> {
-    let copy = listener
-        .try_clone()
-        .inspect_err(|_| stop(listener.as_fd()))?;
-    TcpListener::from_std(listener).inspect_err(|_| stop(copy.as_fd()))
+    #[cfg(target_os = "linux")]
+    let copy = listener.try_clone().ok();
+    TcpListener::from_std(listener).inspect_err(|_| {
+        #[cfg(target_os = "linux")]
+        if let Some(copy) = &copy {
+            stop(copy.as_fd());
+        }
+    })
 }
 
 impl listener::Driver for Listener {
@@ -228,7 +233,7 @@ mod tests {
 
     /// A child that another thread spawns holds a copy of each socket until its exec.
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs the shutdown of a listener")]
     #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
     fn a_dropped_listener_refuses_while_a_copy_of_it_is_open() {
         let config = tcp::Listen {
@@ -249,7 +254,7 @@ mod tests {
 
     /// The runtime of the thread shut down, so the registration fails.
     #[test]
-    #[cfg(target_os = "linux")]
+    #[cfg_attr(not(target_os = "linux"), ignore = "needs the shutdown of a listener")]
     #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
     fn a_listener_with_a_failed_registration_refuses_while_a_copy_is_open() {
         let config = tcp::Listen {
@@ -268,8 +273,17 @@ mod tests {
         drop(runtime);
         let _entered = handle.enter();
         let mut cx = Context::from_waker(std::task::Waker::noop());
-        let polled = listener::Driver::poll_accept(&mut listener, &mut cx);
-        assert!(matches!(polled, Poll::Ready(Err(_))));
+        let Poll::Ready(Err(failed)) =
+            listener::Driver::poll_accept(&mut listener, &mut cx)
+        else {
+            panic!("the registration fails");
+        };
+        assert_eq!(
+            failed,
+            Error::Io {
+                code: Errno::IO.raw_os_error()
+            }
+        );
         drop(listener);
         let error = std::net::TcpStream::connect(local).unwrap_err();
         assert_eq!(
