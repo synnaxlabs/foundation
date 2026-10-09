@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::process::{Command, ExitCode};
 
-use comrak::nodes::{AstNode, LineColumn, NodeValue, Sourcepos};
+use comrak::nodes::{AstNode, LineColumn, NodeHeading, NodeValue, Sourcepos};
 use comrak::{Arena, Options, parse_document};
 use serde_json::Value;
 
@@ -350,7 +350,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         .hiding
         .iter()
         .find(|(_, cause)| !old || matches!(cause, Cause::Misplaced));
-    let number = shown.number.or(shown.html_number.filter(|_| !old))?;
+    let number = (shown.number.as_deref()).or(shown.html_number.filter(|_| !old))?;
     let text = &shown.text;
     let lines = shown.fields().iter().map(String::as_str);
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
@@ -490,9 +490,10 @@ fn options() -> Options<'static> {
 /// lines that can hide text or that the check cannot read.
 #[derive(Debug, Default)]
 struct Shown<'a> {
-    /// The text after `## Review round ` in the heading, or `None` when the comment
-    /// has no such heading at the top level.
-    number: Option<&'a str>,
+    /// The text after `Review round` in the first top-level level 2 heading whose text
+    /// as GitHub shows it ([`texts`]) is `Review round` or starts with `Review round `,
+    /// or `None` when the comment has no such heading.
+    number: Option<String>,
     /// Each top-level block after the heading: the index in `text` of a paragraph, or
     /// `None` for any other block. The footnotes come last, as GitHub shows them.
     blocks: Vec<Option<usize>>,
@@ -544,8 +545,15 @@ impl<'a> Shown<'a> {
                 shown.blocks.push(index);
             }
             match &data.value {
-                NodeValue::Heading(_) if top && shown.number.is_none() => {
-                    shown.number = heading(&body[source(data.sourcepos)]);
+                NodeValue::Heading(NodeHeading { level: 2, .. })
+                    if top && shown.number.is_none() =>
+                {
+                    let text = texts(node).into_iter().next();
+                    shown.number = text.and_then(|t| {
+                        let rest = t.strip_prefix("Review round")?;
+                        let word = rest.is_empty() || rest.starts_with(' ');
+                        word.then(|| rest.trim_start().to_owned())
+                    });
                     shown.text.clear();
                 }
                 NodeValue::Paragraph if misplaced(node, data.sourcepos.end.line) => {

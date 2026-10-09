@@ -592,11 +592,15 @@ fn a_round_that_names_a_hot_path_needs_performance() {
 
 #[test]
 fn fails_an_earlier_round_with_fields_and_no_number() {
-    for heading in ["## Review round 1.", "## Review round <n>"] {
+    // GitHub does not show the raw HTML `<n>`.
+    for (heading, shown) in [
+        ("## Review round 1.", "## Review round 1."),
+        ("## Review round <n>", "## Review round "),
+    ] {
         let first = bot(&format!("{heading}\n\nReviewers: reviewer"));
         assert_eq!(
             check(&record(vec![first, bot(ROUND)])),
-            vec![format!("`{heading}` has no round number")]
+            vec![format!("`{shown}` has no round number")]
         );
     }
     // The number comes before raw HTML.
@@ -688,6 +692,37 @@ fn reads_each_field_as_github_shows_it() {
              c77c67d72fd8d37964334c80e14dd8b5a1d5b6fb. A commit after the round needs \
              a new round; only a clean merge of the base does not.",
         ]
+    );
+}
+
+#[test]
+fn reads_the_round_heading_as_github_shows_it() {
+    let fields = ROUND.replace("Findings: none", "Findings: 2");
+    for heading in [
+        "## Review&#32;round 3",
+        "## Review *round* 3",
+        "## Review\u{200B} round 3",
+        "Review round 3\n---",
+    ] {
+        let last = fields.replace("## Review round 3", heading);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&last)])),
+            vec![
+                "review round 3 has findings (2). Fix or answer them, then run \
+                 another round."
+            ],
+            "{heading}"
+        );
+    }
+    let word = fields.replace("## Review round 3", "## Review roundup 3");
+    assert_eq!(
+        check(&record(vec![bot(ROUND), bot(&word)])),
+        Vec::<String>::new()
+    );
+    let level = fields.replace("## Review round 3", "# Review round 3");
+    assert_eq!(
+        check(&record(vec![bot(ROUND), bot(&level)])),
+        Vec::<String>::new()
     );
 }
 
