@@ -865,48 +865,6 @@ mod tests {
         }
 
         #[test]
-        fn retries_a_pending_send_when_the_socket_is_writable() {
-            runtime().block_on(async {
-                let udp = loopback();
-                let fd = udp.bound.socket.try_clone().unwrap();
-                let mut writer = idle(fd);
-                let mut sends = 0;
-                let sent = std::future::poll_fn(|cx| {
-                    writer.poll_send(cx, |_, _| {
-                        sends += 1;
-                        if sends == 1 {
-                            Poll::Pending
-                        } else {
-                            Poll::Ready(Ok(()))
-                        }
-                    })
-                });
-                let bound = std::time::Duration::from_secs(10);
-                assert_eq!(tokio::time::timeout(bound, sent).await, Ok(Ok(())));
-                assert_eq!(sends, 2);
-            });
-        }
-
-        #[test]
-        fn a_failed_wait_drops_the_registration() {
-            let udp = loopback();
-            let fd = udp.bound.socket.try_clone().unwrap();
-            let mut writer = idle(fd);
-            let mut cx = Context::from_waker(Waker::noop());
-            let full = runtime()
-                .block_on(async { writer.poll_send(&mut cx, |_, _| Poll::Pending) });
-            assert_eq!(full, Poll::Pending);
-            runtime().block_on(async {
-                let gone = writer.poll_send(&mut cx, |_, _| Poll::Pending);
-                assert_eq!(gone, Poll::Ready(Err(Error::Io { code: 5 })));
-                assert!(writer.full.is_none());
-                let full = writer.poll_send(&mut cx, |_, _| Poll::Pending);
-                assert_eq!(full, Poll::Pending);
-                assert!(writer.full.is_some());
-            });
-        }
-
-        #[test]
         fn gives_the_outcome_of_a_send() {
             runtime().block_on(async {
                 let udp = loopback();

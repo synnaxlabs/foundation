@@ -181,7 +181,8 @@ fn a_failed_wait_restarts_the_next_transmit_at_its_first_datagram() {
         let first = runtime();
         let (mut sender, gone) = first.block_on(pair());
         answer_calls(|nr, k| {
-            let full = nr == libc::SYS_sendmsg && (k == 2 || k == 3);
+            // At 6, the next transmit waits on a new registration.
+            let full = nr == libc::SYS_sendmsg && matches!(k, 2 | 3 | 6);
             full.then_some(libc::EAGAIN)
         });
         let waiting = batch(&gone, b"abcdefgh");
