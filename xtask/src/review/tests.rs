@@ -1154,6 +1154,7 @@ fn fails_a_round_with_raw_html() {
         ("1) <source", "1) <source"),
         ("-\t<source", "-\t<source"),
         ("[^1]: <source", "[^1]: <source"),
+        ("[^1]: [^2]: <source x", "[^1]: [^2]: <source x"),
         ("> [^a]: <source", "> [^a]: <source"),
         ("[^a\\\\]: <source", "[^a\\\\]: <source"),
         ("- [^a]:<source", "- [^a]:<source"),
@@ -1240,7 +1241,8 @@ fn passes_a_round_whose_text_github_shows_as_text() {
     assert_eq!(check(&record(vec![old, bot(ROUND)])), Vec::<String>::new());
 }
 
-/// The problem of a round 3 with a footnote label that only GitHub reads in `line`.
+/// The problem of a round 3 with a footnote label in GitHub's form that pulldown-cmark
+/// does not read as a definition, in `line`.
 fn label(line: &str) -> String {
     format!(
         "review round 3 has a footnote label in GitHub's form that pulldown-cmark does \
@@ -1258,7 +1260,7 @@ fn fails_a_round_whose_fields_github_reads_as_a_footnote() {
 }
 
 #[test]
-fn fails_a_round_with_a_footnote_label_that_only_github_reads() {
+fn fails_a_round_with_a_footnote_label_that_pulldown_cmark_does_not_read() {
     let cases = [
         ("[^a\\]: x", "[^a\\]: x"),
         ("[^\\]: x", "[^\\]: x"),
@@ -1270,6 +1272,7 @@ fn fails_a_round_with_a_footnote_label_that_only_github_reads() {
         ("> [^a\\]: x", "> [^a\\]: x"),
         ("- [^a\\]: x", "- [^a\\]: x"),
         ("[^1]: [^a\\]: x", "[^1]: [^a\\]: x"),
+        ("[^1]: [^2]: [^a\\]: x", "[^1]: [^2]: [^a\\]: x"),
         ("a\n[^a\\]: x", "[^a\\]: x"),
         ("[^a\\]: x](https://x.y)", "[^a\\]: x](https://x.y)"),
     ];
@@ -1306,6 +1309,21 @@ fn fails_a_footnote_label_on_a_line_inside_a_span() {
     }
     let shown = ROUND.replace("but comments", "but `x\ny [^a\\]: z`");
     assert_eq!(check(&record(vec![bot(&shown)])), Vec::<String>::new());
+    let marked = [
+        ("a `x\n  [^a\\]: y`", "[^a\\]: y`"),
+        ("> a `x\n> [^a\\]: y`", "> [^a\\]: y`"),
+        ("- a `x\n  [^a\\]: y`", "[^a\\]: y`"),
+    ];
+    for (text, line) in marked {
+        let comment =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![label(line)],
+            "{text}"
+        );
+    }
 }
 
 #[test]
@@ -1332,6 +1350,7 @@ fn passes_a_footnote_label_that_both_parsers_read() {
         "```\n[^a\\]: x\n```",
         "> ```\n> [^a\\]: x\n> ```",
         "    [^a\\]: x",
+        "- a\n\n      [^a\\]: x",
     ] {
         let comment =
             ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));

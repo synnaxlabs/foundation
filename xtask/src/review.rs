@@ -633,7 +633,8 @@ fn html(body: &str, event: &Event<'_>, start: usize, at: usize) -> bool {
 /// starts at an offset in `notes`), starts with a footnote label in GitHub's form
 /// ([`note`]) at no offset in `notes` or `codes`. GitHub can read that label as a
 /// footnote, and hides a footnote with no reference. GitHub reads the blocks of a
-/// comment before its spans, so a line inside a code span or a link counts too.
+/// comment before its spans, so a line inside a code span, a link, or a link
+/// definition counts too.
 fn label(body: &str, notes: &[usize], codes: &[Range<usize>]) -> Option<usize> {
     let starts = body.match_indices(['\n', '\r']).map(|(i, _)| i + 1);
     std::iter::once(0).chain(starts).find(|&start| {
