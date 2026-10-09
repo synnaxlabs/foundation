@@ -11,6 +11,10 @@ use crate::error::Error;
 use crate::front_end;
 use crate::operation::{self, Response, TABLE};
 
+/// The fix of `ops.argument`.
+const HELP: &str =
+    "Match the arguments to `foundation --help` or `foundation <operation> --help`";
+
 #[derive(Debug, PartialEq, Eq)]
 struct Exit {
     stdout: String,
@@ -198,7 +202,8 @@ fn a_bad_argument_gives_the_code_message_and_fix_as_text() {
         cli(&["version", "--nope"]),
         failed(
             "error[ops.argument]: unexpected argument found: `--nope`\n\
-             fix: Match the arguments to the operation in `foundation docs`\n"
+             fix: Match the arguments to `foundation --help` or \
+             `foundation <operation> --help`\n"
         )
     );
 }
@@ -212,14 +217,14 @@ fn a_bad_argument_gives_the_code_message_and_fix_as_json() {
         error,
         json!({ "errors": [{ "code": "ops.argument",
             "message": "unexpected argument found: `--nope`",
-            "fix": "Match the arguments to the operation in `foundation docs`", "notes": [] }] })
+            "fix": HELP, "notes": [] }] })
     );
 }
 
 #[test]
 fn no_operation_gives_the_same_error_as_text_and_as_json() {
     let message = "a subcommand is required but one was not provided";
-    let fix = "Match the arguments to the operation in `foundation docs`";
+    let fix = HELP;
     assert_eq!(
         cli(&[]),
         failed(&format!("error[ops.argument]: {message}\nfix: {fix}\n"))
@@ -238,7 +243,8 @@ fn json_after_a_double_dash_is_not_the_flag() {
         cli(&["version", "--", "--json"]),
         failed(
             "error[ops.argument]: unexpected argument found: `--json`\n\
-             fix: Match the arguments to the operation in `foundation docs`\n"
+             fix: Match the arguments to `foundation --help` or \
+             `foundation <operation> --help`\n"
         )
     );
 }
@@ -358,7 +364,7 @@ fn a_json_flag_with_a_value_gives_its_error_as_json() {
                 crate::Run::Exit(2),
                 json!({ "errors": [{ "code": "ops.argument",
                     "message": "unexpected value for an argument found: `--json`",
-                    "fix": "Match the arguments to the operation in `foundation docs`", "notes": [] }] })
+                    "fix": HELP, "notes": [] }] })
             ),
             "{value:?}"
         );
@@ -367,7 +373,8 @@ fn a_json_flag_with_a_value_gives_its_error_as_json() {
         cli(&["version", "--jsonx"]),
         failed(
             "error[ops.argument]: unexpected argument found: `--jsonx`\n\
-             fix: Match the arguments to the operation in `foundation docs`\n"
+             fix: Match the arguments to `foundation --help` or \
+             `foundation <operation> --help`\n"
         )
     );
 }
@@ -418,7 +425,7 @@ fn a_call_with_a_bad_argument_names_it() {
             message,
             &json!({ "errors": [{ "code": "ops.argument",
                 "message": message,
-                "fix": "Match the arguments to the operation in `foundation docs`", "notes": [] }] })
+                "fix": HELP, "notes": [] }] })
         )
     );
 }
@@ -476,7 +483,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
             | Error::Stale { .. }
             | Error::Apply(_)
             | Error::Config(_)
-            | Error::Node(_) => {}
+            | Error::Start(_) => {}
         }
     }
     let mut lines: Vec<_> = every
@@ -565,7 +572,8 @@ mod start {
             failed(
                 "error[ops.argument]: invalid value for one of the arguments: `--name \
                  <NAME>`: a segment is not valid: \"\" in \"a..b\"\n\
-                 fix: Match the arguments to the operation in `foundation docs`\n"
+                 fix: Match the arguments to `foundation --help` or \
+                 `foundation <operation> --help`\n"
             )
         );
     }
@@ -627,6 +635,21 @@ mod start {
         assert_eq!(
             String::from_utf8(json).unwrap(),
             "{\"name\":\"edge\",\"data\":\"foundation-data\"}\n"
+        );
+    }
+
+    #[test]
+    fn running_flushes_the_line() {
+        let start = Start {
+            data: PathBuf::from("foundation-data"),
+            json: false,
+            name: None,
+        };
+        let mut text = io::BufWriter::new(Vec::new());
+        start.running(&edge(), &mut text);
+        assert_eq!(
+            String::from_utf8_lossy(text.get_ref()),
+            "node edge runs in foundation-data. Stop it with Ctrl-C.\n"
         );
     }
 
