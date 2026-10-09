@@ -103,6 +103,8 @@ struct State {
     remotes: reader::remote::Sessions,
     /// The waker of each reader that waits for a frame.
     wakers: hash::Map<::home::reader::Key, Waker>,
+    /// Each open reader session that a later open of its name took over.
+    replaced: hash::Set<::home::reader::Key>,
     /// Each served open from its first key to its session, by a key from `opened`.
     opens: Sessions<u64>,
     /// The waker of each open in `opens`.
@@ -152,6 +154,7 @@ impl Hub {
             readers: Sessions::default(),
             remotes: reader::remote::Sessions::default(),
             wakers: hash::Map::default(),
+            replaced: hash::Set::default(),
             opens: Sessions::default(),
             waiting: hash::Map::default(),
             opened: 0,
@@ -216,30 +219,36 @@ impl Hub {
         Writer::open(&self.0, config).await
     }
 
-    /// Opens a reader session on `channels`, which share one index. While the mesh
-    /// names no home for the index, it waits for one. At the home of another node,
-    /// each open reader holds one stream of the one session to it, so it also waits
-    /// while that home allows this node no more streams, until another reader there
-    /// drops. It gets each frame of the index, as a view of only `channels` and their
-    /// index. A complete reader gets each live frame written after the returned future
-    /// resolves, until it misses one ([`reader::Mode::Complete`]).
+    /// Opens a reader session on the channels that `config.select` matches, which
+    /// share one index. While the mesh names no home for the index, it waits for one.
+    /// At the home of another node, each open reader holds one stream of the one
+    /// session to it, so it also waits while that home allows this node no more
+    /// streams, until another reader there drops. It gets each frame of the index, as
+    /// a view of only its channels and their index. A complete reader gets each live
+    /// frame written after the returned future resolves, until it misses one
+    /// ([`reader::Mode::Complete`]). A named reader takes over the open session of its
+    /// subject and name, which ends with [`reader::Ended::Replaced`].
     ///
     /// # Errors
     ///
-    /// For the first name that breaks a rule: [`reader::Error::Unknown`] for a name
-    /// that no channel has, and [`reader::Error::ManyIndexes`] for a channel on
-    /// another index than the first. [`reader::Error::Empty`] for no name. Then
-    /// [`reader::Error::Mesh`] when the mesh stopped. At the home of another node:
-    /// [`reader::Error::Transport`] when the dial or the stream fails,
+    /// [`reader::Error::Empty`] when the selector matches no channel, and
+    /// [`reader::Error::ManyIndexes`] when the channels are on more than one index.
+    /// Then [`reader::Error::Mesh`] when the mesh stopped. A named reader:
+    /// [`reader::Error::Remote`] when the home is another node, and
+    /// [`reader::Error::Unsynced`] before the node has mesh time. At the home of
+    /// another node: [`reader::Error::Transport`] when the dial or the stream fails,
     /// [`reader::Error::Refused`] when the home refuses the session,
     /// [`reader::Error::Message`] for a reply that breaks the hub protocol, and
     /// [`reader::Error::Pool`] when the shard's pool has no block for the open.
+    ///
+    /// # Panics
+    ///
+    /// When `config.hold` is negative, or not zero for an unnamed or latest reader.
     pub async fn reader(
         &self,
-        channels: &[Name],
-        mode: reader::Mode,
+        config: reader::Config,
     ) -> Result<Reader, reader::Error> {
-        Reader::open(&self.0, channels, mode).await
+        Reader::open(&self.0, config).await
     }
 
     /// Sets the access rules that each later hello and request is checked against.
@@ -445,10 +454,23 @@ impl State {
     /// Returns its waker, when it waits for a frame.
     fn close_reader(&mut self, key: ::home::reader::Key) -> Option<Waker> {
         let waker = self.wakers.remove(&key);
+        self.replaced.remove(&key);
         if self.readers.remove(key) {
             self.home.close_reader(key);
         }
         waker
+    }
+
+    /// Ends the session `replaced`, which the home closed when a later open of its name
+    /// took it over, with [`reader::Ended::Replaced`].
+    fn replace(&mut self, replaced: Option<::home::reader::Key>) {
+        let Some(key) = replaced else {
+            return;
+        };
+        self.replaced.insert(key);
+        if let Some(waker) = self.wakers.remove(&key) {
+            waker.wake();
+        }
     }
 
     /// Makes `channel` known to sessions as `name`.

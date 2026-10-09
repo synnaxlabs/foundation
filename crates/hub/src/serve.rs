@@ -24,7 +24,7 @@ use wire::hub::{
     BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends, keys,
 };
 
-use crate::reader::{Credit, Session, Stop};
+use crate::reader::{Channels, Credit, Session, Stop};
 use crate::{Away, Removal, State};
 
 pub use client::{Reply, Request};
@@ -301,6 +301,9 @@ async fn serve(
             Event::Frame(Err(Stop::Removed(key))) => {
                 return Err(Error::Removed(key));
             }
+            Event::Frame(Err(Stop::Replaced)) => {
+                unreachable!("invariant: a served session has no name to take over")
+            }
         }
     }
 }
@@ -380,21 +383,19 @@ async fn open(
     let keys = opening.into_keys();
     let slots = state.borrow_mut().slots(keys[at], &keys);
     let index = slots[at];
-    let keys: Box<[channel::Key]> = keys.into();
+    let channels = Channels {
+        keys: keys.into(),
+        slots: slots.clone(),
+        index,
+    };
     let (session, credit) = match open.mode {
         Mode::Complete { limit_bytes } => {
             let charge = ::home::reader::complete::Charge::Places(slots.clone());
-            let (session, credit) = Session::complete(
-                state,
-                keys,
-                slots.clone(),
-                index,
-                limit_bytes,
-                charge,
-            );
+            let (session, credit) =
+                Session::complete(state, channels, limit_bytes, charge);
             (session, Some(credit))
         }
-        Mode::Latest => (Session::latest(state, keys, slots.clone(), index), None),
+        Mode::Latest => (Session::latest(state, channels), None),
     };
     if let Some(credit) = &credit {
         credit.grant(granted);

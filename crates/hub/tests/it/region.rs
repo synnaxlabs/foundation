@@ -27,7 +27,7 @@ use super::definitions::{I32, write_i32};
 use super::serve::{Peer, session_in, stopped};
 use super::{
     AREA, BODY_MAX, I64, NODE, POOL, TIME, TIME_B, Test, applied, channels, config,
-    definition, entry, keys, name, poll_once, reader, samples, without, write,
+    definition, entry, keys, name, poll_once, reader, samples, unnamed, without, write,
     write_series, writer, written,
 };
 use crate::net::{HOME, PEER, own_pool, public_key};
@@ -324,9 +324,9 @@ impl Test {
 fn a_session_waits_for_the_first_home_and_the_home_carries_the_index() {
     run(1, |test| async move {
         let mut opening = std::pin::pin!(test.hub.writer(config("a", &["value"])));
-        let names = [name("value")];
+        let names = ["value"];
         let mut reading =
-            std::pin::pin!(test.hub.reader(&names, reader::Mode::Complete));
+            std::pin::pin!(test.hub.reader(unnamed(&names, reader::Mode::Complete)));
         test.clock.sleep(Span::SECOND).await;
         assert!(poll_once(opening.as_mut()).is_pending());
         assert!(poll_once(reading.as_mut()).is_pending());
@@ -345,8 +345,9 @@ fn a_session_waits_for_the_first_home_and_the_home_carries_the_index() {
 fn a_session_does_not_open_on_a_channel_removed_while_it_waits_for_a_home() {
     run(7, |test| async move {
         let mut opening = std::pin::pin!(test.hub.writer(config("a", &["value"])));
-        let names = [name("value")];
-        let mut reading = std::pin::pin!(test.hub.reader(&names, reader::Mode::Latest));
+        let names = ["value"];
+        let mut reading =
+            std::pin::pin!(test.hub.reader(unnamed(&names, reader::Mode::Latest)));
         assert!(poll_once(opening.as_mut()).is_pending());
         assert!(poll_once(reading.as_mut()).is_pending());
         test.hub.set_definitions(&without(&["value"]));
@@ -354,7 +355,7 @@ fn a_session_does_not_open_on_a_channel_removed_while_it_waits_for_a_home() {
         let error = opening.await.expect_err("value was removed");
         assert_eq!(error, writer::Error::Unknown(name("value")));
         let error = reading.await.expect_err("value was removed");
-        assert_eq!(error, reader::Error::Unknown(name("value")));
+        assert_eq!(error, reader::Error::Empty);
     });
 }
 
@@ -364,8 +365,9 @@ fn a_session_does_not_open_on_a_channel_removed_while_it_waits_for_a_home() {
 fn a_session_opens_on_the_new_index_of_a_channel_moved_while_it_waits_for_a_home() {
     run(8, |test| async move {
         let mut opening = std::pin::pin!(test.hub.writer(config("a", &["value"])));
-        let names = [name("value")];
-        let mut reading = std::pin::pin!(test.hub.reader(&names, reader::Mode::Latest));
+        let names = ["value"];
+        let mut reading =
+            std::pin::pin!(test.hub.reader(unnamed(&names, reader::Mode::Latest)));
         assert!(poll_once(opening.as_mut()).is_pending());
         assert!(poll_once(reading.as_mut()).is_pending());
         let mut moved = channels();
@@ -397,10 +399,10 @@ fn a_writer_opens_on_the_new_index_when_the_old_one_moves_away_during_its_home_w
         test.set_home(TIME_B, NODE).await;
         test.set_home(TIME, OTHER).await;
         let mut writer = opening.await.expect("opens on time-b, homed at this node");
-        let names = [name("value")];
+        let names = ["value"];
         let mut reader = test
             .hub
-            .reader(&names, reader::Mode::Latest)
+            .reader(unnamed(&names, reader::Mode::Latest))
             .await
             .expect("opens");
         let now = test.now();
@@ -417,8 +419,9 @@ fn a_writer_opens_on_the_new_index_when_the_old_one_moves_away_during_its_home_w
 fn a_session_opens_on_the_new_type_of_a_channel_changed_while_it_waits_for_a_home() {
     run(9, |test| async move {
         let mut opening = std::pin::pin!(test.hub.writer(config("a", &["value"])));
-        let names = [name("value")];
-        let mut reading = std::pin::pin!(test.hub.reader(&names, reader::Mode::Latest));
+        let names = ["value"];
+        let mut reading =
+            std::pin::pin!(test.hub.reader(unnamed(&names, reader::Mode::Latest)));
         assert!(poll_once(opening.as_mut()).is_pending());
         assert!(poll_once(reading.as_mut()).is_pending());
         let mut changed = channels();
@@ -444,8 +447,9 @@ fn a_session_opens_on_the_new_type_of_a_channel_changed_while_it_waits_for_a_hom
 fn a_session_opens_on_the_new_key_of_a_channel_changed_while_it_waits_for_a_home() {
     run(10, |test| async move {
         let mut opening = std::pin::pin!(test.hub.writer(config("a", &["value"])));
-        let names = [name("value")];
-        let mut reading = std::pin::pin!(test.hub.reader(&names, reader::Mode::Latest));
+        let names = ["value"];
+        let mut reading =
+            std::pin::pin!(test.hub.reader(unnamed(&names, reader::Mode::Latest)));
         assert!(poll_once(opening.as_mut()).is_pending());
         assert!(poll_once(reading.as_mut()).is_pending());
         let mut changed = channels();
@@ -486,11 +490,28 @@ fn a_writer_with_an_index_whose_home_is_another_node_does_not_open() {
 }
 
 #[test]
+fn a_named_reader_does_not_open_at_the_home_of_another_node() {
+    run(4, |test| async move {
+        test.set_home(TIME, OTHER).await;
+        let mut open = unnamed(&["value"], reader::Mode::Complete);
+        open.name = Some(name("r"));
+        let error = test.hub.reader(open).await.expect_err("the home is OTHER");
+        assert_eq!(error, reader::Error::Remote { home: OTHER });
+        assert_eq!(
+            error.to_string(),
+            "the home of the index of the named reader is node \
+             00000000-0000-0000-0000-000000000002, and a named reader opens only at \
+             this node"
+        );
+    });
+}
+
+#[test]
 fn a_reader_of_an_index_at_a_member_with_no_address_does_not_reach_it() {
     run(3, |test| async move {
         test.set_home(TIME, OTHER).await;
-        let names = [name("value")];
-        let opened = test.hub.reader(&names, reader::Mode::Latest).await;
+        let names = ["value"];
+        let opened = test.hub.reader(unnamed(&names, reader::Mode::Latest)).await;
         let error = opened.expect_err("the other node has no address");
         let unreachable = transport::Error::Unreachable {
             peer: public_key(&PEER),
@@ -513,8 +534,8 @@ fn a_session_on_a_stopped_mesh_gets_why_it_stopped() {
         let error = opened.expect_err("the mesh stopped");
         assert_eq!(error, writer::Error::Mesh(stopped.clone()));
         assert_eq!(error.to_string(), format!("the mesh stopped: {stopped}"));
-        let names = [name("value")];
-        let opened = test.hub.reader(&names, reader::Mode::Latest).await;
+        let names = ["value"];
+        let opened = test.hub.reader(unnamed(&names, reader::Mode::Latest)).await;
         let error = opened.expect_err("the mesh stopped");
         assert_eq!(error, reader::Error::Mesh(stopped.clone()));
         assert_eq!(error.to_string(), format!("the mesh stopped: {stopped}"));
