@@ -4,7 +4,6 @@
 //! receiver. The receiver then keeps a list of at most 64 chunks, not one sized by the
 //! message.
 
-use std::cell::OnceCell;
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
@@ -17,8 +16,8 @@ use sim::node::Node;
 use transport::{Address, Class, Code, Error, Transport};
 use types::time::Span;
 
-use crate::common::{CLIENT, PORT, SERVER, config, filled, part};
-use crate::{ALLOCATOR, fill};
+use crate::common::{CLIENT, PORT, SERVER, config, fill, filled, part};
+use crate::{ALLOCATOR, CLOSED};
 
 /// A message that the read takes over many polls.
 const LEN: usize = 60_000;
@@ -30,9 +29,6 @@ const LONG: usize = 100_000;
 const LONGER: usize = 250_000;
 /// The heap of a list of 64 chunks, since each slot is 32 bytes.
 const LIST: usize = 2 << 10;
-/// The heap of the cell that holds a closed session's error, which the drop of its
-/// receiver frees: an `Rc` box, with its two counts.
-const CLOSED: usize = 2 * size_of::<usize>() + size_of::<OnceCell<Error>>();
 /// When the server first polls a long message, once it is whole and before the end.
 const WHOLE: Span = Span::from_nanos(250_000_000);
 /// When the client ends the stream or the session, after its send.

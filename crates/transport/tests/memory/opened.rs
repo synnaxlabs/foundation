@@ -4,20 +4,17 @@
 //! the reply is in, and also with one poll each millisecond from the open, which
 //! waits for the prefix of the reply.
 
-use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
 
 use sim::Sim;
 use sim::node::Node;
 use transport::{Address, Class, Transport};
 use types::time::Span;
 
-use crate::ALLOCATOR;
 use crate::common::{CLIENT, PORT, SERVER, config, filled, part};
+use crate::{ALLOCATOR, next};
 
 /// The most heap that the drop of the receiver gives back: a list of 64 chunks, since
 /// each slot is 32 bytes.
@@ -102,19 +99,7 @@ fn run(reading: Reading, len: usize) -> Out {
         if matches!(reading, Reading::Whole) {
             clock.sleep(READ).await;
         }
-        let mut pending = 0;
-        let read = {
-            let mut recv = pin!(receiver.recv());
-            loop {
-                if let Poll::Ready(read) =
-                    poll_fn(|cx| Poll::Ready(recv.as_mut().poll(cx))).await
-                {
-                    break read;
-                }
-                pending += 1;
-                clock.sleep(Span::MILLISECOND).await;
-            }
-        };
+        let (read, pending) = next(&mut receiver, &clock, |_| ()).await;
         let len = read.ok().flatten().map(|block| block.len());
         clock.sleep(DROP).await;
         let before = ALLOCATOR.held();

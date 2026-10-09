@@ -4,24 +4,17 @@
 //! the stream. A short message comes first, so a read over many also waits for the
 //! prefix of the long one.
 
-use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
 
-use block::Block;
-use env::clock::Clock;
 use sim::Sim;
 use sim::node::Node;
-use transport::stream::Receiver;
-use transport::{Address, Class, Error, Transport};
+use transport::{Address, Class, Transport};
 use types::time::Span;
 
-use crate::ALLOCATOR;
-use crate::common::{CLIENT, PORT, SERVER, config, filled, part};
-use crate::fill;
+use crate::common::{CLIENT, PORT, SERVER, config, fill, filled, part};
+use crate::{ALLOCATOR, next};
 
 /// The most heap that the drop of the receiver gives back: a list of 64 chunks, since
 /// each slot is 32 bytes.
@@ -207,12 +200,12 @@ fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out
         let session = transport.accept().await.expect("a session");
         let mut receiver = session.accept().await.expect("a stream").receiver;
         let clock = own.clock();
-        let short = next(&mut receiver, &clock, || ()).await.0;
+        let short = next(&mut receiver, &clock, |_| ()).await.0;
         let short = short.ok().flatten().map(|block| block.len());
         if !matches!(reading, Reading::Parts) {
             clock.sleep(READ).await;
         }
-        let (read, pending) = next(&mut receiver, &clock, || {
+        let (read, pending) = next(&mut receiver, &clock, |_| {
             if transport.status().waited > Span::ZERO {
                 full.clear();
             }
@@ -222,7 +215,7 @@ fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out
         let len = read.ok().flatten().map(|block| block.len());
         let (ended, more, ending) = match end {
             End::Finish => {
-                let (read, ending) = next(&mut receiver, &clock, || ()).await;
+                let (read, ending) = next(&mut receiver, &clock, |_| ()).await;
                 (matches!(read, Ok(None)), None, ending)
             }
             End::Reset => {
@@ -230,7 +223,7 @@ fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out
                 (false, None, 0)
             }
             End::More => {
-                let (read, ending) = next(&mut receiver, &clock, || ()).await;
+                let (read, ending) = next(&mut receiver, &clock, |_| ()).await;
                 clock.sleep(DROP).await;
                 (false, read.ok().flatten().map(|block| block.len()), ending)
             }
@@ -250,26 +243,4 @@ fn serve(node: &Node, reading: Reading, len: usize, end: End, out: Arc<Mutex<Out
         };
     });
     drop(started.expect("a shard"));
-}
-
-/// Polls one `receiver.recv()` each millisecond until it is ready, and calls
-/// `on_pending` after each poll that gives `Pending`. Gives the read and the count of
-/// those polls.
-async fn next(
-    receiver: &mut Receiver,
-    clock: &Clock,
-    mut on_pending: impl FnMut(),
-) -> (Result<Option<Block>, Error>, usize) {
-    let mut recv = pin!(receiver.recv());
-    let mut pending = 0;
-    loop {
-        if let Poll::Ready(read) =
-            poll_fn(|cx| Poll::Ready(recv.as_mut().poll(cx))).await
-        {
-            return (read, pending);
-        }
-        pending += 1;
-        on_pending();
-        clock.sleep(Span::MILLISECOND).await;
-    }
 }
