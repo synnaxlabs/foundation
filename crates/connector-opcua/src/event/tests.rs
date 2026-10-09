@@ -606,13 +606,12 @@ fn a_timed_callback_at_a_past_date_runs_at_the_next_run() {
             client,
             count,
             ptr::from_ref(&runs).cast_mut().cast(),
-            -1,
+            -1_000_000_000_000,
             &raw mut key,
         )
     });
     assert_eq!(status, Status::GOOD);
-    let next = f.events.next();
-    assert!(next.is_some_and(|due| due <= f.now()), "{next:?}");
+    assert_eq!(f.events.next(), Some(Monotonic(0)));
     // SAFETY: the client lives.
     let status = Status(unsafe { ffi::UA_Client_run_iterate(client, 0) });
     assert_eq!(status, Status::GOOD);
