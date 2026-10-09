@@ -100,3 +100,11 @@ fn gives_the_json_error_of_an_apply() {
         assert_eq!(error, Error::Stale { base, pointer }.json());
     });
 }
+
+#[test]
+fn debug_names_each_front_end() {
+    solo(|mesh| async move {
+        let node = create_node(mesh);
+        assert_eq!(format!("{node:?}"), r#"Node { front_ends: ["hcl"], .. }"#);
+    });
+}
