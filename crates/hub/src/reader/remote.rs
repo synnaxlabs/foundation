@@ -753,6 +753,7 @@ fn to_usize(value: u32) -> usize {
 mod tests {
     use super::*;
 
+    // Only the length of the list shows that an add drops each queue that went.
     #[test]
     fn an_add_drops_each_queue_that_went_and_keeps_each_that_lives() {
         let [a, b, c] = [1, 2, 3].map(channel::Key::from_u128);
@@ -767,5 +768,24 @@ mod tests {
         assert_eq!(first.borrow().ended, Some(Ended::Removed(a)));
         assert_eq!(third.borrow().ended, None);
         assert_eq!(sessions.0.len(), 1);
+    }
+
+    // A run gets this order only when the caller asks and the session ends between
+    // two polls of the task.
+    #[test]
+    fn an_end_with_a_refusal_comes_before_a_grant_that_is_due() {
+        let queue = Rc::new(RefCell::new(Queue {
+            due: Some(2 * WINDOW),
+            ended: Some(Ended::Credit {
+                limit_bytes: WINDOW,
+            }),
+            ..Queue::default()
+        }));
+        let cx = Context::from_waker(Waker::noop());
+        assert_eq!(
+            poll_due(&Rc::downgrade(&queue), &cx),
+            Poll::Ready(Err(Some(Refusal::Malformed)))
+        );
+        assert_eq!(queue.borrow().due, Some(2 * WINDOW));
     }
 }

@@ -2674,6 +2674,24 @@ fn a_credit_waits_for_no_idle_caller_of_another_open() {
     );
 }
 #[test]
+fn a_removal_ends_a_remote_reader_that_opened_before_another() {
+    remote(
+        7,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            hub_home(node, tasks, transport, steps, |_| async {}).await;
+        },
+        |test, _| async move {
+            let mut first = test.reader(&["value"], Mode::Complete).await;
+            let _second = test.reader(&["value-c"], Mode::Complete).await;
+            test.hub.set_definitions(&without(&["value"]));
+            let ended = first.next().await.map(|_| ());
+            assert_eq!(ended, Err(Ended::Removed(VALUE)));
+        },
+    );
+}
+
+#[test]
 fn a_removal_ends_a_remote_reader_that_waits_for_a_stream() {
     remote(
         22,
@@ -2694,6 +2712,27 @@ fn a_removal_ends_a_remote_reader_that_waits_for_a_stream() {
             let wait = test.clock.sleep(Span::from_nanos(5_000_000_000));
             let opened = race(opening.as_mut(), wait).await;
             assert!(opened.is_ok(), "the removal ends the open that waits");
+        },
+    );
+}
+
+#[test]
+fn a_second_removal_keeps_the_end_of_a_remote_reader() {
+    remote(
+        7,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            hub_home(node, tasks, transport, steps, |_| async {}).await;
+        },
+        |test, _| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            test.hub.set_definitions(&without(&["value"]));
+            let ended = reader.next().await.map(|_| ());
+            assert_eq!(ended, Err(Ended::Removed(VALUE)));
+            test.hub
+                .set_definitions(&without(&["value", "time", "value-c"]));
+            let ended = reader.next().await.map(|_| ());
+            assert_eq!(ended, Err(Ended::Removed(VALUE)));
         },
     );
 }
