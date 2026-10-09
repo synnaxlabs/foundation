@@ -2,8 +2,7 @@
 //! answers each `sendmsg` and `epoll_ctl` of the test thread, so each test runs on a
 //! thread of its own.
 
-#[path = "../../../common/seccomp.rs"]
-mod seccomp;
+use crate::seccomp;
 
 use std::future::poll_fn;
 use std::io::IoSliceMut;

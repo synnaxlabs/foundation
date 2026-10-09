@@ -5,7 +5,7 @@ use std::cell::RefCell;
 use std::ffi::OsStr;
 use std::fmt;
 use std::io::IoSlice;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -47,7 +47,7 @@ pub struct Disk {
 }
 
 impl Disk {
-    /// Opens or makes `dir/data` and starts I/O thread `name`.
+    /// Opens or makes `dir` and `dir/data`, and starts I/O thread `name`.
     pub(crate) fn new(
         dir: &Path,
         threads: &Threads,
@@ -315,20 +315,20 @@ fn open(data: &OwnedFd, path: &Path, mode: Mode) -> Result<(OwnedFd, u64), Error
 
 /// Opens `dir/data`, and first makes `dir` and `dir/data` when they are not there.
 fn data(dir: &Path) -> io::Result<OwnedFd> {
-    match fs::mkdir(dir, DIR) {
-        // A `dir` made here is not durable until its parent syncs.
-        Ok(()) => sync_all(&fs::open(dir.join(".."), READ_DIR, fs::Mode::empty())?)?,
-        Err(Errno::EXIST) => {}
-        Err(errno) => return Err(errno),
-    }
-    let dir = fs::open(dir, READ_DIR, fs::Mode::empty())?;
-    match fs::mkdirat(&dir, "data", DIR) {
+    let dir = make(fs::CWD, dir)?;
+    make(&dir, Path::new("data"))
+}
+
+/// Opens directory `path` of `at`, and first makes it when it is not there.
+fn make(at: impl AsFd, path: &Path) -> io::Result<OwnedFd> {
+    match fs::mkdirat(&at, path, DIR) {
         Ok(()) | Err(Errno::EXIST) => {}
         Err(errno) => return Err(errno),
     }
-    // A `data` made by this or an earlier start is not durable until `dir` syncs.
-    sync_all(&dir)?;
-    fs::openat(&dir, "data", READ_DIR, fs::Mode::empty())
+    let made = fs::openat(&at, path, READ_DIR, fs::Mode::empty())?;
+    // An entry made by this or an earlier call is not durable until its holder syncs.
+    sync_all(&fs::openat(&made, "..", READ_DIR, fs::Mode::empty())?)?;
+    Ok(made)
 }
 
 /// The names in `dir`, without `.` and `..`.

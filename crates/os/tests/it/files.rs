@@ -690,10 +690,58 @@ fn files_of_a_dir_with_a_missing_parent_gives_dir_and_makes_nothing() {
     let found = dir_error(&scratch.0.join("a").join("b"));
     assert_eq!(
         found.to_string(),
-        "cannot open the data directory: No such file or directory (os error 2)"
+        "cannot open or make the data directory: No such file or directory (os error 2)"
     );
     assert!(matches!(found, os::Error::Dir(_)));
     assert_eq!(std::fs::read_dir(&scratch.0).unwrap().count(), 0);
+}
+
+/// Each call syncs the holders of `dir` and `dir/data`, also when they are there: an
+/// entry that a call made before a crash is not durable until then.
+#[cfg(target_os = "linux")]
+#[test]
+fn files_syncs_the_holders_of_dir_and_its_data_at_each_call() {
+    use std::sync::{Arc, Mutex};
+
+    let scratch = Scratch::new();
+    let root = std::fs::canonicalize(&scratch.0).unwrap();
+    let dir = root.join("a");
+    let threads = os::threads().unwrap();
+    let handle = threads.start("synced", move || async move {
+        let synced = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&synced);
+        crate::seccomp::answer_calls(&[libc::SYS_fsync], move |data, _| {
+            let fd = format!("/proc/self/fd/{}", data.args[0]);
+            seen.lock().unwrap().push(std::fs::read_link(fd).unwrap());
+            None
+        });
+        for _ in 0..2 {
+            let (disk, thread) = os::files(&dir, &os::threads().unwrap(), "files")
+                .expect("the disk opens");
+            drop(disk);
+            thread.join().unwrap();
+        }
+        let holders = [root.clone(), dir.clone()];
+        assert_eq!(*synced.lock().unwrap(), [holders.clone(), holders].concat());
+    });
+    crate::common::assert_joins(handle.unwrap(), Ok(()));
+}
+
+/// A `dir` that the call made under a holder that it cannot sync is still not
+/// durable, so each later call fails too.
+#[test]
+fn files_under_a_parent_it_cannot_read_gives_dir_at_each_call() {
+    let scratch = Scratch::new();
+    let dir = scratch.0.join("a");
+    // Write and search only: a read open of the parent fails.
+    std::fs::set_permissions(&scratch.0, std::fs::Permissions::from_mode(0o300))
+        .unwrap();
+    let found = [dir_error(&dir).to_string(), dir_error(&dir).to_string()];
+    std::fs::set_permissions(&scratch.0, std::fs::Permissions::from_mode(0o700))
+        .unwrap();
+    let denied = "cannot open or make the data directory: Permission denied (os error \
+                  13)";
+    assert_eq!(found, [denied, denied]);
 }
 
 #[test]
@@ -703,7 +751,7 @@ fn files_in_a_directory_under_a_file_gives_dir() {
     let found = dir_error(&scratch.0.join("a"));
     assert_eq!(
         found.to_string(),
-        "cannot open the data directory: Not a directory (os error 20)"
+        "cannot open or make the data directory: Not a directory (os error 20)"
     );
     assert!(matches!(found, os::Error::Dir(_)));
 }
