@@ -90,10 +90,9 @@ pub fn plan(
 /// # Errors
 ///
 /// The diagnostics of `kinds` for each connector whose kind or config it refuses.
-/// Else each problem of [`plan`] after `config.wrong-channel`, with no span: the
-/// problems of the indexes, then of the connectors, then of the nodes, each in name
-/// order. When two connectors on two nodes write an index, `config.writer-nodes` names
-/// the node of the connector with the first name first.
+/// Else each problem of [`plan`] after `config.wrong-channel`, with no span. When
+/// connectors on two nodes write an index, `config.writer-nodes` names the node of the
+/// connector with the first name first.
 pub fn check(
     definitions: &BTreeMap<Name, definition::Definition>,
     members: &BTreeSet<Name>,
