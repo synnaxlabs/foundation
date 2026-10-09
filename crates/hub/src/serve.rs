@@ -8,6 +8,7 @@ use std::fmt;
 use std::future::poll_fn;
 use std::pin::pin;
 use std::rc::Rc;
+use std::slice;
 use std::task::{Context, Poll};
 
 use block::{Block, Unique};
@@ -486,11 +487,10 @@ impl<'s> Opening<'s> {
     /// Panics if the open checked no key.
     async fn home(&self) -> Result<(), Error> {
         let index = self.index.expect("invariant: the open checked a key");
-        let mut homed = pin!(crate::home(self.state, index));
+        let mut homed = pin!(crate::homes(self.state, slice::from_ref(&index)));
         poll_fn(|cx| {
             self.watch(cx)?;
-            let homed = homed.as_mut().poll(cx).map_ok(|_| ());
-            homed.map_err(Error::from)
+            homed.as_mut().poll(cx).map_err(Error::from)
         })
         .await
     }

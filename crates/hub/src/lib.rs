@@ -538,30 +538,38 @@ enum Away {
     Mesh(::mesh::Stopped),
 }
 
-/// Waits until the mesh names this node the home of `index`. With no mesh, this node
-/// is the home. It changes no state, so the caller checks its channels again, or reads
-/// its removal, after it, then carries `index` with no `await` between. Gives whether
-/// it waited: the mesh named no home at the call.
-async fn home(
+/// Waits until the mesh names this node the home of each of `indexes`, in one pass
+/// that waits for none, so a home that moves while it waits for another is seen. With
+/// no mesh, this node is the home. It changes no state, so the caller checks its
+/// channels again, or reads their removal, after it, then carries `indexes` with no
+/// `await` between.
+async fn homes(
     state: &Rc<RefCell<State>>,
-    index: types::channel::Key,
-) -> Result<bool, Away> {
-    let (watch, node) = {
-        let state = state.borrow();
-        (
-            state.region.as_ref().map(|region| region.mesh.watch(index)),
-            state.node,
-        )
-    };
-    let mut waited = false;
-    if let Some(mut watch) = watch {
-        loop {
-            match watch.next().await.map_err(Away::Mesh)? {
-                Some(home) if home == node => break,
-                Some(home) => return Err(Away::Remote(home)),
-                None => waited = true,
+    indexes: &[types::channel::Key],
+) -> Result<(), Away> {
+    loop {
+        let mut waited = false;
+        for &index in indexes {
+            let (watch, node) = {
+                let state = state.borrow();
+                (
+                    state.region.as_ref().map(|region| region.mesh.watch(index)),
+                    state.node,
+                )
+            };
+            let Some(mut watch) = watch else {
+                return Ok(());
+            };
+            loop {
+                match watch.next().await.map_err(Away::Mesh)? {
+                    Some(home) if home == node => break,
+                    Some(home) => return Err(Away::Remote(home)),
+                    None => waited = true,
+                }
             }
         }
+        if !waited {
+            return Ok(());
+        }
     }
-    Ok(waited)
 }

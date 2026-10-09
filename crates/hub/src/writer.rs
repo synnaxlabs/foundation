@@ -157,24 +157,20 @@ impl Writer {
         if channels.is_empty() {
             return Err(Error::Empty);
         }
+        let indexes = |groups: &[Indexed]| -> Vec<channel::Key> {
+            groups.iter().map(|&(index, _)| index).collect()
+        };
         let (mut keys, groups) = loop {
             let (_, groups) = resolve(&state.borrow(), &channels)?;
             // Each mesh time reaches the first stamp. Once the node has mesh time, it
             // is ready at once.
             let time = state.borrow().time.reach(Stamp::from_nanos(i64::MIN));
             time.await;
-            // A home can move while the open waits for another, so a pass with a
-            // wait checks each home again.
-            let mut waited = false;
-            for (index, _) in &groups {
-                waited |= crate::home(state, *index).await?;
-            }
+            let homed = indexes(&groups);
+            crate::homes(state, &homed).await?;
             // A call of `set_definitions` while the open waits can change a channel.
             let (keys, again) = resolve(&state.borrow(), &channels)?;
-            let indexes = |groups: &[Indexed]| -> Vec<channel::Key> {
-                groups.iter().map(|&(index, _)| index).collect()
-            };
-            if !waited && indexes(&again) == indexes(&groups) {
+            if indexes(&again) == homed {
                 break (keys, again);
             }
         };
