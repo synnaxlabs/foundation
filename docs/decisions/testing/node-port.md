@@ -63,7 +63,8 @@
   (NODE MESH), by `laptop.architect-2` (21:31 UTC):
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069443456.
   Supersedes the #1780 clause of
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010.
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. Under
+  `sim`, the port is free once `lock` is, which a test pins.
   Amended (2026-10-09, #2017, by `laptop.architect-2`, 02:17 UTC:
   https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072896717, on
   https://github.com/synnaxlabs/foundation/issues/2017): shard 0 drops `lock` only once
@@ -80,7 +81,7 @@
   https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6073847772).
   The `transport` surface, by `laptop.architect` (02:19 UTC):
   https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072912165.
-  Supersedes the port rule of
+  Supersedes the `os` sentences of the port rule of
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069829972,
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070247529, and
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070577797, and the

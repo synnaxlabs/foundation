@@ -58,7 +58,7 @@
 | NODE PORT amendment of #1830 (6054871235): the transport drops when the last task of the mesh ends | NODE PORT second amendment (#1962, 6068113010): the transport drops with the last of the port's future and the tasks of the mesh |
 | NODE PORT second amendment (#1962, 6068113010): a node whose mesh stops keeps serving until #1780 stops it | NODE PORT second amendment, new words (#1962, 6069443456): a group stop of the mesh stops the node (NODE MESH) |
 | NODE PORT, test of the amendment (#1962, 6069568312): the port is free once `lock` is | NODE PORT (#1962, 6069829972, 6070247529, and 6070577797): under `sim` the port is free once `lock` is; under `os` the carrier's task can hold the socket until the runtime of shard 0 drops, until #2017 |
-| NODE PORT (#1962, 6069829972, 6070247529, and 6070577797): under `sim` the port is free once `lock` is; under `os` the carrier's task can hold the socket until the runtime of shard 0 drops | NODE PORT amendment (#2017): shard 0 drops `lock` only once the transport has freed the port |
+| NODE PORT (#1962, 6069829972, 6070247529, and 6070577797): under `os` the carrier's task can hold the socket until the runtime of shard 0 drops | NODE PORT amendment (#2017): shard 0 drops `lock` only once the transport has freed the port |
 | NODE PORT (#1962, 6069568312): no test sees the drop of the transport, and the end of shard 0 frees the socket also when a clone of the transport leaks | NODE PORT amendment (#2017): a leaked clone of the transport holds the stop |
 | HOME TYPE REFUSAL (#963): `open_writer` refuses a series of a type the home does not write | HOME EVERY TYPE |
 | FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
