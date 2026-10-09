@@ -759,7 +759,6 @@ fn hold_while_another_create_fails(mode: Mode) {
 
 /// A remove that drops while it waits for room in the full queue of the I/O thread
 /// never runs.
-#[cfg(target_os = "linux")]
 #[test]
 fn a_remove_that_drops_while_it_waits_for_room_leaves_the_file() {
     run(|files, data| async move {
@@ -787,27 +786,47 @@ fn a_remove_that_drops_while_it_waits_for_room_leaves_the_file() {
 
 /// Runs `start` while the I/O thread of `files` blocks in the open of a FIFO, so each
 /// call that `start` polls once waits in the queue, and then frees the thread.
-#[cfg(target_os = "linux")]
 async fn stalled<T>(
     files: &Files,
     data: &Path,
     start: impl FnOnce(&mut std::task::Context<'_>) -> T,
 ) -> T {
-    let mode = rustix::fs::Mode::from_raw_mode(0o600);
-    rustix::fs::mkfifoat(rustix::fs::CWD, data.join("p"), mode).unwrap();
+    mkfifo(&data.join("p"));
     let mut context = std::task::Context::from_waker(std::task::Waker::noop());
     let mut blocker = Box::pin(files.open(Path::new("p"), Mode::Read));
     assert!(blocker.as_mut().poll(&mut context).is_pending());
     let started = start(&mut context);
-    let writer = rustix::fs::open(data.join("p"), rustix::fs::OFlags::WRONLY, mode);
+    let writer = rustix::fs::open(
+        data.join("p"),
+        rustix::fs::OFlags::WRONLY,
+        rustix::fs::Mode::empty(),
+    );
     drop(blocker.await.unwrap());
     drop(writer.unwrap());
     std::fs::remove_file(data.join("p")).unwrap();
     started
 }
 
+/// Makes a FIFO at `path`. A child process, such as `mkfifo`, would hold the files of
+/// the tests on other threads open until it starts, and so keep their locks.
+fn mkfifo(path: &Path) {
+    #[cfg(target_os = "linux")]
+    {
+        let mode = rustix::fs::Mode::from_raw_mode(0o600);
+        rustix::fs::mkfifoat(rustix::fs::CWD, path, mode).unwrap();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `path` ends in a NUL and lives past the call.
+        #[expect(unsafe_code, reason = "`rustix` has no `mkfifoat` on macOS")]
+        let made = unsafe { libc::mkfifo(path.as_ptr(), 0o600) };
+        assert_eq!(made, 0, "{}", std::io::Error::last_os_error());
+    }
+}
+
 /// Polls `future` once, and expects it to wait.
-#[cfg(target_os = "linux")]
 fn pend<F: Future>(
     future: &mut std::pin::Pin<Box<F>>,
     context: &mut std::task::Context<'_>,
@@ -815,7 +834,6 @@ fn pend<F: Future>(
     assert!(future.as_mut().poll(context).is_pending());
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn a_write_open_waits_for_the_write_of_a_dropped_handle() {
     run(|files, data| async move {
@@ -838,7 +856,6 @@ fn a_write_open_waits_for_the_write_of_a_dropped_handle() {
     });
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn a_write_open_waits_for_a_dropped_call_on_the_file_that_its_path_names() {
     run(|files, data| async move {
@@ -861,7 +878,6 @@ fn a_write_open_waits_for_a_dropped_call_on_the_file_that_its_path_names() {
     });
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn a_write_open_waits_for_a_dropped_rename_to_its_path() {
     run(|files, data| async move {
@@ -886,7 +902,6 @@ fn a_write_open_waits_for_a_dropped_rename_to_its_path() {
     });
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn a_create_after_a_dropped_remove_keeps_its_file() {
     run(|files, data| async move {
@@ -907,7 +922,6 @@ fn a_create_after_a_dropped_remove_keeps_its_file() {
     });
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn a_write_open_waits_for_a_dropped_remove_through_the_handle() {
     run(|files, data| async move {
@@ -926,7 +940,6 @@ fn a_write_open_waits_for_a_dropped_remove_through_the_handle() {
     });
 }
 
-#[cfg(target_os = "linux")]
 #[test]
 fn a_rename_waits_for_a_dropped_remove_of_its_new_name() {
     run(|files, data| async move {
@@ -944,6 +957,42 @@ fn a_rename_waits_for_a_dropped_remove_of_its_new_name() {
         assert_eq!(renamed.as_mut().await, Ok(()));
         let names = files.list(Path::new("")).await.unwrap();
         assert_eq!(names, [PathBuf::from("b")]);
+    });
+}
+
+#[test]
+fn a_write_open_waits_for_a_remove_through_the_handle_whose_future_lives() {
+    run(|files, data| async move {
+        let file = create(&files, "a", KIB).await;
+        let (mut remove, mut open) = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(file.remove());
+            pend(&mut remove, context);
+            let mut open = Box::pin(files.open(Path::new("a"), Mode::Write));
+            pend(&mut open, context);
+            (remove, open)
+        })
+        .await;
+        let found = open.as_mut().await.map(drop);
+        assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        assert_eq!(remove.as_mut().await, Ok(()));
+    });
+}
+
+#[test]
+fn a_remove_waits_for_a_dropped_create() {
+    run(|files, data| async move {
+        let mut removed = stalled(&files, &data, |context| {
+            let mode = Mode::Create { len: KIB };
+            let mut create = Box::pin(files.open(Path::new("a"), mode));
+            pend(&mut create, context);
+            drop(create);
+            let mut remove = Box::pin(files.remove(Path::new("a")));
+            pend(&mut remove, context);
+            remove
+        })
+        .await;
+        assert_eq!(removed.as_mut().await, Ok(()));
+        assert!(files.list(Path::new("")).await.unwrap().is_empty());
     });
 }
 
