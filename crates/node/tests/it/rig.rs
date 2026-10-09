@@ -236,16 +236,16 @@ impl Drop for Process {
         // `kill` gives `Ok` for a command that exited. No wait: while the thread
         // panics, a wait can block, and `run` waits for its command itself.
         match self.0.kill() {
-            // A second panic aborts the test binary. Only the macro writes to the
-            // output that the test harness captures for the report of the test.
+            // A panic out of this drop aborts the test binary, and `eprintln!`
+            // panics when stderr is closed. Only the macro writes to the output
+            // that the test harness captures for the report of the test.
             Err(error) if std::thread::panicking() => {
+                let line = format!("kill the command: {error}");
                 #[expect(
                     clippy::print_stderr,
                     reason = "a second panic aborts the test binary"
                 )]
-                {
-                    eprintln!("kill the command: {error}");
-                }
+                let _printed = std::panic::catch_unwind(move || eprintln!("{line}"));
             }
             kill => kill.expect("kill the command"),
         }
@@ -431,6 +431,26 @@ fn a_failed_kill_panics() {
         ),
         "{report}"
     );
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs perl and /proc")]
+fn a_failed_kill_while_the_test_panics_with_a_closed_stderr_does_not_abort() {
+    let binary = std::env::current_exe().expect("the test binary");
+    let mut child = Command::new("perl")
+        .args(["-e", "$SIG{CHLD} = 'IGNORE'; exec @ARGV or die"])
+        .arg(binary)
+        .args(["--exact", "rig::a_command_that_the_kernel_reaped_drops"])
+        .arg("--nocapture")
+        .env(REAPED, "panic")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("run the test binary");
+    drop(child.stderr.take());
+    let output = child.wait_with_output().expect("wait for the test binary");
+    let report = String::from_utf8(output.stdout).expect("UTF-8");
+    assert_eq!(output.status.code(), Some(101), "{report}");
 }
 
 #[test]
