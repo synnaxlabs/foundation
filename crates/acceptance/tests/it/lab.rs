@@ -305,7 +305,7 @@ impl Lab {
 
     /// Creates the `f64` channel `channel`, whose home is `home`.
     pub(crate) fn channel(&mut self, _home: Node, _channel: &str) {
-        todo!("waits on #462, #1931, #1957")
+        todo!("waits on #462, #1957")
     }
 
     /// Opens a live reader on `channel` at `node`. It gets the samples written from
