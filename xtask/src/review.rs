@@ -293,7 +293,7 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
 /// block is the end lines ([`END`]), unless the comment is `old`, posted before
 /// [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Parsed> {
-    let body = unpadded(body);
+    let body = normalized(body);
     let shown = Shown::read(&body);
     let number = shown.number.or(shown.html_number.filter(|_| !old))?;
     let text = &shown.text;
@@ -449,7 +449,7 @@ struct Shown<'a> {
 }
 
 impl<'a> Shown<'a> {
-    /// Reads `body` ([`unpadded`]). Its round heading is the first top-level
+    /// Reads `body` ([`normalized`]). Its round heading is the first top-level
     /// `## Review round ` heading.
     fn read(body: &'a str) -> Self {
         let mut shown = Self::default();
@@ -459,7 +459,7 @@ impl<'a> Shown<'a> {
         let (mut fresh, mut code) = (true, false);
         let (mut html_line, mut notes, mut codes) = (None, Vec::new(), Vec::new());
         for (event, range) in Parser::new_ext(body, OPTIONS).into_offset_iter() {
-            let start = body[..range.start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
+            let start = body[..range.start].rfind('\n').map_or(0, |i| i + 1);
             let line = &body[range.start..line_end(body, range.start)];
             let paragraph = open.last().copied().flatten().filter(|_| fresh);
             let html = matches!(event, Event::Html(_) | Event::InlineHtml(_));
@@ -571,19 +571,20 @@ fn inline(tag: TagEnd) -> bool {
     }
 }
 
-/// `text` with the spaces and tabs at the end of each line removed, which changes
-/// nothing that the check reads. pulldown-cmark 0.13.4 does not close a code block at
-/// a fence that a tab follows, as the Markdown spec and GitHub do.
-fn unpadded(text: &str) -> String {
-    let mut unpadded = String::with_capacity(text.len());
+/// `text` with each line ended by `\n` and with no spaces or tabs at the end of a line,
+/// which changes nothing that the check reads. pulldown-cmark 0.13.4 does not close a
+/// code block at a fence that a tab follows, or end a code block line at a lone `\r`,
+/// as the Markdown spec and GitHub do.
+fn normalized(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
     let mut rest = text;
     while let Some(end) = rest.find(['\n', '\r']) {
-        unpadded.push_str(rest[..end].trim_end_matches([' ', '\t']));
-        unpadded.push_str(&rest[end..=end]);
-        rest = &rest[end + 1..];
+        normalized.push_str(rest[..end].trim_end_matches([' ', '\t']));
+        normalized.push('\n');
+        rest = rest[end..].strip_prefix("\r\n").unwrap_or(&rest[end + 1..]);
     }
-    unpadded.push_str(rest.trim_end_matches([' ', '\t']));
-    unpadded
+    normalized.push_str(rest.trim_end_matches([' ', '\t']));
+    normalized
 }
 
 /// The text after `## Review round ` in `line` when it starts with it after at most
@@ -628,7 +629,7 @@ fn starts(
     codes: &[Range<usize>],
 ) -> (Option<usize>, Option<usize>) {
     let (mut label, mut html) = (None, None);
-    let starts = body.match_indices(['\n', '\r']).map(|(i, _)| i + 1);
+    let starts = body.match_indices('\n').map(|(i, _)| i + 1);
     for start in std::iter::once(0).chain(starts) {
         let line = &body[start..line_end(body, start)];
         let mut rest = unmarked(line);
@@ -692,9 +693,7 @@ fn note(text: &str) -> Option<&str> {
 
 /// The offset in `text` of the end of the line that holds offset `start`.
 fn line_end(text: &str, start: usize) -> usize {
-    text[start..]
-        .find(['\n', '\r'])
-        .map_or(text.len(), |i| start + i)
+    text[start..].find('\n').map_or(text.len(), |i| start + i)
 }
 
 /// Whether the `Hot path:` value `value` names a function: its first word, with

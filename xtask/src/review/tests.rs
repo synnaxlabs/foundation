@@ -1405,6 +1405,22 @@ fn passes_a_footnote_label_that_both_parsers_read() {
 }
 
 #[test]
+fn fails_a_footnote_label_after_a_lone_carriage_return_in_a_code_block() {
+    // GitHub ends the code block at the `\r`, reads the label as a footnote, and
+    // hides the end lines, which continue it.
+    let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n    c\r[^a\\]: x\n");
+    assert_ne!(hidden, ROUND);
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![label("[^a\\]: x")]);
+}
+
+#[test]
+fn fails_raw_html_after_a_lone_carriage_return_in_a_code_block() {
+    let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n    c\r<!-- x\n");
+    assert_ne!(hidden, ROUND);
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<!-- x")]);
+}
+
+#[test]
 fn fails_end_lines_that_a_fence_after_a_list_item_hides() {
     let hidden = later("reviewer, breaker").replace(
         "weakening.\n\n",
