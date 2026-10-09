@@ -7,10 +7,11 @@
 
 use std::path::Path;
 
-use env::files::{Files, Mode};
+use env::files::Files;
 use types::name::Name;
 
-use crate::{Error, sector};
+use crate::Error;
+use crate::sector::{self, Held};
 
 /// The name of the file.
 pub(crate) const FILE: &str = "name";
@@ -29,18 +30,8 @@ pub(crate) const LEN: usize = BODY + 4;
 /// [`Error::Name`] for a file that a node did not write, and [`Error::Directory`] for
 /// a file call that fails.
 pub(crate) async fn read(files: &Files) -> Result<Option<Name>, Error> {
-    let file = match files.open(Path::new(FILE), Mode::Read).await {
-        Ok(file) => file,
-        Err(env::files::Error::NotFound { .. }) => return Ok(None),
-        Err(error) => return Err(Error::Directory(error)),
-    };
-    match file.len() {
-        0 => Ok(None),
-        len if len == LEN as u64 => {
-            decode(&sector::read(&file).await.map_err(Error::Directory)?)
-        }
-        _ => Err(Error::Name),
-    }
+    let held = sector::read(files, Path::new(FILE), TAG).await;
+    decode(&held.map_err(Error::Directory)?)
 }
 
 /// Writes `name` to the file `name` of `files` and makes it durable, when the file
@@ -53,12 +44,12 @@ pub(crate) async fn read(files: &Files) -> Result<Option<Name>, Error> {
 /// that a node did not write, and [`Error::Directory`] for a file call that fails.
 /// Writes no other name over a name.
 pub(crate) async fn keep(files: &Files, name: &Name) -> Result<(), Error> {
-    let opened = sector::open(files, Path::new(FILE)).await;
-    let (file, bytes) = opened.map_err(|error| match error {
+    let opened = sector::open(files, Path::new(FILE), TAG).await;
+    let (file, held) = opened.map_err(|error| match error {
         env::files::Error::Length { .. } => Error::Name,
         error => Error::Directory(error),
     })?;
-    if let Some(stored) = decode(&bytes)?
+    if let Some(stored) = decode(&held)?
         && stored != *name
     {
         return Err(Error::Renamed {
@@ -78,16 +69,18 @@ fn encode(name: &Name) -> [u8; LEN] {
     bytes[..TAG.len()].copy_from_slice(TAG);
     bytes[TAG.len()] = u8::try_from(name.len()).expect("invariant: a name fits a u8");
     bytes[TAG.len() + 1..][..name.len()].copy_from_slice(name);
-    sector::seal(&mut bytes);
+    sector::checksum(&mut bytes);
     bytes
 }
 
-/// The name in `bytes`, `None` for zero bytes, or [`Error::Name`] for bytes that
+/// The name that `held` holds, `None` for nothing, or [`Error::Name`] for bytes that
 /// [`encode`] does not give.
-fn decode(bytes: &[u8; LEN]) -> Result<Option<Name>, Error> {
-    if *bytes == [0; LEN] {
-        return Ok(None);
-    }
+fn decode(held: &Held<LEN>) -> Result<Option<Name>, Error> {
+    let bytes = match held {
+        Held::Nothing => return Ok(None),
+        Held::Written(bytes) => bytes,
+        Held::Foreign => return Err(Error::Name),
+    };
     let len = usize::from(bytes[TAG.len()]);
     let name = &bytes[TAG.len() + 1..][..len];
     let name = std::str::from_utf8(name)
@@ -108,6 +101,11 @@ mod tests {
 
     use super::*;
 
+    /// The name in the file of `bytes`.
+    fn read(bytes: &[u8; LEN]) -> Result<Option<Name>, Error> {
+        decode(&sector::held(bytes, TAG))
+    }
+
     #[test]
     fn writes_the_tag_the_length_the_name_and_the_checksum() {
         let bytes = encode(&"site_a.edge".parse().unwrap());
@@ -127,12 +125,12 @@ mod tests {
         let name: Name = "a".repeat(Name::MAX_BYTES).parse().unwrap();
         let bytes = encode(&name);
         assert_eq!(bytes[17], 255);
-        assert_eq!(decode(&bytes).unwrap(), Some(name));
+        assert_eq!(read(&bytes).unwrap(), Some(name));
     }
 
     #[test]
     fn zero_bytes_are_no_name() {
-        assert_eq!(decode(&[0; LEN]).unwrap(), None);
+        assert_eq!(read(&[0; LEN]).unwrap(), None);
     }
 
     proptest! {
@@ -145,9 +143,9 @@ mod tests {
             flip in 1..=u8::MAX,
         ) {
             let mut bytes = encode(&name.parse().unwrap());
-            prop_assert_eq!(decode(&bytes).unwrap(), Some(name.parse().unwrap()));
+            prop_assert_eq!(read(&bytes).unwrap(), Some(name.parse().unwrap()));
             bytes[at] ^= flip;
-            prop_assert!(matches!(decode(&bytes), Err(Error::Name)));
+            prop_assert!(matches!(read(&bytes), Err(Error::Name)));
         }
 
         /// Bytes that no encode gives are not a name.
@@ -156,7 +154,7 @@ mod tests {
             let mut file = [0; LEN];
             file[..32].copy_from_slice(&bytes);
             prop_assume!(file != [0; LEN]);
-            prop_assert!(matches!(decode(&file), Err(Error::Name)));
+            prop_assert!(matches!(read(&file), Err(Error::Name)));
         }
     }
 }

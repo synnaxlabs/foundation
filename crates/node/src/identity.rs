@@ -10,7 +10,8 @@ use env::files::Files;
 use types::ed25519::PrivateKey;
 use types::time::Stamp;
 
-use crate::{Error, sector};
+use crate::Error;
+use crate::sector::{self, Held};
 
 /// The name of the file.
 pub(crate) const FILE: &str = "node.key";
@@ -44,20 +45,26 @@ pub(crate) async fn load(
     clock: &clock::Reader,
     entropy: &env::entropy::Entropy,
 ) -> Result<Identity, Error> {
-    let opened = sector::open(files, Path::new(FILE)).await;
-    let (file, bytes) = opened.map_err(|error| match error {
+    let opened = sector::open(files, Path::new(FILE), TAG).await;
+    let (file, held) = opened.map_err(|error| match error {
         env::files::Error::Length { .. } => Error::Key,
         error => Error::Directory(error),
     })?;
-    let identity = if bytes == [0; LEN] {
-        clock.reach(Stamp::from_nanos(i64::MIN)).await;
-        let now = match clock.status() {
-            clock::Status::Synced(now) | clock::Status::Holdover(now, _) => now.time(),
-            clock::Status::Unsynced(_) => unreachable!("invariant: mesh time has come"),
-        };
-        create(now, entropy)
-    } else {
-        decode(&bytes).ok_or(Error::Key)?
+    let identity = match held {
+        Held::Nothing => {
+            clock.reach(Stamp::from_nanos(i64::MIN)).await;
+            let now = match clock.status() {
+                clock::Status::Synced(now) | clock::Status::Holdover(now, _) => {
+                    now.time()
+                }
+                clock::Status::Unsynced(_) => {
+                    unreachable!("invariant: mesh time has come")
+                }
+            };
+            create(now, entropy)
+        }
+        Held::Written(bytes) => fields(&bytes),
+        Held::Foreign => return Err(Error::Key),
     };
     sector::write(files, &file, &encode(&identity))
         .await
@@ -75,10 +82,10 @@ pub(crate) async fn load(
 /// length that is not 0, and with the error of each other file call that fails.
 #[cfg(feature = "sim")]
 pub(crate) async fn store(files: &Files, identity: &Identity) -> Result<(), Error> {
-    let (file, bytes) = sector::open(files, Path::new(FILE))
+    let (file, held) = sector::open::<LEN>(files, Path::new(FILE), TAG)
         .await
         .map_err(Error::Directory)?;
-    if bytes != [0; LEN] {
+    if held != Held::Nothing {
         let path = std::path::PathBuf::from(FILE);
         return Err(Error::Directory(env::files::Error::Exists { path }));
     }
@@ -103,16 +110,21 @@ fn create(now: Stamp, entropy: &env::entropy::Entropy) -> Identity {
 
 /// The bytes of the file that holds `identity`.
 pub(crate) fn encode(identity: &Identity) -> [u8; LEN] {
-    let mut body = [0; BODY];
-    body[..16].copy_from_slice(TAG);
-    body[16..32].copy_from_slice(&identity.key.as_u128().to_be_bytes());
-    body[32..].copy_from_slice(&identity.private_key.0);
-    with_checksum(&body)
+    let mut bytes = [0; LEN];
+    bytes[..16].copy_from_slice(TAG);
+    bytes[16..32].copy_from_slice(&identity.key.as_u128().to_be_bytes());
+    bytes[32..BODY].copy_from_slice(&identity.private_key.0);
+    sector::checksum(&mut bytes);
+    bytes
 }
 
-/// The identity in `bytes`, or `None` for another tag or checksum.
+/// The identity in `bytes`, or `None` for zero bytes or another tag or checksum.
+#[cfg(any(test, feature = "sim"))]
 fn decode(bytes: &[u8; LEN]) -> Option<Identity> {
-    (bytes[..16] == *TAG && sector::sealed(bytes)).then(|| fields(bytes))
+    match sector::held(bytes, TAG) {
+        Held::Written(bytes) => Some(fields(&bytes)),
+        Held::Nothing | Held::Foreign => None,
+    }
 }
 
 /// The key and the private key in `bytes`, whatever its tag and checksum.
@@ -125,14 +137,6 @@ fn fields(bytes: &[u8; LEN]) -> Identity {
             bytes[32..BODY].try_into().expect("invariant: 32 bytes"),
         ),
     }
-}
-
-/// `body` with its CRC32C after it.
-pub(crate) fn with_checksum(body: &[u8; BODY]) -> [u8; LEN] {
-    let mut bytes = [0; LEN];
-    bytes[..BODY].copy_from_slice(body);
-    sector::seal(&mut bytes);
-    bytes
 }
 
 /// Checks that `decode` gives an identity exactly for the bytes that `encode` writes,
@@ -216,11 +220,11 @@ mod tests {
             private_key in any::<[u8; 32]>(),
             bit in 0..TAG.len() * 8,
         ) {
-            let bytes = encode(&identity(key, private_key));
-            let mut body = *bytes.first_chunk::<BODY>().expect("68 bytes");
+            let mut bytes = encode(&identity(key, private_key));
             check(&bytes);
-            body[bit / 8] ^= 1 << (bit % 8);
-            prop_assert!(decode(&with_checksum(&body)).is_none());
+            bytes[bit / 8] ^= 1 << (bit % 8);
+            sector::checksum(&mut bytes);
+            prop_assert!(decode(&bytes).is_none());
         }
 
         #[test]
@@ -229,8 +233,9 @@ mod tests {
         }
 
         #[test]
-        fn checks_any_body_with_its_checksum(body in any::<[u8; BODY]>()) {
-            check(&with_checksum(&body));
+        fn checks_any_body_with_its_checksum(mut bytes in any::<[u8; LEN]>()) {
+            sector::checksum(&mut bytes);
+            check(&bytes);
         }
     }
 }
