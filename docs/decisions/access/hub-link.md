@@ -5,7 +5,7 @@
   (`laptop.architect`, 2026-10-08T18:56:15Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
   `hub::Config` gets `node` (the `via` that `admit` checks), `time` (`clock::Reader`),
-  and `entropy` (the nonces). The link waits for a hello's expiry with
+  and `entropy` (the nonces). The link waits for `Admitted::ends` of a hello with
   `clock::Reader::reach` (CLOCK REACH), so `hub` knows nothing of how mesh time moves
   against the monotonic clock, and gets no second clock. A link has one open request:
   it frees the request when `Reply::send` is called or the `Reply` drops, before the
