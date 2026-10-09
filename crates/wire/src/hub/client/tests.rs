@@ -546,7 +546,7 @@ fn gives_the_code_and_the_text_of_each_refusal() {
         (
             Refusal::Capped,
             25,
-            "the hello expires later than the cap past the earliest mesh time",
+            "the hello expires later than the cap past the latest mesh time",
         ),
         (
             Refusal::Changed,

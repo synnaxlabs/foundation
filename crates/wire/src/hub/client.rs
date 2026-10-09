@@ -59,7 +59,7 @@ pub const VIA: u32 = 23;
 /// Stop code: the hello expired.
 pub const EXPIRED: u32 = 24;
 
-/// Stop code: the hello expires later than the cap past the earliest mesh time.
+/// Stop code: the hello expires later than the cap past the latest mesh time.
 pub const CAPPED: u32 = 25;
 
 /// Stop code: a renewal names another subject, key, `via`, or connection than the
@@ -143,7 +143,7 @@ impl fmt::Display for Refusal {
             Self::Via => "the hello names another node as via",
             Self::Expired => "the hello expired",
             Self::Capped => {
-                "the hello expires later than the cap past the earliest mesh \
+                "the hello expires later than the cap past the latest mesh \
                  time"
             }
             Self::Changed => {
