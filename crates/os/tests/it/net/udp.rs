@@ -280,11 +280,11 @@ fn a_batch_arrives_when_the_kernel_refuses_gso() {
 
 /// Each batch sent one datagram at a time arrives whole, also after the first.
 #[test]
+#[cfg(target_os = "linux")]
 fn each_batch_sent_one_datagram_at_a_time_arrives_whole() {
     on_thread("udp-batches", || async {
         let net = net();
         let (mut sender, _) = loopback(&net);
-        #[cfg(target_os = "linux")]
         gso::refuse(sender.local());
         let (_, mut receiver) = loopback(&net);
         let batch = Transmit {
