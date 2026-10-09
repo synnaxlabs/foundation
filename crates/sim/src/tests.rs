@@ -1643,6 +1643,27 @@ fn a_timer_past_the_end_after_a_wall_step_waits() {
     );
 }
 
+#[test]
+fn a_timer_past_the_end_of_true_time_does_not_wake_early() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    let clock = node.clock();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&polls);
+    let _handle = node.shards().start(shard("shard-0"), move |_| {
+        let sleep = async move { clock.sleep(millis(2_500)).await };
+        Counted(Box::pin(sleep), count)
+    });
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
+    assert_eq!(polls.load(Ordering::Relaxed), 1);
+}
+
 /// Starts a shard on `node` that sleeps for `span`, then logs its name and the time.
 fn log_after(
     node: &node::Node,
