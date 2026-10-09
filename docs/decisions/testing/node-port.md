@@ -64,15 +64,21 @@
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069443456.
   Supersedes the #1780 clause of
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. Under
-  `sim`, the port is free once `lock` is, which a test pins.
+  `sim`, the port is free once `lock` is, which a test pins, by `laptop.architect-2`
+  (21:58 UTC, words of 22:23 UTC and 22:47 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069829972,
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070247529,
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070577797.
   Amended (2026-10-09, #2017, by `laptop.architect-2`, 02:17 UTC:
   https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072896717, on
   https://github.com/synnaxlabs/foundation/issues/2017): shard 0 drops `lock` only once
   the transport has freed the port (`transport::Transport::ended`), also when the mesh
-  does not open, so a restart at once binds the port under `os` too. A peer sees its
-  close before `lock` is free, which a test pins. Each clone of the transport and each
-  session lives in a future that shard 0 drops, or in a task of the mesh that it waits
-  for, before it waits for the port, so a leak holds the stop. The drop of each session
+  does not open, so a restart at once binds the port under `os` too. Each close leaves
+  before `lock` is free. A peer under 3 s away sees its close first, unless the link
+  loses it, and a peer 4 s away sees it after, which a test pins for each. Each clone
+  of the transport and each session lives in a future that shard 0 drops, or in a
+  task of the mesh that it waits for, before it waits for the port, so a leak holds
+  the stop. The drop of each session
   closes it. The drop of the transport closes each session that no caller accepted and
   each handshake in flight, its own dials too (#2084, by `laptop.architect-2`, 02:57
   UTC: https://github.com/synnaxlabs/foundation/issues/2084). The stop waits for each to
@@ -81,11 +87,7 @@
   https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6073847772).
   The `transport` surface, by `laptop.architect` (02:19 UTC):
   https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072912165.
-  Supersedes the `os` sentences of the port rule of
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069829972,
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070247529, and
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070577797, and the
-  sentence of
+  Supersedes the `os` sentences of that port rule, and the sentence of
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312 that no
   test sees the drop of the transport.
   Amended (2026-10-08, #1660, by `laptop.architect-2`, 19:52 UTC): `Config` has no key.
