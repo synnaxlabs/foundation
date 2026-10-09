@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use types::channel;
 use types::name::Name;
 
-use crate::error::{self, Error, Problem};
+use crate::error::{self, Error};
 use crate::front_end;
 use crate::plan::{self, Action, Counts};
 use crate::used;
@@ -45,9 +45,9 @@ pub(crate) async fn apply(
     kinds: &connector::kind::Table,
     key: impl FnMut() -> channel::Key,
 ) -> Result<Applied, Error> {
-    let file = path.to_str().ok_or_else(|| {
-        Error::Config(vec![Problem::of(front_end::not_utf8(path), &[])])
-    })?;
+    let file = path
+        .to_str()
+        .ok_or_else(|| Error::config(vec![front_end::not_utf8(path)], &[]))?;
     let planned = config::plan::Plan::decode(bytes).map_err(Error::Plan)?;
     let (pointer, applied) = used::spec(mesh).await?;
     // `definitions` reads the definitions at the base, so the compare comes first.
@@ -63,10 +63,8 @@ pub(crate) async fn apply(
         pointer
     } else {
         let definitions = planned.definitions(&applied, key).map_err(Error::Plan)?;
-        config::plan::check(&definitions, members, kinds).map_err(|diagnostics| {
-            let problems = diagnostics.into_iter().map(|d| Problem::of(d, &[]));
-            Error::Config(problems.collect())
-        })?;
+        config::plan::check(&definitions, members, kinds)
+            .map_err(|diagnostics| Error::config(diagnostics, &[]))?;
         mesh.apply(planned.base, definitions, planned.homes)
             .await
             .map_err(|error| match error {

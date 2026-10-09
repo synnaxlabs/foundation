@@ -4,13 +4,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 use document::Source;
-use document::diagnostic::Diagnostic;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use spec::definition::{Definition, Kind};
 use types::name::Name;
 
-use crate::error::{Error, Place, Problem};
+use crate::error::{Error, Place};
 use crate::front_end::{self, File, FrontEnd};
 
 #[cfg(test)]
@@ -36,13 +35,7 @@ pub(crate) fn plan(
     kinds: &connector::kind::Table,
 ) -> Result<(Output, config::plan::Plan), Error> {
     let paths: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
-    let failed = |diagnostics: Vec<Diagnostic>| {
-        let problems = diagnostics
-            .into_iter()
-            .map(|diagnostic| Problem::of(diagnostic, &paths))
-            .collect();
-        Error::Config(problems)
-    };
+    let failed = |diagnostics| Error::config(diagnostics, &paths);
     let documents = front_end::read(files, front_ends).map_err(failed)?;
     let plan = config::plan::plan(&documents, base, applied, members, kinds)
         .map_err(failed)?;
