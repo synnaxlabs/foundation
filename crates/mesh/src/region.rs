@@ -15,8 +15,8 @@ use raft::Voters;
 use spec::definition::Definition;
 
 use crate::bytes::{
-    put_channel, put_count, put_key, put_keys, put_name, take, take_channel,
-    take_count, take_key, take_keys, take_name, take_rising,
+    put_channel, put_count, put_key, put_keys, put_name, put_prefix, take_channel,
+    take_count, take_key, take_keys, take_name, take_prefix, take_rising,
 };
 use crate::card;
 use crate::change::{self, Change, Join, Malformed};
@@ -53,11 +53,7 @@ impl Founding {
     /// differ only in the order of their members have one byte form.
     pub(crate) fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        let prefix = self.prefix.to_string();
-        out.push(
-            u8::try_from(prefix.len()).expect("invariant: a name is at most 255 bytes"),
-        );
-        out.extend(prefix.as_bytes());
+        put_prefix(&self.prefix, &mut out);
         let mut members: Vec<&Member> = self.members.iter().collect();
         members.sort_by_key(|member| member.card.key());
         put_count(members.len(), &mut out);
@@ -84,10 +80,7 @@ impl Founding {
     /// when `bytes` are not that form, also with bytes after it.
     pub(crate) fn decode(mut bytes: &[u8]) -> Option<Self> {
         let bytes = &mut bytes;
-        let [len] = take(bytes)?;
-        let (prefix, rest) = bytes.split_at_checked(usize::from(len))?;
-        *bytes = rest;
-        let prefix = std::str::from_utf8(prefix).ok()?.parse().ok()?;
+        let prefix = take_prefix(bytes)?;
         let mut members: Vec<Member> = Vec::new();
         for _ in 0..take_count(bytes)? {
             let member = Member::decode(bytes)?;
@@ -1580,6 +1573,38 @@ mod tests {
                         .collect(),
                 }
             })
+    }
+
+    #[test]
+    fn a_founding_with_members_out_of_order_or_of_one_key_does_not_decode() {
+        let members = create_members(&[1, 2]);
+        let none = Founding {
+            prefix: Prefix::ROOT,
+            members: Vec::new(),
+            voters: [node(1)].into(),
+            definitions: BTreeMap::new(),
+            homes: BTreeMap::new(),
+        };
+        let mut head = Vec::new();
+        put_prefix(&Prefix::ROOT, &mut head);
+        put_count(0, &mut head);
+        let with = |order: [usize; 2]| {
+            let mut bytes = Vec::new();
+            put_prefix(&Prefix::ROOT, &mut bytes);
+            put_count(2, &mut bytes);
+            for i in order {
+                members[i].encode(&mut bytes);
+            }
+            bytes.extend(none.encode().strip_prefix(head.as_slice()).unwrap());
+            Founding::decode(&bytes)
+        };
+        let founding = Founding {
+            members: members.clone(),
+            ..none.clone()
+        };
+        assert_eq!(with([0, 1]), Some(founding));
+        assert_eq!(with([1, 0]), None);
+        assert_eq!(with([0, 0]), None);
     }
 
     proptest! {
