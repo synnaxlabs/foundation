@@ -282,10 +282,10 @@ impl sender::Driver for Sender {
     }
 }
 
-/// Sends each datagram of `transmit` from `bound` with `send`, from the datagram at
-/// index `next`. Gives `Pending` when the OS send buffer is full, with no waker kept.
-/// When it sends one datagram at a time, it moves `next` past each datagram that it
-/// sent or lost over the path MTU.
+/// Sends each datagram of `transmit` from `bound` with `send`. Gives `Pending` when
+/// the OS send buffer is full, with no waker kept. With GSO off and more than one
+/// datagram, it starts at index `next` and moves `next` past each datagram that it sent
+/// or lost over the path MTU; else it sends the whole transmit and leaves `next`.
 fn send_all(
     bound: &Bound,
     transmit: &Transmit<'_>,
@@ -740,9 +740,8 @@ mod tests {
             assert_eq!(recorded.sends.len(), 2);
         }
 
-        /// No public call sees where a send starts: Linux loopback frees the send
-        /// buffer at each send, so a public `Sender` never gets `Pending` there, also
-        /// with GSO refused.
+        /// No public call sees where a send starts: no public call fills the OS send
+        /// buffer at a chosen datagram.
         #[test]
         #[cfg(target_os = "linux")]
         fn a_retry_after_pending_sends_only_the_datagrams_that_did_not_go_out() {
@@ -767,9 +766,8 @@ mod tests {
             });
         }
 
-        /// No public call sees where a send starts: Linux loopback frees the send
-        /// buffer at each send, so a public `Sender` never gets `Pending` there, also
-        /// with GSO refused.
+        /// No public call sees where a send starts: no public call fills the OS send
+        /// buffer at a chosen datagram.
         #[test]
         #[cfg(target_os = "linux")]
         fn a_different_transmit_after_pending_loses_the_datagrams_that_went_out() {
@@ -798,9 +796,8 @@ mod tests {
             });
         }
 
-        /// No public call sees where a send starts: Linux loopback frees the send
-        /// buffer at each send, so a public `Sender` never gets `Pending` there, also
-        /// with GSO refused.
+        /// No public call sees where a send starts: no public call fills the OS send
+        /// buffer at a chosen datagram.
         #[test]
         #[cfg(target_os = "linux")]
         fn a_different_transmit_of_one_datagram_after_pending_goes_out_whole() {
@@ -829,9 +826,8 @@ mod tests {
             });
         }
 
-        /// No public call sees where a send starts: Linux loopback frees the send
-        /// buffer at each send, so a public `Sender` never gets `Pending` there, also
-        /// with GSO refused.
+        /// No public call sees where a send starts: no public call fills the OS send
+        /// buffer at a chosen datagram.
         #[test]
         #[cfg(target_os = "linux")]
         fn a_different_transmit_skips_one_datagram_for_each_lost_over_the_path_mtu() {
@@ -861,8 +857,8 @@ mod tests {
             });
         }
 
-        /// No public call sees `next`: Linux loopback gives a public `Sender` no
-        /// `EMSGSIZE` and no `Pending`.
+        /// No public call sees `next`: no public call fills the OS send buffer at a
+        /// chosen datagram.
         #[test]
         #[cfg(target_os = "linux")]
         fn a_datagram_over_the_path_mtu_counts_as_sent() {
@@ -1001,9 +997,8 @@ mod tests {
             });
         }
 
-        /// No public call sees where a send starts: Linux loopback frees the send
-        /// buffer at each send, so a public `Sender` never gets `Pending` there, also
-        /// with GSO refused.
+        /// No public call sees where a send starts: no public call fills the OS send
+        /// buffer at a chosen datagram.
         #[test]
         fn retries_a_pending_send_when_the_socket_is_writable() {
             runtime().block_on(async {
@@ -1034,9 +1029,8 @@ mod tests {
             });
         }
 
-        /// No public call sees where a send starts: Linux loopback frees the send
-        /// buffer at each send, so a public `Sender` never gets `Pending` there, also
-        /// with GSO refused.
+        /// No public call sees where a send starts: no public call fills the OS send
+        /// buffer at a chosen datagram.
         #[test]
         fn a_failed_wait_drops_the_registration() {
             let udp = loopback();
