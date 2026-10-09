@@ -38,14 +38,13 @@
   `Latest` bytes, because no byte moves in the pause and the share has no clock. When a
   simulation of a deployed load shows `Latest` behind `Complete` by more than these
   bounds after such a pause, the share gets a signal of the pause. A class that holds
-  less than its share when QUIC
-  gives room sends what it holds first, and the core holds no QUIC room for its later
-  messages. So one `Latest` stream on `try_send` sends at most one message for each step
-  of credit. So the share bounds a `Latest` stream on `try_send` only while its samples
-  are at least one step of credit; smaller samples go once each step. Lost: a stream
-  that takes a second sample while QUIC holds the first, because that sample then waits
-  behind an older one, and the core holds QUIC room for a later message: architect-2
-  (#1998, 2026-10-09 04:40 UTC):
+  less than its share when QUIC gives room sends what it holds first, and the core holds
+  no QUIC room for its later messages. So one `Latest` stream on `try_send` sends at
+  most one message for each step of credit. So the share bounds a `Latest` stream on
+  `try_send` only while its samples are at least one step of credit; smaller samples go
+  once each step. Lost: a stream that takes a second sample while QUIC holds the first,
+  because that sample then waits behind an older one, and the core holds QUIC room for a
+  later message: architect-2 (#1998, 2026-10-09 04:40 UTC):
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6074392062. Room that
   a stream got and its caller has not taken counts for neither class, and a message that
   `try_send` gave back is not held. The caller of `send` writes the rest of its message;
@@ -82,6 +81,7 @@
   in the lead: architect-2 (#1998, 2026-10-09 06:15 UTC):
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6075478571, which
   supersedes the rest of one message for each stream of
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073524571 and
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6074595514.
   Supersedes the sentence on the lead and the trigger bound of
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070623279. Lost: a
