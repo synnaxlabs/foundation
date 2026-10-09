@@ -12,14 +12,26 @@ const RULE: &str = "A `sim` feature is test-only: only a dev-dependency, the fuz
                     turns on `dep:sim` and `simulate` features. See rule 9 in \
                     docs/decisions/crate-map.md.";
 
-/// The problems where `package`, one package of `cargo metadata`, turns on a `sim`
-/// feature from a feature other than `sim` or from a dependency that is not a
-/// dev-dependency.
-///
-/// # Errors
-///
-/// A field of `package` that is missing or of another shape.
-pub(crate) fn check(package: &Value) -> Result<Vec<String>, String> {
+/// The problems where a local crate of `graph`, the resolved `cargo metadata` of a
+/// workspace, turns on a `sim` feature from a feature other than `sim` or from a
+/// dependency that is not a dev-dependency. A local crate is a member, also a tool or
+/// a benchmark, or a path crate outside the workspace: a build unifies the features
+/// of each. A field that is missing or of another shape is a problem too.
+pub(crate) fn check(graph: &Value) -> Vec<String> {
+    let packages = match field::list(graph, "packages") {
+        Ok(packages) => packages,
+        Err(e) => return vec![e],
+    };
+    let local = packages
+        .iter()
+        .filter(|package| package["source"].is_null());
+    local
+        .flat_map(|package| problems(package).unwrap_or_else(|e| vec![e]))
+        .collect()
+}
+
+/// The problems of one package of `cargo metadata`, as [`check`] states.
+fn problems(package: &Value) -> Result<Vec<String>, String> {
     let name = field::text(package, "name")?;
     let features: BTreeMap<String, Vec<String>> =
         serde_json::from_value(package["features"].clone())
@@ -53,11 +65,13 @@ mod tests {
 
     use super::*;
 
-    fn problems(name: &str) -> Vec<String> {
-        let metadata = crate::metadata(&crate::fixture().join("features")).unwrap();
-        let packages = metadata["packages"].as_array().unwrap();
-        let package = packages.iter().find(|p| p["name"] == name).unwrap();
-        check(package).unwrap()
+    fn of(name: &str) -> Vec<String> {
+        let graph = crate::graph(&crate::fixture().join("features")).unwrap();
+        let prefix = format!("`{name}` ");
+        check(&graph)
+            .into_iter()
+            .filter(|p| p.starts_with(&prefix))
+            .collect()
     }
 
     #[test]
@@ -68,7 +82,7 @@ mod tests {
             ("strong", "simulate", "own/sim"),
         ] {
             assert_eq!(
-                problems(name),
+                of(name),
                 [format!(
                     "`{name}` turns on `{value}` in its feature `{feature}`. A `sim` \
                      feature is test-only: only a dev-dependency, the fuzz crate, or \
@@ -85,7 +99,7 @@ mod tests {
     fn rejects_a_normal_build_or_platform_dependency_that_turns_on_sim() {
         for name in ["normal", "build", "platform"] {
             assert_eq!(
-                problems(name),
+                of(name),
                 [format!(
                     "`{name}` turns on the `sim` feature of its dependency `own`. Move \
                      it to the dev-dependencies. A `sim` feature is test-only: only a \
@@ -100,7 +114,7 @@ mod tests {
 
     #[test]
     fn accepts_sim_from_sim_and_from_dev_dependencies() {
-        assert_eq!(problems("pass"), Vec::<String>::new());
+        assert_eq!(of("pass"), Vec::<String>::new());
     }
 
     #[test]
@@ -129,7 +143,22 @@ mod tests {
                 "JSON has no string field `name`",
             ),
         ] {
-            assert_eq!(check(&package), Err(error.to_string()), "{package}");
+            assert_eq!(problems(&package), Err(error.to_string()), "{package}");
         }
+    }
+
+    #[test]
+    fn checks_only_local_crates_and_names_a_malformed_graph() {
+        assert_eq!(check(&json!({})), ["JSON has no array field `packages`"]);
+        let registry = json!({
+            "name": "a",
+            "source": "registry+https://github.com/rust-lang/crates.io-index",
+            "features": { "default": ["sim"] },
+            "dependencies": [],
+        });
+        assert_eq!(
+            check(&json!({ "packages": [registry, {}] })),
+            ["JSON has no string field `name`"]
+        );
     }
 }

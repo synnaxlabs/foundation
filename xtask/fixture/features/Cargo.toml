@@ -1,4 +1,5 @@
 # A workspace for the tests of the `sim` feature check: one crate per case.
 [workspace]
-members = ["own", "weak", "strong", "normal", "build", "platform", "pass", "sim", "bench/tool"]
+members = ["own", "weak", "strong", "normal", "build", "platform", "pass", "sim", "wrap", "bench/tool"]
+exclude = ["patches"]
 resolver = "3"

@@ -64,18 +64,15 @@ fn main() -> ExitCode {
 }
 
 /// Checks every dependency of the workspace at `root` against the crate map in
-/// `map.rs`, and that no feature other than `sim` and no normal dependency turns on a
-/// `sim` feature.
+/// `map.rs`, and that no local crate turns on a `sim` feature outside a `sim` feature
+/// or a dev-dependency.
 fn layers(root: &Path) -> Result<(), Vec<String>> {
     let metadata = metadata(root).map_err(|e| vec![e])?;
     let packages = metadata["packages"].as_array().cloned().unwrap_or_default();
     let members: BTreeSet<&str> =
         packages.iter().filter_map(|p| p["name"].as_str()).collect();
-    let mut problems = Vec::new();
+    let mut problems = sim::check(&graph(root).map_err(|e| vec![e])?);
     for package in &packages {
-        // A workspace build unifies the features of every member, tools and
-        // benchmarks too.
-        problems.extend(sim::check(package).unwrap_or_else(|e| vec![e]));
         let Some(name) = package["name"].as_str() else {
             continue;
         };
@@ -242,7 +239,7 @@ mod tests {
     }
 
     #[test]
-    fn layers_reports_a_feature_that_turns_on_sim_also_in_a_benchmark() {
+    fn layers_reports_sim_also_in_a_benchmark_and_a_path_crate_outside_the_members() {
         let problems = layers(&fixture().join("features")).unwrap_err();
         assert!(
             problems.iter().any(|p| p.starts_with(
@@ -250,12 +247,14 @@ mod tests {
             )),
             "{problems:?}"
         );
-        assert!(
-            problems.iter().any(|p| p.starts_with(
-                "`tool` turns on the `sim` feature of its dependency `own`."
-            )),
-            "{problems:?}"
-        );
+        for name in ["tool", "outer"] {
+            assert!(
+                problems.iter().any(|p| p.starts_with(&format!(
+                    "`{name}` turns on the `sim` feature of its dependency `own`."
+                ))),
+                "`{name}`: {problems:?}"
+            );
+        }
     }
 
     #[test]

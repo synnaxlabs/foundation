@@ -1,0 +1,9 @@
+# A path crate outside the workspace: it is in the build, so the `sim` check covers it.
+[package]
+name = "outer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+own = { path = "../../own", default-features = false, features = ["sim"] }
