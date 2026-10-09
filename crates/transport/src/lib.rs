@@ -377,6 +377,9 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::pin::pin;
     use std::rc::Rc;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll, Wake, Waker};
 
     use block::{Heap, Pool};
     use types::ed25519::PrivateKey;
@@ -819,6 +822,41 @@ mod tests {
             let waited = node.clock().now() - before;
             let bound = testing::spans(Span::SECOND, 3);
             assert!(waited <= bound, "the stop waited {waited:?}");
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn the_end_wakes_each_ended_that_still_waits_and_no_dropped_one() {
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let (mut sim, _, server) = testing::nodes(0);
+        testing::transport(&server, SERVER, |transport, _| async move {
+            let counts: [_; 2] =
+                std::array::from_fn(|_| Arc::new(Count(AtomicUsize::new(0))));
+            let mut kept = Box::pin(transport.ended());
+            assert_eq!(format!("{kept:?}"), "Ended { .. }");
+            let mut dropped = Box::pin(transport.ended());
+            for (ended, count) in [(&mut kept, &counts[0]), (&mut dropped, &counts[1])]
+            {
+                let waker = Waker::from(Arc::clone(count));
+                let poll = ended.as_mut().poll(&mut Context::from_waker(&waker));
+                assert_eq!(poll, Poll::Pending);
+            }
+            drop(dropped);
+            let ended = transport.ended();
+            drop(transport);
+            ended.await;
+            let woken = counts
+                .each_ref()
+                .map(|count| count.0.load(Ordering::Relaxed));
+            assert_eq!(woken, [1, 0]);
+            let poll = kept.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            assert_eq!(poll, Poll::Ready(()));
         });
         assert_eq!(sim.run(), Ok(()));
     }
