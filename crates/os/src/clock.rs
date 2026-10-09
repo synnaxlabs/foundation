@@ -146,8 +146,9 @@ fn read_ns(clock: libc::clockid_t) -> u64 {
 /// slews on Linux, so a sleep completes late by at most this much from either.
 const ARM_MAX: Duration = Duration::from_secs(1);
 
-/// A Tokio sleep that fires at or after a deadline on the boot clock. Each poll
-/// checks the boot clock and re-arms the sleep from it.
+/// A Tokio sleep that fires at or after a deadline on the boot clock. A poll for a new
+/// deadline, or after the sleep fired, checks the boot clock and arms the sleep from
+/// it.
 struct Timer {
     driver: Driver,
     sleep: Pin<Box<Sleep>>,
@@ -174,21 +175,22 @@ impl env::clock::Timer for Timer {
     ) -> Poll<()> {
         let this = self.get_mut();
         loop {
+            // Ends by the second pass: a sleep armed from Tokio's now is pending. While
+            // it is, the clock is not read, since the sleep fires late by at most
+            // `ARM_MAX`.
+            if this.armed == Some(deadline) && this.sleep.as_mut().poll(cx).is_pending()
+            {
+                return Poll::Pending;
+            }
             let now = env::clock::Driver::now(&this.driver);
             if now >= deadline {
                 return Poll::Ready(());
             }
-            if this.armed != Some(deadline) {
-                let wait = Duration::from_nanos(deadline.0 - now.0).min(ARM_MAX);
-                let at = tokio::time::Instant::now() + wait;
-                this.sleep.as_mut().reset(at);
-                this.armed = Some(deadline);
-            }
-            // Ends by the second pass: a sleep armed from Tokio's now is pending.
-            match this.sleep.as_mut().poll(cx) {
-                Poll::Ready(()) => this.armed = None,
-                Poll::Pending => return Poll::Pending,
-            }
+            let wait = Duration::from_nanos(deadline.0 - now.0).min(ARM_MAX);
+            this.sleep
+                .as_mut()
+                .reset(tokio::time::Instant::now() + wait);
+            this.armed = Some(deadline);
         }
     }
 }
@@ -224,6 +226,34 @@ mod tests {
         let armed = timer.sleep.deadline();
         assert!(before + ARM_MAX <= armed, "{armed:?} before {before:?}");
         assert!(armed <= after + ARM_MAX, "{armed:?} after {after:?}");
+    }
+
+    /// The clock is read only for a new deadline or once the sleep fired, so a poll
+    /// for the armed deadline stays pending after it passed until the runtime fires
+    /// the sleep.
+    #[test]
+    fn a_poll_for_the_armed_deadline_reads_the_clock_once_the_sleep_fired() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        let guard = runtime.enter();
+        let driver = Driver::new();
+        let mut timer = Box::pin(Timer::new(driver.clone()));
+        let deadline = Monotonic(env::clock::Driver::now(&driver).0 + SECOND / 10);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let mut poll =
+            |deadline| env::clock::Timer::poll_until(timer.as_mut(), deadline, &mut cx);
+        assert_eq!(poll(deadline), Poll::Pending);
+        #[expect(clippy::disallowed_methods, reason = "the boot clock must pass")]
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(env::clock::Driver::now(&driver) >= deadline);
+        assert_eq!(poll(deadline), Poll::Pending);
+        assert_eq!(poll(Monotonic(deadline.0 + 1)), Poll::Ready(()));
+        drop(guard);
+        runtime.block_on(std::future::poll_fn(|cx| {
+            env::clock::Timer::poll_until(timer.as_mut(), deadline, cx)
+        }));
     }
 
     #[test]
