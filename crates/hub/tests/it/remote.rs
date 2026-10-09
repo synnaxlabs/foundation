@@ -1621,6 +1621,44 @@ fn a_reader_that_ended_for_no_room_for_a_credit_sends_no_later_credit() {
 }
 
 #[test]
+fn a_reader_whose_home_finished_sends_no_credit_for_the_frames_that_arrived() {
+    remote(
+        54,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
+            for n in 0..34 {
+                send_credit_frame(&mut sender, n).await;
+            }
+            sender.finish().expect("finishes");
+            let got = receiver.recv().await;
+            let malformed = Code(Refusal::Malformed.code());
+            assert_eq!(
+                got.map(|m| m.map(|b| b.to_vec())),
+                Err(transport::Error::Reset { code: malformed })
+            );
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            // The task takes each frame and the finish before the caller takes one.
+            test.clock.sleep(Span::from_nanos(300_000_000)).await;
+            for _ in 0..34 {
+                reader
+                    .next()
+                    .await
+                    .expect("a frame that arrived before the end");
+            }
+            test.clock.sleep(Span::from_nanos(100_000_000)).await;
+            let ended = reader.next().await.expect_err("the home finished");
+            assert_eq!(ended, Ended::Message(wire::hub::Error::Finished));
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+#[test]
 fn a_remote_reader_that_drops_stops_its_stream_at_once() {
     remote(
         55,
