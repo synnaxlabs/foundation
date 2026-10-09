@@ -101,7 +101,7 @@
   carries it again when it returns. The home carries each new index at once: the PR that
   carries an index at the first session that finds this node is its home (#340,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511) changes
-  this (`laptop.architect`,
+  this (`laptop.architect`, 2026-10-09T00:00:09Z:
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071433041). The home
   then drops the newest frame of each index that it keeps and that a removed channel was
   on (`Shard::drop_newest`, HOME SURFACE), before the first new channel, so a latest
@@ -116,8 +116,9 @@
   opens, since a call between two messages of its keys run can remove one. The call
   checks the definitions before it changes anything: two channels with one key or one
   name, or a data channel whose index is not an index of the definitions, panic.
-  This changes "A known key or name panics" and "The PR that defines channels at each
-  new spec decides what a known, renamed, or removed channel does" in
+  This changes "A known key or name panics", "The hub keeps the key, the sample type,
+  and the index of each", and "The PR that defines channels at each new spec decides
+  what a known, renamed, or removed channel does" in
   https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349. Lost: a
   session ends at its next call, under which a writer keeps the control of a removed
   index until it calls, and a reader that waits in `next` needs a wake anyway; and the
