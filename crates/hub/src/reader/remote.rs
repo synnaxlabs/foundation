@@ -3,7 +3,7 @@
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::future::poll_fn;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker, ready};
@@ -328,15 +328,17 @@ async fn session(
     let limit = Rc::new(Cell::new(WINDOW));
     let checked = (mode == Mode::Complete).then(|| Rc::clone(&limit));
     let inbound = Inbound::new(&state, receiver, decoder, &set, checked);
-    let receiving = receive(Weak::clone(&queue), inbound, mode == Mode::Latest);
-    run(receiving, grant(queue, state, sender, limit)).await;
+    let receiving = pin!(receive(Weak::clone(&queue), inbound, mode == Mode::Latest));
+    run(receiving, pin!(grant(queue, state, sender, limit))).await;
 }
 
 /// Polls `granting` and `receiving`, the two halves of the task of a session, until
 /// both end. In the poll in which `receiving` ends, polls `granting` again if it has
 /// not ended, which ends it.
-async fn run(receiving: impl Future<Output = ()>, granting: impl Future<Output = ()>) {
-    let (mut receiving, mut granting) = (pin!(receiving), pin!(granting));
+async fn run(
+    mut receiving: Pin<&mut impl Future<Output = ()>>,
+    mut granting: Pin<&mut impl Future<Output = ()>>,
+) {
     let mut granted = false;
     poll_fn(|cx| {
         // Each end reaches both halves in this poll, before the caller can drop the
