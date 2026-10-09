@@ -88,7 +88,11 @@
   transmit in flight when GSO turns off is the exception: its retry can send again
   datagrams that went out. A different transmit in place of the one that got
   `Pending` can lose its first datagrams (`laptop.architect-2`, 2026-10-09 13:18 UTC,
-  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081691897). Each
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081691897).
+  Supersedes the counts of
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081443711 (13:03
+  UTC) and https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081528612
+  (13:09 UTC). Each
   half has its own `dup` of the socket. The receiver registers for readable at its
   first poll, in a field of its driver (`laptop.architect-2`, 2026-10-08 19:12 UTC,
   https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
