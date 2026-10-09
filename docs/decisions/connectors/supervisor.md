@@ -24,8 +24,9 @@
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). The
   tests of `connector` and of each kind build that config with
   `connector::testing::create_config`, behind `sim`, which opens the hub through
-  `hub::testing::open`. It gives the mesh time as `hub::testing::open` does, until
-  #2143 gives a task mesh time (`laptop.architect-2`, 2026-10-09T13:37:08Z:
+  `hub::testing::open`. It gives the mesh time as `hub::testing::open` does, and
+  drops it when #2143 gives a task mesh time, if no test needs it then
+  (`laptop.architect-2`, 2026-10-09T13:37:08Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6082035824;
   `laptop.architect`, 2026-10-08T17:50:53Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). After
