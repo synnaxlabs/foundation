@@ -133,8 +133,11 @@
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071897947). A served
   open checks each key as its message arrives, and checks all of them again after it
   waits for the home of its index, since a call between two messages of its keys run or
-  during the wait can remove one. A writer and a reader find their channels again after
-  they wait for the home of each index, and wait again when an index changed. The call
+  during the wait can remove one. Each open checks its names or keys again after it
+  waits for the home, and then carries each index and opens with no `await` between.
+  When the check gives another result, the open waits again (`laptop.architect`,
+  2026-10-09T00:55:16Z:
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072038723). The call
   checks the definitions before it changes anything: two channels with one key or one
   name, or a data channel whose index is not an index of the definitions, panic. This
   changes "A known key or name panics", "The hub keeps the key, the sample type, and the

@@ -160,7 +160,7 @@ impl Writer {
         let (mut keys, groups) = loop {
             let (_, groups) = resolve(&state.borrow(), &channels)?;
             for (index, _) in &groups {
-                crate::carry(state, *index).await?;
+                crate::home(state, *index).await?;
             }
             // A call of `set_definitions` while the open waits can change a channel.
             let (keys, again) = resolve(&state.borrow(), &channels)?;
@@ -173,6 +173,9 @@ impl Writer {
         };
         let mut borrowed = state.borrow_mut();
         let borrowed = &mut *borrowed;
+        for &(index, _) in &groups {
+            borrowed.carry(index);
+        }
         let groups: Vec<_> = groups
             .iter()
             .map(|(index, data)| Group {

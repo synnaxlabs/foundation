@@ -14,11 +14,11 @@ use types::frame::{Form, Range};
 use types::sample::{Scalar, Type};
 
 use super::{
-    I64, LIVE, RING, SETTLE, applied, channels, config, definition, entry, name,
+    I64, LIVE, RING, SETTLE, applied, channels, config, definition, entry, keys, name,
     poll_flagged, run, samples, without, write, write_series, written,
 };
 
-const I32: Type = Type::Scalar(Scalar::I32);
+pub(super) const I32: Type = Type::Scalar(Scalar::I32);
 
 /// The seq of the one frame that `outcomes` applied.
 fn seq(outcomes: &[Outcome]) -> u64 {
@@ -241,7 +241,7 @@ fn keeps_each_session_through_a_call_that_panics() {
 }
 
 /// Writes `value` to `value` as an I32 at `stamp`.
-fn write_i32(writer: &mut Writer, stamp: i64, value: i32) -> Vec<Outcome> {
+pub(super) fn write_i32(writer: &mut Writer, stamp: i64, value: i32) -> Vec<Outcome> {
     let set = writer.set();
     let (time, entry) = (entry(set, 1), entry(set, 2));
     let group = set.entries()[time].group;
@@ -257,16 +257,6 @@ fn write_i32(writer: &mut Writer, stamp: i64, value: i32) -> Vec<Outcome> {
         .write(LIVE, draft)
         .map(<[_]>::to_vec)
         .expect("the home takes it")
-}
-
-/// The key of each series that `received` holds.
-fn keys(received: &reader::Received<'_>) -> Vec<u128> {
-    let entries = received.set.entries();
-    received
-        .view
-        .iter()
-        .map(|(at, _)| entries[at].key.as_u128())
-        .collect()
 }
 
 /// A latest reader on a channel whose type changed at its key takes the newest frame

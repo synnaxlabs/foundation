@@ -288,8 +288,9 @@ struct Opened {
 }
 
 /// Reads the open and its keys, checks each key as it arrives, waits until the mesh
-/// names a home for the index, checks each key again, and opens the session in the
-/// order of the keys. Gives `None` when the peer finishes first.
+/// names this node the home of the index, checks each key again, and carries the index
+/// and opens the session in the order of the keys. When the index changed meanwhile,
+/// it waits again for the new one. Gives `None` when the peer finishes first.
 async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
@@ -324,16 +325,13 @@ async fn open(
             break;
         }
     }
-    let at = index
-        .and_then(|index| keys.iter().position(|&key| key == index))
-        .ok_or(Error::NoIndex)?;
-    let Some(granted) = wait(state, keys[at], home, receiver).await? else {
+    let Some((at, granted)) = wait(state, &keys, index, home, receiver).await? else {
         return Ok(None);
     };
-    // A call of `set_definitions` while the open reads or waits can remove a key.
-    check(&state.borrow(), &keys, &mut Some(keys[at]))?;
     let slots: Box<[Slot]> = {
-        let interner = &mut state.borrow_mut().interner;
+        let mut borrowed = state.borrow_mut();
+        borrowed.carry(keys[at]);
+        let interner = &mut borrowed.interner;
         keys.iter()
             .map(|&key| interner.slots().assign(key))
             .collect()
@@ -365,6 +363,16 @@ async fn open(
     }))
 }
 
+/// The position of `index` in `keys`.
+fn position(
+    keys: &[channel::Key],
+    index: Option<channel::Key>,
+) -> Result<usize, Error> {
+    index
+        .and_then(|index| keys.iter().position(|&key| key == index))
+        .ok_or(Error::NoIndex)
+}
+
 /// Checks that each of `keys` is known and on `index`, which the first key sets when
 /// it is `None`.
 fn check(
@@ -381,16 +389,45 @@ fn check(
     Ok(())
 }
 
-/// Waits until the home carries `index`, and reads the peer meanwhile. Gives the
+/// Waits until the mesh names this node the home of the index of `keys`, and checks
+/// `keys` again after it, since a call of `set_definitions` while the open reads or
+/// waits can change a key. Waits again when the index changed. Gives the position of
+/// the index in `keys` and the highest grant that the peer sent, or `None` when the
+/// peer finished first.
+async fn wait(
+    state: &Rc<RefCell<State>>,
+    keys: &[channel::Key],
+    mut index: Option<channel::Key>,
+    home: &mut Home,
+    receiver: &mut Receiver,
+) -> Result<Option<(usize, u64)>, Error> {
+    let mut granted = 0;
+    loop {
+        let at = position(keys, index)?;
+        let Some(grant) = wait_for(state, keys[at], home, receiver).await? else {
+            return Ok(None);
+        };
+        granted = granted.max(grant);
+        let mut again = None;
+        check(&state.borrow(), keys, &mut again)?;
+        if again == index {
+            return Ok(Some((at, granted)));
+        }
+        index = again;
+    }
+}
+
+/// Waits until the mesh names this node the home of `index`, and reads the peer
+/// meanwhile. Gives the
 /// highest grant that the peer sent, 0 for none, or `None` when the peer finished
 /// first.
-async fn wait(
+async fn wait_for(
     state: &Rc<RefCell<State>>,
     index: channel::Key,
     home: &mut Home,
     receiver: &mut Receiver,
 ) -> Result<Option<u64>, Error> {
-    let mut carry = pin!(crate::carry(state, index));
+    let mut carry = pin!(crate::home(state, index));
     let mut granted = 0;
     loop {
         let mut recv = pin!(receiver.recv());

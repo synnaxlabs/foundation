@@ -142,7 +142,7 @@ impl Reader {
     ) -> Result<Self, Error> {
         let (mut keys, index) = loop {
             let (_, index) = resolve(&state.borrow(), channels)?;
-            crate::carry(state, index).await?;
+            crate::home(state, index).await?;
             // A call of `set_definitions` while the open waits can change a channel.
             let (keys, again) = resolve(&state.borrow(), channels)?;
             if again == index {
@@ -151,6 +151,7 @@ impl Reader {
         };
         let (mut slots, slot) = {
             let mut borrowed = state.borrow_mut();
+            borrowed.carry(index);
             let assigned = borrowed.interner.slots();
             let slots: Vec<_> = keys.iter().map(|&key| assigned.assign(key)).collect();
             (slots, assigned.assign(index))

@@ -21,10 +21,12 @@ use types::node::SealKey;
 use types::time::Span;
 use wire::hub::Mode;
 
+use super::definitions::{I32, write_i32};
 use super::serve::{HOME, PEER, Peer, own_pool, public_key, session_in, stopped};
 use super::{
-    AREA, BODY_MAX, I64, NODE, POOL, Test, channels, config, definition, name,
-    poll_once, reader, samples, without, write, write_series, writer,
+    AREA, BODY_MAX, I64, NODE, POOL, Test, applied, channels, config, definition,
+    entry, keys, name, poll_once, reader, samples, without, write, write_series,
+    writer,
 };
 
 /// The other member of the region, which is not a voter.
@@ -190,6 +192,30 @@ fn a_session_opens_on_the_new_index_of_a_channel_moved_while_it_waits_for_a_home
         write_series(&mut writer, &[(3, &[now]), (2, &[7])]);
         let received = reader.next().await.expect("a frame");
         assert_eq!(samples(&received, 2), [7]);
+    });
+}
+
+/// A session that waits for the home of its index opens on the sample type that a
+/// call gave its channel meanwhile.
+#[test]
+fn a_session_opens_on_the_new_type_of_a_channel_changed_while_it_waits_for_a_home() {
+    run(9, |test| async move {
+        let mut opening = std::pin::pin!(test.hub.writer(config("a", &["value"])));
+        let names = [name("value")];
+        let mut reading = std::pin::pin!(test.hub.reader(&names, reader::Mode::Latest));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        assert!(poll_once(reading.as_mut()).is_pending());
+        let mut changed = channels();
+        changed.insert(name("value"), definition(2, DataType::Sample(I32), 1));
+        test.hub.set_definitions(&changed);
+        test.set_home(TIME, NODE).await;
+        let mut writer = opening.await.expect("opens");
+        let mut reader = reading.await.expect("opens");
+        assert_eq!(write_i32(&mut writer, test.now(), 20), [applied(0)]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(keys(&received), [1, 2]);
+        let at = entry(received.set, 2);
+        assert_eq!(received.set.entries()[at].data_type, I32);
     });
 }
 

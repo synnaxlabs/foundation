@@ -27,9 +27,10 @@ use types::time::Span;
 use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
 
+use super::definitions::{I32, write_i32};
 use super::{
-    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, channels, fill, region,
-    scrambled, without, write, write_series, write_wide,
+    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, channels, definition,
+    fill, name, region, scrambled, without, write, write_series, write_wide,
 };
 
 /// The UDP port of each transport.
@@ -664,6 +665,53 @@ fn keeps_the_highest_credit_sent_while_the_open_waits_for_a_home() {
             let got = got(&mut peer, &mut reader).await.expect("a frame");
             assert_eq!(places(&got), [0, 1]);
             assert_eq!(decoded(&got, &[I64])[0], [10]);
+            peer.sender.finish().expect("finishes");
+            assert_eq!(peer.recv().await, Ok(None));
+        },
+    );
+}
+
+/// An open that waits for a home serves the sample type that a call gave its channel
+/// meanwhile.
+#[test]
+fn serves_the_new_type_of_a_channel_changed_while_the_open_waits_for_a_home() {
+    let home = |test: Test, link: Link, incoming| async move {
+        let test = Rc::new(test);
+        let writing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            writing.clock.sleep(SETTLE).await;
+            let mut changed = channels();
+            changed.insert(name("value"), definition(2, DataType::Sample(I32), 1));
+            writing.hub.set_definitions(&changed);
+            writing.set_home(region::TIME, super::NODE).await;
+            let mut writer = writing.writer("a", &["value"]).await;
+            writing.clock.sleep(SETTLE).await;
+            write_i32(&mut writer, writing.now(), 20);
+            writing.clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session_in(
+        79,
+        Class::Latest,
+        false,
+        true,
+        home,
+        |mut peer| async move {
+            peer.open(Mode::Latest, &[2, 1]).await;
+            let mut reader = Reader::new(&Open {
+                mode: Mode::Latest,
+                channels: 2,
+            });
+            let opened = peer.recv().await.expect("receives").expect("a message");
+            assert!(matches!(reader.decode(&opened), Ok(FromHome::Opened)));
+            let got = got(&mut peer, &mut reader).await.expect("a frame");
+            assert_eq!(places(&got), [0, 1]);
+            let (_, end) = got.ends[0];
+            let end = usize::try_from(end).expect("fits");
+            let mut out = [0; 4];
+            codec::decode(I32, 1, &got.body[..end], &mut out).expect("decodes");
+            assert_eq!(i32::from_le_bytes(out), 20);
             peer.sender.finish().expect("finishes");
             assert_eq!(peer.recv().await, Ok(None));
         },

@@ -434,7 +434,7 @@ impl State {
     }
 }
 
-/// Why the home did not carry an index for a session.
+/// Why this node is not the home of an index for a session.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Away {
     /// The mesh names this other node as the home.
@@ -443,9 +443,10 @@ enum Away {
     Mesh(::mesh::Stopped),
 }
 
-/// Waits until the mesh names a home for `index`, then carries `index` at the home
-/// when the home is this node. With no mesh, this node is the home.
-async fn carry(
+/// Waits until the mesh names this node the home of `index`. With no mesh, this node
+/// is the home. It changes no state, so the caller checks its channels again after
+/// it, then carries `index` with no `await` between.
+async fn home(
     state: &Rc<RefCell<State>>,
     index: types::channel::Key,
 ) -> Result<(), Away> {
@@ -465,6 +466,5 @@ async fn carry(
             }
         }
     }
-    state.borrow_mut().carry(index);
     Ok(())
 }
