@@ -196,15 +196,17 @@ impl Hub {
         self.0.borrow_mut().set(&checked(&channels));
     }
 
-    /// Opens a writer session on `config.channels` and the index of each. While the
-    /// mesh names no home for an index, it waits for one.
+    /// Opens a writer session on `config.channels` and the index of each. It waits
+    /// for the node's first mesh time, and while the mesh names no home for an index,
+    /// for one.
     ///
     /// # Errors
     ///
     /// [`writer::Error::Empty`] for no name, [`writer::Error::Unknown`] for the first
     /// name that no channel has, then, for the first index whose home is not this
     /// node, [`writer::Error::Remote`], or [`writer::Error::Mesh`] when the mesh
-    /// stopped. Else [`writer::Error::Home`] when the home refuses the writer.
+    /// stopped. Else [`writer::Error::Home`] for a lease that is not longer than zero:
+    /// never `Unsynced`.
     pub async fn writer(
         &self,
         config: writer::Config,

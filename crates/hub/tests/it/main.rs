@@ -592,20 +592,32 @@ fn gives_a_latest_reader_a_frame_before_its_commit_and_a_complete_reader_after()
 fn opens_a_writer_once_the_node_has_mesh_time_and_a_reader_before() {
     unsynced(5, |mut test| async move {
         let mut reader = test.reader(&["value"], Mode::Complete).await;
-        let error = test
-            .hub
-            .writer(config("a", &["value"]))
-            .await
-            .expect_err("an error");
-        let unsynced = hub::home::writer::Error::Unsynced;
-        assert_eq!(error, writer::Error::Home(unsynced));
-        assert_eq!(error.to_string(), "the node has no mesh time yet");
+        let hub = test.hub.clone();
+        let mut opening = pin!(hub.writer(config("a", &["value"])));
+        test.clock.sleep(Span::SECOND).await;
+        assert!(poll_once(opening.as_mut()).is_pending());
         test.sync().await;
-        let mut writer = test.writer("a", &["value"]).await;
-        let now = test.now();
-        assert_eq!(write(&mut writer, &[now], &[1]), [applied(0)]);
+        let mut writer = opening.await.expect("opens");
+        let now = writer.now();
+        assert_eq!(now.nanos(), test.now());
+        assert_eq!(write(&mut writer, &[now.nanos()], &[1]), [applied(0)]);
         let received = reader.next().await.expect("a frame");
         assert_eq!(samples(&received, 2), [1]);
+    });
+}
+
+/// A writer that waits for mesh time finds a channel that a call removed meanwhile
+/// unknown.
+#[test]
+fn opens_no_writer_on_a_channel_removed_while_it_waits_for_mesh_time() {
+    unsynced(8, |mut test| async move {
+        let hub = test.hub.clone();
+        let mut opening = pin!(hub.writer(config("a", &["value"])));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        hub.set_definitions(&without(&["value"]));
+        test.sync().await;
+        let error = opening.await.expect_err("value was removed");
+        assert_eq!(error, writer::Error::Unknown(name("value")));
     });
 }
 
