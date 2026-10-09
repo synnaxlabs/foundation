@@ -759,14 +759,11 @@ impl StreamsState {
     pub(crate) fn queue_max_stream_id(&mut self, pending: &mut Retransmits) -> bool {
         let mut queued = false;
         for dir in Dir::iter() {
-            let dir = dir as usize;
-            let diff = self.max_remote[dir] - self.sent_max_remote[dir];
-            // A peer that opened each stream of the last sent limit may wait for one, so
-            // announce each freed stream at once. Else, to reduce traffic, announce once
-            // 1/8 of the window is free.
-            let full = self.next_remote[dir] == self.sent_max_remote[dir];
-            if (diff > 0 && full) || diff > self.max_concurrent_remote_count[dir] / 8 {
-                pending.max_stream_id[dir] = true;
+            let diff = self.max_remote[dir as usize] - self.sent_max_remote[dir as usize];
+            // Announce each freed stream at once: `MAX_STREAMS` carries only the latest
+            // limit, so a burst of freed streams still costs one frame per packet.
+            if diff > 0 {
+                pending.max_stream_id[dir as usize] = true;
                 queued = true;
             }
         }
