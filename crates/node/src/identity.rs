@@ -30,16 +30,17 @@ pub(crate) struct Identity {
     pub(crate) private_key: PrivateKey,
 }
 
-/// The identity in `node.key` of `files`. When the file is not there, or holds only
-/// zero bytes, makes a new one at mesh time from `clock`, once it has mesh time, and
-/// from `entropy`. Writes the identity back and makes it durable before it returns,
-/// also one it read: a failed sync of an earlier start can leave a key that a read
-/// sees but a crash loses. Never writes another key over a file that holds one.
+/// The identity in `node.key` of `files`. When the file is not there, has no bytes,
+/// or holds only zero bytes, makes a new one at mesh time from `clock`, once it has
+/// mesh time, and from `entropy`. Writes the identity back and makes it durable
+/// before it returns, also one it read: a failed sync of an earlier start can leave
+/// a key that a read sees but a crash loses. Never writes another key over a file
+/// that holds one.
 ///
 /// # Errors
 ///
-/// [`Error::Key`] for a file of another length, tag, or checksum, and
-/// [`Error::Directory`] for a file call that fails.
+/// [`Error::Key`] for a file of another length that is not 0, or of another tag or
+/// checksum, and [`Error::Directory`] for a file call that fails.
 pub(crate) async fn load(
     files: &Files,
     clock: &clock::Reader,
