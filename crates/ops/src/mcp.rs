@@ -114,6 +114,7 @@ fn tools() -> Value {
     let outputs = operation::outputs();
     let tools: Vec<Value> = TABLE
         .iter()
+        .filter(|spec| !spec.cli_only)
         .map(|spec| {
             json!({
                 "name": spec.name,

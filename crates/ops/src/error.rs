@@ -9,6 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::Failure;
+
 const ARGUMENT: Code = Code::new("ops.argument");
 const UNKNOWN: Code = Code::new("ops.unknown-operation");
 const INPUT: Code = Code::new("ops.input");
@@ -45,6 +47,8 @@ pub(crate) enum Error {
     },
     /// The region did not apply the plan.
     Apply(mesh::Error),
+    /// The node did not start, or stopped with an error.
+    Node(Failure),
 }
 
 impl Error {
@@ -58,7 +62,8 @@ impl Error {
             | Self::Output { .. }
             | Self::Behind(_)
             | Self::Stale { .. }
-            | Self::Apply(_) => 1,
+            | Self::Apply(_)
+            | Self::Node(_) => 1,
         }
     }
 
@@ -66,6 +71,7 @@ impl Error {
     pub(crate) fn problems(&self) -> Cow<'_, [Problem]> {
         let (code, fix) = match self {
             Self::Config(problems) => return Cow::Borrowed(problems),
+            Self::Node(failure) => (failure.code, failure.fix.clone()),
             Self::Argument { .. } => (
                 ARGUMENT,
                 "Match the arguments to the operation in `foundation docs`".to_owned(),
@@ -279,6 +285,7 @@ impl fmt::Display for Error {
                  of the plan"
             ),
             Self::Apply(error) => error.fmt(f),
+            Self::Node(failure) => f.write_str(&failure.message),
         }
     }
 }

@@ -22,7 +22,10 @@ fn run(args: &[&str], input: impl io::BufRead) -> Exit {
     let args = ["foundation"].iter().chain(args).map(OsString::from);
     let mut stdout = Vec::new();
     let mut stderr = Vec::new();
-    let status = crate::cli(args, input, &mut stdout, &mut stderr);
+    let crate::Run::Exit(status) = crate::cli(args, input, &mut stdout, &mut stderr)
+    else {
+        panic!("a command that is not `start` exits");
+    };
     Exit {
         stdout: String::from_utf8(stdout).expect("UTF-8"),
         stderr: String::from_utf8(stderr).expect("UTF-8"),
@@ -68,12 +71,18 @@ fn names(map: &Map<String, Value>) -> BTreeSet<&str> {
     map.keys().map(String::as_str).collect()
 }
 
+/// Each operation that has an MCP tool.
+fn tooled() -> impl Iterator<Item = &'static operation::Spec> {
+    TABLE.iter().filter(|spec| !spec.cli_only)
+}
+
 #[test]
 fn the_table_names_each_input_and_output_once() {
     let names_in_table: BTreeSet<_> = TABLE.iter().map(|spec| spec.name).collect();
     assert_eq!(names_in_table.len(), TABLE.len());
-    assert_eq!(names(&operation::inputs()), names_in_table);
-    assert_eq!(names(&operation::outputs()), names_in_table);
+    let tooled: BTreeSet<_> = tooled().map(|spec| spec.name).collect();
+    assert_eq!(names(&operation::inputs()), tooled);
+    assert_eq!(names(&operation::outputs()), tooled);
 }
 
 #[test]
@@ -84,7 +93,7 @@ fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
     let docs = operation::docs();
     // Two more for `mcp` and `help`, which are not operations.
     assert_eq!(command.get_subcommands().count(), TABLE.len() + 2);
-    assert_eq!(tools.len(), TABLE.len());
+    assert_eq!(tools.len(), tooled().count());
     let inputs = operation::inputs();
     let outputs = operation::outputs();
     for spec in TABLE {
@@ -96,19 +105,24 @@ fn each_operation_appears_once_in_the_cli_the_tools_and_the_docs() {
             Some(spec.summary)
         );
         let tool: Vec<_> = tools.iter().filter(|t| t["name"] == spec.name).collect();
-        assert_eq!(tool.len(), 1, "{}", spec.name);
-        assert_eq!(tool[0]["description"], spec.summary);
-        assert_eq!(tool[0]["annotations"]["readOnlyHint"], spec.read_only);
-        assert_eq!(tool[0]["annotations"]["destructiveHint"], spec.destructive);
-        assert_eq!(tool[0]["inputSchema"], inputs[spec.name]);
-        assert_eq!(tool[0]["outputSchema"], outputs[spec.name]);
+        if spec.cli_only {
+            assert_eq!(tool.len(), 0, "{}", spec.name);
+        } else {
+            assert_eq!(tool.len(), 1, "{}", spec.name);
+            assert_eq!(tool[0]["description"], spec.summary);
+            assert_eq!(tool[0]["annotations"]["readOnlyHint"], spec.read_only);
+            assert_eq!(tool[0]["annotations"]["destructiveHint"], spec.destructive);
+            assert_eq!(tool[0]["inputSchema"], inputs[spec.name]);
+            assert_eq!(tool[0]["outputSchema"], outputs[spec.name]);
+        }
         let yes = |flag| if flag { "yes" } else { "no" };
         let section = format!(
-            "## `{}`\n\n{}\n\n- Read-only: {}\n- Destructive: {}\n",
+            "## `{}`\n\n{}\n\n- Read-only: {}\n- Destructive: {}\n- MCP tool: {}\n",
             spec.name,
             spec.summary,
             yes(spec.read_only),
             yes(spec.destructive),
+            yes(!spec.cli_only),
         );
         assert_eq!(docs.matches(&section).count(), 1, "{section}");
         assert_eq!(docs.matches(&format!("## `{}`", spec.name)).count(), 1);
@@ -131,7 +145,7 @@ fn each_schema_is_a_closed_object() {
 
 #[test]
 fn json_output_parses_back_to_the_typed_output() {
-    for spec in TABLE {
+    for spec in tooled() {
         let exit = cli(&[spec.name, "--json"]);
         assert_eq!(
             (exit.status, exit.stderr.as_str()),
@@ -352,7 +366,7 @@ fn a_json_flag_with_a_value_gives_its_error_as_json() {
         assert_eq!(
             (status, error),
             (
-                2,
+                crate::Run::Exit(2),
                 json!({ "errors": [{ "code": "ops.argument",
                     "message": "unexpected value for an argument found: `--json`",
                     "fix": "Match the arguments to the operation in `foundation docs`", "notes": [] }] })
@@ -462,6 +476,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
     for error in &every {
         // A new variant fails this match, so it joins `every` and the golden file.
         // `Config` holds the codes of the front ends, of `config`, and the one below.
+        // `Node` holds the codes of `node`.
         match error {
             Error::Argument { .. }
             | Error::Unknown { .. }
@@ -471,7 +486,8 @@ fn error_codes_and_fixes_match_the_golden_file() {
             | Error::Behind(_)
             | Error::Stale { .. }
             | Error::Apply(_)
-            | Error::Config(_) => {}
+            | Error::Config(_)
+            | Error::Node(_) => {}
         }
     }
     let mut lines: Vec<_> = every
@@ -491,6 +507,200 @@ fn error_codes_and_fixes_match_the_golden_file() {
         lines.push(format!("{}\t{}\n", diagnostic.code, diagnostic.fix));
     }
     assert_eq!(lines.concat(), include_str!("codes.golden"));
+}
+
+mod start {
+    use std::ffi::OsString;
+    use std::io::{self, Write};
+    use std::path::PathBuf;
+
+    use document::diagnostic::Code;
+    use serde_json::json;
+
+    use super::{Exit, call, cli, failed};
+    use crate::{Failure, Run, Start};
+
+    fn start(args: &[&str]) -> Run {
+        let args = ["foundation", "start"]
+            .iter()
+            .chain(args)
+            .map(OsString::from);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let run = crate::cli(args, io::empty(), &mut stdout, &mut stderr);
+        assert_eq!((stdout, stderr), (Vec::new(), Vec::new()), "writes nothing");
+        run
+    }
+
+    fn edge() -> types::name::Name {
+        "edge".parse().unwrap()
+    }
+
+    fn busy() -> Failure {
+        Failure {
+            code: Code::new("node.busy"),
+            message: "another node runs in foundation-data".to_owned(),
+            fix: "Stop that node, or give another data directory with `--data`"
+                .to_owned(),
+        }
+    }
+
+    #[test]
+    fn start_with_no_flag_uses_foundation_data_and_no_name() {
+        assert_eq!(
+            start(&[]),
+            Run::Start(Start {
+                data: PathBuf::from("foundation-data"),
+                json: false,
+                name: None,
+            })
+        );
+    }
+
+    #[test]
+    fn start_gives_its_flags() {
+        assert_eq!(
+            start(&["--data", "/srv/a", "--name", "site_a.edge", "--json"]),
+            Run::Start(Start {
+                data: PathBuf::from("/srv/a"),
+                json: true,
+                name: Some("site_a.edge".parse().unwrap()),
+            })
+        );
+    }
+
+    #[test]
+    fn a_bad_name_is_an_argument_error() {
+        assert_eq!(
+            cli(&["start", "--name", "a..b"]),
+            failed(
+                "error[ops.argument]: invalid value for one of the arguments: `--name \
+                 <NAME>`: a segment is not valid: \"\" in \"a..b\"\n\
+                 fix: Match the arguments to the operation in `foundation docs`\n"
+            )
+        );
+    }
+
+    #[test]
+    fn the_help_of_start_names_its_flags() {
+        let exit = cli(&["start", "--help"]);
+        assert_eq!((exit.status, exit.stderr.as_str()), (0, ""));
+        for flag in [
+            "--data <DATA>",
+            "--name <NAME>",
+            "--json",
+            "[default: foundation-data]",
+        ] {
+            assert!(exit.stdout.contains(flag), "{flag}: {}", exit.stdout);
+        }
+    }
+
+    #[test]
+    fn start_has_no_tool() {
+        assert_eq!(
+            call(&json!({ "name": "start", "arguments": {} }))["error"]["message"],
+            "no operation is named `start`"
+        );
+    }
+
+    #[test]
+    fn running_writes_the_name_and_the_data_directory() {
+        let mut start = Start {
+            data: PathBuf::from("foundation-data"),
+            json: false,
+            name: None,
+        };
+        let mut text = Vec::new();
+        start.running(&edge(), &mut text);
+        assert_eq!(
+            String::from_utf8(text).unwrap(),
+            "node edge runs in foundation-data. Stop it with Ctrl-C.\n"
+        );
+        start.json = true;
+        let mut json = Vec::new();
+        start.running(&edge(), &mut json);
+        assert_eq!(
+            String::from_utf8(json).unwrap(),
+            "{\"data\":\"foundation-data\",\"name\":\"edge\"}\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn running_gives_a_data_directory_that_is_not_utf8_lossily() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let start = Start {
+            data: PathBuf::from(std::ffi::OsStr::from_bytes(b"a\xffb")),
+            json: true,
+            name: None,
+        };
+        let mut json = Vec::new();
+        start.running(&edge(), &mut json);
+        assert_eq!(
+            String::from_utf8(json).unwrap(),
+            "{\"data\":\"a\u{fffd}b\",\"name\":\"edge\"}\n"
+        );
+    }
+
+    /// A writer whose every call fails.
+    struct Closed;
+
+    impl Write for Closed {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::ErrorKind::BrokenPipe.into())
+        }
+    }
+
+    #[test]
+    fn running_to_a_closed_output_does_not_panic() {
+        let Run::Start(start) = start(&[]) else {
+            panic!("start runs");
+        };
+        start.running(&edge(), Closed);
+    }
+
+    #[test]
+    fn fail_writes_the_failure_as_cli_does_and_gives_1() {
+        let Run::Start(mut start) = start(&[]) else {
+            panic!("start runs");
+        };
+        let mut text = Vec::new();
+        let status = start.fail(&busy(), &mut text);
+        assert_eq!(
+            Exit {
+                stdout: String::new(),
+                stderr: String::from_utf8(text).unwrap(),
+                status,
+            },
+            Exit {
+                stdout: String::new(),
+                stderr: "error[node.busy]: another node runs in foundation-data\n\
+                         fix: Stop that node, or give another data directory with \
+                         `--data`\n"
+                    .to_owned(),
+                status: 1,
+            }
+        );
+        start.json = true;
+        let mut json = Vec::new();
+        assert_eq!(start.fail(&busy(), &mut json), 1);
+        let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+        assert_eq!(
+            json,
+            json!({ "errors": [{
+                "code": "node.busy",
+                "message": "another node runs in foundation-data",
+                "fix": "Stop that node, or give another data directory with `--data`",
+                "notes": [],
+            }] })
+        );
+        assert_eq!(start.fail(&busy(), Closed), 1, "a closed output");
+    }
 }
 
 mod mcp {
@@ -714,6 +924,7 @@ mod serve {
     use std::io::{self, Read, Write};
 
     use super::{Exit, run};
+    use crate::Run;
 
     const PING: &str = "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n";
     const PONG: &str = "{\"id\":1,\"jsonrpc\":\"2.0\",\"result\":{}}\n";
@@ -796,7 +1007,7 @@ mod serve {
             &mut output,
             io::sink(),
         );
-        assert_eq!(status, 0);
+        assert_eq!(status, Run::Exit(0));
         assert_eq!(
             (output.pending.as_slice(), output.flushed.as_slice()),
             (b"".as_slice(), PONG.as_bytes())
@@ -820,7 +1031,7 @@ mod serve {
         );
         assert_eq!(
             (status, stderr.as_slice(), rest),
-            (0, b"".as_slice(), PING.as_bytes())
+            (Run::Exit(0), b"".as_slice(), PING.as_bytes())
         );
     }
 
@@ -852,7 +1063,7 @@ mod serve {
         );
         assert_eq!(
             (status, stdout.as_slice(), rest),
-            (0, b"".as_slice(), PING.as_bytes())
+            (Run::Exit(0), b"".as_slice(), PING.as_bytes())
         );
         let mut stderr = Vec::new();
         let status = crate::cli(
@@ -861,7 +1072,7 @@ mod serve {
             Failing(io::ErrorKind::BrokenPipe),
             &mut stderr,
         );
-        assert_eq!((status, stderr.as_slice()), (0, b"".as_slice()));
+        assert_eq!((status, stderr.as_slice()), (Run::Exit(0), b"".as_slice()));
     }
 
     #[test]
@@ -874,7 +1085,7 @@ mod serve {
             &mut stderr,
         );
         let message = io::Error::from(io::ErrorKind::StorageFull).to_string();
-        assert_eq!(status, 1);
+        assert_eq!(status, Run::Exit(1));
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&stderr).expect("json"),
             serde_json::json!({ "errors": [{

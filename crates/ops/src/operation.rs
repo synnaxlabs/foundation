@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::path::PathBuf;
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
@@ -6,7 +7,9 @@ use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use types::name::Name;
 
+use crate::Start;
 use crate::error::Error;
 
 /// The facts that the CLI, the MCP tools, and the docs show for one operation.
@@ -15,22 +18,33 @@ pub(crate) struct Spec {
     pub(crate) summary: &'static str,
     pub(crate) read_only: bool,
     pub(crate) destructive: bool,
+    /// Only the CLI runs it: it has no MCP tool.
+    pub(crate) cli_only: bool,
 }
 
 /// Every operation, in the order the help and the docs list them. A test holds the
 /// names equal to the variants of `Request` and `Response`.
 pub(crate) const TABLE: &[Spec] = &[
     Spec {
+        name: "start",
+        summary: "Start a node on a data directory, and run it until Ctrl-C",
+        read_only: false,
+        destructive: false,
+        cli_only: true,
+    },
+    Spec {
         name: "version",
         summary: "Print the version of Foundation",
         read_only: true,
         destructive: false,
+        cli_only: false,
     },
     Spec {
         name: "docs",
         summary: "Print the reference for every operation, as Markdown",
         read_only: true,
         destructive: false,
+        cli_only: false,
     },
 ];
 
@@ -52,14 +66,29 @@ struct Cli {
 enum Command {
     #[command(flatten)]
     Run(Request),
+    Start(StartArgs),
     /// Answer MCP messages on standard input, one JSON-RPC message per line, until it
     /// closes.
     Mcp,
     /// Print this help, or the help of one command.
-    Help { command: Option<String> },
+    Help {
+        command: Option<String>,
+    },
 }
 
-/// The input of each operation. Clap and serde both name a variant in kebab case.
+#[derive(clap::Args)]
+struct StartArgs {
+    /// The data directory of the node. The start makes it when it is not there, but
+    /// not its parents.
+    #[arg(long, default_value = "foundation-data")]
+    data: PathBuf,
+    /// The name of the node. The first start on a data directory needs it, and a later
+    /// start reads it from there.
+    #[arg(long)]
+    name: Option<Name>,
+}
+
+/// The input of each operation that is not CLI only. Clap and serde both name a variant in kebab case.
 #[derive(Subcommand, Deserialize, JsonSchema)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum Request {
@@ -92,6 +121,7 @@ pub(crate) struct Reference {
 
 pub(crate) enum Parsed {
     Run(Request),
+    Start(Start),
     Help(String),
     Mcp,
 }
@@ -112,11 +142,14 @@ pub(crate) fn parse(args: &[OsString]) -> Result<Parsed, Error> {
         }
         Err(e) => return Err(from_clap(&e)),
     };
-    match Cli::from_arg_matches(&matches)
-        .map_err(|e| from_clap(&e))?
-        .command
-    {
+    let cli = Cli::from_arg_matches(&matches).map_err(|e| from_clap(&e))?;
+    match cli.command {
         Command::Run(request) => Ok(Parsed::Run(request)),
+        Command::Start(StartArgs { data, name }) => Ok(Parsed::Start(Start {
+            data,
+            json: cli.json,
+            name,
+        })),
         Command::Mcp => Ok(Parsed::Mcp),
         Command::Help { command } => help(command.as_deref()),
     }
@@ -136,12 +169,13 @@ fn help(name: Option<&str>) -> Result<Parsed, Error> {
     Ok(Parsed::Help(command.render_help().to_string()))
 }
 
-/// Reads a request for the operation `name` from its JSON `arguments`.
+/// Reads a request for the operation `name` from its JSON `arguments`. A CLI-only
+/// operation is unknown here.
 pub(crate) fn read(
     name: &str,
     arguments: Map<String, Value>,
 ) -> Result<Request, Error> {
-    if !TABLE.iter().any(|spec| spec.name == name) {
+    if !TABLE.iter().any(|spec| spec.name == name && !spec.cli_only) {
         return Err(unknown(name));
     }
     let tagged = Map::from_iter([(name.to_owned(), Value::Object(arguments))]);
@@ -185,10 +219,14 @@ fn from_clap(e: &clap::Error) -> Error {
         .kind()
         .as_str()
         .expect("invariant: clap describes each error kind that is not help");
-    let message = match context(e, ContextKind::InvalidArg) {
+    let mut message = match context(e, ContextKind::InvalidArg) {
         Some(arg) => format!("{what}: `{arg}`"),
         None => what.to_owned(),
     };
+    // The error of a value's parser, such as why a name is not one.
+    if let Some(source) = std::error::Error::source(e) {
+        message = format!("{message}: {source}");
+    }
     Error::Argument { message }
 }
 
@@ -231,11 +269,13 @@ pub(crate) fn docs() -> String {
         .iter()
         .map(|spec| {
             format!(
-                "\n## `{}`\n\n{}\n\n- Read-only: {}\n- Destructive: {}\n",
+                "\n## `{}`\n\n{}\n\n- Read-only: {}\n- Destructive: {}\n- MCP tool: \
+                 {}\n",
                 spec.name,
                 spec.summary,
                 yes(spec.read_only),
                 yes(spec.destructive),
+                yes(!spec.cli_only),
             )
         })
         .collect();
