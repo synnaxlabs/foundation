@@ -219,7 +219,8 @@ impl Node {
     /// The path of each file descriptor that the node closed or dropped, in order,
     /// since the run started: the path of its open, or of the last rename that it made,
     /// with only its names. A crash closes each descriptor of the node, a leaked one
-    /// too, in the order that their opens started.
+    /// too: first those that the drops of its futures close, then the leaked ones, in
+    /// the order that their opens started.
     #[must_use]
     pub fn file_closes(&self) -> Vec<PathBuf> {
         lock(&self.0.shared).files().closes(self.0.node)
