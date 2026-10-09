@@ -60,8 +60,8 @@
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). Tokio's
   `AsyncFd` locks a `Mutex` in two cases: its waiter list, when a poll finds the socket
   not readable; and the registration set of its I/O driver, at the first poll and at
-  the drop. That driver is the receiver's alone, as a sender clone's is: it comes from the
-  bind, beside the socket (`laptop.architect-2`, 2026-10-09 01:42 UTC,
+  the drop. That driver is the receiver's alone, as a sender clone's is: it comes from
+  the bind, beside the socket (`laptop.architect-2`, 2026-10-09 01:42 UTC,
   https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6072529426).
   Supersedes the `OnceLock` of item 2 of
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541 and the
