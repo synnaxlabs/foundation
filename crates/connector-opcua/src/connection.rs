@@ -333,11 +333,11 @@ impl State {
             .get_mut(&id)
             .expect("invariant: only `Step::Gone` of this id removes it")
             .take_stream();
-        if matches!(
-            stream,
-            Stream::Connecting(_) | Stream::Open(_) | Stream::Listening(_)
-        ) {
-            self.queue_closing(id);
+        match stream {
+            Stream::Connecting(_) | Stream::Listening(_) | Stream::Open(_) => {
+                self.queue_closing(id);
+            }
+            Stream::Closing { .. } | Stream::Closed => {}
         }
     }
 
