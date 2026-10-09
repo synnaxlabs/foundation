@@ -897,6 +897,41 @@ mod tests {
             );
         }
 
+        #[test]
+        fn a_wait_inside_a_prefix_or_for_room_keeps_the_list() {
+            const LONG: usize = 100_000;
+            let pool = pool(1 << 18);
+            let long = prefix(LONG);
+            let (first, rest) = long.split_first().expect("a prefix");
+            let bytes = [encode(&[vec![1; 100]]), vec![*first]].concat();
+            let mut source = Source::new(bytes, 1);
+            source.open = true;
+            let mut reader = Reader::new(1 << 20);
+            let read = super::read(&mut reader, &pool, &mut source);
+            assert_eq!(read, Ok(Poll::Ready(Some(vec![1; 100]))));
+            // Private: only a peer that breaks its window makes a read wait for room,
+            // and no public test chooses where a packet splits a prefix.
+            assert_eq!(reader.chunks.capacity(), CHUNKS_MAX);
+            let read = super::read(&mut reader, &pool, &mut source);
+            assert_eq!(read, Ok(Poll::Pending));
+            assert_eq!(reader.chunks.capacity(), CHUNKS_MAX);
+            source.bytes.extend(rest);
+            for _ in 0..2 {
+                let take = |_| panic!("a message with no room takes no block");
+                let read =
+                    drive(&mut reader, |_| false, take, |max| Ok(source.take(max)));
+                assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
+                assert_eq!(reader.chunks.capacity(), CHUNKS_MAX);
+            }
+            source.bytes.extend([2; LONG]);
+            source.open = false;
+            assert_eq!(
+                read_all(&mut reader, &pool, &mut source),
+                Ok(vec![vec![2; LONG]])
+            );
+            assert_eq!(reader.chunks.capacity(), CHUNKS_MAX);
+        }
+
         /// One read of `reader` that takes `batch[*at..end]` one byte per chunk,
         /// each a view into `batch`, then is pending.
         fn read_views(
