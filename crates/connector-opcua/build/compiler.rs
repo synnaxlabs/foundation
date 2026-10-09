@@ -61,24 +61,21 @@ impl Builds {
     /// behavior sanitizers, and stops at the first error. Under `cfg(fuzzing)`, it
     /// gives libFuzzer its coverage.
     ///
-    /// # Errors
+    /// # Panics
     ///
-    /// A sanitizer other than `address` and `leak`, which the C does not follow, and
+    /// On a sanitizer other than `address` and `leak`, which the C does not follow, and
     /// which reports false errors or misses the C without it.
-    pub(crate) fn sanitize(
-        &mut self,
-        env: impl Fn(&str) -> Option<String>,
-    ) -> Result<bool, String> {
+    pub(crate) fn sanitize(&mut self, env: impl Fn(&str) -> Option<String>) -> bool {
         let sanitize = env("CARGO_CFG_SANITIZE").unwrap_or_default();
         let mut names = sanitize.split(',').filter(|name| !name.is_empty());
         if let Some(name) = names
             .clone()
             .find(|name| !matches!(*name, "address" | "leak"))
         {
-            return Err(format!(
+            panic!(
                 "connector-opcua: the C does not build with the sanitizer `{name}` of \
                  the Rust build; it follows only `address` and `leak`"
-            ));
+            );
         }
         let address = names.any(|name| name == "address");
         if address {
@@ -93,7 +90,7 @@ impl Builds {
         if env("CARGO_CFG_FUZZING").is_some() {
             self.add(&["-fsanitize=fuzzer-no-link"]);
         }
-        Ok(address)
+        address
     }
 
     /// Adds `flags` to both builds. A compiler that is not clang gives way to `clang`,

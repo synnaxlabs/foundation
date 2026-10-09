@@ -38,6 +38,7 @@ mod compiler;
 
 #[cfg(test)]
 mod tests {
+    use std::panic::AssertUnwindSafe;
     use std::path::Path;
 
     use super::child;
@@ -112,15 +113,19 @@ mod tests {
             .collect()
     }
 
-    /// The variables of a build script whose target has the `cfg(sanitize)` list
-    /// `sanitize`, and `cfg(fuzzing)` when `fuzzing`.
-    fn cfgs(sanitize: &str, fuzzing: bool) -> impl Fn(&str) -> Option<String> {
-        move |name| match name {
-            "CARGO_CFG_SANITIZE" if !sanitize.is_empty() => Some(sanitize.to_string()),
-            "CARGO_CFG_FUZZING" if fuzzing => Some(String::new()),
-            _ => None,
+    /// The names and values of the variables of a build script.
+    type Vars<'a> = &'a [(&'a str, &'a str)];
+
+    /// The variables of a build script that has only `vars`.
+    fn env(vars: Vars<'_>) -> impl Fn(&str) -> Option<String> {
+        move |name| {
+            let value = vars.iter().find(|(var, _)| *var == name);
+            value.map(|(_, value)| value.to_string())
         }
     }
+
+    const SANITIZE: &str = "CARGO_CFG_SANITIZE";
+    const FUZZING: (&str, &str) = ("CARGO_CFG_FUZZING", "");
 
     #[test]
     fn sanitize_follows_the_rust_build() {
@@ -130,20 +135,22 @@ mod tests {
             "-fno-sanitize-recover=all",
         ];
         let fuzzer = "-fsanitize=fuzzer-no-link";
-        let cases = [
-            ("", false, vec![]),
-            ("address", false, address.to_vec()),
-            ("leak,address", false, address.to_vec()),
-            ("leak", false, vec![]),
-            ("", true, vec![fuzzer]),
-            ("address", true, [&address[..], &[fuzzer]].concat()),
+        let cases: [(Vars<'_>, Vec<&str>); 6] = [
+            (&[], vec![]),
+            (&[(SANITIZE, "address")], address.to_vec()),
+            (&[(SANITIZE, "leak,address")], address.to_vec()),
+            (&[(SANITIZE, "leak")], vec![]),
+            (&[FUZZING], vec![fuzzer]),
+            (
+                &[(SANITIZE, "address"), FUZZING],
+                [&address[..], &[fuzzer]].concat(),
+            ),
         ];
-        for (sanitize, fuzzing, expected) in cases {
+        for (vars, expected) in cases {
             let (mut plain, mut sanitized) =
                 (builds("/missing/clang"), builds("/missing/clang"));
-            let asan = sanitized.sanitize(cfgs(sanitize, fuzzing));
-            let expected_asan = expected.contains(&address[0]);
-            assert_eq!(asan, Ok(expected_asan), "{sanitize} {fuzzing}");
+            let asan = sanitized.sanitize(env(vars));
+            assert_eq!(asan, expected.contains(&address[0]), "{vars:?}");
             let pairs = [
                 (&mut sanitized.library, &mut plain.library),
                 (&mut sanitized.shim, &mut plain.shim),
@@ -153,7 +160,7 @@ mod tests {
                 assert_eq!(tool.path(), Path::new("/missing/clang"));
                 let before = args(&child::tool(plain, TARGET));
                 let after = args(&tool);
-                assert_eq!(added(&before, &after), expected, "{sanitize} {fuzzing}");
+                assert_eq!(added(&before, &after), expected, "{vars:?}");
             }
         }
     }
@@ -180,12 +187,17 @@ mod tests {
         ] {
             let (mut plain, mut sanitized) =
                 (builds("/missing/gcc"), builds("/missing/gcc"));
+            let vars = [(SANITIZE, sanitize), FUZZING];
+            let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                sanitized.sanitize(env(&vars))
+            }));
+            let message = panic.expect_err(sanitize).downcast::<String>();
             assert_eq!(
-                sanitized.sanitize(cfgs(sanitize, true)),
-                Err(format!(
+                *message.expect(sanitize),
+                format!(
                     "connector-opcua: the C does not build with the sanitizer `{name}` \
                      of the Rust build; it follows only `address` and `leak`"
-                ))
+                )
             );
             let tool = child::tool(&mut sanitized.library, TARGET);
             assert_eq!(tool.path(), Path::new("/missing/gcc"));
@@ -195,9 +207,11 @@ mod tests {
 
     #[test]
     fn sanitize_moves_gcc_to_clang() {
-        for (sanitize, fuzzing) in [("address", false), ("", true)] {
+        let cases: [(Vars<'_>, bool); 2] =
+            [(&[(SANITIZE, "address")], true), (&[FUZZING], false)];
+        for (vars, asan) in cases {
             let mut builds = builds("/missing/gcc");
-            assert_eq!(builds.sanitize(cfgs(sanitize, fuzzing)), Ok(!fuzzing));
+            assert_eq!(builds.sanitize(env(vars)), asan, "{vars:?}");
             for build in [&mut builds.library, &mut builds.shim] {
                 assert_eq!(child::tool(build, TARGET).path(), Path::new("clang"));
             }
@@ -208,7 +222,7 @@ mod tests {
     fn sanitize_keeps_gcc_when_the_c_has_no_sanitizer() {
         for sanitize in ["", "leak"] {
             let mut builds = builds("/missing/gcc");
-            assert_eq!(builds.sanitize(cfgs(sanitize, false)), Ok(false));
+            assert!(!builds.sanitize(env(&[(SANITIZE, sanitize)])), "{sanitize}");
             for build in [&mut builds.library, &mut builds.shim] {
                 let path = child::tool(build, TARGET).path().to_owned();
                 assert_eq!(path, Path::new("/missing/gcc"), "{sanitize}");

@@ -40,7 +40,7 @@ fn build() {
                   environment"
     )]
     let asan = builds.sanitize(|name| std::env::var(name).ok());
-    if asan.unwrap_or_else(|e| panic!("{e}")) {
+    if asan {
         println!("cargo::rustc-cfg=asan");
     }
     let compiler::Builds { mut library, shim } = builds;
