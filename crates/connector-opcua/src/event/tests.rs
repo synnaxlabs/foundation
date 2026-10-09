@@ -37,8 +37,12 @@ impl Probe {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with(sim::node::Config::default())
+    }
+
+    fn with(node: sim::node::Config) -> Self {
         let mut sim = Sim::new(sim::Config::default());
-        let node = sim.node(sim::node::Config::default());
+        let node = sim.node(node);
         let clock = node.clock();
         let events =
             Loop::new(env::clock::Clock::clone(&clock), &mut Rng::from_seed(0));
@@ -354,7 +358,7 @@ fn a_timer_changes_its_interval_and_goes() {
     assert_eq!(f.ran(), []);
 }
 
-/// Intervals whose due time or ticks leave the range of the clock's ticks, or that are
+/// Intervals whose due time or ticks leave the range of `i64` ticks, or that are
 /// not a number. The ticks of the fourth are below `i64::MIN`, though its due time from
 /// a clock past 1 s is not.
 const OUT_OF_RANGE: [(f64, ffi::Policy); 5] = [
@@ -382,34 +386,36 @@ fn a_timer_whose_due_time_leaves_the_range_of_the_clock_is_refused() {
     assert_eq!(f.ran(), []);
 }
 
-/// The interval, in ms, of a timer due `before` ticks before the last tick of the
-/// clock.
+/// The interval, in ms, of a timer due `before` ticks before the last date, at
+/// `i64::MAX` ticks.
 #[expect(
     clippy::cast_precision_loss,
     reason = "the loss is under 2,048 ticks, far inside the margins of the tests"
 )]
-fn due_before_the_end(f: &Fixture, before: f64) -> f64 {
+fn due_before_the_last_date(f: &Fixture, before: f64) -> f64 {
     let now = (f.now().0 / 100) as f64;
     (i64::MAX as f64 - now - before) / 1.0e4
 }
 
 #[test]
-fn a_timer_due_within_1_s_of_the_end_of_the_clock_is_refused() {
+fn a_timer_due_within_1_s_of_the_last_date_is_refused() {
     let mut f = Fixture::new();
     f.advance(ms(1000));
     f.start();
-    let within = due_before_the_end(&f, 5.0e6);
+    let within = due_before_the_last_date(&f, 5.0e6);
     assert_eq!(
         f.try_timer(record, number(1), within, None, ffi::CURRENT_TIME),
         Err(Status::BAD_OUT_OF_RANGE)
     );
-    let outside = due_before_the_end(&f, 2.0e7);
+    let outside = due_before_the_last_date(&f, 2.0e7);
     f.try_timer(record, number(2), outside, None, ffi::CURRENT_TIME)
-        .expect("a timer due 2 s before the end is in range");
-    assert!(f.events.next().is_some_and(|due| due > f.now()));
+        .expect("a timer due 2 s before the last date is in range");
+    assert_eq!(f.events.next(), None, "it is due after the clock ends");
+    f.run();
+    assert_eq!(f.ran(), []);
 }
 
-/// The latest base in range of the clock.
+/// The latest base in range of the last date.
 const LATEST_BASE: i64 = i64::MAX - 10_000_001;
 
 /// The ticks of the clock, and the earliest base in range of them.
@@ -445,13 +451,28 @@ fn a_timer_from_a_base_out_of_range_of_the_clock_is_refused() {
     );
 }
 
+/// A driver that runs the loop whenever the next due time has come finishes at the end
+/// of the clock, where the timers past it never run.
 #[test]
-fn a_once_timer_from_the_latest_base_waits() {
-    let f = Fixture::new();
+fn a_timer_due_after_the_end_of_the_clock_is_never_next() {
+    let mut f = Fixture::with(sim::node::Config {
+        monotonic: Monotonic(u64::MAX - 1000),
+        ..sim::node::Config::default()
+    });
     f.start();
-    f.try_timer(record, number(1), 0.0, Some(LATEST_BASE), ffi::ONCE)
-        .expect("the latest base is in range");
-    assert_eq!(f.events.next(), Some(Monotonic(u64::MAX)));
+    let last = i64::try_from(u64::MAX / 100).unwrap();
+    for (n, base) in [(1, LATEST_BASE), (2, last + 1)] {
+        f.try_timer(record, number(n), 0.0, Some(base), ffi::ONCE)
+            .expect("the base is in range");
+    }
+    assert_eq!(f.events.next(), None);
+    f.try_timer(record, number(3), 0.0, Some(last), ffi::ONCE)
+        .expect("the last tick is in range");
+    assert_eq!(f.events.next(), Some(Monotonic(u64::MAX / 100 * 100)));
+    f.advance(Span::from_nanos(1000));
+    f.run();
+    assert_eq!(f.ran(), [3]);
+    assert_eq!(f.events.next(), None);
 }
 
 #[test]
