@@ -7,8 +7,8 @@
   adds nothing. A test asserts from it the order of two closes in one poll, which no
   probe can see. Lost: a close stamp per path, since two closes in one poll have the
   same instant (#1835, decided by `laptop.architect-2`, 2026-10-09 04:51 UTC:
-  https://github.com/synnaxlabs/foundation/issues/1835#issuecomment-6074501894; the
-  crash sentence, 04:58 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1835#issuecomment-6074501894; a crash
+  of a held descriptor, 04:58 UTC:
   https://github.com/synnaxlabs/foundation/issues/1835#issuecomment-6074586228; the
   normal form, 05:01 UTC:
   https://github.com/synnaxlabs/foundation/pull/2110#issuecomment-6074620722; the leaked
