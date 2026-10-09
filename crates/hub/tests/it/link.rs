@@ -1059,6 +1059,78 @@ fn closes_the_session_at_the_cap_of_a_hello_past_it() {
     );
 }
 
+/// A node with an unknown error admits a hello, its error shrinks to 10 ms, and the
+/// program renews once from the old challenge, then stops. The renewal ends at the
+/// cap past the latest edge at its admission, and the session closes there.
+#[test]
+fn closes_the_session_at_the_cap_of_a_renewal_after_a_drop() {
+    let ten = Span::from_nanos(10 * Span::MINUTE.nanos());
+    let five = Span::from_nanos(5 * Span::MINUTE.nanos());
+    let third = Arc::new(Mutex::new(None));
+    let kept_third = Arc::clone(&third);
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&served);
+    run(
+        173,
+        move |node, tasks| async move {
+            node.set_wall_error(None);
+            let (test, session, link) =
+                accept(&node, &tasks, POOL, true, Some(rules())).await;
+            let shrink = node.clone();
+            tasks.spawn(async move {
+                shrink.clock().sleep(Span::MINUTE).await;
+                shrink.set_wall_error(Some(Span::from_nanos(10_000_000)));
+            });
+            while let Ok(mut incoming) = session.accept().await {
+                let (link, kept, clock) =
+                    (link.clone(), Arc::clone(&kept), node.clock());
+                tasks.spawn(async move {
+                    header(&mut incoming).await;
+                    let got = answer(link.serve(incoming), &clock).await;
+                    kept.lock().expect("not poisoned").push(got);
+                });
+            }
+            drop((link, test));
+        },
+        move |mut agent| async move {
+            let first = agent.hello.challenge().await;
+            let mut hello = Agent::hello(first);
+            hello.expires = first.now.latest + ten;
+            agent.send_hello(hello, &AGENT).await;
+            let second = agent.hello.challenge().await;
+            agent.sleep(five).await;
+            let mut hello = Agent::hello(second);
+            hello.expires = second.now.latest + five + ten;
+            agent.send_hello(hello, &AGENT).await;
+            let next = agent.hello.challenge().await;
+            *kept_third.lock().expect("not poisoned") = Some(next.now);
+            let start = agent.node.clock().now();
+            assert_eq!(agent.closed().await, closed_with(EXPIRED));
+            let lived = agent.node.clock().now() - start;
+            assert!(
+                lived.nanos() <= access::proof::CAP.nanos() + Span::SECOND.nanos(),
+                "the session lived {lived:?} past the renewal"
+            );
+        },
+    );
+    let next = third
+        .lock()
+        .expect("not poisoned")
+        .expect("a third challenge");
+    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
+    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
+        served.as_slice()
+    else {
+        panic!("one expiry, not {served:?}");
+    };
+    let cap = next.latest + access::proof::CAP;
+    assert!(
+        *at <= cap && *at > cap - Span::SECOND,
+        "the renewal ends at the cap: {at:?}, {cap:?}"
+    );
+    assert!(*now >= *at && *now < *at + Span::from_nanos(10_000_000));
+}
+
 /// The first expiry that a link reads is the one the node checks: a hello that has
 /// already expired at the node is refused at admit.
 #[test]
