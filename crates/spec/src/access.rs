@@ -156,7 +156,7 @@ impl Policy {
     }
 }
 
-/// A policy that allows nothing.
+/// Why [`Policy::new`] refuses its inputs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
     /// The policy allows no action.
