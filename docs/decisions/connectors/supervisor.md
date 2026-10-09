@@ -95,6 +95,10 @@
   `Failure::Removed` or `home::Error::Disk`, no change of state waits
   (`laptop.architect-2`, 2026-10-09T21:46:07Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089790301).
+  While the shard's pool gives no frame, a change of state waits also after its status
+  channels were removed, until the pool frees or `cancel` is cancelled
+  (`laptop.architect-2`, 2026-10-09T23:16:59Z:
+  https://github.com/synnaxlabs/foundation/pull/2173#issuecomment-6090887547).
   Supersedes "at once" in rule 3 of
   https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6054035730 and
   "The frame's time is when the wait started" in
