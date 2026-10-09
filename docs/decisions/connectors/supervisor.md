@@ -71,17 +71,23 @@
   can set counts between `state` 3 and the next state (`laptop.architect-2`,
   2026-10-09T21:16:18Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089396653).
+  Supersedes the bound of 12 frames of
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6088160535.
   `state` 3 and the next state stay two frames also when no task is left, because
   `state` 3 marks the end of the run (`laptop.architect-2`, 2026-10-09T19:51:38Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6088160535).
   `status::Writer` holds the rules of `state`, `class`, and `restarts`, and the
   supervisor calls its `start`, `end`, `wait`, and `stop` (same ruling). A frame that
   the home does not apply (`Waiting`, `Reserved`, `Order`, or `Lost`), or for which the
-  shard's pool gives no frame (`frame::Error::Pool`), leaves the status staged, so it
-  is written again one second later, also the last frame of a call: the call returns
-  once the home applied it, or once `cancel` is cancelled. The pool case is load, not
-  a defect (`laptop.architect-2`, 2026-10-09T21:32:53Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089614613). After
+  shard's pool has no block now (`block::Error::Exhausted` or `Refused` in
+  `frame::Error::Pool`), leaves the status staged, so it is written again one second
+  later, also the last frame of a call: the call returns once the home applied it, or
+  once `cancel` is cancelled. The pool case is load, not a defect
+  (`laptop.architect-2`, 2026-10-09T21:32:53Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089614613). A
+  status frame larger than the largest block of the pool (`block::Error::TooLarge`) is
+  a defect, and panics (`laptop.architect-2`, 2026-10-09T21:40:46Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089720287). After
   `Failure::Removed` or `home::Error::Disk` the call writes no more status. Each other
   refusal is a defect of `connector`, and panics (`laptop.architect-2`,
   2026-10-09T19:41:05Z:
