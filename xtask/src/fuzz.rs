@@ -215,8 +215,8 @@ fn patched(root: &Path) -> Result<(), Vec<String>> {
 }
 
 /// A problem for each package of the `fuzz` graph that is a copy in `patches/`, or
-/// whose name the `root` graph builds from such a copy, when the `root` graph has no
-/// package of its key.
+/// that is a release compatible with a copy that the `root` graph builds, when the
+/// `root` graph has no package of its key.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let root_packages = field::list(root, "packages")?;
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
@@ -231,6 +231,7 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
             continue;
         }
         let name = field::text(package, "name")?;
+        let version = field::text(package, "version")?;
         let manifest = field::text(package, "manifest_path")?;
         if copy(package)? {
             problems.push(format!(
@@ -240,7 +241,8 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
             ));
         }
         for namesake in root_packages.iter().filter(|p| p["name"] == name) {
-            if copy(namesake)? {
+            if copy(namesake)? && compatible(version, field::text(namesake, "version")?)
+            {
                 problems.push(format!(
                     "fuzz/Cargo.toml builds `{name}` from `{manifest}`, not from the \
                      copy in patches/ that the root Cargo.toml builds. Give \
@@ -251,6 +253,20 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
         }
     }
     Ok(problems)
+}
+
+/// Whether `a` and `b` share their leftmost nonzero part, so that one caret requirement
+/// can resolve to either, as a `[patch.crates-io]` entry needs.
+fn compatible(a: &str, b: &str) -> bool {
+    let series = |version: &str| {
+        let parts: Vec<&str> = version.split(['.', '-', '+']).take(3).collect();
+        let last = parts
+            .iter()
+            .position(|part| *part != "0")
+            .unwrap_or(parts.len() - 1);
+        parts[..=last].join(".")
+    };
+    series(a) == series(b)
 }
 
 #[cfg(test)]
@@ -265,7 +281,8 @@ mod tests {
     const PATCHED: &str = "path+file:///w/patches/noq-proto#noq-proto@1.3.0";
 
     fn package(name: &str, id: &str, manifest: &str) -> Value {
-        json!({ "name": name, "id": id, "manifest_path": manifest })
+        let version = id.rsplit(['@', '#']).next().unwrap();
+        json!({ "name": name, "id": id, "version": version, "manifest_path": manifest })
     }
 
     fn root() -> Value {
@@ -382,6 +399,31 @@ mod tests {
                     .to_string()
             ])
         );
+    }
+
+    #[test]
+    fn passes_a_release_that_the_copy_cannot_replace() {
+        let fuzz = fuzz(&[
+            package("noq-proto", PATCHED, "/w/patches/noq-proto/Cargo.toml"),
+            package(
+                "noq-proto",
+                "registry+https://github.com/rust-lang/crates.io-index#noq-proto@0.9.0",
+                "/r/noq-proto-0.9.0/Cargo.toml",
+            ),
+        ]);
+        assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn compatible_releases_share_their_leftmost_nonzero_part() {
+        assert!(compatible("1.3.0", "1.4.2"));
+        assert!(compatible("0.9.0", "0.9.7"));
+        assert!(compatible("0.0.3", "0.0.3"));
+        assert!(compatible("1.3.0-alpha.1", "1.0.0"));
+        assert!(!compatible("0.9.0", "1.3.0"));
+        assert!(!compatible("0.9.0", "0.10.0"));
+        assert!(!compatible("0.0.3", "0.0.4"));
+        assert!(!compatible("2.0.0", "1.0.0"));
     }
 
     #[test]
