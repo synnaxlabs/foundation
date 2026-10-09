@@ -100,8 +100,10 @@ pub(crate) fn placed_site() -> String {
     format!("{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n")
 }
 
-pub(crate) const NODE: node::Key = key(1);
-pub(crate) const PRIVATE_KEY: PrivateKey = private_key(1);
+/// The member number of this node.
+const OWN: u8 = 1;
+pub(crate) const NODE: node::Key = key(OWN);
+pub(crate) const PRIVATE_KEY: PrivateKey = private_key(OWN);
 pub(crate) const ADMIN: PrivateKey = PrivateKey([7; 32]);
 pub(crate) const PORT: u16 = 7000;
 
@@ -134,7 +136,7 @@ pub(crate) fn create_member(n: u8, name: &str) -> Member {
 }
 
 /// The mesh of a root region with the founding `definitions`, whose members are
-/// `names` at the keys from 1 up. The first is this node and the one voter.
+/// `names` at the keys from `NODE` up. The first is this node and the one voter.
 pub(crate) async fn open(
     node: &sim::node::Node,
     tasks: &Tasks,
@@ -174,7 +176,7 @@ pub(crate) async fn open(
         founding: Founding {
             prefix: Prefix::ROOT,
             voters: [NODE].into(),
-            members: (1..)
+            members: (OWN..)
                 .zip(names)
                 .map(|(n, name)| create_member(n, name))
                 .collect(),
