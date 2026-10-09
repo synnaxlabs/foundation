@@ -116,8 +116,8 @@
   opens, since a call between two messages of its keys run can remove one. The call
   checks the definitions before it changes anything: two channels with one key or one
   name, or a data channel whose index is not an index of the definitions, panic.
-  Supersedes "A known key or name panics" and "The PR that defines channels at each new
-  spec decides what a known, renamed, or removed channel does" in
+  This changes "A known key or name panics" and "The PR that defines channels at each
+  new spec decides what a known, renamed, or removed channel does" in
   https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349. Lost: a
   session ends at its next call, under which a writer keeps the control of a removed
   index until it calls, and a reader that waits in `next` needs a wake anyway; and the
