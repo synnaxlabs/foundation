@@ -1,8 +1,8 @@
 - **HUB LINK (2026-10-08)** `Hub::link(session)` gives a `hub::Link` for one transport
-  session. `node` calls `Link::serve` for each hub stream once it reads its header. On
-  a client link, the first stream given to `serve` is its hello stream, and each later
-  one a request stream; `serve` takes the role at the call (`laptop.architect`,
-  2026-10-08T18:56:15Z,
+  session. `node` calls `Link::serve` for each hub stream that NODE PORT serves once it
+  reads its header. On a client link, the first stream given to `serve` is its hello
+  stream, and each later one a request stream; `serve` takes the role at the call
+  (`laptop.architect`, 2026-10-08T18:56:15Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
   `hub::Config` gets `node` (the `via` that `admit` checks), `time` (`clock::Reader`),
   and `entropy` (the nonces). The link waits for a hello's expiry with

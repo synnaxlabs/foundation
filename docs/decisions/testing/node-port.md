@@ -38,10 +38,16 @@
   message. A `Mesh` stream of a `Peer::Client` session stops with
   `Code(wire::header::REJECTED)`, and its reply half resets with the same code. For
   `Mesh` streams, the admission rule is the mesh's check of each message: a peer that
-  is not the member it names gets `Spoofed`, and the stream stops at that message. The
-  `Hub` rule comes with PR 4. At the stop, each session and stream future drops, then
-  the mesh, and shard 0 waits for the mesh's task to end before it drops `lock` (DATA
-  DIRECTORY LOCK) and before `Node::join` returns, so a restart at once opens the log:
+  is not the member it names gets `Spoofed`, and the stream stops at that message. A
+  `Hub` stream of a `Peer::Node` session goes to the hub's link of the session only
+  when the node has a mesh and a member of its region, in this node's view, has the
+  peer's public key; else it stops with `Code(wire::header::REJECTED)`, and its reply
+  half resets with the same code. A `Hub` stream of a `Peer::Client` session is
+  rejected until #1744 (PR 4b of #585, by `laptop.architect-2`, 22:22 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2021#issuecomment-6070221342). At the
+  stop, each session and stream future drops, then the mesh, and shard 0 waits for the
+  mesh's task to end before it drops `lock` (DATA DIRECTORY LOCK) and before
+  `Node::join` returns, so a restart at once opens the log:
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051658475. For a
   node with a mesh, this supersedes the stop order of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669.
