@@ -7959,25 +7959,30 @@ mod tests {
             });
         }
 
-        /// Once the credit of `Complete` ends, the turn puts `Latest` first, and
-        /// only the first stream in turn writes. Room that a `Complete` message
-        /// frees also goes to the waiting `Latest` first. So for any count of
-        /// `Complete` streams, only the rest of the message in hand passes the credit.
+        /// A `Latest` claim that waits for room in the budget waits in no turn. So
+        /// when a late reader gives a burst of credit as the credit of `Complete`
+        /// ends, each `Complete` stream that holds QUIC room writes the rest of its
+        /// message.
         #[test]
-        fn complete_streams_go_ahead_of_a_held_latest_by_their_credit_and_one_message()
-        {
-            testing::run(1, |shard| {
-                let loads = [(1, MESSAGE_MAX), (4, MESSAGE_MAX / 2), (4, MESSAGE_MAX)];
-                for (streams, size) in loads {
-                    let Lead { credit, ahead, .. } =
-                        lead(shard, 2 * NARROW, size, 1, streams, true);
-                    let bound = credit + size;
-                    assert!(
-                        ahead <= bound,
-                        "{ahead} of {bound}; {streams} of {size} B"
-                    );
-                }
-            });
+        fn complete_streams_go_ahead_of_a_held_latest_by_their_credit_and_a_message_each()
+         {
+            let loads = [(1, MESSAGE_MAX), (4, MESSAGE_MAX / 2), (4, MESSAGE_MAX)];
+            for (alone, lag) in
+                [(NARROW, 1), (2 * NARROW, 1), (NARROW, 50), (2 * NARROW, 50)]
+            {
+                testing::run(1, move |shard| {
+                    for (streams, size) in loads {
+                        let Lead { credit, ahead, .. } =
+                            lead(shard, alone, size, lag, streams, true);
+                        let bound = credit + streams * size;
+                        assert!(
+                            ahead <= bound,
+                            "{ahead} of {bound}; {streams} of {size} B, alone {alone}, \
+                             lag {lag}"
+                        );
+                    }
+                });
+            }
         }
 
         #[test]

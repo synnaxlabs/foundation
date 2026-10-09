@@ -30,27 +30,28 @@
   credit of a whole message is never lost. A class that does not wait keeps no credit
   past one peer window of its own bytes once the other class sent one peer window alone.
   So a class that starts again after the other sent alone goes ahead of it by its
-  credit, at most one window, and one of its messages. When the other class holds no
-  message as its credit ends, as a `Latest` stream on `try_send` between its calls, it
-  also takes the rest of that step of credit, at most one more window. After a pause in
-  which neither class sends, each keeps the credit of the time both waited, at most one
-  peer window of `Latest` bytes, because no byte moves in the pause and the share has no
-  clock. When a simulation of a deployed load shows `Latest` behind `Complete` by more
-  than these bounds after such a pause, the share gets a signal of the pause. A class
-  that holds less than its share when QUIC gives room sends what it holds first, and the
-  core holds no QUIC room for its later messages. So one `Latest` stream on `try_send`
-  sends at most one message for each step of credit. Room that a stream got and its
-  caller has not taken counts for neither class, and a message that `try_send` gave back
-  is not held. The caller of `send` writes the rest of its message; the stream writes
-  the rest of a message from `try_send` or of a finished stream. A rest that the stream
-  held for a waiting caller would take each freed byte before the other class's caller
-  wakes. The send budget gives room in the order of the turn. While the owed class
-  competes and a claim of the other class holds room, room that a message of the owed
-  class frees waits for that class's next message, and the budget starts no new message
-  of the other class, so neither class can take the share through the budget (#819). A
-  change of this share changes the share bound of `transport/benches/send.rs` in the
-  same PR. The share holds because each window is at least twice the message limit, so
-  one message of each class fits: architect-2 (#1998, 2026-10-09 03:45 UTC):
+  credit, at most one window, and one message for each of its streams that holds QUIC
+  room. When the other class holds no message as its credit ends, as a `Latest` stream
+  on `try_send` between its calls, it also takes the rest of that step of credit, at
+  most one more window. After a pause in which neither class sends, each keeps the
+  credit of the time both waited, at most one peer window of `Latest` bytes, because no
+  byte moves in the pause and the share has no clock. When a simulation of a deployed
+  load shows `Latest` behind `Complete` by more than these bounds after such a pause,
+  the share gets a signal of the pause. A class that holds less than its share when QUIC
+  gives room sends what it holds first, and the core holds no QUIC room for its later
+  messages. So one `Latest` stream on `try_send` sends at most one message for each step
+  of credit. Room that a stream got and its caller has not taken counts for neither
+  class, and a message that `try_send` gave back is not held. The caller of `send`
+  writes the rest of its message; the stream writes the rest of a message from
+  `try_send` or of a finished stream. A rest that the stream held for a waiting caller
+  would take each freed byte before the other class's caller wakes. The send budget
+  gives room in the order of the turn. While the owed class competes and a claim of the
+  other class holds room, room that a message of the owed class frees waits for that
+  class's next message, and the budget starts no new message of the other class, so
+  neither class can take the share through the budget (#819). A change of this share
+  changes the share bound of `transport/benches/send.rs` in the same PR. The share holds
+  because each window is at least twice the message limit, so one message of each class
+  fits: architect-2 (#1998, 2026-10-09 03:45 UTC):
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073837407. The
   share: architect-2 (#977, 2026-10-07 17:15 UTC):
   https://github.com/synnaxlabs/foundation/issues/977#issuecomment-6042983190. The
