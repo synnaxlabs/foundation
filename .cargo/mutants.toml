@@ -34,6 +34,8 @@ exclude_re = [
   # Empty outside a build with the address sanitizer. Only the Rust ASan build of
   # #1912 reads the header in `block`, and its alloc tests fail without it.
   'crates/connector-opcua/src/alloc\.rs:.*replace unpoison with \(\)$',
+  # `moves` is a `sim` hook that only the two tests of the moves of a drive read.
+  'crates/connector-opcua/src/connection\.rs:.*replace \+ with \* in State::move_on$',
   # The fields of a UUIDv7 share no bit, so `^` gives the same bits as `|`.
   'crates/types/src/uuid\.rs:.*replace \| with \^ in v7$',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
