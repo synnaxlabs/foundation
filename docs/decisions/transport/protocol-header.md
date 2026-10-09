@@ -10,15 +10,20 @@
   it (C9d), and writers take the version from the format flag. `node` stops a stream
   whose header is not valid with code 1 (`wire::header::REJECTED`) and resets its
   reply half, if it has one, with the same code; a datagram whose header is not valid
-  drops and counts in a status channel. Stop and reset codes 1 to 15 belong to the
-  header; each protocol numbers its own from 16. A client session (`Peer::Client`)
-  opens only hub streams, its hello stream is the first hub stream, and the node's
-  `Challenge` is the first message on it (CLIENT HELLO); `node` refuses the other
-  four protocols from a client. The stream and client rules are approved by the
-  coordinator on #90. The hello stream was changed by `laptop.architect` at
-  2026-10-08T09:53:58Z
+  drops and counts in a status channel. Codes 1 to 15 belong to `wire::header` and
+  `wire::session`; each protocol numbers its own from 16. Codes 1 to 15 are one space
+  for streams and sessions: `wire::session::REFUSED` (3) closes a session that the node
+  does not admit. Lost: a second space for session codes, because the hub already closes
+  a client session with the code of its stream, and 1 would then have two meanings.
+  Decided by `laptop.architect` on #2148
+  (https://github.com/synnaxlabs/foundation/issues/2148#issuecomment-6082041865). A
+  client session (`Peer::Client`) opens only hub streams, its hello stream is the first
+  hub stream, and the node's `Challenge` is the first message on it (CLIENT HELLO);
+  `node` refuses the other four protocols from a client. The stream and client rules are
+  approved by the coordinator on #90. The hello stream was changed by `laptop.architect`
+  at 2026-10-08T09:53:58Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526).
-  Rejected: a version agreed once per session
-  (the format flag's flip reaches nodes at different times, so one session can carry
-  streams of two versions) and a session per protocol (`transport` stays blind to
-  protocols, and it costs five handshakes per peer pair).
+  Rejected: a version agreed once per session (the format flag's flip reaches nodes at
+  different times, so one session can carry streams of two versions) and a session per
+  protocol (`transport` stays blind to protocols, and it costs five handshakes per peer
+  pair).
