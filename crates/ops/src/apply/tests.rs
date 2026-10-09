@@ -674,9 +674,6 @@ fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
         };
         let mut removal = one(&site, "site.time", Some(stored), None);
         removal.base = pointer;
-        let error = apply(path(), &removal.encode(), &mesh, &kinds(), keys(10))
-            .await
-            .expect_err("a dangling edge");
         let dangling = Problem::Dangling {
             from: name("site.temp"),
             edge: Edge::Index,
@@ -684,16 +681,14 @@ fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
         };
         let problems = vec![spec::region::Problem::Channel(dangling)];
         let cause = mesh::Error::Problems(problems);
-        assert_eq!(
-            error.text(),
-            format!(
-                "error[ops.apply]: {cause}\nfix: Fix the cause in the message, then \
-                 plan and apply again\n"
-            )
+        let text = format!(
+            "error[ops.apply]: {cause}\nfix: Fix the cause in the message, then plan \
+             and apply again\n"
         );
-        assert_eq!(error, Error::Apply(cause));
+        let error =
+            refuses(&mesh, &removal.encode(), &kinds(), Error::Apply(cause)).await;
+        assert_eq!(error.text(), text);
         assert_eq!(error.status(), 1);
-        assert_eq!(mesh.pointer(), pointer);
     });
 }
 
