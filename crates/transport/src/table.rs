@@ -97,10 +97,13 @@ pub(crate) async fn dial(
             let dialer = table.dialer.clone();
             let this = rc::Weak::clone(&table.this);
             let addresses = addresses.to_vec();
-            let started = Rc::clone(&attempt);
+            // A strong handle would keep the result of an attempt that a session
+            // from the peer ended, and so that session, open while the dial runs.
+            let started = Rc::downgrade(&attempt);
             table.tasks.spawn(async move {
                 let dial = dial::dial(&dialer, node, &addresses).await;
-                let Some(table) = this.upgrade() else {
+                let (Some(table), Some(started)) = (this.upgrade(), started.upgrade())
+                else {
                     return;
                 };
                 table
@@ -1255,6 +1258,36 @@ mod tests {
     fn a_restarted_peer_of_the_higher_key_wins_once_the_first_session_resets() {
         let reason = "reset by peer".to_owned();
         restart(SERVER, CLIENT, Error::Broken { reason });
+    }
+
+    // The client has the higher key and dials a dead address. The server's session
+    // ends that attempt, and the client drops each handle to it, so it closes at once,
+    // not when the dead dial times out.
+    #[test]
+    fn an_attempt_that_a_session_from_the_peer_ended_does_not_keep_it_open() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let back = [Address::Udp(testing::address(&client))];
+        let dead = dead(&server);
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            let dialed = transport.dial(CLIENT.public(), &back).await;
+            let dialed = dialed.expect("a session");
+            let start = node.clock().now();
+            assert_eq!(dialed.closed().await, Error::PeerClosed { code: Code(0) });
+            let open = node.clock().now() - start;
+            assert!(
+                open < testing::spans(Span::MILLISECOND, 100),
+                "open {open:?}"
+            );
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            {
+                let dial = pin!(transport.dial(SERVER.public(), &dead));
+                assert!(testing::poll_once(dial).await.is_none());
+            }
+            drop(transport.accept().await.expect("the server's session"));
+            node.clock().sleep(testing::spans(testing::IDLE, 5)).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
     }
 
     // The server holds the client's second session, closes it once its own answers a
