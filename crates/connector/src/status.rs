@@ -141,7 +141,7 @@ impl Count {
 
 /// What a connector's run is doing, as `state` gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum State {
+enum State {
     Running = 0,
     Waiting = 1,
     Stopped = 2,
@@ -150,7 +150,7 @@ pub(crate) enum State {
 
 /// How the last run ended, as `class` gives it: `None` also before the first end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Class {
+enum Class {
     None = 0,
     Config = 1,
     Device = 2,
@@ -159,7 +159,7 @@ pub(crate) enum Class {
 
 impl Class {
     /// The class of a run that ended with `end`.
-    pub(crate) fn of(end: &Result<(), kind::Error>) -> Self {
+    fn of(end: &Result<(), kind::Error>) -> Self {
         match end {
             Ok(()) => Self::None,
             Err(kind::Error::Config(_)) => Self::Config,
@@ -204,29 +204,25 @@ impl fmt::Debug for Values {
     }
 }
 
-/// The writer session of one connector's status channels.
+/// The writer of one connector's status channels: the supervisor sets each change of
+/// state, and [`Writer::flush`] writes the counts.
 pub(crate) struct Writer {
-    session: hub::writer::Writer,
+    session: RefCell<Session>,
     values: Rc<Values>,
-    /// The entries of the index and the supervisor's channels, then the counts.
-    entries: Box<[usize]>,
-    /// Each series of a frame, by entry, with its length.
-    series: Box<[(usize, usize)]>,
-    group: u32,
-    last: Option<Stamp>,
-    /// When the last write was, by the node's clock.
-    wrote: Monotonic,
-    /// Set once a status channel is removed: the writer writes no more.
-    removed: bool,
+    clock: Clock,
+    /// Set at the first start, after which each start is a restart.
+    started: Cell<bool>,
 }
 
 impl Writer {
     /// Opens the writer of the status channels of `connector`, whose kind named
-    /// `counts`, as the connector, and gives the status that it writes.
+    /// `counts`, as the connector, and gives the status that it writes. `clock` times
+    /// the writes.
     pub(crate) async fn open(
         hub: &hub::Hub,
         connector: &Name,
         counts: Vec<Name>,
+        clock: Clock,
     ) -> Result<(Self, Status), hub::writer::Error> {
         let (time, channels) = channels(connector, &counts);
         let names = std::iter::once(time).chain(channels.into_iter().map(|(n, _)| n));
@@ -252,9 +248,8 @@ impl Writer {
         series.sort_unstable();
         let group = set.entries()[entries[0]].group;
         let status = Status::new(counts);
-        let writer = Self {
-            session,
-            values: Rc::clone(&status.0),
+        let session = Session {
+            hub: session,
             entries,
             series,
             group,
@@ -262,41 +257,115 @@ impl Writer {
             wrote: Monotonic::default(),
             removed: false,
         };
+        let writer = Self {
+            session: RefCell::new(session),
+            values: Rc::clone(&status.0),
+            clock,
+            started: Cell::new(false),
+        };
         Ok((writer, status))
     }
 
-    /// Sets the supervisor's channels and writes the whole status at once.
-    pub(crate) fn set(
-        &mut self,
-        state: State,
-        class: Class,
-        restarts: u64,
-        now: Monotonic,
-    ) {
-        self.values.state.set(state);
-        self.values.class.set(class);
-        self.values.restarts.set(restarts);
-        self.write(now);
+    /// Writes `state` 0, with one more restart after the first start.
+    pub(crate) fn start(&self) {
+        if self.started.replace(true) {
+            let restarts = &self.values.restarts;
+            restarts.set(restarts.get().strict_add(1));
+        }
+        self.set(State::Running);
     }
 
+    /// Writes `state` 3 with the class of a run that ended with `end`.
+    pub(crate) fn end(&self, end: &Result<(), kind::Error>) {
+        self.values.class.set(Class::of(end));
+        self.set(State::Ending);
+    }
+
+    /// Writes `state` 1.
+    pub(crate) fn wait(&self) {
+        self.set(State::Waiting);
+    }
+
+    /// Writes `state` 2.
+    pub(crate) fn stop(&self) {
+        self.set(State::Stopped);
+    }
+
+    fn set(&self, state: State) {
+        self.values.state.set(state);
+        self.write();
+    }
+
+    fn write(&self) {
+        let now = self.clock.now();
+        self.session.borrow_mut().write(&self.values, now);
+    }
+
+    /// Writes the status that a kind staged or the home did not apply, at most once
+    /// each [`PERIOD`] after the last write. Never returns.
+    #[expect(
+        clippy::infinite_loop,
+        reason = "the flush ends when its call drops it"
+    )]
+    pub(crate) async fn flush(&self) -> Infallible {
+        let values = &self.values;
+        loop {
+            poll_fn(|cx| {
+                if values.staged.get() {
+                    return Poll::Ready(());
+                }
+                values.waker.set(Some(cx.waker().clone()));
+                Poll::Pending
+            })
+            .await;
+            // A write by the supervisor while this sleeps moves the next write later.
+            loop {
+                let next = self.session.borrow().wrote + PERIOD;
+                if self.clock.now() >= next {
+                    break;
+                }
+                self.clock.sleep_until(next).await;
+            }
+            if values.staged.get() {
+                self.write();
+            }
+        }
+    }
+}
+
+/// The hub's writer session of the status channels.
+struct Session {
+    hub: hub::writer::Writer,
+    /// The entries of the index and the supervisor's channels, then the counts.
+    entries: Box<[usize]>,
+    /// Each series of a frame, by entry, with its length.
+    series: Box<[(usize, usize)]>,
+    group: u32,
+    last: Option<Stamp>,
+    /// When the last write was, by the node's clock.
+    wrote: Monotonic,
+    /// Set once a status channel is removed: the writer writes no more.
+    removed: bool,
+}
+
+impl Session {
     /// Writes the last value of each status channel. A frame that the home does not
     /// apply leaves the status staged, so the flush writes it again.
-    fn write(&mut self, now: Monotonic) {
-        self.values.staged.set(false);
+    fn write(&mut self, values: &Values, now: Monotonic) {
+        values.staged.set(false);
         self.wrote = now;
         if self.removed {
             return;
         }
-        let mut stamp = self.session.now();
+        let mut stamp = self.hub.now();
         if let Some(last) = self.last {
             stamp = stamp.max(Stamp::from_nanos(last.nanos().strict_add(1)));
         }
         self.last = Some(stamp);
         let mut draft = self
-            .session
+            .hub
             .draft(Form::Raw, &self.series)
             .expect("invariant: the series follow the key set");
-        let values = &self.values;
         let supervisor = [
             u64::from(values.state.get() as u8),
             u64::from(values.class.get() as u8),
@@ -317,7 +386,7 @@ impl Writer {
             bytes.copy_from_slice(&sample.to_le_bytes()[..len]);
         }
         draft.set_count(self.group, 1);
-        let applied = match self.session.write(Label::Path(Path::Live), draft) {
+        let applied = match self.hub.write(Label::Path(Path::Live), draft) {
             Ok(outcomes) => matches!(outcomes, [hub::home::Outcome::Applied { .. }]),
             Err(hub::writer::Failure::Home(_)) => false,
             Err(hub::writer::Failure::Removed(_)) => {
@@ -326,38 +395,7 @@ impl Writer {
             }
         };
         if !applied {
-            self.values.stage();
-        }
-    }
-}
-
-/// Writes the status that a kind staged or the home did not apply, at most once each
-/// [`PERIOD`] after the last write of `writer`. Never returns.
-#[expect(
-    clippy::infinite_loop,
-    reason = "the flush ends when its call drops it"
-)]
-pub(crate) async fn flush(writer: &RefCell<Writer>, clock: &Clock) -> Infallible {
-    let values = Rc::clone(&writer.borrow().values);
-    loop {
-        poll_fn(|cx| {
-            if values.staged.get() {
-                return Poll::Ready(());
-            }
-            values.waker.set(Some(cx.waker().clone()));
-            Poll::Pending
-        })
-        .await;
-        // A write by the supervisor while this sleeps moves the next write later.
-        loop {
-            let next = writer.borrow().wrote + PERIOD;
-            if clock.now() >= next {
-                break;
-            }
-            clock.sleep_until(next).await;
-        }
-        if values.staged.get() {
-            writer.borrow_mut().write(clock.now());
+            values.stage();
         }
     }
 }

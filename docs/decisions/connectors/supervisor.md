@@ -33,7 +33,8 @@
   constants). The waits start again from 1 s after a run that lasted at least 60 s.
   `Ok` from `run` ends the connector.
   `Config` returns to the caller, which starts a new supervisor when the spec
-  changes (R12-4). Restart errors reach the connector's status (CONNECTOR STATUS).
+  changes (R12-4). The class of a restart error reaches the connector's status
+  (CONNECTOR STATUS), and its text reaches it in #420.
   Decided by the `connector` builder in the plan on #338, after `/eb-review`; approved
   by the coordinator (#338), with the reset after a long run approved on #338 later.
 - **CONNECTOR STATUS** `Supervisor::run` writes the status channels of its connector,

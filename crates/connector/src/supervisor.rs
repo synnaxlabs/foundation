@@ -1,6 +1,6 @@
 //! Runs connectors and restarts them after errors.
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::future::poll_fn;
 use std::pin::pin;
 use std::rc::Rc;
@@ -16,7 +16,7 @@ use types::name::Name;
 use types::time::Span;
 
 use crate::kind::{self, Context, Error};
-use crate::status::{self, Class, State};
+use crate::status;
 use crate::{cancel, retry};
 
 /// The waits between restarts.
@@ -95,7 +95,8 @@ impl Supervisor {
             .check(kind, None, config)
             .map_err(Error::Config)?
             .counts;
-        let (writer, status) = match status::Writer::open(hub, &name, counts).await {
+        let open = status::Writer::open(hub, &name, counts, clock.clone());
+        let (writer, status) = match open.await {
             Ok(opened) => opened,
             Err(hub::writer::Error::Mesh(_)) => return Ok(()),
             Err(error) => {
@@ -104,9 +105,8 @@ impl Supervisor {
                 )
             }
         };
-        let writer = RefCell::new(writer);
         let mut runs = pin!(self.runs(kind, &name, config, cancel, &writer, &status));
-        let mut flush = pin!(status::flush(&writer, clock));
+        let mut flush = pin!(writer.flush());
         poll_fn(|cx| {
             if let Poll::Ready(never) = flush.as_mut().poll(cx) {
                 match never {}
@@ -124,7 +124,7 @@ impl Supervisor {
         name: &Name,
         config: &Document,
         cancel: &cancel::Token,
-        writer: &RefCell<status::Writer>,
+        writer: &status::Writer,
         status: &status::Status,
     ) -> Result<(), Error> {
         let Config {
@@ -134,15 +134,9 @@ impl Supervisor {
             tasks,
             ..
         } = &*self.0;
-        let set = |state, class, restarts| {
-            writer.borrow_mut().set(state, class, restarts, clock.now());
-        };
         let mut backoff = retry::Backoff::new(clock, entropy.rng(), RESTART);
-        let (mut class, mut started) = (Class::None, 0_u64);
         while !cancel.cancelled() {
-            let restarts = started;
-            started = started.strict_add(1);
-            set(State::Running, class, restarts);
+            writer.start();
             let token = Ended(cancel.child());
             let live = Rc::new(Live::default());
             let count = Count {
@@ -161,27 +155,26 @@ impl Supervisor {
             let end = kinds.run(kind, config, ctx).map_err(Error::Config)?.await;
             let lasted = clock.now() - start;
             drop(token);
-            class = Class::of(&end);
-            set(State::Ending, class, restarts);
+            writer.end(&end);
             live.ended().await;
             match end {
                 Ok(()) | Err(Error::Config(_)) => {
-                    set(State::Stopped, class, restarts);
+                    writer.stop();
                     return end;
                 }
-                // These reach the connector's status in #420.
+                // The class reaches the status; the error text reaches it in #420.
                 Err(Error::Device(_) | Error::Retry(_)) => {}
             }
             if cancel.cancelled() {
                 break;
             }
-            set(State::Waiting, class, restarts);
+            writer.wait();
             if lasted >= HEALTHY {
                 backoff.reset();
             }
             backoff.wait(cancel).await;
         }
-        set(State::Stopped, class, started.saturating_sub(1));
+        writer.stop();
         Ok(())
     }
 }
@@ -247,6 +240,7 @@ impl Drop for Held {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::io::IoSlice;
     use std::net::SocketAddr;
