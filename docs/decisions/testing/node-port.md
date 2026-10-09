@@ -137,13 +137,15 @@
   arrived 10 s after the stream did is rejected as a header that does not decode is. A
   test cannot open a stream with no bytes, because the transport queues a stream at its
   first byte, so a first message that is still arriving at 10 s tests the wait. Shard 0
-  holds at most 256 sessions of peers outside the region (`Peer::Client`, and a
-  `Peer::Node` whose key no member holds in this node's view) and closes each next one
-  at once with `Code(wire::session::REFUSED)`. It never refuses a member, so a flood of
-  programs cannot lock the region out. Trigger: the PR that adds the change kind that
-  removes a member (MESH DRIVER). That change also closes each session of that node,
-  with the code of a refused session, and so ends its `Hub` and `Mesh` streams. The node
-  then admits it again as any other peer. Supersedes the deferrals of
+  gives peers outside the region (`Peer::Client`, and a `Peer::Node` whose key no member
+  holds in this node's view) at most 256 places, one for each session of a program and
+  one for the key of a node. It closes each session that gets no place at once with
+  `Code(wire::session::REFUSED)`. A node's new session takes the place of its old one,
+  which the transport closes (ONE SESSION PER PEER). It never refuses a member, so a
+  flood of programs cannot lock the region out. Trigger: the PR that adds the change
+  kind that removes a member (MESH DRIVER). That change also closes each session of that
+  node, with the code of a refused session, and so ends its `Hub` and `Mesh` streams.
+  The node then admits it again as any other peer. Supersedes the deferrals of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669 (item 5,
   2026-10-07 21:09 UTC) and
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609 (23:41

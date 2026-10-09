@@ -169,12 +169,13 @@ impl Node {
     /// once it has mesh time, unless [`create_key`] made it, then opens the mesh of
     /// [`Config::region`] when it has one, then serves the port, admits each member of
     /// the region and at most 256 sessions of other peers at once, until its transport
-    /// or the mesh's group stops, which stops the node. Returns once each shard runs or one has failed to start. When the disk
-    /// budget holds no ring on each shard, no shard starts, and [`Node::join`] gives
-    /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
-    /// start, a shard with no memory, a data directory that another node holds or that
-    /// was made for another shard count, a key file that is not valid, or a buffer or a
-    /// mesh that does not open stops the node, and [`Node::join`] returns its error.
+    /// or the mesh's group stops, which stops the node. Returns once each shard runs or
+    /// one has failed to start. When the disk budget holds no ring on each shard, no
+    /// shard starts, and [`Node::join`] gives [`Error::Disk`] with the budget, the
+    /// shard count, and the least budget. A failed start, a shard with no memory, a
+    /// data directory that another node holds or that was made for another shard count,
+    /// a key file that is not valid, or a buffer or a mesh that does not open stops the
+    /// node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
