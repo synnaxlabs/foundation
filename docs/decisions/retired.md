@@ -57,7 +57,7 @@
 | NODE PORT deferral of #1649 (6048464411): a transport that stops ends the routing and the node runs on with no port | NODE PORT amendment (#1647, 6049354544) |
 | HOME TYPE REFUSAL (#963): `open_writer` refuses a series of a type the home does not write | HOME EVERY TYPE |
 | FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
-| HUB SESSIONS (#340, 6066821273): `reader::Error::Remote` gives a reader of an index at another node | HUB SESSIONS amendment (#340 PR 4d-b, 6068108715): the reader reads from that home over one hub stream |
+| HUB SESSIONS (#340, 6066821273): `reader::Error::Remote` gives a reader of an index at another node | HUB SESSIONS amendment (#340 PR 4d-b, 6069259471): the reader reads from that home over one hub stream |
 | `hub::Config::mesh` of 6067438821 | HUB SESSIONS amendment (#340 PR 4d-b, 6068108715): `hub::Config::region` |
 | `hub::Config::transport` of 6048960511 | HUB SESSIONS amendment (#340 PR 4d-b, 6068108715): `hub::Config::region` |
 | `reader::Error::Refused(transport::Code)` and `reader::Ended::Refused(transport::Code)` of 6048960511 | HUB SESSIONS (6069259471): `Refused(wire::hub::Refusal)` |

@@ -131,7 +131,7 @@
   `reader::Ended` in 6048960511 and the session for each home of that plan
   (2026-10-08T21:19:24Z:
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6069259471). The
-  removal of `reader::Error::Remote` supersedes it in
+  removal of `reader::Error::Remote` in 6069259471 supersedes it in
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273.
   The remote reader costs `complete wait` +2 ns (27 to 29 ns, +7.4%) and
   `complete grant` +2 ns (64 to 66 ns, +3.1%) on a quiet host
