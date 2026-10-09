@@ -4263,50 +4263,14 @@ mod port {
                 private_key: KEY,
             };
             write_key(&mut sim, &host, identity::encode(&identity).to_vec());
-            let node = start(&host, region(&[member(OWN, &KEY, &host)]));
-            let made = Arc::new(Mutex::new(Vec::new()));
-            let out = Arc::clone(&made);
-            let zero = host.clock().now();
-            let wall = host.clone();
-            let applied = Arc::new(Mutex::new(None));
-            let span = Arc::clone(&applied);
-            node.operate(move |ops| async move {
-                let first = apply_index(&ops, "a").await;
-                wall.set_wall_error(Some(Span::from_nanos(
-                    10 * Span::MILLISECOND.nanos(),
-                )));
-                wall.clock()
-                    .sleep(Span::from_nanos(600 * Span::SECOND.nanos()))
-                    .await;
-                let before = wall.clock().now();
-                let second = apply_index(&ops, "b").await;
-                let after = wall.clock().now();
-                out.lock().unwrap().extend([first, second]);
-                *span.lock().unwrap() = Some((before, after));
+            let ten_ms = Span::from_nanos(10 * Span::MILLISECOND.nanos());
+            let [first, second] = key_times(&mut sim, &host, move |host| {
+                host.set_wall_error(Some(ten_ms));
             });
-            let eleven_minutes = Span::from_nanos(660 * Span::SECOND.nanos());
-            assert_eq!(sim.run_for(eleven_minutes), Ok(()));
-            node.stop();
-            assert_eq!(sim.run(), Ok(()));
-            assert_eq!(node.join(), Ok(()));
-            let millis: Vec<i64> = made
-                .lock()
-                .unwrap()
-                .iter()
-                .map(|key| i64::try_from(key.as_u128() >> 80).unwrap())
-                .collect();
             let start = sim::node::Config::default().wall.nanos() / 1_000_000;
-            let [first, second] = millis[..] else {
-                panic!("two keys, not {millis:?}");
-            };
-            let (before, after) = applied.lock().unwrap().expect("a second apply");
-            let at = |time: types::time::Monotonic| {
-                start + i64::try_from((time.0 - zero.0) / 1_000_000).unwrap()
-            };
             assert!((start..start + 1_000).contains(&first), "{first} ms");
-            let wall = at(before) - 1_000..=at(after) + 1_000;
+            let wall = first + 600_000..first + 605_000;
             assert!(wall.contains(&second), "{second} ms is not in {wall:?}");
-            assert!(first <= second, "{second} ms is before {first} ms");
         }
 
         /// A key made after the wall steps back from past 2162 is no earlier than a key
@@ -4316,17 +4280,43 @@ mod port {
         fn a_channel_key_after_the_wall_steps_back_from_2171_is_no_earlier() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
-            let node = start(&host, region(&[member(OWN, &KEY, &host)]));
+            let jump = Span::from_nanos(145 * 365 * Span::DAY.nanos());
+            host.step_wall(jump);
+            let back = Span::from_nanos(-jump.nanos());
+            let [first, second] =
+                key_times(&mut sim, &host, move |host| host.step_wall(back));
+            let start = (sim::node::Config::default().wall + jump).nanos() / 1_000_000;
+            assert!((start..start + 1_000).contains(&first), "{first} ms");
+            assert!(first <= second, "{second} ms is before {first} ms");
+        }
+
+        /// A key made while the clock holds over, after the wall error becomes
+        /// unknown, has mesh time, not the time 0.
+        #[test]
+        fn a_channel_key_in_holdover_has_mesh_time() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let [first, second] =
+                key_times(&mut sim, &host, |host| host.set_wall_error(None));
+            let wall = first + 600_000..first + 605_000;
+            assert!(wall.contains(&second), "{second} ms is not in {wall:?}");
+        }
+
+        /// The key times in ms of `plant.a` and `plant.b`, which a node of `host`
+        /// applies 600 s apart, with `change` called on `host` between them.
+        fn key_times(
+            sim: &mut sim::Sim,
+            host: &sim::node::Node,
+            change: impl FnOnce(&sim::node::Node) + Send + 'static,
+        ) -> [i64; 2] {
+            let node = start(host, region(&[member(OWN, &KEY, host)]));
             let made = Arc::new(Mutex::new(Vec::new()));
             let out = Arc::clone(&made);
-            let wall = host.clone();
-            let jump = Span::from_nanos(145 * 365 * Span::DAY.nanos());
+            let host = host.clone();
             node.operate(move |ops| async move {
-                wall.step_wall(jump);
-                wall.clock().sleep(TEN).await;
                 let first = apply_index(&ops, "a").await;
-                wall.step_wall(Span::from_nanos(-jump.nanos()));
-                wall.clock()
+                change(&host);
+                host.clock()
                     .sleep(Span::from_nanos(600 * Span::SECOND.nanos()))
                     .await;
                 let second = apply_index(&ops, "b").await;
@@ -4343,12 +4333,7 @@ mod port {
                 .iter()
                 .map(|key| i64::try_from(key.as_u128() >> 80).unwrap())
                 .collect();
-            let [first, second] = millis[..] else {
-                panic!("two keys, not {millis:?}");
-            };
-            let start = (sim::node::Config::default().wall + jump).nanos() / 1_000_000;
-            assert!((start..start + 20_000).contains(&first), "{first} ms");
-            assert!(first <= second, "{second} ms is before {first} ms");
+            millis.try_into().expect("two keys")
         }
 
         /// A channel key made before the clock has mesh time has the time 0. It calls
