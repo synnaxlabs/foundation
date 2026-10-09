@@ -190,14 +190,17 @@ impl Remote {
     }
 
     /// Sends the credit once the home's grant is half a window short of the frames
-    /// given back plus a window, unless a credit is on its way. A credit that finds
-    /// no room goes on its way, and [`poll_credit`] sends it. A send that fails sends
-    /// no more credits: the home stopped reading them, and the frames that it sent
-    /// still arrive.
+    /// given back plus a window, unless the session ended or a credit is on its
+    /// way. A credit that finds no room goes on its way, and [`poll_credit`] sends
+    /// it. A send that fails sends no more credits: the home stopped reading them,
+    /// and the frames that it sent still arrive.
     fn grant(&mut self) -> Result<(), Ended> {
         let Some(taken) = self.credit else {
             return Ok(());
         };
+        if self.queue.borrow().ended.is_some() {
+            return Ok(());
+        }
         let limit_bytes = taken + WINDOW;
         let Some(Out::Idle(sender)) = &mut self.out else {
             return Ok(());

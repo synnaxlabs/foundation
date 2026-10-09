@@ -1581,6 +1581,46 @@ fn a_complete_reader_whose_pool_has_no_room_for_a_credit_gives_the_frame_that_ar
 }
 
 #[test]
+fn a_reader_that_ended_for_no_room_for_a_credit_sends_no_later_credit() {
+    remote(
+        54,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
+            for n in 0..34 {
+                send_credit_frame(&mut sender, n).await;
+            }
+            let got = receiver.recv().await;
+            let busy = Code(Refusal::Busy.code());
+            assert_eq!(
+                got.map(|m| m.map(|b| b.to_vec())),
+                Err(transport::Error::Reset { code: busy })
+            );
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            for _ in 0..32 {
+                reader.next().await.expect("a frame");
+            }
+            test.clock.sleep(Span::from_nanos(100_000_000)).await;
+            let next = reader.next();
+            let blocks = fill(&test.pool);
+            next.await.expect("the 33rd frame, before the end");
+            let expected = test.pool.alloc(Credit::LEN).expect_err("the pool is full");
+            drop(blocks);
+            // The pool has room again, and the reader takes a frame that arrived.
+            reader.next().await.expect("the 34th frame, before the end");
+            test.clock.sleep(Span::from_nanos(100_000_000)).await;
+            let ended = reader.next().await.expect_err("the pool had no room");
+            assert_eq!(ended, Ended::Pool(expected));
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+#[test]
 fn a_remote_reader_that_drops_stops_its_stream_at_once() {
     remote(
         55,
