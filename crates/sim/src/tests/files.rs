@@ -364,15 +364,20 @@ fn a_create_after_a_dropped_remove_keeps_its_file() {
     }
 }
 
-/// What a read open of `a` and a remove of it, in flight at once, leave: the error of
-/// a read open a millisecond later.
-fn read_beside_remove(value: u64) -> Option<Error> {
-    run(value, MIB, |node, tasks| async move {
+/// What a read open of `a` gives while a remove of it is in flight: one whose future
+/// lives, or, when `dropped`, one polled once whose future drops.
+fn read_beside_remove(value: u64, dropped: bool) -> Option<Error> {
+    run(value, MIB, move |node, tasks| async move {
         let (files, path) = (node.files(), Path::new("a"));
         drop(create(&node, "a", KIB).await);
-        let theirs = files.clone();
-        tasks.spawn(async move { theirs.remove(Path::new("a")).await.unwrap() });
-        let found = files.open(path, Mode::Read).await.err();
+        if dropped {
+            let mut remove = Box::pin(files.remove(path));
+            pend(remove.as_mut()).await;
+        } else {
+            let theirs = files.clone();
+            tasks.spawn(async move { theirs.remove(Path::new("a")).await.unwrap() });
+        }
+        let found = files.open(path, Mode::Read).await.map(drop).err();
         node.clock().sleep(Span::MILLISECOND).await;
         found
     })
@@ -381,8 +386,37 @@ fn read_beside_remove(value: u64) -> Option<Error> {
 #[test]
 fn a_read_open_does_not_wait_for_a_remove_in_flight() {
     let gone = Some(Error::NotFound { path: "a".into() });
-    let found: Vec<_> = (0..32).map(read_beside_remove).collect();
-    assert!(found.contains(&None) && found.contains(&gone), "{found:?}");
+    for dropped in [false, true] {
+        let found: Vec<_> = (0..32)
+            .map(|value| read_beside_remove(value, dropped))
+            .collect();
+        assert!(
+            found.contains(&None) && found.contains(&gone),
+            "{dropped}: {found:?}"
+        );
+    }
+}
+
+/// What a remove of `a` gives once a create of `a` is polled once and its future
+/// drops, and the names in the data directory a millisecond later.
+fn remove_after_dropped_create(value: u64) -> (Result<(), Error>, Vec<PathBuf>) {
+    run(value, MIB, |node, _| async move {
+        let (files, path) = (node.files(), Path::new("a"));
+        let mut made = Box::pin(files.open(path, Mode::Create { len: KIB }));
+        pend(made.as_mut()).await;
+        drop(made);
+        let removed = files.remove(path).await;
+        node.clock().sleep(Span::MILLISECOND).await;
+        (removed, files.list(Path::new("")).await.unwrap())
+    })
+}
+
+#[test]
+fn a_remove_waits_for_a_dropped_create() {
+    for value in 0..32 {
+        let found = remove_after_dropped_create(value);
+        assert_eq!(found, (Ok(()), Vec::new()), "value {value}");
+    }
 }
 
 /// What a create of `a` gives while a remove of it, whose future lives, is in flight,
@@ -1577,6 +1611,50 @@ fn a_create_does_not_wait_for_a_dropped_call_on_another_path() {
             .map(|value| create_before_dropped_call(value, renamed))
             .collect();
         assert!(runs.contains(&true), "renamed {renamed}: {runs:?}");
+    }
+}
+
+/// Whether `a` is still there when a create of `b` ends, which starts once a remove
+/// of `a` is polled once and its future drops.
+fn create_beside_dropped_remove(value: u64) -> bool {
+    run(value, MIB, |node, _| async move {
+        let files = node.files();
+        drop(create(&node, "a", KIB).await);
+        let mut remove = Box::pin(files.remove(Path::new("a")));
+        pend(remove.as_mut()).await;
+        drop(remove);
+        drop(create(&node, "b", KIB).await);
+        files
+            .list(Path::new(""))
+            .await
+            .unwrap()
+            .contains(&"a".into())
+    })
+}
+
+#[test]
+fn a_create_does_not_wait_for_a_dropped_remove_of_another_path() {
+    let runs: Vec<_> = (0..32).map(create_beside_dropped_remove).collect();
+    assert!(runs.contains(&true), "{runs:?}");
+}
+
+/// What a write open of `a` gives while a `File::remove` of it, whose future lives,
+/// is in flight.
+fn open_beside_handle_remove(value: u64) -> Option<Error> {
+    run(value, MIB, |node, tasks| async move {
+        let file = create(&node, "a", KIB).await;
+        tasks.spawn(async move { file.remove().await.unwrap() });
+        node.clock().sleep(Span::from_nanos(1)).await;
+        let found = node.files().open(Path::new("a"), Mode::Write).await;
+        found.map(drop).err()
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_a_remove_through_the_handle_whose_future_lives() {
+    for value in 0..32 {
+        let gone = Some(Error::NotFound { path: "a".into() });
+        assert_eq!(open_beside_handle_remove(value), gone, "value {value}");
     }
 }
 

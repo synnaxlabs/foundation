@@ -252,13 +252,16 @@ impl Files {
     }
 
     /// The end of the last call on `path` of `node` that a dropped future or handle
-    /// left to run, or zero. A call on `path` uses it, or the file that it names, or a
-    /// file that a rename to it moves there.
+    /// left to run, or of a remove through a handle, or zero. A call on `path` uses
+    /// it, or the file that it names, or a file that a rename to it moves there.
     fn dropped_end(&self, node: usize, path: &Path) -> Monotonic {
         let path = disk::normal(path);
         let dropped: Vec<_> = (self.queue.iter().rev())
             .map(|(at, key)| (*at, &self.flights[key]))
-            .filter(|(_, flight)| flight.node == node && flight.dropped)
+            .filter(|(_, flight)| {
+                let unlink = matches!(flight.call, Call::Unlink { .. });
+                flight.node == node && (flight.dropped || unlink)
+            })
             .collect();
         let moved = dropped.iter().filter_map(|(_, flight)| match &flight.call {
             Call::Rename { handle, to } if disk::normal(to) == path => {
@@ -533,4 +536,28 @@ fn writes(flights: &BTreeMap<u64, Flight>, inode: u64) -> Vec<(u64, &[u8])> {
             _ => None,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether a create on node 1 ends before a remove of the same path on node 0,
+    /// whose future dropped, when both start at time zero.
+    fn create_before_remove_of_another_node(seed: u64) -> bool {
+        let mut files = Files::new(Rng::from_seed(seed));
+        files.add(1 << 20);
+        files.add(1 << 20);
+        let key = files.submit(Monotonic(0), 0, "a".into(), Call::Remove, None);
+        files.abandon(key);
+        let removed = files.first();
+        let mode = Mode::Create { len: 1 << 10 };
+        files.submit(Monotonic(0), 1, "a".into(), Call::Open(mode), None);
+        files.first() < removed
+    }
+
+    #[test]
+    fn a_call_does_not_wait_for_a_dropped_call_of_another_node() {
+        assert!((0..32).any(create_before_remove_of_another_node));
+    }
 }
