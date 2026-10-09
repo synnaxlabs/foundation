@@ -2,7 +2,6 @@
 
 use std::cell::Cell;
 use std::future::poll_fn;
-use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Poll, Waker};
@@ -108,15 +107,8 @@ impl Supervisor {
                 )
             }
         };
-        let mut runs = pin!(self.runs(kind, &name, config, cancel, &writer, &status));
-        let mut flush = pin!(writer.flush());
-        let end = poll_fn(|cx| {
-            if let Poll::Ready(never) = flush.as_mut().poll(cx) {
-                match never {}
-            }
-            runs.as_mut().poll(cx)
-        })
-        .await;
+        let runs = self.runs(kind, &name, config, cancel, &writer, &status);
+        let end = writer.during(runs).await;
         cancel.race(writer.settle()).await;
         end
     }

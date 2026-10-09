@@ -5,8 +5,11 @@ use std::cell::{Cell, RefCell};
 use std::convert::Infallible;
 use std::fmt;
 use std::future::poll_fn;
+use std::pin::pin;
 use std::rc::Rc;
-use std::task::{Poll, Waker};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::task::{self, Poll, Wake, Waker};
 
 use env::clock::Clock;
 use types::authority::Authority;
@@ -295,26 +298,24 @@ impl Writer {
         session.write(&self.values, self.clock.now());
     }
 
-    /// Writes the status that a kind staged or the home did not apply, at most once
-    /// each [`PERIOD`] after the last write. Never returns.
+    /// Polls `run` to its end. Meanwhile it writes the status that a kind staged or
+    /// the home did not apply, at most once each [`PERIOD`] after the last write.
+    pub(crate) async fn during<T>(&self, run: impl Future<Output = T>) -> T {
+        beside(run, self.flush()).await
+    }
+
     #[expect(
         clippy::infinite_loop,
         reason = "the flush ends when its call drops it"
     )]
-    pub(crate) async fn flush(&self) -> Infallible {
+    async fn flush(&self) -> Infallible {
         let values = &self.values;
         loop {
             poll_fn(|cx| {
                 if values.staged.get() {
                     return Poll::Ready(());
                 }
-                // The flush is polled at each wake of the run, so most polls keep the
-                // waker.
-                let waker = values.waker.take();
-                let waker = waker.filter(|waker| waker.will_wake(cx.waker()));
-                values
-                    .waker
-                    .set(Some(waker.unwrap_or_else(|| cx.waker().clone())));
+                values.waker.set(Some(cx.waker().clone()));
                 Poll::Pending
             })
             .await;
@@ -440,9 +441,133 @@ impl Session {
     }
 }
 
+/// Polls `run` to its end, and `side` with it. `side` has a waker of its own, and is
+/// polled only after a wake of it, so a poll of `run` alone costs one atomic swap.
+async fn beside<T>(
+    run: impl Future<Output = T>,
+    side: impl Future<Output = Infallible>,
+) -> T {
+    let woke = Arc::new(Woke {
+        woken: AtomicBool::new(true),
+        task: Mutex::new(None),
+    });
+    let waker = Waker::from(Arc::clone(&woke));
+    let mut task: Option<Waker> = None;
+    let (mut run, mut side) = (pin!(run), pin!(side));
+    poll_fn(|cx| {
+        if !task.as_ref().is_some_and(|task| task.will_wake(cx.waker())) {
+            task = Some(cx.waker().clone());
+            let mut stored = woke.task.lock().expect("no panic under the lock");
+            stored.clone_from(&task);
+        }
+        if woke.woken.swap(false, Ordering::AcqRel) {
+            let side = side.as_mut().poll(&mut task::Context::from_waker(&waker));
+            if let Poll::Ready(never) = side {
+                match never {}
+            }
+        }
+        run.as_mut().poll(cx)
+    })
+    .await
+}
+
+/// The waker of the side future of [`beside`]: it marks the side as woken, then
+/// wakes the task that polls both.
+struct Woke {
+    woken: AtomicBool,
+    task: Mutex<Option<Waker>>,
+}
+
+impl Wake for Woke {
+    fn wake(self: Arc<Self>) {
+        self.wake_by_ref();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.woken.store(true, Ordering::Release);
+        if let Some(task) = &*self.task.lock().expect("no panic under the lock") {
+            task.wake_by_ref();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+
     use super::*;
+
+    /// A side of [`beside`] that counts its polls and keeps its last waker.
+    fn side(
+        polls: &Rc<Cell<u32>>,
+        waker: &Rc<RefCell<Option<Waker>>>,
+    ) -> impl Future<Output = Infallible> {
+        let (polls, waker) = (Rc::clone(polls), Rc::clone(waker));
+        poll_fn(move |cx| {
+            polls.set(polls.get() + 1);
+            *waker.borrow_mut() = Some(cx.waker().clone());
+            Poll::Pending
+        })
+    }
+
+    /// A run that is pending `n` times, then ready.
+    fn pending(mut n: u32) -> impl Future<Output = ()> {
+        poll_fn(move |_| {
+            if n == 0 {
+                return Poll::Ready(());
+            }
+            n -= 1;
+            Poll::Pending
+        })
+    }
+
+    #[test]
+    fn polls_the_side_only_after_a_wake_of_its_own() {
+        let (polls, waker) = (Rc::default(), Rc::default());
+        let mut both = pin!(beside(pending(3), side(&polls, &waker)));
+        let mut cx = task::Context::from_waker(Waker::noop());
+        assert!(both.as_mut().poll(&mut cx).is_pending());
+        assert!(both.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(polls.get(), 1, "a poll of the run alone polls no side");
+        waker
+            .borrow()
+            .as_ref()
+            .expect("the side keeps a waker")
+            .wake_by_ref();
+        assert!(both.as_mut().poll(&mut cx).is_pending());
+        assert_eq!(polls.get(), 2, "the side is polled after its wake");
+        assert!(both.as_mut().poll(&mut cx).is_ready());
+        assert_eq!(polls.get(), 2);
+    }
+
+    /// A waker that counts its wakes.
+    #[derive(Default)]
+    struct Wakes(AtomicUsize);
+
+    impl Wake for Wakes {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn wakes_the_task_that_polled_last_at_a_wake_of_the_side() {
+        let (polls, waker) = (Rc::default(), Rc::default());
+        let (first, last) = (Arc::new(Wakes::default()), Arc::new(Wakes::default()));
+        let mut both = pin!(beside(pending(3), side(&polls, &waker)));
+        for task in [&first, &last] {
+            let task = Waker::from(Arc::clone(task));
+            let pending = both.as_mut().poll(&mut task::Context::from_waker(&task));
+            assert!(pending.is_pending());
+        }
+        waker
+            .borrow()
+            .as_ref()
+            .expect("the side keeps a waker")
+            .wake_by_ref();
+        let woken = |task: &Wakes| task.0.load(Ordering::Relaxed);
+        assert_eq!((woken(&first), woken(&last)), (0, 1));
+    }
 
     fn name(text: &str) -> Name {
         text.parse().expect("a valid name")
