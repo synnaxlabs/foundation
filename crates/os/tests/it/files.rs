@@ -982,6 +982,30 @@ fn a_write_open_waits_for_a_remove_through_the_handle_whose_future_lives() {
 }
 
 #[test]
+fn a_write_open_waits_for_the_close_of_a_failed_remove_through_the_handle() {
+    run(|files, data| async move {
+        files.create_dir(Path::new("d")).await.unwrap();
+        let file = create(&files, "d/a", KIB).await;
+        let locked = std::fs::Permissions::from_mode(0o500);
+        std::fs::set_permissions(data.join("d"), locked).unwrap();
+        let (mut remove, mut open) = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(file.remove());
+            pend(&mut remove, context);
+            let mut open = Box::pin(files.open(Path::new("d/a"), Mode::Write));
+            pend(&mut open, context);
+            (remove, open)
+        })
+        .await;
+        let found = open.as_mut().await.map(drop);
+        let removed = remove.as_mut().await;
+        let open = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(data.join("d"), open).unwrap();
+        assert_eq!(removed, Err(io("d/a", Operation::Remove, 13)));
+        assert_eq!(found, Ok(()));
+    });
+}
+
+#[test]
 fn a_remove_waits_for_a_dropped_create() {
     run(|files, data| async move {
         let mut removed = stalled(&files, &data, |context| {

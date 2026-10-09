@@ -1677,6 +1677,32 @@ fn a_remove_through_the_handle_removes_the_file_and_closes_it() {
 
 /// What a write open of `a` gives after a `File::remove` of it is polled once and
 /// dropped, then what a create gives, and the names in the data directory a
+/// What a write open of `a` gives while a `File::remove` of it, whose future lives
+/// and which a fault fails, is in flight.
+fn open_beside_failed_handle_remove(value: u64) -> Option<Error> {
+    run(value, MIB, |node, tasks| async move {
+        let file = create(&node, "a", KIB).await;
+        node.fail_file(Path::new("a"), Operation::Remove);
+        tasks.spawn(async move {
+            assert_eq!(file.remove().await, Err(io("a", Operation::Remove, 5)));
+        });
+        node.clock().sleep(Span::from_nanos(1)).await;
+        let found = node.files().open(Path::new("a"), Mode::Write).await;
+        found.map(drop).err()
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_close_of_a_failed_remove_through_the_handle() {
+    for value in 0..32 {
+        assert_eq!(
+            open_beside_failed_handle_remove(value),
+            None,
+            "value {value}"
+        );
+    }
+}
+
 /// millisecond after the create.
 fn opens_after_dropped_remove(
     value: u64,

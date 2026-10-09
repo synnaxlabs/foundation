@@ -251,10 +251,12 @@ impl Files {
         key
     }
 
-    /// The end that a call of `node` that changes what `path` names waits for: that
-    /// of the last call on `path` that a dropped future or handle left to run, or of
-    /// a remove through a handle, live or not, or zero. A call on `path` uses it, or
-    /// the file that it names, or a file that a rename to it moves there.
+    /// The time that a call of `node` that changes what `path` names ends no earlier
+    /// than: one nanosecond past the end of the last call on `path` that a dropped
+    /// future or handle left to run, or of a remove through a handle, live or not, or
+    /// zero. The nanosecond lets the task of a live remove close its handle first. A
+    /// call on `path` uses it, or the file that it names, or a file that a rename to
+    /// it moves there.
     fn wait_end(&self, node: usize, path: &Path) -> Monotonic {
         let path = disk::normal(path);
         let pending: Vec<_> = (self.queue.iter().rev())
@@ -280,7 +282,7 @@ impl Files {
                 Some(handle) => inodes.contains(&handle.inode),
                 None => disk::normal(&flight.path) == path,
             })
-            .map_or(Monotonic::default(), |(at, _)| *at)
+            .map_or(Monotonic::default(), |(at, _)| Monotonic(at.0 + 1))
     }
 
     /// The true time at which the first call in flight ends.
