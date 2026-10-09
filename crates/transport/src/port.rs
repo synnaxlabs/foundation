@@ -46,7 +46,7 @@ impl Port {
         net: &env::net::Net,
         local: SocketAddr,
     ) -> Result<Self, env::net::Error> {
-        let (sender, receiver) = udp(net, local)?;
+        let (sender, receiver) = socket(net, local)?;
         Ok(Self { sender, receiver })
     }
 
@@ -94,7 +94,7 @@ impl Part {
         net: &env::net::Net,
         local: SocketAddr,
     ) -> Result<Self, env::net::Error> {
-        let (sender, receiver) = udp(net, local)?;
+        let (sender, receiver) = socket(net, local)?;
         Ok(Self {
             index: 0,
             sender,
@@ -105,7 +105,7 @@ impl Part {
 
 /// A UDP socket bound at `local`, with the buffers of each socket of a node or a
 /// program.
-fn udp(
+fn socket(
     net: &env::net::Net,
     local: SocketAddr,
 ) -> Result<(udp::Sender, udp::Receiver), env::net::Error> {
