@@ -637,10 +637,20 @@ fn writes_the_cause_of_a_node_behind() {
 
 #[test]
 fn proposes_nothing_for_a_plan_with_no_change() {
-    solo(|mesh| async move {
+    // A site with an index lists its home, so this site has none.
+    let people = concat!(
+        "subject \"carol\" {\n  keys = [\"ssh-ed25519 ",
+        "AAAAC3NzaC1lZDI1NTE5AAAAIP0QMDFGOHfS9XR71aVyCvs+QnNQ4BXrHs9dGDDz7KY6",
+        " bob@site\"]\n}\n",
+    );
+    solo(move |mesh| async move {
+        let (_, site) = plan_on(&mesh, &[("people.hcl", people)]).await;
+        apply(path(), &site.encode(), &mesh, keys(0))
+            .await
+            .expect("an apply");
         let pointer = mesh.pointer();
-        // A site with an index lists its home, so the plan has no file.
-        let (_, planned) = plan_on(&mesh, &[]).await;
+        assert_eq!(pointer.version, 1);
+        let (_, planned) = plan_on(&mesh, &[("people.hcl", people)]).await;
         assert!(planned.changes.is_empty() && planned.homes.is_empty());
         let applied = apply(path(), &planned.encode(), &mesh, keys(10))
             .await
