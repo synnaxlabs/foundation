@@ -9,11 +9,12 @@
 #![expect(unsafe_code, reason = "a seccomp filter is an OS call")]
 
 use std::future::poll_fn;
+use std::io::IoSliceMut;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 
 use env::net::tcp::{self, Listen, Options};
-use env::net::udp;
+use env::net::udp::{self, Meta, Transmit};
 
 /// Makes the OS refuse each `fcntl` of this thread with `F_SETFD`, with `EPERM`.
 fn refuse_setfd() {
@@ -82,11 +83,25 @@ fn each_socket_opens_closed_on_exec_with_no_second_call() {
         let _client = net.connect(&connect).await.expect("the listener accepts");
         let accepted = poll_fn(|cx| listener.poll_accept(cx)).await;
         let _server = accepted.expect("a stream waits in the backlog");
+        let bind = udp::Config {
+            local,
+            send_buffer_bytes: 1 << 16,
+            recv_buffer_bytes: 1 << 16,
+        };
+        let (mut sender, mut receiver) = net.udp(&bind).expect("bind on loopback");
+        let transmit = Transmit {
+            destination: receiver.local(),
+            source: None,
+            ecn: None,
+            contents: b"x",
+            segment: None,
+        };
+        let sent = poll_fn(|cx| sender.poll_send(cx, &transmit)).await;
+        sent.expect("the send");
+        let mut buffer = [0; 8];
+        let mut meta = [Meta::default()];
+        let mut buffers = [IoSliceMut::new(&mut buffer)];
+        let arrived = poll_fn(|cx| receiver.poll_recv(cx, &mut buffers, &mut meta));
+        assert_eq!(arrived.await, Ok(1));
     });
-    let bind = udp::Config {
-        local,
-        send_buffer_bytes: 1 << 16,
-        recv_buffer_bytes: 1 << 16,
-    };
-    let _halves = net.udp(&bind).expect("bind on loopback");
 }
