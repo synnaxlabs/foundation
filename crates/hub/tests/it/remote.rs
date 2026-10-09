@@ -422,7 +422,7 @@ fn two_readers_that_open_at_once_at_one_home_each_get_its_frames() {
 const STREAMS: usize = 16;
 
 #[test]
-fn a_reader_past_the_streams_of_its_home_waits_also_after_another_reader_drops() {
+fn a_reader_past_the_streams_of_its_home_opens_once_another_reader_drops() {
     remote(
         22,
         sim::link::Config::default(),
@@ -441,13 +441,10 @@ fn a_reader_past_the_streams_of_its_home_waits_also_after_another_reader_drops()
                 "no stream is free"
             );
             drop(readers.pop());
-            // A transport defect (#2018): a session gives back stream slots only
-            // in batches, so one drop frees none. Once #2029 merges, the reader
-            // opens here.
             let wait = test.clock.sleep(Span::from_nanos(2_000_000_000));
             assert!(
-                race(opening, wait).await.is_err(),
-                "the session gives back no stream"
+                race(opening, wait).await.is_ok(),
+                "the reader opens on the freed stream"
             );
         },
     );
