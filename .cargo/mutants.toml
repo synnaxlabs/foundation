@@ -2,8 +2,8 @@
 # `sim` is mutated and tested.
 all_features = true
 
-# Mutants that no caller or peer can see, or that only a job outside the mutants run
-# kills, each with the reason.
+# Mutants that no caller or peer can see, that only a job outside the mutants run
+# kills, or that no test kills yet (with its open issue). Each has its reason.
 exclude_re = [
   # A type name shows only in a panic of `connector_opcua::fuzz::decode`, which a
   # correct open62541 never gives. `fuzz::tests` checks the names.
