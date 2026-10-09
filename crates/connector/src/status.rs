@@ -415,7 +415,8 @@ struct Session {
     /// until the writer writes no more.
     unapplied: bool,
     /// Set after the hub refused a write as `Removed` or the home failed on disk,
-    /// after which the session writes nothing.
+    /// after which the session writes nothing. Each write after it clears `unapplied`
+    /// and the staged flag, which ends each wait for the home.
     closed: bool,
 }
 
@@ -756,10 +757,20 @@ mod tests {
 
     #[test]
     #[should_panic(
-        expected = "invariant: a status frame fits the largest block of the pool: \
-                    block of 8000096 bytes is above the largest block of 7340032 \
-                    bytes"
+        expected = "invariant: a status frame fits the largest block of the pool: block \
+                    of 128 bytes is above the largest block of 64 bytes"
     )]
+    fn panics_when_no_block_of_the_pool_holds_a_status_frame() {
+        check_pool(&block::Error::TooLarge {
+            requested: 128,
+            largest: 64,
+        });
+    }
+
+    /// The sizes of the frame and of the block come from `types` and `home`, so the
+    /// test above checks the exact message.
+    #[test]
+    #[should_panic(expected = "invariant: a status frame fits the largest block")]
     fn panics_at_the_start_of_a_status_larger_than_the_largest_block() {
         // 16 bytes a count.
         const N: usize = 500_000;
