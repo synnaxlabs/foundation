@@ -764,14 +764,7 @@ fn a_hub_of_testing_open_refuses_a_hello_through_any_node_but_1() {
     let served = Arc::new(Mutex::new(Vec::new()));
     let kept = Arc::clone(&served);
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
-        let env = hub::testing::Env {
-            files: node.files(),
-            clock: node.clock(),
-            wall: node.wall(),
-            entropy: node.entropy(),
-            tasks: tasks.clone(),
-        };
-        let (hub, _) = hub::testing::open(env).await;
+        let (hub, _) = hub::testing::open(crate::node::env(&node, tasks.clone())).await;
         let (session, link) = accept_on(&hub, &node, &tasks, Some(rules())).await;
         let accepted = Rc::new(Cell::new(0));
         serve_each(&session, &link, &tasks, &node.clock(), &kept, &accepted).await;
