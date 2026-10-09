@@ -304,11 +304,21 @@ fn refuses_actions_that_allow_nothing_before_their_authority() {
 #[test]
 fn refuses_actions_that_allow_nothing_before_a_missing_authority() {
     let bytes = access(&[b"a"], &[b"b"], 0, 0);
+    let input = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/access_empty_truncated_at_39"
+    );
+    assert_eq!(&bytes[..bytes.len() - 1], input);
     let error = Error::Access {
         at: 38,
         error: access::Error::Empty,
     };
-    assert_eq!(Definition::decode(&bytes[..bytes.len() - 1]), Err(error));
+    assert_eq!(Definition::decode(input), Err(error));
+    let read = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/read_only_truncated_at_39"
+    );
+    let full = include_bytes!("../../../../oracles/fuzz/spec_definition/read_only");
+    assert_eq!(read, &full[..39]);
+    assert_eq!(Definition::decode(read), Err(Error::Truncated { at: 39 }));
 }
 
 #[test]
