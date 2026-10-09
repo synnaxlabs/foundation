@@ -73,6 +73,9 @@ fn layers(root: &Path) -> Result<(), Vec<String>> {
         packages.iter().filter_map(|p| p["name"].as_str()).collect();
     let mut problems = Vec::new();
     for package in &packages {
+        // A workspace build unifies the features of every member, tools and
+        // benchmarks too.
+        problems.extend(sim::check(package).unwrap_or_else(|e| vec![e]));
         let Some(name) = package["name"].as_str() else {
             continue;
         };
@@ -85,7 +88,6 @@ fn layers(root: &Path) -> Result<(), Vec<String>> {
         if name == "xtask" || bench {
             continue;
         }
-        problems.extend(sim::check(package).unwrap_or_else(|e| vec![e]));
         let Some(entry) = map::find(name) else {
             problems.push(format!(
                 "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs \
@@ -240,11 +242,17 @@ mod tests {
     }
 
     #[test]
-    fn layers_reports_a_product_feature_that_turns_on_sim() {
+    fn layers_reports_a_feature_that_turns_on_sim_also_in_a_benchmark() {
         let problems = layers(&fixture().join("features")).unwrap_err();
         assert!(
             problems.iter().any(|p| p.starts_with(
                 "`own` turns on `sim` in its feature `default`. A `sim` feature"
+            )),
+            "{problems:?}"
+        );
+        assert!(
+            problems.iter().any(|p| p.starts_with(
+                "`tool` turns on the `sim` feature of its dependency `own`."
             )),
             "{problems:?}"
         );
