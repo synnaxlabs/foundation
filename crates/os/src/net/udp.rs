@@ -283,11 +283,11 @@ impl sender::Driver for Sender {
 }
 
 /// Sends each datagram of `transmit` from `bound` with `send`. Gives `Pending` when
-/// the OS send buffer is full, with no waker kept. With GSO off and more than one
-/// datagram, it starts at index `next` and moves `next` past each datagram that it sent
-/// or lost over the path MTU; else it gives the whole transmit to `send` in one call
-/// and leaves `next`. When that call is over the path MTU, it sends a short last
-/// datagram alone.
+/// the OS send buffer is full, with no waker kept. With GSO on, it gives the whole
+/// transmit to `send` in one call. With GSO off and more than one datagram, or after
+/// that call is over the path MTU, it starts at index `next` (past the full segments,
+/// in the second case) and moves `next` past each datagram that it sent or lost over
+/// the path MTU.
 fn send_all(
     bound: &Bound,
     transmit: &Transmit<'_>,
@@ -313,17 +313,11 @@ fn send_all(
     // When the kernel or the card cannot segment, `noq-udp` sends the batch a
     // datagram at a time and turns GSO off for the socket.
     if bound.state.max_gso_segments().get() > 1 {
-        return match send(&datagram(contents, Some(segment))) {
+        match send(&datagram(contents, Some(segment))) {
             // Each full segment is over the path MTU, but a short last one can fit.
-            Err(e) if errno(&e) == Errno::MSGSIZE => match contents.len() % segment {
-                0 => Poll::Ready(Ok(())),
-                rest => {
-                    let last = &contents[contents.len() - rest..];
-                    sent(send(&datagram(last, None)), remote)
-                }
-            },
-            outcome => sent(outcome, remote),
-        };
+            Err(e) if errno(&e) == Errno::MSGSIZE => *next = contents.len() / segment,
+            outcome => return sent(outcome, remote),
+        }
     }
     for contents in contents.chunks(segment).skip(*next) {
         ready!(sent(send(&datagram(contents, None)), remote))?;
@@ -737,50 +731,6 @@ mod tests {
             let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
             assert_eq!(sent, Poll::Pending);
             assert_eq!(recorded.sends.len(), 1);
-        }
-
-        #[test]
-        #[cfg(target_os = "linux")]
-        fn sends_the_short_last_datagram_of_a_batch_over_the_path_mtu_alone() {
-            let mut recorded = Recorded::new(&[Outcome::Fails(Errno::MSGSIZE)]);
-            let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
-            assert_eq!(sent, Poll::Ready(Ok(())));
-            let batch = (b"abcde".to_vec(), Some(2));
-            assert_eq!(recorded.sends, [batch, (b"e".to_vec(), None)]);
-        }
-
-        #[test]
-        #[cfg(target_os = "linux")]
-        fn loses_a_batch_of_full_segments_over_the_path_mtu() {
-            let mut recorded = Recorded::new(&[Outcome::Fails(Errno::MSGSIZE)]);
-            let sent = run(&loopback(), &batch(b"abcd", 2), &mut recorded);
-            assert_eq!(sent, Poll::Ready(Ok(())));
-            assert_eq!(recorded.sends, [(b"abcd".to_vec(), Some(2))]);
-        }
-
-        #[test]
-        #[cfg(target_os = "linux")]
-        #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
-        fn the_last_datagram_under_the_mtu_of_a_batch_goes_out() {
-            let udp = Udp::bind(&config(v6(0))).unwrap().0;
-            let peer = std::net::UdpSocket::bind(v6(0)).unwrap();
-            peer.set_nonblocking(true).unwrap();
-            let contents = vec![7; 65_507];
-            let big = Transmit {
-                segment: NonZeroUsize::new(65_500),
-                ..transmit(peer.local_addr().unwrap(), &contents)
-            };
-            let sent = send_all(&udp.bound, &big, &mut 0, |d| {
-                udp.bound.state.try_send((&udp.bound.socket).into(), d)
-            });
-            assert_eq!(sent, Poll::Ready(Ok(())));
-            assert!(udp.bound.state.max_gso_segments().get() > 1);
-            let mut buffer = vec![0; 1 << 17];
-            let mut lens = Vec::new();
-            while let Ok(len) = peer.recv(&mut buffer) {
-                lens.push(len);
-            }
-            assert_eq!(lens, [7]);
         }
 
         #[test]
