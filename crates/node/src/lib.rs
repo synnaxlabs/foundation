@@ -91,10 +91,9 @@ pub struct Config<M> {
     /// value checks proofs against the wrong voters and starts at another spec. A patch
     /// until the node keeps its region in its data directory when it founds or joins
     /// one, and reads it at each start (#1744). The hub of each task knows each channel
-    /// of the founding's `definitions`. Give only a founding that `spec::region::check`
-    /// accepts. One with a data channel whose index is not an index of it, or with two
-    /// channels of one key, makes shard 0 panic, and [`Node::join`] gives
-    /// [`Error::Panicked`].
+    /// of the region's spec in use, at the open and after each spec change that takes
+    /// effect. At the first start, that is the founding's `definitions`, or no channel
+    /// when `spec::region::check` gives them problems.
     pub region: Option<mesh::region::Founding>,
 }
 
@@ -736,16 +735,17 @@ impl Endpoint {
 impl Serve {
     /// Loads the node's identity ([`identity::load`]) and opens the endpoint, then
     /// runs each task given with a hub over `home` that knows each channel of the
-    /// region's founding spec, and serves the node's port, until `guard` completes,
-    /// the transport stops, or the mesh's group stops, by the rank of [`end`]. A
-    /// transport or a group that ends it goes into `failed` before it drops the tasks
-    /// given that still run. Before it returns, it drops the tasks, the hub, `home`,
-    /// `guard`, each session and stream future, the operations on the mesh, the mesh,
-    /// and the transport, and waits for each task of the mesh to end, with a mesh, and
-    /// for the transport to free the port. Unless the socket broke, the port is freed
-    /// only after each task of a remote reader of the hub has ended. Runs no task and
-    /// takes no session when a shard did not open, or when the identity did not load or
-    /// the mesh did not open, which goes into `failed`.
+    /// spec that the mesh uses, and of each spec that takes effect later, and serves
+    /// the node's port, until `guard` completes, the transport stops, or the mesh's
+    /// group stops, by the rank of [`end`]. A transport or a group that ends it goes
+    /// into `failed` before it drops the tasks given that still run. Before it
+    /// returns, it drops the tasks, the hub, `home`, `guard`, each session and stream
+    /// future, the operations on the mesh, the mesh, and the transport, and waits for
+    /// each task of the mesh to end, with a mesh, and for the transport to free the
+    /// port. Unless the socket broke, the port is freed only after each task of a
+    /// remote reader of the hub has ended. Runs no task and takes no session when a
+    /// shard did not open, or when the identity did not load or the mesh did not open,
+    /// which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -770,12 +770,6 @@ impl Serve {
             };
         let (key, entropy) = (identity.key, self.endpoint.entropy.clone());
         let clock = self.endpoint.clock.clone();
-        // The endpoint's open takes the founding, so the definitions go first.
-        let definitions = self
-            .endpoint
-            .region
-            .as_ref()
-            .map(|region| region.definitions.clone());
         let opened = self.endpoint.open(identity, files, pool, tasks.clone());
         let (transport, mesh) = opened.await;
         let freed = transport.ended();
@@ -807,9 +801,8 @@ impl Serve {
                 entropy,
                 region,
             });
-            hub.set_definitions(definitions.iter().flatten());
             let ended = mesh.as_ref().map(mesh::Mesh::ended);
-            let group = stopped(mesh.as_ref());
+            let group = follow(mesh.as_ref(), hub.clone()).await;
             let port =
                 route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
             let stop = until(guard, port, group, fail);
@@ -861,16 +854,28 @@ fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
         .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
-/// Resolves with the stop of the group of `mesh`, or never when the node has no mesh.
-fn stopped(mesh: Option<&mesh::Mesh>) -> impl Future<Output = mesh::Stopped> + use<> {
-    // `next` gives the stop of the group on a watch of any index.
-    let watch = mesh.map(|mesh| mesh.watch(types::channel::Key::from_u128(0)));
+/// Gives `hub` what the spec that `mesh` uses defines, then returns a future that gives
+/// it that of each later spec in use and resolves with the stop of the group, or never
+/// resolves when the node has no mesh.
+async fn follow(
+    mesh: Option<&mesh::Mesh>,
+    hub: hub::Hub,
+) -> impl Future<Output = mesh::Stopped> + use<> {
+    let define = move |spec: mesh::used::Spec| hub.set_definitions(&*spec.definitions);
+    let mut watch = mesh.map(mesh::Mesh::watch_spec);
+    let first = match &mut watch {
+        Some(watch) => watch.next().await.map(&define),
+        None => Ok(()),
+    };
     async move {
         let Some(mut watch) = watch else {
             return std::future::pending().await;
         };
+        if let Err(stopped) = first {
+            return stopped;
+        }
         loop {
-            if let Err(stopped) = watch.next().await {
+            if let Err(stopped) = watch.next().await.map(&define) {
                 return stopped;
             }
         }

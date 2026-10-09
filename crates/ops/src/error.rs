@@ -48,6 +48,17 @@ pub(crate) enum Error {
 }
 
 impl Error {
+    /// `Config` with the problem of each of `diagnostics`, whose spans are in the files
+    /// at `paths`, by source.
+    pub(crate) fn config(diagnostics: Vec<Diagnostic>, paths: &[PathBuf]) -> Self {
+        Self::Config(
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| Problem::of(diagnostic, paths))
+                .collect(),
+        )
+    }
+
     pub(crate) fn status(&self) -> u8 {
         match self {
             Self::Argument { .. }

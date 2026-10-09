@@ -64,15 +64,20 @@
   `Hub::set_definitions` (#2020), and `Hub::define` into a new hub before it, panic only
   when two channels have one key or one name, or the index of a data channel is not an
   index of the input. No spec holds two channels of one name, and `spec::region::check`
-  refuses the other two cases. Each panic is a defect of the caller. `node` runs
-  `spec::region::check` on each spec before it gives it to the hub: the founding once it
-  is region state (#1744, #336), and each committed change, with `set_definitions`
-  (#1957 PR 2). A spec with problems follows #1741: the node gives the hub none of it
-  and keeps the spec it uses, which is empty for a founding with problems. So no spec
-  from disk or a peer makes an open panic. `Config::region` keeps its panic (NODE PORT)
-  until the first PR that adds the check (#1744 or #1957 PR 2). That PR runs the check
-  on `Config::region` too, and its doc then says that a founding with problems defines
-  no channel. Decided by `laptop.architect`: chunks through `blob` and no BQ12 check,
+  refuses the other two cases. Each panic is a defect of the caller. `mesh` runs
+  `spec::region::check` on the founding and on each committed spec before it puts it in
+  use (#1741). `node` gives the hub only the specs of `Mesh::watch_spec` (#1957 PR 2)
+  and runs no check of its own. A spec with problems follows #1741: the mesh keeps the
+  spec it uses, which is empty for a founding with problems, and the hub gets none of
+  it. So no spec from disk or a peer makes an open panic. A founding with problems
+  defines no channel, and `Config::region` has no panic (#1957 PR 2). The check in the
+  mesh only, by `laptop.architect`, 2026-10-09T20:52:20Z
+  (https://github.com/synnaxlabs/foundation/issues/2179#issuecomment-6089059684).
+  Supersedes the check in `node` of
+  https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791,
+  https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068123507, and
+  https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6070012949.
+  Decided by `laptop.architect`: chunks through `blob` and no BQ12 check,
   2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
   with problems, 2026-10-07T07:03:20Z
