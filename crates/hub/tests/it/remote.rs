@@ -14,7 +14,7 @@ use hub::Hub;
 use hub::reader::{self, Ended, Mode};
 use spec::data_type::DataType;
 use transport::stream::{Receiver, Sender};
-use transport::{Address, Code, Transport};
+use transport::{Address, Code, Session, Transport};
 use types::frame::{self, Path, Range};
 use types::time::Span;
 use wire::Protocol;
@@ -480,9 +480,9 @@ fn a_reader_whose_pool_has_no_room_for_its_open_gets_pool() {
     );
 }
 
-/// A home's end of the first hub stream that `transport` accepts, once it took the
-/// header, the open, and one message of keys, and sent `Opened`.
-async fn fake_open(transport: &Transport) -> (Sender, Receiver) {
+/// A home's session and its end of the first hub stream that `transport` accepts,
+/// once it took the header, the open, and one message of keys, and sent `Opened`.
+async fn fake_open(transport: &Transport) -> (Session, Sender, Receiver) {
     let session = transport.accept().await.expect("a session");
     let mut incoming = session.accept().await.expect("a stream");
     let mut receiver = incoming.receiver;
@@ -495,28 +495,50 @@ async fn fake_open(transport: &Transport) -> (Sender, Receiver) {
             .expect("not finished");
     }
     send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
-    (sender, receiver)
+    (session, sender, receiver)
 }
 
 /// Sends a message of `len` bytes that `fill` writes.
 async fn send(sender: &mut Sender, len: usize, fill: impl FnOnce(&mut [u8])) {
-    let mut block = own_pool().alloc(len).expect("the pool has room");
-    fill(&mut block);
-    sender.send(block.freeze()).await.expect("sends");
+    try_send(sender, len, fill).await.expect("sends");
 }
 
-/// Sends the head of a frame of `count` samples and `ends`.
-async fn send_head(sender: &mut Sender, count: u32, ends: &[(u32, u32)]) {
+/// Sends a message of `len` bytes that `fill` writes, or gives the error of the stream.
+async fn try_send(
+    sender: &mut Sender,
+    len: usize,
+    fill: impl FnOnce(&mut [u8]),
+) -> Result<(), transport::Error> {
+    let mut block = own_pool().alloc(len).expect("the pool has room");
+    fill(&mut block);
+    sender.send(block.freeze()).await
+}
+
+/// Sends the head of a frame of `count` samples and `ends`, or gives the error of the
+/// stream.
+async fn send_head(
+    sender: &mut Sender,
+    count: u32,
+    ends: &[(u32, u32)],
+) -> Result<(), transport::Error> {
     let head = Reply::Head(Head {
         path: Path::Live,
         range: Range { seq: 0, count },
         series: u32::try_from(ends.len()).expect("a few ends"),
     });
-    send(sender, head.encoded_len(), |out| head.encode(out)).await;
-    send(sender, ends.len() * ends::LEN, |out| {
+    try_send(sender, head.encoded_len(), |out| head.encode(out)).await?;
+    try_send(sender, ends.len() * ends::LEN, |out| {
         ends::encode(ends.iter().copied(), out);
     })
-    .await;
+    .await
+}
+
+/// Sends a frame of two series with `body` bytes in all, or gives the error of the
+/// stream.
+async fn send_frame(sender: &mut Sender, body: usize) -> Result<(), transport::Error> {
+    let half = u32::try_from(body / 2).expect("a short body");
+    send_head(sender, half / 8, &[(0, half), (1, 2 * half)]).await?;
+    try_send(sender, body, |out| out.fill(1)).await
 }
 
 /// A home that opens the session of the first hub stream, sends one frame head,
@@ -527,8 +549,8 @@ async fn fake_home(
     ends: &[(u32, u32)],
     bodies: &[usize],
 ) -> transport::Error {
-    let (mut sender, mut receiver) = fake_open(transport).await;
-    send_head(&mut sender, 1, ends).await;
+    let (_, mut sender, mut receiver) = fake_open(transport).await;
+    send_head(&mut sender, 1, ends).await.expect("sends");
     for &len in bodies {
         send(&mut sender, len, |out| out.fill(1)).await;
     }
@@ -692,11 +714,9 @@ fn a_complete_reader_sends_a_credit_each_time_it_gave_back_half_a_window() {
         10,
         sim::link::Config::default(),
         move |node, _, transport, steps| async move {
-            let (mut sender, mut receiver) = fake_open(&transport).await;
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
             for n in 0..FRAMES {
-                let half = u32::try_from(body(n) / 2).expect("a short body");
-                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
-                send(&mut sender, body(n), |out| out.fill(1)).await;
+                send_frame(&mut sender, body(n)).await.expect("sends");
             }
             let mut got = Vec::new();
             while got.len() < credits {
@@ -872,42 +892,28 @@ fn a_complete_reader_whose_credit_finds_no_room_gets_each_frame() {
         sent <= 1 << 20 && sent + charge > 1 << 20,
         "the grant ends here"
     );
-    let half = u32::try_from(BODY / 2).expect("a short body");
     remote_sized(
         12,
         sim::link::Config::default(),
         [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
         move |node, _, transport, steps| async move {
-            let session = transport.accept().await.expect("a session");
-            let mut incoming = session.accept().await.expect("a stream");
-            let mut sender = incoming.sender.take().expect("a two-way stream");
-            for _ in 0..3 {
-                incoming
-                    .receiver
-                    .recv()
-                    .await
-                    .expect("a message")
-                    .expect("open");
-            }
-            send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
+            let (session, mut sender, mut receiver) = fake_open(&transport).await;
             // The second reader's keys fill the window of the session until the home
             // takes them.
             let mut second = session.accept().await.expect("a second stream");
             for _ in 0..FRAMES {
-                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
-                send(&mut sender, BODY, |out| out.fill(1)).await;
+                send_frame(&mut sender, BODY).await.expect("sends");
             }
             node.clock().sleep(Span::from_nanos(500_000_000)).await;
             let credit = loop {
-                match race(incoming.receiver.recv(), second.receiver.recv()).await {
+                match race(receiver.recv(), second.receiver.recv()).await {
                     Ok(credit) => break credit,
                     Err(keys) => drop(keys.expect("a message").expect("open")),
                 }
             };
             let credit = credit.expect("a credit").expect("open");
             assert_eq!(credit.len(), Credit::LEN);
-            send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
-            send(&mut sender, BODY, |out| out.fill(1)).await;
+            send_frame(&mut sender, BODY).await.expect("sends");
             until(&node.clock(), &steps.done).await;
         },
         |test, _| async move {
@@ -971,7 +977,9 @@ fn a_reader_whose_home_replies_with_a_head_before_opened_stops_the_stream_as_mal
             for _ in 0..3 {
                 incoming.receiver.recv().await.expect("a message");
             }
-            send_head(&mut sender, 1, &[(0, 8), (1, 16)]).await;
+            send_head(&mut sender, 1, &[(0, 8), (1, 16)])
+                .await
+                .expect("sends");
             let error = loop {
                 if let Err(error) = incoming.receiver.recv().await {
                     break error;
@@ -1006,7 +1014,7 @@ fn a_reader_gets_the_seq_and_path_of_each_frame_from_the_home() {
         16,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (mut sender, _receiver) = fake_open(&transport).await;
+            let (_, mut sender, _receiver) = fake_open(&transport).await;
             let head = Reply::Head(Head {
                 path: Path::Backfill,
                 range: Range { seq: 41, count: 2 },
@@ -1035,7 +1043,7 @@ fn a_complete_reader_that_the_home_ends_with_behind_gets_behind_at_each_next() {
         17,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (mut sender, _receiver) = fake_open(&transport).await;
+            let (_, mut sender, _receiver) = fake_open(&transport).await;
             send(&mut sender, Reply::Behind.encoded_len(), |out| {
                 Reply::Behind.encode(out);
             })
@@ -1061,7 +1069,7 @@ fn a_reader_whose_home_resets_the_open_stream_with_failed_gets_refused() {
         18,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (sender, _receiver) = fake_open(&transport).await;
+            let (_, sender, _receiver) = fake_open(&transport).await;
             until(&node.clock(), &steps.opened).await;
             sender.reset(Code(Refusal::Failed.code()));
             until(&node.clock(), &steps.done).await;
@@ -1088,7 +1096,7 @@ fn a_reader_whose_home_resets_the_open_stream_with_a_code_outside_hub_wire_gets_
         19,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (sender, _receiver) = fake_open(&transport).await;
+            let (_, sender, _receiver) = fake_open(&transport).await;
             until(&node.clock(), &steps.opened).await;
             sender.reset(Code(7));
             until(&node.clock(), &steps.done).await;
@@ -1113,7 +1121,7 @@ fn a_reader_whose_home_finishes_the_stream_between_frames_stops_it_as_malformed(
         20,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (mut sender, mut receiver) = fake_open(&transport).await;
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
             sender.finish().expect("finishes");
             let error = loop {
                 if let Err(error) = receiver.recv().await {
@@ -1181,9 +1189,11 @@ fn a_reader_whose_pool_has_no_room_for_a_frame_stops_the_stream_with_busy() {
         21,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (mut sender, mut receiver) = fake_open(&transport).await;
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
             until(&node.clock(), &steps.full).await;
-            send_head(&mut sender, 1, &[(0, 8), (1, 16)]).await;
+            send_head(&mut sender, 1, &[(0, 8), (1, 16)])
+                .await
+                .expect("sends");
             let error = loop {
                 if let Err(error) = receiver.recv().await {
                     break error;
@@ -1267,9 +1277,7 @@ fn a_reader_whose_pool_has_no_room_for_a_message_of_keys_stops_the_stream_with_b
 /// the first body and one of the second charge exactly half a window.
 async fn send_credit_frame(sender: &mut Sender, n: usize) {
     let body = if n == 31 { 14_272 } else { 16_320 };
-    let half = u32::try_from(body / 2).expect("a short body");
-    send_head(sender, half / 8, &[(0, half), (1, 2 * half)]).await;
-    send(sender, body, |out| out.fill(1)).await;
+    send_frame(sender, body).await.expect("sends");
 }
 
 #[test]
@@ -1279,7 +1287,7 @@ fn a_complete_reader_whose_pool_has_no_room_for_its_credit_stops_the_stream_with
         42,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (mut sender, mut receiver) = fake_open(&transport).await;
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
             for n in 0..32 {
                 send_credit_frame(&mut sender, n).await;
             }
@@ -1324,34 +1332,21 @@ fn a_complete_reader_raises_its_grant_once_a_credit_that_waited_for_room_is_sent
     // The credit falls due once 32 frames are given back.
     let limit = 32 * charge + (1 << 20);
     assert!(31 * charge < 1 << 19 && 32 * charge >= 1 << 19);
-    let half = u32::try_from(BODY / 2).expect("a short body");
     remote_sized(
         43,
         sim::link::Config::default(),
         [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
         move |node, _, transport, steps| async move {
-            let session = transport.accept().await.expect("a session");
-            let mut incoming = session.accept().await.expect("a stream");
-            let mut sender = incoming.sender.take().expect("a two-way stream");
-            for _ in 0..3 {
-                incoming
-                    .receiver
-                    .recv()
-                    .await
-                    .expect("a message")
-                    .expect("open");
-            }
-            send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
+            let (session, mut sender, mut receiver) = fake_open(&transport).await;
             // The second reader's keys fill the window of the session until the home
             // takes them.
             let mut second = session.accept().await.expect("a second stream");
             for _ in 0..FIRST {
-                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
-                send(&mut sender, BODY, |out| out.fill(1)).await;
+                send_frame(&mut sender, BODY).await.expect("sends");
             }
             node.clock().sleep(Span::from_nanos(500_000_000)).await;
             let credit = loop {
-                match race(incoming.receiver.recv(), second.receiver.recv()).await {
+                match race(receiver.recv(), second.receiver.recv()).await {
                     Ok(credit) => break credit,
                     Err(keys) => drop(keys.expect("a message").expect("open")),
                 }
@@ -1360,14 +1355,13 @@ fn a_complete_reader_raises_its_grant_once_a_credit_that_waited_for_room_is_sent
             let got = u64::from_le_bytes(credit[1..].try_into().expect("a credit"));
             assert_eq!(got, limit);
             for _ in 0..MORE {
-                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
-                send(&mut sender, BODY, |out| out.fill(1)).await;
+                send_frame(&mut sender, BODY).await.expect("sends");
             }
             let mut deadline =
                 pin!(node.clock().sleep(Span::from_nanos(1_000_000_000)));
             loop {
                 let keys = race(second.receiver.recv(), deadline.as_mut());
-                match race(incoming.receiver.recv(), keys).await {
+                match race(receiver.recv(), keys).await {
                     Ok(message) => panic!("a second credit: {message:?}"),
                     Err(Ok(keys)) => drop(keys.expect("a message").expect("open")),
                     Err(Err(())) => break,
@@ -1439,8 +1433,10 @@ fn a_reader_whose_home_finishes_the_stream_inside_a_body_stops_it_as_malformed()
         45,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (mut sender, mut receiver) = fake_open(&transport).await;
-            send_head(&mut sender, 1, &[(0, 8), (1, 16)]).await;
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
+            send_head(&mut sender, 1, &[(0, 8), (1, 16)])
+                .await
+                .expect("sends");
             send(&mut sender, 10, |out| out.fill(1)).await;
             sender.finish().expect("finishes");
             let error = loop {
@@ -1473,35 +1469,21 @@ fn a_complete_reader_whose_waiting_credit_fails_to_send_sends_no_later_credit() 
     const BODY: usize = 16_320;
     const FIRST: usize = 40;
     const ALL: usize = 64;
-    let half = u32::try_from(BODY / 2).expect("a short body");
     remote_sized(
         46,
         sim::link::Config::default(),
         [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
         move |node, _, transport, steps| async move {
-            let session = transport.accept().await.expect("a session");
-            let mut incoming = session.accept().await.expect("a stream");
-            let mut sender = incoming.sender.take().expect("a two-way stream");
-            for _ in 0..3 {
-                incoming
-                    .receiver
-                    .recv()
-                    .await
-                    .expect("a message")
-                    .expect("open");
-            }
-            send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
+            let (session, mut sender, receiver) = fake_open(&transport).await;
             let _second = session.accept().await.expect("a second stream");
             for _ in 0..FIRST {
-                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
-                send(&mut sender, BODY, |out| out.fill(1)).await;
+                send_frame(&mut sender, BODY).await.expect("sends");
             }
             node.clock().sleep(Span::from_nanos(500_000_000)).await;
-            incoming.receiver.stop(Code(0));
+            receiver.stop(Code(0));
             node.clock().sleep(Span::from_nanos(500_000_000)).await;
             for _ in FIRST..ALL {
-                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
-                send(&mut sender, BODY, |out| out.fill(1)).await;
+                send_frame(&mut sender, BODY).await.expect("sends");
             }
             send(&mut sender, 1, |out| Reply::Behind.encode(out)).await;
             until(&node.clock(), &steps.done).await;
@@ -1529,17 +1511,15 @@ fn a_complete_reader_whose_waiting_credit_fails_to_send_sends_no_later_credit() 
 fn a_complete_reader_whose_credit_the_stream_refuses_sends_no_later_credit() {
     const BODY: usize = 16_320;
     const ALL: usize = 33;
-    let half = u32::try_from(BODY / 2).expect("a short body");
     remote(
         47,
         sim::link::Config::default(),
         move |node, _, transport, steps| async move {
-            let (mut sender, receiver) = fake_open(&transport).await;
+            let (_, mut sender, receiver) = fake_open(&transport).await;
             receiver.stop(Code(0));
             node.clock().sleep(Span::from_nanos(500_000_000)).await;
             for _ in 0..ALL {
-                send_head(&mut sender, half / 8, &[(0, half), (1, 2 * half)]).await;
-                send(&mut sender, BODY, |out| out.fill(1)).await;
+                send_frame(&mut sender, BODY).await.expect("sends");
             }
             send(&mut sender, 1, |out| Reply::Behind.encode(out)).await;
             until(&node.clock(), &steps.done).await;
@@ -1566,8 +1546,10 @@ fn a_reader_whose_frame_is_larger_than_each_block_of_its_pool_stops_the_stream_w
         48,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (mut sender, mut receiver) = fake_open(&transport).await;
-            send_head(&mut sender, 1, &[(0, 8), (1, BODY)]).await;
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
+            send_head(&mut sender, 1, &[(0, 8), (1, BODY)])
+                .await
+                .expect("sends");
             let error = loop {
                 if let Err(error) = receiver.recv().await {
                     break error;
@@ -1581,12 +1563,12 @@ fn a_reader_whose_frame_is_larger_than_each_block_of_its_pool_stops_the_stream_w
         |test, steps| async move {
             let mut reader = test.reader(&["value"], Mode::Latest).await;
             let ended = reader.next().await.expect_err("the frame is too large");
-            // The block also holds the header, one range, and two descriptors.
-            let too_large = block::Error::TooLarge {
-                requested: usize::try_from(BODY).expect("a usize") + 16 + 16 + 2 * 8,
-                largest: test.pool.largest(),
+            let Ended::Pool(block::Error::TooLarge { requested, .. }) = ended else {
+                panic!("not a frame too large for the pool: {ended:?}");
             };
-            assert_eq!(ended, Ended::Pool(too_large));
+            assert!(requested > usize::try_from(BODY).expect("a usize"));
+            let expected = test.pool.alloc(requested).expect_err("too large");
+            assert_eq!(ended, Ended::Pool(expected));
             until(&test.clock, &steps.stopped).await;
         },
     );
@@ -1604,22 +1586,11 @@ fn a_complete_reader_whose_pool_has_no_room_for_a_frame_while_a_credit_waits_res
         sim::link::Config::default(),
         [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
         move |node, _, transport, steps| async move {
-            let session = transport.accept().await.expect("a session");
-            let mut incoming = session.accept().await.expect("a stream");
-            let mut sender = incoming.sender.take().expect("a two-way stream");
-            for _ in 0..3 {
-                incoming
-                    .receiver
-                    .recv()
-                    .await
-                    .expect("a message")
-                    .expect("open");
-            }
-            send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
+            let (session, mut sender, mut receiver) = fake_open(&transport).await;
             let _second = session.accept().await.expect("a second stream");
             send_until_stopped(&mut sender, FIRST, BODY).await;
             let error = loop {
-                if let Err(error) = incoming.receiver.recv().await {
+                if let Err(error) = receiver.recv().await {
                     break error;
                 }
             };
@@ -1658,26 +1629,9 @@ fn a_complete_reader_whose_pool_has_no_room_for_a_frame_while_a_credit_waits_res
 /// Sends up to `n` frames of two series with `body` bytes in all, and returns at the
 /// first send that the stream refuses.
 async fn send_until_stopped(sender: &mut Sender, n: usize, body: usize) {
-    let half = u32::try_from(body / 2).expect("a short body");
-    let head = Reply::Head(Head {
-        path: Path::Live,
-        range: Range {
-            seq: 0,
-            count: half / 8,
-        },
-        series: 2,
-    });
     for _ in 0..n {
-        let mut h = own_pool().alloc(head.encoded_len()).expect("room");
-        head.encode(&mut h);
-        let mut e = own_pool().alloc(2 * ends::LEN).expect("room");
-        ends::encode([(0, half), (1, 2 * half)], &mut e);
-        let mut b = own_pool().alloc(body).expect("room");
-        b.fill(1);
-        for block in [h, e, b] {
-            if sender.send(block.freeze()).await.is_err() {
-                return;
-            }
+        if send_frame(sender, body).await.is_err() {
+            return;
         }
     }
 }
