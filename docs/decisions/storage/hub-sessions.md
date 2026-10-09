@@ -256,3 +256,14 @@
   no check per call. Lost: an end only at the home, which closes the session when the
   home's own definitions change, and which the reader may never see when the two nodes
   apply a spec at different times.
+  Amended (#2143) by `laptop.architect` (2026-10-09T13:40:05Z:
+  https://github.com/synnaxlabs/foundation/issues/2143#issuecomment-6082087720):
+  `Hub::writer` waits for the node's first mesh time (`clock::Reader::reach` on
+  `hub::Config::time`), as it waits for a home, so a hub caller never sees
+  `home::writer::Error::Unsynced`. The wait comes before the open resolves its channels
+  again, so it sees a change of the definitions during the wait. A task gets mesh time
+  from `writer::Writer::now`, which gives `home::Shard::now` (HOME CLOCKS) and cannot
+  fail, since mesh time stays once known. Lost: `Hub::now() -> Option<Stamp>`, because
+  each caller holds a writer and would expect mesh time itself. Lost: a `hub` export of
+  `clock::Reader`, because each task would compute the home's midpoint again. Lost: a
+  writer that stamps the frame, because only the caller knows when it read each sample.

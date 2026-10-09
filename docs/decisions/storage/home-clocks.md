@@ -15,3 +15,7 @@
   latest edge, because it goes back when the error shrinks, and with an unknown error
   (OS CLOCK BOUND) it is 36500 days ahead, so the ahead limit stops nothing and one bad
   stamp makes each later true stamp `Backwards` (#952 review, 2026-10-06).
+  `home::Shard::now` gives that midpoint, `None` before the node first has mesh
+  time, so the rule of a stamp stays in the home that checks it (HUB SESSIONS;
+  `laptop.architect`, 2026-10-09T13:40:05Z:
+  https://github.com/synnaxlabs/foundation/issues/2143#issuecomment-6082087720).
