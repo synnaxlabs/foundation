@@ -629,7 +629,9 @@ fn connectors<'f>(
                     &Fix::Home { node }
                 }
                 Some(fix) => fix,
-                None => unreachable!("invariant: a unit with a winner has a fix"),
+                None => unreachable!(
+                    "invariant: the unit of {name} at {placement} has no fix"
+                ),
             };
             let p = label(placement);
             diagnostics.push(Diagnostic::new(

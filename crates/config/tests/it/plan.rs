@@ -2716,3 +2716,45 @@ fn excludes_each_winner_of_a_unit_whose_target_is_elsewhere_and_spread() {
     );
     plans_after(&refused, &expected, &fixed);
 }
+
+#[test]
+fn gives_the_exclude_fix_of_a_unit_at_the_connector_home_of_a_second_winner() {
+    let z =
+        "connector \"z\" {\n  kind = \"writer\"\n  node = \"m\"\n  writes = []\n}\n";
+    let text =
+        |more: &str| writers(&["a", "b"], &["\"i.time\""; 2], &(z.to_owned() + more));
+    let refused = text(
+        &(placement("p", "\"a\", \"i.time\", \"z\"", "m")
+            + &placement("q", "\"b\"", "k")),
+    );
+    let fix = "Exclude the connectors `a` and `b` and their indexes from the `select` \
+               of `p` and `q`, and select them with another placement whose `home` is \
+               `n`";
+    let expected = [
+        ("config.split-placement", fix.to_owned()),
+        ("config.connector-home", fix.to_owned()),
+        ("config.connector-home", fix.to_owned()),
+    ];
+    let fixed = text(
+        &(placement("p", "\"a\", \"i.time\", \"z\", \"!a\", \"!i.time\"", "m")
+            + &placement("q", "\"b\", \"!b\"", "k")
+            + &placement("ab", "\"a\", \"b\", \"i.time\"", "n")),
+    );
+    plans_after(&refused, &expected, &fixed);
+}
+
+#[test]
+fn names_the_home_at_each_connector_home_of_the_target_of_a_unit() {
+    let text = |home: &str| {
+        writers(
+            &["a", "b"],
+            &["\"i.time\""; 2],
+            &placement("p", "\"a\", \"b\", \"i.time\"", home),
+        )
+    };
+    plans_after_connector_home(
+        &text("m"),
+        &[RENAMED.into(), RENAMED.into()],
+        &text("n"),
+    );
+}

@@ -116,10 +116,12 @@
   is "Make the placement `t` win for the connectors `a` and `b` and their indexes", so
   one edit applies it. This also holds for the `config.connector-home` of a connector
   of the unit whose winner is not `t`. The `config.connector-home` at `t` keeps the
-  case 1 fix, which names `n` as the home of `t`. A unit of one connector `c` keeps
-  "the connector `c` and its indexes" in each fix (same comment of 15:21:54Z, and
-  `laptop.architect`, 2026-10-08T16:22:59Z, and `laptop.architect`,
-  2026-10-09T22:58:00Z,
+  case 1 fix, which names `n` as the home of `t` (`laptop.architect`,
+  2026-10-09T23:19:32Z,
+  https://github.com/synnaxlabs/foundation/pull/2194#issuecomment-6090913905). A unit
+  of one connector `c` keeps "the connector `c` and its indexes" in each fix (same
+  comment of 15:21:54Z, and `laptop.architect`, 2026-10-08T16:22:59Z, and
+  `laptop.architect`, 2026-10-09T22:58:00Z,
   https://github.com/synnaxlabs/foundation/pull/2194#issuecomment-6090684061). When no
   placement can win for each connector and index of the unit at `n`, each of its
   diagnostics gives one fix that names each winner. When `t` gets case 2 of
