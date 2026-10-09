@@ -1694,6 +1694,11 @@ fn a_write_to_a_reset_stream_gives_closing_and_a_warning() {
 /// Records the call, with a `CLOSING` as one byte: 1 when the context is the
 /// application. On a read, sets the context to the application and closes. Gives
 /// whether it closed.
+///
+/// # Safety
+///
+/// The arguments are those that the manager of a live side gives a callback, on the
+/// thread of its loop.
 unsafe fn mark(
     cm: *mut ffi::ConnectionManager,
     id: usize,
