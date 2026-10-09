@@ -119,12 +119,14 @@
   waits for room in the session waits for the caller. A complete reader queues at most
   its grant plus one frame, and a frame that starts once the charges that arrived reach
   the grant ends the session with `Refusal::Malformed`. A latest reader keeps only the
-  newest frame. Lost: a bound on the sum of the credit at one home; a receive window for
-  each stream in `transport`; one task for each session. Trigger: a link that a
+  newest frame. Lost: a bound on the sum of the credit at one home; a receive window
+  for each stream in `transport`; one task for each session. Trigger: a link that a
   remote latest reader with an idle caller fills, as measured, then a credit of one
   frame for a latest reader (HUB WIRE). Decided by `laptop.architect`
   (2026-10-09T03:24:37Z:
-  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6073632038). The new
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6073632038), and the
+  open in the task by `laptop.architect` (2026-10-09T06:07:04Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6075355092). The new
   errors: `reader::Error::{Transport, Refused, Message, Pool}` and
   `reader::Ended::{Stream, Refused, Message, Frame, Pool, Credit}`. Each `Refused` holds
   a `wire::hub::Refusal`, the code of HUB WIRE that stopped or reset the stream. A code
