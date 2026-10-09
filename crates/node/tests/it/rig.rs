@@ -235,21 +235,16 @@ impl Drop for Process {
     fn drop(&mut self) {
         // `kill` gives `Ok` for a command that exited. No wait: while the thread
         // panics, a wait can block, and `run` waits for its command itself.
-        killed(self.0.kill(), std::thread::panicking());
+        killed(self.0.kill(), &mut std::io::stderr());
     }
 }
 
-/// Panics when `kill` failed, or prints its error while the thread is `panicking`.
-fn killed(kill: std::io::Result<()>, panicking: bool) {
+/// Panics when `kill` failed, or writes its error to `log` while the thread panics,
+/// since a second panic aborts the test binary.
+fn killed(kill: std::io::Result<()>, log: &mut impl Write) {
     match kill {
-        Err(error) if panicking => {
-            #[expect(
-                clippy::print_stderr,
-                reason = "a second panic aborts the test binary"
-            )]
-            {
-                eprintln!("kill the command: {error}");
-            }
+        Err(error) if std::thread::panicking() => {
+            let _logged = writeln!(log, "kill the command: {error}");
         }
         kill => kill.expect("kill the command"),
     }
@@ -369,9 +364,19 @@ fn a_test_that_panics_kills_its_command() {
     );
 }
 
+/// Gives a failed kill to [`killed`] when it drops.
+struct Failed<'a>(&'a mut Vec<u8>);
+
+impl Drop for Failed<'_> {
+    fn drop(&mut self) {
+        killed(Err(ErrorKind::PermissionDenied.into()), self.0);
+    }
+}
+
 #[test]
 fn a_failed_kill_panics() {
-    let failed = || killed(Err(ErrorKind::PermissionDenied.into()), false);
+    let mut log = Vec::new();
+    let failed = std::panic::AssertUnwindSafe(|| drop(Failed(&mut log)));
     let panic = std::panic::catch_unwind(failed).expect_err("the kill panics");
     assert_eq!(
         panic.downcast_ref::<String>().map(String::as_str),
@@ -380,8 +385,16 @@ fn a_failed_kill_panics() {
 }
 
 #[test]
-fn a_failed_kill_while_the_test_panics_does_not_panic() {
-    killed(Err(ErrorKind::PermissionDenied.into()), true);
+fn a_failed_kill_while_the_test_panics_writes_its_error() {
+    let mut log = Vec::new();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _failed = Failed(&mut log);
+        panic!("the test fails");
+    }))
+    .expect_err("the test panics");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"the test fails"));
+    let log = String::from_utf8(log).expect("UTF-8");
+    assert_eq!(log, "kill the command: permission denied\n");
 }
 
 #[test]
