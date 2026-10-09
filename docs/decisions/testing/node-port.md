@@ -64,18 +64,19 @@
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069443456.
   Supersedes the #1780 clause of
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010.
-  Amended (2026-10-09, #2017, by `laptop.architect-2`, 2026-10-08 21:57 UTC:
-  https://github.com/synnaxlabs/foundation/issues/2017, on the plan of 02:17 UTC:
-  https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072896717): shard
-  0 drops `lock` only once the transport has freed the port
-  (`transport::Transport::ended`), also when the mesh does not open, so a restart at
-  once binds the port under `os` too. A peer sees its close before `lock` is free,
-  which a test pins. Each clone of the transport and each session lives in a future
-  that shard 0 drops, or in a task of the mesh that it waits for, before it waits for
-  the port, so a leak holds the stop. The drop of the transport closes each
-  connection, also one whose handshake is in flight (#2084), and the stop waits for
-  each to drain: about 3 PTO, which is about 3 s for a handshake with no round-trip
-  sample. The `transport` surface, by `laptop.architect` (02:19 UTC):
+  Amended (2026-10-09, #2017, by `laptop.architect-2`, 02:17 UTC:
+  https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072896717, on
+  https://github.com/synnaxlabs/foundation/issues/2017): shard 0 drops `lock` only once
+  the transport has freed the port (`transport::Transport::ended`), also when the mesh
+  does not open, so a restart at once binds the port under `os` too. A peer sees its
+  close before `lock` is free, which a test pins. Each clone of the transport and each
+  session lives in a future that shard 0 drops, or in a task of the mesh that it waits
+  for, before it waits for the port, so a leak holds the stop. The drop of each session
+  closes it. The drop of the transport closes each session that no caller accepted and
+  each handshake in flight (#2084, by `laptop.architect-2`, 02:57 UTC:
+  https://github.com/synnaxlabs/foundation/issues/2084). The stop waits for each to
+  drain: about 3 PTO, which is about 3 s for a handshake with no round-trip sample.
+  The `transport` surface, by `laptop.architect` (02:19 UTC):
   https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072912165.
   Supersedes the port rule of
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069829972,
