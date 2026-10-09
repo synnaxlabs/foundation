@@ -1969,17 +1969,20 @@ fn reads_an_old_round_with_html_or_a_bracket_as_before() {
 fn reads_a_line_break_in_an_image_text_as_github_shows_it() {
     // GitHub shows the image as one character on the line of `Reviewers:`, so the
     // `Findings:` line that GitHub shows is `Findings: 2`.
-    let comment = ROUND.replace("Findings: none", "Findings: 2").replace(
-        "Reviewers: reviewer",
-        "Reviewers: reviewer, ![a\nb](x)Findings: none",
-    );
-    assert_eq!(
-        check(&record(vec![bot(&comment)])),
-        vec![
-            "review round 3 has findings (2). Fix or answer them, then run another \
-             round."
-        ]
-    );
+    for image in ["![a\nb](x)", "![a\\\nb](x)"] {
+        let comment = ROUND.replace("Findings: none", "Findings: 2").replace(
+            "Reviewers: reviewer",
+            &format!("Reviewers: reviewer, {image}Findings: none"),
+        );
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![
+                "review round 3 has findings (2). Fix or answer them, then run \
+                 another round."
+            ],
+            "{image}"
+        );
+    }
 }
 
 #[test]
