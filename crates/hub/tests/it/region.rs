@@ -256,6 +256,36 @@ fn a_writer_does_not_open_at_a_home_that_moved_while_it_waits_for_a_middle_home(
 }
 
 #[test]
+fn a_writer_of_two_indexes_opens_after_an_index_it_left_moves_away()
+ {
+    run(19, |test| async move {
+        let config = config("a", &["value", "value-b"]);
+        let mut opening = std::pin::pin!(test.hub.writer(config));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        test.set_home(TIME, NODE).await;
+        assert!(poll_once(opening.as_mut()).is_pending());
+        let mut defs = super::channels();
+        defs.insert(
+            name("time-c"),
+            super::definition(6, DataType::Sample(super::STAMP), 6),
+        );
+        defs.insert(
+            name("value"),
+            super::definition(2, DataType::Sample(I64), 6),
+        );
+        test.hub.set_definitions(&defs);
+        test.set_home(channel::Key::from_u128(6), NODE).await;
+        test.set_home(TIME, OTHER).await;
+        let region = test.region.as_ref().expect("a region");
+        let named = region.mesh.watch(TIME).next().await;
+        assert_eq!(named, Ok(Some(OTHER)));
+        test.set_home(TIME_B, NODE).await;
+        let opened = opening.await;
+        opened.expect("value is on time-c and value-b on time-b, both homed here");
+    });
+}
+
+#[test]
 fn a_writer_does_not_open_on_a_mesh_that_stopped_while_it_waits_for_mesh_time() {
     unsynced(12, |mut test| async move {
         let hub = test.hub.clone();
