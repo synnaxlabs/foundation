@@ -61,9 +61,11 @@ type under test, other than in the test of a hand-written `Debug` impl itself, i
 the only kill. `.cargo/mutants.toml` lists the few functions it skips. Each entry is as
 narrow as one function. Its comment says why no caller or peer can see the mutant, or
 names the test that kills it in a job that the mutants run does not see (Miri, loom,
-another OS). A mutant that a test could kill but none does links its open issue. Miri
-and cargo-fuzz run on one pinned nightly, named in `rust-toolchain-nightly`, that only
-those gates use.
+another OS). A mutant made by hand that `cargo mutants` never makes, and that only
+such an assertion kills, gets no entry, since one matches nothing. The doc of that test
+says why no caller or peer can see the mutant, and the round comment links that doc. A
+mutant that a test could kill but none does links its open issue. Miri and cargo-fuzz
+run on one pinned nightly, named in `rust-toolchain-nightly`, that only those gates use.
 
 ## Process tests
 
@@ -155,7 +157,15 @@ again once to prove that the failure replays (r16 59).
   yet. The PR that closes such an issue removes it from each reason, and removes the
   `#[ignore]` when no issue is left. A test that needs a tool of one OS, and that CI
   runs on that OS, is `#[cfg_attr(not(target_os = "<os>"), ignore = "needs <tool>")]`,
-  never `#[cfg(target_os = ...)]`, which hides it on another OS with no reason.
+  never `#[cfg(target_os = ...)]`, which hides it on another OS with no reason. A test
+  of a behavior that differs by OS checks it on each OS that the crate builds for: with
+  `#[cfg(target_os = ...)]` on its expected value, as `UNLINK_DIRECTORY` in
+  `crates/os/tests/it/files.rs` does, or with one test for each OS. A behavior has no
+  test on another OS only when that OS does not have it, when no test can fix its value
+  there (a count that a kernel buffer sets), or when its test needs an item that exists
+  on one OS to cause the case, such as a seccomp filter. A test whose code calls such an
+  item does not compile on another OS, so it is `#[cfg(target_os = ...)]`, not the
+  `cfg_attr` form above.
 - **One `check` helper per feature under test.** Inputs and expected output are data,
   so a signature change edits one helper (r16 50).
 - **A fixture helper is `create_*`.** A helper that builds the state a test runs
@@ -187,7 +197,8 @@ again once to prove that the failure replays (r16 59).
   process (the descriptor table, the thread count, a resource limit, a seccomp filter,
   the first-lookup state of the C library) gets a binary of its own with that one test,
   as a counting allocator does. Its module doc names that state. Helpers that binaries
-  share go in `tests/common/mod.rs`.
+  share go in `tests/common/`: `mod.rs`, and a file for a helper that only some binaries
+  use, which each of them mounts with `#[path]`.
 
 ## Oracles
 

@@ -9,9 +9,14 @@ dependencies = [
  "block",
  "connector-influx",
  "env",
+ "mesh",
  "node",
+ "ops",
  "proptest",
+ "serde_json",
  "sim",
+ "spec",
+ "transport",
  "types",
 ]
 
@@ -158,6 +163,15 @@ dependencies = [
  "divan",
  "loom",
  "proptest",
+]
+
+[[package]]
+name = "block-buffer"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3078c7629b62d3f0439517fa394996acacc5cbc91c5a20d8c658e77abd503a71"
+dependencies = [
+ "generic-array",
 ]
 
 [[package]]
@@ -340,6 +354,7 @@ dependencies = [
  "document",
  "proptest",
  "spec",
+ "ssh-key",
  "types",
 ]
 
@@ -411,6 +426,12 @@ name = "connector-opcua"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "connector-opcua",
+ "counting",
+ "divan",
+ "env",
+ "sim",
+ "types",
 ]
 
 [[package]]
@@ -535,6 +556,16 @@ dependencies = [
  "rustc_version",
  "syn 2.0.119",
  "unicode-xid",
+]
+
+[[package]]
+name = "digest"
+version = "0.10.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
+dependencies = [
+ "block-buffer",
+ "crypto-common",
 ]
 
 [[package]]
@@ -835,6 +866,7 @@ version = "0.0.0"
 dependencies = [
  "access",
  "aws-lc-rs",
+ "blob",
  "block",
  "buffer",
  "clock",
@@ -842,6 +874,7 @@ dependencies = [
  "counting",
  "env",
  "home",
+ "mesh",
  "sim",
  "spec",
  "transport",
@@ -1000,6 +1033,7 @@ dependencies = [
  "blob",
  "block",
  "clock",
+ "counting",
  "env",
  "proptest",
  "raft",
@@ -1034,13 +1068,20 @@ dependencies = [
  "blob",
  "block",
  "buffer",
+ "bytes",
  "clock",
  "codec",
+ "config-hcl",
+ "connector",
+ "connector-influx",
  "counting",
+ "crc32c",
  "divan",
+ "document",
  "env",
  "estimate",
  "home",
+ "http",
  "hub",
  "loom",
  "mesh",
@@ -1167,15 +1208,21 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 name = "ops"
 version = "0.0.0"
 dependencies = [
+ "blob",
+ "block",
  "clap",
  "config",
  "config-hcl",
  "connector",
  "document",
+ "env",
+ "mesh",
  "schemars",
  "serde",
  "serde_json",
+ "sim",
  "spec",
+ "transport",
  "types",
 ]
 
@@ -1189,11 +1236,21 @@ dependencies = [
  "env",
  "getrandom 0.4.3",
  "libc",
+ "noq-udp",
  "os",
  "proptest",
  "rustix",
  "tokio",
  "types",
+]
+
+[[package]]
+name = "pem-rfc7468"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "88b39c9bfcfc231068454382784bb460aae594343fb030d46e9f50a645418412"
+dependencies = [
+ "base64ct",
 ]
 
 [[package]]
@@ -1600,6 +1657,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.10.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7507d819769d01a365ab707794a4084392c824f54a7a6a7862f8c3d0892b283"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1613,6 +1681,12 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signature"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 
 [[package]]
 name = "sim"
@@ -1681,6 +1755,41 @@ dependencies = [
  "document",
  "proptest",
  "types",
+]
+
+[[package]]
+name = "ssh-cipher"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "caac132742f0d33c3af65bfcde7f6aa8f62f0e991d80db99149eb9d44708784f"
+dependencies = [
+ "cipher",
+ "ssh-encoding",
+]
+
+[[package]]
+name = "ssh-encoding"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eb9242b9ef4108a78e8cd1a2c98e193ef372437f8c22be363075233321dd4a15"
+dependencies = [
+ "base64ct",
+ "pem-rfc7468",
+ "sha2",
+]
+
+[[package]]
+name = "ssh-key"
+version = "0.6.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3b86f5297f0f04d08cabaa0f6bff7cb6aec4d9c3b49d87990d63da9d9156a8c3"
+dependencies = [
+ "sha2",
+ "signature",
+ "ssh-cipher",
+ "ssh-encoding",
+ "subtle",
+ "zeroize",
 ]
 
 [[package]]

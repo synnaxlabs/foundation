@@ -1,19 +1,17 @@
 //! Runs the built `foundation` binary as a process.
 
 #![cfg(test)]
+// The simulated servers need `os::net()`, which a `--cfg loom` build lacks.
+#![cfg(not(loom))]
 
 mod one_node;
 mod rig;
 mod status;
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Stdio};
 
-fn foundation(args: &[&str], input: &[u8]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
-    command.args(args);
-    rig::run(&os::clock(), rig::PATIENCE, command, input)
-}
+use rig::Rig;
 
 fn text(bytes: &[u8]) -> &str {
     std::str::from_utf8(bytes).expect("UTF-8")
@@ -21,7 +19,7 @@ fn text(bytes: &[u8]) -> &str {
 
 #[test]
 fn an_operation_prints_its_output_and_exits_0() {
-    let output = rig::Rig::new().run(&["version"]);
+    let output = Rig::new().run(&["version"], b"");
     assert_eq!(
         (
             output.status.code(),
@@ -38,7 +36,7 @@ fn an_operation_prints_its_output_and_exits_0() {
 
 #[test]
 fn an_error_goes_to_standard_error_and_exits_2() {
-    let output = foundation(&["versoin"], b"");
+    let output = Rig::new().run(&["versoin"], b"");
     assert_eq!(
         (
             output.status.code(),
@@ -64,7 +62,7 @@ fn mcp_answers_each_request_on_its_own_line_until_input_closes() {
         r#"{"jsonrpc":"2.0","id":"b","method":"nope"}"#,
         "\n",
     );
-    let output = foundation(&["mcp"], input.as_bytes());
+    let output = Rig::new().run(&["mcp"], input.as_bytes());
     assert_eq!(
         (
             output.status.code(),
@@ -115,7 +113,7 @@ fn mcp_answers_a_line_that_is_not_utf8_and_goes_on() {
         b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
     ]
     .concat();
-    let output = foundation(&["mcp"], &input);
+    let output = Rig::new().run(&["mcp"], &input);
     assert_eq!(
         (
             output.status.code(),
@@ -137,7 +135,7 @@ fn mcp_answers_a_line_that_is_not_utf8_and_goes_on() {
 
 #[test]
 fn help_lists_mcp() {
-    let output = foundation(&["--help"], b"");
+    let output = Rig::new().run(&["--help"], b"");
     assert_eq!(output.status.code(), Some(0));
     assert!(
         text(&output.stdout)

@@ -31,6 +31,10 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
     library.warnings(false);
     let mut shim = Build::new();
     shim.warnings(true).warnings_into_errors(true);
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let header = format!("\"{}\"", root.join("src/alloc.h").display());
+    library.define("UA_ARCH_HEADER", header.as_str());
+    shim.define("UA_ARCH_HEADER", header.as_str());
     for flag in flags.lines() {
         if let Some(dir) = flag.strip_prefix("-I") {
             let dir = copy.join(dir);
@@ -41,9 +45,11 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
             shim.flag(flag);
         }
     }
+    // `shim.c` builds its event loop on the copy's timer, which has no public header.
+    shim.include(copy.join("arch/common"));
     for source in sources.lines() {
         library.file(copy.join(source));
     }
-    shim.file(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shim.c"));
+    shim.file(root.join("src/shim.c"));
     Builds { library, shim }
 }

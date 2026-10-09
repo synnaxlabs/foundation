@@ -2,12 +2,17 @@
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
-use crate::ffi::{self, Bytes, Status};
+use env::rng::Rng;
+
+use crate::event::Loop;
+use crate::ffi::Status;
+use crate::ffi::test::{self as ffi, Bytes};
 
 #[test]
 fn the_copy_names_a_status_code() {
     assert_eq!(Status(0).name(), "Good");
     assert_eq!(Status(0x8034_0000).name(), "BadNodeIdUnknown");
+    assert_eq!(format!("{:?}", Status(0x8034_0000)), "BadNodeIdUnknown");
 }
 
 #[test]
@@ -21,25 +26,29 @@ fn the_global_clocks_give_a_fixed_time() {
     assert_eq!((now, monotonic, offset), (0, 0, 0));
 }
 
-/// The constructors that abort.
-const REFUSED: [&str; 5] = [
+/// The constructors and the members of the event loop that abort.
+const REFUSED: [&str; 9] = [
     "UA_EventLoop_new_POSIX",
     "UA_ConnectionManager_new_POSIX_TCP",
     "UA_ConnectionManager_new_POSIX_UDP",
     "UA_ConnectionManager_new_POSIX_Ethernet",
     "UA_InterruptManager_new_POSIX",
+    "UA_EventLoop.stop",
+    "UA_EventLoop.free",
+    "UA_EventLoop.registerEventSource",
+    "UA_EventLoop.deregisterEventSource",
 ];
 
-/// The variable that names the constructor `call_refused` calls.
+/// The variable that names the call that `call_refused` makes.
 const CHILD: &str = "CONNECTOR_OPCUA_REFUSED";
 
-/// Calls the constructor that `CHILD` names, and does nothing when it is not set.
-/// `each_posix_constructor_prints_its_name_and_aborts` sets it in a child process.
+/// Makes the call that `CHILD` names, and does nothing when it is not set.
+/// `each_refused_call_prints_its_name_and_aborts` sets it in a child process.
 #[test]
 fn call_refused() {
     #[expect(
         clippy::disallowed_methods,
-        reason = "the parent test picks the constructor that its child process calls"
+        reason = "the parent test picks the call that its child process makes"
     )]
     let Ok(name) = std::env::var(CHILD) else {
         return;
@@ -69,13 +78,40 @@ fn call_refused() {
         "UA_InterruptManager_new_POSIX" => unsafe {
             ffi::UA_InterruptManager_new_POSIX(empty())
         },
-        _ => panic!("no POSIX constructor is named {name}"),
+        _ => call_member(&name),
     };
+}
+
+/// Calls the member of the event loop that `name` names.
+fn call_member(name: &str) -> ! {
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let clock = sim.node(sim::node::Config::default()).clock();
+    let events = Loop::new(clock, &mut Rng::from_seed(0));
+    let (members, raw, none) = (events.members(), events.raw(), std::ptr::null_mut());
+    let status = match name {
+        "UA_EventLoop.stop" => {
+            // SAFETY: each member takes its own loop, and aborts before it reads more.
+            unsafe { (members.stop)(raw) };
+            Status::GOOD
+        }
+        // SAFETY: as above.
+        "UA_EventLoop.free" => Status(unsafe { (members.free)(raw) }),
+        "UA_EventLoop.registerEventSource" => {
+            // SAFETY: as above.
+            Status(unsafe { (members.register)(raw, none) })
+        }
+        "UA_EventLoop.deregisterEventSource" => {
+            // SAFETY: as above.
+            Status(unsafe { (members.deregister)(raw, none) })
+        }
+        _ => panic!("no refused call is named {name}"),
+    };
+    panic!("{name} gave {status:?}")
 }
 
 #[test]
 #[cfg(unix)]
-fn each_posix_constructor_prints_its_name_and_aborts() {
+fn each_refused_call_prints_its_name_and_aborts() {
     use std::os::unix::process::ExitStatusExt;
     const SIGABRT: i32 = 6;
     for name in REFUSED {
@@ -257,4 +293,234 @@ fn the_copy_links_the_timer() {
     ]);
     let distinct: std::collections::BTreeSet<_> = functions.iter().collect();
     assert_eq!(distinct.len(), functions.len());
+}
+
+/// Each symbol outside the copy and `shim.c` that they may name in glibc: on x86-64
+/// with GCC or Clang at each optimization level, and on 64-bit Arm with Clang at
+/// `-O2` and `-moutline-atomics`. None gives or takes a heap block, so no block
+/// crosses between the allocator of libc and `src/alloc.rs`.
+const OUTSIDE: [&str; 35] = [
+    "_GLOBAL_OFFSET_TABLE_",
+    "__ctype_b_loc",
+    "__errno_location",
+    "__fprintf_chk",
+    "__memcpy_chk",
+    "__memmove_chk",
+    "__memset_chk",
+    "__printf_chk",
+    "__stack_chk_fail",
+    "__stack_chk_guard",
+    "__syslog_chk",
+    "__tls_get_addr",
+    "abort",
+    "access",
+    "bcmp",
+    "connector_opcua_calloc",
+    "connector_opcua_free",
+    "connector_opcua_malloc",
+    "connector_opcua_realloc",
+    "fflush",
+    "fprintf",
+    "memcmp",
+    "memcpy",
+    "memmove",
+    "memset",
+    "printf",
+    "puts",
+    "stderr",
+    "stdout",
+    "strcmp",
+    "strlen",
+    "strncmp",
+    "strtod",
+    "syslog",
+    "write",
+];
+
+/// At `UA_MULTITHREADING` 0 the copy takes no lock and calls no atomic, so the symbol
+/// tests fail on each such name only while the list holds none.
+#[test]
+fn the_list_holds_no_lock_and_no_atomic() {
+    let held: Vec<_> = OUTSIDE
+        .iter()
+        .filter(|name| name.starts_with("pthread_") || name.starts_with("__aarch64_"))
+        .collect();
+    assert!(held.is_empty(), "{held:?}");
+}
+
+/// The symbols that `nm` with `flag` gives for `files`.
+fn names(
+    files: &[std::path::PathBuf],
+    flag: &str,
+) -> std::collections::BTreeSet<String> {
+    let output = std::process::Command::new("nm")
+        .args(["-P", flag])
+        .args(files)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let text = String::from_utf8(output.stdout).unwrap();
+    // A line that names a file or an object of an archive has one word.
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let name = words.next()?;
+            words.next().map(|_| name.to_owned())
+        })
+        .collect()
+}
+
+/// The symbols that `nm` with `flag` gives for the archive of this build, which holds
+/// the copy and the shim.
+fn symbols(flag: &str) -> std::collections::BTreeSet<String> {
+    let out = std::path::Path::new(env!("OUT_DIR"));
+    names(&[out.join("libopen62541.a")], flag)
+}
+
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs GNU nm and the glibc symbols"
+)]
+fn the_c_names_only_the_listed_symbols_outside_it() {
+    let defined = symbols("--defined-only");
+    assert!(
+        defined.contains("shim_client_new"),
+        "the archive holds no shim"
+    );
+    let undefined = symbols("--undefined-only");
+    let outside: Vec<&str> =
+        undefined.difference(&defined).map(String::as_str).collect();
+    assert!(outside.contains(&"connector_opcua_malloc"), "{outside:?}");
+    let unlisted: Vec<&str> = outside
+        .into_iter()
+        .filter(|name| !OUTSIDE.contains(name))
+        .collect();
+    assert!(unlisted.is_empty(), "the C names {unlisted:?}");
+}
+
+/// GCC 10 and later default to `-moutline-atomics` on 64-bit Arm Linux, and so does
+/// Clang with libgcc 9.3.1 or later, or with `-rtlib=compiler-rt`. The host build does
+/// not show it. So this preprocesses each source of the copy as the host build does,
+/// and compiles it for 64-bit Arm with that default. The preprocessing is the host's,
+/// so the test finds the names that the code generation for Arm adds, not the names of
+/// a branch of the source for Arm only.
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs GNU nm, Clang, and the glibc symbols"
+)]
+fn the_c_on_64_bit_arm_names_only_the_listed_symbols_outside_it() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let copy = root.join("../../patches/open62541");
+    let out = std::path::Path::new(env!("OUT_DIR")).join("arm");
+    std::fs::create_dir_all(&out).unwrap();
+    let flags = std::fs::read_to_string(copy.join("flags.txt")).unwrap();
+    let sources = std::fs::read_to_string(copy.join("sources.txt")).unwrap();
+    let header = format!(
+        "-DUA_ARCH_HEADER=\"{}\"",
+        root.join("src/alloc.h").display()
+    );
+    let objects: Vec<_> = sources
+        .lines()
+        .enumerate()
+        .map(|(i, source)| {
+            let text = out.join(format!("{i}.i"));
+            let object = out.join(format!("{i}.o"));
+            let mut preprocess = std::process::Command::new("clang");
+            preprocess.arg("-E").arg(&header);
+            for flag in flags.lines() {
+                match flag.strip_prefix("-I") {
+                    Some(dir) => {
+                        preprocess.arg(format!("-I{}", copy.join(dir).display()))
+                    }
+                    None => preprocess.arg(flag),
+                };
+            }
+            let status = preprocess
+                .arg(copy.join(source))
+                .arg("-o")
+                .arg(&text)
+                .status()
+                .expect("needs Clang");
+            assert!(status.success(), "{source}");
+            let status = std::process::Command::new("clang")
+                .args([
+                    "--target=aarch64-linux-gnu",
+                    "-moutline-atomics",
+                    "-O2",
+                    "-w",
+                    "-c",
+                ])
+                .arg(&text)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .unwrap();
+            assert!(status.success(), "{source}");
+            object
+        })
+        .collect();
+    let defined = symbols("--defined-only");
+    let undefined = names(&objects, "--undefined-only");
+    assert!(
+        undefined.contains("connector_opcua_malloc"),
+        "{undefined:?}"
+    );
+    let unlisted: Vec<String> = undefined
+        .into_iter()
+        .filter(|name| !defined.contains(name) && !OUTSIDE.contains(&name.as_str()))
+        .collect();
+    assert!(unlisted.is_empty(), "the C names {unlisted:?}");
+}
+
+/// Clang defines no `__FLOAT_WORD_ORDER__`, so `config.h` must find the float order of
+/// each target from its other macros, or the copy encodes floats on its slow path with
+/// `long double` helpers. A big-endian target must not copy floats as they lie in
+/// memory. Each system header is empty, so only the predefined macros of the target
+/// decide the float order.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs Clang")]
+fn the_copy_copies_floats_as_they_lie_in_memory_on_little_endian_targets() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let generated = root.join("../../patches/open62541/src_generated");
+    let config = generated.join("open62541/config.h");
+    let empty = std::path::Path::new(env!("OUT_DIR")).join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let text = std::fs::read_to_string(&config).unwrap();
+    for header in text.lines().filter_map(|line| {
+        let line = line.strip_prefix('#')?.trim_start();
+        line.strip_prefix("include")?
+            .trim()
+            .strip_prefix('<')?
+            .strip_suffix('>')
+    }) {
+        let header = empty.join(header);
+        std::fs::create_dir_all(header.parent().unwrap()).unwrap();
+        std::fs::write(header, "").unwrap();
+    }
+    let arch = empty.join("arch.h");
+    std::fs::write(&arch, "").unwrap();
+    for (target, copied) in [
+        ("x86_64-linux-gnu", "1"),
+        ("aarch64-linux-gnu", "1"),
+        ("arm64-apple-macos", "1"),
+        ("aarch64_be-linux-gnu", "0"),
+    ] {
+        let output = std::process::Command::new("clang")
+            .arg(format!("--target={target}"))
+            .args(["-nostdinc", "-E", "-dM", "-x", "c"])
+            .arg(format!("-DUA_ARCH_HEADER=\"{}\"", arch.display()))
+            .arg(format!("-I{}", empty.display()))
+            .arg(&config)
+            .output()
+            .expect("needs Clang");
+        let errors = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{target}: {errors}");
+        let macros = String::from_utf8(output.stdout).unwrap();
+        let overlayable = macros
+            .lines()
+            .find_map(|line| line.strip_prefix("#define UA_BINARY_OVERLAYABLE_FLOAT "));
+        assert_eq!(overlayable, Some(copied), "{target}");
+    }
 }

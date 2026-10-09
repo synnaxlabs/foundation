@@ -7,6 +7,7 @@ use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
@@ -27,15 +28,16 @@ use types::time::Span;
 use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
 
+use super::definitions::{I32, write_i32};
 use super::{
-    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, fill, scrambled, write,
-    write_series, write_wide,
+    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, channels, definition,
+    fill, name, region, scrambled, without, write, write_series, write_wide,
 };
 
 /// The UDP port of each transport.
 pub(super) const PORT: u16 = 7000;
 pub(super) const HOME: PrivateKey = PrivateKey([1; 32]);
-const PEER: PrivateKey = PrivateKey([2; 32]);
+pub(super) const PEER: PrivateKey = PrivateKey([2; 32]);
 /// The peer's message limit: the least that `transport` takes, so the home cuts a
 /// body and its ends into several messages.
 const PEER_MESSAGE: usize = 1472;
@@ -76,7 +78,7 @@ pub(super) fn transport(
 }
 
 /// The reader's node: its end of one hub stream.
-struct Peer {
+pub(super) struct Peer {
     node: sim::node::Node,
     pool: Rc<Pool>,
     sender: Sender,
@@ -92,7 +94,7 @@ impl Peer {
     }
 
     /// Sends an open of `keys` in `mode`, the keys in one message.
-    async fn open(&mut self, mode: Mode, keys: &[u128]) {
+    pub(super) async fn open(&mut self, mode: Mode, keys: &[u128]) {
         let channels = u32::try_from(keys.len()).expect("the keys fit a u32");
         let open = Open { mode, channels };
         let mut out = vec![0; open.encoded_len()];
@@ -104,14 +106,17 @@ impl Peer {
         self.send(&out).await.expect("sends the keys");
     }
 
-    async fn credit(&mut self, limit_bytes: u64) -> Result<(), transport::Error> {
+    pub(super) async fn credit(
+        &mut self,
+        limit_bytes: u64,
+    ) -> Result<(), transport::Error> {
         let mut out = [0; Credit::LEN];
         Credit { limit_bytes }.encode(&mut out);
         self.send(&out).await
     }
 
     /// The next message from the home, `None` once the home finished.
-    async fn recv(&mut self) -> Result<Option<Vec<u8>>, transport::Error> {
+    pub(super) async fn recv(&mut self) -> Result<Option<Vec<u8>>, transport::Error> {
         let receiver = self.receiver.as_mut().expect("a two-way stream");
         Ok(receiver.recv().await?.map(|block| block.to_vec()))
     }
@@ -144,6 +149,22 @@ fn session<H, P>(
     H: Future<Output = ()> + 'static,
     P: Future<Output = ()> + 'static,
 {
+    session_in(seed, class, one_way, false, home, peer);
+}
+
+/// As [`session`], with the home's node in the region of [`region::open`] when
+/// `regional`.
+pub(super) fn session_in<H, P>(
+    seed: u64,
+    class: Class,
+    one_way: bool,
+    regional: bool,
+    home: impl FnOnce(Test, Link, Incoming) -> H + Send + 'static,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) where
+    H: Future<Output = ()> + 'static,
+    P: Future<Output = ()> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
@@ -157,15 +178,16 @@ fn session<H, P>(
     let node = nodes[0].clone();
     let main = move |tasks: Tasks| async move {
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test = Test::new(node.clone(), tasks.clone(), layout, POOL).await;
+        let transport = Rc::new(transport(&node, &tasks, &own_pool(), HOME, 1 << 16));
+        let region = if regional {
+            Some(region::open(&node, &tasks, Rc::clone(&transport)).await)
+        } else {
+            None
+        };
+        let mut test =
+            Test::new(node.clone(), tasks.clone(), layout, POOL, region).await;
         test.sync().await;
-        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
-        let session = transport.accept().await.expect("a session");
-        let mut incoming = session.accept().await.expect("a stream");
-        let header = incoming.receiver.recv().await.expect("a header");
-        let header = header.expect("the header comes before the finish");
-        assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
-        drop(header);
+        let (session, incoming) = accept(&transport).await;
         let link = test.hub.link(session.clone());
         home(test, link, incoming).await;
         drop(session.closed().await);
@@ -212,6 +234,17 @@ fn session<H, P>(
     sim.run().expect("the run ends");
 }
 
+/// The first session of `transport`, and its first stream, after the stream's header.
+async fn accept(transport: &Transport) -> (transport::Session, Incoming) {
+    let session = transport.accept().await.expect("a session");
+    let mut incoming = session.accept().await.expect("a stream");
+    let header = incoming.receiver.recv().await.expect("a header");
+    let header = header.expect("the header comes before the finish");
+    assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
+    drop(header);
+    (session, incoming)
+}
+
 /// Runs a session whose home only serves it, and gives what `serve` returned, or
 /// `None` when it did not return.
 fn served<P>(
@@ -240,14 +273,14 @@ where
 }
 
 /// Serves `incoming` on `link`, which must end with no request.
-async fn serve(link: &Link, incoming: Incoming) -> Result<(), serve::Error> {
+pub(super) async fn serve(link: &Link, incoming: Incoming) -> Result<(), serve::Error> {
     let served = link.serve(incoming).await?;
     assert!(matches!(served, Served::Ended), "{served:?}");
     Ok(())
 }
 
 /// The stop code that a send of the peer gets once the home stopped the stream.
-async fn stopped(peer: &mut Peer) -> transport::Error {
+pub(super) async fn stopped(peer: &mut Peer) -> transport::Error {
     loop {
         if let Err(error) = peer.credit(0).await {
             return error;
@@ -310,6 +343,121 @@ fn stops_an_open_of_an_unknown_key_with_unknown() {
         "the open names channel 00000000-0000-0000-0000-000000000009, which this \
          node does not know"
     );
+}
+
+/// The home stops the open at the message of the unknown key, before the rest of the
+/// keys run comes.
+#[test]
+fn stops_an_open_at_the_message_of_an_unknown_key() {
+    let served = served(72, Class::Complete, false, |mut peer| async move {
+        let open = Open {
+            mode: Mode::Complete { limit_bytes: 0 },
+            channels: 2,
+        };
+        let mut out = vec![0; open.encoded_len()];
+        open.encode(&mut out);
+        peer.send(&out).await.expect("sends the open");
+        let mut out = vec![0; keys::LEN];
+        keys::encode(&[channel::Key::from_u128(9)], &mut out);
+        peer.send(&out).await.expect("sends a key");
+        stopped_as_unknown(&mut peer).await;
+    });
+    let unknown = serve::Error::Unknown(channel::Key::from_u128(9));
+    assert_eq!(served, Some(Err(unknown)));
+}
+
+#[test]
+fn keeps_an_open_session_through_a_call_with_the_same_definitions() {
+    let home = |test: Test, link: Link, incoming| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let (hub, clock, now) = (test.hub.clone(), test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            hub.set_definitions(&channels());
+            write(&mut writer, &[now], &[10]);
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session(73, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[2, 1], 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        assert_eq!(decoded(&got, &[I64, STAMP])[0], [10]);
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
+/// Runs a session whose home removes the channel `value` (key 2) once `SETTLE` passes,
+/// and gives what `serve` returned, or `None` when it did not return.
+fn removed<P>(
+    n: u64,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) -> Option<Result<(), serve::Error>>
+where
+    P: Future<Output = ()> + 'static,
+{
+    let result = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&result);
+    let home = move |test: Test, link: Link, incoming| async move {
+        let (hub, clock) = (test.hub.clone(), test.clock.clone());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            hub.set_definitions(&without(&["value"]));
+        });
+        *kept.lock().expect("not poisoned") =
+            Some(link.serve(incoming).await.map(drop));
+    };
+    session(n, Class::Complete, false, home, peer);
+    result.lock().expect("not poisoned").take()
+}
+
+/// The peer of a session that the home stops with `UNKNOWN`.
+async fn stopped_as_unknown(peer: &mut Peer) {
+    let code = Code(wire::hub::UNKNOWN);
+    assert_eq!(peer.recv().await, Err(transport::Error::Reset { code }));
+    assert_eq!(stopped(peer).await, transport::Error::Stopped { code });
+}
+
+#[test]
+fn stops_an_open_session_with_unknown_when_its_channel_is_removed() {
+    let served = removed(70, |mut peer| async move {
+        let _reader = open_complete(&mut peer, &[1, 2], 1 << 20).await;
+        stopped_as_unknown(&mut peer).await;
+    });
+    let removed = serve::Error::Removed(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(removed.clone())));
+    assert_eq!(
+        removed.to_string(),
+        "the open names channel 00000000-0000-0000-0000-000000000002, which was \
+         removed from this node"
+    );
+}
+
+/// The removal comes after the home checked the first message of the keys run.
+#[test]
+fn stops_an_open_whose_keys_run_spans_a_removal_with_unknown() {
+    let served = removed(71, |mut peer| async move {
+        let open = Open {
+            mode: Mode::Complete {
+                limit_bytes: 1 << 20,
+            },
+            channels: 2,
+        };
+        let mut out = vec![0; open.encoded_len()];
+        open.encode(&mut out);
+        peer.send(&out).await.expect("sends the open");
+        for key in [2, 1] {
+            let mut out = vec![0; keys::LEN];
+            keys::encode(&[channel::Key::from_u128(key)], &mut out);
+            peer.send(&out).await.expect("sends a key");
+            peer.sleep(SETTLE).await;
+            peer.sleep(SETTLE).await;
+        }
+        stopped_as_unknown(&mut peer).await;
+    });
+    let unknown = serve::Error::Unknown(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(unknown)));
 }
 
 /// Runs a session whose peer opens `keys` in a complete session, and gives what
@@ -430,6 +578,198 @@ fn ends_with_the_error_of_the_stream_when_the_peer_resets_it() {
     assert_eq!(
         serve::Error::Stream(reset).to_string(),
         "the stream of the hub session failed: the peer reset the stream (7)"
+    );
+}
+
+/// Runs a session at a node in a region whose mesh names no home, and gives what
+/// `serve` returned, or `None` when it did not return in 10 s.
+fn served_homeless<P>(
+    seed: u64,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) -> Option<Result<(), serve::Error>>
+where
+    P: Future<Output = ()> + 'static,
+{
+    let result = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&result);
+    let home = move |test: Test, link: Link, incoming| async move {
+        let mut serving = pin!(serve(&link, incoming));
+        let mut deadline = pin!(test.clock.sleep(Span::from_nanos(10_000_000_000)));
+        let served = poll_fn(|cx| {
+            if let Poll::Ready(served) = serving.as_mut().poll(cx) {
+                return Poll::Ready(Some(served));
+            }
+            deadline.as_mut().poll(cx).map(|()| None)
+        })
+        .await;
+        *kept.lock().expect("not poisoned") = served;
+    };
+    session_in(seed, Class::Complete, false, true, home, peer);
+    result.lock().expect("not poisoned").take()
+}
+
+#[test]
+fn finishes_when_the_peer_finishes_while_the_open_waits_for_a_home() {
+    let served = served_homeless(76, |mut peer| async move {
+        peer.open(Mode::Complete { limit_bytes: 0 }, &[1, 2]).await;
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+    assert_eq!(served, Some(Ok(())));
+}
+
+#[test]
+fn ends_with_the_error_of_the_stream_when_the_peer_resets_it_while_the_open_waits_for_a_home()
+ {
+    let served = served_homeless(77, |mut peer| async move {
+        peer.open(Mode::Complete { limit_bytes: 0 }, &[1, 2]).await;
+        peer.sleep(QUIET).await;
+        let Peer { node, sender, .. } = peer;
+        sender.reset(Code(7));
+        node.clock().sleep(QUIET).await;
+    });
+    let reset = transport::Error::Reset { code: Code(7) };
+    assert_eq!(served, Some(Err(serve::Error::Stream(reset))));
+}
+
+/// The highest credit that the peer sends while the open waits for a home raises the
+/// grant of 0 once the session opens, so the session gets the frame written after it.
+#[test]
+fn keeps_the_highest_credit_sent_while_the_open_waits_for_a_home() {
+    let home = |test: Test, link: Link, incoming| async move {
+        let test = Rc::new(test);
+        let writing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            writing.clock.sleep(SETTLE).await;
+            writing.set_home(region::TIME, super::NODE).await;
+            let mut writer = writing.writer("a", &["value"]).await;
+            writing.clock.sleep(SETTLE).await;
+            write(&mut writer, &[writing.now()], &[10]);
+            writing.clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session_in(
+        78,
+        Class::Complete,
+        false,
+        true,
+        home,
+        |mut peer| async move {
+            let mode = Mode::Complete { limit_bytes: 0 };
+            peer.open(mode, &[2, 1]).await;
+            peer.credit(1 << 20).await.expect("sends the credit");
+            peer.credit(0).await.expect("sends the credit");
+            let mut reader = Reader::new(&Open { mode, channels: 2 });
+            let opened = peer.recv().await.expect("receives").expect("a message");
+            assert!(matches!(reader.decode(&opened), Ok(FromHome::Opened)));
+            let got = got(&mut peer, &mut reader).await.expect("a frame");
+            assert_eq!(places(&got), [0, 1]);
+            assert_eq!(decoded(&got, &[I64])[0], [10]);
+            peer.sender.finish().expect("finishes");
+            assert_eq!(peer.recv().await, Ok(None));
+        },
+    );
+}
+
+/// An open that waits for a home serves the sample type that a call gave its channel
+/// meanwhile.
+#[test]
+fn serves_the_new_type_of_a_channel_changed_while_the_open_waits_for_a_home() {
+    let home = |test: Test, link: Link, incoming| async move {
+        let test = Rc::new(test);
+        let writing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            writing.clock.sleep(SETTLE).await;
+            let mut changed = channels();
+            changed.insert(name("value"), definition(2, DataType::Sample(I32), 1));
+            writing.hub.set_definitions(&changed);
+            writing.set_home(region::TIME, super::NODE).await;
+            let mut writer = writing.writer("a", &["value"]).await;
+            writing.clock.sleep(SETTLE).await;
+            write_i32(&mut writer, writing.now(), 20);
+            writing.clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session_in(
+        79,
+        Class::Latest,
+        false,
+        true,
+        home,
+        |mut peer| async move {
+            peer.open(Mode::Latest, &[2, 1]).await;
+            let mut reader = Reader::new(&Open {
+                mode: Mode::Latest,
+                channels: 2,
+            });
+            let opened = peer.recv().await.expect("receives").expect("a message");
+            assert!(matches!(reader.decode(&opened), Ok(FromHome::Opened)));
+            let got = got(&mut peer, &mut reader).await.expect("a frame");
+            assert_eq!(places(&got), [0, 1]);
+            let (_, end) = got.ends[0];
+            let end = usize::try_from(end).expect("fits");
+            let mut out = [0; 4];
+            codec::decode(I32, 1, &got.body[..end], &mut out).expect("decodes");
+            assert_eq!(i32::from_le_bytes(out), 20);
+            peer.sender.finish().expect("finishes");
+            assert_eq!(peer.recv().await, Ok(None));
+        },
+    );
+}
+
+/// An open that waits for the home of its index waits again for the home of the new
+/// index of its keys that a call gave them meanwhile, and serves it.
+#[test]
+fn serves_the_new_index_of_keys_changed_while_the_open_waits_for_a_home() {
+    let homed = Arc::new(AtomicBool::new(false));
+    let setting = Arc::clone(&homed);
+    let home = |test: Test, link: Link, incoming| async move {
+        let test = Rc::new(test);
+        let writing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            writing.clock.sleep(SETTLE).await;
+            let mut swapped = channels();
+            let sample = DataType::Sample(I64);
+            swapped.insert(name("value"), definition(2, sample.clone(), 2));
+            swapped.insert(name("time"), definition(1, sample.clone(), 2));
+            swapped.insert(name("value-c"), definition(5, sample, 2));
+            writing.hub.set_definitions(&swapped);
+            writing.set_home(region::TIME, super::NODE).await;
+            writing.clock.sleep(SETTLE).await;
+            setting.store(true, Ordering::Relaxed);
+            writing
+                .set_home(channel::Key::from_u128(2), super::NODE)
+                .await;
+            let mut writer = writing.writer("a", &["time"]).await;
+            writing.clock.sleep(SETTLE).await;
+            let now = writing.now();
+            write_series(&mut writer, &[(2, &[now]), (1, &[20])]);
+            writing.clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session_in(
+        80,
+        Class::Latest,
+        false,
+        true,
+        home,
+        |mut peer| async move {
+            peer.open(Mode::Latest, &[2, 1]).await;
+            let mut reader = Reader::new(&Open {
+                mode: Mode::Latest,
+                channels: 2,
+            });
+            let opened = peer.recv().await.expect("receives").expect("a message");
+            assert!(matches!(reader.decode(&opened), Ok(FromHome::Opened)));
+            assert!(homed.load(Ordering::Relaxed), "opened before the new home");
+            let got = got(&mut peer, &mut reader).await.expect("a frame");
+            assert_eq!(places(&got), [0, 1]);
+            peer.sender.finish().expect("finishes");
+            assert_eq!(peer.recv().await, Ok(None));
+        },
     );
 }
 
@@ -691,12 +1031,10 @@ fn sends_a_frame_wider_than_a_message_of_the_peer() {
     const KEYS: std::ops::Range<u128> = 10..200;
     let home = |test: Test, link: Link, incoming| async move {
         let names: Vec<_> = KEYS.map(|key| format!("v{key}")).collect();
-        for (key, name) in KEYS.zip(&names) {
-            test.hub.define([(
-                &super::name(name),
-                &super::spec_channel(key, DataType::Sample(I64), 1),
-            )]);
-        }
+        test.define(
+            KEYS.zip(&names)
+                .map(|(key, name)| (key, name.as_str(), DataType::Sample(I64), 1)),
+        );
         let names: Vec<_> = names.iter().map(String::as_str).collect();
         let mut writer = test.writer("a", &names).await;
         let (clock, now) = (test.clock.clone(), test.now());
@@ -742,10 +1080,7 @@ fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
     let raw = [&2001_u32.to_le_bytes()[..], &text].concat();
     let written = raw.clone();
     let home = |test: Test, link: Link, incoming| async move {
-        test.hub.define([(
-            &super::name("text"),
-            &super::spec_channel(6, DataType::Sample(Type::String), 1),
-        )]);
+        test.define([(6, "text", DataType::Sample(Type::String), 1)]);
         let mut writer = test.writer("a", &["text", "value"]).await;
         let (clock, now) = (test.clock.clone(), test.now());
         test.tasks.spawn(async move {
@@ -809,12 +1144,10 @@ fn sends_no_message_for_a_last_series_of_no_bytes() {
             len: 0,
         };
         let types = KEYS.map(|_| I64).chain([empty]);
-        for ((key, name), data_type) in KEYS.chain([EMPTY]).zip(&names).zip(types) {
-            test.hub.define([(
-                &super::name(name),
-                &super::spec_channel(key, DataType::Sample(data_type), 1),
-            )]);
-        }
+        let channels = KEYS.chain([EMPTY]).zip(&names).zip(types);
+        test.define(channels.map(|((key, name), data_type)| {
+            (key, name.as_str(), DataType::Sample(data_type), 1)
+        }));
         let names: Vec<_> = names.iter().map(String::as_str).collect();
         let mut writer = test.writer("a", &names).await;
         let (clock, now) = (test.clock.clone(), test.now());
@@ -1039,12 +1372,10 @@ fn stops_a_session_whose_ends_find_the_pool_empty_with_busy() {
     let kept = Arc::clone(&result);
     let home = move |test: Test, link: Link, incoming| async move {
         let names: Vec<_> = WIDE[1..].iter().map(|key| format!("v{key}")).collect();
-        for (&key, name) in WIDE[3..].iter().zip(&names[2..]) {
-            test.hub.define([(
-                &super::name(name),
-                &super::spec_channel(key, DataType::Sample(I64), 1),
-            )]);
-        }
+        let channels = WIDE[3..].iter().zip(&names[2..]);
+        test.define(
+            channels.map(|(&key, name)| (key, name.as_str(), DataType::Sample(I64), 1)),
+        );
         let names = [
             &["value", "value-c"][..],
             &names[2..].iter().map(String::as_str).collect::<Vec<_>>(),

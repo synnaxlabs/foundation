@@ -1,18 +1,18 @@
-//! TCP streams, listeners, and name lookups on the real network. Each stream and
-//! listener is a non-blocking socket that registers with the I/O driver of the Tokio
-//! runtime of the thread of its first poll.
+//! UDP sockets, TCP streams, listeners, and name lookups on the real network. Each
+//! socket is non-blocking. `os::net()` states when each registers.
 
 use std::io;
 use std::net::SocketAddr;
-use std::os::fd::{AsFd, BorrowedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
-use env::net::{Connect, Error, Resolve, tcp, udp};
+use env::net::{Connect, Error, Resolve, tcp};
 use rustix::io::Errno;
-use rustix::net::sockopt;
+use rustix::net::{AddressFamily, Protocol, SocketType, sockopt};
 use tokio::net::TcpStream;
 
 use self::listener::Listener;
 use self::stream::Stream;
+use self::udp::Udp;
 
 mod listener;
 #[expect(
@@ -24,13 +24,26 @@ mod lowat;
 mod resolve;
 mod socket;
 mod stream;
+mod udp;
+#[cfg(target_os = "macos")]
+mod unsent;
 
 /// The network of this machine.
 pub(crate) struct Driver;
 
 impl env::net::Driver for Driver {
-    fn udp(&self, _: &udp::Config) -> Result<Box<dyn udp::Driver>, Error> {
-        panic!("os::net has no UDP driver yet")
+    fn udp(
+        &self,
+        config: &env::net::udp::Config,
+    ) -> Result<
+        (
+            Box<dyn env::net::udp::Driver>,
+            Box<dyn env::net::udp::receiver::Driver>,
+        ),
+        Error,
+    > {
+        let (udp, receiver) = Udp::bind(config)?;
+        Ok((Box::new(udp), Box::new(receiver)))
     }
 
     fn connect<'a>(&'a self, config: &'a tcp::Config) -> Connect<'a> {
@@ -64,6 +77,8 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
     }
     let stream = TcpStream::from_std(fd.into()).map_err(|e| failed(errno(&e)))?;
     stream.writable().await.map_err(|e| failed(errno(&e)))?;
+    // Before `take_error`, so a reset that removed the peer is still pending.
+    let named = stream.peer_addr();
     let reset = match stream.take_error() {
         Ok(None) => None,
         Ok(Some(e)) | Err(e) => match failed(errno(&e)) {
@@ -72,28 +87,28 @@ async fn connect(config: &tcp::Config) -> Result<Box<dyn tcp::Driver>, Error> {
         },
     };
     let stream = stream.into_std().map_err(|e| failed(errno(&e)))?;
-    let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
-    let peer = peer(&stream, remote)?;
-    let mut stream = Stream::new(stream, canonical(local), peer).map_err(failed)?;
-    if let Some(reset) = reset {
-        // The kernel gave the reset to `take_error`, so a read would see an end of
-        // stream.
-        stream.fail(reset);
-    }
+    let local = stream.local_addr().map_err(|e| from_io(&e))?;
+    let peer = peer(named, remote, reset.is_some())?;
+    // With a reset, the kernel gave it to `take_error`, so a read would see an end of
+    // stream.
+    let stream = Stream::new(stream, canonical(local), peer, &config.options, reset)
+        .map_err(failed)?;
     Ok(Box::new(stream))
 }
 
-/// The peer of `stream`, connected to `remote`, as the kernel names it: without a
+/// The peer that the kernel `named` for a stream connected to `remote`: without a
 /// scope or flow label the kernel does not use, and with the address an unspecified
-/// `remote` reached. After a reset the kernel holds no peer, so the peer is `remote`,
-/// which `connect` has already passed through `canonical`.
-fn peer(stream: &std::net::TcpStream, remote: SocketAddr) -> Result<SocketAddr, Error> {
-    match stream.peer_addr() {
+/// `remote` reached. After a `reset` the kernel holds no peer, so the peer is
+/// `remote`, which `connect` has already passed through `canonical`.
+fn peer(
+    named: std::io::Result<SocketAddr>,
+    remote: SocketAddr,
+    reset: bool,
+) -> Result<SocketAddr, Error> {
+    match named {
         Ok(peer) => Ok(canonical(peer)),
-        Err(e) => match errno(&e) {
-            Errno::NOTCONN => Ok(remote),
-            code => Err(io_error(code)),
-        },
+        Err(_) if reset => Ok(remote),
+        Err(e) => Err(from_io(&e)),
     }
 }
 
@@ -109,12 +124,53 @@ fn canonical(address: SocketAddr) -> SocketAddr {
     }
 }
 
+/// A non-blocking socket of the family of `address`, closed on exec. macOS has no flag
+/// to open it so, and a child that another thread spawns between the calls holds it.
+fn socket(
+    address: SocketAddr,
+    kind: SocketType,
+    protocol: Protocol,
+) -> Result<OwnedFd, Errno> {
+    let family = match address {
+        SocketAddr::V4(_) => AddressFamily::INET,
+        SocketAddr::V6(_) => AddressFamily::INET6,
+    };
+    #[cfg(target_os = "linux")]
+    let fd = {
+        use rustix::net::SocketFlags;
+
+        let flags = SocketFlags::CLOEXEC | SocketFlags::NONBLOCK;
+        rustix::net::socket_with(family, kind, flags, Some(protocol))?
+    };
+    #[cfg(target_os = "macos")]
+    let fd = {
+        let fd = rustix::net::socket(family, kind, Some(protocol))?;
+        rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
+        rustix::fs::fcntl_setfl(&fd, rustix::fs::OFlags::NONBLOCK)?;
+        fd
+    };
+    Ok(fd)
+}
+
+/// `EADDRINUSE` on `local` is `AddressInUse`.
+fn in_use(local: SocketAddr) -> impl Fn(Errno) -> Error {
+    move |code| match code {
+        Errno::ADDRINUSE => Error::AddressInUse { local },
+        code => io_error(code),
+    }
+}
+
+/// Binds `fd` to `local`.
+fn bind(fd: BorrowedFd<'_>, local: SocketAddr) -> Result<(), Error> {
+    rustix::net::bind(fd, &local).map_err(in_use(local))
+}
+
 /// Sets `options` on a TCP socket.
 fn apply(fd: BorrowedFd<'_>, options: &tcp::Options) -> Result<(), Errno> {
     sockopt::set_socket_send_buffer_size(fd, options.send_buffer_bytes)?;
     sockopt::set_socket_recv_buffer_size(fd, options.recv_buffer_bytes)?;
     sockopt::set_tcp_nodelay(fd, !options.delayed)?;
-    lowat::set(fd, options.unsent_bytes_max)
+    lowat::set(fd, options.unsent_bytes_max.get())
 }
 
 /// The OS code of `error`, or `EIO` when it has none.
@@ -127,6 +183,11 @@ fn io_error(code: Errno) -> Error {
     Error::Io {
         code: code.raw_os_error(),
     }
+}
+
+/// The error of a socket call that failed with `error`, with no remote to name.
+fn from_io(error: &io::Error) -> Error {
+    io_error(errno(error))
 }
 
 /// The error of a stream to `remote` that failed with `code`.
@@ -145,6 +206,7 @@ fn stream_error(code: Errno, remote: SocketAddr) -> Error {
 #[cfg(test)]
 mod tests {
     use std::net::Ipv4Addr;
+    use std::num::NonZeroUsize;
 
     use super::*;
 
@@ -156,7 +218,7 @@ mod tests {
         tcp::Options {
             send_buffer_bytes: 1 << 16,
             recv_buffer_bytes: 1 << 15,
-            unsent_bytes_max: 1 << 14,
+            unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
             delayed,
         }
     }
@@ -198,7 +260,7 @@ mod tests {
         fn gives_the_code_of_a_refused_option() {
             let fd = listener::socket(loopback()).unwrap();
             let mut options = options(false);
-            options.unsent_bytes_max = usize::MAX;
+            options.unsent_bytes_max = NonZeroUsize::MAX;
             assert_eq!(apply(fd.as_fd(), &options), Err(Errno::INVAL));
         }
     }
@@ -229,8 +291,6 @@ mod tests {
     mod peer {
         use std::time::Duration;
 
-        use rustix::fs::{Mode, OFlags};
-
         use super::*;
 
         #[test]
@@ -240,27 +300,29 @@ mod tests {
             let remote = listener.local_addr().unwrap();
             let client = std::net::TcpStream::connect(remote).unwrap();
             let (server, _) = listener.accept().unwrap();
-            sockopt::set_socket_linger(&server, Some(Duration::ZERO)).unwrap();
-            drop(server);
+            // macOS refuses an option on a socket after a reset.
             client
                 .set_read_timeout(Some(Duration::from_secs(10)))
                 .unwrap();
+            sockopt::set_socket_linger(&server, Some(Duration::ZERO)).unwrap();
+            drop(server);
             let read = client.peek(&mut [0; 1]).map_err(|e| e.raw_os_error());
             assert_eq!(read, Err(Some(Errno::CONNRESET.raw_os_error())));
-            assert_eq!(
-                client.peer_addr().map_err(|e| errno(&e)),
-                Err(Errno::NOTCONN)
-            );
-            assert_eq!(peer(&client, remote), Ok(remote));
+            let none = if cfg!(target_os = "macos") {
+                Errno::INVAL
+            } else {
+                Errno::NOTCONN
+            };
+            assert_eq!(client.peer_addr().map_err(|e| errno(&e)), Err(none));
+            assert_eq!(peer(client.peer_addr(), remote, true), Ok(remote));
         }
 
         #[test]
-        fn another_failure_gives_its_code() {
-            let null = rustix::fs::open("/dev/null", OFlags::RDONLY, Mode::empty());
-            let stream = std::net::TcpStream::from(null.unwrap());
+        fn no_peer_without_a_reset_gives_its_code() {
             let remote = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 4433);
-            let code = Errno::NOTSOCK.raw_os_error();
-            assert_eq!(peer(&stream, remote), Err(Error::Io { code }));
+            let named = Err(Errno::INVAL.into());
+            let code = Errno::INVAL.raw_os_error();
+            assert_eq!(peer(named, remote, false), Err(Error::Io { code }));
         }
     }
 

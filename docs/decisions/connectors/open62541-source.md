@@ -50,8 +50,10 @@
   flag. `build.rs` and the check both read `flags.txt`, so the check reads objects
   compiled with the flags of the connector. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849,
-  2026-10-08 13:31 UTC). A `-W` flag with no `,` is a warning, which changes no code,
-  so `collect` leaves it out by that pattern, not by name. Decided by
+  2026-10-08 13:31 UTC). The `UA_ARCH_HEADER` of the allocator below is the one flag
+  of `build.rs` outside `flags.txt`, so the objects of the check do not have it. A
+  `-W` flag with no `,` is a warning, which changes no code, so `collect` leaves it
+  out by that pattern, not by name. Decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061473044,
   2026-10-08 13:57 UTC) and `laptop.director`
@@ -127,3 +129,88 @@
   2026-10-08 17:47 UTC; the release path,
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6066098798,
   2026-10-08 18:08 UTC).
+  The copy and `shim.c` allocate through the global allocator of the binary.
+  `src/alloc.h` is the `UA_ARCH_HEADER` of both builds: it declares the 4 functions
+  of `src/alloc.rs` and defines `UA_malloc`, `UA_calloc`, `UA_realloc`, and `UA_free`
+  as them, before `config.h` sets the libc calls as the defaults. They keep the C
+  contract on `std::alloc`: a failure gives NULL and never panics, `malloc(0)` and
+  `realloc(p, 0)` give a unique pointer that is not NULL, and each pointer is aligned
+  to 16. No pointer crosses between the libc allocator and these: the objects of the
+  copy and of `shim.c` call no libc function that gives or takes a heap pointer. A
+  crypto library that a later PR links keeps its own allocator. So the counting
+  allocator of a test or benchmark binary counts C too. The copy check compiles
+  without `alloc.h`. A test reads the archive that `build.rs` makes with it, and
+  fails on each symbol outside the copy and `shim.c` that its closed list does not
+  hold. The list holds no clock function and no libc function that gives or takes a
+  heap pointer. Lost: `UA_ENABLE_MALLOC_SINGLETON` (a global), `--wrap=malloc`
+  (`std::alloc` calls `malloc`, so it recurses), and 4 `-D` flags (a define gives no
+  prototype, and C99 needs one). Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067206932,
+  2026-10-08 19:13 UTC; the header:
+  https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6067771921,
+  2026-10-08 19:46 UTC). The exception for `UA_ARCH_HEADER` in the flags passage
+  above, the copy check without `alloc.h`, and the test of the archive: approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6068060133,
+  2026-10-08 20:04 UTC, and at 1a593331:
+  https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6069664332,
+  2026-10-08 21:46 UTC, and the list for 64-bit Arm at 586e8089:
+  https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6069858320,
+  2026-10-08 22:00 UTC).
+  The copy builds with `UA_MULTITHREADING` 0, so it takes no `UA_LOCK` and links no
+  `pthread_mutex_*` symbol: each server and each client runs on one thread. Level 0
+  alone makes `UA_THREAD_LOCAL` empty, so two threads would share `UA_rng` and the
+  `static UA_THREAD_LOCAL` buffers of `src/client/ua_client.c` and the server files.
+  So our change of `src_generated/open62541/config.h` moves its thread-local block out
+  of `#if UA_MULTITHREADING >= 100`. The driver test of `UA_rng` is its positive
+  control, and the test of the archive fails on each `pthread_mutex_*` symbol: the
+  closed list holds none. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912,
+  2026-10-08 20:03 UTC). Supersedes the note "a copy config with `UA_MULTITHREADING`
+  0 is the fix, as its own change" of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211.
+  It is the one file outside the release that we edit by hand. Supersedes, for this
+  block, "never edited by hand. Our change (PR 3, `UA_rng`) edits only release files"
+  of https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572. This
+  text approved by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069607884,
+  2026-10-08 21:42 UTC) and `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6069329793,
+  2026-10-08 21:24 UTC).
+  A second change of that file adds a branch that sets `UA_FLOAT_LITTLE_ENDIAN` when
+  the target is 64-bit Arm and `__BYTE_ORDER__` is little-endian. Clang defines no
+  `__FLOAT_WORD_ORDER__`, so without it a Clang build for 64-bit Arm encodes each float
+  on the slow path of `pack754`, which links the `long double` helpers. On 64-bit Arm
+  the float order is the byte order. The test of `connector-opcua` that preprocesses
+  `config.h` for each target is its check. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6071050895,
+  2026-10-08 23:26 UTC).
+  The event loop of `connector-opcua` is a `UA_EventLoop` that `shim.c` fills and
+  `event::Loop` owns, on one thread. Its monotonic time is the clock of `env`.
+  `dateTime_now` gives that time counted from the Unix epoch, and the UTC offset is 0,
+  until #1992 gives it the wall time of the node through `hub`, in the PR of the first
+  connection with a security policy other than `None`. No connection that checks a
+  certificate runs before. Its drop runs the queued delayed callbacks in at most 64
+  passes, then aborts: a callback that queues itself at each pass is a defect. The
+  hidden module `bench`, behind the feature `sim`, gives the benchmark and the
+  allocation test a client on the loop. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211,
+  2026-10-08 19:05 UTC); the abort supersedes "panics" in that comment
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
+  2026-10-08 20:22 UTC).
+  The logger of the loop writes each message of level warning and up to fd 2, and
+  drops the lower levels: it formats the line into a stack buffer of 512 bytes with
+  `mp_vsnprintf` and sends it in one `write`, so a line allocates nothing, takes no
+  `stdio` lock, and does not mix with a line of another thread. A longer line is cut,
+  not dropped. Trigger: when `node` has a log, the loop takes its sink from its
+  caller. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068103327,
+  2026-10-08 20:07 UTC;
+  https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
+  2026-10-08 20:22 UTC).
+  Two timers due at one time run in an order that no code may depend on. Until PR 6 of
+  #435 orders the timer tree of the copy by due time, then by `id`, that order comes
+  from heap addresses, so a simulation with such timers does not replay. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6073878926,
+  2026-10-09 03:49 UTC).
