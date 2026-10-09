@@ -80,11 +80,10 @@
   the home's `hub` checks it at the `Open` and stops the session with `MALFORMED`.
   Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node
   is not the home of the index), 18 `FAILED` (the home's buffer failed), 19 `BUSY` (the
-  side that stops had no block for a stream's session, in both directions, or no room
-  for a request body under its cap; a later open or request can succeed, but not when
-  the block is larger than each block of that side's pool; `laptop.architect`,
-  2026-10-09T00:12:49Z,
-  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074;
+  home's pool had no block for a reply, or the node had no room for a request body
+  under its cap; a later open or request can succeed; `laptop.architect`,
+  2026-10-09T04:00:55Z,
+  https://github.com/synnaxlabs/foundation/pull/2093#issuecomment-6073992277;
   supersedes the code 19 text of
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084), and 2
   `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
