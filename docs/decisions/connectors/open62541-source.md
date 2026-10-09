@@ -211,7 +211,6 @@
   Two timers due at one time run in an order that no code may depend on. The timer
   tree of the copy orders by due time, then by `id`, so that order is the order of
   their adds and a simulation with such timers replays; open62541 ranks them by heap
-  address. Decided by
-  `laptop.architect-2`
+  address. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6073878926,
   2026-10-09 03:49 UTC).
