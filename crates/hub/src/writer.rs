@@ -140,7 +140,6 @@ impl Writer {
         };
         let key = borrowed.home.open_writer(writer).map_err(Error::Home)?;
         borrowed.commit.appended();
-        keys.reserve_exact(groups.len());
         keys.extend(groups.iter().map(|group| group.index));
         let removed = borrowed.writers.add(key, keys.into());
         Ok(Self {
