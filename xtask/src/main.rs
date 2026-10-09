@@ -169,12 +169,13 @@ impl Nightly {
 
     /// The host triple of this toolchain, or the error of `rustc -vV`.
     fn host(&self) -> Result<String, String> {
+        let command = format!("`rustup run {} rustc -vV`", self.pin);
         let output = self
             .tool("rustc")
             .arg("-vV")
             .output()
-            .map_err(|e| format!("rustup: {e}"))?;
-        host(&output)
+            .map_err(|e| format!("{command}: {e}"))?;
+        host(&output).map_err(|e| format!("{command}: {e}"))
     }
 
     /// A command that runs `tool` of this toolchain through rustup, at the workspace
@@ -188,16 +189,18 @@ impl Nightly {
     }
 }
 
-/// The host triple in `output`, from `rustc -vV`, or its stderr when it failed.
+/// The host triple in `output`, from `rustc -vV`, or its exit status and stderr when it
+/// failed.
 fn host(output: &Output) -> Result<String, String> {
     if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("{}: {}", output.status, stderr.trim()));
     }
     let text = String::from_utf8_lossy(&output.stdout);
     text.lines()
         .find_map(|line| line.strip_prefix("host: "))
         .map(str::to_string)
-        .ok_or_else(|| format!("`rustc -vV` gives no host: {text}"))
+        .ok_or_else(|| format!("gives no host: {text}"))
 }
 
 /// The toolchain in `rust-toolchain-nightly` of the workspace at `root`.
@@ -271,7 +274,7 @@ mod tests {
         let text = "rustc 1.93.0-nightly\nrelease: 1.93.0\n";
         assert_eq!(
             host(&output(0, text, "")),
-            Err(format!("`rustc -vV` gives no host: {text}"))
+            Err(format!("gives no host: {text}"))
         );
     }
 
@@ -299,7 +302,19 @@ mod tests {
     #[test]
     fn host_names_the_error_of_rustc() {
         let error = "error: toolchain 'nightly-x' is not installed\n";
-        assert_eq!(host(&output(1, "", error)), Err(error.to_string()));
+        assert_eq!(
+            host(&output(1, "", error)),
+            Err("exit status: 1: error: toolchain 'nightly-x' is not installed".into())
+        );
+        assert_eq!(host(&output(2, "", "")), Err("exit status: 2: ".into()));
+    }
+
+    #[test]
+    fn nightly_names_rustup_and_the_pin_when_the_pin_is_not_installed() {
+        let error = nightly(&fixture()).unwrap().host().unwrap_err();
+        let command = "`rustup run nightly-2000-01-01 rustc -vV`: exit status: 1: ";
+        assert!(error.starts_with(command), "{error}");
+        assert!(error.contains("'nightly-2000-01-01"), "{error}");
     }
 
     #[test]
