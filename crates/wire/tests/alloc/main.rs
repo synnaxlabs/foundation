@@ -1,6 +1,6 @@
-//! The hub messages on a frame's path make no heap allocation. This binary has no
-//! test harness: the count covers each thread, and a harness allocates on its own
-//! thread at any time.
+//! The hub messages on a frame's path, and the body counters of client requests and
+//! blob chunks, make no heap allocation. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -32,6 +32,8 @@ fn main() {
         ends(series);
     }
     ends_by_place();
+    client_body();
+    blob_body();
 }
 
 /// A reader that has decoded `Opened` and a head of `series` series.
@@ -138,4 +140,38 @@ fn ends_by_place() {
         allocations, 0,
         "the encode of a run split by place allocated"
     );
+}
+
+/// The take of each message of a client request body.
+fn client_body() {
+    let body = [7; 1_000];
+    let request = wire::hub::client::Request {
+        length: 1_000,
+        signature: [0; 64],
+    };
+    let mut rest = request.body();
+    let (taken, allocations) = ALLOCATOR.count(|| {
+        body.chunks(300)
+            .map(|message| rest.take(message).expect("a body message").len())
+            .sum::<usize>()
+    });
+    assert_eq!(allocations, 0, "the take of a client body allocated");
+    assert_eq!(taken, body.len(), "the whole body was taken");
+}
+
+/// The take of each message of a blob chunk's body.
+fn blob_body() {
+    let body = [7; 1_000];
+    let put = wire::blob::Put {
+        digest: types::digest::Digest([0; 32]),
+        len: 1_000,
+    };
+    let mut rest = put.body();
+    let (taken, allocations) = ALLOCATOR.count(|| {
+        body.chunks(300)
+            .map(|message| rest.take(message).expect("a body message").len())
+            .sum::<usize>()
+    });
+    assert_eq!(allocations, 0, "the take of a blob body allocated");
+    assert_eq!(taken, body.len(), "the whole body was taken");
 }
