@@ -149,17 +149,11 @@ impl Reader {
                 break (keys, index);
             }
         };
-        let (mut slots, slot) = {
-            let mut borrowed = state.borrow_mut();
-            borrowed.carry(index);
-            let assigned = borrowed.interner.slots();
-            let slots: Vec<_> = keys.iter().map(|&key| assigned.index(key)).collect();
-            (slots, assigned.index(index))
-        };
         // A frame without the reader's channels still shows that time moved.
-        slots.push(slot);
         keys.push(index);
-        let (slots, keys) = (slots.into(), keys.into());
+        let slots = state.borrow_mut().slots(index, &keys);
+        let slot = slots[slots.len() - 1];
+        let keys = keys.into();
         let (session, credit) = match mode {
             Mode::Complete => {
                 let (session, credit) = Session::complete(

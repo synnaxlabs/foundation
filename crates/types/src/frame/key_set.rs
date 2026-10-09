@@ -119,9 +119,9 @@ impl Interner {
     }
 
     /// The key set of `groups`: each index, with type `Stamp`, and each data channel.
-    /// Each channel gets its slot from [`Self::slots`], which assigns one to each new
-    /// key in the order of `groups`, each index before its data. Groups are numbered
-    /// in the order of their index slots. Equal groups, in any order, give the same key
+    /// Each index gets its slot from [`Slots::index`], and each data channel from
+    /// [`Slots::data`], in the order of `groups`, each index before its data. Groups
+    /// are numbered in the order of their index slots. Equal groups, in any order, give the same key
     /// set. A new key set copies the snapshot's list, so it takes time linear in the
     /// number of key sets. Give it only groups that the node builds from the spec,
     /// never a subset of channels that a party outside the node picks: the table of key
@@ -142,15 +142,15 @@ impl Interner {
             indexes.push(index);
             channels.push((index, group.index, stamp, index));
             for &(key, data_type) in group.data {
-                channels.push((self.slots.index(key), key, data_type, index));
+                channels.push((self.slots.data(key), key, data_type, index));
             }
         }
-        channels.sort_unstable_by_key(|&(slot, ..)| slot);
-        if let Some([(_, key, ..), _]) =
-            channels.array_windows().find(|[a, b]| a.0 == b.0)
-        {
+        let mut keys: Vec<_> = channels.iter().map(|&(_, key, ..)| key).collect();
+        keys.sort_unstable();
+        if let Some([key, _]) = keys.array_windows().find(|[a, b]| a == b) {
             panic!("channel {key} appears twice in a key set");
         }
+        channels.sort_unstable_by_key(|&(slot, ..)| slot);
         indexes.sort_unstable();
         let entries: Arc<[Entry]> = channels
             .iter()
@@ -232,11 +232,16 @@ mod tests {
         channel::Key::from_u128(u128::from(n))
     }
 
-    /// An interner where key `n` has slot `n`, for each `n` below `len`.
-    fn interner(len: u32) -> Interner {
+    /// An interner where key `n` has slot `n`, for each `n` below 10: as an index for
+    /// each `n` in `indexes`, else as a data channel.
+    fn interner(indexes: &[u32]) -> Interner {
         let mut interner = Interner::new();
-        for n in 0..len {
-            interner.slots().index(key(n));
+        for n in 0..10 {
+            if indexes.contains(&n) {
+                interner.slots().index(key(n));
+            } else {
+                interner.slots().data(key(n));
+            }
         }
         interner
     }
@@ -252,7 +257,7 @@ mod tests {
 
     #[test]
     fn sorts_entries_and_numbers_groups_by_index_slot() {
-        let mut interner = interner(10);
+        let mut interner = interner(&[4, 9]);
         let set = interner.intern(&[
             Group {
                 index: key(9),
@@ -283,7 +288,7 @@ mod tests {
 
     #[test]
     fn finds_the_entry_of_each_slot() {
-        let mut interner = interner(10);
+        let mut interner = interner(&[5]);
         let set = interner.intern(&[Group {
             index: key(5),
             data: &[(key(8), F64), (key(2), F64)],
@@ -296,7 +301,7 @@ mod tests {
 
     #[test]
     fn gives_equal_groups_the_same_key_set() {
-        let mut interner = interner(10);
+        let mut interner = interner(&[1, 4]);
         let first = interner.intern(&[
             Group {
                 index: key(1),
@@ -328,7 +333,7 @@ mod tests {
 
     #[test]
     fn tells_an_index_from_a_stamp_channel_on_it() {
-        let mut interner = interner(10);
+        let mut interner = interner(&[1]);
         let first = interner.intern(&[Group {
             index: key(1),
             data: &[(key(2), STAMP)],
@@ -337,15 +342,21 @@ mod tests {
             index: key(2),
             data: &[(key(1), STAMP)],
         }]);
-        assert_eq!(first.entries(), swapped.entries());
-        assert_eq!(first.groups(), [0]);
-        assert_eq!(swapped.groups(), [1]);
+        let known = |n, k| Entry {
+            slot: slot(n),
+            key: key(k),
+            data_type: STAMP,
+            group: 0,
+        };
+        assert_eq!(first.entries(), [known(1, 1), known(2, 2)]);
+        assert_eq!(swapped.entries(), [known(10, 2), known(11, 1)]);
+        assert_eq!(swapped.groups(), [0]);
         assert_eq!(swapped.key().get(), 1);
     }
 
     #[test]
     fn tells_an_index_from_a_stamp_channel_beside_another_group() {
-        let mut interner = interner(10);
+        let mut interner = interner(&[1, 5]);
         let first = interner.intern(&[
             Group {
                 index: key(1),
@@ -367,12 +378,12 @@ mod tests {
             },
         ]);
         assert_eq!(first.groups(), [0, 2]);
-        assert_eq!(swapped.groups(), [1, 2]);
+        assert_eq!(swapped.groups(), [0, 1]);
     }
 
     #[test]
     fn snapshots_hold_the_key_sets_interned_before_them() {
-        let mut interner = interner(10);
+        let mut interner = interner(&[0, 1]);
         let empty = interner.snapshot();
         let first = interner.intern(&[Group {
             index: key(0),
@@ -433,7 +444,7 @@ mod tests {
     #[test]
     fn keeps_a_slot_assigned_before_the_key_set() {
         let mut interner = Interner::new();
-        let early = interner.slots().index(key(7));
+        let early = interner.slots().data(key(7));
         let set = interner.intern(&[Group {
             index: key(3),
             data: &[(key(7), F64)],
@@ -454,7 +465,7 @@ mod tests {
         expected = "channel 00000000-0000-0000-0000-000000000002 appears twice in a key set"
     )]
     fn refuses_a_data_channel_twice() {
-        interner(10).intern(&[Group {
+        interner(&[1]).intern(&[Group {
             index: key(1),
             data: &[(key(2), F64), (key(2), U8)],
         }]);
@@ -465,7 +476,7 @@ mod tests {
         expected = "channel 00000000-0000-0000-0000-000000000001 appears twice in a key set"
     )]
     fn refuses_an_index_that_is_also_data() {
-        interner(10).intern(&[
+        interner(&[1, 3]).intern(&[
             Group {
                 index: key(1),
                 data: &[],
@@ -486,7 +497,7 @@ mod tests {
             index: key(6),
             data: &[],
         };
-        interner(10).intern(&[group, group]);
+        interner(&[6]).intern(&[group, group]);
     }
 
     #[test]
@@ -556,8 +567,13 @@ mod tests {
     ) -> Result<(), TestCaseError> {
         let entries = set.entries();
         prop_assert!(entries.is_sorted_by(|a, b| a.slot < b.slot));
-        for entry in entries {
-            prop_assert_eq!(slots.index(entry.key), entry.slot);
+        for (at, entry) in entries.iter().enumerate() {
+            let slot = if set.index(at) == at {
+                slots.index(entry.key)
+            } else {
+                slots.data(entry.key)
+            };
+            prop_assert_eq!(slot, entry.slot);
         }
         let total: usize = groups.iter().map(|(_, data)| 1 + data.len()).sum();
         prop_assert_eq!(entries.len(), total);
@@ -570,7 +586,7 @@ mod tests {
             prop_assert_eq!(set.index(at), at);
             prop_assert_eq!(numbered.and_then(|g| u32::try_from(g).ok()), Some(group));
             for (key, kind) in data {
-                let at_data = set.find(slots.index(*key)).unwrap();
+                let at_data = set.find(slots.data(*key)).unwrap();
                 prop_assert_eq!(entries[at_data].data_type, *kind);
                 prop_assert_eq!(entries[at_data].group, group);
                 prop_assert_eq!(set.index(at_data), at);

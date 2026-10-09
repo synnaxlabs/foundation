@@ -345,19 +345,14 @@ impl State {
             let slot = self.interner.slots().index(key);
             self.home.shed(slot);
         }
-        let retired: Vec<Key> = self
-            .channels
-            .values()
-            .filter(|known| {
-                removed.contains(&known.key()) && known.key() != known.index()
-            })
-            .map(Channel::key)
-            .collect();
-        for key in retired {
-            self.interner.slots().retire(key);
-        }
-        self.channels
-            .retain(|_, known| !removed.contains(&known.key()));
+        let slots = self.interner.slots();
+        self.channels.retain(|_, known| {
+            let gone = removed.contains(&known.key());
+            if gone {
+                slots.retire(known.key());
+            }
+            !gone
+        });
         self.indexes.retain(|key, _| !removed.contains(key));
         let mut new: Vec<_> = channels
             .iter()
@@ -410,6 +405,23 @@ impl State {
     fn carry(&mut self, index: types::channel::Key) {
         let slot = self.interner.slots().index(index);
         self.home.carry(slot);
+    }
+
+    /// Carries `index` at the home, and gives the slot of each of `keys` in its role:
+    /// `index` as an index, and each other key as a data channel.
+    fn slots(&mut self, index: Key, keys: &[Key]) -> Box<[types::channel::Slot]> {
+        self.carry(index);
+        let assigned = self.interner.slots();
+        let slot = assigned.index(index);
+        keys.iter()
+            .map(|&key| {
+                if key == index {
+                    slot
+                } else {
+                    assigned.data(key)
+                }
+            })
+            .collect()
     }
 
     /// Wakes each reader that the home names as having a frame to take or a miss to

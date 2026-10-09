@@ -76,11 +76,16 @@ impl Slot {
     }
 }
 
-/// The node's table of channel slots. The node's
+/// The node's table of channel slots. A key holds at most two slots: its slot as an
+/// index, which never changes, and its slot as a data channel, which each
+/// [`retire`](Self::retire) replaces. Slots count from 0, and no slot goes to a second
+/// key or role. Give it only keys from the spec or the node's disk, which limit the
+/// keys that it holds: it hashes with no key. The node's
 /// [`Interner`](crate::frame::key_set::Interner) owns it.
 #[derive(Debug, Default)]
 pub struct Slots {
-    assigned: hash::Map<Key, Slot>,
+    indexes: hash::Map<Key, Slot>,
+    data: hash::Map<Key, Slot>,
     /// The slots given, which a retire does not lower.
     given: u64,
 }
@@ -92,28 +97,46 @@ impl Slots {
         Self::default()
     }
 
-    /// The slot of `key`. The first call for a key, and the first call after each
-    /// [`retire`](Self::retire) of it, assigns the next slot, from 0. A slot is never
-    /// reused. Give it only keys from the spec or the node's disk, which limit the keys
-    /// that the table holds: it hashes with no key.
+    /// The slot of `key` as an index. The first call for `key` assigns the next slot,
+    /// and each later call gives the same slot, also after `key` was a data channel.
+    /// The buffer keys the tails of an index by this slot.
     ///
     /// # Panics
     ///
     /// If the table already assigned 2^32 slots.
     pub fn index(&mut self, key: Key) -> Slot {
-        *self.assigned.entry(key).or_insert_with(|| {
-            let slot =
-                u32::try_from(self.given).expect("a node assigns at most 2^32 slots");
-            self.given += 1;
-            Slot(slot)
-        })
+        *self
+            .indexes
+            .entry(key)
+            .or_insert_with(|| next(&mut self.given))
     }
 
-    /// Retires the slot of `key`: the next [`index`](Self::index) of `key` gives a
-    /// slot that no key had.
-    pub fn retire(&mut self, key: Key) {
-        self.assigned.remove(&key);
+    /// The slot of `key` as a data channel. The first call for `key`, and the first
+    /// call after each [`retire`](Self::retire) of it, assigns the next slot. It is
+    /// never the slot of `key` as an index.
+    ///
+    /// # Panics
+    ///
+    /// If the table already assigned 2^32 slots.
+    pub fn data(&mut self, key: Key) -> Slot {
+        *self
+            .data
+            .entry(key)
+            .or_insert_with(|| next(&mut self.given))
     }
+
+    /// Retires the slot of `key` as a data channel: the next [`data`](Self::data) of
+    /// `key` gives a slot that no key had. The slot of `key` as an index stays.
+    pub fn retire(&mut self, key: Key) {
+        self.data.remove(&key);
+    }
+}
+
+/// The slot after the `given` slots, which it counts.
+fn next(given: &mut u64) -> Slot {
+    let slot = u32::try_from(*given).expect("a node assigns at most 2^32 slots");
+    *given += 1;
+    Slot(slot)
 }
 
 #[cfg(test)]
@@ -241,36 +264,73 @@ mod tests {
     }
 
     #[test]
-    fn assigns_dense_slots_once_per_key() {
+    fn assigns_dense_slots_once_per_key_and_role() {
+        let mut slots = Slots::new();
+        let (a, b) = (Key::from_u128(7), Key::from_u128(3));
+        assert_eq!(slots.index(a), Slot::new(0));
+        assert_eq!(slots.data(b), Slot::new(1));
+        assert_eq!(slots.index(a), Slot::new(0));
+        assert_eq!(slots.data(b), Slot::new(1));
+        assert_eq!(slots.data(a), Slot::new(2));
+        assert_eq!(slots.index(b), Slot::new(3));
+        assert_eq!(slots.index(Key::from_u128(9)), Slot::new(4));
+    }
+
+    #[test]
+    fn keeps_the_index_slot_after_data_and_retire_of_its_key() {
         let mut slots = Slots::new();
         let a = Key::from_u128(7);
-        let b = Key::from_u128(3);
         assert_eq!(slots.index(a), Slot::new(0));
-        assert_eq!(slots.index(b), Slot::new(1));
+        assert_eq!(slots.data(a), Slot::new(1));
+        slots.retire(a);
         assert_eq!(slots.index(a), Slot::new(0));
-        assert_eq!(slots.index(Key::from_u128(9)), Slot::new(2));
     }
 
     #[test]
-    fn assigns_a_new_slot_to_a_retired_key() {
+    fn gives_a_new_data_slot_after_each_retire() {
         let mut slots = Slots::new();
-        let (a, b, c) = (Key::from_u128(7), Key::from_u128(3), Key::from_u128(9));
-        assert_eq!(slots.index(a), Slot::new(0));
-        assert_eq!(slots.index(b), Slot::new(1));
+        let (a, b) = (Key::from_u128(7), Key::from_u128(3));
+        assert_eq!(slots.data(a), Slot::new(0));
+        assert_eq!(slots.data(b), Slot::new(1));
         slots.retire(a);
-        assert_eq!(slots.index(a), Slot::new(2));
-        assert_eq!(slots.index(c), Slot::new(3));
-        assert_eq!(slots.index(b), Slot::new(1));
+        assert_eq!(slots.data(a), Slot::new(2));
+        assert_eq!(slots.index(a), Slot::new(3));
+        slots.retire(a);
+        assert_eq!(slots.data(a), Slot::new(4));
+        assert_eq!(slots.index(a), Slot::new(3));
+        assert_eq!(slots.data(b), Slot::new(1));
         let unassigned = Key::from_u128(5);
         slots.retire(unassigned);
-        assert_eq!(slots.index(unassigned), Slot::new(4));
+        assert_eq!(slots.data(unassigned), Slot::new(5));
     }
 
+    /// A restart makes a new table, so an index that was a data channel before it
+    /// gets its slot back in this order.
+    #[test]
+    fn gives_the_first_slot_to_an_index_after_its_data_slot_retires() {
+        let mut slots = Slots::new();
+        let a = Key::from_u128(3);
+        assert_eq!(slots.index(a), Slot::new(0));
+        slots.data(a);
+        slots.retire(a);
+        assert_eq!(slots.index(a), Slot::new(0));
+    }
+
+    /// It sets the private count, as no test can make 2^32 calls.
     #[test]
     #[should_panic(expected = "a node assigns at most 2^32 slots")]
-    fn panics_at_the_assign_after_2_32_slots() {
+    fn panics_at_the_index_after_2_32_slots() {
         let mut slots = Slots::new();
         slots.given = 1 << 32;
         slots.index(Key::from_u128(7));
+    }
+
+    /// It sets the private count, as no test can make 2^32 calls.
+    #[test]
+    #[should_panic(expected = "a node assigns at most 2^32 slots")]
+    fn panics_at_the_data_slot_after_2_32_slots() {
+        let mut slots = Slots::new();
+        slots.given = 1 << 32;
+        slots.data(Key::from_u128(7));
     }
 }

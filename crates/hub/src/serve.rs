@@ -328,14 +328,7 @@ async fn open(
     let Some((at, granted)) = wait(state, &keys, index, home, receiver).await? else {
         return Ok(None);
     };
-    let slots: Box<[Slot]> = {
-        let mut borrowed = state.borrow_mut();
-        borrowed.carry(keys[at]);
-        let interner = &mut borrowed.interner;
-        keys.iter()
-            .map(|&key| interner.slots().index(key))
-            .collect()
-    };
+    let slots = state.borrow_mut().slots(keys[at], &keys);
     let index = slots[at];
     let keys: Box<[channel::Key]> = keys.into();
     let (session, credit) = match open.mode {
@@ -390,7 +383,7 @@ fn check(
 }
 
 /// Waits until the mesh names this node the home of the index of `keys`, and checks
-/// `keys` again after it, since a call of `set_definitions` while the open reads or
+/// `keys` again after it, as a call of `set_definitions` while the open reads or
 /// waits can change a key. Waits again when the index changed. Gives the position of
 /// the index in `keys` and the highest grant that the peer sent, or `None` when the
 /// peer finished first.
@@ -426,18 +419,18 @@ async fn wait_for(
     home: &mut Home,
     receiver: &mut Receiver,
 ) -> Result<Option<u64>, Error> {
-    let mut carry = pin!(crate::home(state, index));
+    let mut homed = pin!(crate::home(state, index));
     let mut granted = 0;
     loop {
         let mut recv = pin!(receiver.recv());
-        let read = poll_fn(|cx| match carry.as_mut().poll(cx) {
-            Poll::Ready(carried) => Poll::Ready(Err(carried)),
+        let read = poll_fn(|cx| match homed.as_mut().poll(cx) {
+            Poll::Ready(found) => Poll::Ready(Err(found)),
             Poll::Pending => recv.as_mut().poll(cx).map(Ok),
         })
         .await;
         let message = match read {
-            Err(carried) => {
-                carried?;
+            Err(found) => {
+                found?;
                 return Ok(Some(granted));
             }
             Ok(read) => match read? {
@@ -649,7 +642,11 @@ mod tests {
     fn gives_the_range_of_the_index_group_of_the_session() {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
-        let [_, _, index, _] = [1, 2, 4, 5].map(|k| interner.slots().index(key(k)));
+        let slots = interner.slots();
+        slots.index(key(1));
+        slots.data(key(2));
+        let index = slots.index(key(4));
+        slots.data(key(5));
         let set = interner.intern(&[
             Group {
                 index: key(1),

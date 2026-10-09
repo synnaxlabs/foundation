@@ -332,6 +332,152 @@ fn gives_a_latest_reader_no_series_of_a_channel_that_moved_away_and_back() {
     });
 }
 
+/// A data channel at the key of an index between two definitions of a data channel
+/// there does not give the second one the series of the first.
+#[test]
+fn gives_a_latest_reader_no_series_of_a_data_channel_before_an_index_at_its_key() {
+    run(43, |test| async move {
+        let mut data = without(&["time-b", "value-b"]);
+        data.insert(name("time-b"), definition(3, DataType::Sample(I64), 1));
+        test.hub.set_definitions(&data);
+        let mut writer = test.writer("a", &["time-b"]).await;
+        let now = test.now();
+        let outcomes = write_series(&mut writer, &[(1, &[now]), (3, &[10])]);
+        assert_eq!(seq(&outcomes), 0);
+        drop(writer);
+        test.hub.set_definitions(&channels());
+        let mut data = without(&["time-b", "value-b"]);
+        data.insert(name("time-b"), definition(3, DataType::Sample(I32), 1));
+        test.hub.set_definitions(&data);
+        let mut reader = test.reader(&["time-b"], Mode::Latest).await;
+        let received = reader.next().await.expect("the newest frame");
+        assert_eq!(keys(&received), [1]);
+    });
+}
+
+/// An index that becomes a data channel at its key and then an index again continues
+/// its seq from the buffer, as an index that leaves and returns does.
+#[test]
+fn continues_the_seq_of_an_index_that_was_a_data_channel_between() {
+    run(31, |test| async move {
+        let mut writer = test.writer("a", &["value-b"]).await;
+        let now = test.now();
+        assert_eq!(
+            seq(&write_series(&mut writer, &[(3, &[now]), (4, &[10])])),
+            0
+        );
+        drop(writer);
+        let mut data = without(&["time-b", "value-b"]);
+        data.insert(name("time-b"), definition(3, DataType::Sample(I64), 1));
+        test.hub.set_definitions(&data);
+        test.hub.set_definitions(&channels());
+        let mut writer = test.writer("b", &["value-b"]).await;
+        let outcomes = write_series(&mut writer, &[(3, &[now + 1]), (4, &[20])]);
+        assert_eq!(seq(&outcomes), 1);
+    });
+}
+
+/// The seq of a write on `value-b` after a restart, where the first call of the new
+/// hub defines `time-b` as a data channel when `data`, before the index again.
+fn seq_after_restart(seed: u64, data: bool) -> u64 {
+    let out = Arc::new(Mutex::new(None));
+    let set = Arc::clone(&out);
+    run(seed, move |test| async move {
+        let mut writer = test.writer("a", &["value-b"]).await;
+        let now = test.now();
+        assert_eq!(
+            seq(&write_series(&mut writer, &[(3, &[now]), (4, &[10])])),
+            0
+        );
+        test.clock.sleep(SETTLE).await;
+        let super::Test {
+            node,
+            mut commit,
+            hub,
+            mesh,
+            tasks,
+            clock,
+            ..
+        } = test;
+        drop((hub, writer));
+        assert_eq!((&mut commit).await, Ok(()));
+        drop(commit);
+        clock.sleep(SETTLE).await;
+        let hub = reopen(&node, tasks, mesh.clone()).await;
+        if data {
+            let mut data = without(&["time-b", "value-b"]);
+            data.insert(name("time-b"), definition(3, DataType::Sample(I64), 1));
+            hub.set_definitions(&data);
+        }
+        hub.set_definitions(&channels());
+        let mut writer = hub.writer(config("b", &["value-b"])).await.expect("opens");
+        let now = mesh.now().mesh.expect("mesh time");
+        let now = now.earliest.nanos().midpoint(now.latest.nanos());
+        let outcomes = write_series(&mut writer, &[(3, &[now]), (4, &[20])]);
+        *set.lock().expect("not poisoned") = Some(seq(&outcomes));
+    });
+    out.lock().expect("not poisoned").expect("the run ended")
+}
+
+/// A hub on the ring that a hub of `node` left, as after a restart, with no
+/// definitions.
+async fn reopen(
+    node: &sim::node::Node,
+    tasks: env::tasks::Tasks,
+    mesh: clock::Reader,
+) -> hub::Hub {
+    let budget = block::Config {
+        budget: super::POOL,
+    };
+    let pool = std::rc::Rc::new(block::Pool::new(
+        budget.clone(),
+        block::Heap::new(budget.reservation()),
+    ));
+    let mut interner = types::frame::key_set::Interner::new();
+    let layout = buffer::Layout::new(super::AREA, super::BODY_MAX).expect("a ring");
+    let ring = buffer::Config {
+        files: node.files(),
+        dir: std::path::PathBuf::from(super::DIR),
+        pool,
+        clock: node.clock(),
+        tasks: tasks.clone(),
+        entropy: node.entropy(),
+        layout,
+        commit: super::COMMIT,
+    };
+    let buffer = buffer::Buffer::open(ring, interner.slots())
+        .await
+        .expect("opens");
+    let home = home::Shard::new(home::Config {
+        shard: 0,
+        buffer,
+        clock: mesh.clone(),
+        limits: super::LIMITS,
+    });
+    hub::Hub::new(hub::Config {
+        home,
+        interner,
+        tasks,
+        node: super::NODE,
+        time: mesh.clone(),
+        entropy: node.entropy(),
+        mesh: None,
+    })
+}
+
+/// Control: an index defined at the first call after a restart continues its seq.
+#[test]
+fn continues_the_seq_of_an_index_after_a_restart() {
+    assert_eq!(seq_after_restart(42, false), 1);
+}
+
+/// An index whose key is a data channel at the first call after a restart, and then
+/// an index again, continues its seq from the buffer.
+#[test]
+fn continues_the_seq_of_an_index_that_is_a_data_channel_after_a_restart() {
+    assert_eq!(seq_after_restart(42, true), 1);
+}
+
 /// The ring bytes after 8 writers on `value` open and then end: by a removal of
 /// `value` when `removed`, else by drops in open order.
 fn ring_after_writers_end(removed: bool) -> Vec<u8> {
