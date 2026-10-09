@@ -597,12 +597,33 @@ fn opens_a_writer_once_the_node_has_mesh_time_and_a_reader_before() {
         test.clock.sleep(Span::SECOND).await;
         assert!(poll_once(opening.as_mut()).is_pending());
         test.sync().await;
+        let synced = test.clock.now();
         let mut writer = opening.await.expect("opens");
+        assert!(
+            test.clock.now() - synced <= Span::SECOND,
+            "opens at the next read"
+        );
         let now = writer.now();
         assert_eq!(now.nanos(), test.now());
         assert_eq!(write(&mut writer, &[now.nanos()], &[1]), [applied(0)]);
         let received = reader.next().await.expect("a frame");
         assert_eq!(samples(&received, 2), [1]);
+    });
+}
+
+#[test]
+fn opens_no_writer_with_a_lease_of_zero() {
+    run(9, |test| async move {
+        let config = writer::Config {
+            lease: Some(Span::ZERO),
+            ..config("a", &["value"])
+        };
+        let error = test.hub.writer(config).await.expect_err("a lease of zero");
+        let lease = hub::home::writer::Error::Lease { span: Span::ZERO };
+        assert_eq!(error, writer::Error::Home(lease));
+        let want =
+            format!("control lease must be longer than zero, got {}", Span::ZERO);
+        assert_eq!(error.to_string(), want);
     });
 }
 
