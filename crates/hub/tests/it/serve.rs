@@ -18,8 +18,8 @@ use spec::data_type::DataType;
 use transport::stream::{Incoming, Receiver, Sender};
 use transport::{Address, Class, Code};
 use types::channel;
-use types::frame::Form;
 use types::frame::Path as FramePath;
+use types::frame::{self, Form};
 use types::sample::{Scalar, Type};
 use types::time::Span;
 use wire::Protocol;
@@ -960,6 +960,44 @@ fn sends_each_frame_through_the_places_of_the_open() {
             assert_eq!(got_values, values);
             assert_eq!(got_stamps, stamps);
         }
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
+/// A frame of both indexes, whose groups hold different seqs and counts: a session on
+/// `time-b` gets the range of its own group.
+#[test]
+fn sends_the_range_of_the_group_of_the_session() {
+    let home = |test: Test, link: Link, incoming| async move {
+        let mut writer = test.writer("a", &["value", "value-b"]).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            write(&mut writer, &[now], &[10]);
+            let stamps = [now + 1, now + 2];
+            let stamps_b = [now, now + 1, now + 2];
+            let series = [
+                (1, &stamps[..]),
+                (2, &[20, 30][..]),
+                (3, &stamps_b[..]),
+                (4, &[40, 50, 60][..]),
+            ];
+            let written = write_series(&mut writer, &series);
+            assert_eq!(written.len(), 2, "{written:?}");
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session(74, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[4, 3], 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        assert_eq!(got.head.range, frame::Range { seq: 0, count: 3 });
+        assert_eq!(places(&got), [0, 1]);
+        let [values, stamps] =
+            <[_; 2]>::try_from(decoded(&got, &[I64, STAMP])).expect("two series");
+        assert_eq!(values, [40, 50, 60]);
+        assert_eq!(stamps, [0, 1, 2].map(|at| stamps[0] + at));
         peer.sender.finish().expect("finishes");
         assert_eq!(peer.recv().await, Ok(None));
     });
