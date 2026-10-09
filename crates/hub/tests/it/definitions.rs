@@ -594,7 +594,7 @@ async fn reopen(
         node: super::NODE,
         time: mesh.clone(),
         entropy: node.entropy(),
-        mesh: None,
+        region: None,
     })
 }
 

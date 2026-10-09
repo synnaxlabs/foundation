@@ -1,0 +1,17 @@
+[package]
+name = "maskedpatched"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+up-x = { package = "p", path = "../../patches/p" }
+up_x = { package = "p", version = "1" }
+
+[dev-dependencies]
+up_x = { package = "p", version = "1.5" }
+
+[patch.crates-io]
+p = { path = "../../patches/p" }

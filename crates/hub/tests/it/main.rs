@@ -32,10 +32,16 @@ use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
+#[path = "../common/net.rs"]
+mod net;
+
 mod client;
 mod definitions;
 mod link;
+#[path = "../common/node.rs"]
+mod node;
 mod region;
+mod remote;
 mod serve;
 
 /// The node key of the hub under test.
@@ -74,6 +80,12 @@ const CHANNELS: [(u128, &str, Type, u128); 5] = [
     (4, "value-b", I64, 3),
     (5, "value-c", I64, 1),
 ];
+/// The key of `time` in [`CHANNELS`].
+const TIME: channel::Key = channel::Key::from_u128(CHANNELS[0].0);
+/// The key of `value` in [`CHANNELS`].
+const VALUE: channel::Key = channel::Key::from_u128(CHANNELS[1].0);
+/// The key of `time-b` in [`CHANNELS`].
+const TIME_B: channel::Key = channel::Key::from_u128(CHANNELS[2].0);
 
 /// What one test gets: a hub on one shard, with [`CHANNELS`] defined.
 struct Test {
@@ -92,8 +104,8 @@ struct Test {
     unsynced: Option<clock::Clock>,
     /// A commit of the home, taken before the hub had it. It holds the ring open.
     commit: home::Commit,
-    /// The mesh of the node's region, which the hub holds too.
-    region: Option<mesh::Mesh>,
+    /// The node's region, which the hub holds too.
+    region: Option<hub::Region>,
     hub: Hub,
 }
 
@@ -105,7 +117,7 @@ impl Test {
         tasks: Tasks,
         layout: buffer::Layout,
         pool: usize,
-        region: Option<mesh::Mesh>,
+        region: Option<hub::Region>,
     ) -> Self {
         let config = block::Config { budget: pool };
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
@@ -145,7 +157,10 @@ impl Test {
             node: NODE,
             time: mesh.clone(),
             entropy: node.entropy(),
-            mesh: region.clone(),
+            region: region.as_ref().map(|region| hub::Region {
+                mesh: region.mesh.clone(),
+                transport: Rc::clone(&region.transport),
+            }),
         });
         hub.set_definitions(&channels());
         Self {
@@ -358,7 +373,7 @@ fn write(writer: &mut Writer, stamps: &[i64], values: &[i64]) -> Vec<Outcome> {
     write_series(writer, &[(1, stamps), (2, values)])
 }
 
-/// Writes the samples of each channel by key, in one group: the first is its index.
+/// Writes the samples of each channel by key, as [`draft`] makes them.
 fn write_series(writer: &mut Writer, channels: &[(u128, &[i64])]) -> Vec<Outcome> {
     written(writer, channels).expect("the home takes it")
 }
@@ -372,25 +387,27 @@ fn written(
     writer.write(LIVE, draft).map(<[_]>::to_vec)
 }
 
-/// A frame of the samples of each channel by key, in one group: the first is its
-/// index.
+/// A frame of the samples of each channel by key. The count of each group is that of
+/// its index's samples.
 fn draft(writer: &Writer, channels: &[(u128, &[i64])]) -> frame::Draft {
     let set = writer.set();
-    let entries: Vec<_> = channels.iter().map(|&(key, _)| entry(set, key)).collect();
-    let group = set.entries()[entries[0]].group;
-    let mut series: Vec<_> = (entries.iter().zip(channels))
-        .map(|(&entry, (_, samples))| (entry, samples.len() * 8))
+    let mut series: Vec<_> = channels
+        .iter()
+        .map(|&(key, samples)| (entry(set, key), samples.len() * 8))
         .collect();
     series.sort_unstable();
     let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
-    for (&entry, (_, samples)) in entries.iter().zip(channels) {
+    for &(key, samples) in channels {
+        let entry = entry(set, key);
         let bytes = draft.series_mut(entry).expect("the series is present");
-        for (bytes, sample) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(*samples) {
+        for (bytes, sample) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(samples) {
             *bytes = sample.to_le_bytes();
         }
+        if set.index(entry) == entry {
+            let count = u32::try_from(samples.len()).expect("a short frame");
+            draft.set_count(set.entries()[entry].group, count);
+        }
     }
-    let count = u32::try_from(channels[0].1.len()).expect("a short frame");
-    draft.set_count(group, count);
     draft
 }
 

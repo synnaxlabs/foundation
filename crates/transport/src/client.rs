@@ -83,7 +83,7 @@ impl Client {
         node: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        let dialed = dial::dial(&self.carrier.dialer(), node, addresses).await;
+        let dialed = dial::dial(&self.carrier.handle(), node, addresses).await;
         dialed.map(Session::new)
     }
 }

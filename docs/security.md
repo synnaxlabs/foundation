@@ -370,7 +370,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; each valid message made from the input decodes to itself |
 | `wire_blob` | `wire::blob::Server::decode`, `Requester::decode`, `Put::body`, `Reply::body`, `Body::take`, `Body::end`, `get::encode`, `Put::encode`, `Reply::encode` | Each message encodes to the same bytes; each body counts exactly the bytes of its head, and each refusal of a body is the one that its rest gives; a body ends unfinished while bytes remain; each valid message made from the input decodes to itself |
-| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
+| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reader::end`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; the body is where `Reader::body` says; `Reader::end` refuses each point before `Behind`, with `Unfinished` inside a body; each valid message made from the input decodes to itself |
 | `wire_hub_client` | `wire::hub::client::Challenge::decode`, `Signed::decode`, `Request::decode`, `Response::decode`, `Body::take`, `Body::end`, and the encoders of each message | Each message encodes to the same bytes; each decoder refuses another kind with `Error::Kind`; each body ends at its length and nowhere else, and each refusal of a body is the one that its rest gives; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
 | `transport_certificate` | `transport::fuzzing::peer`: the client verifier and the peer of a node's server, for a dialer's chain of 0 to 3 certificates (feature `fuzzing`) | Gives the peer that a second reader of the rules gives: a client for no certificate, none for a chain of more than one or a certificate over 1024 bytes, and else none or the node whose key follows the Ed25519 key header in the certificate; a certificate that a node issues reads back to its key, and two of it are refused. Not reached: the handshake signature, which fuzzed bytes cannot make |
@@ -411,11 +411,10 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 No target yet, because the decoder is private, not built, not reached from a file, or
 not reached from the corpus: `transport::message` (#55), the QUIC hello
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
-#336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
-mesh log files and the names of their directory (`mesh::log::scan` and
-`mesh::log::sequence`, #1746), the names in the directory of the spec in use
-(`mesh::driver::used::pointer`, #1746), each connector's protocol parser, the OPC UA
-binary decoding of open62541 (`UA_decodeBinary`, #1885), and `connector::reader::read`,
-`connector::http::uri`, and `connector_influx::Kind::parse`, which `config_check`
-reaches only from an input with a `connector` block of kind `influx`, and no input holds
-one yet (#1817).
+#336 adds its target), `spec` tree chunks (#64), the scan of the mesh log files and the
+names of their directory (`mesh::log::scan` and `mesh::log::sequence`, #1746), the names
+in the directory of the spec in use (`mesh::driver::used::pointer`, #1746), each
+connector's protocol parser, the OPC UA binary decoding of open62541 (`UA_decodeBinary`,
+#1885), and `connector::reader::read`, `connector::http::uri`, and
+`connector_influx::Kind::parse`, which `config_check` reaches only from an input with a
+`connector` block of kind `influx`, and no input holds one yet (#1817).

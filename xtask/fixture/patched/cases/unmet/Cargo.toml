@@ -1,0 +1,13 @@
+[package]
+name = "unmet"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+p = "1.5"
+
+[patch.crates-io]
+p = { path = "../../patches/p" }
