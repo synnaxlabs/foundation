@@ -36,7 +36,10 @@
   https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074512538).
   It did so for the swapped results of `cmpBatchWindow` at `17a75f322` (approved by
   `laptop.architect-2`, 2026-10-09T05:27:21Z,
-  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074900634).
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074900634), and
+  for its tests and its row in `docs/dependencies.md` at `7a0913317` (approved by
+  `laptop.architect-2`, 2026-10-09T06:23:46Z,
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6075586406).
   A change of a file that the copy command of a C copy generates (the thread-local
   block of the open62541 `config.h`) is made again after each run of that command, as
   a change of a release file is, and a test fails when it is lost (`laptop.architect-2`,
