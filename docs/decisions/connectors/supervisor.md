@@ -15,7 +15,8 @@
   https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6067043337). It also
   waits so before it returns (`laptop.architect-2`, 2026-10-09T01:06:45Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6072159701, item
-  1). The wait does not count toward the run's length (`laptop.architect-2`, 2026-10-09T01:56:56Z:
+  1). The wait does not count toward the run's length (`laptop.architect-2`,
+  2026-10-09T01:56:56Z:
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072678811). One
   supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
   entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
