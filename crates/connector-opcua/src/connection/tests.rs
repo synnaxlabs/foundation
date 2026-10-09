@@ -1,13 +1,14 @@
 use std::cell::RefCell;
+use std::convert::Infallible;
 use std::ffi::{CString, c_char, c_int, c_void};
 use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::pin::Pin;
+use std::pin::{Pin, pin};
 use std::ptr;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
-use env::clock::{Clock, Sleep};
+use env::clock::Clock;
 use env::net::{Tcp, tcp};
 use env::rng::Rng;
 use sim::{Sim, node};
@@ -108,10 +109,9 @@ fn set(map: &mut KeyValueMap, key: &str, value: *const c_void, kind: u32) {
 /// One call of the connection callback: the connection, the state, and the message.
 type Call = (usize, ConnectionState, Vec<u8>);
 
-/// A loop and its manager, and the calls of the connection callback.
+/// A manager and its loop, and the calls of the connection callback.
 struct Side {
     clock: Clock,
-    events: Loop,
     manager: Manager,
     calls: Box<RefCell<Vec<Call>>>,
 }
@@ -119,22 +119,26 @@ struct Side {
 impl Side {
     fn new(node: &node::Node) -> Self {
         let clock = node.clock();
-        let events = Loop::new(Clock::clone(&clock), &mut Rng::from_seed(0));
-        let manager = Manager::new(&events, node.net());
+        let manager =
+            Manager::new(Clock::clone(&clock), node.net(), &mut Rng::from_seed(0));
+        let events = manager.events();
         // SAFETY: the member takes its own loop.
         let status = Status(unsafe { (events.members().start)(events.raw()) });
         assert_eq!(status, Status::GOOD);
         Self {
             clock,
-            events,
             manager,
             calls: Box::new(RefCell::new(Vec::new())),
         }
     }
 
+    fn events(&self) -> &Loop {
+        self.manager.events()
+    }
+
     /// The manager, as the loop lists it.
     fn cm(&self) -> *mut ffi::ConnectionManager {
-        self.events.members().sources.cast()
+        self.events().members().sources.cast()
     }
 
     fn members(&self) -> &ffi::ConnectionManager {
@@ -185,35 +189,24 @@ impl Side {
     }
 
     fn run(&self) {
+        let events = self.events();
         // SAFETY: the member takes its own loop.
-        let status =
-            Status(unsafe { (self.events.members().run)(self.events.raw(), 0) });
+        let status = Status(unsafe { (events.members().run)(events.raw(), 0) });
         assert_eq!(status, Status::GOOD);
     }
 
-    /// Polls the manager and runs the loop until `span` passes, as the owner of a
-    /// client does: it sleeps until the next timer, and polls again only on that
-    /// timer or on a wake.
+    /// Drives the manager and runs the loop until `span` passes.
     async fn drive(&self, span: Span) {
-        let end = self.clock.now() + span;
-        let mut sleep: Option<(Monotonic, Sleep)> = None;
+        let mut end = self.clock.sleep(span);
+        let mut drive = pin!(self.manager.drive(|| {
+            self.run();
+            None::<Infallible>
+        }));
         poll_fn(|cx| {
-            loop {
-                self.manager.poll(cx);
-                self.run();
-                if self.clock.now() >= end {
-                    return Poll::Ready(());
-                }
-                let next = self.events.next().map_or(end, |next| next.min(end));
-                if sleep.as_ref().is_none_or(|(at, _)| *at != next) {
-                    sleep = Some((next, self.clock.sleep_until(next)));
-                }
-                let (_, timer) = sleep.as_mut().expect("invariant: set above");
-                match Pin::new(timer).poll(cx) {
-                    Poll::Ready(()) => sleep = None,
-                    Poll::Pending => return Poll::Pending,
-                }
+            if let Poll::Ready(never) = drive.as_mut().poll(cx) {
+                match never {}
             }
+            Pin::new(&mut end).poll(cx)
         })
         .await;
     }
@@ -471,7 +464,7 @@ fn a_close_of_the_peer_gives_its_bytes_then_closing_once() {
 }
 
 #[test]
-fn a_drop_unlinks_the_manager_and_drops_a_closing_that_waits() {
+fn a_drop_drops_a_closing_that_waits() {
     let mut network = Network::new();
     let reads = network.serve(None);
     let remote = network.remote();
@@ -482,17 +475,8 @@ fn a_drop_unlinks_the_manager_and_drops_a_closing_that_waits() {
             assert_eq!(side.connect(remote), Status::GOOD);
             side.drive(Span::SECOND).await;
             assert_eq!(side.close(1), Status::GOOD);
-            let Side {
-                events,
-                manager,
-                calls,
-                ..
-            } = side;
+            let Side { manager, calls, .. } = side;
             drop(manager);
-            assert!(events.members().sources.is_null());
-            // SAFETY: the member takes its own loop.
-            let status = Status(unsafe { (events.members().run)(events.raw(), 0) });
-            assert_eq!(status, Status::GOOD);
             calls.take()
         })
         .expect("the run ends");
@@ -653,8 +637,8 @@ fn after_a_timer(action: Action) -> Outcome {
                 // SAFETY: the member takes its own loop, and `later` outlives the
                 // run.
                 let status = Status(unsafe {
-                    (side.events.members().add_timer)(
-                        side.events.raw(),
+                    (side.events().members().add_timer)(
+                        side.events().raw(),
                         callback,
                         ptr::null_mut(),
                         data,
@@ -730,7 +714,7 @@ fn a_client_sends_hel_and_its_disconnect_ends_the_stream() {
         .run_on(&network.local.clone(), move |node, _| async move {
             let side = Side::new(&node);
             // SAFETY: the loop outlives the client, which the test deletes.
-            let client = unsafe { ffi::shim_client_new(side.events.raw()) };
+            let client = unsafe { ffi::shim_client_new(side.events().raw()) };
             assert!(!client.is_null());
             let url = CString::new(format!("opc.tcp://{remote}")).expect("no NUL");
             let url: *const c_char = url.as_ptr();

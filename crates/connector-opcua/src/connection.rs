@@ -7,13 +7,17 @@
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
+use std::future::poll_fn;
 use std::io::IoSlice;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
 use std::task::{Context, Poll, Waker};
 
+use env::clock::{Clock, Sleep};
 use env::net::{self, Net, Tcp, tcp};
+use env::rng::Rng;
+use types::time::Monotonic;
 
 use crate::event::Loop;
 use crate::ffi::{self, Bytes, Status};
@@ -33,20 +37,24 @@ const WRITE_PARTS: usize = 16;
 
 static HOOKS: ffi::Hooks = ffi::Hooks { open, send, close };
 
-/// A TCP connection manager on a loop, on the thread that made it. Delete each client
-/// and server on the loop before it drops, and drop it before the loop.
+/// A TCP connection manager and the loop it is linked into, on the thread that made
+/// it. Delete each client and server on its loop before it drops.
 pub(crate) struct Manager {
     state: NonNull<State>,
+    events: Loop,
+    clock: Clock,
 }
 
 impl Manager {
-    /// Makes a manager that connects through `net`, and links it first into the event
-    /// sources of `events`, where a client finds it.
+    /// Makes a loop on `clock` and `rng`, as [`Loop::new`] does, and a manager that
+    /// connects through `net`, linked first into the event sources of the loop, where
+    /// a client finds it.
     ///
     /// # Panics
     ///
-    /// When the C allocation of the manager fails.
-    pub(crate) fn new(events: &Loop, net: Net) -> Self {
+    /// When a C allocation fails.
+    pub(crate) fn new(clock: Clock, net: Net, rng: &mut Rng) -> Self {
+        let events = Loop::new(Clock::clone(&clock), rng);
         let state = NonNull::from(Box::leak(Box::new(State {
             net,
             raw: Cell::new(ptr::null_mut()),
@@ -76,15 +84,51 @@ impl Manager {
             "open62541: out of memory for a connection manager"
         );
         this.raw.set(raw);
-        Self { state }
+        Self {
+            state,
+            events,
+            clock,
+        }
+    }
+
+    /// Gives the loop, for a client or server config with `externalEventLoop`.
+    pub(crate) fn events(&self) -> &Loop {
+        &self.events
+    }
+
+    /// Moves the connections on and calls `run` until `run` gives a value, and gives
+    /// it. `run` runs the loop with a timeout of 0, alone or through its client or
+    /// server. Between calls, the drive sleeps until the next timer of the loop or a
+    /// wake, also from a send or a close that `run` or another task asks for.
+    pub(crate) async fn drive<T>(&self, mut run: impl FnMut() -> Option<T>) -> T {
+        let mut sleep: Option<(Monotonic, Sleep)> = None;
+        poll_fn(|cx| {
+            loop {
+                self.poll(cx);
+                if let Some(value) = run() {
+                    return Poll::Ready(value);
+                }
+                let Some(next) = self.events.next() else {
+                    return Poll::Pending;
+                };
+                if sleep.as_ref().is_none_or(|(at, _)| *at != next) {
+                    sleep = Some((next, self.clock.sleep_until(next)));
+                }
+                let (_, timer) = sleep.as_mut().expect("invariant: set above");
+                match Pin::new(timer).poll(cx) {
+                    Poll::Ready(()) => sleep = None,
+                    Poll::Pending => return Poll::Pending,
+                }
+            }
+        })
+        .await
     }
 
     /// Connects, reads, and writes each connection until each waits, and wakes the
     /// task of `cx` when one can go on. It calls the connection callbacks of
     /// open62541, so a call that sends or closes from outside a poll also wakes that
-    /// task. Run the loop after it: a connection ends with a callback that the next
-    /// run of the loop calls.
-    pub(crate) fn poll(&self, cx: &mut Context<'_>) {
+    /// task.
+    fn poll(&self, cx: &mut Context<'_>) {
         let state = self.state();
         state.park(cx.waker());
         let mut after = 0;
@@ -109,7 +153,8 @@ impl Manager {
 }
 
 impl Drop for Manager {
-    /// Drops each connection with no callback, and unlinks and frees the manager.
+    /// Drops each connection with no callback, unlinks and frees the manager, then
+    /// drops the loop.
     fn drop(&mut self) {
         let state = self.state();
         if state.queued.get() {
