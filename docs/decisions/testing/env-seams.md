@@ -68,8 +68,13 @@
   behind one thread. Socket options come from `rustix`, and `TCP_NOTSENT_LOWAT`, which
   it lacks, from one `libc::setsockopt`. Decided by `laptop.architect-2` (2026-10-08
   02:32 UTC, #120,
-  https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). On
-  `os`, a UDP socket uses `noq-udp` for its socket calls: GSO, GRO, `recvmmsg`, ECN,
+  https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). Amended
+  (2026-10-09, #2108): A drop of an `os` listener stops its listen at once on Linux,
+  also while a child holds a copy of the socket, from its fork to its exec. macOS has no
+  call that stops the listen of a copy, so there a connect in that window succeeds and
+  resets at the exec (`laptop.architect-2`, 2026-10-09T04:57:56Z:
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074581669). On `os`,
+  a UDP socket uses `noq-udp` for its socket calls: GSO, GRO, `recvmmsg`, ECN,
   the local address, and don't-fragment. `os` binds with `rustix`, with `IPV6_V6ONLY`
   off on an IPv6 socket, and routes as `sim` does: a socket on `::` sends IPv4 as
   `::ffff:a.b.c.d`, and any other socket that gets a destination of the other family
