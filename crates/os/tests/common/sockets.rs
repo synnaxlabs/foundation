@@ -17,7 +17,7 @@ pub(crate) const BIND: udp::Config = udp::Config {
     recv_buffer_bytes: 1 << 16,
 };
 
-const OPTIONS: Options = Options {
+pub(crate) const OPTIONS: Options = Options {
     send_buffer_bytes: 1 << 16,
     recv_buffer_bytes: 1 << 16,
     unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
