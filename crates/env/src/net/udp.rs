@@ -91,8 +91,8 @@ impl Sender {
     }
 
     /// Sends every datagram of `transmit`. It is pending while the OS send buffer is
-    /// full. Some datagrams may have gone out before a `Pending` or an error, and a
-    /// retry sends them again.
+    /// full. After `Pending`, call it again with the same transmit: it sends only the
+    /// datagrams that did not go out. Some datagrams may have gone out before an error.
     ///
     /// # Errors
     ///
