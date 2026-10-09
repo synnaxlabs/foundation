@@ -3,13 +3,14 @@
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use connector::cancel;
 use connector::kind::{self, Channels, Context};
 use document::diagnostic::Diagnostic;
 use document::{Document, Source};
+use env::files::{self, Operation};
 use env::tasks::Tasks;
 use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
@@ -210,12 +211,41 @@ pub(crate) fn founded<F: Future<Output = ()> + 'static>(
     definitions: BTreeMap<Name, Definition>,
     body: impl FnOnce(Mesh) -> F + Send + 'static,
 ) {
+    founded_on(names, definitions, |_, mesh| body(mesh));
+}
+
+/// As [`solo`], and also gives `body` the node.
+pub(crate) fn solo_on<F: Future<Output = ()> + 'static>(
+    body: impl FnOnce(sim::node::Node, Mesh) -> F + Send + 'static,
+) {
+    founded_on(&["edge"], spec::founding::create(ADMIN.public()), body);
+}
+
+fn founded_on<F: Future<Output = ()> + 'static>(
+    names: &'static [&'static str],
+    definitions: BTreeMap<Name, Definition>,
+    body: impl FnOnce(sim::node::Node, Mesh) -> F + Send + 'static,
+) {
     let mut sim = Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     let ran = sim.run_on(&node, move |node, tasks| async move {
-        body(open(&node, &tasks, names, definitions).await).await;
+        let mesh = open(&node, &tasks, names, definitions).await;
+        body(node, mesh).await;
     });
     assert_eq!(ran, Ok(()));
+}
+
+/// Makes each sync of the log of the mesh of [`open`] on `node` fail, and gives the
+/// stop of its group at its next write of the log.
+pub(crate) fn fail_sync(node: &sim::node::Node) -> mesh::Stopped {
+    let path = Path::new("log").join("log-0");
+    node.fail_file(&path, Operation::Sync);
+    let cause = files::Error::Io {
+        path,
+        operation: Operation::Sync,
+        code: 5,
+    };
+    mesh::Stopped::Write(mesh::log::Error::Files(cause))
 }
 
 /// Gives `Key::from_u128(n)` for each `n` from `from` up.

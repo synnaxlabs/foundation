@@ -1,6 +1,9 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::future::poll_fn;
 use std::path::{Path, PathBuf};
+use std::pin::pin;
+use std::task::Poll;
 
 use connector::kind::Table;
 use document::Source;
@@ -10,10 +13,13 @@ use types::channel::Key;
 
 use super::Node;
 use crate::apply::Applied;
-use crate::common::{NODE, PLANT, Reader, front_ends, placed_site, solo};
+use crate::common::{
+    NODE, PLANT, Reader, fail_sync, front_ends, placed_site, solo, solo_on,
+};
 use crate::error::{Error, Problem};
 use crate::front_end::{self, File};
 use crate::plan::{self, Counts};
+use crate::used;
 
 /// The node of `mesh`, whose channel keys count from 1.
 fn create_node(mesh: Mesh) -> Node {
@@ -165,5 +171,33 @@ fn debug_names_each_front_end() {
     solo(|mesh| async move {
         let node = create_node(mesh);
         assert_eq!(format!("{node:?}"), r#"Node { front_ends: ["hcl"], .. }"#);
+    });
+}
+
+#[test]
+fn gives_a_stop_of_the_group_as_stopped_in_plan() {
+    solo_on(|sim, mesh| async move {
+        let node = create_node(mesh.clone());
+        let (plan, _) = node.plan(site()).await.expect("a plan");
+        node.apply(Path::new("site.plan"), &plan)
+            .await
+            .expect("an apply");
+        // `Mesh::spec` gives the stop only while the read of a committed spec waits.
+        let mut read = pin!(mesh.spec());
+        let polled = poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await;
+        assert!(polled.is_pending());
+        let stopped = fail_sync(&sim);
+        let home = mesh.set_home(Key::from_u128(1), NODE).await;
+        assert_eq!(home, Err(mesh::Error::Stopped(stopped.clone())));
+        let problem = json!({
+            "code": "ops.stopped",
+            "message": stopped.to_string(),
+            "fix": "Start the node, then plan again",
+            "notes": [],
+        });
+        assert_eq!(node.plan(site()).await, Err(json!({ "errors": [problem] })));
+        let error = used::spec(&mesh).await.expect_err("a stop");
+        assert_eq!(error, Error::Stopped(stopped));
+        assert_eq!(error.status(), 1);
     });
 }

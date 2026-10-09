@@ -50,7 +50,7 @@
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681.
   Decided by `laptop.architect-2` (2026-10-08T18:03:02Z,
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681).
-  The apply gives five codes of its own. A plan file path that is not UTF-8 is
+  The apply gives six codes of its own. A plan file path that is not UTF-8 is
   `ops.path-not-utf8`, status 2, as in `plan`. Each `config::plan::Error` is
   `ops.bad-plan`, status 2, with its `Display` as the message and the fix ``Make a plan
   with `foundation plan`, and apply it with no edits``. A node with no spec in use or
@@ -61,10 +61,16 @@
   base is not the spec in use, before the proposal or after another change applies
   first, is `ops.stale-plan`, status 1, fix `Plan again`. Each other error of
   `Mesh::apply` is `ops.apply`, status 1, with its `Display` as the message and the fix
-  `Fix the cause in the message, then plan and apply again`. There is no
-  `ops.reserved-change`: `Plan::definitions` refuses a change at a reserved label (FIRST
-  ADMIN). After `definitions`, each problem of `config::plan::check` is a `Config`
-  problem with its own code and no place, status 2 (PLAN FILE): plan
+  `Fix the cause in the message, then plan and apply again`. A stop of the group of the
+  mesh, from `Mesh::spec` or from `Mesh::apply`, is `ops.stopped`, status 1, in `plan`
+  and in `apply`, with the `Display` of the stop as the message and the fix `Start the
+  node, then plan again`. It can come after a proposal, so plan again to see whether
+  the change applied. `ops.stopped` decided by `laptop.architect-2`
+  (2026-10-09T03:42:35Z, (b) of
+  https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6073812317). There
+  is no `ops.reserved-change`: `Plan::definitions` refuses a change at a reserved label
+  (FIRST ADMIN). After `definitions`, each problem of `config::plan::check` is a
+  `Config` problem with its own code and no place, status 2 (PLAN FILE): plan
   https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071877567, approved
   by `laptop.architect-2` (2026-10-09T00:48:39Z,
   https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).

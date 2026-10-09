@@ -458,6 +458,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
             pointer,
         },
         Error::Apply(mesh::Error::NoVote),
+        Error::Stopped(mesh::Stopped::Dropped),
     ];
     for error in &every {
         // A new variant fails this match, so it joins `every` and the golden file.
@@ -471,6 +472,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
             | Error::Behind(_)
             | Error::Stale { .. }
             | Error::Apply(_)
+            | Error::Stopped(_)
             | Error::Config(_) => {}
         }
     }

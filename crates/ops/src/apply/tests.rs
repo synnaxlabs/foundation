@@ -23,8 +23,8 @@ use types::name::{Name, Prefix};
 
 use super::{Applied, apply};
 use crate::common::{
-    ADMIN, NODE, PLANT, Reader, files, founded, front_ends, keys, name, open,
-    placed_site, solo,
+    ADMIN, NODE, PLANT, Reader, fail_sync, files, founded, front_ends, keys, name,
+    open, placed_site, solo, solo_on,
 };
 use crate::error::Error;
 use crate::plan::{self, Counts, Output, plan};
@@ -687,6 +687,21 @@ fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
         );
         let error =
             refuses(&mesh, &removal.encode(), &kinds(), Error::Apply(cause)).await;
+        assert_eq!(error.text(), text);
+        assert_eq!(error.status(), 1);
+    });
+}
+
+#[test]
+fn gives_a_stop_of_the_group_as_stopped() {
+    solo_on(|node, mesh| async move {
+        let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        let stopped = fail_sync(&node);
+        let expected = Error::Stopped(stopped.clone());
+        let error = refuses(&mesh, &site.encode(), &kinds(), expected).await;
+        let text = format!(
+            "error[ops.stopped]: {stopped}\nfix: Start the node, then plan again\n"
+        );
         assert_eq!(error.text(), text);
         assert_eq!(error.status(), 1);
     });
