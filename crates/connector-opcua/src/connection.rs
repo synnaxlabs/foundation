@@ -313,7 +313,7 @@ impl State {
             .table
             .borrow_mut()
             .get_mut(&id)
-            .expect("invariant: only a pass removes a connection")
+            .expect("invariant: only `Step::Gone` of this id removes it")
             .take_stream();
         if matches!(stream, Stream::Connecting(_) | Stream::Open(_)) {
             self.queue_closing(id);
@@ -357,7 +357,7 @@ impl State {
                     self.table
                         .borrow_mut()
                         .get_mut(&id)
-                        .expect("invariant: only a pass removes a connection")
+                        .expect("invariant: only `Step::Gone` of this id removes it")
                         .buffer = buffer;
                 }
             }
