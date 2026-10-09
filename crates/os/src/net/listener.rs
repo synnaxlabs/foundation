@@ -80,18 +80,34 @@ pub(super) fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
     Ok(fd)
 }
 
-/// A child that another thread spawns holds a copy of the socket until its exec. On
-/// Linux a shutdown stops the listen of each copy, so a drop refuses at once. macOS
-/// gives `ENOTCONN` for a shutdown of a listener. A failed registration closes the
-/// socket with no shutdown.
 impl Drop for Listener {
     fn drop(&mut self) {
-        #[cfg(target_os = "linux")]
         if let Some(fd) = self.socket.fd() {
-            rustix::net::shutdown(fd, rustix::net::Shutdown::Read)
-                .expect("a listening socket shuts down");
+            stop(fd);
         }
     }
+}
+
+/// Stops the listen of `fd`. A child that another thread spawns holds a copy of the
+/// socket until its exec. On Linux a shutdown stops the listen of each copy, so a
+/// connect is refused at once. macOS gives `ENOTCONN` for a shutdown of a listener.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(unused_variables, reason = "macOS has no call that stops the listen")
+)]
+fn stop(fd: BorrowedFd<'_>) {
+    #[cfg(target_os = "linux")]
+    rustix::net::shutdown(fd, rustix::net::Shutdown::Read)
+        .expect("a listening socket shuts down");
+}
+
+/// Registers `listener` with the I/O driver of this thread. A failed registration
+/// closes the socket, so it stops the listen first.
+fn register(listener: std::net::TcpListener) -> std::io::Result<TcpListener> {
+    let copy = listener
+        .try_clone()
+        .inspect_err(|_| stop(listener.as_fd()))?;
+    TcpListener::from_std(listener).inspect_err(|_| stop(copy.as_fd()))
 }
 
 impl listener::Driver for Listener {
@@ -105,7 +121,7 @@ impl listener::Driver for Listener {
     ) -> Poll<Result<Box<dyn tcp::Driver>, Error>> {
         let listener = self
             .socket
-            .live("TCP listener", TcpListener::from_std)
+            .live("TCP listener", register)
             .map_err(io_error)?;
         let (stream, peer) =
             ready!(listener.poll_accept(cx)).map_err(|e| from_io(&e))?;
@@ -223,6 +239,37 @@ mod tests {
         let listener = Listener::listen(&config).unwrap();
         let local = listener::Driver::local(&listener);
         let _copy = rustix::io::dup(listener.socket.fd().unwrap()).unwrap();
+        drop(listener);
+        let error = std::net::TcpStream::connect(local).unwrap_err();
+        assert_eq!(
+            error.raw_os_error(),
+            Some(Errno::CONNREFUSED.raw_os_error())
+        );
+    }
+
+    /// The runtime of the thread shut down, so the registration fails.
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
+    fn a_listener_with_a_failed_registration_refuses_while_a_copy_is_open() {
+        let config = tcp::Listen {
+            local: loopback(),
+            backlog: 1,
+            options: options(),
+        };
+        let mut listener = Listener::listen(&config).unwrap();
+        let local = listener::Driver::local(&listener);
+        let _copy = rustix::io::dup(listener.socket.fd().unwrap()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        let handle = runtime.handle().clone();
+        drop(runtime);
+        let _entered = handle.enter();
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let polled = listener::Driver::poll_accept(&mut listener, &mut cx);
+        assert!(matches!(polled, Poll::Ready(Err(_))));
         drop(listener);
         let error = std::net::TcpStream::connect(local).unwrap_err();
         assert_eq!(
