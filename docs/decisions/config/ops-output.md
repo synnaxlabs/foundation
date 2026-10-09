@@ -53,8 +53,9 @@
   The apply gives four codes. Each `config::plan::Error` is `ops.bad-plan`, status 2,
   with its `Display` as the message and the fix ``Make a plan with `foundation plan`,
   and apply it with no edits``. A node with no spec in use or with `Spec::behind` set
-  gives `ops.behind`, status 1, first: the message names the newest pointer and one
-  line for its `Cause`, and the fix is `Fix the cause, then plan again`. One private
+  gives `ops.behind`, status 1, after the decode and before the base compare: the
+  message names the newest pointer and one line for its `Cause`, and the fix is
+  `Fix the cause, then plan again`. One private
   function of `ops` reads `Mesh::spec` and gives the spec in use or this error, for
   each caller. A plan whose base is not the spec in use, before the proposal or after
   another change applies first, is `ops.stale-plan`, status 1, fix `Plan again`. Each
