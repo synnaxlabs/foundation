@@ -12,6 +12,8 @@
 //!   frames hold one sample of each. A write, then one poll, which sends that frame.
 //! - `wide 1472`, `wide 64k`: as `narrow`, with an index and one data channel of
 //!   `SAMPLES` samples per frame. At 1472 bytes the body takes two messages.
+//! - `one set 1472`: the `narrow` session, while one writer of the index and half of
+//!   its data channels writes, the control of `two sets`.
 //! - `complete 1472`: a complete session of the `narrow` channels. The round's writes
 //!   and their commit, then one poll, which sends the round's frames. The open grants
 //!   the bytes of the run, so no frame waits for credit.
@@ -70,9 +72,9 @@ const ROUNDS: usize = 50;
 /// The frames of each session.
 const RUN: usize = (WARMUP + ROUNDS) * FRAMES;
 /// Samples per series of a `wide` frame.
-const SAMPLES: usize = 128;
+const SAMPLES: usize = 256;
 /// A ring that holds each frame of the run, as nothing frees a ring until #160.
-const AREA: u64 = 16 * shard::AREA;
+const AREA: u64 = 64 * shard::AREA;
 /// How long the bench waits between two checks of what the peer read.
 const STEP: Span = Span::MILLISECOND;
 
@@ -93,6 +95,8 @@ const WIDE_DATA: u128 = 102;
 enum Shape {
     Narrow,
     Wide,
+    /// The `narrow` session, and a writer of the index and half its data channels.
+    OneSet,
     TwoSets,
     /// The `narrow` writer, and a session of the index and half its data channels.
     Half,
@@ -102,7 +106,7 @@ impl Shape {
     /// The samples of each series of a frame.
     fn samples(self) -> usize {
         match self {
-            Self::Narrow | Self::TwoSets | Self::Half => 1,
+            Self::Narrow | Self::OneSet | Self::TwoSets | Self::Half => 1,
             Self::Wide => SAMPLES,
         }
     }
@@ -112,8 +116,9 @@ impl Shape {
         match self {
             Self::Narrow | Self::Half => vec![narrow(base).collect()],
             Self::Wide => vec![vec![base + WIDE, base + WIDE_DATA]],
+            Self::OneSet => vec![first(base)],
             Self::TwoSets => vec![
-                narrow(base).filter(|&key| key <= half(base)).collect(),
+                first(base),
                 narrow(base)
                     .filter(|&key| key == base + NARROW || key > half(base))
                     .collect(),
@@ -123,13 +128,11 @@ impl Shape {
 
     /// The keys that the session reads from `base`, in order.
     fn read(self, base: u128) -> Vec<u128> {
-        if let Self::Half = self {
-            return narrow(base).filter(|&key| key <= half(base)).collect();
+        match self {
+            Self::Narrow | Self::OneSet | Self::TwoSets => narrow(base).collect(),
+            Self::Wide => vec![base + WIDE, base + WIDE_DATA],
+            Self::Half => first(base),
         }
-        let mut keys = self.sets(base).concat();
-        keys.sort_unstable();
-        keys.dedup();
-        keys
     }
 }
 
@@ -138,6 +141,11 @@ fn narrow(base: u128) -> impl Iterator<Item = u128> {
     std::iter::once(NARROW)
         .chain(DATA)
         .map(move |key| base + key)
+}
+
+/// The index and the first half of the `narrow` data channels from `base`.
+fn first(base: u128) -> Vec<u128> {
+    narrow(base).filter(|&key| key <= half(base)).collect()
 }
 
 /// The last key of the first half of the `narrow` data channels from `base`.
@@ -156,6 +164,8 @@ struct Case {
     name: &'static str,
     mode: Mode,
     shape: Shape,
+    /// The messages of each frame: the head, the ends, and the body.
+    messages: usize,
 }
 
 const LATEST: Mode = Mode::Latest;
@@ -172,26 +182,37 @@ const PEERS: [(usize, &[Case]); 2] = [
                 name: "narrow 1472",
                 mode: LATEST,
                 shape: Shape::Narrow,
+                messages: 3,
             },
             Case {
                 name: "wide 1472",
                 mode: LATEST,
                 shape: Shape::Wide,
+                messages: 4,
             },
             Case {
                 name: "complete 1472",
                 mode: COMPLETE,
                 shape: Shape::Narrow,
+                messages: 3,
             },
             Case {
                 name: "complete half 1472",
                 mode: COMPLETE,
                 shape: Shape::Half,
+                messages: 3,
+            },
+            Case {
+                name: "one set 1472",
+                mode: LATEST,
+                shape: Shape::OneSet,
+                messages: 3,
             },
             Case {
                 name: "two sets 1472",
                 mode: LATEST,
                 shape: Shape::TwoSets,
+                messages: 3,
             },
         ],
     ),
@@ -202,11 +223,13 @@ const PEERS: [(usize, &[Case]); 2] = [
                 name: "narrow 64k",
                 mode: LATEST,
                 shape: Shape::Narrow,
+                messages: 3,
             },
             Case {
                 name: "wide 64k",
                 mode: LATEST,
                 shape: Shape::Wide,
+                messages: 3,
             },
         ],
     ),
@@ -366,16 +389,22 @@ async fn peer(
         let mut reader =
             open(&pool, &mut sender, &mut receiver, case.mode, &keys).await;
         progress.opened.fetch_add(1, Ordering::Relaxed);
-        let mut frames = 0;
+        let (mut frames, mut messages) = (0, 0);
         while frames < RUN {
             let message = receiver.recv().await.expect("receives").expect("a message");
             let decoded = reader.decode(&message).expect("a valid message");
+            messages += 1;
             let ended = matches!(
                 decoded,
                 FromHome::Body { .. } | FromHome::Ends { last: true, .. }
             );
             if ended && reader.body().is_none() {
-                frames += 1;
+                assert_eq!(
+                    messages, case.messages,
+                    "the messages of a frame of {}",
+                    case.name
+                );
+                (frames, messages) = (frames + 1, 0);
                 progress.frames.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -515,10 +544,18 @@ fn draft(writer: &Writer, samples: usize, stamp: &mut i64) -> Draft {
     let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
     let first = *stamp;
     *stamp += i64::try_from(samples).expect("few");
-    for entry in 0..entries.len() {
-        let bytes = draft.series_mut(entry).expect("the series is present");
+    for (at, entry) in entries.iter().enumerate() {
+        let index = entry.data_type == Type::Scalar(Scalar::Stamp);
+        let bytes = draft.series_mut(at).expect("the series is present");
         for (sample, stamp) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(first..) {
-            sample.copy_from_slice(&stamp.to_le_bytes());
+            let stamp = stamp.cast_unsigned();
+            // Values that the codec cannot shrink, as a linear run shrinks to 24 bytes.
+            let value = if index {
+                stamp
+            } else {
+                stamp.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(29) ^ stamp
+            };
+            sample.copy_from_slice(&value.to_le_bytes());
         }
     }
     draft.set_count(entries[0].group, u32::try_from(samples).expect("few"));
