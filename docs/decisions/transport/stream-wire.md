@@ -90,7 +90,11 @@
   first send after the peer's last packet that asks for an ack (`laptop.architect-2`,
   #2149, 2026-10-09 16:42 UTC:
   https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085189583; 17:07 UTC:
-  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085581998). The idle
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085581998). A link
+  that loses most datagrams can also end an honest session with this error, when the
+  peer's hello and each resend of it are lost until the bound (`laptop.architect-2`,
+  #2149, 2026-10-09 17:21 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085801016). The idle
   timeout is QUIC's: `idle`, or 3 PTO when that is longer. The second idle timeout is
   for the probe that resends a hello that a cut the session lives through (PROBE GAP)
   held back (`laptop.architect-2`, #1628, 2026-10-09 13:35 UTC:

@@ -565,8 +565,8 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::ops::Range;
     use std::pin::pin;
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Waker};
 
     use std::future::poll_fn;
@@ -1023,6 +1023,35 @@ mod tests {
             let late = Span::from_nanos(waited.load(Ordering::Relaxed));
             assert!(late > spans(Span::SECOND, after), "{delay}: {late:?}");
         }
+    }
+
+    /// Two honest nodes, on a link that loses 70% of the server's datagrams. The
+    /// server's hello and each resend of it are lost until the bound, while enough
+    /// keep-alives arrive that the idle timeout never ends the session. The client
+    /// ends it as a peer with no hello.
+    #[test]
+    fn end_a_session_whose_hello_a_lossy_link_loses_until_the_bound() {
+        let closed = Arc::new(Mutex::new(None));
+        let close = Arc::clone(&closed);
+        let (mut sim, client, server) = testing::sessions(
+            39,
+            |config| config,
+            move |side| async move {
+                *close.lock().expect("a lock") = Some(side.session.closed().await);
+            },
+            |side| async move {
+                side.session.closed().await;
+            },
+        );
+        let lossy = sim::link::Config {
+            loss: 0.7,
+            ..sim::link::Config::default()
+        };
+        sim.link(&server, &client, lossy);
+        assert_eq!(sim.run_for(spans(Span::SECOND, 10)), Ok(()));
+        let reason = "a peer with no hello".to_owned();
+        let closed = closed.lock().expect("a lock").take();
+        assert_eq!(closed, Some(Error::Broken { reason }));
     }
 
     #[test]
