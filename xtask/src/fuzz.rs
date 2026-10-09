@@ -26,9 +26,11 @@ const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 /// The least `-max_len` of a run: libFuzzer makes no input longer.
 const MAX_LEN: u64 = 16 * 1024;
 
-/// Each target, and the count of features that it must give at `INITED` to pass. Below
-/// it, a build gave the target no coverage of its C.
-const FLOORS: [(&str, u64); 1] = [("connector_opcua_decode", 1000)];
+/// Each target, and the count of features that it must give at `INITED` to pass.
+const FLOORS: [(&str, u64); 1] = [
+    // With fewer, the build gave its C no coverage.
+    ("connector_opcua_decode", 1000),
+];
 
 /// Runs each target of `fuzz/` at `root` for `seconds`, as many at once as the host has
 /// cores. Each run reads `fuzz/corpus/<target>`, which libFuzzer writes to, and
@@ -195,9 +197,8 @@ fn max_len(sizes: impl IntoIterator<Item = u64>) -> u64 {
 
 /// What the run of `target` that gave `output` prints, and its problem. A run that
 /// passed prints libFuzzer's last `Done` line, and any other run its whole output. A
-/// run that passed with no `Done` line ran no input, and a run with fewer features at
-/// `INITED` than the floor of its target in [`FLOORS`] has no coverage of its C. Each
-/// is a problem.
+/// run that passed with no `Done` line ran no input, which is a problem. So is a run
+/// with fewer features at `INITED` than the floor of its target in [`FLOORS`].
 fn report(target: &str, output: &Output) -> (String, Result<(), String>) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -208,7 +209,7 @@ fn report(target: &str, output: &Output) -> (String, Result<(), String>) {
         (true, Some(_), Some((_, floor))) if features.is_none_or(|n| n < *floor) => {
             let problem = format!(
                 "fuzz target `{target}` gave {} features at `INITED`, fewer than \
-                 {floor}, so its C has no coverage",
+                 its floor of {floor} in `FLOORS`",
                 features.map_or_else(|| "no".to_string(), |n| n.to_string())
             );
             (format!("{problem}:\n{stdout}{stderr}\n"), Err(problem))
@@ -1452,7 +1453,7 @@ mod tests {
         let refused = |n: &str| {
             Err(format!(
                 "fuzz target `{target}` gave {n} features at `INITED`, fewer than \
-                 1000, so its C has no coverage"
+                 its floor of 1000 in `FLOORS`"
             ))
         };
         assert_eq!(floor(" cov: 75 ft: 999"), refused("999"));
