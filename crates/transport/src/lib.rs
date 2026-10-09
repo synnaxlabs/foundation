@@ -136,10 +136,12 @@ impl Transport {
     pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
         let public_key = config.private_key.public();
         let tasks = config.tasks.clone();
+        let carrier = quic::Carrier::new(config.setup()?, part);
+        let table = Table::new(public_key, tasks, carrier.dialer());
         Ok(Self {
-            carrier: quic::Carrier::new(config.setup()?, part),
+            carrier,
             public_key,
-            table: Table::new(public_key, tasks),
+            table,
         })
     }
 
@@ -194,7 +196,7 @@ impl Transport {
         peer: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        table::dial(&self.table, &self.carrier, peer, addresses).await
+        table::dial(&self.table, peer, addresses).await
     }
 
     /// Waits for the next new session: one that a dial on this transport made, or
