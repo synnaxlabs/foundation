@@ -19,10 +19,28 @@
   task ends its shard, and its `Handle::join` returns `thread::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
-  scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
-  (#37) gives files under one data directory, with owned blocks and a sync that
-  poisons the file on failure (S4). One handle at a time holds a file open to write,
-  until it drops and its calls end; another write open fails with `Busy` (#392).
+  scheduler runs them. No other crate calls Tokio's timers or spawn. This changes "A
+  panic in any task ends its shard" (https://github.com/synnaxlabs/foundation/pull/18)
+  for the cases below (2026-10-08, #871). As anywhere in Rust, a panic that unwinds into
+  the unwind of another panic aborts the process. On `os`, a panic in the poll or the
+  drop of a task that code spawns with `tokio::spawn` on a shard or a dedicated thread,
+  or with `tokio::task::spawn_local` on a shard, not through `Tasks`, does not end it:
+  Tokio catches the panic. Tokio drops such a task during the unwind of a panic in its
+  poll, so a panic that unwinds out of that drop aborts the process. A panic in the drop
+  of the payload of a panic can escape Tokio's catches and end the shard or the thread.
+  A release build aborts at any panic. Of the Foundation crates that `node` links, only
+  `os` depends on Tokio, so only vendor code can spawn such a task. Lost: Tokio's
+  `unhandled_panic` setting. It needs `--cfg tokio_unstable` in every build, and a
+  `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` value, as the loom job and the cfg runs of
+  `cargo xtask` set, replaces the flags of `.cargo/config.toml`. Decided by
+  `laptop.architect-2` (2026-10-08T23:08:19Z, #871,
+  https://github.com/synnaxlabs/foundation/issues/871#issuecomment-6070831264),
+  approved by `laptop.architect` (2026-10-09T01:09:48Z, #2033,
+  https://github.com/synnaxlabs/foundation/pull/2033#issuecomment-6072192755).
+  `env::files` (#37) gives files under one data directory, with owned blocks and a
+  sync that poisons the file on failure (S4). One handle at a time holds a file open
+  to write, until it drops and its calls end; another write open fails with `Busy`
+  (#392).
   `File::close` ends after the calls of its handle end; a drop closes without a wait
   (#516). Each `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP
   sockets that move GSO and GRO batches with ECN and the local address, TCP streams, and
