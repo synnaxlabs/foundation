@@ -4,6 +4,7 @@
 mod access;
 mod channel;
 mod connector;
+mod duplicate;
 mod node_settings;
 pub mod openssh;
 mod placement;
@@ -15,14 +16,13 @@ mod subject;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ::connector::kind::Table;
-use document::diagnostic::{Code, Diagnostic, Note};
+use document::diagnostic::{Code, Diagnostic};
 use document::value::Value;
 use document::{Block, Document, Label, Span, read};
 use spec::definition::Kind;
 use spec::key;
 use types::name::{Name, Selector};
 
-const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
 
@@ -146,67 +146,14 @@ fn checked<'a>(
             }
         }
     }
-    found.repeats();
+    let repeats = duplicate::in_labels(&mut found.labels);
+    found.diagnostics.extend(repeats);
     if found.diagnostics.is_empty() {
         Ok(found)
     } else {
         sort(&mut found.diagnostics);
         Err(found.diagnostics)
     }
-}
-
-/// `config.duplicate-name` at each tree key of `definitions` that repeats an earlier
-/// one, in name order, in another ASCII case.
-pub(crate) fn repeated(
-    definitions: &BTreeMap<Name, spec::definition::Definition>,
-) -> Vec<Diagnostic> {
-    let mut firsts: BTreeMap<Box<str>, (Label, Kind)> = BTreeMap::new();
-    let mut diagnostics = Vec::new();
-    for (key, definition) in definitions {
-        let kind = definition.kind();
-        let label = Label {
-            text: label(kind, key).as_str().into(),
-            span: None,
-        };
-        let lower: Box<str> = key.as_str().to_ascii_lowercase().into();
-        match firsts.get(&lower) {
-            Some((first, earlier)) => {
-                diagnostics.push(duplicate((&label, kind), (first, *earlier)));
-            }
-            None => {
-                firsts.insert(lower, (label, kind));
-            }
-        }
-    }
-    diagnostics
-}
-
-/// `config.duplicate-name` at `label`, whose tree key repeats the earlier `first` in
-/// another ASCII case.
-fn duplicate(
-    (label, later): (&Label, Kind),
-    (first, earlier): (&Label, Kind),
-) -> Diagnostic {
-    let (earlier, keyword) = (earlier.as_str(), later.as_str());
-    let blocks = if earlier == keyword {
-        format!("`{keyword}`")
-    } else {
-        format!("`{earlier}` and `{keyword}`")
-    };
-    let mut diagnostic = Diagnostic::new(
-        DUPLICATE_NAME,
-        label.span,
-        format!(
-            "the name {:?} repeats the earlier `{earlier}` name {:?}",
-            label.text, first.text
-        ),
-        format!("Give each {blocks} block a name that differs by more than case"),
-    );
-    diagnostic.notes.extend(first.span.map(|span| Note {
-        span,
-        text: "the earlier name".into(),
-    }));
-    diagnostic
 }
 
 /// The label of the definition of `kind` at tree key `key`, or `key` when it has no
@@ -244,9 +191,8 @@ fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Lab
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
-    /// Each label of each tree key so far, with the kind of its block, by the key in
-    /// lowercase, so that keys that differ only in case collide.
-    labels: BTreeMap<Box<str>, Vec<(&'a Label, Kind)>>,
+    /// Each label of each tree key so far.
+    labels: duplicate::Labels<'a>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
     /// The label of the first connector in [`order`] that a `connector` block in any
@@ -305,23 +251,8 @@ impl<'a> Found<'a> {
                 return None;
             }
         };
-        self.labels
-            .entry(key.as_str().to_ascii_lowercase().into())
-            .or_default()
-            .push((label, kind));
+        duplicate::add(&mut self.labels, &key, label, kind);
         Some((key, label.span))
-    }
-
-    /// Reports each label of a tree key after the first in [`order`].
-    fn repeats(&mut self) {
-        for labels in self.labels.values_mut() {
-            labels.sort_by_key(|(label, _)| order(label.span));
-            let (first, earlier) = labels[0];
-            for &(label, later) in &labels[1..] {
-                self.diagnostics
-                    .push(duplicate((label, later), (first, earlier)));
-            }
-        }
     }
 
     /// The value that a reader gives, or `Reported` after it reports the reader's
@@ -408,6 +339,7 @@ fn span(block: &Block, key: &str) -> Option<Span> {
 
 #[cfg(test)]
 mod tests {
+    use document::diagnostic::Note;
     use document::value::Kind;
     use document::{Attribute, Map, Position, Source};
     use proptest::prelude::*;

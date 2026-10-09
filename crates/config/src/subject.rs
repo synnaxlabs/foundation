@@ -50,7 +50,7 @@ fn not_connector(found: &mut Found<'_>, block: &Block) {
 
 /// `config.subject-is-connector` at each subject of `definitions` whose label is the
 /// name of a connector in any ASCII case, in name order.
-pub(crate) fn connectors(
+pub(crate) fn not_connectors(
     definitions: &BTreeMap<Name, definition::Definition>,
 ) -> Vec<Diagnostic> {
     let connectors: BTreeSet<String> = definitions

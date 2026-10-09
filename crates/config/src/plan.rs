@@ -15,8 +15,8 @@ use types::digest::Digest;
 use types::name::Name;
 
 use crate::{
-    Definition, Entry, Found, KINDS, channel, checked, placement, private_key, sort,
-    span, subject,
+    Definition, Entry, Found, KINDS, channel, checked, duplicate, placement,
+    private_key, sort, span, subject,
 };
 
 pub use codec::Error;
@@ -111,8 +111,8 @@ pub fn check(
     }
     let mut diagnostics = Vec::new();
     let writes = writes(definitions, kinds, &mut diagnostics);
-    diagnostics.extend(crate::repeated(definitions));
-    diagnostics.extend(subject::connectors(definitions));
+    diagnostics.extend(duplicate::in_definitions(definitions));
+    diagnostics.extend(subject::not_connectors(definitions));
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
