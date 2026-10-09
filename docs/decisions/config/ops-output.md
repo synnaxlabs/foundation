@@ -67,8 +67,11 @@
   `Display` of the stop as the message and the fix `Fix the cause in the message, then
   start the node and plan again`. It can come after a proposal, so plan again to see
   whether the change applied. Lost: a code for each variant of the stop, which gives a
-  better hint but adds three codes for one cause. `ops.stopped` decided by
-  `laptop.architect-2` (2026-10-09T03:42:35Z, (b) of
+  better hint but adds three codes for one cause. The code has only this cause: a
+  node that does not run is `ops.no-node` (#1744), by `laptop.architect-2`
+  (2026-10-09T23:13:35Z,
+  https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090851088).
+  `ops.stopped` decided by `laptop.architect-2` (2026-10-09T03:42:35Z, (b) of
   https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6073812317); the
   fix, which supersedes the fix of (b), by `laptop.architect` (2026-10-09T22:19:11Z,
   https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090194371) and
