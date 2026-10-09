@@ -22,7 +22,7 @@ const PATIENCE: Span = Span::from_nanos(90_000_000_000);
 const POLL: Duration = Duration::from_millis(100);
 
 /// One `foundation` node in a temporary directory of its own. Drop removes the
-/// directory.
+/// directory, except while the thread panics: a failed test keeps it.
 #[derive(Debug)]
 pub(crate) struct Rig {
     /// The working directory of each command. It holds `plant.hcl`.
@@ -101,18 +101,31 @@ fn wait<T>(
     clock: &Clock,
     limit: Span,
     what: &str,
-    mut check: impl FnMut() -> Result<T, String>,
+    check: impl FnMut() -> Result<T, String>,
 ) -> T {
+    poll(clock, limit, check).unwrap_or_else(|seen| late(what, limit, &seen))
+}
+
+/// Panics: `what` did not happen within `limit`, and the last check saw `seen`.
+fn late(what: &str, limit: Span, seen: &str) -> ! {
+    panic!("{what}: not within {limit}. The last check saw:\n{seen}")
+}
+
+/// Gives the first value of `check`, or what its last check saw once `limit` passes.
+fn poll<T>(
+    clock: &Clock,
+    limit: Span,
+    mut check: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
     let deadline = clock.now() + limit;
     loop {
         let seen = match check() {
-            Ok(value) => return value,
+            Ok(value) => return Ok(value),
             Err(seen) => seen,
         };
-        assert!(
-            clock.now() < deadline,
-            "{what}: not within {limit}. The last check saw:\n{seen}"
-        );
+        if clock.now() >= deadline {
+            return Err(seen);
+        }
         #[expect(
             clippy::disallowed_methods,
             reason = "a process test waits on another process in real time"
@@ -126,13 +139,16 @@ fn wait<T>(
 /// output so far.
 fn run(clock: &Clock, limit: Span, command: Command, input: &[u8]) -> Output {
     let mut running = Running::new(command, input);
-    let status = wait(
-        clock,
-        limit,
-        "the command exits and closes its pipes",
-        || running.ended().ok_or_else(|| running.seen()),
-    );
-    running.output(status)
+    let ended = poll(clock, limit, || {
+        running.ended().ok_or_else(|| running.seen())
+    });
+    match ended {
+        Ok(status) => running.output(status),
+        Err(seen) => {
+            running.process.end();
+            late("the command exits and closes its pipes", limit, &seen)
+        }
+    }
 }
 
 /// A command that runs, with a thread for each of its pipes.
@@ -205,13 +221,34 @@ impl Running {
 /// `foundation` process. A process that it starts lives on: `foundation` starts none.
 struct Process(Child);
 
-impl Drop for Process {
-    fn drop(&mut self) {
+impl Process {
+    /// Kills the command and waits for it to exit.
+    fn end(&mut self) {
         // `kill` gives `Ok` for a command that exited.
-        self.0
-            .kill()
+        (self.0.kill())
             .and_then(|()| self.0.wait())
             .expect("kill the command");
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // `kill` gives `Ok` for a command that exited. No wait: while the thread
+        // panics, a wait can block, and `run` waits for its command itself.
+        match self.0.kill() {
+            // A panic out of this drop aborts the test binary, and `eprintln!`
+            // panics when stderr is closed. Only the macro writes to the output
+            // that the test harness captures for the report of the test.
+            Err(error) if std::thread::panicking() => {
+                let line = format!("kill the command: {error}");
+                #[expect(
+                    clippy::print_stderr,
+                    reason = "a second panic aborts the test binary"
+                )]
+                let _printed = std::panic::catch_unwind(move || eprintln!("{line}"));
+            }
+            kill => kill.expect("kill the command"),
+        }
     }
 }
 
@@ -264,10 +301,10 @@ impl Capture {
 
 impl Drop for Rig {
     fn drop(&mut self) {
-        let removed = std::fs::remove_dir_all(&self.dir);
-        // A second panic aborts the test binary.
+        // While the thread panics, a remove can block and a second panic aborts the
+        // test binary.
         if !std::thread::panicking() {
-            removed.expect("remove the directory");
+            std::fs::remove_dir_all(&self.dir).expect("remove the directory");
         }
     }
 }
@@ -299,27 +336,148 @@ fn a_rig_removes_its_directory_with_its_files() {
 }
 
 #[test]
-fn a_rig_removes_its_directory_when_the_test_fails() {
+#[cfg_attr(not(target_os = "linux"), ignore = "needs /proc")]
+fn a_test_that_panics_kills_its_command() {
+    let mut command = Command::new("sh");
+    command.args(["-c", "exec sleep 60"]);
+    let running = Running::new(command, &[]);
+    let pid = running.process.0.id();
+    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _running = running;
+        panic!("the test fails");
+    }))
+    .expect_err("the test panics");
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"the test fails"));
+    // Killed and not waited for, the command stays a zombie.
+    wait(
+        &os::clock(),
+        Span::from_nanos(10_000_000_000),
+        "the command ends",
+        || {
+            let stat =
+                std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("stat");
+            let state = stat.rsplit(") ").next().expect("a state").chars().next();
+            if state == Some('Z') {
+                Ok(())
+            } else {
+                Err(stat)
+            }
+        },
+    );
+}
+
+/// Set to `drop` or `panic` in the test binary that
+/// [`drop_a_command_that_the_kernel_reaped`] runs.
+const REAPED: &str = "RIG_REAPED";
+
+/// Drops a command that the kernel reaped, so its kill fails, and panics after the
+/// drop when [`REAPED`] is `panic`. Does nothing when [`REAPED`] is not set.
+#[test]
+fn a_command_that_the_kernel_reaped_drops() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the parent test sets it for the child"
+    )]
+    let Some(reaped) = std::env::var_os(REAPED) else {
+        return;
+    };
+    let mut command = Command::new("sh");
+    command.args(["-c", "exit 0"]);
+    let running = Running::new(command, &[]);
+    let pid = running.process.0.id();
+    wait(
+        &os::clock(),
+        Span::from_nanos(10_000_000_000),
+        "the kernel reaps the command",
+        || {
+            let exists = std::fs::exists(format!("/proc/{pid}")).expect("check /proc");
+            if exists {
+                Err(format!("{pid} runs"))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    let _running = running;
+    assert_ne!(reaped, "panic", "the test fails");
+}
+
+/// The test binary that runs [`a_command_that_the_kernel_reaped_drops`] with
+/// [`REAPED`] set to `reaped`. It ignores `SIGCHLD`, so the kernel reaps each command
+/// it starts.
+fn reaped(reaped: &str) -> Command {
+    let binary = std::env::current_exe().expect("the test binary");
+    let mut command = Command::new("perl");
+    command
+        .args(["-e", "$SIG{CHLD} = 'IGNORE'; exec @ARGV or die"])
+        .arg(binary)
+        .args(["--exact", "rig::a_command_that_the_kernel_reaped_drops"])
+        .env(REAPED, reaped);
+    command
+}
+
+/// Runs [`reaped`] and gives the report of the test harness.
+fn drop_a_command_that_the_kernel_reaped(reaped: &str) -> String {
+    let output = self::reaped(reaped).output().expect("run the test binary");
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "the test fails with no abort"
+    );
+    String::from_utf8(output.stdout).expect("UTF-8")
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs perl and /proc")]
+fn a_failed_kill_panics() {
+    let report = drop_a_command_that_the_kernel_reaped("drop");
+    assert!(
+        report.contains(concat!(
+            "kill the command: Os { code: 3, kind: Uncategorized, ",
+            "message: \"No such process\" }\n",
+        )),
+        "{report}"
+    );
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs perl and /proc")]
+fn a_failed_kill_while_the_test_panics_with_a_closed_stderr_does_not_abort() {
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let output = reaped("panic")
+        .arg("--nocapture")
+        .stderr(writer)
+        .output()
+        .expect("run the test binary");
+    let report = String::from_utf8(output.stdout).expect("UTF-8");
+    assert_eq!(output.status.code(), Some(101), "{report}");
+}
+
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs perl and /proc")]
+fn a_failed_kill_while_the_test_panics_reports_its_error() {
+    let report = drop_a_command_that_the_kernel_reaped("panic");
+    assert!(report.contains("the test fails\n"), "{report}");
+    assert!(
+        report.contains("kill the command: No such process (os error 3)\n"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_rig_keeps_its_directory_when_the_test_fails() {
     let mut dir = PathBuf::new();
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let rig = Rig::new();
+        rig.config("");
         dir.clone_from(&rig.dir);
         panic!("the test fails");
     }))
     .expect_err("the test panics");
     assert_eq!(panic.downcast_ref::<&str>(), Some(&"the test fails"));
-    assert!(!dir.exists(), "{} is still there", dir.display());
-}
-
-#[test]
-fn a_failed_test_keeps_its_panic_when_the_directory_is_gone() {
-    let panic = std::panic::catch_unwind(|| {
-        let rig = Rig::new();
-        std::fs::remove_dir(&rig.dir).expect("remove the directory");
-        panic!("the test fails");
-    })
-    .expect_err("the test panics");
-    assert_eq!(panic.downcast_ref::<&str>(), Some(&"the test fails"));
+    assert!(dir.join("plant.hcl").exists(), "{} is gone", dir.display());
+    std::fs::remove_dir_all(&dir).expect("remove the directory");
 }
 
 #[test]
