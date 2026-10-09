@@ -19,7 +19,13 @@ pub(crate) const CRATE: &str = "connector-opcua";
 pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let nightly = Toolchain::read(root).map_err(|e| vec![e])?;
     let host = nightly.host().map_err(|e| vec![e])?;
-    match libtest::run(&mut command(&nightly, &host)).map_err(|e| vec![e])? {
+    let run = libtest::run(&mut command(&nightly, &host)).map_err(|e| vec![e])?;
+    verdict(&run)
+}
+
+/// What [`run`] gives for `run`.
+fn verdict(run: &Run) -> Result<(), Vec<String>> {
+    match run {
         Run::Failed => Err(vec![format!("the sanitizer tests of `{CRATE}` failed")]),
         Run::Empty => Err(vec![format!(
             "`{CRATE}` runs no tests under the sanitizers"
@@ -87,5 +93,22 @@ mod tests {
                 ("RUSTFLAGS".as_ref(), None),
             ]
         );
+    }
+
+    #[test]
+    fn verdict_fails_each_run_that_does_not_pass() {
+        assert_eq!(
+            verdict(&Run::Failed),
+            Err(vec![
+                "the sanitizer tests of `connector-opcua` failed".to_string()
+            ])
+        );
+        assert_eq!(
+            verdict(&Run::Empty),
+            Err(vec![
+                "`connector-opcua` runs no tests under the sanitizers".to_string()
+            ])
+        );
+        assert_eq!(verdict(&Run::Passed), Ok(()));
     }
 }

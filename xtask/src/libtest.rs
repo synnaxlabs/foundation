@@ -54,6 +54,7 @@ mod tests {
         assert_eq!(sh(passed), Ok(Run::Passed));
         assert_eq!(sh("echo 'test result: ok. 0 passed'"), Ok(Run::Empty));
         assert_eq!(sh(&format!("{passed}; exit 101")), Ok(Run::Failed));
+        assert_eq!(sh("exit 101"), Ok(Run::Failed));
     }
 
     #[test]
