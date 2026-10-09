@@ -789,7 +789,7 @@ impl Serve {
             region,
         });
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
-        let group = defined(mesh.as_ref(), hub.clone()).await;
+        let group = define(mesh.as_ref(), hub.clone()).await;
         // The port's future holds the mesh, so it drops before the wait.
         {
             let port =
@@ -857,14 +857,14 @@ fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
 /// Gives `hub` the channels of the spec that `mesh` uses, then returns a future that
 /// gives it those of each new spec in use and resolves with the stop of the group, or
 /// never resolves when the node has no mesh.
-async fn defined(
+async fn define(
     mesh: Option<&mesh::Mesh>,
     hub: hub::Hub,
 ) -> impl Future<Output = mesh::Stopped> + use<> {
-    let define = move |spec: mesh::used::Spec| hub.set_definitions(&*spec.definitions);
+    let set = move |spec: mesh::used::Spec| hub.set_definitions(&*spec.definitions);
     let mut watch = mesh.map(mesh::Mesh::watch_spec);
     let first = match &mut watch {
-        Some(watch) => watch.next().await.map(&define),
+        Some(watch) => watch.next().await.map(&set),
         None => Ok(()),
     };
     async move {
@@ -876,7 +876,7 @@ async fn defined(
             if let Err(stopped) = next {
                 return stopped;
             }
-            next = watch.next().await.map(&define);
+            next = watch.next().await.map(&set);
         }
     }
 }

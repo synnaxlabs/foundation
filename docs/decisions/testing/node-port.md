@@ -125,7 +125,7 @@
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6048898047. `node`
   runs no check of the spec: `mesh` uses only a spec with no problems (SPEC IN USE), so
   a founding with problems gives no spec in use and the hub knows no channel, by
-  `laptop.architect-2` (2026-10-09, #1957 PR 2):
+  `laptop.architect-2` (2026-10-09T20:41:17Z, #1957 PR 2):
   https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6088900310. This
   supersedes the panic of a founding with a dangling index or two channels of one key,
   and the check in `node` that was to end it, by
