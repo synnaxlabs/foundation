@@ -81,7 +81,10 @@
   refusal gives, and written again at once, one time. A writer starts with no last
   stamp, so its first frame can be at or before the last frame of the writer before it
   on the same index (`laptop.architect-2`, 2026-10-09T20:20:46Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6088599351). The
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6088599351). Each
+  other refusal of the frame written again follows the rules above. A second
+  `Backwards` is a defect, and panics (`laptop.architect-2`, 2026-10-09T20:24:02Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6088648651). The
   status channels open once the node has mesh time, and no run starts before. A cancel
   while they wait to open gives `Ok` at once (`laptop.architect-2`,
   2026-10-09T19:43:41Z:

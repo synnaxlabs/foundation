@@ -381,7 +381,8 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// When the home refuses the frame for a cause that only a defect gives.
+    /// When the home refuses the frame for a cause that only a defect gives, which
+    /// includes `Backwards` on the frame written again.
     fn write(&mut self, values: &Values, now: Monotonic) {
         values.staged.set(false);
         self.wrote = now;
@@ -391,9 +392,12 @@ impl Session {
         let now = self.hub.now();
         let stamp = self.last.map_or(now, |last| now.max(after(last)));
         if let Err(before) = self.send(values, stamp)
-            && let Err(_) = self.send(values, after(before))
+            && let Err(again) = self.send(values, after(before))
         {
-            values.stage();
+            panic!(
+                "invariant: a status frame stamped after {before}, the last stamp of \
+                 its index, is not backwards, but the home gives {again} as last"
+            )
         }
     }
 
