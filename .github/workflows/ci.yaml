@@ -237,10 +237,12 @@ jobs:
           workspaces: |
             . -> target
             fuzz -> target
+      - name: Read the cargo-fuzz pin
+        id: cargo-fuzz
+        run: echo "tool=cargo-fuzz@$(cat fuzz/cargo-fuzz-version)" >> "$GITHUB_OUTPUT"
       - uses: taiki-e/install-action@v2
         with:
-          # The same pin as in `fuzz.yaml`.
-          tool: cargo-fuzz@0.13.2
+          tool: ${{ steps.cargo-fuzz.outputs.tool }}
       # `fuzz/` is a workspace of its own, which the Clippy step of `check` does not
       # see.
       - name: Clippy

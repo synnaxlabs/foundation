@@ -18,10 +18,12 @@ jobs:
       - name: Install the pinned nightly
         run: |
           rustup toolchain install "$(cat rust-toolchain-nightly)" --profile minimal
+      - name: Read the cargo-fuzz pin
+        id: cargo-fuzz
+        run: echo "tool=cargo-fuzz@$(cat fuzz/cargo-fuzz-version)" >> "$GITHUB_OUTPUT"
       - uses: taiki-e/install-action@v2
         with:
-          # The same pin as in `ci.yaml`.
-          tool: cargo-fuzz@0.13.2
+          tool: ${{ steps.cargo-fuzz.outputs.tool }}
       - name: Fuzz
         run: cargo xtask fuzz 600
       - if: failure()
