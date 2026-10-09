@@ -12,7 +12,7 @@ use connector::cancel::Token;
 use connector::http::Client;
 use connector_influx::sim::Store;
 use env::net::tcp::{Listen, Options};
-use env::thread::{Handle, Panicked};
+use env::thread::Handle;
 use http::Request;
 use types::quality::Quality;
 use types::time::{Span, Stamp};
@@ -32,8 +32,8 @@ pub(super) struct Opcua {}
 /// The simulated InfluxDB, with the database `plant`. Drop stops it.
 #[derive(Debug, Default)]
 pub(super) struct Influx {
-    /// The tests read it while [`Influx::stored`] waits on #1734. The two
-    /// `a_dropped_influx_ends_its_shard` tests count its owners while a refused connect
+    /// The tests read it while [`Influx::stored`] waits on #1734. The test
+    /// `a_dropped_influx_ends_its_shard` counts its owners while a refused connect
     /// waits on #2000.
     store: Arc<Mutex<Store>>,
     /// The address of the first [`Influx::serve`].
@@ -102,15 +102,18 @@ impl Influx {
     /// Stops, and panics when the server panicked. A process that holds or takes the
     /// port before the next [`Influx::serve`] makes that serve panic.
     pub(super) fn stop(&mut self) {
-        let joined = self.halt().expect("it serves");
-        joined.expect("the simulated InfluxDB stops with no panic");
+        let shard = self.cancel().expect("it serves");
+        shard
+            .join()
+            .expect("the simulated InfluxDB stops with no panic");
     }
 
-    /// Cancels the server and joins its shard, or gives `None` when it does not serve.
-    fn halt(&mut self) -> Option<Result<(), Panicked>> {
+    /// Cancels the server, and gives its shard to join, or `None` when it does not
+    /// serve.
+    fn cancel(&mut self) -> Option<Handle> {
         let (stop, shard) = self.serving.take()?;
         stop.cancel();
-        Some(shard.join())
+        Some(shard)
     }
 
     /// Each sample stored, by data channel, in time order.
@@ -123,13 +126,13 @@ impl Drop for Influx {
     fn drop(&mut self) {
         // While the thread panics, a join can block and a second panic aborts the
         // test binary. The server stops on its own.
-        if std::thread::panicking() {
-            if let Some((stop, _)) = self.serving.take() {
-                stop.cancel();
-            }
-            return;
+        if let Some(shard) = self.cancel()
+            && !std::thread::panicking()
+        {
+            shard
+                .join()
+                .expect("the simulated InfluxDB serves with no panic");
         }
-        (self.halt().transpose()).expect("the simulated InfluxDB serves with no panic");
     }
 }
 
@@ -196,7 +199,7 @@ fn a_dropped_influx_ends_its_shard() {
 }
 
 #[test]
-fn a_dropped_influx_stops_its_server_when_the_test_panics() {
+fn a_dropped_influx_cancels_its_server_when_the_test_panics() {
     let mut influx = Influx::default();
     influx.serve();
     let stop = influx.serving.as_ref().expect("it serves").0.clone();
