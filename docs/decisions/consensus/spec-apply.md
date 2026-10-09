@@ -57,7 +57,7 @@
   pointer is the call's and each listed index has a home in this node's state when the
   call settles, the listed one or another. A call whose entry finds the pointer that its
   change makes returns it when each listed index has a home then, and else gives
-  `Stale`. This supersedes `base.next(root)` in
+  `Stale`. This changes `base.next(root)` of
   https://github.com/synnaxlabs/foundation/pull/1934#issuecomment-6065525915, as a
   change at the base root with no home leaves the pointer (SPEC CHANGE;
   `laptop.architect`, 2026-10-09T00:57:47Z,

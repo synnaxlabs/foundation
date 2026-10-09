@@ -38,14 +38,14 @@
   the pointer at chunks that no majority holds. The record lists only the chunks that
   the base tree lacks, so the rule also needs the chunks of the base on a majority after
   a change of voters (#1231). Every member applies a change whose base is the pointer,
-  and refuses one whose base is not (`Refused::Stale`), so of two changes from one base,
-  only the first that moves the pointer applies, and each change from that base after it
-  gives `Stale`. The state machine never reads chunks and never runs a check: a
-  committed spec with problems moves the pointer, and the node keeps the last spec it
-  used (#1741). The pointer before the first change is version 0 at the root of the tree
-  of `Config::founding.definitions`. No BQ12 signature check on the change in this
-  milestone (#1213). The pointer is `spec::Pointer`, and `mesh` has no pointer type of
-  its own (#1887; `laptop.architect`, 2026-10-08T13:26:52Z,
+  and refuses one whose base is not (`Refused::Stale`), so after a change from one base
+  moves the pointer, each later change from that base gives `Stale`. The state machine
+  never reads chunks and never runs a check: a committed spec with problems moves the
+  pointer, and the node keeps the last spec it used (#1741). The pointer before the
+  first change is version 0 at the root of the tree of `Config::founding.definitions`.
+  No BQ12 signature check on the change in this milestone (#1213). The pointer is
+  `spec::Pointer`, and `mesh` has no pointer type of its own (#1887; `laptop.architect`,
+  2026-10-08T13:26:52Z,
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6060906734, and the
   removal at 2026-10-08T16:04:51Z,
   https://github.com/synnaxlabs/foundation/pull/1913#issuecomment-6063975359). This
