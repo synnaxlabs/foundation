@@ -196,11 +196,7 @@ impl Dialer {
         let mut state = self.0.borrow_mut();
         let now = state.clock.now();
         let key = state.endpoint.connect(now, peer, remote);
-        let slot = Slot {
-            dialed: true,
-            ..Slot::default()
-        };
-        state.sessions.insert(key, slot);
+        state.sessions.insert(key, Slot::default());
         state.wake();
         Ok(Session {
             state: Rc::clone(&self.0),
@@ -346,8 +342,6 @@ impl State {
 struct Slot {
     /// The peer, once the handshake finishes.
     peer: Option<Peer>,
-    /// This side dialed it.
-    dialed: bool,
     /// How many [`Event::Acked`] came.
     acks: u64,
     /// How many dials connected before this one, once `peer` is set.
@@ -409,24 +403,29 @@ impl Session {
         self.state.borrow().endpoint.live(self.key)
     }
 
-    /// Whether this side dialed the session.
+    /// Whether this side dialed the session. `false` once it ended.
     pub(crate) fn dialed(&self) -> bool {
-        self.state.borrow_mut().slot(self.key).dialed
+        self.state.borrow().endpoint.dialed(self.key)
     }
 
-    /// Pings the peer, and waits until it acknowledges the ping or a later packet.
+    /// Pings the peer, and gives a future that completes when the peer acknowledges
+    /// the ping or a later packet. The future does not keep the session open.
     ///
     /// # Errors
     ///
-    /// Why the session ended, as [`Session::closed`] gives it.
-    pub(crate) async fn ping(&self) -> Result<(), Error> {
+    /// Why the session ended, as [`Session::closed`] gives it, and
+    /// [`Error::Closed`] with `Code(0)` once the session dropped.
+    pub(crate) fn ping(&self) -> impl Future<Output = Result<(), Error>> + 'static {
         let acks = self.with(|endpoint, clock, slot, _| {
             endpoint.ping(clock.now(), self.key);
             slot.acks
         });
-        poll_fn(|cx| {
-            let mut state = self.state.borrow_mut();
-            let slot = state.slot(self.key);
+        let (state, key) = (Rc::clone(&self.state), self.key);
+        poll_fn(move |cx| {
+            let mut state = state.borrow_mut();
+            let Some(slot) = state.sessions.get_mut(&key) else {
+                return Poll::Ready(Err(Error::Closed { code: Code(0) }));
+            };
             if slot.acks > acks {
                 return Poll::Ready(Ok(()));
             }
@@ -436,7 +435,6 @@ impl Session {
             register(&mut slot.status, cx.waker());
             Poll::Pending
         })
-        .await
     }
 
     /// Waits until the session ends, and gives why.
@@ -737,10 +735,13 @@ impl Drop for Session {
     fn drop(&mut self) {
         let mut state = self.state.borrow_mut();
         let slot = state.sessions.remove(&self.key);
-        let slot = slot.expect("invariant: a session keeps its slot until it drops");
+        let mut slot =
+            slot.expect("invariant: a session keeps its slot until it drops");
         if slot.end.is_none() {
             state.close(self.key, Code(0));
         }
+        // A ping future waits on the slot with no handle to the session.
+        slot.wake_status();
     }
 }
 

@@ -289,6 +289,14 @@ impl Endpoint {
         connection.is_some_and(|connection| connection.key == key && connection.live())
     }
 
+    /// Whether this endpoint dialed the connection of `key`. `false` once it ended.
+    pub(crate) fn dialed(&self, key: connection::Key) -> bool {
+        let connection = self.connections.get(key.handle.0).and_then(Option::as_ref);
+        connection.is_some_and(|connection| {
+            connection.key == key && connection.inner.side().is_client()
+        })
+    }
+
     /// Closes the connection of `key` with `code`, and queues its [`Event::Closed`]
     /// with [`Error::Closed`]. Does nothing when the connection already ended: its
     /// [`Event::Closed`] is queued or was given.

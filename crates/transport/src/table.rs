@@ -160,17 +160,16 @@ impl Table {
         attempt: &Rc<Attempt>,
         dialed: Result<Session, Error>,
     ) {
-        let Some(entry) = self.nodes.get_mut(&node) else {
-            return;
-        };
-        if !entry
-            .dial
-            .as_ref()
-            .is_some_and(|dial| Rc::ptr_eq(dial, attempt))
-        {
+        if attempt.ended() {
             return;
         }
-        entry.dial = None;
+        let entry = self.nodes.get_mut(&node);
+        let entry = entry.expect("invariant: a dial keeps its entry");
+        let dial = entry.dial.take().expect("invariant: one dial ends it");
+        assert!(
+            Rc::ptr_eq(&dial, attempt),
+            "invariant: one dial runs per node"
+        );
         let result = match dialed {
             Ok(session) => {
                 if let Some(held) = entry.held.take() {
@@ -195,8 +194,8 @@ impl Table {
         }
     }
 
-    /// Settles which session to its node `session`, which the peer dialed, makes
-    /// open, and gives it back when it goes to `accept`. The lower key's dial wins:
+    /// Takes `session`, which a peer dialed, and gives it back when it becomes the
+    /// open session to its node and goes to `accept`. The lower key's dial wins:
     /// the lower node holds a higher peer's session while its own dial runs, or
     /// while it pings its own open session. Else the newer session wins. Each loser
     /// closes with `Code(0)`. A client's session has no node.
@@ -211,7 +210,7 @@ impl Table {
         if lower && (own || entry.dial.is_some()) {
             let replaced = entry.held.replace(session.clone());
             if let Some(open) = open {
-                self.ping(node, open, session.downgrade());
+                self.prove(node, &open, session.downgrade());
             }
             if let Some(replaced) = replaced {
                 replaced.close(Code(0));
@@ -230,13 +229,13 @@ impl Table {
     }
 
     /// Pings `open`, the session that this node dialed to `node`. When the peer
-    /// answers, the held session closes. When `open` ends first, the held session
-    /// wins. Either applies only while `held` is the held session.
-    fn ping(&self, node: PublicKey, open: Session, held: session::Weak) {
+    /// answers, the held session closes. When `open` ends or drops first, the held
+    /// session wins. Either applies only while `held` is the held session.
+    fn prove(&self, node: PublicKey, open: &Session, held: session::Weak) {
         let this = rc::Weak::clone(&self.this);
+        let ping = open.ping();
         self.tasks.spawn(async move {
-            let answered = open.ping().await.is_ok();
-            drop(open);
+            let answered = ping.await.is_ok();
             let Some(table) = this.upgrade() else {
                 return;
             };
@@ -323,6 +322,11 @@ impl Attempt {
         }
         wake::register(&mut state.waiting, cx.waker());
         Poll::Pending
+    }
+
+    /// Whether the attempt has its result.
+    fn ended(&self) -> bool {
+        self.0.borrow().result.is_some()
     }
 
     fn end(&self, result: Result<Session, Error>) {
@@ -1050,6 +1054,44 @@ mod tests {
             let bound = testing::spans(Span::MILLISECOND, 30);
             assert!(closed < bound, "closed after {closed:?}");
             assert_eq!(accepted.closed().await, Error::PeerClosed { code: Code(5) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // The server drops its open session while it pings it, before the client can
+    // acknowledge the ping. The ping does not keep the session open, so the session
+    // that the server held wins.
+    #[test]
+    fn the_held_session_wins_when_the_open_one_drops_during_the_ping() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let back = [Address::Udp(testing::address(&client))];
+        let at = [Address::Udp(testing::address(&server))];
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let (transport, sessions) = accepting(config, &node);
+            let open = transport.dial(CLIENT.public(), &back).await;
+            let open = open.expect("a session");
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 15))
+                .await;
+            sessions.borrow_mut().clear();
+            drop(open);
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 5))
+                .await;
+            let won = sessions.borrow_mut().pop().expect("the held session");
+            assert!(!won.dialed());
+            won.close(Code(7));
+            linger(&node).await;
+        });
+        testing::start(&client, move |shard, node| async move {
+            let [first, second] = twins(&shard, &node);
+            let accepted = first.accept().await.expect("the server's session");
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 10))
+                .await;
+            let held = second.dial(SERVER.public(), &at).await.expect("a session");
+            assert_eq!(accepted.closed().await, Error::PeerClosed { code: Code(0) });
+            assert_eq!(held.closed().await, Error::PeerClosed { code: Code(7) });
         });
         assert_eq!(sim.run(), Ok(()));
     }

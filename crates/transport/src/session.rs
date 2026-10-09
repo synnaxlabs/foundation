@@ -53,13 +53,15 @@ impl Session {
         self.0.live()
     }
 
-    /// Pings the peer, and waits until it acknowledges the ping or a later packet.
+    /// Pings the peer, and gives a future that completes when the peer acknowledges
+    /// the ping or a later packet. The future does not keep the session open.
     ///
     /// # Errors
     ///
-    /// Why the session ended, as [`Session::closed`] gives it.
-    pub(crate) async fn ping(&self) -> Result<(), Error> {
-        self.0.ping().await
+    /// Why the session ended, as [`Session::closed`] gives it, and
+    /// [`Error::Closed`] with `Code(0)` once the session dropped.
+    pub(crate) fn ping(&self) -> impl Future<Output = Result<(), Error>> + 'static {
+        self.0.ping()
     }
 
     /// Who is on the other end.
