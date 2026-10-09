@@ -70,7 +70,7 @@ fn main() -> ExitCode {
 /// Checks every dependency of the workspace at `root` against the crate map in
 /// `map.rs`.
 fn layers(root: &Path) -> Result<(), Vec<String>> {
-    let metadata = metadata(root).map_err(|e| vec![e])?;
+    let metadata = metadata(root, &["--no-deps"]).map_err(|e| vec![e])?;
     let packages = metadata["packages"].as_array().cloned().unwrap_or_default();
     let members: BTreeSet<&str> =
         packages.iter().filter_map(|p| p["name"].as_str()).collect();
@@ -133,11 +133,12 @@ fn violation(entry: &map::Crate, dep: &str) -> String {
     )
 }
 
-/// Runs `cargo metadata` on the workspace at `root`.
-fn metadata(root: &Path) -> Result<Value, String> {
+/// Runs `cargo metadata` with `flags` on the package or workspace at `dir`.
+fn metadata(dir: &Path, flags: &[&str]) -> Result<Value, String> {
     let output = cargo()
-        .current_dir(root)
-        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(dir)
+        .args(["metadata", "--format-version", "1"])
+        .args(flags)
         .output()
         .map_err(|e| format!("cargo metadata: {e}"))?;
     if !output.status.success() {
@@ -200,7 +201,7 @@ mod tests {
             .split("models:\n")
             .nth(1)
             .expect("ci.yaml has a models filter");
-        let metadata = metadata(&root).unwrap();
+        let metadata = metadata(&root, &["--no-deps"]).unwrap();
         let by_cfg = |name| select::packages(&metadata, |s| select::names_cfg(s, name));
         let tasks = [
             ("loom", by_cfg("loom").unwrap()),
@@ -220,7 +221,7 @@ mod tests {
 
     #[test]
     fn miri_skips_only_crates_that_name_unsafe_code() {
-        let metadata = metadata(&fixture().join("../..")).unwrap();
+        let metadata = metadata(&fixture().join("../.."), &["--no-deps"]).unwrap();
         let named = select::packages(&metadata, |s| select::has_word(s, "unsafe_code"));
         let (named, checked) = (named.unwrap(), miri::packages(&metadata).unwrap());
         for name in miri::SKIPPED {

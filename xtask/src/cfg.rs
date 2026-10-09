@@ -19,7 +19,7 @@ pub(crate) fn test(root: &Path, name: &str) -> Result<(), Vec<String>> {
 }
 
 fn problems(root: &Path, name: &str) -> Result<Vec<String>, String> {
-    let metadata = crate::metadata(root)?;
+    let metadata = crate::metadata(root, &["--no-deps"])?;
     let workspace = PathBuf::from(field::text(&metadata, "workspace_root")?);
     let packages = select::packages(&metadata, |s| select::names_cfg(s, name))?;
     if packages.is_empty() {

@@ -20,7 +20,7 @@ pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
 }
 
 fn problems(root: &Path) -> Result<Vec<String>, String> {
-    let metadata = crate::metadata(root)?;
+    let metadata = crate::metadata(root, &["--no-deps"])?;
     let workspace = Path::new(field::text(&metadata, "workspace_root")?);
     let mut problems = Vec::new();
     for package in field::list(&metadata, "packages")? {

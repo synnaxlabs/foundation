@@ -160,33 +160,15 @@ fn report(target: &str, output: &Output) -> String {
 /// Checks that `fuzz/Cargo.lock` at `root` is current, and that `fuzz/` builds each
 /// crate that the root `Cargo.toml` patches from its copy in `patches/`.
 fn patched(root: &Path) -> Result<(), Vec<String>> {
-    let graph = |manifest: &str| graph(&root.join(manifest)).map_err(|e| vec![e]);
-    let problems = unpatched(&graph("Cargo.toml")?, &graph("fuzz/Cargo.toml")?)
-        .map_err(|e| vec![e])?;
+    let graph = |dir: &str| {
+        crate::metadata(&root.join(dir), &["--locked"]).map_err(|e| vec![e])
+    };
+    let problems = unpatched(&graph(".")?, &graph("fuzz")?).map_err(|e| vec![e])?;
     if problems.is_empty() {
         Ok(())
     } else {
         Err(problems)
     }
-}
-
-/// Runs `cargo metadata --locked` on the package or workspace of `manifest`.
-fn graph(manifest: &Path) -> Result<Value, String> {
-    let output = crate::cargo()
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--locked",
-            "--manifest-path",
-        ])
-        .arg(manifest)
-        .output()
-        .map_err(|e| format!("cargo metadata: {e}"))?;
-    if !output.status.success() {
-        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
-    }
-    serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata: {e}"))
 }
 
 /// A problem for each package of the `fuzz` graph that is a copy in `patches/`, or
@@ -277,8 +259,8 @@ mod tests {
     }
 
     #[test]
-    fn graph_holds_each_package_of_the_lock() {
-        let graph = graph(&crate::fixture().join("Cargo.toml")).unwrap();
+    fn a_locked_graph_holds_each_package_of_the_lock() {
+        let graph = crate::metadata(&crate::fixture(), &["--locked"]).unwrap();
         let mut names: Vec<_> = graph["packages"]
             .as_array()
             .unwrap()
