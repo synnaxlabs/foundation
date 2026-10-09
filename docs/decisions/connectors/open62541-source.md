@@ -320,3 +320,8 @@
   parameters of the first callbacks: approved by `laptop.architect-2` at `feb6c21a4`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089521550,
   2026-10-09 21:25 UTC).
+  A server on the loop of a manager is `STOPPED` when its last connection closes after
+  `UA_Server_run_shutdown`, so its owner drives until then. `UA_Server_delete` then
+  frees the server and each session at once. Between that drive and the delete, the
+  owner calls nothing that queues a delayed callback on the server, such as
+  `UA_Server_addCertificates`: the next run of the loop would read the freed server.
