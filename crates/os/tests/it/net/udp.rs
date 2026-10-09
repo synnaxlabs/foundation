@@ -136,7 +136,9 @@ fn a_full_batch_arrives_in_order() {
     });
 }
 
+/// Only Linux sends more than one datagram in a batch, with GSO.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_batch_with_a_short_last_datagram_arrives_whole() {
     on_thread("udp-short", || async {
         let net = net();
@@ -274,7 +276,9 @@ fn a_batch_arrives_when_the_kernel_refuses_gso() {
     });
 }
 
+/// macOS loses it: `a_datagram_over_the_path_mtu_is_lost`.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_datagram_of_the_byte_max_arrives() {
     on_thread("udp-max", || async {
         let net = net();
@@ -363,7 +367,10 @@ fn an_any_v6_socket_talks_plain_ipv4() {
     });
 }
 
+/// Linux holds all of 127.0.0.0/8 on the loopback. macOS ignores each IPv4 source
+/// until #1972 patches `noq-udp`.
 #[test]
+#[cfg(target_os = "linux")]
 fn a_source_address_picks_the_local_address() {
     on_thread("udp-source", || async {
         let net = net();
@@ -525,7 +532,9 @@ fn a_bad_source_or_port_0_gives_the_answer_of_linux() {
 }
 
 /// The OS drops each datagram that the receive buffer has no room for. A receiver
-/// with the default buffer of Linux holds about 90 of these.
+/// with the default buffer of Linux holds about 90 of these. macOS delivers on the
+/// loopback from a queue, and a receive during delivery makes room for more, so the
+/// test sleeps before it receives.
 #[test]
 fn a_small_receive_buffer_holds_few_datagrams() {
     on_thread("udp-buffer", || async {
@@ -540,7 +549,8 @@ fn a_small_receive_buffer_holds_few_datagrams() {
         for _ in 0..200 {
             assert_eq!(send(&mut sender, &to).await, Ok(()));
         }
-        let mut held = 0;
+        tokio::time::sleep(SILENCE).await;
+        let mut held = receive(&mut receiver, 1).await.len();
         while let Ok(datagrams) = timeout(SILENCE, receive(&mut receiver, 1)).await {
             held += datagrams.len();
         }

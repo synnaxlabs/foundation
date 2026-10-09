@@ -2398,6 +2398,7 @@ mod tests {
                 let none = crate::Status {
                     waited: Span::ZERO,
                     refusals: 0,
+                    budget_waits: 0,
                 };
                 assert_eq!(side.transport.status(), none);
                 let held = side.pool.alloc(LARGE).expect("room");
@@ -2421,10 +2422,65 @@ mod tests {
                     side.transport.status(),
                     crate::Status {
                         waited,
-                        refusals: 0
+                        refusals: 0,
+                        budget_waits: 0,
                     }
                 );
                 side.session.close(Code(4));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn the_status_counts_the_sends_that_wait_for_send_budget_room() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| Config {
+                window_bytes: 2 * LARGE,
+                ..config
+            },
+            |side| async move {
+                assert_eq!(side.transport.status().budget_waits, 0);
+                let mut senders = Vec::new();
+                // One claim of each class waits.
+                let classes = [Class::Complete; 3].into_iter().chain([
+                    Class::CatchUp,
+                    Class::Complete,
+                    Class::Latest,
+                    Class::Command,
+                ]);
+                for class in classes {
+                    let opened = side.session.open_sender(class).await;
+                    senders.push(opened.expect("a stream"));
+                }
+                let mut sends: Vec<Pin<Box<dyn Future<Output = _>>>> = Vec::new();
+                for sender in &mut senders {
+                    sends.push(Box::pin(sender.send(side.block(&vec![0; LARGE]))));
+                }
+                let mut pending = Vec::new();
+                for mut send in sends {
+                    if poll_once(Pin::new(&mut send)).await.is_none() {
+                        pending.push(send);
+                    }
+                }
+                // QUIC takes the first message whole, and the window only part of the
+                // second. The second and third hold the budget, so the others wait.
+                assert_eq!(side.transport.status().budget_waits, 4);
+                for send in &mut pending {
+                    poll_once(Pin::new(send)).await;
+                }
+                assert_eq!(side.transport.status().budget_waits, 4);
+                drop(pending);
+                side.session.close(Code(4));
+                let closed = Error::Closed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
+                side.node.clock().sleep(spans(IDLE, 3)).await;
+                assert_eq!(side.transport.status().budget_waits, 4);
+            },
+            |side| async move {
+                let closed = Error::PeerClosed { code: Code(4) };
+                assert_eq!(side.session.closed().await, closed);
             },
         );
         assert_eq!(sim.run(), Ok(()));
@@ -2795,11 +2851,10 @@ mod tests {
         });
         testing::shard(&client, testing::CLIENT, move |config, node| async move {
             let pool = Rc::clone(&config.pool);
-            let part = testing::part(&node.net(), testing::address(&node));
-            let transport = Transport::new(config, part).expect("a transport");
+            let transports = testing::transports(&config, &node, 2);
             let server = testing::SERVER.public();
-            let ended = transport.dial(server, &at).await.expect("a session");
-            let waiting = transport.dial(server, &at).await.expect("a session");
+            let ended = transports[0].dial(server, &at).await.expect("a session");
+            let waiting = transports[1].dial(server, &at).await.expect("a session");
             let messages = [(&waiting, 0), (&waiting, 1), (&ended, 2)];
             for (session, byte) in messages {
                 let opened = session.open_sender(Class::Complete).await;
@@ -2945,11 +3000,11 @@ mod tests {
         testing::shard(&client, testing::CLIENT, move |config, node| async move {
             let tasks = config.tasks.clone();
             let pool = Rc::clone(&config.pool);
-            let part = testing::part(&node.net(), testing::address(&node));
-            let transport = Transport::new(config, part).expect("a transport");
+            let count = u8::try_from(sessions).expect("a few sessions");
+            let transports = testing::transports(&config, &node, count);
             let server = testing::SERVER.public();
             let mut held = Vec::new();
-            for _ in 0..sessions {
+            for transport in &transports {
                 let session = transport.dial(server, &at).await.expect("a session");
                 let streams = [(0, Class::Complete, 2), (1, Class::Latest, 3)];
                 for (byte, class, count) in streams {
@@ -2968,7 +3023,7 @@ mod tests {
                 held.push(session);
             }
             std::future::pending::<()>().await;
-            drop((transport, held));
+            drop((transports, held));
         });
         assert_eq!(sim.run_for(spans(Span::SECOND, 60)), Ok(()));
         let count = |counts: &[AtomicU32; 2]| {

@@ -518,6 +518,10 @@ mod tests {
         use super::*;
 
         #[derive(Clone, Copy)]
+        #[cfg_attr(
+            not(target_os = "linux"),
+            expect(dead_code, reason = "only a GSO test fails a send")
+        )]
         enum Outcome {
             Fails(Errno),
             Sent,

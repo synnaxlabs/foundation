@@ -79,13 +79,29 @@
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068090235,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068606545).
   Supersedes https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068520601,
-  which refused only `0.0.0.0`. On `os`, a peer that resets after the handshake gives
-  `Ok` from `Net::connect`, and the stream reads `Reset`. The kernel then holds no peer,
-  so `Tcp::peer` is the remote of the connect, an IPv4-mapped address as plain IPv4, and
-  any other address as given, with its scope and flow label. A caller that needs the
-  kernel's peer there makes an interface change to `env::net`. Decided by
-  `laptop.architect-2` (2026-10-08 15:42 UTC, #1789,
-  https://github.com/synnaxlabs/foundation/pull/1789#issuecomment-6063559667).
+  which refused only `0.0.0.0`. On macOS, `os` has no GSO, so `batch_max` is 1, and the
+  loopback, with an MTU of 16,384 bytes, loses a larger datagram. Decided by
+  `laptop.architect-2` (2026-10-08 22:35 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767). Until
+  #1972 patches noq-udp to send an IPv4 source as `IP_PKTINFO` on Apple, macOS ignores
+  each IPv4 source and sends from an address of its choice, with no error. Decided by
+  `laptop.architect-2` (2026-10-08 22:51 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958).
+  `os::net()` is behind the `os` cargo feature `net`, off by default, because Tokio has
+  no `net` under `--cfg loom`. Decided by `laptop.architect-2` (2026-10-08 23:42 UTC,
+  #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415).
+  Supersedes the removal of the feature in
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066303437, approved
+  in https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066705829.
+  Trigger: #2038 gives the loom models a cfg name of their own, and then removes the
+  feature.
+  On `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and
+  the stream
+  reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of the
+  connect, an IPv4-mapped address as plain IPv4, and any other address as given, with
+  its scope and flow label. A caller that needs the kernel's peer there makes an
+  interface change to `env::net`. Decided by `laptop.architect-2` (2026-10-08 15:42 UTC,
+  #1789, https://github.com/synnaxlabs/foundation/pull/1789#issuecomment-6063559667).
   Amended (2026-10-07, #995): `env::net` also gives name lookups.
   `Net::resolve` gives an IP literal, also an IPv6 address in brackets, with no
   lookup, and keeps no cache. `NotFound` is final; `Io` is a failed lookup that a
@@ -182,3 +198,46 @@
   (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6050977855). The
   `Poisoned` sentence: `laptop.architect-2`, 2026-10-08T02:41:37Z
   (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051075955).
+  Amended (2026-10-08T17:19:48Z, #1921): on macOS, an accepted socket does not keep
+  the receive buffer of its listener, so `os` sets the options of the listener again
+  on each accepted socket, on every OS. The listener still sets them before `listen`:
+  the window scale of the SYN-ACK comes from its receive buffer. On macOS, a socket
+  option on a socket that a reset ended gives `EINVAL`. On `ENOTCONN` or `EINVAL`
+  from a call on the socket, `os` reads the pending error and gives it: a pending
+  error ends the stream, and with none the call gives `Io` with the code. Decided by
+  `laptop.architect-2` (2026-10-08T17:19:48Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065277473; the
+  one rule for `ENOTCONN` or `EINVAL`, 2026-10-08T18:12:38Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6066172138).
+  Measured on macOS (#1921): a create of a path with a trailing slash gives `ENOTDIR`
+  for a file and `NotFound` for no file, not `EISDIR`, and an unlink of a directory
+  gives `EPERM`, not `EISDIR`. No code reads these codes.
+  Amended (2026-10-08T17:46:08Z, #1921): macOS applies `TCP_NOTSENT_LOWAT` only to the
+  write event, not to the write itself. So on macOS, `os` counts the bytes written since
+  the count last reached the bound. When the count reaches `unsent_bytes_max`, the next
+  write waits for the write event, which honors the bound. So the unsent bytes stay at
+  most twice the bound, with one wait per `unsent_bytes_max` bytes. On macOS with
+  `delayed`, XNU also posts the write event under one segment, so the unsent bytes stay
+  at most the bound plus the larger of the bound and one segment. Decided by
+  `laptop.architect-2` (2026-10-08T17:46:08Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065728469; the last
+  two sentences, 2026-10-08T18:12:38Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6066172138).
+  Supersedes the second item of
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065283346
+  (2026-10-08T17:20:09Z), and the last sentence of the record text of
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065728469
+  (2026-10-08T17:46:08Z).
+  Amended (2026-10-08T19:21:24Z, #1977): a write of no bytes gives `Ok(0)` at once, with
+  no wait and no error, also after a reset or `poll_close`. It writes nothing, so it has
+  nothing to report; the next write of bytes, read, or close reports a reset or a close.
+  `os` and `sim` each return after the thread check (and, in `sim`, the crash check),
+  before any other step, so the two agree with no shared logic. The thread check binds
+  the stream to its thread, also at a first poll that writes no bytes. Lost: `Ok(0)` or
+  the error that ended the stream, which needs a read of `SO_ERROR` in `os` and the
+  close and reset states in both drivers, for a call that no caller makes; and a wait as
+  for a write of bytes, which needs the kernel's unsent count on each such call and is
+  not exact on macOS. Decided by `laptop.architect-2` (2026-10-08T19:21:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1977#issuecomment-6067346540; the
+  order, 2026-10-08T19:44:46Z:
+  https://github.com/synnaxlabs/foundation/pull/1938#issuecomment-6067736678).

@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# `os::net()`. A `--cfg loom` build leaves it off, as Tokio has no `net` there.
+net = ["dep:noq-udp"]
+
 [dependencies]
 block = { path = "../block" }
 env = { path = "../env" }
@@ -16,7 +20,7 @@ types = { path = "../types" }
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = { workspace = true }
 # The UDP socket calls of `env::net` (#119).
-noq-udp = { workspace = true }
+noq-udp = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["thread"] }
@@ -24,6 +28,8 @@ rustix = { workspace = true, features = ["thread"] }
 [dev-dependencies]
 counting = { path = "../counting" }
 divan = { workspace = true }
+# Turns `net` on for the tests and benches of this crate.
+os = { path = ".", features = ["net"] }
 proptest = { workspace = true }
 rustix = { workspace = true, features = ["process"] }
 tokio = { workspace = true, features = ["net", "rt", "time"] }
