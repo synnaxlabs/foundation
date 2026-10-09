@@ -84,7 +84,9 @@
   `Pending` partway through a transmit sent one datagram at a time, the `os` sender
   keeps the index of the next datagram, so the retry with the same transmit sends only
   the datagrams that did not go out (`laptop.architect-2`, 2026-10-09 07:15 UTC,
-  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6076288463). Each
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6076288463). A
+  caller that drops a transmit after `Pending` and sends another loses the first
+  datagrams of the other. Each
   half has its own `dup` of the socket. The receiver registers for readable at its
   first poll, in a field of its driver (`laptop.architect-2`, 2026-10-08 19:12 UTC,
   https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
