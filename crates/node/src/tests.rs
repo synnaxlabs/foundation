@@ -2820,14 +2820,17 @@ mod port {
         /// file.
         #[test]
         fn a_key_that_is_not_valid_stops_the_node() {
-            let mut tag = own();
-            tag[15] = b'2';
-            let crc = crc32c::crc32c(&tag[..64]);
-            tag[64..].copy_from_slice(&crc.to_le_bytes());
+            let tags = (0..16).map(|i| {
+                let mut tag = own();
+                tag[i] ^= 1;
+                let crc = crc32c::crc32c(&tag[..64]);
+                tag[64..].copy_from_slice(&crc.to_le_bytes());
+                tag
+            });
             let mut changed = own();
             changed[40] ^= 1;
             let short = own()[..LEN - 1].to_vec();
-            for bytes in [short, tag, changed] {
+            for bytes in [short, changed].into_iter().chain(tags) {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
                 create_key(&mut sim, &host, bytes.clone());
