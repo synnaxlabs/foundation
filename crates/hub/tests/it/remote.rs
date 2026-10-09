@@ -1557,3 +1557,127 @@ fn a_complete_reader_whose_credit_the_stream_refuses_sends_no_later_credit() {
         },
     );
 }
+
+#[test]
+fn a_reader_whose_frame_is_larger_than_each_block_of_its_pool_stops_the_stream_with_busy()
+ {
+    const BODY: u32 = 1 << 28;
+    remote(
+        48,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (mut sender, mut receiver) = fake_open(&transport).await;
+            send_head(&mut sender, 1, &[(0, 8), (1, BODY)]).await;
+            let error = loop {
+                if let Err(error) = receiver.recv().await {
+                    break error;
+                }
+            };
+            let busy = Code(Refusal::Busy.code());
+            assert_eq!(error, transport::Error::Reset { code: busy });
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Latest).await;
+            let ended = reader.next().await.expect_err("the frame is too large");
+            // The block also holds the header, one range, and two descriptors.
+            let too_large = block::Error::TooLarge {
+                requested: usize::try_from(BODY).expect("a usize") + 16 + 16 + 2 * 8,
+                largest: test.pool.largest(),
+            };
+            assert_eq!(ended, Ended::Pool(too_large));
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+/// The home's receive half should reset with `BUSY`, as its send half stops (#2031).
+#[test]
+fn a_complete_reader_whose_pool_has_no_room_for_a_frame_while_a_credit_waits_resets_with_0()
+ {
+    const BODY: usize = 16_320;
+    const FIRST: usize = 40;
+    const TAKEN: usize = 34;
+    remote_sized(
+        49,
+        sim::link::Config::default(),
+        [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
+        move |node, _, transport, steps| async move {
+            let session = transport.accept().await.expect("a session");
+            let mut incoming = session.accept().await.expect("a stream");
+            let mut sender = incoming.sender.take().expect("a two-way stream");
+            for _ in 0..3 {
+                incoming
+                    .receiver
+                    .recv()
+                    .await
+                    .expect("a message")
+                    .expect("open");
+            }
+            send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
+            let _second = session.accept().await.expect("a second stream");
+            send_until_stopped(&mut sender, FIRST, BODY).await;
+            let error = loop {
+                if let Err(error) = incoming.receiver.recv().await {
+                    break error;
+                }
+            };
+            let block = own_pool().alloc(1).expect("the pool has room");
+            let stopped = sender.send(block.freeze()).await.expect_err("stopped");
+            let busy = Code(Refusal::Busy.code());
+            assert_eq!(stopped, transport::Error::Stopped { code: busy });
+            assert_eq!(error, transport::Error::Reset { code: Code(0) });
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let names = define_many(&test, 1000);
+            let hub = test.hub.clone();
+            test.tasks.spawn(async move {
+                drop(hub.reader(&names, Mode::Complete).await);
+            });
+            for _ in 0..TAKEN {
+                reader.next().await.expect("a frame");
+            }
+            let next = reader.next();
+            let blocks = fill(&test.pool);
+            let ended = next.await.expect_err("the pool has no room for the frame");
+            let Ended::Pool(block::Error::Exhausted { requested, .. }) = ended else {
+                panic!("not an exhausted pool: {ended:?}");
+            };
+            let expected = test.pool.alloc(requested).expect_err("the pool is full");
+            drop(blocks);
+            assert_eq!(ended, Ended::Pool(expected));
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+/// Sends up to `n` frames of two series with `body` bytes in all, and returns at the
+/// first send that the stream refuses.
+async fn send_until_stopped(sender: &mut Sender, n: usize, body: usize) {
+    let half = u32::try_from(body / 2).expect("a short body");
+    let head = Reply::Head(Head {
+        path: Path::Live,
+        range: Range {
+            seq: 0,
+            count: half / 8,
+        },
+        series: 2,
+    });
+    for _ in 0..n {
+        let mut h = own_pool().alloc(head.encoded_len()).expect("room");
+        head.encode(&mut h);
+        let mut e = own_pool().alloc(2 * ends::LEN).expect("room");
+        ends::encode([(0, half), (1, 2 * half)], &mut e);
+        let mut b = own_pool().alloc(body).expect("room");
+        b.fill(1);
+        for block in [h, e, b] {
+            if sender.send(block.freeze()).await.is_err() {
+                return;
+            }
+        }
+    }
+}
