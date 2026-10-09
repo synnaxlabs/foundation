@@ -149,7 +149,7 @@
   2026-10-08 19:13 UTC; the header:
   https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6067771921,
   2026-10-08 19:46 UTC). The exception for `UA_ARCH_HEADER` in the flags passage
-  above, the copy check without `alloc.h`, and the test of the archives: approved by
+  above, the copy check without `alloc.h`, and the test of the archive: approved by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6068060133,
   2026-10-08 20:04 UTC, and at 1a593331:
@@ -163,7 +163,7 @@
   `static UA_THREAD_LOCAL` buffers of `src/client/ua_client.c` and the server files.
   So our change of `src_generated/open62541/config.h` moves its thread-local block out
   of `#if UA_MULTITHREADING >= 100`. The driver test of `UA_rng` is its positive
-  control, and the test of the archives fails on each `pthread_mutex_*` symbol: the
+  control, and the test of the archive fails on each `pthread_mutex_*` symbol: the
   closed list holds none. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912,
   2026-10-08 20:03 UTC). Supersedes the note "a copy config with `UA_MULTITHREADING`
