@@ -1,4 +1,5 @@
 use super::{BEHIND, Error, HEAD, Head, Mode, OPENED, Open, Reply, ends, rest_of_run};
+use crate::common;
 
 /// The decoder at the reader's node: it takes each message from the home, in order,
 /// and checks the order and the runs of the session.
@@ -16,7 +17,7 @@ enum Next {
     Head,
     Ended,
     Ends { remain: u32 },
-    Body { end: usize, remain: usize },
+    Body(common::Body),
 }
 
 /// A message from the home, decoded.
@@ -90,28 +91,15 @@ impl Reader {
                 let remain = rest_of_run(remain, ends.len())?;
                 let next = match (remain, ends.last_end()) {
                     (0, Some(0)) => Next::Head,
-                    (0, Some(end)) => {
-                        let end = body_len(end);
-                        Next::Body { end, remain: end }
-                    }
+                    (0, Some(end)) => Next::Body(common::Body::new(body_len(end))),
                     _ => Next::Ends { remain },
                 };
                 let last = remain == 0;
                 (FromHome::Ends { ends, last }, next)
             }
-            Next::Body { end, remain } => {
-                let len = message.len();
-                if len == 0 {
-                    return Err(Error::Empty);
-                }
-                let remain =
-                    remain.checked_sub(len).ok_or(Error::Body { len, remain })?;
-                let next = if remain == 0 {
-                    Next::Head
-                } else {
-                    Next::Body { end, remain }
-                };
-                let last = remain == 0;
+            Next::Body(mut body) => {
+                let last = body.take(message)?;
+                let next = if last { Next::Head } else { Next::Body(body) };
                 (
                     FromHome::Body {
                         bytes: message,
@@ -130,7 +118,7 @@ impl Reader {
     #[must_use]
     pub fn body(&self) -> Option<usize> {
         match self.next {
-            Next::Body { end, remain } => Some(start(end, remain)),
+            Next::Body(body) => Some(body.at()),
             Next::Opened | Next::Head | Next::Ends { .. } | Next::Ended => None,
         }
     }
@@ -162,11 +150,6 @@ impl Reader {
 
 fn body_len(end: u32) -> usize {
     usize::try_from(end).expect("invariant: a usize holds a u32")
-}
-
-fn start(end: usize, remain: usize) -> usize {
-    end.checked_sub(remain)
-        .expect("invariant: the rest of the body is no longer than the body")
 }
 
 #[cfg(test)]
