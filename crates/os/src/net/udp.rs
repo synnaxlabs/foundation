@@ -199,8 +199,21 @@ impl Writer {
     }
 
     /// Runs `send` on the descriptor and the index of its next datagram until it is
-    /// ready, and waits for writable while it is `Pending`.
+    /// ready, and waits for writable while it is `Pending`. The index goes to 0 at
+    /// each `Ready`.
     fn poll_send(
+        &mut self,
+        cx: &mut Context<'_>,
+        send: impl FnMut(&UdpSocket, &mut usize) -> Poll<Result<(), Error>>,
+    ) -> Poll<Result<(), Error>> {
+        let outcome = self.poll_until_ready(cx, send);
+        if outcome.is_ready() {
+            self.next = 0;
+        }
+        outcome
+    }
+
+    fn poll_until_ready(
         &mut self,
         cx: &mut Context<'_>,
         mut send: impl FnMut(&UdpSocket, &mut usize) -> Poll<Result<(), Error>>,
@@ -208,7 +221,6 @@ impl Writer {
         loop {
             if let Poll::Ready(sent) = send(&self.fd, &mut self.next) {
                 self.full = None;
-                self.next = 0;
                 return Poll::Ready(sent);
             }
             let full = match &mut self.full {
@@ -222,7 +234,6 @@ impl Writer {
                 Ok(mut guard) => guard.clear_ready(),
                 Err(e) => {
                     self.full = None;
-                    self.next = 0;
                     return Poll::Ready(Err(from_io(&e)));
                 }
             }
@@ -914,6 +925,31 @@ mod tests {
                 let full = writer.poll_send(&mut cx, pending);
                 assert_eq!(full, Poll::Pending);
                 assert!(writer.full.is_some());
+            });
+        }
+
+        #[test]
+        fn a_failed_registration_restarts_the_next_transmit_at_its_first_datagram() {
+            runtime().block_on(async {
+                let udp = loopback();
+                let fd = udp.bound.socket.try_clone().unwrap();
+                // A registration of the same descriptor, so epoll refuses the one of
+                // the writer with `EEXIST`, as it refuses one with `ENOSPC`.
+                let _taken = Writer::register(&fd).unwrap();
+                let mut writer = idle(fd);
+                let mut cx = Context::from_waker(Waker::noop());
+                let failed = writer.poll_send(&mut cx, |_, next| {
+                    *next = 2;
+                    Poll::Pending
+                });
+                assert_eq!(failed, Poll::Ready(Err(Error::Io { code: 17 })));
+                let mut first = None;
+                let sent = writer.poll_send(&mut cx, |_, next| {
+                    first = Some(*next);
+                    Poll::Ready(Ok(()))
+                });
+                assert_eq!(sent, Poll::Ready(Ok(())));
+                assert_eq!(first, Some(0), "a new transmit skips its first datagrams");
             });
         }
 
