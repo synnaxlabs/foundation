@@ -7307,7 +7307,8 @@ mod tests {
         }
 
         /// On `Endpoint` events, not through `Session`: no public peer can skip its
-        /// hello.
+        /// hello, and a `sim` link cannot lose only the datagrams of a hello, so no
+        /// public peer holds a live connection with no hello past the bound.
         #[test]
         fn end_a_session_whose_peer_sends_no_hello_for_twice_idle() {
             testing::run(1, |shard| {
@@ -7391,45 +7392,38 @@ mod tests {
                         panic!("{events:?}");
                     };
                     assert_eq!(error, &Error::TimedOut);
+                    let deadline = pair.server.endpoint.deadline();
+                    assert!(deadline.is_none_or(|due| due > wake), "{deadline:?}");
                 });
             }
         }
 
-        /// Two nodes with an idle of 1 s, on links of 600 ms and 1.2 s RTT, which lose
-        /// the server's first two datagrams. The client's hello arrives after `idle`,
-        /// and on the slower link after twice `idle`, but within the idle timeout of 3
-        /// PTO. The server's arrives at `Connected`. On `Endpoint`, not through
-        /// `Session`: the test drops exactly the server's first two datagrams, which
-        /// the loss of a `sim` link cannot pick.
+        /// A connection whose socket broke, with no hello from a live peer, gives no
+        /// second [`Event::Closed`] and no fault when the hello's bound passes. On
+        /// `Endpoint` events, not through `Session`: no public peer can skip its hello.
         #[test]
-        fn keep_a_session_whose_hello_a_short_cut_delays() {
-            for (delay, after) in [(300, 1), (600, 2)] {
-                let delay = Duration::from_millis(delay);
-                testing::run(1, move |shard| {
-                    let mut pair = Pair::new(shard, Span::SECOND, delay);
-                    pair.dial(pair::SERVER_KEY.public());
-                    pair.server.drops = 2;
-                    pair.run(Duration::from_secs(20));
-                    for side in [&pair.client, &pair.server] {
-                        let key = key(side);
-                        assert!(
-                            matches!(
-                                events(side)[..],
-                                [Event::Connected { .. }, Event::Available { key: available }]
-                                    if *available == key
-                            ),
-                            "{delay:?}: {:?}",
-                            side.events
-                        );
-                    }
-                    let late =
-                        pair.client.events[1].0.checked_sub(pair.client.events[0].0);
-                    assert!(
-                        late > Some(Duration::from_secs(after)),
-                        "{delay:?}: {late:?}"
-                    );
-                });
-            }
+        fn end_a_failed_session_once_when_the_bound_passes() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let error = env::net::Error::Io { code: 5 };
+                pair.server.endpoint.fail(&error);
+                pair.run(Duration::from_secs(3));
+                let [
+                    (_, Event::Connected { key, .. }),
+                    (
+                        _,
+                        Event::Closed {
+                            key: ended,
+                            error: closed,
+                        },
+                    ),
+                ] = &pair.server.events[..]
+                else {
+                    panic!("{:?}", pair.server.events);
+                };
+                assert_eq!(ended, key);
+                assert_eq!(closed, &Error::Network { error });
+            });
         }
 
         /// On `Endpoint` events, not through `Session`: no public peer can send its
