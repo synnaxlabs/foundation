@@ -29,3 +29,6 @@
   awaits the commit, and never runs a future of `Link::serve` with `tasks.spawn`.
   Decided by `laptop.architect` (2026-10-08T18:16:38Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520).
+  The state holds a clone of the region's mesh when the hub has one. Decided by
+  `laptop.architect` (2026-10-08T18:42:42Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536).

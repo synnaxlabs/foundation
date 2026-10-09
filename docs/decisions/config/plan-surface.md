@@ -128,7 +128,7 @@
   home on each change, a `config::Error` for a lazy fetch of chunks, a provisional tree
   and `tree::diff`, which writes chunks that the plan drops, and the chunks of the
   applied tree as an input, with which `ops` reads the tree a second time and a missing
-  chunk panics in `config`, though #1741 names that case (`Cause::Tree`), and, for
+  chunk panics in `config`, though #1741 names that case (`Cause::Read`), and, for
   checks 2 and 3, a `spec::placement::check` over the whole spec, a second text in
   `config`, no report for the `Tie` or `Homeless` of a connector, a check against each
   connector above the index, with which two nested connectors on two nodes share one
