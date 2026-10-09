@@ -1037,21 +1037,50 @@ fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
         length: BODY_BYTES_MAX,
         held: BODY_BYTES_MAX + 1,
     };
-    assert_eq!(served[0], Err(over.clone()));
-    assert_eq!(served[1], Ok(Got::Request(name(SUBJECT), b"y".to_vec())));
+    let mut each = vec![
+        Err(over.clone()),
+        Ok(Got::Request(name(SUBJECT), b"y".to_vec())),
+    ];
+    // Two stalled requests, and the hello stream of each session.
+    each.resize_with(7, || Err(serve::Error::Stream(closed_with(0))));
     assert_eq!(
-        served
-            .iter()
-            .filter(|got| matches!(got, Err(serve::Error::Bodies { .. })))
-            .count(),
-        1,
-        "the request that fills the cap exactly is not refused: {served:?}"
+        served, each,
+        "the request that fills the cap exactly is not refused"
     );
     assert_eq!(
         over.to_string(),
         "a request body of 16777216 bytes does not fit under the cap of 33554432 bytes: \
          the open requests of the hub hold 16777217 bytes"
     );
+}
+
+/// A request that a link refuses as `Pending` reserves no body: two more requests at
+/// the cap then fit exactly.
+#[test]
+fn reserves_no_body_for_a_second_request_of_a_link() {
+    let served = sessions(109, 3, |agents| async move {
+        let [mut first, mut second, mut third] =
+            <[Agent; 3]>::try_from(agents).ok().expect("three agents");
+        for agent in [&mut first, &mut second, &mut third] {
+            agent.admit().await;
+        }
+        let mut open = first.request(1, b"a").await;
+        first.sleep(Span::from_nanos(HOLD.nanos() / 5)).await;
+        let mut pending = first.unfinished(BODY_BYTES_MAX, &[]).await;
+        assert_eq!(pending.recv().await, reset_with(MALFORMED));
+        assert_eq!(open.response().await, b"a");
+        let _stalled = second.unfinished(BODY_BYTES_MAX, &[]).await;
+        second.sleep(Span::MILLISECOND).await;
+        let _fits = third.unfinished(BODY_BYTES_MAX, &[]).await;
+        third.sleep(QUIET).await;
+    });
+    let mut each = vec![
+        Err(serve::Error::Pending),
+        Ok(Got::Request(name(SUBJECT), b"a".to_vec())),
+    ];
+    // Two stalled requests, and the hello stream of each session.
+    each.resize_with(7, || Err(serve::Error::Stream(closed_with(0))));
+    assert_eq!(served, each);
 }
 
 /// A request whose stream resets after its body was reserved gives the reservation
