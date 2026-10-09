@@ -2493,3 +2493,179 @@ connector \"a\" {
     .expect("the one check of the connector passes");
     assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("n"))]));
 }
+
+/// The fix that makes `winner` win for each of `connectors`, a list such as "`a` and
+/// `b`", and their indexes.
+fn wins(winner: &str, connectors: &str) -> String {
+    format!(
+        "Make the placement `{winner}` win for the connectors {connectors} and their \
+         indexes"
+    )
+}
+
+/// The connectors `names` on `n`, each of which writes the indexes of `writes`, by
+/// position, then `more`.
+fn writers(names: &[&str], writes: &[&str], more: &str) -> String {
+    let mut indexes: Vec<_> = writes.iter().flat_map(|w| w.split(", ")).collect();
+    indexes.sort_unstable();
+    indexes.dedup();
+    let indexes = indexes
+        .into_iter()
+        .map(|index| format!("channel {index} {{\n  kind = \"index\"\n}}\n"));
+    let connectors = names.iter().zip(writes).map(|(name, writes)| {
+        format!(
+            "connector \"{name}\" {{\n  kind = \"writer\"\n  node = \"n\"\n  \
+             writes = [{writes}]\n}}\n"
+        )
+    });
+    indexes.chain(connectors).collect::<String>() + more
+}
+
+#[test]
+fn plans_after_the_one_fix_of_two_writers_of_an_index_with_two_winners() {
+    let text = |more: &str| writers(&["a", "b"], &["\"i.time\""; 2], more);
+    let refused = text(
+        &(placement("p", "\"a\", \"i.time\"", "n") + &placement("q", "\"b\"", "n")),
+    );
+    let found = problems(Spec::create_empty().plan(&[&refused], &["n"]));
+    let found: Vec<_> = found.into_iter().map(|p| (p.0, p.2, p.3)).collect();
+    let expected = [(
+        "config.split-placement",
+        "the placement `p` wins for the index `i.time`, but the placement `q` wins for \
+         the connector `b`"
+            .to_owned(),
+        wins("p", "`a` and `b`"),
+    )];
+    assert_eq!(found, expected);
+    let fixed = text(&placement("p", "\"a\", \"b\", \"i.time\"", "n"));
+    let plan = Spec::create_empty().plan(&[&fixed], &["n"]);
+    assert!(plan.is_ok(), "{fixed}: {plan:?}");
+}
+
+#[test]
+fn lists_each_writer_of_an_index_that_no_placement_selects() {
+    let text = |more: &str| writers(&["c1", "c2"], &["\"x.time\""; 2], more);
+    let refused =
+        text(&(placement("p", "\"c1\"", "n") + &placement("q", "\"c2\"", "n")));
+    let found = problems(Spec::create_empty().plan(&[&refused], &["n"]));
+    let found: Vec<_> = found.into_iter().map(|p| (p.0, p.2, p.3)).collect();
+    let expected = [(
+        "config.split-placement",
+        "no placement selects the index `x.time`, but the placement `p` wins for the \
+         connector `c1`, and the placement `q` wins for the connector `c2`"
+            .to_owned(),
+        wins("p", "`c1` and `c2`"),
+    )];
+    assert_eq!(found, expected);
+    let fixed = text(&placement("p", "\"c1\", \"c2\", \"x.time\"", "n"));
+    let plan = Spec::create_empty().plan(&[&fixed], &["n"]);
+    assert!(plan.is_ok(), "{fixed}: {plan:?}");
+}
+
+#[test]
+fn gives_one_target_to_the_connectors_that_a_chain_of_indexes_links() {
+    let writes = ["\"i.time\"", "\"j.time\"", "\"i.time\", \"j.time\""];
+    let text = |more: &str| writers(&["a", "b", "c"], &writes, more);
+    let refused = text(
+        &(placement("p", "\"a\", \"i.time\"", "n")
+            + &placement("q", "\"b\", \"j.time\"", "n")),
+    );
+    let found = problems(Spec::create_empty().plan(&[&refused], &["n"]));
+    let found: Vec<_> = found.into_iter().map(|p| (p.0, p.2, p.3)).collect();
+    let fix = wins("p", "`a`, `b`, and `c`");
+    let expected = [
+        (
+            "config.split-placement",
+            "the placement `p` wins for the index `i.time`, but no placement selects \
+             the connector `c`"
+                .to_owned(),
+            fix.clone(),
+        ),
+        (
+            "config.split-placement",
+            "the placement `q` wins for the index `j.time`, but no placement selects \
+             the connector `c`"
+                .to_owned(),
+            fix,
+        ),
+    ];
+    assert_eq!(found, expected);
+    let all = "\"a\", \"b\", \"c\", \"i.time\", \"j.time\"";
+    let fixed = text(&placement("p", all, "n"));
+    let plan = Spec::create_empty().plan(&[&fixed], &["n"]);
+    assert!(plan.is_ok(), "{fixed}: {plan:?}");
+}
+
+#[test]
+fn names_no_winner_of_an_index_whose_writers_are_on_two_nodes_in_a_fix() {
+    let text = format!(
+        "\
+channel \"i.time\" {{
+  kind = \"index\"
+}}
+channel \"j.time\" {{
+  kind = \"index\"
+}}
+connector \"a\" {{
+  kind = \"writer\"
+  node = \"n\"
+  writes = [\"i.time\", \"j.time\"]
+}}
+connector \"x\" {{
+  kind = \"writer\"
+  node = \"m\"
+  writes = [\"i.time\"]
+}}
+{}{}",
+        placement("r", "\"j.time\"", "n"),
+        placement("s", "\"i.time\"", "n")
+    );
+    let found = problems(Spec::create_empty().plan(&[&text], &["m", "n"]));
+    let found: Vec<_> = found.into_iter().map(|p| (p.0, p.3)).collect();
+    let expected = [
+        (
+            "config.writer-nodes",
+            "Run each connector that writes `i.time` on one node".into(),
+        ),
+        ("config.split-placement", win("r", "a")),
+    ];
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn plans_after_the_one_exclude_fix_of_two_writers_of_an_index() {
+    let z =
+        "connector \"z\" {\n  kind = \"writer\"\n  node = \"m\"\n  writes = []\n}\n";
+    let text =
+        |more: &str| writers(&["a", "b"], &["\"i.time\""; 2], &(z.to_owned() + more));
+    let refused = text(&placement("p", "\"a\", \"b\", \"i.time\", \"z\"", "m"));
+    let fix = "Exclude the connectors `a` and `b` and their indexes from the `select` \
+               of `p`, and select them with another placement whose `home` is `n`";
+    let expected = [
+        ("config.connector-home", fix.to_owned()),
+        ("config.connector-home", fix.to_owned()),
+    ];
+    let fixed = text(
+        &(placement(
+            "p",
+            "\"a\", \"b\", \"i.time\", \"z\", \"!a\", \"!b\", \"!i.time\"",
+            "m",
+        ) + &placement("ab", "\"a\", \"b\", \"i.time\"", "n")),
+    );
+    plans_after(&refused, &expected, &fixed);
+}
+
+#[test]
+fn plans_after_the_one_regroup_fix_of_two_writers_of_an_index() {
+    let text = |more: &str| writers(&["a", "b"], &["\"i.time\""; 2], more);
+    let refused = text(&placement("r", "\"i.time\"", "m"));
+    let fix = "Exclude the indexes of the connectors `a` and `b` from the `select` of \
+               `r`, and select the connectors and their indexes with another placement \
+               whose `home` is `n`";
+    let expected = [("config.split-placement", fix.to_owned())];
+    let fixed = text(
+        &(placement("r", "\"i.time\", \"!i.time\"", "m")
+            + &placement("ab", "\"a\", \"b\", \"i.time\"", "n")),
+    );
+    plans_after(&refused, &expected, &fixed);
+}
