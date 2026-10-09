@@ -23,16 +23,14 @@
   when a package of the `fuzz` graph has an edge to another package of the name of a
   copy that the root builds, and a requirement on crates.io, of a kind and target of
   the edge, that both the copy and that package meet. A requirement that the copy does
-  not meet passes, such as one on a release of another series (limit 1 of
-  https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074424462). A
-  requirement that resolves to another package always gives such an edge, so the
-  check has no false pass. Its cost is a false refusal of a requirement of the kind
-  and target of one that resolves to another package, also when it resolves to the
-  copy or to nothing, such as an optional dependency that is off. `fuzz/Cargo.lock`
-  at `8df01ff28` has one package of each copy's name, so no such case exists there
-  (`laptop.architect`, 2026-10-09T06:40:13Z,
-  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6075796048; this text
-  approved by `laptop.architect` at 2026-10-09T07:11:50Z,
+  not meet passes. A requirement that resolves to another package always gives such an
+  edge, so the check has no false pass. Its cost is a false refusal of a requirement
+  of the kind and target of one that resolves to another package, also when it
+  resolves to the copy or to nothing, such as an optional dependency that is off.
+  `fuzz/Cargo.lock` at `8df01ff28` has one package of each copy's name, so no such
+  case exists there (`laptop.architect`, 2026-10-09T06:40:13Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6075796048; the rule
+  approved at `8df01ff28` by `laptop.architect` at 2026-10-09T07:11:50Z,
   https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076247492, and
   `laptop.architect-2` at 2026-10-09T07:14:50Z,
   https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076285542).
@@ -40,7 +38,7 @@
   (the pair by edge name) of
   https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391, the text
   of https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074614166, and
-  limit 2 of
+  the two limits of
   https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074424462.
   The task checks the graphs of `cargo metadata --locked`, not the text of the two
   tables: a patch that `fuzz/` does not use changes no code that it tests
