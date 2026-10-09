@@ -41,7 +41,7 @@ pub(crate) struct Bytes {
 
 /// `UA_NodeId`.
 #[repr(C)]
-pub(crate) struct NodeId {
+pub(crate) struct Key {
     namespace: u16,
     kind: u32,
     identifier: [u64; 2],
@@ -51,7 +51,7 @@ pub(crate) struct NodeId {
 #[repr(C)]
 pub(crate) struct DataType {
     name: *const c_char,
-    ids: [NodeId; 3],
+    keys: [Key; 3],
     /// `memSize` in the low 16 bits, then `typeKind`, `pointerFree`, `overlayable`,
     /// and `membersSize`.
     bits: u32,
@@ -92,7 +92,7 @@ pub(crate) const VARIANT: usize = 23;
 
 // `shim.c` asserts the same sizes.
 const _: () = {
-    assert!(size_of::<NodeId>() == 24, "UA_NodeId changed");
+    assert!(size_of::<Key>() == 24, "UA_NodeId changed");
     assert!(size_of::<DataType>() == 96, "UA_DataType changed");
     assert!(
         size_of::<DecodeOptions>() == 40,
