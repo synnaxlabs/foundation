@@ -126,9 +126,10 @@ fn free_of_null_does_nothing() {
     unsafe { free(std::ptr::null_mut()) };
 }
 
-/// Writes 1 byte before `ptr` with C's `memset`, which the address sanitizer checks.
+/// Writes the byte `offset` bytes before `ptr` with C's `memset`, which the address
+/// sanitizer checks.
 #[cfg(asan)]
-fn write_before(ptr: *mut c_void) {
+fn write_before(ptr: *mut c_void, offset: usize) {
     unsafe extern "C" {
         fn memset(
             dest: *mut c_void,
@@ -136,8 +137,9 @@ fn write_before(ptr: *mut c_void) {
             count: usize,
         ) -> *mut c_void;
     }
-    // SAFETY: the byte before `ptr` is in the header of its block.
-    let before = unsafe { ptr.cast::<u8>().sub(1) };
+    assert!((1..=super::ALIGN).contains(&offset));
+    // SAFETY: the header of the block holds the `ALIGN` bytes before `ptr`.
+    let before = unsafe { ptr.cast::<u8>().sub(offset) };
     // SAFETY: `before` is in a live block.
     unsafe { memset(before.cast(), 0, 1) };
 }
@@ -146,7 +148,15 @@ fn write_before(ptr: *mut c_void) {
 #[test]
 fn writes_before_a_block_of_malloc() {
     if crate::child::running() {
-        write_before(malloc(8));
+        write_before(malloc(8), 1);
+    }
+}
+
+#[cfg(asan)]
+#[test]
+fn writes_at_the_start_of_the_header_of_a_block() {
+    if crate::child::running() {
+        write_before(malloc(8), super::ALIGN);
     }
 }
 
@@ -154,7 +164,7 @@ fn writes_before_a_block_of_malloc() {
 #[test]
 fn writes_before_a_block_of_calloc() {
     if crate::child::running() {
-        write_before(calloc(2, 4));
+        write_before(calloc(2, 4), 1);
     }
 }
 
@@ -163,7 +173,7 @@ fn writes_before_a_block_of_calloc() {
 fn writes_before_a_block_of_realloc() {
     if crate::child::running() {
         // SAFETY: the block of `malloc` is live.
-        write_before(unsafe { realloc(malloc(8), 64) });
+        write_before(unsafe { realloc(malloc(8), 64) }, 1);
     }
 }
 
@@ -174,7 +184,7 @@ fn writes_before_a_block_that_a_failed_realloc_keeps() {
         let ptr = malloc(8);
         // SAFETY: `ptr` is live.
         assert!(unsafe { realloc(ptr, HUGE) }.is_null());
-        write_before(ptr);
+        write_before(ptr, 1);
     }
 }
 
@@ -183,13 +193,14 @@ fn writes_before_a_block_that_a_failed_realloc_keeps() {
 fn asan_reports_a_write_before_a_block() {
     for name in [
         "alloc::tests::writes_before_a_block_of_malloc",
+        "alloc::tests::writes_at_the_start_of_the_header_of_a_block",
         "alloc::tests::writes_before_a_block_of_calloc",
         "alloc::tests::writes_before_a_block_of_realloc",
         "alloc::tests::writes_before_a_block_that_a_failed_realloc_keeps",
     ] {
         let output = crate::child::output(
             name,
-            [("ASAN_OPTIONS", "allocator_may_return_null=1")],
+            &[("ASAN_OPTIONS", "allocator_may_return_null=1")],
         );
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(

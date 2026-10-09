@@ -20,9 +20,11 @@ exclude_re = [
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
   # Empty outside a build with the address sanitizer, which no CI job makes until
-  # #1912. In that build, the alloc tests of `connector-opcua` fail when either call is
-  # removed.
-  'crates/connector-opcua/src/alloc\.rs:.*replace (un)?poison with \(\)',
+  # #1912. In a C ASan build, `asan_reports_a_write_before_a_block` fails without it.
+  'crates/connector-opcua/src/alloc\.rs:.*replace poison with \(\)$',
+  # Empty outside a build with the address sanitizer. Only the Rust ASan build of
+  # #1912 reads the header in `block`, and its alloc tests fail without it.
+  'crates/connector-opcua/src/alloc\.rs:.*replace unpoison with \(\)$',
   # The fields of a UUIDv7 share no bit, so `^` gives the same bits as `|`.
   'crates/types/src/uuid\.rs:.*replace \| with \^ in v7$',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
