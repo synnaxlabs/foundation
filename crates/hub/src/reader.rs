@@ -220,6 +220,12 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<::home::reader::Unsynced> for Error {
+    fn from(::home::reader::Unsynced: ::home::reader::Unsynced) -> Self {
+        Self::Unsynced
+    }
+}
+
 /// A reader session through the reader's channels. Dropping it closes the session;
 /// frames that wait do not go out.
 #[derive(Debug)]
@@ -265,16 +271,13 @@ impl Local {
             (Mode::Complete, Some(named)) => {
                 let key = {
                     let mut state = state.borrow_mut();
-                    let opened = state
-                        .home
-                        .open_named_complete(
-                            channels.index,
-                            named,
-                            hold,
-                            WINDOW,
-                            charge,
-                        )
-                        .map_err(|::home::reader::Unsynced| Error::Unsynced)?;
+                    let opened = state.home.open_named_complete(
+                        channels.index,
+                        named,
+                        hold,
+                        WINDOW,
+                        charge,
+                    )?;
                     state.take_over(opened)
                 };
                 let (session, credit) = Session::with_credit(state, key, channels);
@@ -284,10 +287,7 @@ impl Local {
             (Mode::Latest, Some(named)) => {
                 let key = {
                     let mut state = state.borrow_mut();
-                    let opened = state
-                        .home
-                        .open_named_latest(channels.index, named)
-                        .map_err(|::home::reader::Unsynced| Error::Unsynced)?;
+                    let opened = state.home.open_named_latest(channels.index, named)?;
                     state.take_over(opened)
                 };
                 (Session::new(state, key, channels), None)
