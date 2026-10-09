@@ -7,9 +7,9 @@ use std::process::{Command, Stdio};
 pub(crate) enum Run {
     /// The command exited with an error.
     Failed,
-    /// The command passed and ran no test.
+    /// The command passed, and no test passed: none exists, or each is ignored.
     Empty,
-    /// The command passed and ran at least one test.
+    /// The command passed, and at least one test passed.
     Passed,
 }
 
@@ -24,18 +24,18 @@ pub(crate) fn run(command: &mut Command) -> Result<Run, String> {
     eprint!("{stdout}");
     Ok(if !output.status.success() {
         Run::Failed
-    } else if tests_ran(&stdout) == 0 {
+    } else if tests_passed(&stdout) == 0 {
         Run::Empty
     } else {
         Run::Passed
     })
 }
 
-/// The sum of N over the `running N tests` lines of libtest output.
-fn tests_ran(output: &str) -> usize {
+/// The sum of N over the `test result: <status>. N passed` lines of libtest output.
+fn tests_passed(output: &str) -> usize {
     output
         .lines()
-        .filter_map(|line| line.strip_prefix("running ")?.split(' ').next())
+        .filter_map(|line| line.strip_prefix("test result: ")?.split(' ').nth(1))
         .filter_map(|count| count.parse::<usize>().ok())
         .sum()
 }
@@ -50,9 +50,18 @@ mod tests {
 
     #[test]
     fn reads_how_the_run_ended() {
-        assert_eq!(sh("echo 'running 2 tests'"), Ok(Run::Passed));
-        assert_eq!(sh("echo 'running 0 tests'"), Ok(Run::Empty));
-        assert_eq!(sh("echo 'running 2 tests'; exit 101"), Ok(Run::Failed));
+        let passed = "echo 'test result: ok. 2 passed; 0 failed; 0 ignored'";
+        assert_eq!(sh(passed), Ok(Run::Passed));
+        assert_eq!(sh("echo 'test result: ok. 0 passed'"), Ok(Run::Empty));
+        assert_eq!(sh(&format!("{passed}; exit 101")), Ok(Run::Failed));
+    }
+
+    #[test]
+    fn a_run_whose_tests_are_all_ignored_ran_no_test() {
+        let script = "printf 'running 2 tests\\ntest a ... ignored\\ntest b ... \
+                      ignored\\n\\ntest result: ok. 0 passed; 0 failed; 2 ignored; \
+                      0 measured; 0 filtered out\\n'";
+        assert_eq!(sh(script), Ok(Run::Empty));
     }
 
     #[test]
@@ -64,14 +73,12 @@ mod tests {
     }
 
     #[test]
-    fn tests_ran_sums_each_test_binary() {
-        let output = "\nrunning 2 tests\ntest a ... ok\n\nrunning 0 tests\n\n\
-                      running 1 test\ntest b ... ok\n";
-        assert_eq!(tests_ran(output), 3);
-    }
-
-    #[test]
-    fn tests_ran_is_zero_with_no_tests() {
-        assert_eq!(tests_ran("\nrunning 0 tests\n\ntest result: ok.\n"), 0);
+    fn tests_passed_sums_each_test_binary() {
+        let output = "\nrunning 2 tests\ntest a ... ok\ntest c ... ignored\n\n\
+                      test result: ok. 1 passed; 0 failed; 1 ignored\n\n\
+                      running 0 tests\n\ntest result: ok. 0 passed; 0 failed\n\n\
+                      running 1 test\ntest b ... ok\n\n\
+                      test result: ok. 1 passed; 0 failed\n";
+        assert_eq!(tests_passed(output), 2);
     }
 }
