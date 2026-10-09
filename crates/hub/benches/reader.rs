@@ -21,6 +21,9 @@
 //!   `Pending`.
 //! - `complete wait`: each later poll of `next` on the drained complete reader, which
 //!   grants nothing and gives `Pending`.
+//! - `lost write`: after the rounds above, the bench writes until the ring has no
+//!   room, as nothing frees it until #160. Then each `Writer::write` of its own rounds
+//!   finds no room, gives `Outcome::Lost`, and wakes the latest reader with its frame.
 //!
 //! A `next` that gives `Pending` while a frame waits is the yield after a run of
 //! frames: it is polled again, and only the poll that gives the frame is timed. Any
@@ -46,11 +49,13 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use common::SETTLE;
+use hub::home::Outcome;
 use hub::reader::{Mode, Reader};
-use hub::writer;
+use hub::writer::{self, Writer};
 use shard::name;
 use table::Line;
 use types::authority::Authority;
+use types::frame::{Label, Path};
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
@@ -61,6 +66,8 @@ const FRAMES: usize = 64;
 /// `shard::AREA` holds.
 const WARMUP: usize = 20;
 const ROUNDS: usize = 200;
+/// More rounds than fill the ring.
+const FILL: usize = 1 << 10;
 
 fn main() {
     let mut sim = sim::Sim::new(sim::Config::default());
@@ -91,7 +98,7 @@ impl Count {
 }
 
 /// The `timer` line and the lines that it is the floor of.
-async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, [Line; 7]) {
+async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Line>) {
     let (hub, mut stamp) = common::hub(&node, tasks).await;
     let config = writer::Config {
         subject: name("bench"),
@@ -147,7 +154,56 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, [Line;
             line.close(round >= WARMUP);
         }
     }
+    fill(&node, &mut writer, &mut complete, &mut stamp).await;
+    let mut lines = Vec::from(lines);
+    lines.push(lose(&mut writer, &mut latest, stamp));
     (timer, lines)
+}
+
+/// The `lost write` line, from `stamp`, once the ring has no room.
+fn lose(writer: &mut Writer, latest: &mut Reader, mut stamp: i64) -> Line {
+    let mut line = Line::new("lost write", FRAMES);
+    for round in 0..WARMUP + ROUNDS {
+        for _ in 0..FRAMES {
+            let draft = common::draft(writer, stamp);
+            stamp += 1;
+            let (lost, figures) = table::timed(&ALLOCATOR, || {
+                let written = writer.write(Label::Path(Path::Live), draft);
+                matches!(written, Ok([Outcome::Lost { .. }]))
+            });
+            assert!(lost, "the ring has no room for the frame");
+            line.add(figures);
+            take(latest);
+        }
+        line.close(round >= WARMUP);
+    }
+    line
+}
+
+/// Writes rounds of frames, each with its commit, until the ring has no room for one.
+///
+/// # Panics
+///
+/// When `FILL` rounds leave room.
+async fn fill(
+    node: &sim::node::Node,
+    writer: &mut Writer,
+    complete: &mut Reader,
+    stamp: &mut i64,
+) {
+    for _ in 0..FILL {
+        for _ in 0..FRAMES {
+            let draft = common::draft(writer, *stamp);
+            *stamp += 1;
+            let written = writer.write(Label::Path(Path::Live), draft);
+            if matches!(written, Ok([Outcome::Lost { .. }])) {
+                return;
+            }
+        }
+        node.clock().sleep(SETTLE).await;
+        while poll(complete, Waker::noop()) || poll(complete, Waker::noop()) {}
+    }
+    panic!("the ring fills");
 }
 
 /// The ns and allocations of the poll of `reader.next()` that gives the frame that
