@@ -134,14 +134,19 @@ pub(crate) fn spans(span: Span, n: i64) -> Span {
     Span::from_nanos(span.nanos() * n)
 }
 
-/// A run from `value` with a client node and a server node.
+/// A run from `value` with a client node and a server node, whose timers wake early
+/// once a second, as on `os`.
 pub(crate) fn nodes(value: u64) -> (Sim, Node, Node) {
     let mut sim = Sim::new(sim::Config {
         seed: value,
         ..sim::Config::default()
     });
-    let client = sim.node(sim::node::Config::default());
-    let server = sim.node(sim::node::Config::default());
+    let config = || sim::node::Config {
+        arm_max: Some(Span::SECOND),
+        ..sim::node::Config::default()
+    };
+    let client = sim.node(config());
+    let server = sim.node(config());
     (sim, client, server)
 }
 

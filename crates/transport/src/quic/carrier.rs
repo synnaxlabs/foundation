@@ -758,7 +758,7 @@ struct Task {
     state: Rc<RefCell<State>>,
     socket: Socket,
     /// Completes at the first of the endpoint's deadline and `cut`, as of the last
-    /// poll that changed it.
+    /// poll.
     sleep: Sleep,
     retry: Retry,
     /// When the task ends while a close still drains: [`DRAIN_MAX`] after a poll first
@@ -804,9 +804,7 @@ impl Task {
     /// drained, and the socket holds no datagram, or at `cut`.
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         let mut state = self.state.borrow_mut();
-        let fresh =
-            !(state.task.as_ref()).is_some_and(|task| task.will_wake(cx.waker()));
-        if fresh {
+        if !(state.task.as_ref()).is_some_and(|task| task.will_wake(cx.waker())) {
             state.task = Some(cx.waker().clone());
         }
         let now = state.clock.now();
@@ -837,15 +835,12 @@ impl Task {
                 return Poll::Ready(());
             }
         }
-        // Each poll of the sleep arms the timer again.
         let deadline = state.endpoint.deadline().into_iter().chain(self.cut).min();
-        if let Some(deadline) = deadline
-            && (fresh || deadline != self.sleep.deadline())
-        {
+        if let Some(deadline) = deadline {
             self.sleep.reset(deadline);
             more |= Pin::new(&mut self.sleep).poll(cx).is_ready();
         }
-        more |= self.retry.poll(cx, &state.waits, now, fresh);
+        more |= self.retry.poll(cx, &state.waits, now);
         if more {
             cx.waker().wake_by_ref();
         }
@@ -861,7 +856,6 @@ impl Retry {
         cx: &mut Context<'_>,
         waits: &wait::Queue,
         now: Monotonic,
-        fresh: bool,
     ) -> bool {
         if !waits.waiting() {
             self.armed = false;
@@ -871,14 +865,10 @@ impl Retry {
             waits.wake_first();
             self.armed = false;
         }
-        if self.armed && !fresh {
-            return false;
-        }
         if !self.armed {
             self.sleep.reset(now + RETRY);
             self.armed = true;
         }
-        // Each poll of the sleep arms the timer again.
         Pin::new(&mut self.sleep).poll(cx).is_ready()
     }
 }
@@ -1384,14 +1374,14 @@ mod tests {
             assert!(taken.is_none());
             for task in [&old, &new] {
                 let mut cx = Context::from_waker(task);
-                assert!(!retry.poll(&mut cx, &waits, start, true));
+                assert!(!retry.poll(&mut cx, &waits, start));
             }
             clock.sleep(spans(Span::MILLISECOND, 9)).await;
             assert_eq!(woken(), [0, 0, 0]);
             clock.sleep(spans(Span::MILLISECOND, 2)).await;
             assert_eq!(woken(), [0, 0, 1]);
             let mut cx = Context::from_waker(&new);
-            assert!(!retry.poll(&mut cx, &waits, clock.now(), false));
+            assert!(!retry.poll(&mut cx, &waits, clock.now()));
             assert_eq!(woken(), [1, 0, 1]);
             clock.sleep(spans(Span::MILLISECOND, 10)).await;
             assert_eq!(woken(), [1, 0, 2]);
