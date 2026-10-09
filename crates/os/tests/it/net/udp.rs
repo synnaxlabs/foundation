@@ -259,21 +259,24 @@ fn a_batch_arrives_when_the_kernel_refuses_gso() {
         let (mut sender, _) = loopback(&net);
         gso::refuse(sender.local());
         let (_, mut receiver) = loopback(&net);
-        let contents = [5; 300];
+        let contents: Vec<u8> = (0..3).flat_map(|i| [i; 100]).collect();
         let batch = Transmit {
             ecn: Some(Ecn::Ce),
             segment: NonZeroUsize::new(100),
             ..transmit(receiver.local(), &contents)
         };
+        let expected: Vec<_> = contents
+            .chunks(100)
+            .map(|c| (c.to_vec(), Some(Ecn::Ce)))
+            .collect();
         for round in ["first", "second"] {
             assert_eq!(send(&mut sender, &batch).await, Ok(()), "{round} batch");
-            for _ in 0..3 {
-                assert_eq!(
-                    receive_batch(&mut receiver).await,
-                    (100, 100, Some(Ecn::Ce)),
-                    "{round} batch"
-                );
-            }
+            let datagrams: Vec<_> = receive(&mut receiver, 3)
+                .await
+                .into_iter()
+                .map(|d| (d.contents, d.ecn))
+                .collect();
+            assert_eq!(datagrams, expected, "{round} batch");
         }
     });
 }
