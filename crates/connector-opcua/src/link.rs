@@ -424,17 +424,12 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
 }
 
 /// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
-/// cannot bind or call one. Only the paths in `skipped` are for tests.
+/// cannot bind or call one. The scan skips only the paths in `skipped`, which hold
+/// only tests.
 #[test]
 fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let skipped = [
-        "tests",
-        "src/link.rs",
-        "src/alloc/tests.rs",
-        "src/event/tests.rs",
-    ]
-    .map(|path| root.join(path));
+    let skipped = ["src/link.rs", "src/event/tests.rs"].map(|path| root.join(path));
     let mut dirs = vec![root.to_path_buf()];
     let mut drawn = Vec::new();
     while let Some(dir) = dirs.pop() {
