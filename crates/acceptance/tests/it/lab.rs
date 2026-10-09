@@ -305,7 +305,7 @@ impl Lab {
 
     /// Creates the `f64` channel `channel`, whose home is `home`.
     pub(crate) fn channel(&mut self, _home: Node, _channel: &str) {
-        todo!("waits on #462, #1957")
+        todo!("waits on #462, #585")
     }
 
     /// Opens a live reader on `channel` at `node`. It gets the samples written from
@@ -317,7 +317,7 @@ impl Lab {
     /// Writes `values` to `channel` on `node`, one each millisecond, as the
     /// simulation runs.
     pub(crate) fn send(&mut self, _node: Node, _channel: &str, _values: &[f64]) {
-        todo!("waits on #462")
+        todo!("waits on #462, #585")
     }
 
     /// Every sample that `reader` got, in the order it got them.
