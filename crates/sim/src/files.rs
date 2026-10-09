@@ -143,9 +143,6 @@ struct Flight {
     node: usize,
     /// The path of the call, or of the file for a call on an open file.
     path: PathBuf,
-    /// The paths that the call is on: `path`, and each path that a rename of its file
-    /// gives the file while the call is in flight.
-    on: Vec<PathBuf>,
     call: Call,
     held: Option<Held>,
     /// A fault fails the call when it ends.
@@ -244,7 +241,6 @@ impl Files {
         self.queue.insert((at, key));
         let flight = Flight {
             node,
-            on: vec![path.clone()],
             path,
             call,
             held,
@@ -259,12 +255,12 @@ impl Files {
 
     /// The time that a call of `node` that changes what `path` names ends no earlier
     /// than: the end of the last call on `path` that a dropped future or handle left
-    /// to run, or of a remove through a handle, live or not, or zero. A call on `path`
-    /// uses it, or the file that it names, or a file that a rename to it moves there.
-    /// A call through a handle is also on each path that its file had while it was in
-    /// flight, so it stays on them after a remove unlinks the file.
+    /// to run, or of a remove through a handle, live or not, or zero. A call without a
+    /// handle is on its path. A call through a handle is on each path that has named
+    /// its file, and on the path of each dropped rename of the file, so it stays on
+    /// them after a rename or a remove.
     fn wait_end(&self, node: usize, path: &Path) -> Monotonic {
-        let path = disk::normal(path);
+        let (path, disk) = (disk::normal(path), &self.disks[node]);
         let pending: Vec<_> = (self.queue.iter().rev())
             .map(|(at, key)| (*at, &self.flights[key]))
             .filter(|(_, flight)| {
@@ -272,22 +268,20 @@ impl Files {
                 flight.node == node && (flight.dropped || unlink)
             })
             .collect();
-        let moved = pending.iter().filter_map(|(_, flight)| match &flight.call {
-            Call::Rename { handle, to } if disk::normal(to) == path => {
-                Some(handle.inode)
-            }
-            _ => None,
-        });
-        let inodes: BTreeSet<_> = self.disks[node]
-            .inode(&path)
-            .into_iter()
-            .chain(moved)
+        let moved: BTreeSet<_> = (pending.iter())
+            .filter_map(|(_, flight)| match &flight.call {
+                Call::Rename { handle, to } if disk::normal(to) == path => {
+                    Some(handle.inode)
+                }
+                _ => None,
+            })
             .collect();
         (pending.iter())
-            .find(|(_, flight)| {
-                flight.on.iter().any(|on| disk::normal(on) == path)
-                    || (flight.call.handle())
-                        .is_some_and(|handle| inodes.contains(&handle.inode))
+            .find(|(_, flight)| match flight.call.handle() {
+                Some(handle) => {
+                    moved.contains(&handle.inode) || disk.named_by(handle.inode, &path)
+                }
+                None => disk::normal(&flight.path) == path,
             })
             .map_or(Monotonic::default(), |(at, _)| *at)
     }
@@ -383,15 +377,7 @@ impl Files {
                 Ok(Done::Unit)
             }
             Call::Rename { handle, to } => {
-                let renamed = disk.rename(*handle, &path, to);
-                if renamed.is_ok() {
-                    let moved = (self.flights.values_mut()).filter(|flight| {
-                        let file = flight.call.handle().map(|handle| handle.inode);
-                        file == Some(handle.inode)
-                    });
-                    moved.for_each(|flight| flight.on.push(to.clone()));
-                }
-                renamed.map(|()| Done::Unit)
+                disk.rename(*handle, &path, to).map(|()| Done::Unit)
             }
             Call::Unlink { handle } => {
                 disk.unlink(handle.inode, &path).map(|()| Done::Unit)

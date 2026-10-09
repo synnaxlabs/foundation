@@ -106,6 +106,8 @@ pub(crate) struct File {
     durable: bool,
     /// The edits in the log that name the file.
     logged: u64,
+    /// Each normal path that an open made it at or a rename gave it.
+    names: BTreeSet<PathBuf>,
 }
 
 /// The durable bytes of a sector, its clean bytes in the cache, and its writes.
@@ -164,9 +166,12 @@ impl Disk {
         }
     }
 
-    /// The inode that `path` names, when it names one.
-    pub(crate) fn inode(&self, path: &Path) -> Option<u64> {
-        self.lookup(path).ok().flatten()?.2
+    /// Whether `path` has named file `inode`, which a hold keeps.
+    pub(crate) fn named_by(&self, inode: u64, path: &Path) -> bool {
+        match self.inodes.get(&inode) {
+            Some(Inode::File(file)) => file.names.contains(&normal(path)),
+            _ => unreachable!("invariant: held file {inode} is there"),
+        }
     }
 
     /// The directory of `path`, its last name, and the inode of that entry, if any.
@@ -236,6 +241,7 @@ impl Disk {
                     linked: true,
                     durable: false,
                     logged: 0,
+                    names: BTreeSet::from([normal(path)]),
                 };
                 self.inodes.insert(key, Inode::File(file));
                 self.edit(dir, vec![(name.into(), Some(key))]);
@@ -332,6 +338,7 @@ impl Disk {
             return Err(Cause::Exists(to.to_path_buf()));
         }
         self.edit(dir, vec![(old.into(), None), (new.to_owned(), Some(inode))]);
+        self.file(inode).names.insert(normal(to));
         if let Some(path) = self.descriptors.get_mut(&handle.key) {
             *path = to.to_path_buf();
         }
@@ -866,6 +873,7 @@ mod tests {
             linked: true,
             durable: false,
             logged: 0,
+            names: BTreeSet::new(),
         }
     }
 

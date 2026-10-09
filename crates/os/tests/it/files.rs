@@ -952,6 +952,33 @@ fn a_create_waits_for_a_dropped_read_of_a_reader_on_its_path_after_a_rename() {
 }
 
 #[test]
+fn a_create_waits_for_a_dropped_read_of_a_stale_reader_of_a_removed_file() {
+    run(|files, data| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let mut writer = create(&files, "a", big as u64).await;
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        writer.rename(Path::new("b")).await.unwrap();
+        let mut remove = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(files.remove(Path::new("b")));
+            pend(&mut remove, context);
+            let mut read = Box::pin(reader.read_at(0, pool.alloc(big).unwrap()));
+            pend(&mut read, context);
+            drop(read);
+            drop(reader);
+            pool.alloc(big).unwrap_err();
+            remove
+        })
+        .await;
+        assert_eq!(remove.as_mut().await, Ok(()));
+        drop(remove);
+        drop(writer);
+        drop(create(&files, "b", KIB).await);
+        drop(pool.alloc(big).unwrap());
+    });
+}
+
+#[test]
 fn a_write_open_waits_for_a_dropped_rename_to_its_path() {
     run(|files, data| async move {
         let mut file = create(&files, "a", KIB).await;
