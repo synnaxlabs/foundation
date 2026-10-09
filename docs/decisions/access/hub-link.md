@@ -88,3 +88,20 @@
   https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6073876384).
   Supersedes "The bound of a node is the cap times the count of hubs that serve links"
   (https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483).
+  The open requests of one subject, over each link of the hub, reserve at most
+  `BODY_BYTES_MAX` (16 MiB) at once: its share. The subject is the one of the hello that
+  the link admitted, so the hub knows it at decode, before the reservation. A request
+  over the share stops with `BUSY` (`serve::Error::Share`) before the hub reads a byte
+  of its body, and the link takes its next request. A request over the share and the
+  cap gets `Share`. The hub keeps the bytes of each subject, and drops a subject's
+  count when it comes to 0. A stalled request still holds its reservation until its
+  stream or session ends, but only inside its subject's share. Two subjects together
+  can still hold the whole room. Lost: a deadline or a minimum rate for each body,
+  since the subject opens its next request at once when the hub stops one, and a slow
+  honest link pays the rate too; a stop of stalled bodies when a request does not fit,
+  which needs a rate and one task that stops the stream of another link. Decided by
+  `laptop.architect` (2026-10-09T12:49:35Z,
+  https://github.com/synnaxlabs/foundation/issues/2121#issuecomment-6081223893).
+  Supersedes "A stalled request holds its reservation until its stream or session
+  ends; only an admitted subject can do this"
+  (https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483).

@@ -31,6 +31,9 @@ use super::{AREA, BODY_MAX, NODE, POOL, Test};
 use crate::net::{HOME, PORT, own_pool, public_key, transport};
 
 pub(super) const SUBJECT: &str = "ops.agent";
+/// Two more subjects that the spec lists with `AGENT`.
+const SECOND: &str = "ops.second";
+const THIRD: &str = "ops.third";
 /// The key that the spec lists for [`SUBJECT`].
 pub(super) const AGENT: PrivateKey = PrivateKey([3; 32]);
 /// A key that the spec does not list.
@@ -47,11 +50,17 @@ pub(super) fn name(name: &str) -> Name {
     name.parse().expect("a valid name")
 }
 
-/// The rules of a root tree that lists `AGENT` for [`SUBJECT`].
+/// The rules of a root tree that lists `AGENT` for [`SUBJECT`], [`SECOND`], and
+/// [`THIRD`].
 pub(super) fn rules() -> access::Rules {
-    let key = Kind::Subject.key(SUBJECT).expect("a subject key");
-    let subject = Subject::new(vec![public_key(&AGENT)]).expect("a subject");
-    let tree: BTreeMap<Name, Definition> = [(key, Definition::Subject(subject))].into();
+    let tree: BTreeMap<Name, Definition> = [SUBJECT, SECOND, THIRD]
+        .into_iter()
+        .map(|subject| {
+            let key = Kind::Subject.key(subject).expect("a subject key");
+            let listed = Subject::new(vec![public_key(&AGENT)]).expect("a subject");
+            (key, Definition::Subject(listed))
+        })
+        .collect();
     access::Rules::new([(Prefix::ROOT, &tree)])
 }
 
@@ -160,15 +169,14 @@ where
     }
 }
 
-/// The count of client sessions that [`sessions`] runs.
-const SESSIONS: usize = 3;
-
-/// Runs [`SESSIONS`] client sessions of one synced hub, each served as [`session`]
-/// serves its one, from its own port of the program's node. Gives what `serve` gave for
-/// each stream, in the order they ended.
-fn sessions<P>(
+/// Runs a client session of one synced hub for each of `subjects`, each served as
+/// [`session`] serves its one, from its own port of the program's node. Each agent
+/// admits a hello of its subject. Gives what `serve` gave for each stream, in the order
+/// they ended.
+fn sessions<const N: usize, P>(
     seed: u64,
-    program: impl FnOnce([Agent; SESSIONS]) -> P + Send + 'static,
+    subjects: [&'static str; N],
+    program: impl FnOnce([Agent; N]) -> P + Send + 'static,
 ) -> Vec<Result<Got, serve::Error>>
 where
     P: Future<Output = ()> + 'static,
@@ -181,7 +189,7 @@ where
         let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let accepted = Rc::new(Cell::new(0));
         let mut ends = Vec::new();
-        for _ in 0..SESSIONS {
+        for _ in 0..N {
             let session = transport.accept().await.expect("a session");
             let link = test.hub.link(session.clone());
             tasks.spawn(serve_each(
@@ -202,8 +210,10 @@ where
     };
     run_program(seed, home, move |node, tasks, at| async move {
         let mut agents = Vec::new();
-        for _ in 0..SESSIONS {
-            agents.push(Agent::dial(&node, tasks.clone(), at).await);
+        for subject in subjects {
+            let mut agent = Agent::dial(&node, tasks.clone(), at).await;
+            agent.subject = name(subject);
+            agents.push(agent);
         }
         let ends: Vec<_> = agents.iter().map(|agent| agent.session.clone()).collect();
         program(agents.try_into().ok().expect("an agent for each session")).await;
@@ -216,12 +226,13 @@ where
 }
 
 /// `asserted`, then the close of each stream still open when [`sessions`] closed its
-/// sessions: `stalled` requests and the hello stream of each session.
+/// `count` sessions: `stalled` requests and the hello stream of each session.
 fn closed_after(
     mut asserted: Vec<Result<Got, serve::Error>>,
+    count: usize,
     stalled: usize,
 ) -> Vec<Result<Got, serve::Error>> {
-    let open = SESSIONS + stalled;
+    let open = count + stalled;
     asserted.extend((0..open).map(|_| Err(serve::Error::Stream(closed_with(0)))));
     asserted
 }
@@ -497,6 +508,8 @@ impl Stream {
 /// The program: its session, and its hello stream.
 struct Agent {
     node: sim::node::Node,
+    /// The subject of each hello that [`Agent::admit`] sends.
+    subject: Name,
     pool: std::rc::Rc<block::Pool>,
     session: Session,
     hello: Stream,
@@ -528,6 +541,7 @@ impl Agent {
         hello.send(&wire::header::encode(Protocol::Hub)).await;
         Self {
             node: node.clone(),
+            subject: name(SUBJECT),
             pool,
             session,
             hello,
@@ -552,11 +566,15 @@ impl Agent {
         self.hello.send(&signed(hello, key)).await;
     }
 
-    /// Takes the challenge, answers it with a valid hello, and gives the next
-    /// challenge, which the node sends once it admitted the hello.
+    /// Takes the challenge, answers it with a valid hello of the agent's subject, and
+    /// gives the next challenge, which the node sends once it admitted the hello.
     async fn admit(&mut self) -> Challenge {
         let challenge = self.hello.challenge().await;
-        self.send_hello(Self::hello(challenge), &AGENT).await;
+        let hello = Hello {
+            subject: self.subject.clone(),
+            ..Self::hello(challenge)
+        };
+        self.send_hello(hello, &AGENT).await;
         self.hello.challenge().await
     }
 
@@ -1062,20 +1080,24 @@ fn refuses_a_request_whose_signature_does_not_verify() {
 /// declared lengths count, so the large bodies are never sent.
 #[test]
 fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
-    let served = sessions(107, |[mut stalled, mut held, mut refused]| async move {
-        for agent in [&mut stalled, &mut held, &mut refused] {
-            agent.admit().await;
-        }
-        let _stalled = stalled.unfinished(BODY_BYTES_MAX, &[]).await;
-        stalled.sleep(Span::MILLISECOND).await;
-        let mut reply = held.request(1, b"y").await;
-        held.sleep(Span::MILLISECOND).await;
-        let mut busy = refused.unfinished(BODY_BYTES_MAX, &[]).await;
-        assert_eq!(busy.recv().await, reset_with(BUSY));
-        assert_eq!(reply.response().await, b"y");
-        let _fits = refused.unfinished(BODY_BYTES_MAX, &[]).await;
-        refused.sleep(QUIET).await;
-    });
+    let served = sessions(
+        107,
+        [SUBJECT, SECOND, THIRD],
+        |[mut stalled, mut held, mut refused]| async move {
+            for agent in [&mut stalled, &mut held, &mut refused] {
+                agent.admit().await;
+            }
+            let _stalled = stalled.unfinished(BODY_BYTES_MAX, &[]).await;
+            stalled.sleep(Span::MILLISECOND).await;
+            let mut reply = held.request(1, b"y").await;
+            held.sleep(Span::MILLISECOND).await;
+            let mut busy = refused.unfinished(BODY_BYTES_MAX, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            assert_eq!(reply.response().await, b"y");
+            let _fits = refused.unfinished(BODY_BYTES_MAX, &[]).await;
+            refused.sleep(QUIET).await;
+        },
+    );
     let over = serve::Error::Bodies {
         length: BODY_BYTES_MAX,
         held: BODY_BYTES_MAX + 1,
@@ -1083,8 +1105,9 @@ fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
     let each = closed_after(
         vec![
             Err(over.clone()),
-            Ok(Got::Request(name(SUBJECT), b"y".to_vec())),
+            Ok(Got::Request(name(SECOND), b"y".to_vec())),
         ],
+        3,
         2,
     );
     assert_eq!(
@@ -1102,25 +1125,30 @@ fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
 /// the cap then fit exactly.
 #[test]
 fn reserves_no_body_for_a_second_request_of_a_link() {
-    let served = sessions(109, |[mut first, mut second, mut third]| async move {
-        for agent in [&mut first, &mut second, &mut third] {
-            agent.admit().await;
-        }
-        let mut open = first.request(1, b"a").await;
-        first.sleep(Span::from_nanos(HOLD.nanos() / 5)).await;
-        let mut pending = first.unfinished(BODY_BYTES_MAX, &[]).await;
-        assert_eq!(pending.recv().await, reset_with(MALFORMED));
-        assert_eq!(open.response().await, b"a");
-        let _stalled = second.unfinished(BODY_BYTES_MAX, &[]).await;
-        second.sleep(Span::MILLISECOND).await;
-        let _fits = third.unfinished(BODY_BYTES_MAX, &[]).await;
-        third.sleep(QUIET).await;
-    });
+    let served = sessions(
+        109,
+        [SUBJECT, SECOND, THIRD],
+        |[mut first, mut second, mut third]| async move {
+            for agent in [&mut first, &mut second, &mut third] {
+                agent.admit().await;
+            }
+            let mut open = first.request(1, b"a").await;
+            first.sleep(Span::from_nanos(HOLD.nanos() / 5)).await;
+            let mut pending = first.unfinished(BODY_BYTES_MAX, &[]).await;
+            assert_eq!(pending.recv().await, reset_with(MALFORMED));
+            assert_eq!(open.response().await, b"a");
+            let _stalled = second.unfinished(BODY_BYTES_MAX, &[]).await;
+            second.sleep(Span::MILLISECOND).await;
+            let _fits = third.unfinished(BODY_BYTES_MAX, &[]).await;
+            third.sleep(QUIET).await;
+        },
+    );
     let each = closed_after(
         vec![
             Err(serve::Error::Pending),
             Ok(Got::Request(name(SUBJECT), b"a".to_vec())),
         ],
+        3,
         2,
     );
     assert_eq!(served, each);
@@ -1130,21 +1158,25 @@ fn reserves_no_body_for_a_second_request_of_a_link() {
 /// back.
 #[test]
 fn frees_the_room_of_a_request_whose_stream_reset() {
-    let served = sessions(108, |[mut first, mut second, mut third]| async move {
-        for agent in [&mut first, &mut second, &mut third] {
-            agent.admit().await;
-        }
-        let _first = first.unfinished(BODY_BYTES_MAX, &[]).await;
-        let second = second.unfinished(BODY_BYTES_MAX, &[]).await;
-        third.sleep(Span::MILLISECOND).await;
-        let mut busy = third.unfinished(1, &[]).await;
-        assert_eq!(busy.recv().await, reset_with(BUSY));
-        second.sender.reset(Code(0));
-        second.receiver.stop(Code(0));
-        third.sleep(Span::MILLISECOND).await;
-        let mut fits = third.request(1, b"z").await;
-        assert_eq!(fits.response().await, b"z");
-    });
+    let served = sessions(
+        108,
+        [SUBJECT, SECOND, THIRD],
+        |[mut first, mut second, mut third]| async move {
+            for agent in [&mut first, &mut second, &mut third] {
+                agent.admit().await;
+            }
+            let _first = first.unfinished(BODY_BYTES_MAX, &[]).await;
+            let second = second.unfinished(BODY_BYTES_MAX, &[]).await;
+            third.sleep(Span::MILLISECOND).await;
+            let mut busy = third.unfinished(1, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            second.sender.reset(Code(0));
+            second.receiver.stop(Code(0));
+            third.sleep(Span::MILLISECOND).await;
+            let mut fits = third.request(1, b"z").await;
+            assert_eq!(fits.response().await, b"z");
+        },
+    );
     assert_eq!(
         served[0],
         Err(serve::Error::Bodies {
@@ -1153,8 +1185,66 @@ fn frees_the_room_of_a_request_whose_stream_reset() {
         })
     );
     assert!(
-        served.contains(&Ok(Got::Request(name(SUBJECT), b"z".to_vec()))),
+        served.contains(&Ok(Got::Request(name(THIRD), b"z".to_vec()))),
         "{served:?}"
+    );
+}
+
+/// A subject's requests hold at most `BODY_BYTES_MAX` of the hub's room, over each of
+/// its links. While one request of a subject trickles its body, one byte each 400 ms,
+/// so that no session is idle, each further request of the subject stops with `BUSY`,
+/// and a request of another subject 50 s later, inside the life of each hello, gets
+/// its response.
+#[test]
+fn takes_a_request_of_another_subject_while_a_body_trickles() {
+    let served = sessions(
+        110,
+        [SUBJECT, SUBJECT, SECOND],
+        |[mut first, mut second, mut other]| async move {
+            for agent in [&mut first, &mut second, &mut other] {
+                agent.admit().await;
+            }
+            let mut trickled = first.unfinished(BODY_BYTES_MAX, &[]).await;
+            first.sleep(Span::MILLISECOND).await;
+            let mut busy = second.unfinished(BODY_BYTES_MAX, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            let mut busy = second.unfinished(1, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            let pace = Span::from_nanos(400_000_000);
+            for _ in 0..125 {
+                trickled.send(b"x").await;
+                first.sleep(pace).await;
+            }
+            let mut late = other.request(1, b"z").await;
+            assert_eq!(late.response().await, b"z");
+        },
+    );
+    let over = serve::Error::Share {
+        subject: name(SUBJECT),
+        length: 1,
+        held: BODY_BYTES_MAX,
+    };
+    let each = closed_after(
+        vec![
+            Err(serve::Error::Share {
+                subject: name(SUBJECT),
+                length: BODY_BYTES_MAX,
+                held: BODY_BYTES_MAX,
+            }),
+            Err(over.clone()),
+            Ok(Got::Request(name(SECOND), b"z".to_vec())),
+        ],
+        3,
+        1,
+    );
+    assert_eq!(
+        served, each,
+        "the request that fills the share exactly is not refused"
+    );
+    assert_eq!(
+        over.to_string(),
+        "a request body of 1 bytes does not fit under the share of 16777216 bytes of \
+         subject ops.agent: its open requests hold 16777216 bytes"
     );
 }
 
