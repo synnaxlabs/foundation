@@ -3952,9 +3952,9 @@ mod port {
             drop(node);
         }
 
-        /// A node outside the region holds the 256th place, then dials again from a
-        /// new transport. The node's transport closes the old session, as the newer
-        /// one wins, so the new one takes the old one's place.
+        /// A node outside the region holds the 256th place, then dials again from a new
+        /// transport. The node's transport closes the old session, as the newer one
+        /// wins, so the new one takes the old one's place.
         #[test]
         fn a_node_outside_the_region_that_dials_again_at_the_bound_keeps_its_place() {
             let mut sim = sim::Sim::new(sim::Config::default());
