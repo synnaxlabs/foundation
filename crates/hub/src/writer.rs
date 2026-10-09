@@ -167,11 +167,13 @@ impl Writer {
         time.await;
         let (mut keys, groups) = loop {
             let (_, groups) = resolve(&state.borrow(), &channels)?;
-            let homed = indexes(&groups);
-            crate::homes(state, &homed).await?;
-            // A call of `set_definitions` while the open waits can change a channel.
+            let checked = indexes(&groups);
+            let homed = crate::homes(state, &checked).await;
+            // A call of `set_definitions` while the open waits can change a channel,
+            // and then the home of an index it left does not matter.
             let (keys, again) = resolve(&state.borrow(), &channels)?;
-            if indexes(&again) == homed {
+            if indexes(&again) == checked {
+                homed?;
                 break (keys, again);
             }
         };

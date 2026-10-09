@@ -355,6 +355,32 @@ fn a_session_opens_on_the_new_index_of_a_channel_moved_while_it_waits_for_a_home
     });
 }
 
+/// A writer whose channel moves while it waits for the home of the old index opens on
+/// the new index when the mesh then names another node the home of the old one.
+#[test]
+fn a_writer_opens_on_the_new_index_when_the_old_one_moves_away_during_its_home_wait() {
+    run(18, |test| async move {
+        let mut opening = std::pin::pin!(test.hub.writer(config("a", &["value"])));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        let mut moved = channels();
+        moved.insert(name("value"), definition(2, DataType::Sample(I64), 3));
+        test.hub.set_definitions(&moved);
+        test.set_home(TIME_B, NODE).await;
+        test.set_home(TIME, OTHER).await;
+        let mut writer = opening.await.expect("opens on time-b, homed at this node");
+        let names = [name("value")];
+        let mut reader = test
+            .hub
+            .reader(&names, reader::Mode::Latest)
+            .await
+            .expect("opens");
+        let now = test.now();
+        write_series(&mut writer, &[(3, &[now]), (2, &[7])]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(samples(&received, 2), [7]);
+    });
+}
+
 /// A session that waits for the home of its index opens on the sample type that a
 /// call gave its channel meanwhile, on the slot of the new definition: a session that
 /// opens after the wait sees its frames.
