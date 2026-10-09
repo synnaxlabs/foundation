@@ -748,9 +748,9 @@ fn normalized(text: &str) -> String {
 
 /// The round number of the first top-level heading that has one ([`number`]) in `body`
 /// read as GitHub reads its HTML blocks, by an older spec. At the start of each line
-/// ([`bare`]), each tag whose name the two specs list in a different way is renamed
-/// ([`RENAMED`]), and an invisible character ([`texts`]) is put before `<!` and a
-/// lowercase letter, which starts no HTML block on GitHub.
+/// ([`bare`]), each tag whose name starts with a name that the two specs list in a
+/// different way is renamed ([`RENAMED`]), and an invisible character ([`texts`]) is
+/// put before `<!` and a lowercase letter, which starts no HTML block on GitHub.
 fn unblocked(body: &str) -> Option<String> {
     let mut text = String::with_capacity(body.len());
     for line in body.split_inclusive('\n') {
