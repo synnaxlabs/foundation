@@ -975,9 +975,10 @@ mod tests {
     }
 
     /// Two nodes with an idle of 1 s, on links of 600 ms and 1.2 s RTT. A cut drops the
-    /// server's datagrams for the first delay and 27 ms, so the server's hello reaches
-    /// the client after `idle`, and on the slower link after twice `idle`, but within
-    /// the idle timeout of 3 PTO. The session stays.
+    /// server's first flight, with its hello at 0.5-RTT: its datagrams leave within
+    /// 27 ms of the client's Initial, which takes one delay to arrive. So the server's
+    /// hello reaches the client after `idle`, and on the slower link after twice
+    /// `idle`, but within the idle timeout of 3 PTO. The session stays.
     #[test]
     fn keep_a_session_whose_hello_a_short_cut_delays() {
         for (delay, after) in [(300, 1), (600, 2)] {
