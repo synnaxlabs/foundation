@@ -178,8 +178,9 @@ impl Hub {
     /// channel is defined. The home stops carrying each index whose key is not an index
     /// of `definitions`, and carries an index from the first session that finds this
     /// node is its home. A reader of a data channel takes each series of its key with
-    /// its sample type in the frames of its index, also one written before a removal,
-    /// so a rename keeps the history of the channel.
+    /// its sample type in the frames of its index, also one written before a removal
+    /// of the channel while its index stayed, so a rename keeps the history of the
+    /// channel.
     ///
     /// # Panics
     ///
