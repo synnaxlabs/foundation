@@ -4,7 +4,7 @@
 use std::cell::{Cell, RefCell};
 use std::convert::Infallible;
 use std::fmt;
-use std::future::poll_fn;
+use std::future::{pending, poll_fn};
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -357,13 +357,11 @@ impl Writer {
         output
     }
 
-    #[expect(
-        clippy::infinite_loop,
-        reason = "the flush ends when its call drops it"
-    )]
+    /// Writes the staged status until the session closed, then never again, so that a
+    /// set after the close wakes nothing. It ends when its call drops it.
     async fn flush(&self) -> Infallible {
         let values = &self.values;
-        loop {
+        while !self.session.borrow().closed {
             poll_fn(|cx| {
                 if values.staged.get() {
                     return Poll::Ready(());
@@ -374,6 +372,7 @@ impl Writer {
             .await;
             self.write_staged().await;
         }
+        pending().await
     }
 
     /// Waits until [`PERIOD`] after the last write, then writes the status if it is
