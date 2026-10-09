@@ -5,14 +5,13 @@ use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::task::{Context, Poll, ready};
 
 use env::net::{Error, listener, tcp};
-use rustix::fs::OFlags;
-use rustix::io::{Errno, FdFlags};
-use rustix::net::{AddressFamily, SocketType, ipproto, sockopt};
+use rustix::io::Errno;
+use rustix::net::{SocketType, ipproto, sockopt};
 use tokio::net::TcpListener;
 
 use super::socket::Socket;
 use super::stream::Stream;
-use super::{apply, canonical, errno, io_error};
+use super::{apply, bind, canonical, from_io, in_use, io_error};
 
 /// A listening socket.
 pub(super) struct Listener {
@@ -37,7 +36,7 @@ impl Listener {
         bind(fd.as_fd(), local)?;
         listen(fd.as_fd(), local, config.backlog)?;
         let listener = std::net::TcpListener::from(fd);
-        let local = listener.local_addr().map_err(|e| io_error(errno(&e)))?;
+        let local = listener.local_addr().map_err(|e| from_io(&e))?;
         Ok(Self {
             socket: Socket::new(listener),
             local: canonical(local),
@@ -51,7 +50,7 @@ impl Listener {
         stream: std::net::TcpStream,
         peer: SocketAddr,
     ) -> Result<Stream, Error> {
-        let local = stream.local_addr().map_err(|e| io_error(errno(&e)))?;
+        let local = stream.local_addr().map_err(|e| from_io(&e))?;
         Stream::new(
             stream,
             canonical(local),
@@ -61,19 +60,6 @@ impl Listener {
         )
         .map_err(io_error)
     }
-}
-
-/// `EADDRINUSE` on `local` is `AddressInUse`.
-fn in_use(local: SocketAddr) -> impl Fn(Errno) -> Error {
-    move |code| match code {
-        Errno::ADDRINUSE => Error::AddressInUse { local },
-        code => io_error(code),
-    }
-}
-
-/// Binds `fd` to `local`.
-fn bind(fd: BorrowedFd<'_>, local: SocketAddr) -> Result<(), Error> {
-    rustix::net::bind(fd, &local).map_err(in_use(local))
 }
 
 /// Makes `fd`, bound to `local`, listen. Linux lets two `SO_REUSEADDR` sockets bind
@@ -88,13 +74,7 @@ fn listen(fd: BorrowedFd<'_>, local: SocketAddr, backlog: u32) -> Result<(), Err
 /// Linux the `writev` of Tokio sends no `MSG_NOSIGNAL`, and the `SIGPIPE` ignore that
 /// std sets at startup does that.
 pub(super) fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
-    let family = match address {
-        SocketAddr::V4(_) => AddressFamily::INET,
-        SocketAddr::V6(_) => AddressFamily::INET6,
-    };
-    let fd = rustix::net::socket(family, SocketType::STREAM, Some(ipproto::TCP))?;
-    rustix::io::fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
-    rustix::fs::fcntl_setfl(&fd, OFlags::NONBLOCK)?;
+    let fd = super::socket(address, SocketType::STREAM, ipproto::TCP)?;
     #[cfg(target_os = "macos")]
     sockopt::set_socket_nosigpipe(&fd, true)?;
     Ok(fd)
@@ -111,11 +91,11 @@ impl listener::Driver for Listener {
     ) -> Poll<Result<Box<dyn tcp::Driver>, Error>> {
         let listener = self
             .socket
-            .live("listener", TcpListener::from_std)
+            .live("TCP listener", TcpListener::from_std)
             .map_err(io_error)?;
         let (stream, peer) =
-            ready!(listener.poll_accept(cx)).map_err(|e| io_error(errno(&e)))?;
-        let stream = stream.into_std().map_err(|e| io_error(errno(&e)))?;
+            ready!(listener.poll_accept(cx)).map_err(|e| from_io(&e))?;
+        let stream = stream.into_std().map_err(|e| from_io(&e))?;
         let stream = self.accepted(stream, peer)?;
         Poll::Ready(Ok(Box::new(stream)))
     }
@@ -124,6 +104,9 @@ impl listener::Driver for Listener {
 #[cfg(test)]
 mod tests {
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    use rustix::fs::OFlags;
+    use rustix::io::FdFlags;
 
     use super::*;
 

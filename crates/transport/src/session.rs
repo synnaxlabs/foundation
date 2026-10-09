@@ -233,7 +233,7 @@ mod tests {
     use types::time::Span;
 
     use crate::testing::{self, CLIENT, IDLE, SERVER, join, poll_once, spans};
-    use crate::{Address, Class, Code, Config, Error, Transport, message};
+    use crate::{Address, Class, Code, Config, Error, Transport, message, stream};
 
     #[test]
     fn a_session_stays_open_until_its_last_clone_drops() {
@@ -547,6 +547,196 @@ mod tests {
             |side| async move {
                 side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
                 side.session.close(Code(7));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// The longest that an open may wait after a stream is free: 20 round trips of
+    /// the sim link, well under the keep-alive at a third of [`IDLE`].
+    const FREE_WAIT: Span = Span::from_nanos(10_000_000);
+
+    /// Opens [`testing::STREAMS_MAX`] streams on `side` and sends one message on each.
+    async fn fill(side: &testing::Side) -> Vec<(stream::Sender, stream::Receiver)> {
+        let mut held = Vec::new();
+        for _ in 0..testing::STREAMS_MAX {
+            let (mut sender, receiver) =
+                side.session.open(Class::Complete).await.expect("a stream");
+            sender.send(side.block(b"a")).await.expect("sent");
+            held.push((sender, receiver));
+        }
+        held
+    }
+
+    /// Accepts each stream of [`fill`] on `side`, and reads the message of the first.
+    async fn accept_filled(side: &testing::Side) -> Vec<stream::Incoming> {
+        let mut held = Vec::new();
+        for _ in 0..testing::STREAMS_MAX {
+            held.push(side.session.accept().await.expect("a stream"));
+        }
+        let read = held[0].receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+        assert_eq!(read, Ok(Some(b"a".to_vec())));
+        held
+    }
+
+    /// Accepts the stream that waited for a free one on `side`, and reads its message.
+    async fn accept_last(side: &testing::Side) {
+        let mut last = side.session.accept().await.expect("a stream");
+        let read = last.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+        assert_eq!(read, Ok(Some(b"b".to_vec())));
+    }
+
+    /// The read at the end of a half that its peer finished, or reset when `reset`.
+    fn ended(reset: bool) -> Result<Option<Vec<u8>>, Error> {
+        if reset {
+            Err(Error::Reset { code: Code(0) })
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Fills the streams of a session, ends the reply half of the first, and starts
+    /// one more open. Then frees the first stream with the end of its last open half:
+    /// a finish, or a reset when `reset`. The open must complete at most
+    /// [`FREE_WAIT`] after the free.
+    fn open_after_a_free(reset: bool) {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            move |side| async move {
+                let mut held = fill(&side).await;
+                let (mut sender, mut receiver) = held.remove(0);
+                let read = receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, ended(reset));
+                // Past the delay of the ack of the reply's end.
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                let mut opened = pin!(side.session.open(Class::Complete));
+                assert!(poll_once(opened.as_mut()).await.is_none());
+                if !reset {
+                    sender.finish().expect("finished");
+                }
+                let freed = side.node.clock().now();
+                drop((sender, receiver));
+                let (mut sender, _receiver) = opened.await.expect("a stream");
+                let waited = side.node.clock().now() - freed;
+                assert!(waited <= FREE_WAIT, "the open waited {waited:?}");
+                sender.send(side.block(b"b")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+            },
+            move |side| async move {
+                let mut held = accept_filled(&side).await;
+                let mut first = held.remove(0);
+                if reset {
+                    first.sender = None;
+                } else {
+                    let reply = first.sender.as_mut().expect("a reply half");
+                    reply.finish().expect("finished");
+                }
+                let read = first.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, ended(reset));
+                drop(first);
+                accept_last(&side).await;
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn an_open_that_waits_for_a_stream_opens_once_a_stream_ends() {
+        open_after_a_free(false);
+    }
+
+    #[test]
+    fn an_open_that_waits_for_a_stream_opens_once_a_stream_resets() {
+        open_after_a_free(true);
+    }
+
+    #[test]
+    fn an_open_that_waits_opens_once_the_node_drops_a_stream_that_the_peer_reset() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                let mut held = fill(&side).await;
+                let mut opened = pin!(side.session.open(Class::Complete));
+                assert!(poll_once(opened.as_mut()).await.is_none());
+                let (sender, mut receiver) = held.remove(0);
+                let read = receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, Ok(None));
+                drop((sender, receiver));
+                let (mut sender, _receiver) = opened.await.expect("a stream");
+                sender.send(side.block(b"b")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+            },
+            |side| async move {
+                let mut held = accept_filled(&side).await;
+                let mut first = held.remove(0);
+                let reply = first.sender.as_mut().expect("a reply half");
+                reply.finish().expect("finished");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
+                // The node frees the stream at the drop: it never read the reset.
+                let freed = side.node.clock().now();
+                drop(first);
+                accept_last(&side).await;
+                let waited = side.node.clock().now() - freed;
+                assert!(waited <= FREE_WAIT, "the open waited {waited:?}");
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn an_open_that_waits_opens_once_a_stream_ends_while_an_opened_stream_is_unsent() {
+        let (mut sim, ..) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                let mut held = Vec::new();
+                for _ in 0..testing::STREAMS_MAX - 1 {
+                    let (mut sender, receiver) =
+                        side.session.open(Class::Complete).await.expect("a stream");
+                    sender.send(side.block(b"a")).await.expect("sent");
+                    held.push((sender, receiver));
+                }
+                // The last stream that the peer allows: open, but nothing sent yet.
+                let (mut unsent, _unsent_receiver) =
+                    side.session.open(Class::Complete).await.expect("a stream");
+                let (mut sender, mut receiver) = held.remove(0);
+                let read = receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, Ok(None));
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                let mut opened = pin!(side.session.open(Class::Complete));
+                assert!(poll_once(opened.as_mut()).await.is_none());
+                sender.finish().expect("finished");
+                let freed = side.node.clock().now();
+                drop((sender, receiver));
+                let mut sender = loop {
+                    if let Some(opened) = poll_once(opened.as_mut()).await {
+                        break opened.expect("a stream").0;
+                    }
+                    let waited = side.node.clock().now() - freed;
+                    assert!(waited <= FREE_WAIT, "the open waited {waited:?}");
+                    side.node.clock().sleep(spans(Span::MILLISECOND, 1)).await;
+                };
+                sender.send(side.block(b"b")).await.expect("sent");
+                unsent.send(side.block(b"b")).await.expect("sent");
+                side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+            },
+            |side| async move {
+                let mut held = Vec::new();
+                for _ in 0..testing::STREAMS_MAX - 1 {
+                    held.push(side.session.accept().await.expect("a stream"));
+                }
+                let mut first = held.remove(0);
+                let read = first.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, Ok(Some(b"a".to_vec())));
+                let reply = first.sender.as_mut().expect("a reply half");
+                reply.finish().expect("finished");
+                let read = first.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                assert_eq!(read, Ok(None));
+                drop(first);
+                accept_last(&side).await;
+                accept_last(&side).await;
             },
         );
         assert_eq!(sim.run(), Ok(()));
