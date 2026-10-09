@@ -1483,6 +1483,14 @@ fn an_old_round_reads_the_first_footnote_of_a_label_with_a_reference() {
         check(&record(vec![round, bot(ROUND)])),
         Vec::<String>::new()
     );
+    let round = old(
+        "## Review round 1\n\nConfirmed a finding [^a] [^b].\n\n[^a]: x\n\n\
+         [^b]: Hot path: `send`",
+    );
+    assert_eq!(
+        check(&record(vec![round, bot(ROUND)])),
+        vec!["review round 1 names no performance, which this round requires."]
+    );
 }
 
 #[test]
