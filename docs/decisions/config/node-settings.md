@@ -30,7 +30,9 @@
   supersedes item 2, the cgroup doc, of
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6088506863;
   2026-10-09T23:43:24Z, no `memory.stat`,
-  https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6091170677). The
+  https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6091170677, and its
+  sentence here,
+  https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6091307461). The
   node keeps its budgets in the file `budget` of its data directory: one sector with the
   tag `foundation/budget/1`, the two budgets as `u64`, and a CRC32C. `node::budget`
   reads it outside the lock. Under the lock, once each shard has opened its buffer,
