@@ -950,6 +950,8 @@ fn sends_from_one_run_on_one_connection_ask_for_one_move() {
                 .await;
             let moves = state.moves.get() - before;
             let sent = side.clock.now();
+            // A move of the wrong connection leaves the bytes to the next drive.
+            side.clock.sleep(Span::from_nanos(1_000_000)).await;
             side.drive(Span::SECOND).await;
             (moves, sent)
         })
@@ -994,6 +996,8 @@ fn a_send_from_a_run_with_no_value_moves_on_only_its_connection() {
                 .await;
             let moves = state.moves.get() - before;
             let sent = side.clock.now();
+            // A move of the wrong connection leaves the bytes to the next drive.
+            side.clock.sleep(Span::from_nanos(1_000_000)).await;
             side.drive(Span::SECOND).await;
             (moves, runs, sent)
         })
@@ -1688,9 +1692,8 @@ fn a_write_to_a_reset_stream_gives_closing_and_a_warning() {
 }
 
 /// Records the call, with a `CLOSING` as one byte: 1 when the context is the
-/// application. On a read, sets the context to the application, closes, and runs the
-/// loop when `nested`.
-#[expect(clippy::too_many_arguments, reason = "a test callback")]
+/// application. On a read, sets the context to the application and closes. Gives
+/// whether it closed.
 unsafe fn mark(
     cm: *mut ffi::ConnectionManager,
     id: usize,
@@ -1699,15 +1702,14 @@ unsafe fn mark(
     state: ConnectionState,
     params: *const KeyValueMap,
     message: Bytes,
-    nested: bool,
-) {
+) -> bool {
     if state == ffi::CLOSING {
         // SAFETY: `open` passes the calls of a live side.
         let calls = unsafe { &*application.cast::<RefCell<Vec<Call>>>() };
         // SAFETY: the manager gives a live context slot.
         let marked = unsafe { *context } == application;
         calls.borrow_mut().push((id, state, vec![u8::from(marked)]));
-        return;
+        return false;
     }
     let read = state == ffi::ESTABLISHED && message.length > 0;
     // SAFETY: the manager gives the arguments that it gives `record`.
@@ -1719,14 +1721,8 @@ unsafe fn mark(
         let members = unsafe { &*cm.cast::<Members>() };
         // SAFETY: the member takes its own manager.
         assert_eq!(Status(unsafe { (members.close)(cm, id) }), Status::GOOD);
-        if nested {
-            let el = members.event_loop;
-            // SAFETY: the loop of the manager lives through the test.
-            let run = unsafe { (*el).run };
-            // SAFETY: the loop runs on this thread, outside a run of its own.
-            assert_eq!(Status(unsafe { run(el, 0) }), Status::GOOD);
-        }
     }
+    read
 }
 
 unsafe extern "C" fn mark_close(
@@ -1739,7 +1735,7 @@ unsafe extern "C" fn mark_close(
     message: Bytes,
 ) {
     // SAFETY: the manager gives the arguments.
-    unsafe { mark(cm, id, application, context, state, params, message, false) };
+    unsafe { mark(cm, id, application, context, state, params, message) };
 }
 
 unsafe extern "C" fn mark_close_and_run(
@@ -1752,7 +1748,14 @@ unsafe extern "C" fn mark_close_and_run(
     message: Bytes,
 ) {
     // SAFETY: the manager gives the arguments.
-    unsafe { mark(cm, id, application, context, state, params, message, true) };
+    if unsafe { mark(cm, id, application, context, state, params, message) } {
+        // SAFETY: the manager lives through the test.
+        let el = unsafe { &*cm.cast::<Members>() }.event_loop;
+        // SAFETY: the loop of the manager lives through the test.
+        let run = unsafe { (*el).run };
+        // SAFETY: the loop runs on this thread, outside a run of its own.
+        assert_eq!(Status(unsafe { run(el, 0) }), Status::GOOD);
+    }
 }
 
 fn closing_context(callback: ffi::ConnectionCallback) -> Vec<Call> {
