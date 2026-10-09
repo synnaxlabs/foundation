@@ -193,6 +193,7 @@
   https://github.com/synnaxlabs/foundation/pull/1938#issuecomment-6067736678).
   Amended (2026-10-08T17:39:11Z, #1940): `tcp::Options::unsent_bytes_max` is a
   `NonZeroUsize`. A bound of 0 has no meaning in its doc, and the drivers did not agree
-  on it: Linux and macOS read it as no bound, and `sim` never wrote. No caller gives 0.
+  on it: Linux and the macOS kernel read it as no bound, `os` on macOS wrote 1 byte per
+  call, and `sim` never wrote. No caller gives 0.
   Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1940).
