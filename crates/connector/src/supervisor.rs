@@ -1457,27 +1457,11 @@ mod tests {
                 .into();
             let writer = ctx.writer(channels, Authority(1), None).await;
             let writer = writer.expect("the writer opens");
-            let series: Vec<_> = (writer.set().entries().iter().enumerate())
-                .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
-                .collect();
-            let mut held = Vec::new();
-            let mut take = || {
-                let error = loop {
-                    match writer.draft(Form::Raw, &series) {
-                        Ok(draft) => held.push(draft),
-                        Err(error) => break error,
-                    }
-                };
-                assert!(
-                    matches!(error, frame::Error::Pool(block::Error::Exhausted { .. })),
-                    "{error}"
-                );
-            };
-            take();
+            let mut held = fill(&writer);
             ctx.count("samples").set(7);
             ctx.clock().sleep(ms(900)).await;
             if full {
-                take();
+                held.extend(fill(&writer));
             }
             ctx.clock().sleep(ms(600)).await;
             drop(held);
@@ -1504,6 +1488,26 @@ mod tests {
         (Span::from_nanos(3_000_000_001), 2, 7),
     ];
 
+    /// Takes frames of one sample for each channel of `writer` from the shard's pool
+    /// until the pool has no room.
+    fn fill(writer: &hub::writer::Writer) -> Vec<frame::Draft> {
+        let series: Vec<_> = (writer.set().entries().iter().enumerate())
+            .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
+            .collect();
+        let mut held = Vec::new();
+        let error = loop {
+            match writer.draft(Form::Raw, &series) {
+                Ok(draft) => held.push(draft),
+                Err(error) => break error,
+            }
+        };
+        assert!(
+            matches!(error, frame::Error::Pool(block::Error::Exhausted { .. })),
+            "{error}"
+        );
+        held
+    }
+
     /// The time, `state`, and count of each status frame of `hog(full)`.
     fn hogged(full: bool) -> Vec<(Span, i64, i64)> {
         let statuses = tally(hog(full));
@@ -1525,13 +1529,7 @@ mod tests {
             let writer = writer.expect("the writer opens");
             let clock = ctx.clock().clone();
             ctx.tasks().spawn(async move {
-                let series: Vec<_> = (writer.set().entries().iter().enumerate())
-                    .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
-                    .collect();
-                let mut held = Vec::new();
-                while let Ok(draft) = writer.draft(Form::Raw, &series) {
-                    held.push(draft);
-                }
+                let held = fill(&writer);
                 clock.sleep(ms(500)).await;
                 drop(held);
             });
@@ -1593,13 +1591,7 @@ mod tests {
                     channels,
                 };
                 let hog = hub.writer(hog).await.expect("opens");
-                let series: Vec<_> = (hog.set().entries().iter().enumerate())
-                    .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
-                    .collect();
-                let mut held = Vec::new();
-                while let Ok(draft) = hog.draft(Form::Raw, &series) {
-                    held.push(draft);
-                }
+                let held = fill(&hog);
                 sleeper.sleep(ms(2_000)).await;
                 canceller.cancel();
                 sleeper.sleep(ms(5_000)).await;
