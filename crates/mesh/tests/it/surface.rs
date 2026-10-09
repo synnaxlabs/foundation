@@ -156,6 +156,7 @@ async fn create_config_on(
         files: node.files(),
         dir: "blob".into(),
         pool: Rc::clone(&pool),
+        floor_bytes: 0,
     })
     .await
     .unwrap();

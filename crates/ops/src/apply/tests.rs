@@ -88,6 +88,7 @@ async fn open(
         files: node.files(),
         dir: "blob".into(),
         pool: Rc::clone(&pool),
+        floor_bytes: 0,
     })
     .await
     .expect("a store");

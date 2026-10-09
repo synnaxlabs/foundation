@@ -2,6 +2,8 @@
 //! back only when their bytes hash to the digest. A chunk torn by a crash reads as
 //! absent.
 
+pub mod peer;
+
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -26,6 +28,9 @@ pub struct Config {
     /// Blocks for the chunks a get gives and for checks of chunks on disk. Its
     /// largest block bounds a chunk.
     pub pool: Rc<Pool>,
+    /// The bytes the store leaves free on the disk. A put that would leave fewer
+    /// gives [`Error::Floor`].
+    pub floor_bytes: u64,
 }
 
 /// Why a store call failed.
@@ -42,6 +47,16 @@ pub enum Error {
         /// The digest of the bytes.
         found: Digest,
     },
+    /// A put would leave less free on the disk than [`Config::floor_bytes`]. Nothing
+    /// is written.
+    Floor {
+        /// The bytes of the chunk.
+        len: usize,
+        /// The bytes free on the disk.
+        free_bytes: u64,
+        /// The floor of the store.
+        floor_bytes: u64,
+    },
     /// A file in the directory of the store that is not named by a digest.
     Stray {
         /// The file.
@@ -57,6 +72,15 @@ impl fmt::Display for Error {
             Self::Mismatch { digest, found } => {
                 write!(f, "the bytes of the put hash to {found}, not to {digest}")
             }
+            Self::Floor {
+                len,
+                free_bytes,
+                floor_bytes,
+            } => write!(
+                f,
+                "a put of {len} bytes would leave less than the floor of {floor_bytes} \
+                 bytes free on a disk with {free_bytes} free"
+            ),
             Self::Stray { path } => write!(
                 f,
                 "{} is in the directory of the store, but it is not named by a digest",
@@ -118,6 +142,7 @@ pub struct Store {
     files: Files,
     dir: PathBuf,
     pool: Rc<Pool>,
+    floor_bytes: u64,
     chunks: RefCell<BTreeMap<Digest, State>>,
     corruptions: Cell<u64>,
     /// The serial of the next flight. A read that saw one flight's state must not
@@ -136,7 +161,12 @@ impl Store {
     /// [`Error::Files`] when a file call fails, and [`Error::Stray`] when a file in
     /// the directory is not named by a digest.
     pub async fn open(config: Config) -> Result<Self, Error> {
-        let Config { files, dir, pool } = config;
+        let Config {
+            files,
+            dir,
+            pool,
+            floor_bytes,
+        } = config;
         // An earlier open can have made the directory and stopped before this sync.
         files.create_dir(&dir).await?;
         files
@@ -155,6 +185,7 @@ impl Store {
             files,
             dir,
             pool,
+            floor_bytes,
             chunks: RefCell::new(chunks),
             corruptions: Cell::new(0),
             flights: Cell::new(1),
@@ -173,8 +204,10 @@ impl Store {
     ///
     /// [`Error::Pool`] when `chunk` is longer than the largest block of the pool, and
     /// [`Error::Mismatch`] when `chunk` does not hash to `digest`; nothing is written
-    /// in either case. [`Error::Files`] when a file call fails, among them `Full` when
-    /// the disk has no room; the chunk then reads as absent.
+    /// in either case. [`Error::Floor`] when the chunk would leave fewer bytes free
+    /// than the floor, and [`Error::Files`] when a file call fails, among them `Full`
+    /// when the disk has no room; the chunk then reads as absent. The floor counts
+    /// the whole chunk as new room, and not the puts in flight.
     pub async fn put(&self, digest: Digest, chunk: &Block) -> Result<(), Error> {
         let largest = self.pool.largest();
         if chunk.len() > largest {
@@ -403,6 +436,14 @@ impl<'a> Flight<'a> {
         let path = store.path(self.digest);
         let len =
             u64::try_from(chunk.len()).expect("invariant: a length fits in 64 bits");
+        let free_bytes = store.files.free().await?;
+        if free_bytes.saturating_sub(len) < store.floor_bytes {
+            return Err(Error::Floor {
+                len: chunk.len(),
+                free_bytes,
+                floor_bytes: store.floor_bytes,
+            });
+        }
         let mode = Mode::Create { len };
         let opened = match store.files.open(&path, mode).await {
             // A file of another length at the name is not the chunk.
@@ -553,12 +594,25 @@ mod tests {
             files: node.files(),
             dir: DIR.into(),
             pool,
+            floor_bytes: 0,
         })
         .await
     }
 
     async fn open(node: &sim::node::Node) -> Result<Store, Error> {
         open_with(node, create_pool(BUDGET)).await
+    }
+
+    /// A store that leaves `floor_bytes` free on the disk of `node`.
+    async fn open_leaving(node: &sim::node::Node, floor_bytes: u64) -> Store {
+        Store::open(Config {
+            files: node.files(),
+            dir: DIR.into(),
+            pool: create_pool(BUDGET),
+            floor_bytes,
+        })
+        .await
+        .unwrap()
     }
 
     /// A chunk of `len` bytes of `byte`, with its digest.
@@ -687,6 +741,78 @@ mod tests {
 
     mod put {
         use super::*;
+
+        #[test]
+        fn that_leaves_the_floor_free_stores_the_chunk() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                let free_bytes = node.files().free().await.unwrap();
+                let store = open_leaving(&node, free_bytes - 3000).await;
+                store.put(digest, &block).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn that_leaves_one_byte_under_the_floor_gives_floor_and_writes_nothing() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                let free_bytes = node.files().free().await.unwrap();
+                let floor_bytes = free_bytes - 2999;
+                let store = open_leaving(&node, floor_bytes).await;
+                let error = store.put(digest, &block).await.unwrap_err();
+                let expected = Error::Floor {
+                    len: 3000,
+                    free_bytes,
+                    floor_bytes,
+                };
+                assert_eq!(error, expected);
+                assert_absent(&store, digest).await;
+                let left: Vec<PathBuf> = Vec::new();
+                assert_eq!(node.files().list(Path::new(DIR)).await.unwrap(), left);
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn over_a_floor_above_the_free_bytes_gives_floor() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                let free_bytes = node.files().free().await.unwrap();
+                let store = open_leaving(&node, free_bytes + 1).await;
+                let error = store.put(digest, &block).await.unwrap_err();
+                let expected = Error::Floor {
+                    len: 3000,
+                    free_bytes,
+                    floor_bytes: free_bytes + 1,
+                };
+                assert_eq!(error, expected);
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn whose_free_fails_gives_io_and_writes_nothing() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                node.fail_file(Path::new(""), Operation::Free);
+                let error = store.put(digest, &block).await.unwrap_err();
+                assert_eq!(error, io(Path::new(""), Operation::Free));
+                assert_absent(&store, digest).await;
+                store.put(digest, &block).await.unwrap();
+            })
+            .unwrap();
+        }
 
         #[test]
         fn then_a_get_gives_the_same_bytes() {
@@ -991,7 +1117,7 @@ mod tests {
         // is in `env`: a write open waits for the calls in flight on the path.
         #[test]
         fn after_a_store_dropped_with_a_remove_in_flight_loses_the_chunk() {
-            let (mut sim, node) = create_default_node(27104);
+            let (mut sim, node) = create_default_node(22279);
             sim.run_on(&node, |node, _| async move {
                 let (digest, block) = chunk(7, 3000);
                 let (_, other) = chunk(7, 512);
@@ -1000,8 +1126,10 @@ mod tests {
                 let store = open(&node).await.unwrap();
                 {
                     let mut first = pin!(store.put(digest, &block));
-                    assert_eq!(poll_once(&mut first).await, Poll::Pending);
-                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                    for _ in 0..2 {
+                        assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                        node.clock().sleep(Span::from_nanos(100_000)).await;
+                    }
                     assert_eq!(poll_once(&mut first).await, Poll::Pending);
                 }
                 drop(store);
@@ -1019,14 +1147,16 @@ mod tests {
         // and the next store's put of the digest finds the file busy.
         #[test]
         fn after_a_store_dropped_with_a_write_in_flight_is_busy() {
-            let (mut sim, node) = create_default_node(3);
+            let (mut sim, node) = create_default_node(206);
             sim.run_on(&node, |node, _| async move {
                 let (digest, block) = chunk(7, 3000);
                 let store = open(&node).await.unwrap();
                 {
                     let mut first = pin!(store.put(digest, &block));
-                    assert_eq!(poll_once(&mut first).await, Poll::Pending);
-                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                    for _ in 0..2 {
+                        assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                        node.clock().sleep(Span::from_nanos(100_000)).await;
+                    }
                     assert_eq!(poll_once(&mut first).await, Poll::Pending);
                 }
                 drop(store);
@@ -1140,6 +1270,8 @@ mod tests {
                 let store = open(&node).await.unwrap();
                 let (digest, block) = chunk(7, 3000);
                 let mut first = pin!(store.put(digest, &block));
+                assert_eq!(poll_once(&mut first).await, Poll::Pending);
+                node.clock().sleep(Span::from_nanos(100_000)).await;
                 assert_eq!(poll_once(&mut first).await, Poll::Pending);
                 node.fail_file(&path(digest), Operation::Open);
                 let second = store.put(digest, &block);
@@ -1364,7 +1496,7 @@ mod tests {
                 assert_absent(&store, digest).await;
                 {
                     let mut put = pin!(store.put(digest, &block));
-                    for _ in 0..3 {
+                    for _ in 0..4 {
                         assert_eq!(poll_once(&mut put).await, Poll::Pending);
                         node.clock().sleep(Span::from_nanos(100_000)).await;
                     }
@@ -1401,7 +1533,7 @@ mod tests {
                 }
                 {
                     let mut put = pin!(store.put(digest, &block));
-                    for _ in 0..4 {
+                    for _ in 0..5 {
                         assert_eq!(poll_once(&mut put).await, Poll::Pending);
                         node.clock().sleep(Span::from_nanos(100_000)).await;
                     }
@@ -1696,8 +1828,10 @@ mod tests {
                 let (dropped, dropped_block) = chunk(9, 3000);
                 {
                     let mut put = pin!(store.put(dropped, &dropped_block));
-                    assert_eq!(poll_once(&mut put).await, Poll::Pending);
-                    node.clock().sleep(Span::from_nanos(100_000)).await;
+                    for _ in 0..2 {
+                        assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                        node.clock().sleep(Span::from_nanos(100_000)).await;
+                    }
                     assert_eq!(poll_once(&mut put).await, Poll::Pending);
                 }
                 let mut put = pin!(store.put(digest, &block));
@@ -1741,6 +1875,16 @@ mod tests {
                 largest: 2,
             };
             assert_eq!(Error::from(pool.clone()).to_string(), pool.to_string());
+            let floor = Error::Floor {
+                len: 3000,
+                free_bytes: 4096,
+                floor_bytes: 2048,
+            };
+            assert_eq!(
+                floor.to_string(),
+                "a put of 3000 bytes would leave less than the floor of 2048 bytes \
+                 free on a disk with 4096 free"
+            );
         }
     }
 

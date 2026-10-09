@@ -151,7 +151,9 @@ dependencies = [
  "block",
  "env",
  "sim",
+ "transport",
  "types",
+ "wire",
 ]
 
 [[package]]
