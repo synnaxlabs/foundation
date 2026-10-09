@@ -606,7 +606,8 @@ struct Serve {
     time: clock::Reader,
 }
 
-/// What shard 0 opens the node's transport, mesh, and hub from.
+/// What shard 0 opens the node's transport and mesh from, but its files, pool, and
+/// tasks.
 struct Endpoint {
     /// The node's part of its port.
     part: transport::port::Part,
@@ -616,30 +617,6 @@ struct Endpoint {
 }
 
 impl Endpoint {
-    /// The hub of shard 0 of the node `key` over `home`, which knows each channel of
-    /// the node's region.
-    fn hub(
-        &self,
-        key: types::node::Key,
-        home: home::Shard,
-        interner: Interner,
-        time: clock::Reader,
-        tasks: &env::tasks::Tasks,
-    ) -> hub::Hub {
-        let hub = hub::Hub::new(hub::Config {
-            home,
-            interner,
-            tasks: tasks.clone(),
-            node: key,
-            time,
-            entropy: self.entropy.clone(),
-        });
-        if let Some(region) = &self.region {
-            hub.define(&region.definitions);
-        }
-        hub
-    }
-
     /// Opens the node's transport on `pool` and `tasks` with `identity`, then, when the
     /// node has a region, the chunk store in directory [`directory::blob`] of `files`,
     /// and the mesh of that region over both, in directory [`directory::mesh`]. Gives
@@ -725,9 +702,13 @@ impl Serve {
                 Ok(identity) => identity,
                 Err(error) => return fail(error),
             };
-        let hub = self
+        let (key, entropy) = (identity.key, self.endpoint.entropy.clone());
+        // The endpoint's open takes the founding, so the definitions go first.
+        let definitions = self
             .endpoint
-            .hub(identity.key, home, interner, self.time, &tasks);
+            .region
+            .as_ref()
+            .map(|region| region.definitions.clone());
         let (transport, mesh) = match self
             .endpoint
             .open(identity, files, pool, tasks.clone())
@@ -736,21 +717,18 @@ impl Serve {
             Ok(opened) => opened,
             Err(error) => return fail(error),
         };
+        let hub = hub::Hub::new(hub::Config {
+            home,
+            interner,
+            tasks: tasks.clone(),
+            node: key,
+            time: self.time,
+            entropy,
+            mesh: mesh.clone(),
+        });
+        hub.define(definitions.iter().flatten());
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
-        // `next` gives the stop of the group on a watch of any index.
-        let watch = mesh
-            .as_ref()
-            .map(|mesh| mesh.watch(types::channel::Key::from_u128(0)));
-        let group = async move {
-            let Some(mut watch) = watch else {
-                return std::future::pending().await;
-            };
-            loop {
-                if let Err(stopped) = watch.next().await {
-                    return stopped;
-                }
-            }
-        };
+        let group = stopped(mesh.as_ref());
         // The port's future holds the mesh, so it drops before the wait.
         {
             let port = route::accept(transport, mesh, hub.clone(), tasks.clone());
@@ -775,10 +753,26 @@ impl Serve {
     }
 }
 
+/// Resolves with the stop of the group of `mesh`, or never when the node has no mesh.
+fn stopped(mesh: Option<&mesh::Mesh>) -> impl Future<Output = mesh::Stopped> + use<> {
+    // `next` gives the stop of the group on a watch of any index.
+    let watch = mesh.map(|mesh| mesh.watch(types::channel::Key::from_u128(0)));
+    async move {
+        let Some(mut watch) = watch else {
+            return std::future::pending().await;
+        };
+        loop {
+            if let Err(stopped) = watch.next().await {
+                return stopped;
+            }
+        }
+    }
+}
+
 /// How shard 0's serve ends, from one poll of each cause, in rank order: a stop of
 /// the node (`guard`), which gives `None`, then a transport that stopped (`port`),
-/// then a group that stopped. The port's end drops the mesh, which stops the group
-/// with `Dropped` at the same poll, so the port ranks above the group.
+/// then a group that stopped. The order of the port and the group is a fixed
+/// tie-break, with no contract.
 fn end(
     guard: Poll<()>,
     port: Poll<transport::Error>,

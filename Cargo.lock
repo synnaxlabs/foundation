@@ -857,6 +857,7 @@ version = "0.0.0"
 dependencies = [
  "access",
  "aws-lc-rs",
+ "blob",
  "block",
  "buffer",
  "clock",
@@ -864,6 +865,7 @@ dependencies = [
  "counting",
  "env",
  "home",
+ "mesh",
  "sim",
  "spec",
  "transport",
