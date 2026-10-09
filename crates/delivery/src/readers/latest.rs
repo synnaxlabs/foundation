@@ -105,15 +105,6 @@ impl Readers {
         &self.woken_latest
     }
 
-    /// Drops the newest frame. No latest session gets it: each waits for the next
-    /// [`Readers::put`].
-    pub fn drop_newest(&mut self) {
-        self.newest = None;
-        for session in &mut self.latest {
-            session.waiting = false;
-        }
-    }
-
     /// Takes the latest session's waiting frame, or `None` when it has none or is
     /// closed.
     pub(super) fn take_latest(&mut self, key: Key) -> Option<Frame> {
@@ -617,25 +608,6 @@ mod tests {
         }
     }
 
-    mod drop_newest {
-        use super::*;
-
-        #[test]
-        fn gives_no_session_the_frame_and_wakes_each_at_the_next_put() {
-            let frames = Frames::new(2);
-            let mut readers = Readers::new(0);
-            let open = unnamed(&mut readers);
-            assert_eq!(put(&mut readers, frames.frame(1)), [open]);
-            readers.drop_newest();
-            let late = unnamed(&mut readers);
-            assert_eq!(taken(&mut readers, open), None);
-            assert_eq!(taken(&mut readers, late), None);
-            assert_eq!(put(&mut readers, frames.frame(2)), [open, late]);
-            assert_eq!(taken(&mut readers, open), Some(2));
-            assert_eq!(taken(&mut readers, late), Some(2));
-        }
-    }
-
     mod rules {
         use super::*;
 
@@ -644,7 +616,6 @@ mod tests {
             Open,
             Complete,
             Put,
-            DropNewest,
             Take(usize),
             Close(usize),
         }
@@ -654,7 +625,6 @@ mod tests {
                 Just(Input::Open),
                 Just(Input::Complete),
                 Just(Input::Put),
-                Just(Input::DropNewest),
                 any::<usize>().prop_map(Input::Take),
                 any::<usize>().prop_map(Input::Close),
             ]
@@ -712,11 +682,6 @@ mod tests {
                         assert_eq!(put(&mut readers, frames.frame(n)), empty);
                         model.newest = Some(n);
                         model.mailboxes.values_mut().for_each(|m| *m = Some(n));
-                    }
-                    Input::DropNewest => {
-                        readers.drop_newest();
-                        model.newest = None;
-                        model.mailboxes.values_mut().for_each(|m| *m = None);
                     }
                     Input::Take(i) => {
                         if let Some(key) = model.nth(i) {

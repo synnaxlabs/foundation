@@ -259,8 +259,18 @@ fn write_i32(writer: &mut Writer, stamp: i64, value: i32) -> Vec<Outcome> {
         .expect("the home takes it")
 }
 
-/// A latest reader on a channel whose type changed at its key takes no frame of the
-/// old type: it waits for the next frame.
+/// The key of each series that `received` holds.
+fn keys(received: &reader::Received<'_>) -> Vec<u128> {
+    let entries = received.set.entries();
+    received
+        .view
+        .iter()
+        .map(|(at, _)| entries[at].key.as_u128())
+        .collect()
+}
+
+/// A latest reader on a channel whose type changed at its key takes the newest frame
+/// at once, with no series of the old type, and the series of the next frame.
 #[test]
 fn gives_a_latest_reader_of_a_changed_channel_no_series_of_the_removed_one() {
     run(34, |test| async move {
@@ -271,10 +281,13 @@ fn gives_a_latest_reader_of_a_changed_channel_no_series_of_the_removed_one() {
         changed.insert(name("value"), definition(2, DataType::Sample(I32), 1));
         test.hub.set_definitions(&changed);
         let mut reader = test.reader(&["value"], Mode::Latest).await;
-        assert!(poll_once(reader.next()).is_pending(), "no frame waits");
+        let received = reader.next().await.expect("the newest frame");
+        assert_eq!(keys(&received), [1]);
+        assert_eq!(samples(&received, 1), [now]);
         let mut writer = test.writer("b", &["value"]).await;
         assert_eq!(write_i32(&mut writer, now + 1, 20), [applied(1)]);
         let received = reader.next().await.expect("a frame");
+        assert_eq!(keys(&received), [1, 2]);
         let at = entry(received.set, 2);
         assert_eq!(received.set.entries()[at].data_type, I32);
         let (_, bytes) = received
@@ -288,8 +301,28 @@ fn gives_a_latest_reader_of_a_changed_channel_no_series_of_the_removed_one() {
     });
 }
 
+/// A latest reader on a data channel that stays takes the newest frame of its index
+/// at once, with its own series, after another channel of the index changed.
+#[test]
+fn gives_a_latest_reader_of_a_kept_channel_the_newest_frame_after_a_change() {
+    run(38, |test| async move {
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        let outcomes =
+            write_series(&mut writer, &[(1, &[now]), (2, &[10]), (5, &[30])]);
+        assert_eq!(outcomes, [applied(0)]);
+        let mut changed = channels();
+        changed.insert(name("value"), definition(2, DataType::Sample(I32), 1));
+        test.hub.set_definitions(&changed);
+        let mut reader = test.reader(&["value-c"], Mode::Latest).await;
+        let received = reader.next().await.expect("the newest frame");
+        assert_eq!(keys(&received), [1, 5]);
+        assert_eq!(samples(&received, 5), [30]);
+    });
+}
+
 /// A data channel that moves to another index and back with a new type leaves no
-/// frame of its old type on its first index.
+/// series of its old type on its first index.
 #[test]
 fn gives_a_latest_reader_no_series_of_a_channel_that_moved_away_and_back() {
     run(37, |test| async move {
@@ -304,7 +337,8 @@ fn gives_a_latest_reader_no_series_of_a_channel_that_moved_away_and_back() {
         back.insert(name("value"), definition(2, DataType::Sample(I32), 1));
         test.hub.set_definitions(&back);
         let mut reader = test.reader(&["value"], Mode::Latest).await;
-        assert!(poll_once(reader.next()).is_pending(), "no frame waits");
+        let received = reader.next().await.expect("the newest frame");
+        assert_eq!(keys(&received), [1]);
     });
 }
 
