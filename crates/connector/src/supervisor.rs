@@ -862,6 +862,54 @@ mod tests {
     }
 
     #[test]
+    fn returns_at_once_after_a_removed_status_channel_while_the_pool_is_full() {
+        let returned = run_on(|node, tasks| async move {
+            let kind = Counted(|ctx: Context<()>| async move {
+                ctx.count("samples").set(1);
+                ctx.clock().sleep(ms(1_500)).await;
+                Ok(())
+            });
+            let kinds = Table::new().with("tally", kind);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
+            let (connector, counts) = (name("plant.tally"), [name("samples")]);
+            let status = testing::create_status(&connector, &counts, STATUS);
+            inputs
+                .hub
+                .set_definitions(status.iter().map(|(name, def)| (name, def)));
+            let (hub, clock) = (inputs.hub.clone(), node.clock());
+            tasks.spawn(async move {
+                clock.sleep(ms(100)).await;
+                let channels = ["state", "class", "restarts", "samples"]
+                    .map(|c| name(&format!("plant.tally.status.{c}")))
+                    .into();
+                let hog = hub::writer::Config {
+                    subject: name("plant.other"),
+                    authority: Authority(1),
+                    lease: None,
+                    channels,
+                };
+                let hog = hub.writer(hog).await.expect("opens");
+                clock.sleep(ms(400)).await;
+                let samples = name("plant.tally.status.samples");
+                let kept = status.iter().filter(|(name, _)| *name != samples);
+                hub.set_definitions(kept.map(|(name, def)| (name, def)));
+                clock.sleep(ms(700)).await;
+                let held = fill(&hog);
+                clock.sleep(ms(20_000)).await;
+                drop(held);
+            });
+            let (clock, start) = (node.clock(), node.clock().now());
+            let result = Supervisor::new(inputs)
+                .run("tally", connector, &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            clock.now() - start
+        });
+        assert_eq!(returned, ms(1_500), "no change of state waits after 1 s");
+    }
+
+    #[test]
     fn writes_no_status_for_a_config_that_does_not_parse() {
         let out = supervise("modbus", vec![Step::Done], config(), None);
         assert!(out.statuses.is_empty(), "{:?}", out.statuses);

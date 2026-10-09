@@ -266,6 +266,7 @@ impl Writer {
             restarts: 0,
             started: false,
             unapplied: false,
+            closed: false,
         };
         let writer = Self {
             session: RefCell::new(session),
@@ -413,6 +414,9 @@ struct Session {
     /// Set while the last change of state waits for a frame that the home applies,
     /// until the writer writes no more.
     unapplied: bool,
+    /// Set after the hub refused a write as `Removed` or the home failed on disk,
+    /// after which the session writes nothing.
+    closed: bool,
 }
 
 impl Session {
@@ -420,6 +424,7 @@ impl Session {
     /// as `Backwards` is stamped after the stamp the refusal gives and written again,
     /// one time. A frame that the home does not apply, or for which the shard's pool
     /// has no block now, leaves the status staged, so the flush writes it again.
+    /// After the session closed, it writes nothing.
     ///
     /// # Panics
     ///
@@ -428,6 +433,10 @@ impl Session {
     /// than the largest block of the pool.
     fn write(&mut self, values: &Values, now: Monotonic) {
         values.staged.set(false);
+        if self.closed {
+            self.unapplied = false;
+            return;
+        }
         self.wrote = now;
         let mesh = self.hub.now();
         let stamp = self.last.map_or(mesh, |last| mesh.max(after(last)));
@@ -467,9 +476,10 @@ impl Session {
         self.fill(&mut draft, values, stamp);
         self.last = Some(stamp);
         match self.hub.write(Label::Path(Path::Live), draft) {
-            // After either failure, the hub gives it again on each later write.
-            Ok([Outcome::Applied { .. }])
-            | Err(Failure::Removed(_) | Failure::Home(home::Error::Disk(_))) => {}
+            Ok([Outcome::Applied { .. }]) => {}
+            Err(Failure::Removed(_) | Failure::Home(home::Error::Disk(_))) => {
+                self.closed = true;
+            }
             Ok(
                 [
                     Outcome::Refused {
