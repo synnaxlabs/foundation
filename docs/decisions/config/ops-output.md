@@ -73,3 +73,9 @@
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070706432).
   Supersedes the code, message, fix, and order of
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6060043966.
+  The apply output is `Applied { file, pointer, added, changed, removed, homes }`, where
+  `homes` counts the homes that the plan lists. Its text is `Applied <file>: <a> added,
+  <c> changed, <r> removed, <h> homes listed.`, with each count of 0 left out and `1
+  home listed` for one home, and `no change` only for a plan with no change and no
+  home. Decided by `laptop.architect-2` (2026-10-09T00:42:24Z,
+  https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071903259).

@@ -182,9 +182,13 @@ fn applies_a_plan_and_then_plans_no_change() {
                     changed: 0,
                     removed: 0,
                 },
+                homes: 1,
             }
         );
-        assert_eq!(applied.text(), "Applied site.plan: 3 added.\n");
+        assert_eq!(
+            applied.text(),
+            "Applied site.plan: 3 added, 1 home listed.\n"
+        );
         let (output, _) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         assert_eq!(output.text(), "0 to add, 0 to change, 0 to remove.\n");
         let time = &mesh.spec().await.expect("a spec").definitions[&name("site.time")];
@@ -470,7 +474,7 @@ fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
 
 #[test]
 fn leaves_out_each_count_of_zero() {
-    let applied = |added, changed, removed| {
+    let applied = |added, changed, removed, homes| {
         let pointer = Pointer {
             version: 1,
             root: spec::tree::empty(),
@@ -483,16 +487,18 @@ fn leaves_out_each_count_of_zero() {
                 changed,
                 removed,
             },
+            homes,
         };
         applied.text()
     };
-    assert_eq!(applied(0, 0, 0), "Applied a\\n.plan: no change.\n");
+    assert_eq!(applied(0, 0, 0, 0), "Applied a\\n.plan: no change.\n");
     assert_eq!(
-        applied(1, 2, 3),
-        "Applied a\\n.plan: 1 added, 2 changed, 3 removed.\n"
+        applied(1, 2, 3, 2),
+        "Applied a\\n.plan: 1 added, 2 changed, 3 removed, 2 homes listed.\n"
     );
-    assert_eq!(applied(0, 2, 0), "Applied a\\n.plan: 2 changed.\n");
-    assert_eq!(applied(0, 0, 3), "Applied a\\n.plan: 3 removed.\n");
+    assert_eq!(applied(0, 2, 0, 0), "Applied a\\n.plan: 2 changed.\n");
+    assert_eq!(applied(0, 0, 3, 0), "Applied a\\n.plan: 3 removed.\n");
+    assert_eq!(applied(0, 0, 0, 1), "Applied a\\n.plan: 1 home listed.\n");
 }
 
 #[test]
@@ -617,6 +623,7 @@ fn proposes_nothing_for_a_plan_with_no_change() {
                     changed: 0,
                     removed: 0,
                 },
+                homes: 0,
             }
         );
         assert_eq!(applied.text(), "Applied site.plan: no change.\n");
@@ -668,6 +675,7 @@ fn applies_a_plan_with_no_home_and_then_a_plan_with_only_a_home() {
             .await
             .expect("a plan with only a home applies");
         assert_eq!(applied.pointer, plan::Pointer::from(mesh.pointer()));
+        assert_eq!(applied.text(), "Applied site.plan: 1 home listed.\n");
         assert_eq!(mesh.pointer().version, 2);
         assert_eq!(mesh.watch(key).next().await, Ok(Some(NODE)));
     });

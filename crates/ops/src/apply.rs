@@ -51,6 +51,7 @@ pub(crate) async fn apply(
         });
     }
     let counts = Counts::of(planned.changes.values().map(Action::of));
+    let homes = planned.homes.len();
     let pointer = if planned.changes.is_empty() && planned.homes.is_empty() {
         pointer
     } else {
@@ -66,6 +67,7 @@ pub(crate) async fn apply(
         file: file.to_owned(),
         pointer: plan::Pointer::from(pointer),
         counts,
+        homes,
     })
 }
 
@@ -78,22 +80,30 @@ pub(crate) struct Applied {
     pub(crate) pointer: plan::Pointer,
     #[serde(flatten)]
     pub(crate) counts: Counts,
+    /// The count of homes that the plan lists. An index that has a home keeps it.
+    pub(crate) homes: usize,
 }
 
 impl Applied {
-    /// `Applied <file>: <a> added, <c> changed, <r> removed.`, with each count of 0
-    /// left out, or `no change` in place of the counts when each is 0.
+    /// `Applied <file>: <a> added, <c> changed, <r> removed, <h> homes listed.`, with
+    /// each count of 0 left out and `1 home listed` for one home, or `no change` in
+    /// place of the counts when each is 0.
     pub(crate) fn text(&self) -> String {
         let counts = [
             (self.counts.added, "added"),
             (self.counts.changed, "changed"),
             (self.counts.removed, "removed"),
         ];
-        let counts: Vec<String> = counts
+        let mut counts: Vec<String> = counts
             .iter()
             .filter(|(count, _)| *count > 0)
             .map(|(count, action)| format!("{count} {action}"))
             .collect();
+        match self.homes {
+            0 => {}
+            1 => counts.push("1 home listed".to_owned()),
+            homes => counts.push(format!("{homes} homes listed")),
+        }
         let counts = if counts.is_empty() {
             "no change".to_owned()
         } else {
