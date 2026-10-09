@@ -112,7 +112,11 @@ impl Error {
                 APPLY,
                 "Fix the cause in the message, then plan and apply again".to_owned(),
             ),
-            Self::Stopped(_) => (STOPPED, "Start the node, then plan again".to_owned()),
+            Self::Stopped(_) => (
+                STOPPED,
+                "Fix the cause in the message, then start the node and plan again"
+                    .to_owned(),
+            ),
         };
         Cow::Owned(vec![Problem {
             code: code.as_str().to_owned(),

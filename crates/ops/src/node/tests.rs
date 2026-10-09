@@ -1,9 +1,6 @@
 use std::cell::Cell;
 use std::collections::BTreeMap;
-use std::future::poll_fn;
 use std::path::{Path, PathBuf};
-use std::pin::pin;
-use std::task::Poll;
 
 use connector::kind::Table;
 use document::Source;
@@ -13,9 +10,7 @@ use types::channel::Key;
 
 use super::Node;
 use crate::apply::Applied;
-use crate::common::{
-    NODE, PLANT, Reader, fail_sync, front_ends, placed_site, solo, solo_on,
-};
+use crate::common::{NODE, PLANT, Reader, fail_sync, front_ends, placed_site, solo};
 use crate::error::{Error, Problem};
 use crate::front_end::{self, File};
 use crate::plan::{self, Counts};
@@ -64,7 +59,7 @@ fn site() -> Vec<(PathBuf, String)> {
 #[test]
 #[should_panic(expected = "`ops::Node` needs a front end")]
 fn refuses_an_empty_table_of_front_ends() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         drop(Node::new(
             mesh,
             || Key::from_u128(1),
@@ -76,7 +71,7 @@ fn refuses_an_empty_table_of_front_ends() {
 
 #[test]
 fn applies_with_each_connector_kind_of_the_node() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let node = create_node(mesh.clone());
         let files = vec![(PathBuf::from("plant.hcl"), PLANT.to_owned())];
         let (plan, _) = node.plan(files).await.expect("a plan");
@@ -97,7 +92,7 @@ fn applies_with_each_connector_kind_of_the_node() {
 
 #[test]
 fn plans_and_applies_in_the_json_of_the_cli() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let node = create_node(mesh.clone());
         let expected = planned(&mesh, site()).await;
         let (plan, output) = node.plan(site()).await.expect("a plan");
@@ -130,7 +125,7 @@ fn plans_and_applies_in_the_json_of_the_cli() {
 
 #[test]
 fn plans_with_each_connector_kind_of_the_node() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let node = create_node(mesh.clone());
         let files = vec![(PathBuf::from("plant.hcl"), PLANT.to_owned())];
         let expected = planned(&mesh, files.clone()).await;
@@ -141,7 +136,7 @@ fn plans_with_each_connector_kind_of_the_node() {
 
 #[test]
 fn gives_the_json_error_of_a_plan() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let node = create_node(mesh);
         let files = vec![(PathBuf::from("site.txt"), placed_site())];
         let error = node.plan(files).await.expect_err("an unknown extension");
@@ -154,7 +149,7 @@ fn gives_the_json_error_of_a_plan() {
 
 #[test]
 fn gives_the_json_error_of_an_apply() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let node = create_node(mesh.clone());
         let base = mesh.pointer();
         let (plan, _) = node.plan(site()).await.expect("a plan");
@@ -168,36 +163,50 @@ fn gives_the_json_error_of_an_apply() {
 
 #[test]
 fn debug_names_each_front_end() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let node = create_node(mesh);
         assert_eq!(format!("{node:?}"), r#"Node { front_ends: ["hcl"], .. }"#);
     });
 }
 
+/// The output of `ops.stopped` for `stopped`.
+fn stopped_errors(stopped: &mesh::Stopped) -> Value {
+    json!({ "errors": [{
+        "code": "ops.stopped",
+        "message": stopped.to_string(),
+        "fix": "Fix the cause in the message, then start the node and plan again",
+        "notes": [],
+    }] })
+}
+
 #[test]
 fn gives_a_stop_of_the_group_as_stopped_in_plan() {
-    solo_on(|sim, mesh| async move {
+    solo(|sim, mesh| async move {
         let node = create_node(mesh.clone());
         let (plan, _) = node.plan(site()).await.expect("a plan");
-        node.apply(Path::new("site.plan"), &plan)
-            .await
-            .expect("an apply");
-        // `Mesh::spec` gives the stop only while the read of a committed spec waits.
-        let mut read = pin!(mesh.spec());
-        let polled = poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await;
-        assert!(polled.is_pending());
         let stopped = fail_sync(&sim);
-        let home = mesh.set_home(Key::from_u128(1), NODE).await;
-        assert_eq!(home, Err(mesh::Error::Stopped(stopped.clone())));
-        let problem = json!({
-            "code": "ops.stopped",
-            "message": stopped.to_string(),
-            "fix": "Start the node, then plan again",
-            "notes": [],
-        });
-        assert_eq!(node.plan(site()).await, Err(json!({ "errors": [problem] })));
+        let applied = node.apply(Path::new("site.plan"), &plan).await;
+        assert_eq!(applied, Err(stopped_errors(&stopped)));
+        let planned = node.plan(site()).await.map(|(_, output)| output);
+        assert_eq!(planned, Err(stopped_errors(&stopped)));
         let error = used::spec(&mesh).await.expect_err("a stop");
         assert_eq!(error, Error::Stopped(stopped));
         assert_eq!(error.status(), 1);
+    });
+}
+
+#[test]
+fn gives_a_stop_of_the_group_as_stopped_in_apply_of_a_plan_with_no_change() {
+    solo(|sim, mesh| async move {
+        let node = create_node(mesh);
+        let (plan, _) = node.plan(site()).await.expect("a plan");
+        let (empty, output) = node.plan(Vec::new()).await.expect("a plan");
+        assert_eq!(output["added"], json!(0));
+        assert_eq!(output["removed"], json!(0));
+        let stopped = fail_sync(&sim);
+        let applied = node.apply(Path::new("site.plan"), &plan).await;
+        assert_eq!(applied, Err(stopped_errors(&stopped)));
+        let applied = node.apply(Path::new("empty.plan"), &empty).await;
+        assert_eq!(applied, Err(stopped_errors(&stopped)));
     });
 }

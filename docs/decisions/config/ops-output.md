@@ -60,14 +60,22 @@
   `Mesh::spec` and gives the spec in use or this error, for each caller. A plan whose
   base is not the spec in use, before the proposal or after another change applies
   first, is `ops.stale-plan`, status 1, fix `Plan again`. Each other error of
-  `Mesh::apply` is `ops.apply`, status 1, with its `Display` as the message and the fix
-  `Fix the cause in the message, then plan and apply again`. A stop of the group of the
-  mesh, from `Mesh::spec` or from `Mesh::apply`, is `ops.stopped`, status 1, in `plan`
-  and in `apply`, with the `Display` of the stop as the message and the fix `Start the
-  node, then plan again`. It can come after a proposal, so plan again to see whether
-  the change applied. `ops.stopped` decided by `laptop.architect-2`
-  (2026-10-09T03:42:35Z, (b) of
-  https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6073812317). There
+  `Mesh::apply`, except a stop, is `ops.apply`, status 1, with its `Display` as the
+  message and the fix `Fix the cause in the message, then plan and apply again`. A stop
+  of the group of the mesh, from `Mesh::spec` or from `Mesh::apply`, is `ops.stopped`,
+  status 1, in `plan` and in `apply`, with the `Display` of the stop as the message and
+  the fix `Fix the cause in the message, then start the node and plan again`. It can
+  come after a proposal, so plan again to see whether the change applied. `ops.stopped`
+  decided by `laptop.architect-2` (2026-10-09T03:42:35Z, (b) of
+  https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6073812317); the
+  fix, which supersedes the fix of (b), by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090194371) and
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090256164), and
+  "except a stop" by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090197852).
+  Supersedes the code of `mesh::Error::Stopped` in step 4 of
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063695586. There
   is no `ops.reserved-change`: `Plan::definitions` refuses a change at a reserved label
   (FIRST ADMIN). After `definitions`, each problem of `config::plan::check` is a
   `Config` problem with its own code and no place, status 2 (PLAN FILE): plan

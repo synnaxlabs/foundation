@@ -196,32 +196,17 @@ pub(crate) async fn open(
     Mesh::open(config).await.expect("a mesh")
 }
 
-/// Runs `body` with the mesh of [`open`] on the one node of a run, whose one member is
-/// `edge`, with the definitions of a first start.
+/// Runs `body` with the one node of a run and the mesh of [`open`] on it, whose one
+/// member is `edge`, with the definitions of a first start.
 pub(crate) fn solo<F: Future<Output = ()> + 'static>(
-    body: impl FnOnce(Mesh) -> F + Send + 'static,
+    body: impl FnOnce(sim::node::Node, Mesh) -> F + Send + 'static,
 ) {
     founded(&["edge"], spec::founding::create(ADMIN.public()), body);
 }
 
-/// Runs `body` with the mesh of [`open`] on the one node of a run, with the members
-/// `names` and the founding `definitions`.
+/// Runs `body` with the one node of a run and the mesh of [`open`] on it, with the
+/// members `names` and the founding `definitions`.
 pub(crate) fn founded<F: Future<Output = ()> + 'static>(
-    names: &'static [&'static str],
-    definitions: BTreeMap<Name, Definition>,
-    body: impl FnOnce(Mesh) -> F + Send + 'static,
-) {
-    founded_on(names, definitions, |_, mesh| body(mesh));
-}
-
-/// As [`solo`], and also gives `body` the node.
-pub(crate) fn solo_on<F: Future<Output = ()> + 'static>(
-    body: impl FnOnce(sim::node::Node, Mesh) -> F + Send + 'static,
-) {
-    founded_on(&["edge"], spec::founding::create(ADMIN.public()), body);
-}
-
-fn founded_on<F: Future<Output = ()> + 'static>(
     names: &'static [&'static str],
     definitions: BTreeMap<Name, Definition>,
     body: impl FnOnce(sim::node::Node, Mesh) -> F + Send + 'static,
