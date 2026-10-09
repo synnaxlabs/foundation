@@ -212,7 +212,7 @@ async fn header(incoming: &mut Incoming) {
 }
 
 /// What `serve` gave for one stream, once it replied to a request with its body
-/// reversed after [`HOLD`].
+/// reversed after [`HOLD`], or the error of that reply.
 async fn answer(
     serve: impl Future<Output = Result<Served, serve::Error>>,
     clock: &env::clock::Clock,
@@ -223,7 +223,7 @@ async fn answer(
             let subject = request.admitted.hello.subject.clone();
             let reply: Vec<u8> = request.body.iter().rev().copied().collect();
             clock.sleep(HOLD).await;
-            request.reply.send(&reply).await.expect("sends the reply");
+            request.reply.send(&reply).await?;
             Ok(Got::Request(subject, request.body))
         }
     }
@@ -705,6 +705,24 @@ fn stops_a_second_request_while_one_is_open() {
     assert_eq!(
         serve::Error::Pending.to_string(),
         "the program sent a request while another request waits for its reply"
+    );
+}
+
+/// A serve task that still holds its reply when the session closes ends after the
+/// home's accept loop, and its result still counts.
+#[test]
+fn keeps_the_result_of_a_reply_that_fails_once_the_session_closed() {
+    let home = session(99, true, |mut agent| async move {
+        agent.admit().await;
+        let _held = agent.request(2, b"ab").await;
+        agent.sleep(Span::from_nanos(HOLD.nanos() / 5)).await;
+    });
+    assert_eq!(
+        home.served,
+        [
+            Err(serve::Error::Stream(closed_with(0))),
+            Err(serve::Error::Stream(closed_with(0))),
+        ]
     );
 }
 
