@@ -777,6 +777,23 @@ mod tests {
         assert_eq!(out.returned, ms(2_000));
     }
 
+    /// Polls `run` until 5 s pass, checks that it still runs, and drops it. Gives
+    /// what `before` reads just before the drop.
+    async fn drop_at_5_s<T>(
+        run: impl Future,
+        clock: &Clock,
+        before: impl FnOnce() -> T,
+    ) -> T {
+        let mut run = pin!(run);
+        let mut later = pin!(clock.sleep(ms(5_000)));
+        poll_fn(|cx| {
+            assert!(run.as_mut().poll(cx).is_pending(), "it runs until dropped");
+            later.as_mut().poll(cx)
+        })
+        .await;
+        before()
+    }
+
     #[test]
     fn stops_the_tasks_of_a_run_when_its_future_drops() {
         let live = run_on(|node, tasks| async move {
@@ -787,16 +804,10 @@ mod tests {
             let token = Token::new();
             let name = "plant.spawner".parse().expect("a valid name");
             let config = config();
-            let mut run = Box::pin(supervisor.run("spawner", name, &config, &token));
             let clock = node.clock();
-            let mut later = pin!(clock.sleep(ms(5_000)));
-            poll_fn(|cx| {
-                assert!(run.as_mut().poll(cx).is_pending(), "it runs until dropped");
-                later.as_mut().poll(cx)
-            })
-            .await;
-            let before = *live.lock().expect("no panic");
-            drop(run);
+            let run = supervisor.run("spawner", name, &config, &token);
+            let before =
+                drop_at_5_s(run, &clock, || *live.lock().expect("no panic")).await;
             clock.sleep(ms(1)).await;
             (before, *live.lock().expect("no panic"))
         });
@@ -816,15 +827,8 @@ mod tests {
             let (token, config) = (Token::new(), config());
             let name: Name = "plant.spawner".parse().expect("a valid name");
             let clock = node.clock();
-            let mut run =
-                Box::pin(supervisor.run("spawner", name.clone(), &config, &token));
-            let mut later = pin!(clock.sleep(ms(5_000)));
-            poll_fn(|cx| {
-                assert!(run.as_mut().poll(cx).is_pending(), "it runs until dropped");
-                later.as_mut().poll(cx)
-            })
-            .await;
-            drop(run);
+            let run = supervisor.run("spawner", name.clone(), &config, &token);
+            drop_at_5_s(run, &clock, || ()).await;
             let again = Token::new();
             let (canceller, sleeper) = (again.clone(), clock.clone());
             tasks.spawn(async move {
@@ -837,6 +841,10 @@ mod tests {
                 .expect("ok after the cancel");
             seen.lock().expect("no panic").clone()
         });
-        assert_eq!(seen, [0, 0, 1], "the dropped run's task still runs");
+        assert_eq!(
+            seen,
+            [0, 0, 1],
+            "the new call waited for the task of the dropped call"
+        );
     }
 }
