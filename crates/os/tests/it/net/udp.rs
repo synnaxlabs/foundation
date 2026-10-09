@@ -838,6 +838,40 @@ fn an_ipv6_source_on_an_ipv4_socket_gives_einval() {
     });
 }
 
+/// macOS ignores the `IPV6_PKTINFO` of a send to an IPv4 destination, and sends from
+/// an address of its choice.
+#[test]
+fn an_ipv6_source_to_an_ipv4_destination_gives_einval() {
+    on_thread("udp-source-family", || async {
+        let net = net();
+        let (_, mut receiver) = loopback(&net);
+        let (mut sender, _) =
+            bind(&net, SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0));
+        let v4 = receiver.local();
+        let mapped = SocketAddr::new(LOCALHOST.to_ipv6_mapped().into(), v4.port());
+        let sources = [
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]),
+        ];
+        for (source, destination) in sources
+            .into_iter()
+            .flat_map(|source| [(source, v4), (source, mapped)])
+        {
+            let from = Transmit {
+                source: Some(source.into()),
+                ..transmit(destination, b"from")
+            };
+            let case = format!("source {source}, to {destination}");
+            let refused = send(&mut sender, &from).await;
+            assert_eq!(refused, Err(Error::Io { code: 22 }), "{case}");
+            let after = transmit(destination, b"after");
+            assert_eq!(send(&mut sender, &after).await, Ok(()), "{case}");
+            let arrived = receive(&mut receiver, 1).await;
+            assert_eq!(arrived[0].contents, b"after", "{case}");
+        }
+    });
+}
+
 #[test]
 #[should_panic(expected = "A Tokio 1.x context was found, but IO is disabled")]
 fn a_first_receive_in_a_runtime_with_no_io_driver_panics() {
