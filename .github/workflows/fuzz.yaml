@@ -1,7 +1,7 @@
 name: Fuzz
 
 # Each PR runs each target for 60 seconds (`ci.yaml`). This run is longer, on the ARM
-# runner, which is idle at night.
+# runner.
 on:
   schedule:
     - cron: '0 3 * * *'
