@@ -2882,6 +2882,17 @@ mod port {
         use super::*;
         use crate::identity::{FILE, LEN};
 
+        /// Through the public fuzz entry, which panics when the decode is wrong.
+        #[cfg(feature = "sim")]
+        #[test]
+        fn a_key_decodes_and_a_key_with_another_tag_does_not() {
+            let mut body = [7; 64];
+            body[..16].copy_from_slice(b"foundation/key/1");
+            crate::fuzz::identity(&body);
+            body[0] ^= 1;
+            crate::fuzz::identity(&body);
+        }
+
         /// The bytes of `node.key` on `host`.
         fn read(sim: &mut sim::Sim, host: &sim::node::Node) -> Vec<u8> {
             sim.run_on(host, |host, _| async move {
