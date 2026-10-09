@@ -251,13 +251,12 @@ pub struct Server {
     chunk_bytes_max: usize,
 }
 
-/// A head from the requester, decoded.
+/// A message from the requester, decoded.
 #[derive(Clone, Debug)]
 pub enum FromRequester<'m> {
     /// The digests the requester wants.
     Get(get::Digests<'m>),
-    /// A chunk to store. Its body follows, unless `len` is 0: count it with
-    /// [`Put::body`].
+    /// A chunk to store. Its body follows, unless `len` is 0.
     Put(Put),
 }
 
