@@ -52,5 +52,6 @@
   `laptop.architect-2` on #1732 (2026-10-09T21:35:43Z,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601;
   2026-10-09T22:37:18Z, the text of `Refused`, which names the part of the shard and
-  supersedes the `Refused` text of 6089651601,
+  supersedes item 2, the text of `Refused`, of
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601,
   https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6090424579).

@@ -26,8 +26,15 @@
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545;
   2026-10-09T19:31:23Z, `start` as a `Command` variant, which amends the first, and the
   line, https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6087849613;
-  2026-10-09T21:35:43Z, `node.budget`, `node.disk`, and `node.memory`,
-  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601).
+  2026-10-09T20:14:29Z, `node.disk`, `node.memory`, and a code of its own for the file
+  `budget`,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6088506863;
+  2026-10-09T21:08:23Z, `node.budget`,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089288397;
+  2026-10-09T21:35:43Z, `Refused` as `node.memory`,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601;
+  2026-10-09T22:29:12Z, the three codes in this list,
+  https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6090312136).
   `main` writes the line on a thread of its own, so a standard output that nobody
   reads blocks neither shard 0 nor the stop. `main` drops the handles of that thread
   and of the thread that waits for the signal, since each waits only on the process
