@@ -345,7 +345,8 @@ impl Lab {
     ///
     /// # Panics
     ///
-    /// After a node runs, when `home` is in no mesh, or when `channel` exists.
+    /// After a node runs, when `home` is in no mesh, or when a mesh of the lab defines
+    /// `channel` or `{channel}_time`.
     pub(crate) fn channel(&mut self, home: Node, channel: &str) {
         use spec::channel::{Channel, Data, Kind};
         use spec::data_type::DataType;
@@ -360,9 +361,9 @@ impl Lab {
         });
         for name in [channel.to_string(), format!("{channel}_time")] {
             let key = name.parse().expect("lab failure: a channel name");
+            let mut regions = self.members.iter().filter_map(|m| m.region.as_ref());
             assert!(
-                !self.channels.contains_key(&name)
-                    && !founding.definitions.contains_key(&key),
+                !regions.any(|r| r.definitions.contains_key(&key)),
                 "lab failure: {name} exists"
             );
         }
@@ -904,7 +905,7 @@ fn at(entries: &[types::frame::key_set::Entry], key: types::channel::Key) -> usi
 ///
 /// # Panics
 ///
-/// When the frame holds another channel, or the two series differ in length.
+/// When the frame holds another channel.
 fn decode(received: &hub::reader::Received<'_>, keys: Keys) -> Vec<Sample> {
     let entries = received.set.entries();
     let mut series = [Vec::new(), Vec::new()];
@@ -1408,4 +1409,26 @@ fn one_name_in_two_meshes_panics() {
     lab.mesh(&[b]);
     lab.channel(a, "x");
     lab.channel(b, "x");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: x_time exists")]
+fn an_index_name_in_another_mesh_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a]);
+    lab.mesh(&[b]);
+    lab.channel(a, "x");
+    lab.channel(b, "x_time");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: x_time exists")]
+fn a_channel_on_an_index_name_in_another_mesh_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a]);
+    lab.mesh(&[b]);
+    lab.channel(b, "x_time");
+    lab.channel(a, "x");
 }
