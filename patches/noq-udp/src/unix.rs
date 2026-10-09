@@ -594,10 +594,7 @@ pub(crate) fn recv_single(
     let n = loop {
         let n = unsafe { libc::recvmsg(io.as_raw_fd(), &mut hdr, 0) };
 
-        if hdr.msg_flags & libc::MSG_TRUNC != 0 {
-            continue;
-        }
-
+        // A datagram longer than its buffer arrives cut, with `n` the bytes that fit.
         if n >= 0 {
             break n;
         }

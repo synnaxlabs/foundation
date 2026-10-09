@@ -322,6 +322,30 @@ fn a_datagram_over_the_path_mtu_is_lost() {
 }
 
 #[test]
+fn a_datagram_past_the_end_of_its_buffer_arrives_cut() {
+    on_thread("udp-cut", || async {
+        let net = net();
+        let (mut sender, _) = loopback(&net);
+        let (_, mut receiver) = loopback(&net);
+        let contents: Vec<u8> = (0..100).collect();
+        let to = transmit(receiver.local(), &contents);
+        assert_eq!(send(&mut sender, &to).await, Ok(()));
+        tokio::time::sleep(SILENCE).await;
+        let mut buffer = [0; 10];
+        let mut buffers = [IoSliceMut::new(&mut buffer)];
+        let mut meta = [Meta::default()];
+        let batches = timeout(
+            Duration::from_secs(2),
+            poll_fn(|cx| receiver.poll_recv(cx, &mut buffers, &mut meta)),
+        )
+        .await;
+        assert_eq!(batches, Ok(Ok(1)));
+        assert_eq!(meta[0].len, 10);
+        assert_eq!(buffer, contents[..10]);
+    });
+}
+
+#[test]
 fn an_ecn_mark_arrives() {
     on_thread("udp-ecn", || async {
         let net = net();
