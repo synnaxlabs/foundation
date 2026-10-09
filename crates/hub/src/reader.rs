@@ -244,6 +244,36 @@ struct Local {
 }
 
 impl Local {
+    /// Opens a session on `channels` at this node, the home of their index.
+    fn open(
+        state: &Rc<RefCell<State>>,
+        channels: Channels,
+        mode: Mode,
+        named: Option<::home::reader::named::Key>,
+        hold: Span,
+    ) -> Result<Self, Error> {
+        let (session, credit) = match (mode, named) {
+            (Mode::Complete, named) => {
+                let charge = ::home::reader::complete::Charge::Whole;
+                let (session, credit) = match named {
+                    None => Session::complete(state, channels, WINDOW, charge),
+                    Some(named) => Session::named_complete(
+                        state, channels, named, hold, WINDOW, charge,
+                    )
+                    .map_err(|::home::reader::Unsynced| Error::Unsynced)?,
+                };
+                (session, Some((credit, 0)))
+            }
+            (Mode::Latest, None) => (Session::latest(state, channels), None),
+            (Mode::Latest, Some(named)) => {
+                let session = Session::named_latest(state, channels, named)
+                    .map_err(|::home::reader::Unsynced| Error::Unsynced)?;
+                (session, None)
+            }
+        };
+        Ok(Self { session, credit })
+    }
+
     /// Raises the grant by the charge of `frame`, which the reader gave back.
     fn give_back(&mut self, frame: &Frame) {
         if let Some((credit, taken_bytes)) = &mut self.credit {
@@ -313,27 +343,9 @@ impl Reader {
             slots,
             index: slot,
         };
-        let (session, credit) = match (mode, named) {
-            (Mode::Complete, named) => {
-                let charge = ::home::reader::complete::Charge::Whole;
-                let (session, credit) = match named {
-                    None => Session::complete(state, channels, WINDOW, charge),
-                    Some(named) => Session::named_complete(
-                        state, channels, named, hold, WINDOW, charge,
-                    )
-                    .map_err(|::home::reader::Unsynced| Error::Unsynced)?,
-                };
-                (session, Some((credit, 0)))
-            }
-            (Mode::Latest, None) => (Session::latest(state, channels), None),
-            (Mode::Latest, Some(named)) => {
-                let session = Session::named_latest(state, channels, named)
-                    .map_err(|::home::reader::Unsynced| Error::Unsynced)?;
-                (session, None)
-            }
-        };
+        let local = Local::open(state, channels, mode, named, hold)?;
         Ok(Self {
-            source: Source::Local(Local { session, credit }),
+            source: Source::Local(local),
             frame: None,
         })
     }
