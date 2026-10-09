@@ -13,7 +13,6 @@ use transport::{Class, Session, Transport};
 use types::node;
 
 use super::{Group, REMOVED, Spawner, header};
-use crate::bytes::block;
 use crate::error::Stopped;
 use crate::message::Message;
 
@@ -182,7 +181,7 @@ impl Senders {
             sender.send(header(&self.pool)?).await?;
             stream.insert(sender)
         };
-        let block = block(&self.pool, &Message::Raft(message).encode())?;
+        let block = self.pool.copy(&Message::Raft(message).encode())?;
         Ok(sender.send(block).await?)
     }
 

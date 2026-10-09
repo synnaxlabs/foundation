@@ -89,7 +89,7 @@ impl Peer {
     }
 
     pub(super) fn block(&self, bytes: &[u8]) -> block::Block {
-        crate::bytes::block(&self.pool, bytes).unwrap()
+        self.pool.copy(bytes).unwrap()
     }
 }
 

@@ -28,7 +28,6 @@ use types::time::{Span, Stamp};
 use wire::Protocol;
 
 use crate::applied::Applied;
-use crate::bytes::block;
 use crate::change::{Change, Join, Malformed};
 use crate::claim::{self, Known, Signer};
 use crate::error::{Error, Stopped};
@@ -56,7 +55,7 @@ const ELECTION_TICKS: u32 = 10;
 
 /// The header that goes first on each stream that this node opens.
 fn header(pool: &Pool) -> Result<Block, block::Error> {
-    block(pool, &wire::header::encode(Protocol::Mesh))
+    pool.copy(&wire::header::encode(Protocol::Mesh))
 }
 const HEARTBEAT_TICKS: u32 = 1;
 /// The most messages that wait for one member.

@@ -425,9 +425,7 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
         let session = transport.dial(public_key(1), &[at]).await.unwrap();
         let mut sender = session.open_sender(Class::Command).await.unwrap();
         for bytes in [&wire::header::encode(Protocol::Mesh)[..], &[0xff]] {
-            let mut block = pool.alloc(bytes.len()).unwrap();
-            block.copy_from_slice(bytes);
-            sender.send(block.freeze()).await.unwrap();
+            sender.send(pool.copy(bytes).unwrap()).await.unwrap();
         }
         node.clock().sleep(Span::SECOND).await;
         *result.lock().unwrap() = Some(sender.finish());

@@ -124,9 +124,7 @@ pub(crate) fn alloc(pool: &Pool, len: usize) -> Option<Unique> {
 
 /// A block from `pool` that holds `bytes`.
 pub(crate) fn block(pool: &Pool, bytes: &[u8]) -> Block {
-    let mut block = pool.alloc(bytes.len()).expect("room");
-    block.copy_from_slice(bytes);
-    block.freeze()
+    pool.copy(bytes).expect("room")
 }
 
 /// `n` times `span`.

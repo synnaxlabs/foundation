@@ -144,9 +144,8 @@ fn body(case: u64, stream: u64, index: u64, len: usize) -> Vec<u8> {
 
 async fn block(pool: &Pool, clock: &Clock, bytes: &[u8]) -> Block {
     loop {
-        if let Ok(mut unique) = pool.alloc(bytes.len()) {
-            unique.copy_from_slice(bytes);
-            return unique.freeze();
+        if let Ok(block) = pool.copy(bytes) {
+            return block;
         }
         clock.sleep(Span::MILLISECOND).await;
     }
