@@ -1327,6 +1327,47 @@ fn fails_a_footnote_label_on_a_line_inside_a_span() {
 }
 
 #[test]
+fn fails_raw_html_on_a_line_inside_a_span() {
+    let cases = [
+        ("a `x\n<source y` z", "<source y` z"),
+        ("[x](https://x.y \"t\n<source y\")", "<source y\")"),
+        ("a `x\n<div>` b", "<div>` b"),
+        ("a `x\n> <source y`", "> <source y`"),
+        (
+            "a `x\n<source [y](https://x.y)`",
+            "<source [y](https://x.y)`",
+        ),
+    ];
+    for (text, line) in cases {
+        let hidden = ROUND.replace("but comments", &format!("but {text}"));
+        assert_ne!(hidden, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&hidden)])),
+            vec![raw(line)],
+            "{text}"
+        );
+    }
+    let definition = ROUND.replace(
+        "## Review round 3\n\n",
+        "## Review round 3\n\n[x]: /u \"t\n<source y\"\n",
+    );
+    assert_ne!(definition, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&definition)])),
+        vec![raw("<source y\"")]
+    );
+    for text in ["`x\ny <source z`", "`x\n<https://x.y>`", "`x\n< y`"] {
+        let shown = ROUND.replace("but comments", &format!("but {text}"));
+        assert_ne!(shown, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&shown)])),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn fails_a_footnote_label_on_a_line_inside_a_link_definition_title() {
     let hidden = ROUND.replace(
         "## Review round 3\n\n",

@@ -462,7 +462,8 @@ impl<'a> Shown<'a> {
             let start = body[..range.start].rfind(['\n', '\r']).map_or(0, |i| i + 1);
             let line = &body[range.start..line_end(body, range.start)];
             let paragraph = open.last().copied().flatten().filter(|_| fresh);
-            if !code && html_line.is_none() && html(body, &event, start, range.start) {
+            let html = matches!(event, Event::Html(_) | Event::InlineHtml(_));
+            if !code && html_line.is_none() && html {
                 html_line = Some(start);
             }
             match event {
@@ -513,7 +514,8 @@ impl<'a> Shown<'a> {
                 }
             }
         }
-        shown.hiding = hiding(body, html_line, label(body, &notes, &codes));
+        let (label, tag) = starts(body, &notes, &codes);
+        shown.hiding = hiding(body, html_line.into_iter().chain(tag).min(), label);
         shown
     }
 
@@ -611,44 +613,53 @@ fn hiding(
         .map(|(at, what)| (body[at..line_end(body, at)].trim(), what))
 }
 
-/// Whether `event`, at `at` in `body` on the line that starts at `start`, holds raw
-/// HTML: an HTML block, inline HTML, or text whose source starts the line after the
-/// [`marks`] with `<` and a letter, `!`, `/`, or `?`.
-fn html(body: &str, event: &Event<'_>, start: usize, at: usize) -> bool {
-    let opens = |c: char| c.is_ascii_alphabetic() || "!/?".contains(c);
-    let tag = || {
-        body[at..]
-            .strip_prefix('<')
-            .is_some_and(|l| l.starts_with(opens))
-    };
-    match event {
-        Event::Html(_) | Event::InlineHtml(_) => true,
-        Event::Text(_) => tag() && marks(&body[start..at]),
-        _ => false,
-    }
-}
-
-/// The start of the first line of `body` whose source, after the indent and the marks
-/// of quotes, list items, and footnote definitions that `pulldown-cmark` reads (each
-/// starts at an offset in `notes`), starts with a footnote label in GitHub's form
-/// ([`note`]) at no offset in `notes` or `codes`. GitHub can read that label as a
-/// footnote, and hides a footnote with no reference. GitHub reads the blocks of a
-/// comment before its spans, so a line inside a code span, a link, or a link
-/// definition counts too.
-fn label(body: &str, notes: &[usize], codes: &[Range<usize>]) -> Option<usize> {
+/// The starts of the first line of `body` with a footnote label and of the first with
+/// raw HTML, each read from the source of the line after the indent and the marks of
+/// quotes, list items, and footnote definitions that `pulldown-cmark` reads (each
+/// starts at an offset in `notes`). A label is in GitHub's form ([`note`]) at no offset
+/// in `notes`: GitHub can read it as a footnote, and hides a footnote with no
+/// reference. Raw HTML is `<` and a letter, `!`, `/`, or `?` that is not an autolink.
+/// A line in a code block (`codes`) counts for neither. GitHub reads the blocks of a
+/// comment before its spans, so a line inside a code span, a link, or a link definition
+/// counts too.
+fn starts(
+    body: &str,
+    notes: &[usize],
+    codes: &[Range<usize>],
+) -> (Option<usize>, Option<usize>) {
+    let (mut label, mut html) = (None, None);
     let starts = body.match_indices(['\n', '\r']).map(|(i, _)| i + 1);
-    std::iter::once(0).chain(starts).find(|&start| {
+    for start in std::iter::once(0).chain(starts) {
         let line = &body[start..line_end(body, start)];
         let mut rest = unmarked(line);
-        while let Some(after) = note(rest) {
-            let at = start + line.len() - rest.len();
-            if !notes.contains(&at) {
-                return !codes.iter().any(|code| code.contains(&at));
-            }
+        let at = |rest: &str| start + line.len() - rest.len();
+        if codes.iter().any(|code| code.contains(&at(rest))) {
+            continue;
+        }
+        while let Some(after) = note(rest).filter(|_| notes.contains(&at(rest))) {
             rest = unmarked(after);
         }
-        false
-    })
+        if note(rest).is_some() {
+            label = label.or(Some(start));
+        } else if tag(rest) {
+            html = html.or(Some(start));
+        }
+    }
+    (label, html)
+}
+
+/// Whether `text` starts with `<` and a letter, `!`, `/`, or `?`, and not with an
+/// autolink.
+fn tag(text: &str) -> bool {
+    let opens = |c: char| c.is_ascii_alphabetic() || "!/?".contains(c);
+    let autolink = || {
+        Parser::new_ext(text, OPTIONS)
+            .into_offset_iter()
+            .any(|(event, range)| {
+                range.start == 0 && matches!(event, Event::Start(Tag::Link { .. }))
+            })
+    };
+    text.strip_prefix('<').is_some_and(|l| l.starts_with(opens)) && !autolink()
 }
 
 /// `line` after the indent and the marks of quotes and list items at its start.
@@ -668,18 +679,6 @@ fn unmarked(line: &str) -> &str {
             None => return rest,
         }
     }
-}
-
-/// Whether `prefix`, the source of a line before some text, holds only the indent and
-/// the marks of quotes, list items, and footnote labels, so that the text starts a line
-/// of a block. An escaped `<` has its backslash in `prefix`. A footnote label is as
-/// [`note`] reads it.
-fn marks(prefix: &str) -> bool {
-    let mut rest = unmarked(prefix);
-    while let Some(after) = note(rest) {
-        rest = unmarked(after);
-    }
-    rest.is_empty()
 }
 
 /// The text after the footnote label at the start of `text`, as GitHub reads a label:
