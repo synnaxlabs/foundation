@@ -2,6 +2,8 @@
 //! back only when their bytes hash to the digest. A chunk torn by a crash reads as
 //! absent.
 
+pub mod peer;
+
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::fmt;
