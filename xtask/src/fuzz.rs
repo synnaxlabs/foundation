@@ -27,7 +27,8 @@ const MAX_LEN: u64 = 16 * 1024;
 /// `oracles/fuzz/<target>`. It fails when `fuzz/Cargo.lock` is stale, when `fuzz/`
 /// does not build each crate that the root `Cargo.toml` patches from its copy, when the
 /// build fails, or when a target fails. cargo-fuzz keeps the input of a crash in
-/// `fuzz/artifacts/<target>/`.
+/// `fuzz/artifacts/<target>/`. It also fails, before any run, when `fuzz/` has no
+/// target, or when a target and the folders of `oracles/fuzz/` do not match.
 pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
     patched(root)?;
     let nightly = crate::nightly(root).map_err(|e| vec![e])?;
@@ -50,6 +51,10 @@ pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
     }
     let targets = String::from_utf8_lossy(&listed.stdout);
     let targets: Vec<&str> = targets.lines().collect();
+    let problems = unmatched(&targets, &folders(&root.join("oracles/fuzz"))?);
+    if !problems.is_empty() {
+        return Err(problems);
+    }
     let next = AtomicUsize::new(0);
     let worker = || {
         let mut problems = Vec::new();
@@ -100,16 +105,43 @@ fn run_one(
     let output = command(nightly, target, &corpus, &oracles, seconds, max_len(sizes))
         .output()
         .map_err(|e| format!("rustup: {e}"))?;
-    let report = report(target, &output);
+    let (report, result) = report(target, &output);
     eprint!("{report}");
-    if output.status.success() {
-        Ok(())
-    } else {
-        Err(format!(
-            "fuzz target `{target}` failed. cargo-fuzz keeps the input of a crash in \
-             fuzz/artifacts/{target}/."
-        ))
+    result
+}
+
+/// The name of each folder in `dir`.
+fn folders(dir: &Path) -> Result<Vec<String>, Vec<String>> {
+    let read = || -> std::io::Result<Vec<String>> {
+        let mut names = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+        }
+        Ok(names)
+    };
+    read().map_err(|e| vec![format!("{}: {e}", dir.display())])
+}
+
+/// A problem when there are no `targets`, and for each target with no folder of the
+/// same name in `folders` and each folder with no target.
+fn unmatched(targets: &[&str], folders: &[String]) -> Vec<String> {
+    if targets.is_empty() {
+        return vec!["`cargo fuzz list` names no target".to_string()];
     }
+    let inputless = targets
+        .iter()
+        .filter(|target| !folders.iter().any(|folder| folder == *target))
+        .map(|target| {
+            format!("fuzz target `{target}` has no inputs in oracles/fuzz/{target}/")
+        });
+    let targetless = folders
+        .iter()
+        .filter(|folder| !targets.contains(&folder.as_str()))
+        .map(|folder| format!("oracles/fuzz/{folder}/ has no fuzz target"));
+    inputless.chain(targetless).collect()
 }
 
 /// The command that runs `target` on the toolchain `nightly` for `seconds`, on the
@@ -143,19 +175,28 @@ fn max_len(sizes: impl IntoIterator<Item = u64>) -> u64 {
     sizes.into_iter().fold(MAX_LEN, u64::max)
 }
 
-/// What the run of `target` that gave `output` prints: the whole output of a failed
-/// run, and libFuzzer's last `Done` line for a run that passed.
-fn report(target: &str, output: &Output) -> String {
+/// What the run of `target` that gave `output` prints, and its problem. A run that
+/// passed prints libFuzzer's last `Done` line, and any other run its whole output. A
+/// run that passed with no `Done` line ran no input, which is a problem.
+fn report(target: &str, output: &Output) -> (String, Result<(), String>) {
+    let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
-    if output.status.success() {
-        let done = stderr.lines().rfind(|line| line.starts_with("Done "));
-        format!(
-            "fuzz target `{target}` passed: {}\n",
-            done.unwrap_or("no runs")
-        )
-    } else {
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        format!("fuzz target `{target}` failed:\n{stdout}{stderr}\n")
+    let done = stderr.lines().rfind(|line| line.starts_with("Done "));
+    match (output.status.success(), done) {
+        (true, Some(done)) => {
+            (format!("fuzz target `{target}` passed: {done}\n"), Ok(()))
+        }
+        (true, None) => (
+            format!("fuzz target `{target}` gave no `Done` line:\n{stdout}{stderr}\n"),
+            Err(format!("fuzz target `{target}` gave no `Done` line")),
+        ),
+        (false, _) => (
+            format!("fuzz target `{target}` failed:\n{stdout}{stderr}\n"),
+            Err(format!(
+                "fuzz target `{target}` failed. cargo-fuzz keeps the input of a crash \
+                 in fuzz/artifacts/{target}/."
+            )),
+        ),
     }
 }
 
@@ -401,6 +442,13 @@ mod tests {
     fn seconds_refuses_a_count_outside_1_to_65535() {
         assert_eq!(seconds("65535"), Ok(NonZeroU16::MAX));
         assert_eq!(
+            seconds("65536").err().as_deref(),
+            Some(
+                "`65536` is not a count of seconds from 1 to 65535: number too large \
+                 to fit in target type"
+            )
+        );
+        assert_eq!(
             seconds("0").err().as_deref(),
             Some(
                 "`0` is not a count of seconds from 1 to 65535: number would be zero \
@@ -437,7 +485,11 @@ mod tests {
                       Done 99 runs in 5 second(s)\nstat::x: 1\n";
         assert_eq!(
             report("spec_tree", &output(0, "", stderr)),
-            "fuzz target `spec_tree` passed: Done 99 runs in 5 second(s)\n"
+            (
+                "fuzz target `spec_tree` passed: Done 99 runs in 5 second(s)\n"
+                    .to_string(),
+                Ok(())
+            )
         );
     }
 
@@ -445,7 +497,74 @@ mod tests {
     fn reports_the_whole_output_of_a_run_that_failed() {
         assert_eq!(
             report("spec_tree", &output(1, "built\n", "panicked at x\n")),
-            "fuzz target `spec_tree` failed:\nbuilt\npanicked at x\n\n"
+            (
+                "fuzz target `spec_tree` failed:\nbuilt\npanicked at x\n\n".to_string(),
+                Err(
+                    "fuzz target `spec_tree` failed. cargo-fuzz keeps the input of a \
+                     crash in fuzz/artifacts/spec_tree/."
+                        .to_string()
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn refuses_a_run_that_passed_with_no_done_line() {
+        assert_eq!(
+            report("spec_tree", &output(0, "built\n", "INFO: Seed: 1\n")),
+            (
+                "fuzz target `spec_tree` gave no `Done` line:\nbuilt\nINFO: Seed: 1\n\n"
+                    .to_string(),
+                Err("fuzz target `spec_tree` gave no `Done` line".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn refuses_no_targets() {
+        assert_eq!(
+            unmatched(&[], &["spec_tree".to_string()]),
+            ["`cargo fuzz list` names no target"]
+        );
+    }
+
+    #[test]
+    fn refuses_a_target_with_no_inputs_and_inputs_with_no_target() {
+        let folders = ["spec_tree".to_string(), "gone".to_string()];
+        assert_eq!(
+            unmatched(&["spec_tree", "types_name"], &folders),
+            [
+                "fuzz target `types_name` has no inputs in oracles/fuzz/types_name/",
+                "oracles/fuzz/gone/ has no fuzz target",
+            ]
+        );
+    }
+
+    #[test]
+    fn each_fuzz_target_of_this_repository_has_oracle_inputs() {
+        let root = crate::fixture().join("../..");
+        let targets: Vec<String> = std::fs::read_dir(root.join("fuzz/fuzz_targets"))
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                path.file_stem().unwrap().to_string_lossy().into_owned()
+            })
+            .collect();
+        let targets: Vec<&str> = targets.iter().map(String::as_str).collect();
+        let folders = folders(&root.join("oracles/fuzz")).unwrap();
+        assert!(folders.contains(&"types_name".to_string()));
+        assert_eq!(unmatched(&targets, &folders), Vec::<String>::new());
+    }
+
+    #[test]
+    fn folders_names_a_missing_folder() {
+        let dir = crate::fixture().join("absent");
+        assert_eq!(
+            folders(&dir),
+            Err(vec![format!(
+                "{}: No such file or directory (os error 2)",
+                dir.display()
+            )])
         );
     }
 }
