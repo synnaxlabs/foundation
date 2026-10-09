@@ -327,13 +327,15 @@ impl Shard {
     /// that waits for room. Each named reader of the index stops holding its position.
     /// Its frames stay in the buffer, so a later [`carry`](Self::carry) of `slot`
     /// continues each path from its tail in the buffer: the last entry appended, on
-    /// disk or not.
+    /// disk or not. It does nothing when the shard does not carry `slot`.
     ///
     /// # Panics
     ///
-    /// If the shard does not carry `slot`, or a writer or a reader is open on it.
+    /// If a writer or a reader is open on it.
     pub fn shed(&mut self, slot: Slot) {
-        let place = self.place(slot);
+        let Some(&place) = self.places.get(&slot) else {
+            return;
+        };
         let mut claims = self.writers.values().flat_map(|session| &session.claims);
         assert!(
             claims.all(|claim| claim.place != place),
@@ -3929,8 +3931,18 @@ mod tests {
         }
 
         #[test]
-        fn panics_at_the_shed_of_an_index_it_does_not_carry() {
-            check_not_carried(135, |shard| shard.shed(Slot::new(3)));
+        fn does_nothing_at_the_shed_of_an_index_it_does_not_carry() {
+            run(135, |test| async move {
+                let mut shard = test.shard(AREA).await;
+                shard.shed(Slot::new(3));
+                shard.shed(Slot::new(0));
+                shard.shed(Slot::new(0));
+                let carried = latest(&mut shard, Slot::new(2));
+                close(&mut shard, carried);
+                shard.carry(Slot::new(0));
+                let carried = latest(&mut shard, Slot::new(0));
+                close(&mut shard, carried);
+            });
         }
 
         #[test]
