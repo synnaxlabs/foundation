@@ -2314,3 +2314,37 @@ fn a_write_open_waits_for_a_remove_through_a_handle_whose_path_names_another_fil
         assert_eq!(found, (Ok(()), false), "value {value}");
     }
 }
+
+/// Whether the block of a dropped write of a handle of `a` is still in use when a
+/// remove through the handle ends. A remove of `b` starts, and a rename of the handle
+/// to `b` ends before it, so the remove unlinks the file. `None` when the run takes
+/// another order.
+fn block_held_after_remove_of_renamed(value: u64) -> Option<bool> {
+    run(value, MIB, move |node, _| async move {
+        let (pool, files) = (pool(), node.files());
+        let big = pool.largest();
+        let mut file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        let mut remove = Box::pin(files.remove(Path::new("b")));
+        pend(remove.as_mut()).await;
+        file.rename(Path::new("b")).await.unwrap();
+        remove.await.unwrap();
+        let found = file.remove().await;
+        let held = pool.alloc(big).is_err();
+        (found == Err(Error::NotFound { path: "b".into() })).then_some(held)
+    })
+}
+
+#[test]
+fn a_remove_through_a_renamed_handle_ends_after_the_dropped_write_of_its_handle() {
+    let runs: Vec<_> = (0..1024).map(block_held_after_remove_of_renamed).collect();
+    assert!(runs.iter().flatten().count() > 32, "{runs:?}");
+    let held: Vec<_> = (runs.iter().enumerate())
+        .filter_map(|(value, run)| (*run == Some(true)).then_some(value))
+        .collect();
+    assert_eq!(held, Vec::<usize>::new());
+}
