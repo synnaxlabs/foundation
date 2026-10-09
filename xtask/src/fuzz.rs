@@ -233,8 +233,10 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
 /// that the `root` graph does not build, and for each package and copy that the `root`
 /// graph builds when an edge of the package resolves a requirement on crates.io that
 /// the copy meets to another package. Cargo applies a patch to each such requirement,
-/// so one that an edge to a copy can resolve is not a problem. It fails on an edge to a
-/// package with the name of a copy that no requirement resolves.
+/// so one that an edge to a copy can resolve is not a problem. It misses one beside a
+/// path requirement on the copy of the same name, kind, and target, as `cargo metadata`
+/// does not tell the two apart. It fails on an edge to a package with the name of a
+/// copy that no requirement resolves.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
     let root = Package::all(root, &copies)?;
