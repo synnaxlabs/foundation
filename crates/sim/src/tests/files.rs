@@ -1149,6 +1149,32 @@ fn a_write_open_waits_for_the_write_of_a_dropped_handle_of_a_removed_file() {
 }
 
 /// What a write open of `b` gives after a drop of a write handle that a rename moved
+/// What a write open of `a` gives after the drop of a handle with two writes in
+/// flight.
+fn open_after_two_dropped_writes(value: u64) -> Option<Error> {
+    run(value, MIB, |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let file = create(&node, "a", 1_024).await;
+        let (first, second) = ([block(&pool, &[1; 512])], [block(&pool, &[2; 512])]);
+        let mut writes = (
+            Box::pin(file.write_at(0, &first)),
+            Box::pin(file.write_at(512, &second)),
+        );
+        pend(writes.0.as_mut()).await;
+        pend(writes.1.as_mut()).await;
+        drop(writes);
+        drop(file);
+        files.open(Path::new("a"), Mode::Write).await.err()
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_last_dropped_write_of_a_handle() {
+    for value in 0..64 {
+        assert_eq!(open_after_two_dropped_writes(value), None, "value {value}");
+    }
+}
+
 /// from `a` to `b`, with a write dropped in flight before the rename.
 fn open_after_rename_with_dropped_write(value: u64) -> Option<Error> {
     run(value, MIB, |node, _| async move {
