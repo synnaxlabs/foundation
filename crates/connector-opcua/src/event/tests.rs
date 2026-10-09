@@ -777,7 +777,7 @@ fn the_drop_runs_64_passes_of_delayed_callbacks() {
     assert_eq!(drop_queuing(63), (0..=63).rev().collect::<Vec<_>>());
 }
 
-/// Runs a 65th pass of a drop, when `CHILD` is set.
+/// Runs a 65th pass of a drop, when `child::running()`.
 #[test]
 fn drop_65_passes() {
     if child::running() {
@@ -881,8 +881,8 @@ fn ms(n: i64) -> Span {
     Span::from_nanos(n * Span::MILLISECOND.nanos())
 }
 
-/// Connects a client to `url`, which is not valid, when `CHILD` is set. The copy then
-/// logs a warning and an info message.
+/// Connects a client to `url`, which is not valid, when `child::running()`. The copy
+/// then logs a warning and an info message.
 fn connect(url: &CStr) {
     if !child::running() {
         return;
@@ -914,7 +914,7 @@ fn connect_to_a_long_url() {
     connect(&long());
 }
 
-/// Sends a request on a client with no channel, when `CHILD` is set. The copy then
+/// Sends a request on a client with no channel, when `child::running()`. The copy then
 /// logs an error.
 #[test]
 fn send_with_no_channel() {
