@@ -4789,20 +4789,21 @@ mod tests {
     /// and gives the run.
     fn write_of_another_key_set(seed: u64, label: Label) -> Result<(), sim::Error> {
         let (mut sim, _handle) = start(seed, move |test| async move {
-            let mut interner = create_interner(&[0, 2], &[]);
             let group = Group {
                 index: key(Slot::new(2)),
                 data: &[],
             };
-            let set = interner.intern(&[group]);
             let data = [(key(Slot::new(1)), Type::Scalar(Scalar::I64))];
-            let other = interner.intern(&[
+            let groups = [
                 Group {
                     index: key(Slot::new(0)),
                     data: &data,
                 },
                 group,
-            ]);
+            ];
+            let mut interner = create_interner(&[0, 2], &groups);
+            let set = interner.intern(&[group]);
+            let other = interner.intern(&groups);
             let mut shard = test.shard(AREA).await;
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let write = frame(&test.pool, &other, &[(2, &[10])]);

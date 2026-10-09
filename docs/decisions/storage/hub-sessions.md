@@ -200,12 +200,16 @@
   of the new definitions (`Shard::shed`, HOME SURFACE), and carries it again when it
   returns. A key holds one slot as an index (`channel::Slots`), which never changes, as
   the buffer keys its tails by slot (X42), and one slot as a data channel for each
-  sample type. So a reader takes no series of its key of another type, and a rename or
-  a move of index keeps the history of the channel (A4) (`laptop.architect`,
-  2026-10-09T02:59:13Z:
+  sample type. So a reader takes no series of its key of another type, and a rename
+  keeps the history of the channel (A4) (`laptop.architect`, 2026-10-09T02:59:13Z:
   https://github.com/synnaxlabs/foundation/issues/274#issuecomment-6073342524).
   Supersedes the retire at each removal in item 1 of
-  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072361464. An
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072361464. A move
+  of index keeps the data slot, but a reader reads only the frames of its own index, so
+  no reader of the new index reads a series written on the old one. The move ends each
+  session on the channel, so the cut is never silent (`laptop.architect`,
+  2026-10-09T20:03:23Z:
+  https://github.com/synnaxlabs/foundation/pull/2175#issuecomment-6088342132). An
   index continues its seq after its key was a data channel, also after a restart
   (`laptop.architect`, 2026-10-09T01:25:59Z:
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072361464). So a slot

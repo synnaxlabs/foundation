@@ -418,8 +418,9 @@ fn resolve(
 ) -> Result<(Vec<(channel::Key, Type)>, channel::Key), Error> {
     let mut matched: Vec<(&Name, &Channel)> = state
         .channels
-        .iter()
-        .filter(|&(name, _)| select.matches(name).is_some())
+        .keys()
+        .filter(|name| select.matches(name).is_some())
+        .filter_map(|name| state.channel(name).map(|channel| (name, channel)))
         .collect();
     matched.sort_unstable_by_key(|&(name, _)| name);
     let &(first, channel) = matched.first().ok_or(Error::Empty)?;
