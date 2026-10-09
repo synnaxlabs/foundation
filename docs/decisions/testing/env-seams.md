@@ -135,6 +135,10 @@
   the `noq-udp` patch sends an IPv4 source as `IP_PKTINFO`, and `os` has no check of
   its own for an IPv4 source. Decided by `laptop.architect-2` (2026-10-08 22:51 UTC,
   #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958).
+  Trigger: a PR that enables `fast-apple-datapath` first patches `prepare_msg_x` as
+  `prepare_msg` is, and links a macOS run of the source tests with the feature on
+  (`laptop.architect-2`, 2026-10-09, #2097,
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074544404).
   `os::net()` is behind the `os` cargo feature `net`, off by default, because Tokio has
   no `net` under `--cfg loom`. Decided by `laptop.architect-2` (2026-10-08 23:42 UTC,
   #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415).
