@@ -1,0 +1,14 @@
+- **NODE FUZZ (#1994, 2026-10-09)** The fuzz target `node_identity` checks the decode
+  of `node.key`, which T1 asks for, since the file is outside input. It calls
+  `node::fuzz::identity`, a function in a `#[doc(hidden)]` public module behind the
+  feature `sim`, as `bench` is, and `fuzz/Cargo.toml` turns `sim` on. The target takes
+  68 bytes as they are, or 64 bytes with their CRC32C appended, since a random input
+  almost never has the right CRC32C. The oracle is `identity::check`, which the
+  property tests share: `decode` gives an identity exactly for the bytes that `encode`
+  writes, and that identity encodes to the same bytes. Lost: property tests only, with
+  a sentence in `docs/security.md` that the decode needs no target. It breaks T1, and
+  `foundation/key/2` (NODE PORT) adds a second form. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/1994#issuecomment-6071757310,
+  2026-10-09 00:28 UTC); the surface, in
+  https://github.com/synnaxlabs/foundation/pull/2046#issuecomment-6071891219
+  (2026-10-09 00:41 UTC).
