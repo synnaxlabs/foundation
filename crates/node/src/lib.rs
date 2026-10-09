@@ -328,7 +328,7 @@ impl Node {
 
     /// Calls `task` with the operations on the node's mesh on shard 0, in the order
     /// and with the guarantees of [`Node::spawn`]. Each new channel that an apply
-    /// makes gets a UUIDv7 key at the midpoint of mesh time.
+    /// makes gets a UUIDv7 key at mesh time.
     ///
     /// # Panics
     ///
@@ -815,19 +815,21 @@ impl Serve {
     }
 }
 
-/// A new channel key: a UUIDv7 at the midpoint of mesh time read through `time`,
-/// with random bits from `entropy`.
+/// A new channel key: a UUIDv7 at mesh time read through `time`, with random bits
+/// from `entropy`.
 fn channel_key(
     time: &clock::Reader,
     entropy: &env::entropy::Entropy,
 ) -> types::channel::Key {
     // The time only orders keys, so a key before mesh time or 1970 has the time 0.
-    // The midpoint, not an edge: only it never goes back, while mesh time is before
-    // 2162.
-    let at = time.now().mesh.map_or(Stamp::EPOCH, |mesh| {
-        Stamp::from_nanos(mesh.earliest.nanos().midpoint(mesh.latest.nanos()))
-            .max(Stamp::EPOCH)
-    });
+    // Not an edge or the midpoint of the interval: each moves back when an edge stops
+    // at the end of the stamp range or the error shrinks.
+    let at = match time.status() {
+        clock::Status::Synced(mesh) | clock::Status::Holdover(mesh, _) => {
+            mesh.time().max(Stamp::EPOCH)
+        }
+        clock::Status::Unsynced(_) => Stamp::EPOCH,
+    };
     let mut random = [0; 16];
     entropy.fill(&mut random);
     types::channel::Key::v7(at, u128::from_le_bytes(random))

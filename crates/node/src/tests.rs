@@ -4309,6 +4309,48 @@ mod port {
             assert!(first <= second, "{second} ms is before {first} ms");
         }
 
+        /// A key made after the wall steps back from past 2162 is no earlier than a key
+        /// made before the step, though the latest edge of mesh time stops at the end
+        /// of the stamp range.
+        #[test]
+        fn a_channel_key_after_the_wall_steps_back_from_2171_is_no_earlier() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let node = start(&host, region(&[member(OWN, &KEY, &host)]));
+            let made = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&made);
+            let wall = host.clone();
+            let jump = Span::from_nanos(145 * 365 * Span::DAY.nanos());
+            node.operate(move |ops| async move {
+                wall.step_wall(jump);
+                wall.clock().sleep(TEN).await;
+                let first = apply_index(&ops, "a").await;
+                wall.step_wall(Span::from_nanos(-jump.nanos()));
+                wall.clock()
+                    .sleep(Span::from_nanos(600 * Span::SECOND.nanos()))
+                    .await;
+                let second = apply_index(&ops, "b").await;
+                out.lock().unwrap().extend([first, second]);
+            });
+            let eleven_minutes = Span::from_nanos(660 * Span::SECOND.nanos());
+            assert_eq!(sim.run_for(eleven_minutes), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let millis: Vec<i64> = made
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|key| i64::try_from(key.as_u128() >> 80).unwrap())
+                .collect();
+            let [first, second] = millis[..] else {
+                panic!("two keys, not {millis:?}");
+            };
+            let start = (sim::node::Config::default().wall + jump).nanos() / 1_000_000;
+            assert!((start..start + 20_000).contains(&first), "{first} ms");
+            assert!(first <= second, "{second} ms is before {first} ms");
+        }
+
         /// A channel key made before the clock has mesh time has the time 0. It calls
         /// `channel_key` directly: through `operate` the clock always has mesh time,
         /// since shard 0 runs it before the mesh opens and the source measures at once.
