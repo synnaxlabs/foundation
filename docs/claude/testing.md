@@ -164,7 +164,8 @@ again once to prove that the failure replays (r16 59).
   test on another OS only when that OS does not have it, when no test can fix its value
   there (a count that a kernel buffer sets), or when its test needs an item that exists
   on one OS to cause the case, such as a seccomp filter. A test whose code calls such an
-  item is `#[cfg(target_os = ...)]`.
+  item does not compile on another OS, so it is `#[cfg(target_os = ...)]`, not the
+  `cfg_attr` form above.
 - **One `check` helper per feature under test.** Inputs and expected output are data,
   so a signature change edits one helper (r16 50).
 - **A fixture helper is `create_*`.** A helper that builds the state a test runs
