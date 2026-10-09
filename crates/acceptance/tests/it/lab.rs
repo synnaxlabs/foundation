@@ -355,13 +355,16 @@ impl Lab {
             self.members.iter().all(|member| member.node.is_none()),
             "lab failure: `channel` {channel} after a node runs"
         );
-        assert!(
-            !self.channels.contains_key(channel),
-            "lab failure: {channel} exists"
-        );
         let founding = self.members[home.0].region.clone().unwrap_or_else(|| {
             panic!("lab failure: the home of {channel} is in no mesh")
         });
+        for name in [channel.to_string(), format!("{channel}_time")] {
+            let key = name.parse().expect("lab failure: a channel name");
+            assert!(
+                !founding.definitions.contains_key(&key),
+                "lab failure: {name} exists"
+            );
+        }
         let next = u128::try_from(2 * self.channels.len() + 1).unwrap();
         let (index, data) = (
             types::channel::Key::from_u128(next),
@@ -1330,4 +1333,21 @@ fn a_send_at_a_node_that_is_not_the_home_panics() {
 fn samples_with_no_send_panic() {
     let (mut lab, a, _) = pair();
     lab.samples(a, "admin", "a.value");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: a.value_time exists")]
+fn a_channel_named_as_an_index_panics() {
+    let (mut lab, a, _) = pair();
+    lab.channel(a, "a.value_time");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: b_time exists")]
+fn an_index_named_as_a_channel_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a, b]);
+    lab.channel(a, "b_time");
+    lab.channel(a, "b");
 }
