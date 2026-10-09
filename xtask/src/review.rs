@@ -504,14 +504,14 @@ struct Shown<'a> {
     /// Each line of the comment that can hide text on GitHub or that the check cannot
     /// read, with its cause, in order.
     hiding: Vec<(&'a str, Cause)>,
-    /// The round number of the first line in a top-level HTML block that, read alone,
-    /// is a heading with one ([`number`]). GitHub reads some HTML blocks as text, and
-    /// then shows the line as a heading.
+    /// When `number` is `None`, the round number of the comment read with each
+    /// top-level HTML block as text ([`unblocked`]). GitHub reads some HTML blocks as
+    /// text, and then can show a line as a heading.
     html_number: Option<String>,
 }
 
 impl<'a> Shown<'a> {
-    /// Reads `body` ([`normalized`]) from its round heading ([`Shown::number`]).
+    /// Reads `body` ([`normalized`]).
     fn read(body: &'a str) -> Self {
         let mut shown = Self::default();
         let starts: Vec<usize> = std::iter::once(0)
@@ -534,6 +534,7 @@ impl<'a> Shown<'a> {
         }
         footnotes(root);
         let mut hiding = Vec::new();
+        let mut blocks = Vec::new();
         for node in root.descendants() {
             let data = node.data.borrow();
             let start = line_start(data.sourcepos.start.line);
@@ -560,20 +561,18 @@ impl<'a> Shown<'a> {
                     );
                     shown.text.push(texts(node));
                 }
+                NodeValue::HtmlBlock(_) if top => {
+                    hiding.push((start, Cause::Raw));
+                    blocks.push(source(data.sourcepos));
+                }
                 NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) => {
                     hiding.push((start, Cause::Raw));
-                    let block = top.then(|| &body[source(data.sourcepos)]);
-                    let alone = |line: &str| {
-                        let arena = Arena::new();
-                        parse_document(&arena, line, &options())
-                            .first_child()
-                            .and_then(number)
-                    };
-                    let number = || block?.split('\n').find_map(alone);
-                    shown.html_number = shown.html_number.take().or_else(number);
                 }
                 _ => {}
             }
+        }
+        if shown.number.is_none() && !blocks.is_empty() {
+            shown.html_number = unblocked(body, &blocks);
         }
         hiding.extend(tagged(body, &starts, &codes).map(|at| (at, Cause::Raw)));
         hiding.sort_by_key(|(at, _)| *at);
@@ -753,6 +752,29 @@ fn normalized(text: &str) -> String {
         normalized.push('\n');
     }
     normalized
+}
+
+/// The round number of the first top-level heading that has one ([`number`]) in `body`
+/// read with each line of the HTML `blocks` that starts with `<` after at most three
+/// spaces read as text.
+fn unblocked(body: &str, blocks: &[Range<usize>]) -> Option<String> {
+    let mut text = body.to_owned();
+    let starts = blocks.iter().flat_map(|b| {
+        let rest = body[b.clone()]
+            .match_indices('\n')
+            .map(|(i, _)| b.start + i + 1);
+        std::iter::once(b.start).chain(rest)
+    });
+    for line in starts.collect::<Vec<_>>().into_iter().rev() {
+        let indent = body[line..].len() - body[line..].trim_start_matches(' ').len();
+        if indent < 4 && body[line + indent..].starts_with('<') {
+            text.insert(line + indent, '\\');
+        }
+    }
+    let arena = Arena::new();
+    parse_document(&arena, &text, &options())
+        .children()
+        .find_map(number)
 }
 
 /// The round number of `heading`: the text after `Review round` when it is a heading

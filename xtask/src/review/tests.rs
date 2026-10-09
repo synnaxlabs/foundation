@@ -1443,8 +1443,13 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
         "<search\n## Review *round* 3",
         "<search\n## Review&#32;round 3",
         "<search\n## Review  round 3",
+        "<search\n## Review [round][r] 3\n[r]: /x",
+        "<search\n***\nReview round 3\n---",
+        "<search\n## x\nReview round 3\n---",
+        "<search\n<search\n## Review *round* 3",
+        "<search\n## Review [round][d] 3",
     ] {
-        let headless = ROUND.replace("## Review round 3", heading);
+        let headless = ROUND.replace("## Review round 3", heading) + "\n\n[d]: /x";
         assert_eq!(
             check(&record(vec![bot(&headless)])),
             vec![raw("<search")],
