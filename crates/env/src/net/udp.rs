@@ -91,8 +91,11 @@ impl Sender {
     }
 
     /// Sends every datagram of `transmit`. It is pending while the OS send buffer is
-    /// full. Some datagrams may have gone out before a `Pending` or an error, and a
-    /// retry sends them again.
+    /// full. After `Pending`, call it again with the same transmit: it sends only the
+    /// datagrams that did not go out, except for a transmit in flight when GSO turns
+    /// off, whose retry can send again datagrams that went out. A different transmit in
+    /// its place can lose its first datagrams. Some datagrams may have gone out before
+    /// an error.
     ///
     /// # Errors
     ///
