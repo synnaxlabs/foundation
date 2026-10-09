@@ -96,6 +96,7 @@ impl Shard {
     /// A config for a program on this shard.
     pub(crate) fn client(&self) -> client::Config {
         client::Config {
+            net: self.net.clone(),
             clock: self.clock.clone(),
             entropy: self.entropy.clone(),
             tasks: self.tasks.clone(),

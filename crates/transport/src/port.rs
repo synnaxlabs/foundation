@@ -8,7 +8,7 @@ use env::net::udp;
 use crate::Address;
 
 /// The size of the OS send and receive buffers of the UDP socket.
-const BUFFER_BYTES: usize = 1 << 21;
+pub(crate) const BUFFER_BYTES: usize = 1 << 21;
 
 /// The node's sockets: one UDP socket that every shard sends on. `node` binds it
 /// once and splits it into one part for each shard.
