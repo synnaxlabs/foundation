@@ -85,7 +85,9 @@
   2026-10-09T04:00:55Z,
   https://github.com/synnaxlabs/foundation/pull/2093#issuecomment-6073992277;
   supersedes the code 19 text of
-  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084), and 2
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084;
+  trigger: the block refusal of a reader (#2003) widens it to the text of
+  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074), and 2
   `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
   or breaks a rule above), which every protocol may use. A reset drops the frames in
   flight, which is correct for `FAILED`, since the session cannot go on (lost: a
