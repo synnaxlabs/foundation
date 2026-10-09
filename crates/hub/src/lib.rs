@@ -380,7 +380,9 @@ impl State {
         let removed: hash::Set<Key> = self
             .channels
             .iter()
-            .filter(|&(name, key)| channels.get(name) != Some(&&self.known(*key).0))
+            .filter(|&(name, key)| {
+                channels.get(name) != Some(&&known(&self.defined, *key).0)
+            })
             .map(|(_, &key)| key)
             .collect();
         let index = |channel: &spec::channel::Channel| {
@@ -458,20 +460,10 @@ impl State {
         self.defined.insert(channel.key, Channel(channel.clone()));
     }
 
-    /// The defined channel `key`.
-    ///
-    /// # Panics
-    ///
-    /// When `key` is not defined: each caller holds a defined key.
-    fn known(&self, key: Key) -> &Channel {
-        let channel = self.defined.get(&key);
-        channel.unwrap_or_else(|| panic!("invariant: channel {key} is defined"))
-    }
-
     /// The defined channel named `name`, if any.
     fn channel(&self, name: &Name) -> Option<&Channel> {
         let key = self.channels.get(name)?;
-        Some(self.known(*key))
+        Some(known(&self.defined, *key))
     }
 
     /// A block of `len` bytes from the home's pool.
@@ -517,10 +509,7 @@ impl State {
                 if key == index {
                     return slot;
                 }
-                let defined = self.defined.get(&key);
-                let channel =
-                    defined.expect("invariant: each key of a session is defined");
-                assigned.data(key, channel.sample())
+                assigned.data(key, known(&self.defined, key).sample())
             })
             .collect()
     }
@@ -590,4 +579,14 @@ async fn homes(
             return Ok(());
         }
     }
+}
+
+/// The channel `key` of `defined`.
+///
+/// # Panics
+///
+/// When `key` is not defined: each caller holds a defined key.
+fn known(defined: &hash::Map<Key, Channel>, key: Key) -> &Channel {
+    let channel = defined.get(&key);
+    channel.unwrap_or_else(|| panic!("invariant: channel {key} is defined"))
 }
