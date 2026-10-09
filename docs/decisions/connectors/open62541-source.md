@@ -171,17 +171,18 @@
   `sanitize="address"`, it adds `-fsanitize=address,undefined -fno-sanitize=function
   -fno-sanitize-recover=all` and sets `cfg(asan)`. With `cfg(fuzzing)`, it adds
   `-fsanitize=fuzzer-no-link`. With either, a compiler that is not clang gives way to
-  `clang`, since rustc links the LLVM runtimes. With a sanitizer other than `address`
-  and `leak`, `build.rs` fails: the C has no MSan or TSan instrumentation, so MSan
-  reports false errors and TSan misses the C. Lost: a Rust MSan or TSan run of this
-  crate. The `function` check is off because the copy calls functions through a generic
-  type by design (`ZIP_FUNCTIONS`, the `UA_Callback` casts). Under `cfg(asan)`, the test
-  of the archive also accepts the names of the sanitizer runtimes (`__asan_`,
-  `__ubsan_`, `__start_asan_globals`, `__stop_asan_globals`). Lost: `CC` and `CFLAGS`
-  set by each job, which gives two places that pick the flags, and C with no coverage
-  under a plain `cargo fuzz`; and an ignore list for the copy in place of
-  `-fno-sanitize=function`, because the one indirect call of `shim.c` that the check
-  reads runs the cast callbacks of the copy.
+  `clang`, since rustc links the LLVM runtimes. The `function` check is off because the
+  copy calls functions through a generic type by design (`ZIP_FUNCTIONS`, the
+  `UA_Callback` casts). With a sanitizer other than `address` and `leak`, `build.rs`
+  fails: the C has no MSan or TSan instrumentation, so MSan reports false errors and
+  TSan misses the C. Lost: a Rust MSan or TSan run of this crate (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/2165#issuecomment-6088153688, 2026-10-09
+  19:51 UTC). Under `cfg(asan)`, the test of the archive also accepts the names of the
+  sanitizer runtimes (`__asan_`, `__ubsan_`, `__start_asan_globals`,
+  `__stop_asan_globals`). Lost: `CC` and `CFLAGS` set by each job, which gives two
+  places that pick the flags, and C with no coverage under a plain `cargo fuzz`; and an
+  ignore list for the copy in place of `-fno-sanitize=function`, because the one
+  indirect call of `shim.c` that the check reads runs the cast callbacks of the copy.
   The flags follow `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018,
   2026-10-08 02:24 UTC, and the `function` check, 2026-10-09 17:35 UTC:
