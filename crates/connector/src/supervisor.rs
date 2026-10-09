@@ -1452,7 +1452,10 @@ mod tests {
                         Err(error) => break error,
                     }
                 };
-                assert!(matches!(error, frame::Error::Pool(_)), "{error}");
+                assert!(
+                    matches!(error, frame::Error::Pool(block::Error::Exhausted { .. })),
+                    "{error}"
+                );
             };
             take();
             ctx.count("samples").set(7);
