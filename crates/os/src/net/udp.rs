@@ -199,6 +199,21 @@ impl Writer {
         AsyncFd::with_interest(fd.as_raw_fd(), Interest::WRITABLE)
     }
 
+    /// Sends each datagram of `transmit` from `bound` with `send` on the descriptor,
+    /// as [`send_all`] does, and starts a retry after `Pending` at the first datagram
+    /// that did not go out.
+    fn poll_transmit(
+        &mut self,
+        cx: &mut Context<'_>,
+        bound: &Bound,
+        transmit: &Transmit<'_>,
+        mut send: impl FnMut(&UdpSocket, &noq_udp::Transmit<'_>) -> io::Result<()>,
+    ) -> Poll<Result<(), Error>> {
+        self.poll_send(cx, |fd, next| {
+            send_all(bound, transmit, next, |datagram| send(fd, datagram))
+        })
+    }
+
     /// Runs `send` on the descriptor and the index of its next datagram until it is
     /// ready, and waits for writable while it is `Pending`. The index goes to 0 at
     /// each `Ready`.
@@ -261,10 +276,8 @@ impl sender::Driver for Sender {
                 none.insert(Writer { full, next: 0, fd })
             }
         };
-        writer.poll_send(cx, |fd, next| {
-            send_all(bound, transmit, next, |datagram| {
-                bound.state.try_send(fd.into(), datagram)
-            })
+        writer.poll_transmit(cx, bound, transmit, |fd, datagram| {
+            bound.state.try_send(fd.into(), datagram)
         })
     }
 }
@@ -729,18 +742,25 @@ mod tests {
         #[test]
         #[cfg(target_os = "linux")]
         fn a_retry_after_pending_sends_only_the_datagrams_that_did_not_go_out() {
-            let udp = loopback();
-            turn_gso_off(&udp.bound);
-            let full = Outcome::Fails(Errno::AGAIN);
-            let mut recorded = Recorded::new(&[Outcome::Sent, Outcome::Sent, full]);
-            let (transmit, mut next) = (batch(b"abcdefgh", 2), 0);
-            let mut send =
-                || send_all(&udp.bound, &transmit, &mut next, |d| recorded.send(d));
-            assert_eq!(send(), Poll::Pending);
-            assert_eq!(send(), Poll::Ready(Ok(())));
-            let attempts: Vec<_> = recorded.sends.iter().map(|s| &s.0[..]).collect();
-            assert_eq!(attempts, [b"ab", b"cd", b"ef", b"ef", b"gh"]);
-            assert_eq!(next, 4);
+            runtime().block_on(async {
+                let udp = loopback();
+                turn_gso_off(&udp.bound);
+                let full = Outcome::Fails(Errno::AGAIN);
+                let mut recorded = Recorded::new(&[Outcome::Sent, Outcome::Sent, full]);
+                let fd = udp.bound.socket.try_clone().unwrap();
+                let mut writer = idle(fd);
+                let transmit = batch(b"abcdefgh", 2);
+                let sent = std::future::poll_fn(|cx| {
+                    writer.poll_transmit(cx, &udp.bound, &transmit, |_, d| {
+                        recorded.send(d)
+                    })
+                });
+                let bound = std::time::Duration::from_secs(10);
+                assert_eq!(tokio::time::timeout(bound, sent).await, Ok(Ok(())));
+                let attempts: Vec<_> =
+                    recorded.sends.iter().map(|s| &s.0[..]).collect();
+                assert_eq!(attempts, [b"ab", b"cd", b"ef", b"ef", b"gh"]);
+            });
         }
 
         #[test]
@@ -765,6 +785,14 @@ mod tests {
             let sent = run(&loopback(), &transmit(remote, b"x"), &mut recorded);
             assert_eq!(sent, Poll::Ready(Err(Error::Unreachable { remote })));
             assert!(recorded.sends.is_empty());
+        }
+    }
+
+    fn idle(fd: UdpSocket) -> Writer {
+        Writer {
+            full: None,
+            next: 0,
+            fd,
         }
     }
 
@@ -828,14 +856,6 @@ mod tests {
         use std::task::Waker;
 
         use super::*;
-
-        fn idle(fd: UdpSocket) -> Writer {
-            Writer {
-                full: None,
-                next: 0,
-                fd,
-            }
-        }
 
         #[test]
         fn waits_while_the_buffer_is_full_and_then_drops_the_registration() {
@@ -901,8 +921,13 @@ mod tests {
                 });
                 let bound = std::time::Duration::from_secs(10);
                 assert_eq!(tokio::time::timeout(bound, sent).await, Ok(Ok(())));
-                assert_eq!(nexts, [0, 2]);
-                assert_eq!(writer.next, 0);
+                let mut cx = Context::from_waker(Waker::noop());
+                let sent = writer.poll_send(&mut cx, |_, next| {
+                    nexts.push(*next);
+                    Poll::Ready(Ok(()))
+                });
+                assert_eq!(sent, Poll::Ready(Ok(())));
+                assert_eq!(nexts, [0, 2, 0]);
             });
         }
 
@@ -922,9 +947,13 @@ mod tests {
                 let gone = writer.poll_send(&mut cx, pending);
                 assert_eq!(gone, Poll::Ready(Err(Error::Io { code: 5 })));
                 assert!(writer.full.is_none());
-                assert_eq!(writer.next, 0);
-                let full = writer.poll_send(&mut cx, pending);
+                let mut first = None;
+                let full = writer.poll_send(&mut cx, |_, next| {
+                    first.get_or_insert(*next);
+                    Poll::Pending
+                });
                 assert_eq!(full, Poll::Pending);
+                assert_eq!(first, Some(0));
                 assert!(writer.full.is_some());
             });
         }
