@@ -20,11 +20,12 @@
   2026-10-08T14:16:19Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6061840714).
   `cargo xtask fuzz` fails when `fuzz/` builds a copy that the root does not build, or
-  when a copy that the root builds meets a requirement in the `fuzz` graph and the
-  requirement resolves to another package. Cargo applies a patch to each requirement
-  that the patch meets, so a requirement that no such copy meets can resolve to a
-  release (approval owed:
-  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074505111).
+  when the `fuzz` graph resolves a requirement on crates.io that a copy the root builds
+  meets to a package that is not that copy. Cargo applies a patch of
+  `[patch.crates-io]` to each such requirement, so a release that the copy cannot meet
+  passes, and so does a requirement that resolves to nothing, such as an optional
+  dependency that is off (`laptop.architect-2`, 2026-10-09T04:53:51Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391).
   The task checks the graphs of `cargo metadata --locked`, not the text of the two
   tables: a patch that `fuzz/` does not use changes no code that it tests
   (`laptop.architect-2`, 2026-10-09T04:27:21Z,
