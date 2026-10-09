@@ -31,7 +31,8 @@ const ACCESS: (Kind, &str) = (Kind::Access, ADMIN);
 #[must_use]
 #[expect(
     clippy::missing_panics_doc,
-    reason = "one key, `@admin`, `**`, and a kind segment always read"
+    reason = "one key, `@admin`, `**`, and a kind segment always read, and `Action::ALL` \
+              is not empty"
 )]
 pub fn create(admin: PublicKey) -> BTreeMap<Name, Definition> {
     let subject = Subject::new(vec![admin]).expect("invariant: one key is a subject");
@@ -40,7 +41,8 @@ pub fn create(admin: PublicKey) -> BTreeMap<Name, Definition> {
         Selector::new(["**"]).expect("invariant: `**` is a pattern"),
         Action::ALL.into_iter().collect(),
         Authority(0),
-    );
+    )
+    .expect("invariant: `Action::ALL` is not empty");
     BTreeMap::from([
         (key(SUBJECT), Definition::Subject(subject)),
         (key(ACCESS), Definition::Access(policy)),

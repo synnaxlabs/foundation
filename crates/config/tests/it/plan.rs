@@ -22,6 +22,7 @@ use types::digest::Digest;
 use types::ed25519::PrivateKey;
 use types::name::{Name, Selector};
 
+mod check;
 mod codec;
 
 const EDGE: &str = include_str!("../../../acceptance/tests/it/fixtures/edge.hcl");

@@ -104,24 +104,30 @@ pub struct Policy {
 impl Policy {
     /// Makes a policy. `authority` caps the control authority of a write, so it counts
     /// only when `allow` holds [`Action::Write`]; without it the authority is zero.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Empty`] when `allow` holds no action.
     pub fn new(
         subjects: Selector,
         select: Selector,
         allow: Actions,
         authority: Authority,
-    ) -> Self {
+    ) -> Result<Self, Error> {
+        if allow == Actions::NONE {
+            return Err(Error::Empty);
+        }
         let authority = if allow.contains(Action::Write) {
             authority
         } else {
             Authority(0)
         };
-        Self {
+        Ok(Self {
             subjects,
             select,
             allow,
             authority,
-        }
+        })
     }
 
     /// The subjects the policy applies to.
@@ -149,6 +155,23 @@ impl Policy {
         self.allow.contains(Action::Write).then_some(self.authority)
     }
 }
+
+/// Why [`Policy::new`] refuses its inputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The policy allows no action.
+    Empty,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "an access policy allows no action"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
@@ -203,7 +226,8 @@ mod tests {
             selector(&["a.**"]),
             write,
             Authority(7),
-        );
+        )
+        .unwrap();
         assert_eq!(policy.authority(), Some(Authority(7)));
 
         let read = [Action::Read].into_iter().collect();
@@ -212,14 +236,31 @@ mod tests {
             selector(&["a.**"]),
             read,
             Authority(7),
-        );
+        )
+        .unwrap();
         assert_eq!(policy.authority(), None);
         let zero = Policy::new(
             selector(&["ops.*"]),
             selector(&["a.**"]),
             read,
             Authority(0),
-        );
+        )
+        .unwrap();
         assert_eq!(policy, zero);
+    }
+
+    #[test]
+    fn refuses_a_policy_that_allows_no_action() {
+        let policy = Policy::new(
+            selector(&["ops.*"]),
+            selector(&["a.**"]),
+            Actions::NONE,
+            Authority(7),
+        );
+        assert_eq!(policy, Err(Error::Empty));
+        assert_eq!(
+            Error::Empty.to_string(),
+            "an access policy allows no action"
+        );
     }
 }
