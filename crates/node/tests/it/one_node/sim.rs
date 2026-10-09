@@ -39,7 +39,8 @@ pub(super) struct Influx {
     /// The address of the first [`Influx::serve`].
     address: Option<SocketAddr>,
     /// The token that stops the shard that serves, and that shard. The panic tests put
-    /// a shard that panics here, since no input to [`Influx::serve`] makes it panic.
+    /// a shard that panics or blocks here, since no input to [`Influx::serve`] makes
+    /// it do so, and read the token that a drop cancels.
     serving: Option<(Token, Handle)>,
 }
 
@@ -196,6 +197,28 @@ fn a_dropped_influx_ends_its_shard() {
     let store = Arc::clone(&influx.store);
     drop(influx);
     assert_eq!(Arc::strong_count(&store), 1, "the shard holds no store");
+}
+
+#[test]
+fn a_dropped_influx_does_not_join_its_server_when_the_test_panics() {
+    let (release, released) = mpsc::channel::<()>();
+    let mut influx = Influx::default();
+    let shard = start("influx", move |_| async move {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the shard blocks until the test releases it"
+        )]
+        let _waited = released.recv_timeout(std::time::Duration::from_secs(30));
+    });
+    influx.serving = Some((Token::new(), shard));
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _influx = influx;
+        panic!("the test broke");
+    }));
+    unwound.expect_err("the test panics");
+    release
+        .send(())
+        .expect("the drop did not wait for the server");
 }
 
 #[test]
