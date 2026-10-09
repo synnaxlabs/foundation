@@ -203,11 +203,8 @@ struct Held(Rc<Live>);
 
 impl Drop for Held {
     fn drop(&mut self) {
-        let n = self.0.n.get() - 1;
-        self.0.n.set(n);
-        if n == 0
-            && let Some(waker) = self.0.waiter.take()
-        {
+        self.0.n.set(self.0.n.get() - 1);
+        if let Some(waker) = self.0.waiter.take() {
             waker.wake();
         }
     }
@@ -253,6 +250,9 @@ mod tests {
         /// Spawns a task that ends the span after the cancel, then returns a device
         /// error at once.
         Hold(Span),
+        /// Spawns a task that ends the span after the cancel, then returns a config
+        /// error at once.
+        Refuse(Span),
     }
 
     /// When each run started and ended.
@@ -318,12 +318,12 @@ mod tests {
                     Err(Error::Device("stopped late".into()))
                 }
                 Some(Step::Hold(span)) => {
-                    let (token, clock) = (ctx.cancel().clone(), clock.clone());
-                    ctx.tasks().spawn(async move {
-                        token.wait().await;
-                        clock.sleep(span).await;
-                    });
+                    hold(&ctx, span);
                     Err(Error::Device("left a task".into()))
+                }
+                Some(Step::Refuse(span)) => {
+                    hold(&ctx, span);
+                    Err(Error::Config(vec![bad()]))
                 }
                 None => {
                     ctx.cancel().wait().await;
@@ -336,6 +336,15 @@ mod tests {
             }
             out
         }
+    }
+
+    /// Spawns a task of the run that ends `span` after the run's cancel.
+    fn hold(ctx: &Context<()>, span: Span) {
+        let (token, clock) = (ctx.cancel().clone(), ctx.clock().clone());
+        ctx.tasks().spawn(async move {
+            token.wait().await;
+            clock.sleep(span).await;
+        });
     }
 
     fn bad() -> Diagnostic {
@@ -791,6 +800,13 @@ mod tests {
     fn waits_for_the_tasks_of_a_run_before_it_returns() {
         let out = supervise_spawner(ms(2_000));
         assert_eq!((out.returned, out.live), (ms(7_000), 0));
+    }
+
+    #[test]
+    fn waits_for_the_tasks_of_a_run_before_it_returns_a_config_error() {
+        let out = supervise("script", vec![Step::Refuse(ms(2_000))], config(), None);
+        assert_eq!(config_errors(out.result), [bad()]);
+        assert_eq!(out.returned, ms(2_000));
     }
 
     #[test]

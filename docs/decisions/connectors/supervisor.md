@@ -9,7 +9,7 @@
   The wait does not count toward the run's length. After a drop of the future of
   `run`, the next `run` of the same name on that supervisor waits for those tasks
   first. A task that does not end at the cancel is a defect of its kind
-  (`laptop.architect-2`, 2026-10-08T19:04:20Z:
+  (`laptop.architect-2`, 2026-10-08T19:04:15Z:
   https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6067043337). One
   supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
   entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
