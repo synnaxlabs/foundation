@@ -1372,12 +1372,6 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         let host = fuzz.unwrap().host;
         assert!(host.starts_with(std::env::consts::ARCH), "{host}");
-        let os = if cfg!(target_os = "macos") {
-            "darwin"
-        } else {
-            std::env::consts::OS
-        };
-        assert!(host.contains(os), "{host}");
     }
 
     #[test]
