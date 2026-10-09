@@ -1473,6 +1473,43 @@ fn a_timer_wakes_its_task_at_each_arm_max_until_due() {
     assert_eq!(polls.load(Ordering::Relaxed), 4);
 }
 
+/// Records the monotonic reading at each poll of its future.
+struct Timed<F>(Pin<Box<F>>, env::clock::Clock, Arc<Mutex<Vec<Monotonic>>>);
+
+impl<F: Future> Future for Timed<F> {
+    type Output = F::Output;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
+        let now = self.1.now();
+        self.2.lock().unwrap().push(now);
+        self.0.as_mut().poll(cx)
+    }
+}
+
+/// A node of the default config wakes a timer each second until it is due, as `os`
+/// does.
+#[test]
+fn a_timer_of_a_default_node_wakes_its_task_each_second_until_due() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let clock = node.clock();
+    let start = clock.now();
+    let polls = Arc::new(Mutex::new(Vec::new()));
+    let times = Arc::clone(&polls);
+    let handle = node.shards().start(shard("sleep"), move |_| {
+        let sleeper = clock.clone();
+        let sleep = async move { sleeper.sleep(millis(2_500)).await };
+        Timed(Box::pin(sleep), clock, times)
+    });
+    sim.run().unwrap();
+    handle.unwrap().join().unwrap();
+    let offsets: Vec<Span> = polls.lock().unwrap().iter().map(|&t| t - start).collect();
+    assert_eq!(
+        offsets,
+        [millis(0), millis(1_000), millis(2_000), millis(2_500)]
+    );
+}
+
 #[test]
 #[should_panic(expected = "arm_max Span(0) is not positive")]
 fn a_node_with_an_arm_max_of_zero_panics() {
