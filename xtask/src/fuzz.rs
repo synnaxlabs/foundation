@@ -253,6 +253,7 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
             if !built.iter().any(|(copy, _)| copy.name == dependency.name) {
                 continue;
             }
+            // This checks each edge to a copy too.
             let requirements = dependent.requirements(dependency, edge)?;
             if dependency.copied {
                 continue;
