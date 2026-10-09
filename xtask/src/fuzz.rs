@@ -260,29 +260,30 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
                 continue;
             }
             for (requirement, parsed) in requirements {
-                let Some((copy, _)) = built.iter().find(|(copy, version)| {
-                    requirement["source"].as_str() == Some(CRATES_IO)
-                        && copy.name == dependency.name
-                        && parsed.matches(version)
-                }) else {
-                    continue;
-                };
-                if reported.contains(&copy.id) {
+                if requirement["source"].as_str() != Some(CRATES_IO) {
                     continue;
                 }
-                reported.push(copy.id);
-                problems.push(format!(
-                    "`{}` needs `{}` `{}`, which the copy `{}` and another package of \
-                     its name that fuzz/ builds both meet, so fuzz/ can build that \
-                     package in place of the copy. If fuzz/Cargo.toml does not have \
-                     the [patch.crates-io] table of the root Cargo.toml, give it that \
-                     table. If it has the table, change the requirements of fuzz/ so \
-                     that this requirement does not also meet the other package.",
-                    dependent.id,
-                    copy.name,
-                    requirement["req"].as_str().unwrap_or_default(),
-                    copy.manifest
-                ));
+                for (copy, _) in built.iter().filter(|(copy, version)| {
+                    copy.name == dependency.name && parsed.matches(version)
+                }) {
+                    if reported.contains(&copy.id) {
+                        continue;
+                    }
+                    reported.push(copy.id);
+                    problems.push(format!(
+                        "`{}` needs `{}` `{}`, which the copy `{}` and another \
+                         package of its name that fuzz/ builds both meet, so fuzz/ \
+                         can build that package in place of the copy. If \
+                         fuzz/Cargo.toml does not have the [patch.crates-io] table \
+                         of the root Cargo.toml, give it that table. If it has the \
+                         table, change the requirements of fuzz/ so that this \
+                         requirement does not also meet the other package.",
+                        dependent.id,
+                        copy.name,
+                        requirement["req"].as_str().unwrap_or_default(),
+                        copy.manifest
+                    ));
+                }
             }
         }
     }
@@ -1105,6 +1106,29 @@ mod tests {
         let types = needs(types(), "noq-proto", "^1.3");
         let fuzz = fuzz(&[types, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
         assert_eq!(unpatched(&root, &fuzz), Ok(vec![missed()]));
+    }
+
+    #[test]
+    fn names_each_copy_that_a_requirement_meets() {
+        let second = "path+file:///w/patches/noq-proto-2#noq-proto@2.0.0";
+        let manifest = "/w/patches/noq-proto-2/Cargo.toml";
+        let mut root = root();
+        root["packages"] =
+            json!([copy(), package("noq-proto", second, manifest), types()]);
+        let types = needs(types(), "noq-proto", ">=1");
+        let fuzz = fuzz(&[types, release("3.0.0")], &[(TYPES, &id("3.0.0"))]);
+        let problem = |manifest: &str| {
+            missed()
+                .replace("`^1.3`", "`>=1`")
+                .replace("/w/patches/noq-proto/Cargo.toml", manifest)
+        };
+        assert_eq!(
+            unpatched(&root, &fuzz),
+            Ok(vec![
+                problem("/w/patches/noq-proto/Cargo.toml"),
+                problem(manifest)
+            ])
+        );
     }
 
     /// The error for an edge `noq_proto` of `types` to `to` that nothing resolves.
