@@ -109,20 +109,24 @@ pub struct Context<C> {
     name: Name,
     config: C,
     cancel: cancel::Token,
+    tasks: Tasks,
     inputs: Rc<supervisor::Config>,
 }
 
 impl<C> Context<C> {
+    /// Makes the context of one run, whose tasks spawn through `tasks`.
     pub(crate) fn new(
         name: Name,
         config: C,
         cancel: cancel::Token,
+        tasks: Tasks,
         inputs: Rc<supervisor::Config>,
     ) -> Self {
         Self {
             name,
             config,
             cancel,
+            tasks,
             inputs,
         }
     }
@@ -133,6 +137,7 @@ impl<C> Context<C> {
             name: self.name,
             config,
             cancel: self.cancel,
+            tasks: self.tasks,
             inputs: self.inputs,
         }
     }
@@ -174,10 +179,11 @@ impl<C> Context<C> {
     }
 
     /// Runs the kind's own tasks on its shard. Each task must end when
-    /// [`Context::cancel`] is cancelled.
+    /// [`Context::cancel`] is cancelled. The next run starts only after each of them
+    /// ends.
     #[must_use]
     pub fn tasks(&self) -> &Tasks {
-        &self.inputs.tasks
+        &self.tasks
     }
 }
 
@@ -563,7 +569,13 @@ mod tests {
         let (early, late, out, ctx_name, n) = run_on(|node, tasks| async move {
             let token = Token::new();
             let inputs = Rc::new(inputs(&node, tasks.clone(), Table::new()));
-            let ctx = Context::new(name("plant.counter"), 3, token.clone(), inputs);
+            let ctx = Context::new(
+                name("plant.counter"),
+                3,
+                token.clone(),
+                tasks.clone(),
+                inputs,
+            );
             let clock = node.clock();
             let (ctx_name, n) = (ctx.name().clone(), *ctx.config());
             let out = Rc::new(RefCell::new(None));
@@ -587,8 +599,8 @@ mod tests {
     #[test]
     fn gives_a_new_random_source_on_each_call() {
         let (a, b) = run_on(|node, tasks| async move {
-            let inputs = Rc::new(inputs(&node, tasks, Table::new()));
-            let ctx = Context::new(name("a"), (), Token::new(), inputs);
+            let inputs = Rc::new(inputs(&node, tasks.clone(), Table::new()));
+            let ctx = Context::new(name("a"), (), Token::new(), tasks, inputs);
             (ctx.rng().next_u64(), ctx.rng().next_u64())
         });
         assert_ne!(a, b);

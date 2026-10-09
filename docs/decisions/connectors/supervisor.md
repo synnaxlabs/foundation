@@ -3,7 +3,12 @@
   the caller's token, which the supervisor cancels once the run returns or its future
   drops, so each task that the run spawned to wait on it ends with the run
   (`laptop.architect-2`, 2026-10-08T17:58:15Z:
-  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). One
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). After a
+  run returns, the supervisor waits, with no timeout, until each task that the run
+  spawned through `Context::tasks` ended, and only then starts its backoff or returns.
+  A task that does not end at the cancel is a defect of its kind (`laptop.architect-2`,
+  2026-10-08T19:04:20Z:
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6067043337). One
   supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
   entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
   2026-10-08T03:05:58Z:
