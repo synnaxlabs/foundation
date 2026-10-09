@@ -53,10 +53,10 @@ fn node(start: &Start) -> Result<(), Failure> {
     // Before any thread starts, else that thread takes the signals.
     let interrupt = os::interrupt().map_err(failed)?;
     let threads = os::threads().map_err(failed)?;
-    let Read { name, budget, kept } = read(start, &threads)?;
+    let known = known(start, &threads)?;
     let (called, call) = mpsc::channel();
     let mut line = Vec::new();
-    start.running(&name, &mut line);
+    start.running(&known.name, &mut line);
     // Its own thread, which lives until the process ends, so a standard output that
     // nobody reads blocks neither shard 0 nor the stop.
     let show = threads.start("show", move || async move {
@@ -85,7 +85,7 @@ fn node(start: &Start) -> Result<(), Failure> {
         shards,
         clock: os::clock(),
         wall,
-        budget,
+        budget: known.budget,
         memory: Box::new(os::memory::Memory::new),
         files: Box::new(move || {
             let disk = disks.next().expect("invariant: one disk for each shard");
@@ -95,7 +95,7 @@ fn node(start: &Start) -> Result<(), Failure> {
         net: net(),
         listen: SocketAddr::from((Ipv4Addr::LOCALHOST, 0)),
         region: None,
-        name: name.clone(),
+        name: known.name.clone(),
     });
     let stopper = node.stopper();
     let stop = threads.start("stop", move || async move {
@@ -114,7 +114,7 @@ fn node(start: &Start) -> Result<(), Failure> {
     }
     let joined = node
         .join()
-        .map_err(|error| failure(&start.data, &error, budget, kept));
+        .map_err(|error| stopped(&start.data, &error, &known));
     let closed = handles.into_iter().try_for_each(env::thread::Handle::join);
     // Each waits only on the process: for a signal, or for a reader of standard output.
     let ended = stop.map(drop).map_err(failed);
@@ -134,12 +134,36 @@ fn net() -> env::net::Net {
     unreachable!("a `--cfg loom` build runs no node")
 }
 
-/// What a start reads before the node starts.
-struct Read {
+/// What a start knows before the node starts.
+struct Known {
     name: Name,
     budget: Budget,
-    /// The data directory keeps `budget` from its first start.
-    kept: bool,
+    /// Where each budget of `budget` comes from.
+    from: Origins,
+}
+
+/// Where the pool budget and the disk budget come from.
+struct Origins {
+    pool: Origin,
+    disk: Origin,
+}
+
+/// Where a budget comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    /// The data directory keeps it from its first start.
+    Kept,
+    /// A first start gives its most.
+    Most,
+    /// A first start gives a quarter of what is free.
+    Quarter,
+}
+
+/// A resource that a first start gives a quarter of.
+#[derive(Clone, Copy)]
+enum Resource {
+    Memory,
+    Disk,
 }
 
 /// The name of the node of `start`, and its budgets: the ones that the data
@@ -149,57 +173,57 @@ struct Read {
     clippy::unwrap_in_result,
     reason = "a thread that ends with no panic has sent what it read"
 )]
-fn read(start: &Start, threads: &Threads) -> Result<Read, Failure> {
+fn known(start: &Start, threads: &Threads) -> Result<Known, Failure> {
     let (disk, handle) = os::files(&start.data, threads, "files-read")
         .map_err(|error| data(&start.data, error))?;
     let (send, receive) = mpsc::channel();
     let dir = start.data.clone();
     let given = start.name.clone();
-    let read = threads.start("read", move || async move {
+    let thread = threads.start("read", move || async move {
         let files = env::files::Files::new(disk);
-        let read = async {
+        let known = async {
             let name = node::name(&files, given)
                 .await
-                .map_err(|e| unread(&dir, &e))?;
-            let kept = node::budget(&files).await.map_err(|e| unread(&dir, &e))?;
-            let budget = match kept {
-                Some(budget) => budget,
-                None => Budget {
-                    pool: quarter(
-                        os::memory::available().map_err(failed)?.bytes(),
-                        POOL_MOST,
-                    ),
-                    disk: quarter(files.free().await.map_err(failed)?, DISK_MOST),
-                },
-            };
-            Ok(Read {
+                .map_err(|e| failure(&dir, &e))?;
+            let kept = node::budget(&files).await.map_err(|e| failure(&dir, &e))?;
+            if let Some(budget) = kept {
+                let from = Origins {
+                    pool: Origin::Kept,
+                    disk: Origin::Kept,
+                };
+                return Ok(Known { name, budget, from });
+            }
+            let memory = os::memory::available().map_err(failed)?.bytes();
+            let (pool, pool_from) = quarter(memory, POOL_MOST);
+            let free = files.free().await.map_err(failed)?;
+            let (disk, disk_from) = quarter(free, DISK_MOST);
+            Ok(Known {
                 name,
-                budget,
-                kept: kept.is_some(),
+                budget: Budget { pool, disk },
+                from: Origins {
+                    pool: pool_from,
+                    disk: disk_from,
+                },
             })
         };
-        send.send(read.await)
+        send.send(known.await)
             .expect("invariant: main waits for what the thread reads");
     });
-    read.map_err(failed)?.join().map_err(failed)?;
+    thread.map_err(failed)?.join().map_err(failed)?;
     handle.join().map_err(failed)?;
     receive
         .try_recv()
         .expect("invariant: the thread sent what it read")
 }
 
-/// A quarter of `free` bytes, up to `most`.
-fn quarter(free: u64, most: Size) -> Size {
-    Size::from_bytes(free / 4).min(most)
-}
-
-/// The failure of a read before the start, which gave `error`.
-fn unread(dir: &Path, error: &node::Error) -> Failure {
-    let none = Budget {
-        pool: Size::ZERO,
-        disk: Size::ZERO,
-    };
-    failure(dir, error, none, false)
+/// A quarter of `free` bytes up to `most`, and whether the quarter or the most won.
+fn quarter(free: u64, most: Size) -> (Size, Origin) {
+    let quarter = Size::from_bytes(free / 4);
+    if quarter < most {
+        (quarter, Origin::Quarter)
+    } else {
+        (most, Origin::Most)
+    }
 }
 
 /// The failure of a data directory that `os` could not open or make.
@@ -217,9 +241,55 @@ fn data(dir: &Path, error: os::Error) -> Failure {
     }
 }
 
-/// The failure of a node that stopped with `error`, on `budget`, which the data
-/// directory keeps when `kept`.
-fn failure(dir: &Path, error: &node::Error, budget: Budget, kept: bool) -> Failure {
+/// The failure of a node that stopped with `error`, after a start that knew `known`.
+fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
+    match error {
+        node::Error::Disk { disk, cores, min } => {
+            let (from, fix) = source(dir, known.from.disk, Resource::Disk);
+            Failure {
+                code: DISK,
+                message: format!(
+                    "the disk budget {disk}, {from}, holds no ring on each of {cores} \
+                     shards; it needs at least {min}"
+                ),
+                fix,
+            }
+        }
+        node::Error::Buffer {
+            core,
+            error: error @ buffer::Error::Pool(pool),
+        } => {
+            let budget = known.budget.pool;
+            let (message, fix) = match pool {
+                block::Error::Refused { .. } => (
+                    format!(
+                        "the system refused memory that the pool budget {budget} of \
+                         shard-{core} has room for: {error}"
+                    ),
+                    "Free memory on this host".to_owned(),
+                ),
+                block::Error::TooLarge { .. } | block::Error::Exhausted { .. } => {
+                    let (from, fix) = source(dir, known.from.pool, Resource::Memory);
+                    let message = format!(
+                        "the pool budget {budget}, {from}, gives shard-{core} too \
+                         little: {error}"
+                    );
+                    (message, fix)
+                }
+            };
+            Failure {
+                code: MEMORY,
+                message,
+                fix,
+            }
+        }
+        error => failure(dir, error),
+    }
+}
+
+/// The failure of `error`, an error that no budget causes, in the data directory
+/// `dir`.
+fn failure(dir: &Path, error: &node::Error) -> Failure {
     let data = dir.display();
     let (code, message, fix) = match error {
         node::Error::Directory(env::files::Error::Busy { .. }) => (
@@ -257,93 +327,39 @@ fn failure(dir: &Path, error: &node::Error, budget: Budget, kept: bool) -> Failu
              memory and disk"
                 .to_owned(),
         ),
-        node::Error::Disk { disk, cores, min } => {
-            let free = (
-                format!("a quarter of the free disk of {data}"),
-                "Free space on that disk, or give a data directory on another disk \
-                 with `--data`",
-            );
-            let (from, fix) = source(dir, kept, *disk == DISK_MOST, free);
-            let message = format!(
-                "the disk budget {disk}, {from}, holds no ring on each of {cores} \
-                 shards; it needs at least {min}"
-            );
-            (DISK, message, fix)
-        }
-        node::Error::Buffer {
-            core,
-            error: error @ buffer::Error::Pool(pool),
-        } => return memory(dir, *core, error, pool, budget, kept),
         error => return failed(error),
     };
     Failure { code, message, fix }
 }
 
-/// The failure of shard `core`, whose buffer gave `error`, a pool error `pool`, on
-/// `budget`, which the data directory keeps when `kept`.
-fn memory(
-    dir: &Path,
-    core: usize,
-    error: &buffer::Error,
-    pool: &block::Error,
-    budget: Budget,
-    kept: bool,
-) -> Failure {
-    let budget = budget.pool;
-    let (message, fix) = match pool {
-        block::Error::Refused { .. } => (
+/// Where a budget of `resource` that gives the node too little comes from, `from`,
+/// as text, and its fix. `dir` is the data directory.
+fn source(dir: &Path, from: Origin, resource: Resource) -> (String, String) {
+    let data = dir.display();
+    match (from, resource) {
+        (Origin::Kept, _) => (
+            format!("which {data} keeps from its first start"),
             format!(
-                "the system refused memory that the pool budget {budget} of \
-                 shard-{core} has room for: {error}"
+                "Remove the file `budget` in {data}, and the next start computes the \
+                 budgets again from the free memory and disk"
             ),
+        ),
+        (Origin::Most, _) => (
+            "the most that a first start gives".to_owned(),
+            "Start the node on fewer cores: on Linux, give it a smaller CPU affinity \
+             set, such as with `taskset`"
+                .to_owned(),
+        ),
+        (Origin::Quarter, Resource::Memory) => (
+            "a quarter of the available memory".to_owned(),
             "Free memory on this host".to_owned(),
         ),
-        block::Error::TooLarge { .. } | block::Error::Exhausted { .. } => {
-            let free = (
-                "a quarter of the available memory".to_owned(),
-                "Free memory on this host",
-            );
-            let (from, fix) = source(dir, kept, budget == POOL_MOST, free);
-            let message = format!(
-                "the pool budget {budget}, {from}, gives shard-{core} too little: \
-                 {error}"
-            );
-            (message, fix)
-        }
-    };
-    Failure {
-        code: MEMORY,
-        message,
-        fix,
-    }
-}
-
-/// Where a budget that gives the node too little came from, and its fix: the data
-/// directory `dir` when it `kept` the budget, else the most that a first start
-/// gives when the budget is at its `most`, else `free`, the source and fix of a
-/// quarter of the free resource.
-fn source(
-    dir: &Path,
-    kept: bool,
-    most: bool,
-    free: (String, &str),
-) -> (String, String) {
-    let data = dir.display();
-    if kept {
-        let fix = format!(
-            "Remove the file `budget` in {data}, and the next start computes the \
-             budgets again from the free memory and disk"
-        );
-        (format!("which {data} keeps from its first start"), fix)
-    } else if most {
-        let fix = "Start the node on fewer cores: on Linux, give it a smaller CPU \
-                   affinity set, such as with `taskset`";
-        (
-            "the most that a first start gives".to_owned(),
-            fix.to_owned(),
-        )
-    } else {
-        (free.0, free.1.to_owned())
+        (Origin::Quarter, Resource::Disk) => (
+            format!("a quarter of the free disk of {data}"),
+            "Free space on that disk, or give a data directory on another disk with \
+             `--data`"
+                .to_owned(),
+        ),
     }
 }
 
@@ -366,9 +382,21 @@ mod tests {
         Path::new("foundation-data")
     }
 
-    /// The failure of a disk budget `disk` that holds no ring on each of `cores`
-    /// shards, which each need 4120KiB.
-    fn disk(disk: Size, cores: usize, kept: bool) -> Failure {
+    /// What a start knows of the budgets `budget`, which each come `from` there.
+    fn known(budget: Budget, from: Origin) -> Known {
+        Known {
+            name: "edge".parse().expect("a name"),
+            budget,
+            from: Origins {
+                pool: from,
+                disk: from,
+            },
+        }
+    }
+
+    /// The failure of a disk budget `disk`, which comes `from` there, that holds no
+    /// ring on each of `cores` shards, which each need 4120KiB.
+    fn disk(disk: Size, cores: usize, from: Origin) -> Failure {
         let count = u64::try_from(cores).expect("a core count fits a u64");
         let error = node::Error::Disk {
             disk,
@@ -379,7 +407,7 @@ mod tests {
             pool: Size::GIBIBYTE,
             disk,
         };
-        failure(dir(), &error, budget, kept)
+        stopped(dir(), &error, &known(budget, from))
     }
 
     /// What the pool of a test gives for a block that it cannot hold.
@@ -390,8 +418,9 @@ mod tests {
     const FEWER: &str = "Start the node on fewer cores: on Linux, give it a smaller \
                          CPU affinity set, such as with `taskset`";
 
-    /// The failure of a pool budget `pool` that gives shard 3 `error`.
-    fn pool_failure(pool: Size, kept: bool, error: block::Error) -> Failure {
+    /// The failure of a pool budget `pool`, which comes `from` there, that gives
+    /// shard 3 `error`.
+    fn pool_failure(pool: Size, from: Origin, error: block::Error) -> Failure {
         let error = node::Error::Buffer {
             core: 3,
             error: buffer::Error::Pool(error),
@@ -400,32 +429,41 @@ mod tests {
             pool,
             disk: DISK_MOST,
         };
-        failure(dir(), &error, budget, kept)
+        stopped(dir(), &error, &known(budget, from))
     }
 
-    /// The failure of a pool budget `pool` too small for a block of shard 3.
-    fn pool(pool: Size, kept: bool) -> Failure {
+    /// The failure of a pool budget `pool`, which comes `from` there, too small for a
+    /// block of shard 3.
+    fn pool(pool: Size, from: Origin) -> Failure {
         let error = block::Error::TooLarge {
             requested: 52_186,
             largest: 28_672,
         };
-        pool_failure(pool, kept, error)
+        pool_failure(pool, from, error)
     }
 
     #[test]
     fn a_first_start_gives_a_quarter_of_what_is_free_up_to_the_most() {
-        assert_eq!(quarter(4 << 20, POOL_MOST), Size::MEBIBYTE);
-        assert_eq!(quarter(7, POOL_MOST), Size::from_bytes(1));
-        assert_eq!(quarter(4 << 30, POOL_MOST), Size::GIBIBYTE);
-        assert_eq!(quarter((4 << 30) + 4, POOL_MOST), Size::GIBIBYTE);
-        assert_eq!(quarter(64 << 30, DISK_MOST), DISK_MOST);
+        let from_quarter = |bytes| (Size::from_bytes(bytes), Origin::Quarter);
+        assert_eq!(quarter(4 << 20, POOL_MOST), from_quarter(1 << 20));
+        assert_eq!(quarter(7, POOL_MOST), from_quarter(1));
+        assert_eq!(
+            quarter((4 << 30) - 4, POOL_MOST),
+            from_quarter((1 << 30) - 1)
+        );
+        assert_eq!(quarter(4 << 30, POOL_MOST), (Size::GIBIBYTE, Origin::Most));
+        assert_eq!(
+            quarter((4 << 30) + 4, POOL_MOST),
+            (Size::GIBIBYTE, Origin::Most)
+        );
+        assert_eq!(quarter(64 << 30, DISK_MOST), (DISK_MOST, Origin::Most));
         assert_eq!(DISK_MOST, Size::from_bytes(8_589_934_592));
     }
 
     #[test]
     fn a_kept_disk_budget_that_holds_no_ring_tells_the_user_to_remove_it() {
         assert_eq!(
-            disk(Size::from_bytes(1 << 20), 16, true),
+            disk(Size::from_bytes(1 << 20), 16, Origin::Kept),
             Failure {
                 code: DISK,
                 message: "the disk budget 1MiB, which foundation-data keeps from its \
@@ -442,7 +480,7 @@ mod tests {
     #[test]
     fn a_disk_budget_at_its_most_tells_the_user_to_use_fewer_cores() {
         assert_eq!(
-            disk(DISK_MOST, 2048, false),
+            disk(DISK_MOST, 2048, Origin::Most),
             Failure {
                 code: DISK,
                 message: "the disk budget 8GiB, the most that a first start gives, \
@@ -457,7 +495,7 @@ mod tests {
     #[test]
     fn a_disk_budget_from_the_free_disk_tells_the_user_to_free_it() {
         assert_eq!(
-            disk(Size::from_bytes(1 << 20), 16, false),
+            disk(Size::from_bytes(1 << 20), 16, Origin::Quarter),
             Failure {
                 code: DISK,
                 message: "the disk budget 1MiB, a quarter of the free disk of \
@@ -474,7 +512,7 @@ mod tests {
     #[test]
     fn a_kept_pool_budget_that_gives_a_shard_too_little_tells_the_user_to_remove_it() {
         assert_eq!(
-            pool(Size::MEBIBYTE, true),
+            pool(Size::MEBIBYTE, Origin::Kept),
             Failure {
                 code: MEMORY,
                 message: format!(
@@ -495,7 +533,7 @@ mod tests {
             available: 4096,
         };
         assert_eq!(
-            pool_failure(POOL_MOST, false, full),
+            pool_failure(POOL_MOST, Origin::Most, full),
             Failure {
                 code: MEMORY,
                 message: "the pool budget 1GiB, the most that a first start gives, \
@@ -510,7 +548,7 @@ mod tests {
     #[test]
     fn a_pool_budget_from_the_available_memory_tells_the_user_to_free_it() {
         assert_eq!(
-            pool(Size::MEBIBYTE, false),
+            pool(Size::MEBIBYTE, Origin::Quarter),
             Failure {
                 code: MEMORY,
                 message: format!(
@@ -524,12 +562,8 @@ mod tests {
 
     #[test]
     fn a_budget_file_that_no_node_wrote_tells_the_user_to_remove_it() {
-        let budget = Budget {
-            pool: Size::ZERO,
-            disk: Size::ZERO,
-        };
         assert_eq!(
-            failure(dir(), &node::Error::Budget, budget, false),
+            failure(dir(), &node::Error::Budget),
             Failure {
                 code: BUDGET,
                 message:
@@ -550,7 +584,7 @@ mod tests {
             available: 0,
         };
         assert_eq!(
-            pool_failure(Size::MEBIBYTE, false, full),
+            pool_failure(Size::MEBIBYTE, Origin::Quarter, full),
             Failure {
                 code: MEMORY,
                 message: "the pool budget 1MiB, a quarter of the available memory, \
@@ -562,10 +596,10 @@ mod tests {
         );
     }
 
-    /// The failure of memory that the system refused shard 3, on a pool budget
-    /// that the data directory keeps when `kept`.
-    fn refused(kept: bool) -> Failure {
-        pool_failure(POOL_MOST, kept, block::Error::Refused { requested: 64 })
+    /// The failure of memory that the system refused shard 3, on a pool budget that
+    /// comes `from` there.
+    fn refused(from: Origin) -> Failure {
+        pool_failure(POOL_MOST, from, block::Error::Refused { requested: 64 })
     }
 
     #[test]
@@ -578,8 +612,9 @@ mod tests {
                 .to_owned(),
             fix: "Free memory on this host".to_owned(),
         };
-        assert_eq!(refused(false), refused_memory);
-        assert_eq!(refused(true), refused_memory, "also for a kept budget");
+        for from in [Origin::Kept, Origin::Most, Origin::Quarter] {
+            assert_eq!(refused(from), refused_memory, "{from:?}");
+        }
     }
 
     #[test]
@@ -592,6 +627,7 @@ mod tests {
             pool: POOL_MOST,
             disk: DISK_MOST,
         };
-        assert_eq!(failure(dir(), &error, budget, false), failed(&error));
+        let known = known(budget, Origin::Quarter);
+        assert_eq!(stopped(dir(), &error, &known), failed(&error));
     }
 }
