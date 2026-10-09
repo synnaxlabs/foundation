@@ -59,3 +59,7 @@
 | FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
 | HUB SESSIONS (#340, 6066821273): `reader::Error::Remote` gives a reader of an index at another node | HUB SESSIONS amendment (#340 PR 4d-b, 6068108715): the reader reads from that home over one hub stream |
 | `hub::Config::mesh` of 6067438821 | HUB SESSIONS amendment (#340 PR 4d-b, 6068108715): `hub::Config::region` |
+| HUB SESSIONS plan of 6048861311: a session for each home | HUB SESSIONS (6069259471): the dial at each open |
+| Code 18 of #340 6047300641: "the home's buffer failed" | HUB WIRE (6071260886) |
+| Code 19 of #340 6047519084: "the home had no memory for a reply" | HUB WIRE (6071260886) |
+| Code 19 in item 3 of #1946 6069496483: "the node had no memory for a reply or a request body" | HUB WIRE (6071260886), until #2012 (6072387291) |
