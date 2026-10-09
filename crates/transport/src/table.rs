@@ -179,15 +179,20 @@ impl Table {
         Found::Start(attempt)
     }
 
-    /// Ends `attempt` to `node` with what its dial gave. A session waits for
-    /// `accept`, and closes the held one. After an error, the attempt gives the held
-    /// session.
+    /// Ends `attempt` to `node` with what its dial gave, after the table takes the
+    /// sessions that wait in the carrier. A session waits for `accept`, and closes
+    /// the held one. After an error, the attempt gives the held session. When a
+    /// session from the peer ended the attempt first, the dial's session drops.
     fn dialed(
         &mut self,
         node: PublicKey,
         attempt: &Rc<Attempt>,
         dialed: Result<Session, Error>,
     ) {
+        self.take();
+        if attempt.ended() {
+            return;
+        }
         let entry = self.nodes.get_mut(&node);
         let entry = entry.expect("invariant: a dial keeps its entry");
         let dial = entry.dial.take().expect("invariant: one dial ends it");
@@ -358,6 +363,11 @@ impl Attempt {
         }
         wake::register(&mut state.waiting, cx.waker());
         Poll::Pending
+    }
+
+    /// Whether the attempt has its result.
+    fn ended(&self) -> bool {
+        self.0.borrow().result.is_some()
     }
 
     fn end(&self, result: Result<Session, Error>) {
@@ -1309,6 +1319,71 @@ mod tests {
             let dialed = transport.dial(SERVER.public(), &slow).await;
             let dialed = dialed.expect("the server's session");
             assert_eq!(dialed.closed().await, Error::PeerClosed { code: Code(1) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // The client has the higher key and runs no accept. It dials 1 ms after the
+    // server, so the server's session waits in the client's carrier when the
+    // client's own dial ends. The dial gives the server's session.
+    #[test]
+    fn a_dial_that_completes_while_the_peers_session_waits_gives_it() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        let back = [Address::Udp(testing::address(&client))];
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let (transport, _sessions) = accepting(config, &node);
+            let dialed = transport.dial(CLIENT.public(), &back).await;
+            let dialed = dialed.expect("a session");
+            node.clock().sleep(testing::spans(Span::SECOND, 3)).await;
+            drop(dialed);
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            node.clock().sleep(Span::MILLISECOND).await;
+            let dialed = transport.dial(SERVER.public(), &at).await;
+            let dialed = dialed.expect("a session");
+            let now = node.clock().now();
+            let again = transport.dial(SERVER.public(), &[]).await;
+            let again = again.expect("a session");
+            assert_eq!(node.clock().now(), now);
+            assert!(again.downgrade().is(&dialed));
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 100))
+                .await;
+            assert!(dialed.live(), "{:?}", dialed.closed().await);
+            linger(&node).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // Both nodes accept, and the client dials 250 us after the server, so the
+    // server's session and the client's own dial connect at one instant. The dial
+    // task runs first, and gives the server's session.
+    #[test]
+    fn a_dial_that_completes_with_the_peers_session_gives_it() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = [Address::Udp(testing::address(&server))];
+        let back = [Address::Udp(testing::address(&client))];
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let (transport, _sessions) = accepting(config, &node);
+            let dialed = transport.dial(CLIENT.public(), &back).await;
+            let dialed = dialed.expect("a session");
+            node.clock().sleep(testing::spans(Span::SECOND, 3)).await;
+            drop(dialed);
+        });
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let (transport, _sessions) = accepting(config, &node);
+            node.clock().sleep(Span::from_nanos(250_000)).await;
+            let dialed = transport.dial(SERVER.public(), &at).await;
+            let dialed = dialed.expect("a session");
+            let again = transport.dial(SERVER.public(), &[]).await;
+            let again = again.expect("a session");
+            assert!(again.downgrade().is(&dialed));
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 100))
+                .await;
+            assert!(dialed.live(), "{:?}", dialed.closed().await);
+            linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
     }
