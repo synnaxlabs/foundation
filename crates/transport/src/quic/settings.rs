@@ -835,7 +835,7 @@ mod tests {
             testing::run(1, |shard| {
                 let pair = Pair::with(shard, Span::SECOND, DELAY, |config| {
                     config.message_bytes_max = NonZeroUsize::MAX;
-                    config.window_bytes = config.pool.largest();
+                    config.window_bytes = 2 * config.pool.largest();
                 });
                 let largest =
                     shard.config(pair::SERVER_KEY, Span::SECOND).pool.largest();

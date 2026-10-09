@@ -5646,7 +5646,7 @@ mod tests {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             let config = Config {
                 message_bytes_max: NonZeroUsize::new(1_472).expect("not zero"),
-                window_bytes: 2_000,
+                window_bytes: 2_944,
                 ..shard.config(pair::SERVER_KEY, Span::SECOND)
             };
             let shard_key = pair::SERVER_SHARD;
@@ -5655,22 +5655,24 @@ mod tests {
             pair.dial(pair::SERVER_KEY.public());
             pair.run(RUN);
             let first = open_sender(&mut pair, Class::Complete);
-            let second = open_sender(&mut pair, Class::Latest);
+            let second = open_sender(&mut pair, Class::Command);
+            let third = open_sender(&mut pair, Class::Latest);
             let now = pair.now();
-            // The second message waits for the peer's credit, so it holds 1,472
-            // bytes of the send budget.
-            for byte in [1, 2] {
+            // The first message and part of the second fill the peer's credit. The
+            // second and the command wait for it, so they hold all 2,944 bytes of the
+            // send budget.
+            for (byte, sender) in [(1, &first), (2, &first), (3, &second)] {
                 let message = shard.block(&[byte; 1_472]);
                 let written =
-                    pair::try_write(&mut pair.client.endpoint, now, &first, message);
-                assert!(matches!(written, Ok(None)), "{written:?}");
+                    pair::try_write(&mut pair.client.endpoint, now, sender, message);
+                assert!(matches!(written, Ok(None)), "{byte}: {written:?}");
             }
-            let message = shard.block(&[3; 1_472]);
+            let message = shard.block(&[4; 1_472]);
             let written =
-                pair::try_write(&mut pair.client.endpoint, now, &second, message);
+                pair::try_write(&mut pair.client.endpoint, now, &third, message);
             assert_eq!(
                 written.map(|back| back.map(|back| back.to_vec())),
-                Ok(Some(vec![3; 1_472]))
+                Ok(Some(vec![4; 1_472]))
             );
         });
     }

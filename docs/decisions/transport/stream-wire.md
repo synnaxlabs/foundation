@@ -49,7 +49,10 @@
   class frees waits for that class's next message, and the budget starts no new message
   of the other class, so neither class can take the share through the budget (#819). A
   change of this share changes the share bound of `transport/benches/send.rs` in the
-  same PR. Decided by architect-2 (#977, 2026-10-07 17:15 UTC):
+  same PR. The share holds because each window is at least twice the message limit, so
+  one message of each class fits: architect-2 (#1998, 2026-10-09 03:45 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073837407. The
+  share: architect-2 (#977, 2026-10-07 17:15 UTC):
   https://github.com/synnaxlabs/foundation/issues/977#issuecomment-6042983190. The
   competition memory and the cap: architect-2 (#1311, 2026-10-07 11:14 UTC and 12:09
   UTC): https://github.com/synnaxlabs/foundation/issues/1311#issuecomment-6036747607 and
@@ -141,17 +144,17 @@
   the largest it can count. A peer breaks the protocol when its hello ends inside a
   pair, misses a required id, has an id out of order, is over 256 bytes, has a
   `message_bytes_max` below 1472 (architect, #1198:
-  https://github.com/synnaxlabs/foundation/issues/1198) or a `window_bytes` below it, or
-  resets. A peer whose QUIC transport parameters cannot take this node's whole hello at
-  once (no one-way stream, or a stream or connection window under the hello) also breaks
-  it, with the reason `a peer with no room for the hello`. A dial that breaks so gets
-  `Error::Broken` with no `Connected` before it, and an accept gives the caller no
-  event. Before the handshake is confirmed, QUIC gives the peer no reason, only
-  APPLICATION_ERROR. A Foundation node always has room: `streams_max` is at least 1, and
-  `window_bytes` is at least `message_bytes_max`, which is at least 1472. A compile-time
-  assertion holds 1472 at or above the hello limit, so only a foreign peer gets this.
-  Lost: send the hello later when credit comes, because `open` then needs a second gate
-  and a state that only a foreign peer reaches. `Endpoint::write` gives
+  https://github.com/synnaxlabs/foundation/issues/1198) or a `window_bytes` below twice
+  it, or resets. A peer whose QUIC transport parameters cannot take this node's whole
+  hello at once (no one-way stream, or a stream or connection window under the hello)
+  also breaks it, with the reason `a peer with no room for the hello`. A dial that
+  breaks so gets `Error::Broken` with no `Connected` before it, and an accept gives the
+  caller no event. Before the handshake is confirmed, QUIC gives the peer no reason,
+  only APPLICATION_ERROR. A Foundation node always has room: `streams_max` is at least
+  1, and `window_bytes` is at least twice `message_bytes_max`, which is at least 1472. A
+  compile-time assertion holds 1472 at or above the hello limit, so only a foreign peer
+  gets this. Lost: send the hello later when credit comes, because `open` then needs a
+  second gate and a state that only a foreign peer reaches. `Endpoint::write` gives
   `Error::TooLarge` for a message over the peer's limit; a caller that forwards a
   writer's frame gives the writer `Large`, and the writer splits the frame (LARGE
   FRAME). Proposed by `network` in #55; approved by the coordinator on PR #407. The

@@ -1691,11 +1691,11 @@ mod tests {
     }
 
     #[test]
-    fn a_message_of_parts_larger_than_the_window_arrives_whole() {
-        // The stream header leaves the window short of the message.
+    fn a_message_of_parts_larger_than_the_window_left_arrives_whole() {
+        // The stream headers leave the window short of the second message.
         let narrow = |config| Config {
             message_bytes_max: NonZeroUsize::new(16_000).expect("not zero"),
-            window_bytes: 16_000,
+            window_bytes: 32_000,
             ..config
         };
         let parts: Vec<Part> = (0..1000)
@@ -1715,8 +1715,10 @@ mod tests {
             move |side| async move {
                 let opened = side.session.open_sender(Class::Complete).await;
                 let mut sender = opened.expect("a stream");
-                let block = side.block(&body);
-                sender.send_parts(block, &parts).await.expect("sent");
+                for _ in 0..2 {
+                    let block = side.block(&body);
+                    sender.send_parts(block, &parts).await.expect("sent");
+                }
                 sender.finish().expect("finished");
                 let closed = Error::PeerClosed { code: Code(0) };
                 assert_eq!(side.session.closed().await, closed);
@@ -1724,7 +1726,9 @@ mod tests {
             move |side| async move {
                 let mut receiver =
                     side.session.accept().await.expect("a stream").receiver;
-                assert_eq!(bytes(receiver.recv().await), Ok(Some(sent)));
+                for _ in 0..2 {
+                    assert_eq!(bytes(receiver.recv().await), Ok(Some(sent.clone())));
+                }
                 assert_eq!(bytes(receiver.recv().await), Ok(None));
                 side.session.close(Code(0));
             },
@@ -1736,10 +1740,10 @@ mod tests {
     fn a_stretch_that_the_window_takes_in_parts_arrives_whole() {
         let narrow = |config| Config {
             message_bytes_max: NonZeroUsize::new(16_000).expect("not zero"),
-            window_bytes: 16_000,
+            window_bytes: 32_000,
             ..config
         };
-        // One stretch of short runs, after a message that takes half the window.
+        // One stretch of short runs, after messages that take 3/4 of the window.
         let parts: Vec<Part> = (0..2000)
             .map(|index| Part {
                 range: index * 16..index * 16 + 8,
@@ -1759,7 +1763,9 @@ mod tests {
             move |side| async move {
                 let opened = side.session.open_sender(Class::Complete).await;
                 let mut sender = opened.expect("a stream");
-                sender.send(side.block(&[7; 8000])).await.expect("sent");
+                for len in [16_000, 8000] {
+                    sender.send(side.block(&vec![7; len])).await.expect("sent");
+                }
                 let block = side.block(&body);
                 sender.send_parts(block, &parts).await.expect("sent");
                 sender.finish().expect("finished");
@@ -1769,7 +1775,10 @@ mod tests {
             move |side| async move {
                 let mut receiver =
                     side.session.accept().await.expect("a stream").receiver;
-                assert_eq!(bytes(receiver.recv().await), Ok(Some(vec![7; 8000])));
+                for len in [16_000, 8000] {
+                    let read = receiver.recv().await;
+                    assert_eq!(bytes(read), Ok(Some(vec![7; len])));
+                }
                 assert_eq!(bytes(receiver.recv().await), Ok(Some(sent)));
                 assert_eq!(bytes(receiver.recv().await), Ok(None));
                 side.session.close(Code(0));
@@ -1779,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn a_message_of_long_and_short_runs_larger_than_the_window_arrives_whole() {
+    fn a_message_of_long_and_short_runs_larger_than_the_window_left_arrives_whole() {
         let body: Vec<u8> =
             (0..25_200u32).map(|index| index.to_le_bytes()[0]).collect();
         // In each 2100 bytes, a run of 2000 bytes, then two short runs and zeros. The
@@ -1815,11 +1824,11 @@ mod tests {
                     [&body[part.range.clone()], &zeros].concat()
                 })
                 .collect();
-            // The stream header leaves the window short of the message.
+            // The stream headers leave the window short of the second message.
             let len = NonZeroUsize::new(sent.len()).expect("not zero");
             let narrow = move |config| Config {
                 message_bytes_max: len,
-                window_bytes: len.get(),
+                window_bytes: 2 * len.get(),
                 ..config
             };
             let (body, parts) = (body.clone(), parts.clone());
@@ -1829,8 +1838,10 @@ mod tests {
                 move |side| async move {
                     let opened = side.session.open_sender(Class::Complete).await;
                     let mut sender = opened.expect("a stream");
-                    let block = side.block(&body);
-                    sender.send_parts(block, &parts).await.expect("sent");
+                    for _ in 0..2 {
+                        let block = side.block(&body);
+                        sender.send_parts(block, &parts).await.expect("sent");
+                    }
                     sender.finish().expect("finished");
                     let closed = Error::PeerClosed { code: Code(0) };
                     assert_eq!(side.session.closed().await, closed);
@@ -1838,7 +1849,10 @@ mod tests {
                 move |side| async move {
                     let mut receiver =
                         side.session.accept().await.expect("a stream").receiver;
-                    assert_eq!(bytes(receiver.recv().await), Ok(Some(sent)));
+                    for _ in 0..2 {
+                        let read = receiver.recv().await;
+                        assert_eq!(bytes(read), Ok(Some(sent.clone())));
+                    }
                     assert_eq!(bytes(receiver.recv().await), Ok(None));
                     side.session.close(Code(0));
                 },
@@ -1895,7 +1909,7 @@ mod tests {
     fn a_try_send_of_parts_counts_the_parts_not_the_block() {
         let narrow = |config| Config {
             message_bytes_max: NonZeroUsize::new(16_000).expect("not zero"),
-            window_bytes: 16_000,
+            window_bytes: 32_000,
             ..config
         };
         let (mut sim, ..) = testing::sessions(
@@ -1906,7 +1920,7 @@ mod tests {
                 let mut sender = opened.expect("a stream");
                 let block = || side.block(&vec![7; 40_000]);
                 let parts = [Part {
-                    range: 30_000..38_000,
+                    range: 20_000..36_000,
                     zeros: 0,
                 }];
                 for _ in 0..2 {
@@ -1927,7 +1941,7 @@ mod tests {
                     side.session.accept().await.expect("a stream").receiver;
                 for _ in 0..2 {
                     let read = receiver.recv().await;
-                    assert_eq!(bytes(read), Ok(Some(vec![7; 8000])));
+                    assert_eq!(bytes(read), Ok(Some(vec![7; 16_000])));
                 }
                 assert_eq!(bytes(receiver.recv().await), Ok(None));
                 side.session.close(Code(0));
@@ -2437,6 +2451,7 @@ mod tests {
         let (mut sim, ..) = testing::sessions(
             0,
             |config| Config {
+                message_bytes_max: NonZeroUsize::new(LARGE).expect("not zero"),
                 window_bytes: 2 * LARGE,
                 ..config
             },
@@ -2650,7 +2665,8 @@ mod tests {
         let narrow = |config| {
             let config = scarce(config, heap());
             Config {
-                window_bytes: config.message_bytes_max.get(),
+                message_bytes_max: NonZeroUsize::new(LARGE).expect("not zero"),
+                window_bytes: 2 * LARGE,
                 ..config
             }
         };
