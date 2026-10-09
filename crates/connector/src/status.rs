@@ -427,18 +427,23 @@ impl Session {
                     },
                 ],
             ) => values.stage(),
-            Ok([Outcome::Refused { refusal, .. }]) => {
-                panic!("the home refuses a status frame: {refusal}")
-            }
+            Ok(
+                [
+                    Outcome::Refused {
+                        refusal: refusal @ (Refusal::Expired | Refusal::Codec { .. }),
+                        ..
+                    },
+                ],
+            ) => panic!("the home refuses a status frame: {refusal}"),
             Ok(outcomes) => {
                 panic!("invariant: a frame of one group has one outcome: {outcomes:?}")
             }
             Err(Failure::Removed(_) | Failure::Home(home::Error::Disk(_))) => {
                 self.closed = true;
             }
-            Err(Failure::Home(error)) => {
-                panic!("the home refuses a status frame: {error}")
-            }
+            Err(Failure::Home(
+                error @ (home::Error::Resend | home::Error::Full | home::Error::Large),
+            )) => panic!("the home refuses a status frame: {error}"),
         }
     }
 }
