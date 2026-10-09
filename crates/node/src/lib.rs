@@ -675,12 +675,12 @@ impl Serve {
     /// runs each task given with a hub over `home` that knows each channel of the
     /// region's founding spec, and serves the node's port, until `guard` completes,
     /// the transport stops, or the mesh's group stops. A transport or a group that
-    /// stops goes into `failed` before any task drops. Then drops the tasks and
-    /// `guard`, then each session and stream future, the hub, `home`, and the mesh,
-    /// and waits for each task of the mesh to end, the last of which drops the
-    /// transport. Runs no task and takes no session when a shard did not open, or
-    /// when the identity did not load or the mesh did not open, which goes into
-    /// `failed`.
+    /// stops goes into `failed` before any task drops. Then drops the tasks, the hub,
+    /// `home`, `guard`, each session and stream future, and the mesh, in an order
+    /// that depends on the cause, and waits for each task of the mesh to end, the
+    /// last of which drops the transport. Runs no task and takes no session when a
+    /// shard did not open, or when the identity did not load or the mesh did not
+    /// open, which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
