@@ -4,8 +4,6 @@ use std::net::{Ipv6Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::rc::Rc;
 
-use env::net::udp;
-
 use types::ed25519::PublicKey;
 use types::time::Span;
 
@@ -50,19 +48,11 @@ impl Client {
     /// }
     /// ```
     pub fn new(config: Config) -> Result<Self, Error> {
-        let (setup, net) = config.setup()?;
-        let (sender, receiver) = net
-            .udp(&udp::Config {
-                local: SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0),
-                send_buffer_bytes: port::BUFFER_BYTES,
-                recv_buffer_bytes: port::BUFFER_BYTES,
-            })
-            .map_err(|error| Error::Network { error })?;
-        let part = port::Part {
-            index: 0,
-            sender,
-            receiver,
-        };
+        let net = config.net.clone();
+        let setup = config.setup()?;
+        let any = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0);
+        let part =
+            port::Part::udp(&net, any).map_err(|error| Error::Network { error })?;
         Ok(Self {
             carrier: quic::Carrier::new(setup, part),
         })
@@ -123,7 +113,8 @@ impl std::fmt::Debug for Client {
 /// ```
 #[derive(Debug)]
 pub struct Config {
-    /// Binds the program's UDP socket.
+    /// The network where [`Client::new`](crate::Client::new) binds the program's UDP
+    /// socket.
     pub net: env::net::Net,
     /// The monotonic clock for timeouts, pacing, and keep-alives.
     pub clock: env::clock::Clock,
@@ -136,9 +127,8 @@ pub struct Config {
 }
 
 impl Config {
-    /// The program's setup and the net it binds on, or the rule of [`Client::new`]
-    /// that this config breaks.
-    pub(crate) fn setup(self) -> Result<(quic::Setup, env::net::Net), Error> {
+    /// The program's setup, or the rule of [`Client::new`] that this config breaks.
+    pub(crate) fn setup(self) -> Result<quic::Setup, Error> {
         let message_bytes_max = self.pool.largest();
         if message_bytes_max < MESSAGE_BYTES_MIN {
             return Err(Error::Config {
@@ -146,7 +136,7 @@ impl Config {
                 rule: POOL_RULE,
             });
         }
-        let setup = quic::Setup {
+        Ok(quic::Setup {
             role: quic::Role::Program,
             message_bytes_max,
             window_bytes: message_bytes_max.max(WINDOW_BYTES_MIN),
@@ -156,8 +146,7 @@ impl Config {
             entropy: self.entropy,
             tasks: self.tasks,
             pool: self.pool,
-        };
-        Ok((setup, self.net))
+        })
     }
 }
 
@@ -172,22 +161,15 @@ mod tests {
     use types::ed25519::PrivateKey;
 
     use super::*;
-    use crate::testing::{self, IDLE, PORT, Shard, address, nodes, spans};
+    use crate::testing::{self, FREE, IDLE, PORT, Shard, address, any, nodes, spans};
     use crate::{Class, Code, Peer, Port};
 
     const SERVER: PrivateKey = PrivateKey([2; 32]);
     const OTHER: PrivateKey = PrivateKey([3; 32]);
-    /// The first port that a bind of port 0 takes under `sim`.
-    const FREE: u16 = 49152;
-
-    /// Port `port` at `[::]`.
-    fn any(port: u16) -> SocketAddr {
-        SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), port)
-    }
 
     /// Starts a transport for `SERVER` at `[::]` on `node` that accepts `sessions`
-    /// sessions in turn. On each, it checks that the peer is a program, echoes the first message
-    /// of the first stream, and waits until the program drops the session.
+    /// sessions in turn. On each, it checks that the peer is a program, echoes the first
+    /// message of the first stream, and waits until the program drops the session.
     fn serve(node: &Node, sessions: usize) {
         testing::shard(node, SERVER, move |config, node| async move {
             // A program's pool has the budget of this one.

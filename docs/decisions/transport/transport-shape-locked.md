@@ -11,3 +11,10 @@
   window of that or 1 MiB, `streams_max` 1, and idle 30 s. Decided by
   `laptop.architect-2` (#1754, 2026-10-08T09:52:31Z):
   https://github.com/synnaxlabs/foundation/issues/1754#issuecomment-6057273348.
+  `Client::new` binds the program's UDP socket at `[::]` port 0 on
+  `client::Config::net`, through the same private function in `port` as `Port::bind`,
+  and binds no TCP. A `local` field in `client::Config` comes when a program must send
+  from a known port or bind one address family. Until then, on a host booted with
+  `ipv6.disable=1`, the bind fails with `Error::Network`. Decided by
+  `laptop.architect-2` (#1888, 2026-10-09):
+  https://github.com/synnaxlabs/foundation/issues/1888#issuecomment-6072258451.

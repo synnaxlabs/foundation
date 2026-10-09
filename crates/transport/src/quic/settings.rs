@@ -509,7 +509,7 @@ mod tests {
         fn answers_an_initial_with_a_stateless_reset_that_the_dialer_ignores() {
             testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
-                let (setup, _) = shard.client().setup().expect("a setup");
+                let setup = shard.client().setup().expect("a setup");
                 pair.server.endpoint =
                     Endpoint::new(&setup, SERVER_SHARD, NonZeroUsize::MIN);
                 pair.dial(pair::SERVER_KEY.public());
@@ -562,7 +562,7 @@ mod tests {
 
         /// A program's endpoint on `shard`.
         fn program(shard: &testing::Shard) -> Endpoint {
-            let (setup, _) = shard.client().setup().expect("a setup");
+            let setup = shard.client().setup().expect("a setup");
             Endpoint::new(&setup, SERVER_SHARD, NonZeroUsize::MIN)
         }
     }
