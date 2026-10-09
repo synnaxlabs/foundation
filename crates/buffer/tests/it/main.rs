@@ -194,18 +194,22 @@ impl Shard {
     /// Opens a ring that holds a record at `offset` that this build cannot read. The
     /// open must give `Invalid`, as [`Shard::open_refused`] says.
     async fn open_invalid(&self, layout: Layout, offset: u64) {
-        self.open_refused(layout, Error::Invalid { offset }).await;
+        let case = format!("a record at {offset}");
+        let error = Error::Invalid { offset };
+        self.open_refused(layout, error, &case).await;
     }
 
     /// Opens a ring that passes its CRCs and that this build cannot read. The open
     /// must give `error`, leave the file as it was, and not sync it: a fault fails
-    /// the next sync of the ring, so an open that syncs it gives `Io`.
-    async fn open_refused(&self, layout: Layout, error: Error) {
+    /// the next sync of the ring, so an open that syncs it gives `Io`. Each failed
+    /// assert names `case`.
+    async fn open_refused(&self, layout: Layout, error: Error, case: &str) {
         let before = self.bytes().await;
         self.node().fail_file(FilePath::new(RING), Operation::Sync);
         let opened = self.open(layout, &mut Slots::new()).await;
-        assert_eq!(opened.map(drop), Err(error));
-        assert!(self.bytes().await == before, "the open changed the ring");
+        assert_eq!(opened.map(drop), Err(error), "{case}");
+        let changed = self.bytes().await != before;
+        assert!(!changed, "{case}: the open changed the ring");
         let ring = self.files.open(FilePath::new(RING), Mode::Write).await;
         let synced = ring.expect("the ring opens to write").sync().await;
         let fault = FileError::Io {
@@ -213,7 +217,7 @@ impl Shard {
             operation: Operation::Sync,
             code: 5,
         };
-        assert_eq!(synced, Err(fault), "the open synced the ring");
+        assert_eq!(synced, Err(fault), "{case}: the open synced the ring");
     }
 
     /// Puts `bytes` at `at` of the body of the record at `offset` of the area, and
@@ -3230,7 +3234,10 @@ fn an_open_that_finds_an_unaligned_tail_leaves_the_ring_as_read() {
         drop(buffer.expect("opens"));
         shard.tamper(TAIL_AT, &(BLOCK + 1).to_le_bytes()).await;
         let unaligned = Error::Unaligned { tail: BLOCK + 1 };
-        shard.open_refused(layout(AREA, BODY_MAX), unaligned).await;
+        let case = "a tail one byte past a block";
+        shard
+            .open_refused(layout(AREA, BODY_MAX), unaligned, case)
+            .await;
     });
 }
 
@@ -3260,12 +3267,12 @@ fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
             shard
                 .tamper_block(unaligned, TAIL_AT, &u64::MAX.to_le_bytes())
                 .await;
+            let case = format!("newer: {newer:?}, the block at {unaligned}");
             if taken {
                 let refused = Error::Unaligned { tail: u64::MAX };
-                shard.open_refused(ring, refused).await;
+                shard.open_refused(ring, refused, &case).await;
             } else {
                 let opened = shard.open(ring, &mut Slots::new()).await;
-                let case = format!("newer: {newer:?}, the block at {unaligned}");
                 assert_eq!(opened.map(drop), Ok(()), "{case}");
             }
         });
