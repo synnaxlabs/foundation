@@ -405,14 +405,14 @@
   then takes them as with no hold, so a second one ends the process and a stop that
   hangs can still be ended. `main` is to call it before it starts any other thread
   (#1732), since the mask passes to each thread that starts after it. `pthread_sigmask`,
-  not `sigprocmask`, which POSIX does not specify in a process with threads. The signal
-  thread has no handle, as the `resolve` thread does not: it lives until the process
-  ends, to take the second signal. Tokio's `signal` lost: its handler stays for the life
-  of the process and never gives back the default action, so a second signal cannot end
-  the process. A handler of our own lost: it reaches its pipe only through a global.
-  `os::files` makes `dir` and `dir/data` when they are not there, but not the parents of
-  `dir`, and syncs the holder of each at each call, so `main` is to make no file call of
-  its own and each failure of the data directory is `os::Error::Dir`
+  not `sigprocmask`, which POSIX does not specify in a process with threads. Like the
+  `resolve` thread of `os::net`, the signal thread has no handle. It lives until the
+  process ends, to take the second signal. Tokio's `signal` lost: its handler stays for
+  the life of the process and never gives back the default action, so a second signal
+  cannot end the process. A handler of our own lost: it reaches its pipe only through a
+  global. `os::files` makes `dir` and `dir/data` when they are not there, but not the
+  parents of `dir`, and syncs the holder of each at each call, so `main` is to make no
+  file call of its own and each failure of the data directory is `os::Error::Dir`
   (`laptop.architect-2`, 2026-10-09T18:30:45Z:
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545; the sync
   at each call, the thread with no handle, and the lost options: `laptop.architect-2`,
