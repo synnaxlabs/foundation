@@ -136,6 +136,25 @@ fn ends_a_named_complete_reader_behind_when_it_resumes_before_a_released_frame()
 }
 
 #[test]
+fn opens_a_named_complete_reader_at_the_live_frames_once_its_hold_ends() {
+    run(15, |test| async move {
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut first = test.hub.reader(open).await.expect("opens");
+        let mut writer = test.writer("w", &["value"]).await;
+        write(&mut writer, &[test.now()], &[7]);
+        first.next().await.expect("a frame");
+        drop(first);
+        test.clock.sleep(Span::SECOND).await;
+        test.clock.sleep(Span::SECOND).await;
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        write(&mut writer, &[test.now()], &[8]);
+        let received = reader.next().await.expect("a frame after the hold");
+        assert_eq!(samples(&received, 2), [8]);
+    });
+}
+
+#[test]
 fn opens_a_named_reader_of_each_subject_and_name_on_its_own() {
     run(5, |test| async move {
         let mut readers = Vec::new();
