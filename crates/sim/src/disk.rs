@@ -297,17 +297,11 @@ impl Disk {
     /// Unlinks the file at `path`. It stays while a hold, a durable entry, or a change
     /// in the log keeps it.
     pub(crate) fn remove(&mut self, path: &Path) -> Result<(), Cause> {
-        let (segments, slashed) = (segments(path), slashed(path));
-        let Some((name, parent)) = segments.split_last() else {
+        let Some((dir, name, found)) = self.lookup(path)? else {
             return Err(Cause::Code(DIRECTORY));
         };
-        let dir = self.dir(parent)?;
-        let inode = *self
-            .dir_mut(dir)
-            .entries
-            .get(*name)
-            .ok_or(Cause::NotFound)?;
-        self.named(inode, slashed)?.linked = false;
+        let inode = found.ok_or(Cause::NotFound)?;
+        self.named(inode, slashed(path))?.linked = false;
         self.edit(dir, vec![(name.into(), None)]);
         Ok(())
     }
