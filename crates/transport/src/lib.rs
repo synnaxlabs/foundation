@@ -830,6 +830,8 @@ mod tests {
                 .expect("a stream");
             let burst = testing::block(&pool, &[0; 16 << 10]);
             sender.send(burst).await.expect("the burst is sent");
+            // The burst leaves and spends the pacer's tokens, so a paced close waits.
+            node.clock().sleep(Span::MILLISECOND).await;
             let ended = transport.ended();
             drop((sender, session, transport));
             *dropped_at.lock().unwrap() = Some(node.clock().now());
