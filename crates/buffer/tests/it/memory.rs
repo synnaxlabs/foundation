@@ -1,6 +1,6 @@
-//! A file driver over memory, for the tests that the `sim` disk cannot run: it
-//! counts syncs and can slow each one, and its calls end at once. A test that needs
-//! none of this runs on the `sim` disk.
+//! A file driver over memory. It counts syncs, can slow each one, and ends each
+//! call at once, which the `sim` disk does not do yet (#1016). Only a test that
+//! needs this runs on it, until #517 moves it to `sim`.
 
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
