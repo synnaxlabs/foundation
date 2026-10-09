@@ -162,7 +162,9 @@ fn early(waiting: bool) {
 
 /// Whether SIGINT is pending in this process, or the thread `signal` has not named
 /// itself yet or blocks SIGINT. During `sigwait`, the thread does not block it, so the
-/// pending set tells that it is not yet taken.
+/// pending set tells that it is not yet taken. It reads the pending set first: in the
+/// other order, it can read the mask during `sigwait` and the pending set after the
+/// wake, and see neither.
 #[cfg(target_os = "linux")]
 fn untaken() -> bool {
     let process = std::fs::read_to_string("/proc/self/status").expect("a status");
