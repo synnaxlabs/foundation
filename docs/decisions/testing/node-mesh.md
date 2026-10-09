@@ -97,6 +97,7 @@
   the node, and `create_key` stays only if a tool still needs it. Lost: a second copy of
   the format in `acceptance`; a restart of each node and a read of its key from outside
   `node`; a form that gives back only the public key, as the lab signs each card with
-  the private key. Decided by
-  `laptop.architect-2` at 2026-10-08T23:23:28Z
-  (https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6071015421).
+  the private key. Decided by `laptop.architect-2` at 2026-10-08T23:23:28Z
+  (https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6071015421), with
+  the start rule and its trigger approved by `laptop.architect-2` (2026-10-09, #1962,
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6071836755).
