@@ -54,9 +54,11 @@
   GSO flag. Each half has its own `dup` of the socket. The receiver registers for
   readable at its first poll, in a field of its driver (`laptop.architect-2`,
   2026-10-08 19:12 UTC,
-  https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). No
-  lock is on the receive path (item 2 of
-  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541).
+  https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
+  `os` receiver's driver takes no `Mutex` (item 2 of `laptop.architect-2`,
+  2026-10-08 18:27 UTC,
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541); Tokio's
+  `AsyncFd` locks its waiter list when a poll finds the socket not readable.
   That driver is the receiver's alone, as a sender clone's is: it comes from the
   bind, beside the socket (`laptop.architect-2`, 2026-10-09 01:42 UTC,
   https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6072529426).
