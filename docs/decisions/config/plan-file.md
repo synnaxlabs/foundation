@@ -63,6 +63,6 @@
   the base compare, the apply gives the pointer in use, so it makes no other plan
   stale. Such a plan at an old base gives `ops.stale-plan`, as its files can differ
   from the newest spec. A hand-made plan that lists no home for a new index applies,
-  and the index has no home until a later change gives one (MESH SURFACE). Decided by
+  and the index has no home until a later change gives one (SPEC APPLY). Decided by
   `laptop.architect-2` (2026-10-08T23:51:37Z, items 3 and 4 of
   https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071339913).
