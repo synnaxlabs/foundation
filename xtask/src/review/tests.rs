@@ -696,6 +696,75 @@ fn reads_each_field_as_github_shows_it() {
 }
 
 #[test]
+fn reads_no_invisible_character() {
+    // Both ends of each range of Unicode default ignorable code points.
+    for c in [
+        '\u{AD}',
+        '\u{34F}',
+        '\u{61C}',
+        '\u{115F}',
+        '\u{1160}',
+        '\u{17B4}',
+        '\u{17B5}',
+        '\u{180B}',
+        '\u{180F}',
+        '\u{200B}',
+        '\u{200F}',
+        '\u{202A}',
+        '\u{202E}',
+        '\u{2060}',
+        '\u{206F}',
+        '\u{3164}',
+        '\u{FE00}',
+        '\u{FE0F}',
+        '\u{FEFF}',
+        '\u{FFA0}',
+        '\u{FFF0}',
+        '\u{FFF8}',
+        '\u{1BCA0}',
+        '\u{1BCA3}',
+        '\u{1D173}',
+        '\u{1D17A}',
+        '\u{E0000}',
+        '\u{E0FFF}',
+    ] {
+        let comment = ROUND.replace(
+            "Hot path: none",
+            &format!("{c}Hot path: `send`\nHot path: none"),
+        );
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec!["review round 3 has a second `Hot path:` line in its end lines."],
+            "{:X}",
+            u32::from(c)
+        );
+    }
+}
+
+#[test]
+fn reads_off_the_backticks_that_github_shows() {
+    let escaped = ROUND
+        .replace("Reviewers: reviewer", "Reviewers: \\`reviewer\\`")
+        .replace("`38cba24f..c77c67d7`", "\\`38cba24f..c77c67d7\\`");
+    assert_eq!(check(&record(vec![bot(&escaped)])), Vec::<String>::new());
+    let code = ROUND.replace("Hot path: none", "Hot path: `Sender::send`");
+    let shown = ROUND.replace("Hot path: none", "Hot path: \\`Sender::send\\`");
+    let mut code = record(vec![bot(&code)]);
+    let mut shown = record(vec![bot(&shown)]);
+    code.files = vec!["docs/decisions/crate-map.md".to_string()];
+    shown.files = code.files.clone();
+    assert_eq!(
+        check(&shown),
+        vec!["review round 3 names no performance, which this round requires."]
+    );
+    assert_eq!(check(&shown), check(&code));
+    let none = ROUND.replace("Hot path: none", "Hot path: \\`none\\`");
+    let mut none = record(vec![bot(&none)]);
+    none.files = code.files;
+    assert_eq!(check(&none), Vec::<String>::new());
+}
+
+#[test]
 fn reads_the_round_heading_as_github_shows_it() {
     let fields = ROUND.replace("Findings: none", "Findings: 2");
     for heading in [
@@ -1766,6 +1835,12 @@ fn fails_an_old_round_with_a_paragraph_that_comrak_places_in_the_wrong_lines() {
         (
             "[r]: https://x.y\n2. Hot path: `send`",
             "[r]: https://x.y",
+            false,
+        ),
+        // Raw HTML before the paragraph does not count in an old round.
+        (
+            "<b>a</b>\n\nSee [x](\nhttps://x.y)\nHot path: `send`",
+            "See [x](",
             false,
         ),
     ] {
