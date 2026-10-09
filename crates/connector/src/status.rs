@@ -217,7 +217,8 @@ pub(crate) struct Writer {
 impl Writer {
     /// Opens the writer of the status channels of `connector`, whose kind named
     /// `counts`, as the connector, and gives the status that it writes. `clock` times
-    /// the writes, and `cancel` ends each wait for the home.
+    /// the writes. `cancel` is the token of the call: it ends each wait for the home,
+    /// and after it [`Self::start`] writes nothing.
     pub(crate) async fn open(
         hub: &hub::Hub,
         connector: &Name,
@@ -322,9 +323,15 @@ impl Writer {
     /// Waits until the home applied the last change of state or `cancel` is
     /// cancelled.
     async fn applied(&self) {
+        self.settle(|| self.session.borrow().unapplied).await;
+    }
+
+    /// Writes the status while `pending`, at most once each [`PERIOD`] after the last
+    /// write, until `cancel` is cancelled.
+    async fn settle(&self, pending: impl Fn() -> bool) {
         self.cancel
             .race(async {
-                while self.session.borrow().unapplied {
+                while pending() {
                     self.write_staged().await;
                 }
             })
@@ -345,13 +352,7 @@ impl Writer {
     /// more, or `cancel` is cancelled.
     pub(crate) async fn during<T>(&self, run: impl Future<Output = T>) -> T {
         let output = beside(run, self.flush()).await;
-        self.cancel
-            .race(async {
-                while self.values.staged.get() {
-                    self.write_staged().await;
-                }
-            })
-            .await;
+        self.settle(|| self.values.staged.get()).await;
         output
     }
 
