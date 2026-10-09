@@ -459,8 +459,6 @@ mod macos {
 
     #[cfg(test)]
     mod tests {
-        use std::mem::MaybeUninit;
-
         use super::*;
 
         #[test]
