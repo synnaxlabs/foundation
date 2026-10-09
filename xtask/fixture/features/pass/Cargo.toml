@@ -6,10 +6,11 @@ publish = false
 
 [features]
 sim = ["own/sim", "weak?/sim"]
-simulate = ["dep:weak", "weak?/simulate"]
+simulate = ["dep:sim", "dep:weak", "weak?/simulate"]
 
 [dependencies]
 own = { path = "../own", default-features = false }
+sim = { path = "../sim", optional = true }
 weak = { path = "../weak", optional = true }
 
 [dev-dependencies]

@@ -82,8 +82,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_normal_or_build_dependency_that_turns_on_sim() {
-        for name in ["normal", "build"] {
+    fn rejects_a_normal_build_or_platform_dependency_that_turns_on_sim() {
+        for name in ["normal", "build", "platform"] {
             assert_eq!(
                 problems(name),
                 [format!(

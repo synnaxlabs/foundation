@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [features]
+sim = ["own?/sim"]
 simulate = ["own?/sim"]
 
 [dependencies]
