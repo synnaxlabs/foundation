@@ -31,7 +31,7 @@ fn check(front: Front) {
     let mut lab = Lab::new(1);
     let node = lab.start("cloud");
     let changes = plan_and_apply(&mut lab, node, front);
-    assert_eq!(changes, ["site.temp", "site.time"], "first plan");
+    assert_eq!(changes, ["site", "site.temp", "site.time"], "first plan");
     lab.write(node, "site.temp", 1, 1);
     lab.run(Duration::from_secs(2));
     assert_eq!(lab.read(node, "admin", "site.temp").samples, 1, "applied");
@@ -48,7 +48,11 @@ fn a_second_plan_of_an_applied_channel_gives_no_change() {
     let mut lab = Lab::new(1);
     let node = lab.start("cloud");
     lab.mesh(&[node]);
-    assert_eq!(lab.plan(node, HCL), ["site.temp", "site.time"], "first plan");
+    assert_eq!(
+        lab.plan(node, HCL),
+        ["site", "site.temp", "site.time"],
+        "first plan"
+    );
     lab.apply(node, HCL);
     assert_eq!(lab.plan(node, HCL), Vec::<String>::new(), "second plan");
     lab.stop();
