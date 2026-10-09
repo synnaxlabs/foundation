@@ -97,4 +97,6 @@ exclude_re = [
   # Only a pool whose largest block is 1472 bytes tells `<` from `<=`. Block sizes are
   # 64 times 2^k times 5 to 8, so none is 1472: 1280, then 1536.
   'crates/transport/src/client\.rs:.*replace < with <= in Config::setup',
+  # Equal keys get no rule (ONE SESSION PER PEER, rule 4), so no test can pin `<`.
+  'crates/transport/src/table\.rs:.*replace < with <= in Table::arrive',
 ]

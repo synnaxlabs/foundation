@@ -264,6 +264,8 @@ fn transport(setup: &Setup) -> TransportConfig {
         .allow_spin(false)
         .datagram_receive_buffer_size(Some(setup.message_bytes_max))
         .datagram_send_buffer_size(DATAGRAM_QUEUE_BYTES_MAX)
+        // Path zero stays, as `next_packet_number` and `largest_acked` of the
+        // noq-proto patch need.
         .max_concurrent_multipath_paths(0)
         .max_remote_nat_traversal_addresses(0)
         .server_handshake_migration(false)
