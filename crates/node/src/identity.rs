@@ -31,7 +31,7 @@ pub(crate) struct Identity {
 }
 
 /// The identity in `node.key` of `files`. When the file is not there, has no bytes,
-/// or holds only zero bytes, makes a new one at mesh time from `clock`, once it has
+/// or holds 68 zero bytes, makes a new one at mesh time from `clock`, once it has
 /// mesh time, and from `entropy`. Writes the identity back and makes it durable
 /// before it returns, also one it read: a failed sync of an earlier start can leave
 /// a key that a read sees but a crash loses. Never writes another key over a file
@@ -68,7 +68,7 @@ pub(crate) async fn load(
 }
 
 /// Writes `identity` to `node.key` in `files` when the file is not there, has no
-/// bytes, or holds only zero bytes, and makes it durable.
+/// bytes, or holds 68 zero bytes, and makes it durable.
 ///
 /// # Errors
 ///
