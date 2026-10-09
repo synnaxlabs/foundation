@@ -6,8 +6,9 @@
   The bytes hold no span. Another version is `plan::Error::Version`, which says to plan
   again; other bytes are `plan::Error::Malformed` at the offset of the field that holds
   the first wrong byte, or of the field that the bytes cut. `decode` checks only the
-  form. `definitions` refuses the cases below, and `spec::region::check` refuses each
-  problem of the definitions after the plan. Neither checks `homes`, and neither refuses
+  form. `definitions` refuses the cases below, and `spec::region::check` and
+  `config::plan::check` (below) refuse each problem of the definitions after the plan.
+  None checks `homes`, and none refuses
   a change only because its new bytes equal the stored bytes: with a true `old`, at a
   planned name and kind, such a change states nothing false and changes nothing. #337 PR
   2b, which applies the homes, does no check of its own: `Mesh::apply` refuses a name
@@ -61,14 +62,15 @@
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688.
   `config::plan::check(definitions, members, kinds)` checks the definitions after the
   plan against each rule of `plan` that `spec::region::check` does not hold, with no
-  span: the kind table accepts the kind and the config of each connector, then
-  `config.unplaced`, `config.connector-home`, `config.split-placement`,
-  `config.writer-nodes`, and `config.unknown-node`. The rules are in `config` once, on
-  one model of the definitions that `plan` builds with spans. Apply calls it after
-  `definitions` and before `Mesh::apply`, with the members and the kind table of the
-  node that applies, since both can change after `plan`. Decided by
-  `laptop.architect-2`, 2026-10-08T21:36:36Z
-  (https://github.com/synnaxlabs/foundation/issues/2013).
-  Both take the connectors of an index in name order, so `config.writer-nodes` names
-  the same nodes from each (`laptop.architect-2`, 2026-10-09T00:48:39Z:
-  https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
+  span. It holds now: the kind table accepts the kind and the config of each
+  connector, then `config.unplaced`, `config.connector-home`, `config.split-placement`,
+  `config.writer-nodes`, and `config.unknown-node`. #2013 PR 2 adds
+  `config.duplicate-name`, `config.empty-allow`, `config.subject-is-connector`, and
+  `config.private-key`. Apply calls it after `definitions` and before `Mesh::apply`,
+  with the members and the kind table of the node that applies, since both can change
+  after `plan`. Decided by `laptop.architect-2`, 2026-10-08T21:36:36Z
+  (https://github.com/synnaxlabs/foundation/issues/2013). The rules are in `config`
+  once, on one model of the definitions that `plan` builds with spans, and both take
+  the connectors of an index in name order, so each gives the same problems; approved
+  by `laptop.architect-2`, 2026-10-09T00:48:39Z
+  (https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
