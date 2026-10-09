@@ -60,8 +60,13 @@ fn influx_receives_every_sample_the_edge_writes() {
     let ticket = lab.ticket(cloud);
     lab.join(edge, ticket);
     lab.influx(cloud, "influx");
-    lab.apply(cloud, include_str!("fixtures/edge.hcl"));
-    lab.apply(cloud, include_str!("fixtures/influx.hcl"));
+    lab.apply(
+        cloud,
+        concat!(
+            include_str!("fixtures/edge.hcl"),
+            include_str!("fixtures/influx.hcl")
+        ),
+    );
     lab.write(edge, "edge.value", 1000, 5000);
     lab.run(Duration::from_secs(10));
     let stored = lab.stored("influx", "edge.value");

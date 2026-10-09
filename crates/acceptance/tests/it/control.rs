@@ -3,14 +3,19 @@ use std::time::Duration;
 use crate::lab::{Lab, Protocol};
 
 #[test]
-#[ignore = "waits on #432, #1957, #2145"]
+#[ignore = "waits on #432, #1028, #1801, #1957, #2145"]
 fn a_subject_without_authority_cannot_command_and_the_audit_records_who_did() {
     let mut lab = Lab::new(1);
     let edge = lab.start("edge");
     lab.mesh(&[edge]);
     lab.device(edge, Protocol::ModbusTcp, "dev");
-    lab.apply(edge, include_str!("fixtures/modbus_tcp.hcl"));
-    lab.apply(edge, include_str!("fixtures/control.hcl"));
+    lab.apply(
+        edge,
+        concat!(
+            include_str!("fixtures/modbus_tcp.hcl"),
+            include_str!("fixtures/control.hcl")
+        ),
+    );
     lab.run(Duration::from_secs(1));
     assert_eq!(
         lab.command(edge, "viewer", "dev.q", 3.0),
