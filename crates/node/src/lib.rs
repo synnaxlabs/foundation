@@ -738,6 +738,10 @@ impl Serve {
             Ok(opened) => opened,
             Err(error) => return fail(error),
         };
+        let region = mesh.clone().map(|mesh| hub::Region {
+            mesh,
+            transport: Rc::clone(&transport),
+        });
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
@@ -745,24 +749,11 @@ impl Serve {
             node: key,
             time: self.time,
             entropy,
-            mesh: mesh.clone(),
+            region,
         });
         hub.define(definitions.iter().flatten());
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
-        // `next` gives the stop of the group on a watch of any index.
-        let watch = mesh
-            .as_ref()
-            .map(|mesh| mesh.watch(types::channel::Key::from_u128(0)));
-        let group = async move {
-            let Some(mut watch) = watch else {
-                return std::future::pending().await;
-            };
-            loop {
-                if let Err(stopped) = watch.next().await {
-                    return stopped;
-                }
-            }
-        };
+        let group = stopped(mesh.as_ref());
         // The port's future holds the mesh, so it drops before the wait.
         {
             let mut port = pin!(route::accept(transport, mesh, tasks.clone()));
@@ -782,6 +773,22 @@ impl Serve {
         }
         if let Some(ended) = ended {
             ended.await;
+        }
+    }
+}
+
+/// Completes with the stop of `mesh`'s group, or never when the node has no mesh.
+fn stopped(mesh: Option<&mesh::Mesh>) -> impl Future<Output = mesh::Stopped> + use<> {
+    // `next` gives the stop of the group on a watch of any index.
+    let watch = mesh.map(|mesh| mesh.watch(types::channel::Key::from_u128(0)));
+    async move {
+        let Some(mut watch) = watch else {
+            return std::future::pending().await;
+        };
+        loop {
+            if let Err(stopped) = watch.next().await {
+                return stopped;
+            }
         }
     }
 }

@@ -60,3 +60,5 @@
 | NODE PORT, test of the amendment (#1962, 6069568312): the port is free once `lock` is | NODE PORT (#1962, 6069829972, 6070247529, and 6070577797): under `sim` the port is free once `lock` is; under `os` the carrier's task can hold the socket until the runtime of shard 0 drops, until #2017 |
 | HOME TYPE REFUSAL (#963): `open_writer` refuses a series of a type the home does not write | HOME EVERY TYPE |
 | FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
+| HUB SESSIONS (#340, 6066821273): `reader::Error::Remote` gives a reader of an index at another node | HUB SESSIONS amendment (#340 PR 4d-b, 6068108715): the reader reads from that home over one hub stream |
+| `hub::Config::mesh` of 6067438821 | HUB SESSIONS amendment (#340 PR 4d-b, 6068108715): `hub::Config::region` |

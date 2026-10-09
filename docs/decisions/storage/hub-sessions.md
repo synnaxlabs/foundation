@@ -104,3 +104,38 @@
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6067290747), which
   supersedes "`define` carries at once" in item 2 of
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536.
+  Amended (2026-10-08T20:07:32Z, #340 PR 4d-b): a reader of an index whose home is
+  another node reads from that home over one hub stream (HUB WIRE), and
+  `reader::Error::Remote` goes. `hub::Config::region: Option<hub::Region>` replaces
+  `hub::Config::mesh`: a `Region` holds the mesh and the shard's transport, so a mesh
+  with no transport is a state the type cannot hold. Each remote reader opens its
+  stream on the session that `transport::Transport::dial` gives at that open, the one
+  session of the shard to the home (ONE SESSION PER PEER). A complete reader sends
+  `Credit` once its grant is half a window (512 KiB) short of the frames given back
+  plus a window. The new errors: `reader::Error::{Transport, Refused, Message, Pool}`
+  and `reader::Ended::{Stream, Refused, Message, Frame, Pool}`. Each `Refused` holds a
+  `wire::hub::Refusal`, the code of HUB WIRE that stopped or reset the stream. A code
+  outside HUB WIRE and a failed dial are `Transport` or `Stream`. A stream that the
+  home finishes before it ends the session is `Message(Unfinished)` inside a body and
+  `Message(Finished)` at each other point, which `wire::hub::Reader::end` gives.
+  Decided by `laptop.architect`: the reader's errors (2026-10-07T23:31:29Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511, which
+  approves the plan in
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048861311),
+  `Region` (2026-10-08T20:07:32Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715), which
+  supersedes `hub::Config::mesh` of
+  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067438821, and
+  `Refusal`, `Finished`, `end`, and the dial at each open, which supersedes the
+  session for each home of that plan (2026-10-08T21:19:24Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6069259471). The
+  removal of `reader::Error::Remote` supersedes it in
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273.
+  The remote reader costs `complete wait` +2 ns (27 to 29 ns, +7.4%) and
+  `complete grant` +2 ns (64 to 66 ns, +3.1%) on a quiet host
+  (https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6069990547), with no
+  allocation. Accepted until #2025 by `laptop.architect`
+  (2026-10-08T22:34:29Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6070407790). Trigger:
+  when #2025 merges, #2031 steps the remote reader's stream with the poll forms, and
+  `complete wait` is at most 5% over 27 ns on a quiet host.

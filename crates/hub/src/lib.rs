@@ -67,10 +67,19 @@ pub struct Config {
     pub time: clock::Reader,
     /// The source of each challenge's nonce.
     pub entropy: env::entropy::Entropy,
-    /// The region's mesh, or `None` for a node with no region. The mesh names the home
-    /// of each index and the address of each member. With `None`, this node is the
-    /// home of each index.
-    pub mesh: Option<::mesh::Mesh>,
+    /// The node's region, or `None` for a node with no region. With `None`, this node
+    /// is the home of each index.
+    pub region: Option<Region>,
+}
+
+/// What the hub of a node in a region reads homes from, and reaches them on.
+#[derive(Debug)]
+pub struct Region {
+    /// The region's mesh. It names the home of each index and the addresses of each
+    /// member.
+    pub mesh: ::mesh::Mesh,
+    /// The transport of this shard. The hub dials the home of each remote reader on it.
+    pub transport: Rc<transport::Transport>,
 }
 
 /// The state of one shard's hub, which each session shares. No borrow of it lasts
@@ -94,7 +103,7 @@ struct State {
     entropy: env::entropy::Entropy,
     /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
     rules: access::Rules,
-    mesh: Option<::mesh::Mesh>,
+    region: Option<Region>,
 }
 
 impl Hub {
@@ -113,7 +122,7 @@ impl Hub {
             node,
             time,
             entropy,
-            mesh,
+            region,
         } = config;
         let state = Rc::new(RefCell::new(State {
             home,
@@ -128,7 +137,7 @@ impl Hub {
             time,
             entropy,
             rules: access::Rules::default(),
-            mesh,
+            region,
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
@@ -176,19 +185,24 @@ impl Hub {
         Writer::open(&self.0, config).await
     }
 
-    /// Opens a reader session on `channels`, which share one index, as
-    /// [`writer`](Self::writer) opens a writer. It gets each frame of the index, as a
-    /// view of only `channels` and their index. A complete reader gets each live frame
-    /// written after the returned future resolves, until it misses one
-    /// ([`reader::Mode::Complete`]).
+    /// Opens a reader session on `channels`, which share one index. While the mesh
+    /// names no home for the index, it waits for one. At the home of another node,
+    /// each open reader holds one stream of the one session to it, so it also waits
+    /// while that home allows this node no more streams, until another reader there
+    /// drops. It gets each frame of the index, as a view of only `channels` and their
+    /// index. A complete reader gets each live frame written after the returned future
+    /// resolves, until it misses one ([`reader::Mode::Complete`]).
     ///
     /// # Errors
     ///
     /// For the first name that breaks a rule: [`reader::Error::Unknown`] for a name
     /// that no channel has, and [`reader::Error::ManyIndexes`] for a channel on
     /// another index than the first. [`reader::Error::Empty`] for no name. Then
-    /// [`reader::Error::Remote`] when the home of the index is not this node, and
-    /// [`reader::Error::Mesh`] when the mesh stopped.
+    /// [`reader::Error::Mesh`] when the mesh stopped. At the home of another node:
+    /// [`reader::Error::Transport`] when the dial or the stream fails,
+    /// [`reader::Error::Refused`] when the home refuses the session,
+    /// [`reader::Error::Message`] for a reply that breaks the hub protocol, and
+    /// [`reader::Error::Pool`] when the shard's pool has no block for the open.
     pub async fn reader(
         &self,
         channels: &[Name],
@@ -241,6 +255,27 @@ impl State {
         self.channels.insert(name.clone(), channel);
     }
 
+    /// A block of `len` bytes from the home's pool.
+    ///
+    /// # Errors
+    ///
+    /// [`block::Error::Exhausted`] or [`block::Error::Refused`] when the pool has no
+    /// block for it now.
+    ///
+    /// # Panics
+    ///
+    /// When `len` is over the pool's largest block: each caller asks for at most that.
+    fn alloc(&self, len: usize) -> Result<block::Unique, block::Error> {
+        self.home.pool().alloc(len).map_err(|error| match error {
+            block::Error::TooLarge { .. } => {
+                unreachable!(
+                    "invariant: no caller asks for more than the largest block"
+                )
+            }
+            block::Error::Exhausted { .. } | block::Error::Refused { .. } => error,
+        })
+    }
+
     /// Carries `index` at the home. A later carry does nothing.
     fn carry(&mut self, index: types::channel::Key) {
         let slot = self.interner.slots().assign(index);
@@ -287,7 +322,7 @@ async fn carry(
     let (watch, node) = {
         let state = state.borrow();
         (
-            state.mesh.as_ref().map(|mesh| mesh.watch(index)),
+            state.region.as_ref().map(|region| region.mesh.watch(index)),
             state.node,
         )
     };

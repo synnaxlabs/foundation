@@ -20,7 +20,7 @@ use wire::header::MALFORMED;
 use wire::hub::client::Refusal;
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
-use crate::reader::{Credit, Ended, Session};
+use crate::reader::{Credit, Session, Stop};
 use crate::{Away, State};
 
 pub use client::{Reply, Request};
@@ -140,7 +140,7 @@ impl std::error::Error for Error {}
 impl From<Away> for Error {
     fn from(away: Away) -> Self {
         match away {
-            Away::Remote(_) => Self::NotHome,
+            Away::Remote(..) => Self::NotHome,
             Away::Mesh(stopped) => Self::Mesh(stopped),
         }
     }
@@ -234,12 +234,12 @@ async fn serve(
             Event::Frame(Ok((frame, set, _))) => {
                 layout.send(state, sender, &frame, set).await?;
             }
-            Event::Frame(Err(Ended::Behind)) => {
+            Event::Frame(Err(Stop::Behind)) => {
                 sender.send(reply(state, wire::hub::Reply::Behind)?).await?;
                 sender.finish()?;
                 return Ok(());
             }
-            Event::Frame(Err(Ended::Buffer(error))) => {
+            Event::Frame(Err(Stop::Buffer(error))) => {
                 return Err(Error::Buffer(error));
             }
         }
@@ -249,7 +249,7 @@ async fn serve(
 enum Event<F> {
     /// The peer finished, or broke the stream or HUB WIRE.
     Finished(Result<(), Error>),
-    Frame(Result<F, Ended>),
+    Frame(Result<F, Stop>),
 }
 
 /// Reads what the peer sends after the keys run, and grants each credit. Returns when
@@ -398,21 +398,7 @@ fn reply(state: &RefCell<State>, reply: wire::hub::Reply) -> Result<Block, Error
 /// largest block: a reply, an ends run, which is smaller than the frame's
 /// descriptors, or a message of a client stream.
 fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
-    state
-        .borrow()
-        .home
-        .pool()
-        .alloc(len)
-        .map_err(|error| match error {
-            block::Error::TooLarge { .. } => {
-                unreachable!(
-                    "invariant: no caller asks for more than the largest block"
-                )
-            }
-            block::Error::Exhausted { .. } | block::Error::Refused { .. } => {
-                Error::Pool(error)
-            }
-        })
+    state.borrow().alloc(len).map_err(Error::Pool)
 }
 
 /// How a session sends each frame, through its places. It keeps its buffers across

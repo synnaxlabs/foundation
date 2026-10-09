@@ -135,6 +135,20 @@ impl Reader {
         }
     }
 
+    /// Checks that the stream may end here, where the home finished it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unfinished`] inside a body, and [`Error::Finished`] at each other
+    /// point before `Behind`.
+    pub fn end(&self) -> Result<(), Error> {
+        match self.next {
+            Next::Ended => Ok(()),
+            Next::Body { remain, .. } => Err(Error::Unfinished { remain }),
+            Next::Opened | Next::Head | Next::Ends { .. } => Err(Error::Finished),
+        }
+    }
+
     fn reply<'m>(&self, message: &[u8]) -> Result<(FromHome<'m>, Next), Error> {
         if let Next::Ended = self.next {
             return Err(Error::Ended);
@@ -345,6 +359,28 @@ mod tests {
         for message in [vec![OPENED], vec![BEHIND], head(1), ends, vec![4], vec![]] {
             assert_eq!(reader.decode(&message).err(), Some(Error::Ended));
         }
+    }
+
+    #[test]
+    fn lets_the_stream_end_only_after_behind() {
+        let mut reader = Reader::new(&open(2));
+        assert_eq!(reader.end(), Err(Error::Finished));
+        reader.decode(&[OPENED]).expect("the session opens");
+        assert_eq!(reader.end(), Err(Error::Finished));
+        reader.decode(&head(2)).expect("the head decodes");
+        assert_eq!(reader.end(), Err(Error::Finished));
+        let ends = encode_ends(&[(0, 3), (1, 10)]);
+        let (first, second) = ends.split_at(ends::LEN);
+        reader.decode(first).expect("the ends decode");
+        assert_eq!(reader.end(), Err(Error::Finished));
+        reader.decode(second).expect("the ends decode");
+        assert_eq!(reader.end(), Err(Error::Unfinished { remain: 10 }));
+        reader.decode(&[7; 4]).expect("the body decodes");
+        assert_eq!(reader.end(), Err(Error::Unfinished { remain: 6 }));
+        reader.decode(&[7; 6]).expect("the body decodes");
+        assert_eq!(reader.end(), Err(Error::Finished));
+        reader.decode(&[BEHIND]).expect("the behind decodes");
+        assert_eq!(reader.end(), Ok(()));
     }
 
     #[test]

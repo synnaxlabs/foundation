@@ -2153,7 +2153,7 @@ mod hub {
                     node: types::node::Key::from_u128(1),
                     time,
                     entropy,
-                    mesh: None,
+                    region: None,
                 });
                 define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
                 let writer = writer(&hub, &monotonic, &["value"]).await;
@@ -3342,9 +3342,10 @@ mod port {
         }
 
         /// The hub reads the homes of the node's mesh, so a reader of a channel whose
-        /// index has its home at another node gets that home.
+        /// index has its home at another node dials that home. The address of
+        /// [`OTHER`] is this node's port, so the dial fails on its key.
         #[test]
-        fn a_reader_of_a_channel_whose_home_is_another_node_gets_the_home() {
+        fn a_reader_of_a_channel_whose_home_is_another_node_dials_the_home() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let mut founding = founded(&host);
@@ -3365,8 +3366,16 @@ mod port {
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
-            let remote = ::hub::reader::Error::Remote { home: OTHER.0 };
-            assert_eq!(opened.lock().unwrap().take(), Some(Some(remote)));
+            let peer = OTHER.1.public();
+            let unreachable = transport::Error::Unreachable {
+                peer,
+                attempts: vec![(
+                    Address::Udp(listen(&host)),
+                    transport::Error::Authentication { expected: peer },
+                )],
+            };
+            let error = ::hub::reader::Error::Transport(unreachable);
+            assert_eq!(opened.lock().unwrap().take(), Some(Some(error)));
         }
 
         /// The node with key [`OWN`] on `host`, the one member and voter of its region.
