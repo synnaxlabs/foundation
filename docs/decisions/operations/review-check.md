@@ -35,11 +35,11 @@
   (decided by the director at 2026-10-09T04:03:10Z,
   https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6074014717). In a
   round posted after the cutoff with no such heading, it is the first such heading in
-  the comment read with each line of each top-level HTML block that starts with `<`
-  after at most three spaces read as text, since GitHub reads some of these blocks as
-  text and can show a heading in them. The fields are the first top-level block after
-  it, and the end lines are the last one, each when it is a paragraph. A code block, an
-  HTML block, a list, a quote, or a table is not a
+  the comment read with each line of each HTML block that starts with `<` after its
+  indent read as text, since GitHub reads some of these blocks as text and can show a
+  heading in them. The fields are the first top-level block after it, and the end lines
+  are the last one, each when it is a paragraph. A code block, an HTML block, a list, a
+  quote, or a table is not a
   paragraph, so a list after the `Hot path:` line fails. A footnote with no reference
   is not shown, so its lines do not count, and of the footnotes of one label only the
   first is shown. The footnotes are the last blocks, as GitHub shows them. A round
