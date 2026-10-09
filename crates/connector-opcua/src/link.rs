@@ -5,8 +5,9 @@
 use env::rng::Rng;
 
 use crate::event::Loop;
+use crate::ffi::Bytes;
 use crate::ffi::Status;
-use crate::ffi::test::{self as ffi, Bytes};
+use crate::ffi::test as ffi;
 
 #[test]
 fn the_copy_names_a_status_code() {
@@ -393,6 +394,62 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
         .filter(|name| !OUTSIDE.contains(name))
         .collect();
     assert!(unlisted.is_empty(), "the C names {unlisted:?}");
+}
+
+/// The shim takes no value from the PCG32 generator of the copy, which OPEN62541
+/// SOURCE bars for each nonce, key, and session token of Foundation code.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs GNU nm")]
+fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
+    let shim: Vec<_> = std::fs::read_dir(env!("OUT_DIR"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.to_string_lossy().ends_with("-shim.o"))
+        .collect();
+    assert_eq!(shim.len(), 1, "{shim:?}");
+    let undefined = names(&shim, "--undefined-only");
+    assert!(
+        undefined.contains("UA_Client_newWithConfig"),
+        "{undefined:?}"
+    );
+    let drawn: Vec<_> = ["UA_UInt32_random", "UA_Guid_random"]
+        .into_iter()
+        .filter(|name| undefined.contains(*name))
+        .collect();
+    assert!(drawn.is_empty(), "the shim calls {drawn:?}");
+}
+
+/// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
+/// cannot bind or call one. The scan skips only the paths in `skipped`, which hold only
+/// tests.
+#[test]
+fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let skipped = ["src/link.rs", "src/event/tests.rs"].map(|path| root.join(path));
+    let mut dirs = vec![root.to_path_buf()];
+    let mut drawn = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if skipped.contains(&path) {
+                continue;
+            }
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if path.extension() != Some("rs".as_ref()) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            for draw in ["UA_UInt32_random", "UA_Guid_random"] {
+                if text.contains(draw) {
+                    drawn.push(format!("{}: {draw}", path.display()));
+                }
+            }
+        }
+    }
+    assert!(drawn.is_empty(), "the Rust names {drawn:?}");
 }
 
 /// `build.rs` sets `cfg(asan)` exactly when the address sanitizer instruments the C, so

@@ -303,6 +303,13 @@ state on `main`.
 
 - Each protocol parser reads bytes from a device. A connector reaches the core only
   through `hub`. Not built. Each parser gets a fuzz target when it lands.
+- `connector-opcua` decodes OPC UA with the C code of open62541. Fuzzed:
+  `connector_opcua_decode`. Its chunk processing is not fuzzed yet (#1990).
+- The random generator of the open62541 copy is PCG32, which a peer can predict. The
+  copy takes the nonces of the security policy None and the session token of its server
+  from it. OPEN62541 SOURCE bars it for each nonce, key, and session token of Foundation
+  code, and states what a security policy that encrypts, or an OPC UA server of
+  Foundation, changes first. Neither is built.
 
 ### Encoded series
 
@@ -396,6 +403,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
+| `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES` | No memory fault or leak; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. Until #435 is fixed, the encoding decodes with as many zeros after it as its length. Until #1912, the `fuzz` jobs build the C code with no coverage or AddressSanitizer flags. libFuzzer then sees no coverage of the C code. ASan checks the memory access of the C code only in calls to `memcpy` and the other libc functions that ASan intercepts. ASan still catches a crash, a leak, or a bad free. To check all of the C code, build it with `CC=clang CFLAGS="-fsanitize=fuzzer-no-link,address"` |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
@@ -416,7 +424,7 @@ not reached from the corpus: `transport::message` (#55), the QUIC hello
 #336 adds its target), `spec` tree chunks (#64), the scan of the mesh log files and the
 names of their directory (`mesh::log::scan` and `mesh::log::sequence`, #1746), the names
 in the directory of the spec in use (`mesh::driver::used::pointer`, #1746), each
-connector's protocol parser, the OPC UA binary decoding of open62541 (`UA_decodeBinary`,
-#1885), and `connector::reader::read`, `connector::http::uri`, and
+connector's protocol parser, the chunk processing of open62541 (`ua_securechannel.c`,
+#1990), and `connector::reader::read`, `connector::http::uri`, and
 `connector_influx::Kind::parse`, which `config_check` reaches only from an input with a
 `connector` block of kind `influx`, and no input holds one yet (#1817).

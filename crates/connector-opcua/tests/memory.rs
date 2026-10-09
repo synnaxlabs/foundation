@@ -23,7 +23,7 @@ struct Bytes {
 
 /// A `UA_NodeId` with a numeric identifier.
 #[repr(C, align(8))]
-struct NodeId {
+struct Key {
     namespace: u16,
     kind: u32,
     numeric: u32,
@@ -31,7 +31,7 @@ struct NodeId {
 }
 
 unsafe extern "C" {
-    fn UA_findDataType(id: *const NodeId) -> *const c_void;
+    fn UA_findDataType(key: *const Key) -> *const c_void;
     fn UA_ByteString_allocBuffer(bytes: *mut Bytes, length: usize) -> u32;
     fn UA_clear(value: *mut c_void, kind: *const c_void);
     fn connector_opcua_malloc(size: usize) -> *mut c_void;
@@ -46,18 +46,19 @@ fn main() {
     c_allocates_through_the_global_allocator();
     the_drop_frees_the_client_its_loop_and_its_timers();
     each_function_writes_the_size_into_the_header();
+    the_fuzz_round_trip_frees_each_value();
 }
 
 fn c_allocates_through_the_global_allocator() {
-    let id = NodeId {
+    let key = Key {
         namespace: 0,
         kind: 0,
         // The type ByteString.
         numeric: 15,
         rest: [0; 3],
     };
-    // SAFETY: `id` is a valid numeric node key.
-    let kind = unsafe { UA_findDataType(&raw const id) };
+    // SAFETY: `key` is a valid numeric node key.
+    let kind = unsafe { UA_findDataType(&raw const key) };
     assert!(!kind.is_null(), "the copy holds the type ByteString");
     let before = ALLOCATOR.held();
     let mut bytes = Bytes {
@@ -118,4 +119,14 @@ fn each_function_writes_the_size_into_the_header() {
     // SAFETY: `block` is live and from the allocator, and freed once.
     unsafe { connector_opcua_free(block) };
     assert_eq!(ALLOCATOR.held(), before, "free gave back what realloc held");
+}
+
+fn the_fuzz_round_trip_frees_each_value() {
+    // A `Variant` (23, as `ffi` is private) of 7 `ExtensionObject` values, then the
+    // zeros that #435 needs.
+    let mut data = vec![23, 0, 0x96, 7, 0, 0, 0];
+    data.resize(data.len() + 7 * 4, 0);
+    let before = ALLOCATOR.held();
+    connector_opcua::fuzz::decode(&data);
+    assert_eq!(ALLOCATOR.held(), before, "the round trip freed each block");
 }

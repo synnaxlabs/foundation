@@ -4,6 +4,12 @@ all_features = true
 
 # Mutants that no test can catch, each with the reason.
 exclude_re = [
+  # A type name shows only in a panic of `connector_opcua::fuzz::decode`, which a
+  # correct open62541 never gives. `fuzz::tests` checks the names.
+  'crates/connector-opcua/src/ffi\.rs:.*replace DataType::name -> &.static str with',
+  # A larger size only allocates more for a decoded value, and no count sees it.
+  # `fuzz::tests` checks the sizes.
+  'crates/connector-opcua/src/ffi\.rs:.*replace & with (\||\^) in DataType::size',
   # Benchmarks ship in no binary; the run itself checks them.
   '^bench/',
   # `main` reads the arguments and calls a task. Each task has its own tests.

@@ -9,6 +9,10 @@ use types::time::{Monotonic, Span};
 use super::Loop;
 use crate::ffi::{self, DelayedCallback, EventLoop, Status};
 
+unsafe extern "C" {
+    fn UA_UInt32_random() -> u32;
+}
+
 /// Ticks of 100 ns from 1601 to 1970, the epoch of `dateTime_now`.
 const UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
 
@@ -273,7 +277,7 @@ fn draws(seed: u64) -> [u32; 4] {
     let clock = sim.node(sim::node::Config::default()).clock();
     let _events = Loop::new(clock, &mut Rng::from_seed(seed));
     // SAFETY: it draws from the generator of this thread.
-    std::array::from_fn(|_| unsafe { ffi::test::UA_UInt32_random() })
+    std::array::from_fn(|_| unsafe { UA_UInt32_random() })
 }
 
 #[test]
