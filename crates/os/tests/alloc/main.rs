@@ -1,18 +1,22 @@
-//! A write and a read of one message over the loopback make no heap allocation after
-//! the first poll of each end, which registers the socket. This binary has no test
-//! harness: the count covers each thread, and a harness allocates on its own thread
-//! at any time.
+//! A write and a read of one message over the loopback, and a send and a receive of
+//! a UDP batch, make no heap allocation after the first poll of each end, which
+//! registers the socket. Nor does a write past the unsent bound, or one that waits
+//! for the bound. This binary has no test harness: the count covers each thread, and
+//! a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 use std::future::poll_fn;
-use std::io::IoSlice;
+use std::io::{IoSlice, IoSliceMut};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::sync::mpsc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use env::net::udp::{self, Meta, Receiver, Sender, Transmit};
 use env::net::{Error, Tcp, tcp};
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 
 #[global_allocator]
@@ -70,8 +74,39 @@ async fn read(tcp: &mut Tcp) -> u64 {
     allocations
 }
 
+/// Writes a block larger than the unsent bound until a write waits, then one write
+/// more, which the peer's reads let through, with the allocations the polls made.
+async fn write_past_the_bound(tcp: &mut Tcp, peer: &mut Tcp) -> u64 {
+    let block = vec![7; options().unsent_bytes_max * 2];
+    let parts = [IoSlice::new(&block)];
+    let mut buffer = vec![0; 1 << 20];
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    let (mut written, mut allocations) = (0, 0);
+    loop {
+        let (polled, made) = ALLOCATOR.count(|| tcp.poll_write(&mut cx, &parts));
+        allocations += made;
+        match polled {
+            Poll::Ready(sent) => written += sent.expect("the stream takes bytes"),
+            Poll::Pending => break,
+        }
+    }
+    assert!(written > 0, "a write takes bytes before it waits");
+    let polls = ready(|cx| {
+        let polled = tcp.poll_write(cx, &parts);
+        if polled.is_pending() {
+            while let Poll::Ready(Ok(1..)) = peer.poll_read(cx, &mut buffer) {}
+        }
+        polled
+    });
+    let (sent, made) = timeout(BOUND, polls)
+        .await
+        .expect("the peer's reads free the bound");
+    assert!(matches!(sent, Ok(1..)), "{sent:?}");
+    allocations + made
+}
+
 /// The allocations of a write and a read on each end, after the first poll of each.
-async fn count() -> [u64; 4] {
+async fn count() -> [u64; 5] {
     let net = os::net();
     let local = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0);
     let listen = tcp::Listen {
@@ -95,18 +130,87 @@ async fn count() -> [u64; 4] {
         read(&mut server).await,
         write(&mut server).await,
         read(&mut client).await,
+        write_past_the_bound(&mut client, &mut server).await,
+    ]
+}
+
+/// Sends `MESSAGE` to `receiver` as a batch of two datagrams, or one where the OS
+/// has no GSO, with the allocations the polls made.
+async fn send(sender: &mut Sender, receiver: &Receiver) -> u64 {
+    let datagrams = sender.batch_max().get().min(2);
+    let transmit = Transmit {
+        destination: receiver.local(),
+        source: None,
+        ecn: None,
+        contents: MESSAGE,
+        segment: NonZeroUsize::new(MESSAGE.len().div_ceil(datagrams)),
+    };
+    let (sent, allocations) =
+        timeout(BOUND, ready(|cx| sender.poll_send(cx, &transmit)))
+            .await
+            .expect("the send buffer takes one batch in the bound");
+    assert_eq!(sent, Ok(()), "the batch goes out");
+    allocations
+}
+
+/// Receives the batch of `send`, with the allocations the polls made.
+async fn receive(receiver: &mut Receiver) -> u64 {
+    let mut buffers = [[0; 64]; 2];
+    let [first, second] = &mut buffers;
+    let mut slices = [IoSliceMut::new(first), IoSliceMut::new(second)];
+    let mut meta = [Meta::default(); 2];
+    let mut bytes = 0;
+    let mut allocations = 0;
+    while bytes < MESSAGE.len() {
+        let polls = ready(|cx| receiver.poll_recv(cx, &mut slices, &mut meta));
+        let (batches, made) = timeout(BOUND, polls)
+            .await
+            .expect("the loopback delivers the batch in the bound");
+        let batches = batches.expect("the receive succeeds");
+        bytes += meta[..batches].iter().map(|m| m.len).sum::<usize>();
+        allocations += made;
+    }
+    assert_eq!(bytes, MESSAGE.len(), "the batch arrives whole");
+    allocations
+}
+
+/// The allocations of a UDP send and receive, after the first poll of each half.
+async fn count_udp() -> [u64; 2] {
+    let config = udp::Config {
+        local: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+        send_buffer_bytes: 1 << 16,
+        recv_buffer_bytes: 1 << 16,
+    };
+    let net = os::net();
+    let (mut sender, mut receiver) =
+        net.udp(&config).expect("the loopback has a free port");
+    send(&mut sender, &receiver).await;
+    receive(&mut receiver).await;
+    [
+        send(&mut sender, &receiver).await,
+        receive(&mut receiver).await,
     ]
 }
 
 fn main() {
     let (sent, received) = mpsc::channel();
+    // `start` allocates on this thread after the body starts, so the body counts only
+    // after `start` returns.
+    let (started, begin) = oneshot::channel();
     let handle = os::threads()
         .expect("the OS gives the cores of this process")
         .start("net-alloc", move || async move {
-            sent.send(count().await).expect("main waits for the counts");
+            begin.await.expect("main sends after `start` returns");
+            let counts = (count().await, count_udp().await);
+            sent.send(counts).expect("main waits for the counts");
         })
         .expect("the thread starts");
+    started
+        .send(())
+        .expect("the body waits for `start` to return");
     assert_eq!(handle.join(), Ok(()), "the thread ends with no panic");
     let counts = received.try_recv().expect("the thread sent its counts");
-    assert_eq!(counts, [0; 4], "a poll after the first allocates nothing");
+    let (tcp, udp) = counts;
+    assert_eq!(tcp, [0; 5], "a TCP poll after the first allocates nothing");
+    assert_eq!(udp, [0; 2], "a UDP poll after the first allocates nothing");
 }

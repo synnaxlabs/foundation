@@ -50,7 +50,8 @@ pub(crate) enum Change {
         /// The voters whose durable put of the chunks the proposer counted, at most
         /// [`HOLDERS_MAX`].
         holders: BTreeSet<node::Key>,
-        /// The home of each index that the change adds, at most [`HOMES_MAX`].
+        /// The home of each index that had no home in the proposer's state, at most
+        /// [`HOMES_MAX`]. At the apply, an index with a home keeps it.
         homes: BTreeMap<channel::Key, node::Key>,
     },
 }

@@ -49,21 +49,29 @@
   https://github.com/synnaxlabs/foundation/pull/1913#issuecomment-6063975359). This
   supersedes the `mesh::Pointer` of
   https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836.
-  `Mesh::open` runs no check of the founding definitions: the founding is agreed region
-  state, and a check at each open stops a node on a later build whose checks find more
+  `Mesh::open` refuses no founding definitions: the founding is agreed region state,
+  and a refusal at each open stops a node on a later build whose checks find more
   problems. The node that founds the region checks the founding with the `spec`
   function of #1841, and does not found a region whose founding has problems (#1744).
   A founding with problems at a later build follows the rule of a committed spec with
-  problems (#1741). `Hub::define` panics on two channels of one key, or a data channel
-  whose index is not an index of its input: a defect of its caller. `node` runs
-  `spec::region::check` on each spec before it defines it: the founding once it is
-  region state (#1744, #336), and each committed change (#1957). A spec with problems
-  follows #1741: the node defines none of it and keeps the spec it uses, which is
-  empty for a founding with problems. So no spec from disk or a peer makes an open
-  panic. `Config::region` keeps its panic (NODE PORT) until the first PR that adds the
-  check (#1744 or #1957 PR 2), and the check then covers it too.
-  Decided by `laptop.architect`: chunks through `blob` and no BQ12 check,
-  2026-10-07T06:42:23Z
+  problems (#1741). No refusal of the founding at open decided by `laptop.architect`,
+  2026-10-08T15:42:09Z
+  (https://github.com/synnaxlabs/foundation/pull/1897#issuecomment-6063561498), which
+  changes "runs no check of `Config::founding`" in
+  https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151.
+  `Hub::define` into a new hub, and `Hub::set_definitions` of #2020, panic only when
+  two channels have one key or one name, or the index of a data channel is not an
+  index of the input. No spec holds two channels of one name, and
+  `spec::region::check` refuses the other two cases. Each panic is a defect of the
+  caller. `node` runs `spec::region::check` on each spec before it gives it to the
+  hub: the founding once it is region state (#1744, #336), and each committed change,
+  with `set_definitions` (#1957 PR 2). A spec with problems follows #1741: the node
+  gives the hub none of it and keeps the spec it uses, which is empty for a founding
+  with problems. So no spec from disk or a peer makes an open panic. `Config::region`
+  keeps its panic (NODE PORT) until the first PR that adds the check (#1744 or #1957
+  PR 2). That PR runs the check on `Config::region` too, and its doc then says that a
+  founding with problems defines no channel. Decided by `laptop.architect`: chunks
+  through `blob` and no BQ12 check, 2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
   with problems, 2026-10-07T07:03:20Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032786065); the
@@ -71,8 +79,10 @@
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6053614771); the
   kind, its byte form, the version from the base, `CHUNKS_MAX`, `Refused::Stale`, and
   the move of `Pointer` to a layer 1 crate, 2026-10-08T08:22:08Z
-  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); no
-  check of the founding at open, 2026-10-08T08:41:43Z
+  (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836); the
+  founding as agreed region state, and that a check at each open stops a node on a later
+  build whose checks find more problems, the check of the founding by the node that
+  founds the region, and a founding with problems at a later build, 2026-10-08T08:41:43Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056116151); the
   bound of an `Append` in bytes, 2026-10-08T08:44:55Z
   (https://github.com/synnaxlabs/foundation/pull/1840#issuecomment-6056167437), with
@@ -85,4 +95,10 @@
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643).
   The panic of `Hub::define` and the check before it, agreed with
   `laptop.architect-2`, 2026-10-08T20:08:50Z
-  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791).
+  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791), with
+  the check of `Config::region` by `laptop.architect-2`, 2026-10-08T20:08:26Z
+  (https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068123507). This
+  changes item 1 of 6068129791, which left out the panic of `define` on a known key or
+  name (HUB SESSIONS). `set_definitions` has no such panic (`laptop.architect`,
+  2026-10-08T22:09:38Z,
+  https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6070012949).

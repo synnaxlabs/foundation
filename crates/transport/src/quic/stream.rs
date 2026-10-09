@@ -736,6 +736,11 @@ impl Budget {
         }
     }
 
+    /// The claims that queued for room since this budget was made.
+    fn queued(&self) -> u64 {
+        self.tickets.iter().sum()
+    }
+
     /// Whether a claim of `class` holds room, taken or not.
     fn holds(&self, class: Class) -> bool {
         self.held[class.rank()] + self.given[class.rank()] > 0
@@ -1087,6 +1092,11 @@ impl Sending {
 }
 
 impl Streams {
+    /// The messages that waited for room in the send budget.
+    pub(super) fn budget_waits(&self) -> u64 {
+        self.sending.budget.queued()
+    }
+
     /// The streams of a connection that refuses a message over `bytes_max`, with a
     /// window of `window_bytes`.
     pub(super) fn new(window_bytes: usize, bytes_max: usize) -> Self {
@@ -2823,6 +2833,7 @@ mod tests {
         assert!(budget.charge(stream(1), 2, &mut b, Order::RANK));
         assert!(budget.charge(stream(2), 7, &mut c, Order::RANK));
         assert!(!budget.charge(stream(3), 5, &mut d, Order::RANK));
+        assert_eq!(budget.queued(), 2);
         assert_eq!(release(&mut budget, &mut b, Order::RANK), []);
         let woken = release(&mut budget, &mut c, Order::RANK);
         assert_eq!(woken, [stream(3)]);
@@ -2844,6 +2855,7 @@ mod tests {
         for (index, claim) in (1..).zip(rest) {
             assert!(!budget.charge(stream(index), 3, claim, Order::RANK));
         }
+        assert_eq!(budget.queued(), 4);
         let woken = release(&mut budget, a, Order::RANK);
         assert_eq!(woken, [stream(2), stream(4), stream(3)]);
     }
@@ -2858,6 +2870,7 @@ mod tests {
         assert!(!budget.charge(stream(2), 5, &mut large, Order::RANK));
         assert!(!budget.charge(stream(3), 1, &mut small, Order::RANK));
         assert!(!budget.charge(stream(4), 1, &mut catch_up, Order::RANK));
+        assert_eq!(budget.queued(), 3);
         assert_eq!(release(&mut budget, &mut second, Order::RANK), []);
         let woken = release(&mut budget, &mut first, Order::RANK);
         assert_eq!(woken, [stream(2), stream(3), stream(4)]);
@@ -3208,6 +3221,45 @@ mod tests {
                     read.iter().filter(|&&(at, _)| at == id).cloned().collect();
                 assert_eq!(at, [(id, expected)]);
             }
+        });
+    }
+
+    #[test]
+    fn each_message_that_waits_for_send_budget_room_counts_once() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut first = open_sender(&mut pair, Class::Complete);
+            fill(&mut pair, shard, &mut first);
+            let waited = pair.client.endpoint.budget_waits();
+            let second = open_sender(&mut pair, Class::Complete);
+            let third = open_sender(&mut pair, Class::Complete);
+            let fourth = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            // The second takes room at once, and the third and fourth wait for it.
+            let messages = [
+                (&second, vec![0xb; 100]),
+                (&third, vec![0xc; MESSAGE_MAX]),
+                (&fourth, vec![0xd]),
+            ];
+            for (sender, message) in messages {
+                let message = shard.block(&message);
+                let written = pair::write(
+                    &mut pair.client.endpoint,
+                    now,
+                    sender,
+                    &mut Some(message),
+                );
+                assert_eq!(written, Ok(Poll::Pending));
+            }
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 2);
+            let mut senders = [first, second, third, fourth];
+            exchange(&mut pair, &mut senders, 10 * RUN);
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 2);
+            let (now, key) = (pair.now(), key(&pair.client));
+            pair.client.endpoint.close(now, key, Code(1));
+            pair.run(10 * RUN);
+            assert!(pair.client.endpoint.drained());
+            assert_eq!(pair.client.endpoint.budget_waits(), waited + 2);
         });
     }
 

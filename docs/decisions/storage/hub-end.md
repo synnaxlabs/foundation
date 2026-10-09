@@ -23,3 +23,12 @@
   `tasks.spawn`, which gives no way to drop it. Decided by the architect
   (2026-10-07T21:34:19Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641).
+  Changed by HUB LINK (#1946): `Hub::serve` is gone. A `Link`, the future of
+  `Link::serve`, and a `Reply` each hold the hub's state, so this entry counts each as
+  a session of the hub. `node` drops each where `keep` drops the future, before it
+  awaits the commit, and never runs a future of `Link::serve` with `tasks.spawn`.
+  Decided by `laptop.architect` (2026-10-08T18:16:38Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520).
+  The state holds a clone of the region's mesh when the hub has one. Decided by
+  `laptop.architect` (2026-10-08T18:42:42Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536).
