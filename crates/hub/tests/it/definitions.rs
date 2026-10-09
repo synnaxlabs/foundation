@@ -239,23 +239,24 @@ fn ends_the_sessions_of_a_data_channel_whose_quality_channel_changes() {
     });
 }
 
-/// An index whose `error` or `control` edge is `to`, and whose other edge is none.
-fn index_with(error: bool, to: u128) -> Definition {
-    let to = Some(Key::from_u128(to));
-    let (error, control) = if error { (to, None) } else { (None, to) };
+/// The index `time` with the edges `error` and `control`.
+fn index_with(error: Option<u128>, control: Option<u128>) -> Definition {
     Definition::Channel(Channel {
         key: Key::from_u128(1),
-        kind: Kind::Index { error, control },
+        kind: Kind::Index {
+            error: error.map(Key::from_u128),
+            control: control.map(Key::from_u128),
+        },
     })
 }
 
 #[test]
 fn ends_the_sessions_of_an_index_whose_error_or_control_edge_changes() {
-    for (seed, error) in [(48, false), (50, true)] {
-        run(seed, move |test| async move {
+    for (n, error, control) in [(48, None, Some(5)), (50, Some(5), None)] {
+        run(n, move |test| async move {
             let mut reader = test.reader(&["time"], Mode::Latest).await;
             let mut changed = channels();
-            changed.insert(name("time"), index_with(error, 5));
+            changed.insert(name("time"), index_with(error, control));
             test.hub.set_definitions(&changed);
             let ended = reader.next().await.expect_err("the reader ended");
             assert_eq!(ended, Ended::Removed(Key::from_u128(1)));
