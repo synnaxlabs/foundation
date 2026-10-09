@@ -419,6 +419,28 @@ fn continues_the_seq_of_an_index_that_was_a_data_channel_between() {
     });
 }
 
+/// An index that becomes a data channel at its key and then an index again gives a
+/// latest reader no newest frame from before it changed.
+#[test]
+fn gives_a_latest_reader_no_frame_of_an_index_that_was_a_data_channel_between() {
+    run(46, |test| async move {
+        let mut writer = test.writer("a", &["value-b"]).await;
+        let now = test.now();
+        write_series(&mut writer, &[(3, &[now]), (4, &[10])]);
+        drop(writer);
+        let mut data = without(&["time-b", "value-b"]);
+        data.insert(name("time-b"), definition(3, DataType::Sample(I64), 1));
+        test.hub.set_definitions(&data);
+        test.hub.set_definitions(&channels());
+        let mut reader = test.reader(&["value-b"], Mode::Latest).await;
+        let (polled, _) = poll_flagged(pin!(reader.next()));
+        assert!(
+            polled.is_pending(),
+            "the changed index left no newest frame"
+        );
+    });
+}
+
 /// The seq of a write on `value-b` after a restart, where the first call of the new
 /// hub defines `time-b` as a data channel when `data`, before the index again.
 fn seq_after_restart(seed: u64, data: bool) -> u64 {
