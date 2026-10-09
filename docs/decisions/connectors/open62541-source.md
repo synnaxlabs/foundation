@@ -213,4 +213,5 @@
   their adds and a simulation with such timers replays; open62541 ranks them by heap
   address. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6073878926,
-  2026-10-09 03:49 UTC).
+  2026-10-09 03:49 UTC). The batch search of the copy goes in the order of the tree,
+  so whether a current-time timer batches does not depend on addresses (#2106).
