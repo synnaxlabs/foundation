@@ -85,8 +85,6 @@ enum State {
     Sized { len: usize },
     /// A message of `len` bytes, over the limit.
     Over { len: u64 },
-    /// A message that the stream's end cut short.
-    Cut,
     /// A message of `len` bytes that has room, with `have` of its bytes in `buffer`
     /// and the reader's chunks. A chunk of the source can keep its whole receive
     /// buffer alive, so a chunk lives only inside the read that took it, and
@@ -146,11 +144,11 @@ impl Reader {
     /// when it has none now, or `None` when the stream has ended. The reader never
     /// asks for a byte past the current message, so later messages stay with the
     /// source. No chunk from `source` outlives the call, except those of the whole
-    /// message that [`Step::Block`] gives.
+    /// message that [`Step::Block`] gives, and, after an error, those of the message
+    /// until the caller clears it.
     ///
-    /// After an error inside a message's body, the reader holds no bytes of the
-    /// message. After any other error, it holds at most the 8 bytes of a length
-    /// prefix. After the framing breaks, each later read gives its error again.
+    /// After an error, the reader can hold bytes of the message; the caller clears it
+    /// with [`Reader::clear`].
     ///
     /// # Errors
     ///
@@ -192,30 +190,21 @@ impl Reader {
                     });
                 }
                 State::Body { len, have, buffer } if *have < *len => {
-                    let error = match next(&mut source, len.saturating_sub(*have)) {
-                        Ok(Poll::Pending) => {
+                    match next(&mut source, len.saturating_sub(*have))? {
+                        Poll::Pending => {
                             spill(buffer, &mut self.chunks, *len);
                             return Ok(Step::Pending);
                         }
-                        Ok(Poll::Ready(Some(chunk))) => {
+                        Poll::Ready(Some(chunk)) => {
                             *have = have.saturating_add(chunk.len());
                             if self.chunks.len() == CHUNKS_MAX {
                                 spill(buffer, &mut self.chunks, *len);
                             }
                             self.chunks.push(chunk);
-                            continue;
                         }
-                        Ok(Poll::Ready(None)) => {
-                            self.state = State::Cut;
-                            self.chunks.clear();
-                            return Err(ended());
-                        }
-                        Err(error) => error,
-                    };
-                    self.clear();
-                    return Err(error);
+                        Poll::Ready(None) => return Err(ended()),
+                    }
                 }
-                State::Cut => return Err(ended()),
                 State::Body { len, .. } => return Ok(Step::Block(*len)),
             }
         }
@@ -289,9 +278,7 @@ impl Reader {
         matches!(&self.state, State::Body { len, have, .. } if have == len)
     }
 
-    /// Drops the message in hand, so that the reader holds no bytes of it. For a
-    /// stream that ended outside [`Reader::read`], as by a reset that `source` did
-    /// not give.
+    /// Drops the message in hand. The caller calls it after each error of a read.
     pub(crate) fn clear(&mut self) {
         self.state = START;
         self.chunks.clear();
@@ -797,7 +784,8 @@ mod tests {
         }
 
         #[test]
-        fn when_source_fails_inside_a_message_it_gives_the_error_and_drops_its_bytes() {
+        fn when_source_fails_inside_a_message_it_gives_the_error_and_a_clear_drops_it()
+        {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(1_000);
             let part = encode(&[vec![9; 100]]).into_iter().take(10).collect();
@@ -823,6 +811,7 @@ mod tests {
                     code: crate::Code(16)
                 })
             );
+            reader.clear();
             assert_eq!(reader.buffer().capacity(), 0);
             let mut next = Source::new(encode(&[vec![5; 20]]), 64);
             let next = super::read(&mut reader, &pool, &mut next);
@@ -830,7 +819,7 @@ mod tests {
         }
 
         #[test]
-        fn when_source_fails_after_chunks_in_one_read_it_keeps_no_chunk() {
+        fn when_source_fails_after_chunks_in_one_read_a_clear_keeps_no_chunk() {
             let pool = pool(1 << 16);
             let mut reader = Reader::new(1_000);
             let batch = Bytes::from(encode(&[vec![9; 100]]));
@@ -853,7 +842,8 @@ mod tests {
                     code: crate::Code(16)
                 })
             );
-            assert!(batch.is_unique(), "a chunk outlives the read");
+            reader.clear();
+            assert!(batch.is_unique(), "a chunk outlives the clear");
             let mut next = Source::new(encode(&[vec![5; 20]]), 64);
             let next = super::read(&mut reader, &pool, &mut next);
             assert_eq!(next, Ok(Poll::Ready(Some(vec![5; 20]))));
@@ -1124,7 +1114,7 @@ mod tests {
         }
 
         #[test]
-        fn when_stream_ends_inside_a_message_it_fails_and_keeps_no_byte() {
+        fn when_stream_ends_inside_a_message_it_fails_and_a_clear_keeps_no_byte() {
             let pool = pool(1 << 16);
             let batch = Bytes::from(encode(&[vec![3; 1_000]]));
             let end = 2 + 100;
@@ -1143,60 +1133,13 @@ mod tests {
                     reason: "the stream ended inside a message".to_owned()
                 })
             );
-            assert!(batch.is_unique(), "a chunk outlives the read");
+            reader.clear();
+            assert!(batch.is_unique(), "a chunk outlives the clear");
             // Private: only a peer that misframes ends a stream inside a message, and
             // no heap count is exact in a binary with a test harness.
             assert_eq!(reader.buffer().capacity(), 0);
             let slots = reader.chunks.capacity();
             assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
-        }
-
-        #[test]
-        fn after_the_stream_ends_inside_a_message_each_read_fails() {
-            let mut source = Source::new(vec![0x05, 1, 2], 64);
-            let mut reader = Reader::new(16);
-            let ended = Err(Error::Broken {
-                reason: "the stream ended inside a message".to_owned(),
-            });
-            assert_eq!(reader.read(|max| Ok(source.take(max))), Ok(Step::Room(5)));
-            reader.admit();
-            assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
-            assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
-            // Private: no heap count is exact in a binary with a test harness.
-            assert_eq!(reader.held(), (None, 0));
-        }
-
-        #[test]
-        fn after_the_stream_ends_inside_a_prefix_each_read_fails() {
-            let mut source = Source::new(vec![0x40], 64);
-            let mut reader = Reader::new(16);
-            let ended = Err(Error::Broken {
-                reason: "the stream ended inside a message".to_owned(),
-            });
-            assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
-            assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
-        }
-
-        #[test]
-        fn after_the_stream_ends_inside_a_buffered_message_it_holds_no_bytes() {
-            let mut source = Source::new(vec![0x05, 1], 64);
-            source.open = true;
-            let mut reader = Reader::new(16);
-            let ended = Err(Error::Broken {
-                reason: "the stream ended inside a message".to_owned(),
-            });
-            assert_eq!(reader.read(|max| Ok(source.take(max))), Ok(Step::Room(5)));
-            reader.admit();
-            assert_eq!(reader.read(|max| Ok(source.take(max))), Ok(Step::Pending));
-            // Private: no heap count is exact in a binary with a test harness.
-            assert_eq!(reader.held(), (Some((1, 5)), 0));
-            source.open = false;
-            assert_eq!(reader.read(|max| Ok(source.take(max))), ended);
-            assert_eq!(reader.held(), (None, 0));
-            assert_eq!(
-                reader.read(|_| panic!("a cut message asks for no bytes")),
-                ended
-            );
         }
 
         #[test]
