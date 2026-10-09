@@ -418,9 +418,8 @@ async fn wait(
 }
 
 /// Waits until the mesh names this node the home of `index`, and reads the peer
-/// meanwhile. Gives the
-/// highest grant that the peer sent, 0 for none, or `None` when the peer finished
-/// first.
+/// meanwhile. Gives the highest grant that the peer sent, 0 for none, or `None` when
+/// the peer finished first.
 async fn wait_for(
     state: &Rc<RefCell<State>>,
     index: channel::Key,

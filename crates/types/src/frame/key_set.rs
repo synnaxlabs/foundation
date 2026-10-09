@@ -130,7 +130,7 @@ impl Interner {
     /// # Panics
     ///
     /// If a channel appears twice: the `hub` builds groups from the spec, so that is a
-    /// bug. Also if the slot table already holds 2^32 channels, or the node already
+    /// bug. Also if the slot table already assigned 2^32 slots, or the node already
     /// holds 2^32 key sets.
     pub fn intern(&mut self, groups: &[Group<'_>]) -> Arc<KeySet> {
         let stamp = Type::Scalar(Scalar::Stamp);
