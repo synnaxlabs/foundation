@@ -266,16 +266,19 @@
   2026-10-09 18:21 UTC).
   A server listens on the listener that its owner gives the manager at `new`. Each
   accepted stream is a new connection that gets `ESTABLISHED`, with the context of the
-  listen connection at the accept. An accept error closes the listen connection with a
-  warning, also an error of one stream after which the listener stays usable, because
-  `env` gives both as `Error::Io`. This holds only while the one server is the test
-  server: before a server serves users, the manager must keep listening after an error
-  of one stream. Lost: the manager binds its own listener with `Net::listen` from the
-  parameters. `address` is a host name and `Net::listen` takes a socket address, so the
-  open would resolve in a hook that must give `ESTABLISHED` before it returns, and an
-  owner that binds port 0 could not learn the port before it builds the URL of its
-  server. Also lost: a second constructor `Manager::listening`, two constructors that
-  differ in one value; the `Option` keeps one path, and a client gives `None`. Decided
-  by `laptop.architect-2`
+  listen connection at the accept. As the POSIX manager does, the first `ESTABLISHED` of
+  the listen gives `listen-address` and `listen-port`, from which the server makes its
+  discovery URL, and that of an accepted connection gives `remote-address`. A listen on
+  each address gives neither, since it names no host. An accept error closes the listen
+  connection with a warning, also an error of one stream after which the listener stays
+  usable, because `env` gives both as `Error::Io`. This holds only while the one server
+  is the test server: before a server serves users, the manager must keep listening
+  after an error of one stream. Lost: the manager binds its own listener with
+  `Net::listen` from the parameters. `address` is a host name and `Net::listen` takes a
+  socket address, so the open would resolve in a hook that must give `ESTABLISHED`
+  before it returns, and an owner that binds port 0 could not learn the port before it
+  builds the URL of its server. Also lost: a second constructor `Manager::listening`,
+  two constructors that differ in one value; the `Option` keeps one path, and a client
+  gives `None`. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286,
   2026-10-09 20:26 UTC).
