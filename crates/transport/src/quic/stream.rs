@@ -7695,29 +7695,45 @@ mod tests {
         }
 
         #[test]
-        fn a_cancelled_latest_that_sent_nothing_makes_complete_alone_owe_nothing() {
+        fn after_a_cancelled_latest_that_sent_nothing_both_share_from_the_start() {
             testing::run(1, |shard| {
                 let mut pair = narrow(shard);
                 let (mut receivers, mut read) = (Vec::new(), [0; 4]);
                 let mut catch_up = open_sender(&mut pair, Class::CatchUp);
                 fill(&mut pair, shard, &mut catch_up);
-                let latest = open_sender(&mut pair, Class::Latest);
+                let cancelled = open_sender(&mut pair, Class::Latest);
                 let now = pair.now();
                 let message = shard.block(&[1; 1000]);
                 let written = pair::write(
                     &mut pair.client.endpoint,
                     now,
-                    &latest,
+                    &cancelled,
                     &mut Some(message),
                 );
                 assert_eq!(written, Ok(Poll::Pending));
-                pair.client.endpoint.cancel(now, &latest);
+                pair.client.endpoint.cancel(now, &cancelled);
                 for _ in 0..4 {
                     flush(&mut pair, &mut receivers, &mut read, &[&catch_up]);
                 }
                 let mut complete = open_sender(&mut pair, Class::Complete);
                 fill(&mut pair, shard, &mut complete);
-                assert_eq!(owed(&mut pair), 0);
+                for _ in 0..4 {
+                    flush(&mut pair, &mut receivers, &mut read, &[&complete]);
+                }
+                let before = read;
+                let mut latest = open_sender(&mut pair, Class::Latest);
+                let small = shard.block(&[2; 1000]);
+                for _ in 0..2000 {
+                    pair.run(STEP);
+                    refill(&mut pair, &mut latest, &small);
+                    refill(&mut pair, &mut complete, &small);
+                    take(&mut pair, &mut receivers, &mut read);
+                }
+                let [_, latest, complete, _] =
+                    [0, 1, 2, 3].map(|rank| read[rank] - before[rank]);
+                let ahead =
+                    latest.cast_signed() - ((latest + complete) / 4).cast_signed();
+                assert!(ahead <= 1000, "{ahead}: {latest} of `Latest`, {complete}");
             });
         }
 
@@ -7761,15 +7777,7 @@ mod tests {
                 Class::Latest => latest.cast_signed() - (total / 4).cast_signed(),
                 _ => complete.cast_signed() - (3 * total / 4).cast_signed(),
             };
-            let key = key(&pair.client);
-            let connection =
-                crate::quic::find(&mut pair.client.endpoint.connections, key);
-            let window = connection
-                .expect("a connection")
-                .streams
-                .sending
-                .share
-                .window;
+            let window = shard.config(pair::SERVER_KEY, Span::SECOND).window_bytes;
             (ahead, window)
         }
 
@@ -7796,6 +7804,8 @@ mod tests {
         {
             testing::run(1, |shard| {
                 let (paused, ahead) = ahead_after_a_pause(shard, 1);
+                let bound = NARROW + MESSAGE_MAX / 4;
+                assert!(ahead > bound, "{ahead} of {bound}");
                 let credit = usize::try_from(paused).expect("`Complete` is owed");
                 assert!(credit > NARROW, "{credit} of {NARROW}");
                 assert!(ahead >= credit, "{ahead} of {credit}");
@@ -7803,7 +7813,7 @@ mod tests {
         }
 
         /// How many `Latest` bytes noq-proto may still take before `Complete`
-        /// stops competing.
+        /// stops competing. No read count shows this, so it reads the share.
         fn complete_memory(pair: &mut Pair) -> usize {
             let key = key(&pair.client);
             let connection =
