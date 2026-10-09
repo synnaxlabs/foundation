@@ -590,21 +590,20 @@ mod tests {
         assert_eq!(read, Ok(Some(b"b".to_vec())));
     }
 
-    /// Polls `opened` until it gives a stream, and fails once it waits past
-    /// [`FREE_WAIT`] after `freed`.
-    async fn open_within(
+    /// Polls `future` until it is ready, and fails once it waits past [`FREE_WAIT`]
+    /// after `freed`.
+    async fn within<T>(
         side: &testing::Side,
-        mut opened: Pin<
-            &mut impl Future<Output = Result<(stream::Sender, stream::Receiver), Error>>,
-        >,
+        mut future: Pin<&mut impl Future<Output = T>>,
         freed: Monotonic,
-    ) -> stream::Sender {
+    ) -> T {
         loop {
-            if let Some(opened) = poll_once(opened.as_mut()).await {
-                return opened.expect("a stream").0;
-            }
+            let polled = poll_once(future.as_mut()).await;
             let waited = side.node.clock().now() - freed;
             assert!(waited <= FREE_WAIT, "the open waited {waited:?}");
+            if let Some(output) = polled {
+                return output;
+            }
             side.node.clock().sleep(spans(Span::MILLISECOND, 1)).await;
         }
     }
@@ -640,7 +639,8 @@ mod tests {
                 }
                 let freed = side.node.clock().now();
                 drop((sender, receiver));
-                let mut sender = open_within(&side, opened, freed).await;
+                let mut sender =
+                    within(&side, opened, freed).await.expect("a stream").0;
                 sender.send(side.block(b"b")).await.expect("sent");
                 side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
             },
@@ -698,9 +698,7 @@ mod tests {
                 // The node frees the stream at the drop: it never read the reset.
                 let freed = side.node.clock().now();
                 drop(first);
-                accept_last(&side).await;
-                let waited = side.node.clock().now() - freed;
-                assert!(waited <= FREE_WAIT, "the open waited {waited:?}");
+                within(&side, pin!(accept_last(&side)), freed).await;
             },
         );
         assert_eq!(sim.run(), Ok(()));
@@ -725,7 +723,8 @@ mod tests {
                 sender.finish().expect("finished");
                 let freed = side.node.clock().now();
                 drop((sender, receiver));
-                let mut sender = open_within(&side, opened, freed).await;
+                let mut sender =
+                    within(&side, opened, freed).await.expect("a stream").0;
                 sender.send(side.block(b"b")).await.expect("sent");
                 unsent.send(side.block(b"b")).await.expect("sent");
                 side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
