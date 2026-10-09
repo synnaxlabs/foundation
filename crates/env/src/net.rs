@@ -247,6 +247,9 @@ impl Tcp {
     /// bytes written, which may be less than all. It is ready when the bytes not yet
     /// sent are fewer than [`tcp::Options::unsent_bytes_max`].
     ///
+    /// A write of no bytes gives `Ok(0)` at once, also after a reset or
+    /// [`Tcp::poll_close`].
+    ///
     /// # Errors
     ///
     /// [`Error::Reset`] when the peer reset the stream, also after this end's
@@ -505,6 +508,7 @@ pub trait Driver: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::task::Waker;
 
     use super::*;
@@ -600,7 +604,7 @@ mod tests {
         tcp::Options {
             send_buffer_bytes: 1 << 20,
             recv_buffer_bytes: 1 << 20,
-            unsent_bytes_max: 1 << 14,
+            unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
             delayed: false,
         }
     }

@@ -1,6 +1,18 @@
 //! Implements the `env` seams on the real operating system: monotonic and wall clocks,
 //! files, randomness, and threads, and the memory of block pools. The only crate
 //! allowed to call them.
+//!
+//! # Panics in shards and threads
+//!
+//! A panic ends its shard or dedicated thread only where panics unwind, as in tests. A
+//! release build aborts the process at a panic. As anywhere in Rust, a panic that
+//! unwinds into the unwind of another panic aborts the process. Tokio catches a panic
+//! in the poll or the drop of a task that code spawns with `tokio::spawn`, or on a
+//! shard with `tokio::task::spawn_local`, not through [`env::tasks::Tasks`], and the
+//! shard or thread runs on. Tokio drops such a task during the unwind of a panic in its
+//! poll, so a panic that unwinds out of that drop aborts the process. A panic in the
+//! drop of the payload of a panic can escape Tokio's catches and end the shard or
+//! thread.
 
 use std::fmt;
 use std::path::Path;
@@ -81,8 +93,8 @@ pub fn entropy() -> env::entropy::Entropy {
 /// core `i` of [`env::shards::Config::core`] pins to the `i`-th CPU of the set. Only
 /// Linux can pin: elsewhere [`env::shards::Shards::pinnable`] is `false`.
 ///
-/// A panic ends the shard only where panics unwind, as in tests. A release build
-/// aborts the process at a panic.
+/// A panic ends a shard as the crate doc states
+/// ([panics](crate#panics-in-shards-and-threads)).
 ///
 /// # Errors
 ///
@@ -97,9 +109,9 @@ pub fn shards() -> Result<env::shards::Shards, Error> {
 /// CPU of the affinity set, whatever thread starts it.
 ///
 /// The body runs in the context of the runtime but outside its `block_on`, so it may
-/// start and block on a Tokio runtime of its own. A panic of a body, in its call, its
-/// poll, or its drop, makes its join give [`env::thread::Panicked`], where panics
-/// unwind.
+/// start and block on a Tokio runtime of its own. A panic in the call, the poll, or the
+/// drop of a body ends its thread as the crate doc states
+/// ([panics](crate#panics-in-shards-and-threads)).
 ///
 /// # Errors
 ///
@@ -109,18 +121,23 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
     Ok(env::threads::Threads::new(threads::Driver::new(cores)))
 }
 
-/// The network of this machine. A stream or listener registers at its first poll
-/// with the I/O driver of the Tokio runtime current on that thread. Each thread that
-/// `os` starts has one.
+/// The network of this machine. A stream, listener, UDP sender, or UDP receiver
+/// registers with the I/O driver of the Tokio runtime current on the thread of its
+/// first poll, at the first poll that needs the socket. A stream write of no bytes
+/// does not, and a UDP poll that fails before it registers leaves that to the next
+/// poll. A UDP sender drops its registration at each send that ends, with or without
+/// an error, and registers again at the next poll that finds the send buffer full. A
+/// send that the caller drops while it waits keeps the registration until the next
+/// send of that sender ends. Each thread that `os` starts has a runtime with an I/O
+/// driver. Needs the cargo feature `net`.
 ///
 /// [`env::net::Net::resolve`] looks up a host name as each other program on this
 /// machine does, on an OS thread of its own for each lookup.
 ///
 /// # Panics
 ///
-/// - A poll of [`env::net::Net::connect`], or the first poll of a stream or listener,
-///   on a thread with no Tokio runtime or with no I/O driver.
-/// - [`env::net::Net::udp`]: this driver has no UDP yet.
+/// A poll of [`env::net::Net::connect`], or a poll that registers a socket, on a
+/// thread with no Tokio runtime or with no I/O driver.
 #[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
 #[must_use]
 pub fn net() -> env::net::Net {
@@ -131,7 +148,9 @@ pub fn net() -> env::net::Net {
 /// handle of its I/O thread. `os` keeps its own entries in `dir`, so give it a
 /// directory that nothing else uses. `threads` starts I/O thread `name`, which runs
 /// each call of the disk and of its files in the order they reach it, and ends after
-/// the disk and its files drop. Give each shard a disk of its own.
+/// the disk and its files drop. Give each shard a disk of its own. The mode of each
+/// file and directory that it makes gives the group and other users no access. It does
+/// not change the mode of a file or directory that is there.
 ///
 /// # Errors
 ///

@@ -21,9 +21,10 @@ use crate::status::Status;
 use crate::ticket::{self, Options, Record};
 
 /// The region before the first entry of its log: its prefix, its founding members and
-/// voters, and its spec before the first change. It is the same at each member and at
-/// each open. A founding node builds it from its config. A node that joins takes it
-/// whole from its join answer, and is not one of its members.
+/// voters, its spec before the first change, and the home of each founding index that
+/// it holds. It is the same at each member and at each open. A founding node builds it
+/// from its config. A node that joins takes it whole from its join answer, and is not
+/// one of its members.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Founding {
     /// The prefix of the region's names, [`Prefix::ROOT`] for the root region.
@@ -36,10 +37,14 @@ pub struct Founding {
     pub voters: BTreeSet<node::Key>,
     /// The definitions of the region before the first change of its spec, by tree key.
     pub definitions: BTreeMap<Name, Definition>,
+    /// The home of each index of `definitions` before the first entry of the log, by
+    /// channel key to the key of a member. An index with no entry has no home until a
+    /// spec change gives one.
+    pub homes: BTreeMap<channel::Key, node::Key>,
 }
 
-/// The region state that this node holds: its members, its tickets, the homes that it
-/// applied, and its spec pointer.
+/// The region state that this node holds: its members, its tickets, the founding homes
+/// and the homes that it applied, and its spec pointer.
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(test, derive(Clone))]
 pub(crate) struct State {
@@ -60,7 +65,7 @@ pub(crate) struct State {
 
 impl State {
     /// The state of the region with prefix `region`, with `members`, each under the key
-    /// of its card, no ticket or home, the spec at version 0 with root `root`, and the
+    /// of its card, no ticket, `homes`, the spec at version 0 with root `root`, and the
     /// founding `voters`.
     ///
     /// # Errors
@@ -72,12 +77,13 @@ impl State {
         members: Vec<Member>,
         root: Digest,
         voters: BTreeSet<node::Key>,
+        homes: BTreeMap<channel::Key, node::Key>,
     ) -> Result<Self, Unfit> {
         let mut state = Self {
             region,
             members: BTreeMap::new(),
             tickets: BTreeMap::new(),
-            homes: BTreeMap::new(),
+            homes,
             pointer: Pointer { version: 0, root },
             voters: Voters {
                 incoming: voters,
@@ -103,6 +109,14 @@ impl State {
         self.members.get(&key)
     }
 
+    /// The key of the member whose card holds `public_key`, or `None` when none does.
+    pub(crate) fn holder(&self, public_key: PublicKey) -> Option<node::Key> {
+        let mut members = self.members.iter();
+        let (&key, _) =
+            members.find(|(_, member)| member.public_key() == public_key)?;
+        Some(key)
+    }
+
     /// The record of the ticket with `public_key`, or `None` when none is recorded.
     #[cfg_attr(
         not(test),
@@ -122,6 +136,11 @@ impl State {
     /// The home of `index`, or `None` when none is set.
     pub(crate) fn home(&self, index: channel::Key) -> Option<node::Key> {
         self.homes.get(&index).copied()
+    }
+
+    /// The node of each home, in index key order.
+    pub(crate) fn homes(&self) -> impl Iterator<Item = node::Key> {
+        self.homes.values().copied()
     }
 
     /// The spec pointer.
@@ -273,11 +292,14 @@ impl State {
         if self.members.contains_key(&key) {
             return Err(Unfit::Duplicate { key });
         }
+        if let Some(key) = self.holder(card.card().public_key) {
+            return Err(Unfit::Held { key });
+        }
         let mut lower = Vec::with_capacity(names.len());
         for name in names {
             let folded = name.as_str().to_ascii_lowercase();
-            if let Some(&holder) = self.names.get(&folded) {
-                return Err(Unfit::Taken { name, key: holder });
+            if let Some(&taker) = self.names.get(&folded) {
+                return Err(Unfit::Taken { name, key: taker });
             }
             if lower.contains(&folded) {
                 return Err(Unfit::Taken { name, key });
@@ -454,6 +476,11 @@ pub enum Unfit {
         /// The node.
         key: node::Key,
     },
+    /// Another member's card holds the public key of the member's card.
+    Held {
+        /// The member that holds it.
+        key: node::Key,
+    },
     /// The member's name, or the name of one of its status channels, equals a name
     /// that a member holds, ignoring ASCII case.
     Taken {
@@ -486,6 +513,9 @@ impl fmt::Display for Unfit {
                 Name::MAX_BYTES
             ),
             Self::Duplicate { key } => write!(f, "node {key} is already a member"),
+            Self::Held { key } => {
+                write!(f, "the public key of the card is held by node {key}")
+            }
             Self::Taken { name, key } => {
                 write!(f, "the name {name} is taken by node {key}")
             }
@@ -505,20 +535,32 @@ mod tests {
     use super::*;
     use crate::common::{
         EPHEMERAL, EXPIRY, create_members, digest, home, index, join, key as node,
-        name, options, public, record, signed, spec, status, with_status,
+        member, name, options, private, public, record, signed, spec, status, ticket,
+        with_status,
     };
 
     const FOUNDING: Digest = Digest([1; 32]);
 
+    // The state of `members` in the region `prefix`, with voter 1, the spec
+    // `FOUNDING`, and no home.
+    fn create_state(prefix: Prefix, members: Vec<Member>) -> Result<State, Unfit> {
+        State::new(prefix, members, FOUNDING, [node(1)].into(), BTreeMap::new())
+    }
+
+    // The card of node `id` with `name`, which holds the public key of node `holder`
+    // and which `holder` signed.
+    fn holding(id: u8, holder: u8, name: &str) -> card::Signed {
+        let card = card::Card {
+            public_key: public(holder),
+            ..signed(id, name).card().clone()
+        };
+        card::Signed::sign(node(id), card, &private(holder))
+    }
+
     // Members 1 and 2, and single-use ticket 7 for `plant.edge`.
     fn state() -> State {
-        let mut state = State::new(
-            name("plant").into(),
-            create_members(&[1, 2]),
-            FOUNDING,
-            [node(1)].into(),
-        )
-        .unwrap();
+        let mut state =
+            create_state(name("plant").into(), create_members(&[1, 2])).unwrap();
         let recorded = state.apply(record(7, options("plant.edge", false)));
         assert_eq!(recorded, Ok(false));
         state
@@ -687,14 +729,27 @@ mod tests {
     }
 
     #[test]
+    fn holder_gives_the_member_with_a_public_key() {
+        let state = state();
+        assert_eq!(state.holder(public(2)), Some(node(2)));
+        assert_eq!(state.holder(public(3)), None);
+    }
+
+    #[test]
+    fn new_refuses_two_members_with_one_public_key() {
+        let twin = Member {
+            card: holding(3, 1, "plant.node3"),
+            ..member(3)
+        };
+        let error =
+            create_state(name("plant").into(), vec![member(1), twin]).unwrap_err();
+        assert_eq!(error, Unfit::Held { key: node(1) });
+    }
+
+    #[test]
     fn new_refuses_two_members_with_one_key() {
-        let error = State::new(
-            name("plant").into(),
-            create_members(&[1, 2, 1]),
-            FOUNDING,
-            [node(1)].into(),
-        )
-        .unwrap_err();
+        let error =
+            create_state(name("plant").into(), create_members(&[1, 2, 1])).unwrap_err();
         assert_eq!(error, Unfit::Duplicate { key: node(1) });
         assert_eq!(
             error.to_string(),
@@ -707,7 +762,7 @@ mod tests {
         let mut reserved = create_members(&[1, 2]);
         reserved[1].card = signed(2, "plant.@changes");
         assert_eq!(
-            State::new(name("plant").into(), reserved, FOUNDING, [node(1)].into()),
+            create_state(name("plant").into(), reserved),
             Err(Unfit::Reserved {
                 name: name("plant.@changes")
             })
@@ -715,7 +770,7 @@ mod tests {
         let mut outside = create_members(&[1, 2]);
         outside[1].card = signed(2, "factory.node2");
         assert_eq!(
-            State::new(name("plant").into(), outside, FOUNDING, [node(1)].into()),
+            create_state(name("plant").into(), outside),
             Err(Unfit::Outside {
                 name: name("factory.node2"),
                 region: name("plant").into()
@@ -724,8 +779,7 @@ mod tests {
         let mut long = create_members(&[1, 2]);
         long[1].status = status([(long_status(256 - 12), index(1))]);
         assert_eq!(
-            State::new(name("plant").into(), long, FOUNDING, [node(1)].into())
-                .unwrap_err(),
+            create_state(name("plant").into(), long).unwrap_err(),
             Unfit::Long {
                 name: name("plant.node2"),
                 status: long_status(256 - 12),
@@ -737,8 +791,7 @@ mod tests {
     fn the_root_region_holds_a_member_and_a_ticket_under_any_prefix() {
         let mut members = create_members(&[1, 2]);
         members[1].card = signed(2, "factory.node2");
-        let mut state =
-            State::new(Prefix::ROOT, members, FOUNDING, [node(1)].into()).unwrap();
+        let mut state = create_state(Prefix::ROOT, members).unwrap();
         assert_eq!(state.apply(record(8, options("site_a", false))), Ok(false));
         let join = join(8, 3, "site_a.pt_1");
         assert_eq!(state.apply(Change::Join(Box::new(join))), Ok(false));
@@ -844,6 +897,27 @@ mod tests {
                 prefix: name("plant.edge")
             }))
         );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn a_join_with_the_public_key_of_a_member_is_refused() {
+        let mut state = state();
+        let before = state.clone();
+        let card = holding(3, 1, "plant.edge.a");
+        let mut join = join(7, 3, "plant.edge.a");
+        join.admission = ticket(7).admission(&card);
+        join.card = card::Unchecked {
+            key: node(3),
+            card: card.card().clone(),
+            signature: *card.signature(),
+        };
+        let held = Unfit::Held { key: node(1) };
+        assert_eq!(
+            held.to_string(),
+            format!("the public key of the card is held by node {}", node(1))
+        );
+        assert_eq!(state.apply(Change::Join(Box::new(join))), Err(held.into()));
         assert_eq!(state, before);
     }
 
@@ -1075,7 +1149,7 @@ mod tests {
         let mut taken = create_members(&[1, 2]);
         taken[1].card = signed(2, "plant.NODE1");
         assert_eq!(
-            State::new(name("plant").into(), taken, FOUNDING, [node(1)].into()),
+            create_state(name("plant").into(), taken),
             Err(Unfit::Taken {
                 name: name("plant.NODE1"),
                 key: node(1)
@@ -1085,7 +1159,7 @@ mod tests {
         reused[0].status = status([(name("disk"), index(20))]);
         reused[1].status = status([(name("disk"), index(20))]);
         assert_eq!(
-            State::new(name("plant").into(), reused, FOUNDING, [node(1)].into()),
+            create_state(name("plant").into(), reused),
             Err(Unfit::Reused { key: index(20) })
         );
     }
@@ -1298,10 +1372,8 @@ mod tests {
         fn a_refused_change_changes_nothing(
             steps in prop::collection::vec(steps(), 0..16),
         ) {
-            let members = create_members(&[1, 2]);
-            let voters = keys(&[1]);
             let mut state =
-                State::new(name("plant").into(), members, FOUNDING, voters).unwrap();
+                create_state(name("plant").into(), create_members(&[1, 2])).unwrap();
             for step in steps {
                 let before = state.clone();
                 let applied = state.apply(step.clone());

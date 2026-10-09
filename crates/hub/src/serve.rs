@@ -1,4 +1,7 @@
-//! Remote reader sessions that a hub serves, and why one ends.
+//! The streams that a [`Link`](crate::Link) serves: remote reader sessions, and the
+//! hello and request streams of a client, and why one ends.
+
+pub(crate) mod client;
 
 use std::cell::RefCell;
 use std::fmt;
@@ -14,15 +17,19 @@ use types::channel::{self, Slot};
 use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use wire::header::MALFORMED;
-use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, Reply, UNKNOWN, ends};
+use wire::hub::client::Refusal;
+use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
-use crate::State;
 use crate::reader::{Credit, Ended, Session};
+use crate::{Away, State};
 
-/// Why [`Hub::serve`](crate::Hub::serve) ended a session.
+pub use client::{Reply, Request};
+
+/// Why [`Link::serve`](crate::Link::serve) ended a stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// A message that `wire::hub::Home` refuses. Code `MALFORMED`.
+    /// A message that `wire::hub` refuses, or a client body that ended early
+    /// ([`wire::hub::Error::Unfinished`]). Code `MALFORMED`.
     Message(wire::hub::Error),
     /// The peer opened the stream one way. Code `MALFORMED`.
     OneWay,
@@ -34,6 +41,10 @@ pub enum Error {
     NoIndex,
     /// The open names a channel that this node does not know. Code `UNKNOWN`.
     Unknown(channel::Key),
+    /// The mesh names another node as the home of the open's index. Code `NOT_HOME`.
+    NotHome,
+    /// The mesh stopped, so the home of the open's index is not known. Code `FAILED`.
+    Mesh(mesh::Stopped),
     /// The home's buffer failed. Code `FAILED`.
     Buffer(env::files::Error),
     /// The home's pool had no block for a reply (`Exhausted` or `Refused`). Code
@@ -41,19 +52,36 @@ pub enum Error {
     Pool(block::Error),
     /// The stream or its session failed. No code.
     Stream(transport::Error),
+    /// `access` refused a hello or a request, or the hub refused the session:
+    /// `Unsynced` when it has no mesh time for a challenge, and `Expired` when the
+    /// admitted hello expires. Code: the one that CLIENT HELLO gives for the error,
+    /// `REFUSED` for each that tells about the spec.
+    Access(access::proof::Error),
+    /// The hello does not echo the nonce of the last challenge. Code `STALE`.
+    Stale,
+    /// A request stream before the link admitted a hello. Code `MALFORMED`.
+    Unadmitted,
+    /// A request stream while another request of the link waits for its reply. Code
+    /// `MALFORMED`.
+    Pending,
 }
 
 impl Error {
     /// The code that the stream stops with, or `None` when it is broken.
-    fn code(&self) -> Option<Code> {
+    pub(crate) fn code(&self) -> Option<Code> {
         match self {
             Self::Message(_)
             | Self::OneWay
             | Self::Class(_)
             | Self::ManyIndexes
-            | Self::NoIndex => Some(Code(MALFORMED)),
+            | Self::NoIndex
+            | Self::Unadmitted
+            | Self::Pending => Some(Code(MALFORMED)),
+            Self::Access(error) => Some(Code(client::refusal(error).code())),
+            Self::Stale => Some(Code(Refusal::Stale.code())),
             Self::Unknown(_) => Some(Code(UNKNOWN)),
-            Self::Buffer(_) => Some(Code(FAILED)),
+            Self::NotHome => Some(Code(NOT_HOME)),
+            Self::Buffer(_) | Self::Mesh(_) => Some(Code(FAILED)),
             Self::Pool(_) => Some(Code(BUSY)),
             Self::Stream(_) => None,
         }
@@ -82,6 +110,10 @@ impl fmt::Display for Error {
                     "the open names channel {key}, which this node does not know"
                 )
             }
+            Self::NotHome => f.write_str(
+                "the mesh names another node as the home of the open's index",
+            ),
+            Self::Mesh(stopped) => write!(f, "the mesh stopped: {stopped}"),
             Self::Buffer(error) => write!(f, "the buffer of the shard failed: {error}"),
             Self::Pool(error) => {
                 write!(f, "the home's pool had no block for a reply: {error}")
@@ -89,11 +121,30 @@ impl fmt::Display for Error {
             Self::Stream(error) => {
                 write!(f, "the stream of the hub session failed: {error}")
             }
+            Self::Access(error) => write!(f, "access refused the program: {error}"),
+            Self::Stale => f.write_str(
+                "the hello does not echo the nonce of the node's last challenge",
+            ),
+            Self::Unadmitted => f.write_str(
+                "the program sent a request before the node admitted a hello",
+            ),
+            Self::Pending => f.write_str(
+                "the program sent a request while another request waits for its reply",
+            ),
         }
     }
 }
 
 impl std::error::Error for Error {}
+
+impl From<Away> for Error {
+    fn from(away: Away) -> Self {
+        match away {
+            Away::Remote(_) => Self::NotHome,
+            Away::Mesh(stopped) => Self::Mesh(stopped),
+        }
+    }
+}
 
 impl From<wire::hub::Error> for Error {
     fn from(error: wire::hub::Error) -> Self {
@@ -113,23 +164,33 @@ pub(crate) async fn run(
     state: &Rc<RefCell<State>>,
     incoming: Incoming,
 ) -> Result<(), Error> {
+    let class = incoming.class;
+    let (mut receiver, mut sender) = halves(incoming)?;
+    let served = serve(state, class, &mut receiver, &mut sender).await;
+    if let Err(error) = &served {
+        stop(receiver, sender, error);
+    }
+    served
+}
+
+/// The two halves of `incoming`. Stops a one-way stream.
+fn halves(incoming: Incoming) -> Result<(Receiver, Sender), Error> {
     let Incoming {
-        class,
-        mut receiver,
-        sender,
+        receiver, sender, ..
     } = incoming;
-    let Some(mut sender) = sender else {
+    let Some(sender) = sender else {
         receiver.stop(Code(MALFORMED));
         return Err(Error::OneWay);
     };
-    let served = serve(state, class, &mut receiver, &mut sender).await;
-    if let Err(error) = &served
-        && let Some(code) = error.code()
-    {
+    Ok((receiver, sender))
+}
+
+/// Stops both halves of a stream with the code of `error`, if it has one.
+fn stop(receiver: Receiver, sender: Sender, error: &Error) {
+    if let Some(code) = error.code() {
         receiver.stop(code);
         sender.reset(code);
     }
-    served
 }
 
 async fn serve(
@@ -148,7 +209,7 @@ async fn serve(
         sender.finish()?;
         return Ok(());
     };
-    sender.send(reply(state, Reply::Opened)?).await?;
+    sender.send(reply(state, wire::hub::Reply::Opened)?).await?;
     // `peer` lives across turns, so a frame never drops a read of the peer. `take`
     // gives up a frame only in the poll that returns it.
     let mut peer = pin!(peer(receiver, home, credit.as_ref()));
@@ -174,7 +235,7 @@ async fn serve(
                 layout.send(state, sender, &frame, set).await?;
             }
             Event::Frame(Err(Ended::Behind)) => {
-                sender.send(reply(state, Reply::Behind)?).await?;
+                sender.send(reply(state, wire::hub::Reply::Behind)?).await?;
                 sender.finish()?;
                 return Ok(());
             }
@@ -217,8 +278,9 @@ struct Opened {
     layout: Layout,
 }
 
-/// Reads the open and its keys, checks each key as it arrives, and opens the session
-/// in the order of the keys. Gives `None` when the peer finishes first.
+/// Reads the open and its keys, checks each key as it arrives, waits until the mesh
+/// names a home for the index, and opens the session in the order of the keys. Gives
+/// `None` when the peer finishes first.
 async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
@@ -264,7 +326,12 @@ async fn open(
             break;
         }
     }
-    let index = index.and_then(|(_, slot)| slot).ok_or(Error::NoIndex)?;
+    let Some((of, Some(index))) = index else {
+        return Err(Error::NoIndex);
+    };
+    let Some(granted) = wait(state, of, home, receiver).await? else {
+        return Ok(None);
+    };
     let slots: Box<[Slot]> = slots.into();
     let (session, credit) = match open.mode {
         Mode::Complete { limit_bytes } => {
@@ -275,6 +342,9 @@ async fn open(
         }
         Mode::Latest => (Session::latest(state, slots.clone(), index), None),
     };
+    if let Some(credit) = &credit {
+        credit.grant(granted);
+    }
     Ok(Some(Opened {
         session,
         credit,
@@ -282,15 +352,51 @@ async fn open(
     }))
 }
 
+/// Waits until the home carries `index`, and reads the peer meanwhile. Gives the
+/// highest grant that the peer sent, 0 for none, or `None` when the peer finished
+/// first.
+async fn wait(
+    state: &Rc<RefCell<State>>,
+    index: channel::Key,
+    home: &mut Home,
+    receiver: &mut Receiver,
+) -> Result<Option<u64>, Error> {
+    let mut carry = pin!(crate::carry(state, index));
+    let mut granted = 0;
+    loop {
+        let mut recv = pin!(receiver.recv());
+        let read = poll_fn(|cx| match carry.as_mut().poll(cx) {
+            Poll::Ready(carried) => Poll::Ready(Err(carried)),
+            Poll::Pending => recv.as_mut().poll(cx).map(Ok),
+        })
+        .await;
+        let message = match read {
+            Err(carried) => {
+                carried?;
+                return Ok(Some(granted));
+            }
+            Ok(read) => match read? {
+                Some(message) => message,
+                None => return Ok(None),
+            },
+        };
+        let FromReader::Credit(grant) = home.decode(&message)? else {
+            unreachable!("invariant: after the keys run, Home gives only credits");
+        };
+        granted = granted.max(grant.limit_bytes);
+    }
+}
+
 /// A block of the home's pool that holds `reply`.
-fn reply(state: &RefCell<State>, reply: Reply) -> Result<Block, Error> {
+fn reply(state: &RefCell<State>, reply: wire::hub::Reply) -> Result<Block, Error> {
     let mut block = alloc(state, reply.encoded_len())?;
     reply.encode(&mut block);
     Ok(block.freeze())
 }
 
-/// A block of `len` bytes from the home's pool: a reply, or an ends run, which is
-/// smaller than the frame's descriptors.
+/// A block of `len` bytes from the home's pool. Each caller asks for at most its
+/// largest block: a reply, an ends run, which is smaller than the frame's
+/// descriptors, or a message of a client stream.
 fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
     state
         .borrow()
@@ -300,7 +406,7 @@ fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
         .map_err(|error| match error {
             block::Error::TooLarge { .. } => {
                 unreachable!(
-                    "invariant: an ends run is smaller than the frame's descriptors"
+                    "invariant: no caller asks for more than the largest block"
                 )
             }
             block::Error::Exhausted { .. } | block::Error::Refused { .. } => {
@@ -337,7 +443,9 @@ impl Layout {
     ) -> Result<(), Error> {
         let placed = self.places.lay(frame, set);
         let head = head(frame, set, self.index, placed.len());
-        sender.send(reply(state, Reply::Head(head))?).await?;
+        sender
+            .send(reply(state, wire::hub::Reply::Head(head))?)
+            .await?;
         for run in runs(placed, sender.bytes_max()) {
             let mut block = alloc(state, run.len() * ends::LEN)?;
             ends::encode(
@@ -422,7 +530,7 @@ impl Cut {
 }
 
 // These tests call the private `head`, `runs`, and `Cut::next`, so each case of the
-// pure parts has a test; the tests through `Hub::serve` check them on the wire.
+// pure parts has a test; the tests through `Link::serve` check them on the wire.
 #[cfg(test)]
 mod tests {
     use std::ops::Range;

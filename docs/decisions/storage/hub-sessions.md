@@ -55,9 +55,9 @@
   surface was approved by `laptop.architect` (2026-10-07T14:53:11Z:
   https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6040585795).
   Amended (2026-10-08T00:13:26Z, #1625): `reader::Session` is the home's side of a
-  reader, which `Reader` drives, and which `Hub::serve` (#1636) will drive. The split
-  costs `latest next` +1 ns per frame (16 against 17 ns net on a quiet host), which
-  adds 0.3% to the write of one frame. Accepted by laptop.architect:
+  reader, which `Reader` drives, and which `Link::serve` drives (HUB LINK, #1946).
+  The split costs `latest next` +1 ns per frame (16 against 17 ns net on a quiet
+  host), which adds 0.3% to the write of one frame. Accepted by laptop.architect:
   https://github.com/synnaxlabs/foundation/pull/1625#issuecomment-6049444882.
   A doc states what is true at its commit: `Reader` states no credit window, as a
   latest reader has none, and `Session` names `Reader` and each stream of a remote
@@ -72,5 +72,35 @@
   that defines channels at each new spec decides what a known, renamed, or removed
   channel does. Decided by `laptop.architect` (2026-10-08T16:41:41Z:
   https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349).
-  Supersedes https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575
-  in `Hub::define` and `hub::Channel`.
+  Supersedes the `Hub::define` clause of
+  https://github.com/synnaxlabs/foundation/pull/1133#issuecomment-6031908575, the patch
+  that took a `hub::Channel`. Decided by `laptop.architect` (2026-10-08T18:36:19Z,
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
+  Supersedes item 3 of
+  https://github.com/synnaxlabs/foundation/pull/1926#issuecomment-6066382854.
+  Changed by #1969: `Hub::define` takes a spec's definitions and skips each that is not
+  a channel (`laptop.architect`, 2026-10-08T18:49:47Z:
+  https://github.com/synnaxlabs/foundation/issues/1969#issuecomment-6066796714).
+  Supersedes the argument of `Hub::define` in
+  https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349.
+  Amended (2026-10-08T19:18:09Z, #340): the hub takes the region's mesh
+  (`hub::Config::mesh`, `None` for a node with no region), and `hub::Config::node` stays
+  the one source of this node's key. `define` never carries an index. A writer, a
+  reader, or an open that `Link::serve` gives waits until the mesh names a home for each
+  of its indexes. At this node, the first such session carries the index, once: a later
+  carry does nothing (`home::Shard::carry`), so the hub keeps no set of carried indexes
+  (`laptop.architect`, 2026-10-08T19:30:54Z:
+  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067505377). With no
+  mesh, this node is the home of each index. No frame comes before a session, so nothing
+  waits on the carry. When the home is another node, `writer::Error::Remote` and
+  `reader::Error::Remote` give it, and `serve` stops the stream with `NOT_HOME`. A
+  stopped mesh gives `Mesh` with why it stopped (code `FAILED` in `serve`). Trigger:
+  4d-b of #340 removes `reader::Error::Remote` when the hub reads from another node.
+  Decided by `laptop.architect`: the mesh (2026-10-08T18:42:42Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536), the
+  split and `reader::Error::Remote` (2026-10-08T18:51:16Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273), and one
+  carry rule (2026-10-08T19:18:09Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6067290747), which
+  supersedes "`define` carries at once" in item 2 of
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536.

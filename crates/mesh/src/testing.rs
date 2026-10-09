@@ -175,6 +175,33 @@ mod tests {
         assert_eq!(inputs["spec_holders_out_of_order"], bytes);
     }
 
+    // Each decodes as its input before the homes does with the count added, which
+    // `each_spec_change_input_is_what_its_name_says` and
+    // `each_holder_bound_input_is_what_its_name_says` check.
+    #[test]
+    fn each_input_with_a_count_of_0_homes_is_its_input_before_the_homes_with_it() {
+        let before = inputs!(
+            "mesh_change": "spec_chunks_0",
+            "spec_held",
+            "spec_held_chunks_1024",
+            "spec_holders_64",
+        );
+        let counted = inputs!(
+            "mesh_change": "spec_chunks_0_homes_0",
+            "spec_homes_0",
+            "spec_held_chunks_1024_homes_0",
+            "spec_holders_64_homes_0",
+        );
+        for (name, counted_name) in [
+            ("spec_chunks_0", "spec_chunks_0_homes_0"),
+            ("spec_held", "spec_homes_0"),
+            ("spec_held_chunks_1024", "spec_held_chunks_1024_homes_0"),
+            ("spec_holders_64", "spec_holders_64_homes_0"),
+        ] {
+            assert_eq!(counted[counted_name], homed(before[name]), "{name}");
+        }
+    }
+
     // With the counts that its byte form lacks, each fails for what its name says.
     #[test]
     fn each_refused_spec_change_input_fails_for_what_its_name_says() {

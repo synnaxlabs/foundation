@@ -1,14 +1,17 @@
-- **NODE MESH (#585, 2026-10-08)** `Config::key` is the node's key, beside
-  `Config::private_key`; both are patches until #1660 moves them to node-local disk.
+- **NODE MESH (#585, 2026-10-08)** The node's key and private key come from the file
+  `node.key` (NODE PORT, amended for #1660, by `laptop.architect-2`, 19:52 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831). This
+  supersedes `Config::key` and `Config::private_key` of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452.
   `Config::region: Option<mesh::region::Founding>` gives the region that the node is a
-  member of: its prefix, its members (one card has `Config::key`), the voters before the
-  first entry of the log, and its founding definitions. The caller gives the same
-  region at each start: the node keeps no copy of it. `None` opens no mesh. The `Option`
-  is a dark patch: the `None` stays in `node`, and no lower crate gets an `Option` of
-  the mesh. PR 4 of #585, which gives the mesh to the hub, makes the region required,
-  unless #1660 and #1744 have already taken it out of `Config`. The long-term path takes
-  it out of `Config`: the node keeps its membership in its data directory when it founds
-  or joins, and reads it at each start.
+  member of: its prefix, its members (one card has the node's key), the voters before
+  the first entry of the log, and its founding definitions. The caller gives the same
+  region at each start: the node keeps no copy of it. `None` opens no mesh, and the hub
+  of each task then gets no mesh: a node runs with no region before it founds or joins
+  one. Changed by `laptop.architect`, 2026-10-08T18:42:42Z
+  (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536). The
+  long-term path takes it out of `Config`: the node keeps its membership in its data
+  directory when it founds or joins, and reads it at each start.
   With a region, shard 0 opens `mesh::Mesh` on the node's transport after the last shard
   has opened its buffer and before it takes the first session. Its directory is `mesh`
   in the data directory (`mesh::Config::dir`; the directory by `laptop.architect`,
@@ -47,10 +50,35 @@
   approved by `laptop.architect` at 15:26:10Z
   (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063246600).
   Supersedes the trigger of 10:23:48Z, the first of PR 1 of #1744 and the join answer
-  of #336. A mesh that stops does not stop the node until #1780, before PR 4 gives the
-  mesh to the hub. Lost: `Node::found(region)` at run time, which needs a second open
-  path and a node that runs with no region before it; the key in `node::Region`,
-  because a node's identity is not region data, and PR 4 needs it with no region.
-  Decided by `laptop.architect-2` (2026-10-08 03:37 UTC):
+  of #336. Lost: `Node::found(region)` at run time, which needs a second open path and
+  a node that runs with no region before it; the key in `node::Region`, because a
+  node's identity is not region data, and PR 4 needs it with no region. Decided by
+  `laptop.architect-2` (2026-10-08 03:37 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452, on the
-  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943.
+  plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051630943. A
+  mesh whose group stops stops the node, and `Node::join` gives `Error::Group` with
+  the cause. Of a transport that stops and a group that stops, `join` gives the one
+  that the node sees first; of two that stop at one instant, either can be first
+  (#1780). Supersedes the deferral of
+  https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051655452. Lost:
+  `Mesh::stopped()`, because `Watch::next` gives the stop as its contract and one
+  caller does not justify a new `mesh` item; add `Mesh::stopped` when a second caller
+  needs the stop of the group and reads no home, and ask `laptop.architect` for it.
+  Decided by `laptop.architect-2` at 2026-10-08T17:27:20Z
+  (https://github.com/synnaxlabs/foundation/issues/1780#issuecomment-6065408760), and
+  changed by `laptop.architect-2` at 17:32:00Z
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065487136): the
+  stop has its own variant. Lost: `Error::Mesh` with `mesh::Error::Stopped`, which
+  gives one variant two meanings. The rank by what the node sees first supersedes item
+  2 of https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065487136, and
+  the private rank of shard 0's stop is a fixed tie-break with no contract. Decided by
+  `laptop.architect-2` at 17:49:13Z
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065780217), and
+  for `Node::spawn` at 17:58:35Z
+  (https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065936160): a
+  panic gives `Error::Panicked` unless the node saw the transport or the group stop
+  first. Lost: "the transport's when both stop at once", because the node sees each
+  stop only at its next poll, so of two stops at one instant either can come first
+  (the breaker,
+  https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065770160 and
+  https://github.com/synnaxlabs/foundation/pull/1936#issuecomment-6065929818).

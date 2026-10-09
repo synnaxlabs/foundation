@@ -2,7 +2,9 @@
 //! of a shard's home.
 
 mod channel;
+pub mod client;
 mod commit;
+mod link;
 pub mod reader;
 pub mod serve;
 pub mod writer;
@@ -12,12 +14,14 @@ use std::rc::Rc;
 use std::task::Waker;
 
 use spec::channel::Kind;
+use spec::definition::Definition;
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
 use types::sample::{Scalar, Type};
 
 use channel::Channel;
+pub use link::{Link, Served};
 use reader::Reader;
 use writer::Writer;
 
@@ -36,9 +40,14 @@ pub mod home {
     }
 }
 
+/// The `mesh` items that hub calls give, so that layer 3 names them through `hub`.
+pub mod mesh {
+    pub use ::mesh::Stopped;
+}
+
 /// The hub of one shard: it opens writer and reader sessions on the indexes of the
-/// shard's home. It is not `Send`: each call is on the shard's thread. Clones share
-/// it.
+/// shard's home, and serves each hub stream of a transport session through a
+/// [`Link`]. It is not `Send`: each call is on the shard's thread. Clones share it.
 #[derive(Clone, Debug)]
 pub struct Hub(Rc<RefCell<State>>);
 
@@ -52,6 +61,16 @@ pub struct Config {
     pub interner: Interner,
     /// Where the hub spawns its commit task.
     pub tasks: env::tasks::Tasks,
+    /// This node's key. A client's hello must name it as `via`.
+    pub node: types::node::Key,
+    /// Mesh time, which the hub checks each hello and request against.
+    pub time: clock::Reader,
+    /// The source of each challenge's nonce.
+    pub entropy: env::entropy::Entropy,
+    /// The region's mesh, or `None` for a node with no region. The mesh names the home
+    /// of each index and the address of each member. With `None`, this node is the
+    /// home of each index.
+    pub mesh: Option<::mesh::Mesh>,
 }
 
 /// The state of one shard's hub, which each session shares. No borrow of it lasts
@@ -70,6 +89,12 @@ struct State {
     commit: commit::Signal,
     /// The error that ended the home's buffer.
     failed: Option<env::files::Error>,
+    node: types::node::Key,
+    time: clock::Reader,
+    entropy: env::entropy::Entropy,
+    /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
+    rules: access::Rules,
+    mesh: Option<::mesh::Mesh>,
 }
 
 impl Hub {
@@ -85,6 +110,10 @@ impl Hub {
             home,
             interner,
             tasks,
+            node,
+            time,
+            entropy,
+            mesh,
         } = config;
         let state = Rc::new(RefCell::new(State {
             home,
@@ -95,25 +124,35 @@ impl Hub {
             woken: Vec::new(),
             commit: commit::Signal::default(),
             failed: None,
+            node,
+            time,
+            entropy,
+            rules: access::Rules::default(),
+            mesh,
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
     }
 
-    /// Makes each of `channels` known to sessions, the indexes first, so their order
-    /// does not matter. The home carries each index at once.
+    /// Makes each channel of `definitions` known to sessions, the indexes first, so
+    /// their order does not matter. It skips each definition that is not a channel. The
+    /// home carries an index from the first session that finds this node is its home.
     ///
     /// # Panics
     ///
-    /// When a channel has the key or name of a known channel or of another of
-    /// `channels`, or the index of a data channel is neither known nor an index of
-    /// `channels`.
-    pub fn define<'c>(
+    /// When a channel has the key or name of a known channel or of another channel of
+    /// `definitions`, or the index of a data channel is neither known nor an index of
+    /// `definitions`.
+    pub fn define<'d>(
         &self,
-        channels: impl IntoIterator<Item = (&'c Name, &'c spec::channel::Channel)>,
+        definitions: impl IntoIterator<Item = (&'d Name, &'d Definition)>,
     ) {
-        let (indexes, data): (Vec<_>, Vec<_>) = channels
+        let (indexes, data): (Vec<_>, Vec<_>) = definitions
             .into_iter()
+            .filter_map(|(name, definition)| match definition {
+                Definition::Channel(channel) => Some((name, channel)),
+                _ => None,
+            })
             .partition(|(_, channel)| matches!(channel.kind, Kind::Index { .. }));
         let mut state = self.0.borrow_mut();
         for (name, channel) in indexes.into_iter().chain(data) {
@@ -121,24 +160,20 @@ impl Hub {
         }
     }
 
-    /// Opens a writer session on `config.channels` and the index of each. It opens at
-    /// the first poll.
+    /// Opens a writer session on `config.channels` and the index of each. While the
+    /// mesh names no home for an index, it waits for one.
     ///
     /// # Errors
     ///
     /// [`writer::Error::Empty`] for no name, [`writer::Error::Unknown`] for the first
-    /// name that no channel has, else [`writer::Error::Home`] when the home refuses
-    /// the writer.
-    #[expect(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "a remote writer will wait for its home"
-    )]
+    /// name that no channel has, then, for the first index whose home is not this
+    /// node, [`writer::Error::Remote`], or [`writer::Error::Mesh`] when the mesh
+    /// stopped. Else [`writer::Error::Home`] when the home refuses the writer.
     pub async fn writer(
         &self,
         config: writer::Config,
     ) -> Result<Writer, writer::Error> {
-        Writer::open(&self.0, config)
+        Writer::open(&self.0, config).await
     }
 
     /// Opens a reader session on `channels`, which share one index, as
@@ -151,37 +186,29 @@ impl Hub {
     ///
     /// For the first name that breaks a rule: [`reader::Error::Unknown`] for a name
     /// that no channel has, and [`reader::Error::ManyIndexes`] for a channel on
-    /// another index than the first. [`reader::Error::Empty`] for no name.
-    #[expect(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "a remote reader will wait for its home"
-    )]
+    /// another index than the first. [`reader::Error::Empty`] for no name. Then
+    /// [`reader::Error::Remote`] when the home of the index is not this node, and
+    /// [`reader::Error::Mesh`] when the mesh stopped.
     pub async fn reader(
         &self,
         channels: &[Name],
         mode: reader::Mode,
     ) -> Result<Reader, reader::Error> {
-        Reader::open(&self.0, channels, mode)
+        Reader::open(&self.0, channels, mode).await
     }
 
-    /// Serves one remote reader session on `incoming`, a hub stream whose header the
-    /// caller read. It reads the `Open` and its keys, opens the session at this
-    /// node's home, sends `Opened`, then sends each frame that the session takes
-    /// through the reader's places, and applies each `Credit`. It returns when the
-    /// session ends: after `Behind` and a finish when the session missed a frame, or
-    /// when the peer finishes or the stream breaks. A drop of the future closes the
-    /// session at the home and drops the stream.
-    ///
-    /// # Errors
-    ///
-    /// The [`serve::Error`] that ended the session. The stream stops with the code
-    /// that HUB WIRE gives for it, except after [`serve::Error::Stream`].
-    pub async fn serve(
-        &self,
-        incoming: transport::stream::Incoming,
-    ) -> Result<(), serve::Error> {
-        serve::run(&self.0, incoming).await
+    /// Sets the access rules that each later hello and request is checked against.
+    /// Until the first call, the rules know no subject, so they refuse each hello with
+    /// `access::proof::Error::Unknown`.
+    pub fn set_rules(&self, rules: access::Rules) {
+        self.0.borrow_mut().rules = rules;
+    }
+
+    /// The hub's part of `session`. Give each hub stream of the session to
+    /// [`Link::serve`].
+    #[must_use]
+    pub fn link(&self, session: transport::Session) -> Link {
+        Link::new(Rc::clone(&self.0), session)
     }
 }
 
@@ -195,11 +222,7 @@ impl State {
             "a channel with key {key} or name {name} is known already"
         );
         let (data_type, index) = match &channel.kind {
-            Kind::Index { .. } => {
-                let slot = self.interner.slots().assign(key);
-                self.home.carry(slot);
-                (Type::Scalar(Scalar::Stamp), key)
-            }
+            Kind::Index { .. } => (Type::Scalar(Scalar::Stamp), key),
             Kind::Data(data) => {
                 let index = *data.index();
                 assert!(
@@ -216,6 +239,12 @@ impl State {
             index,
         };
         self.channels.insert(name.clone(), channel);
+    }
+
+    /// Carries `index` at the home. A later carry does nothing.
+    fn carry(&mut self, index: types::channel::Key) {
+        let slot = self.interner.slots().assign(index);
+        self.home.carry(slot);
     }
 
     /// Wakes each reader that the home names as having a frame to take or a miss to
@@ -238,4 +267,39 @@ impl State {
             waker.wake();
         }
     }
+}
+
+/// Why the home did not carry an index for a session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Away {
+    /// The mesh names this other node as the home.
+    Remote(types::node::Key),
+    /// The mesh stopped.
+    Mesh(::mesh::Stopped),
+}
+
+/// Waits until the mesh names a home for `index`, then carries `index` at the home
+/// when the home is this node. With no mesh, this node is the home.
+async fn carry(
+    state: &Rc<RefCell<State>>,
+    index: types::channel::Key,
+) -> Result<(), Away> {
+    let (watch, node) = {
+        let state = state.borrow();
+        (
+            state.mesh.as_ref().map(|mesh| mesh.watch(index)),
+            state.node,
+        )
+    };
+    if let Some(mut watch) = watch {
+        loop {
+            match watch.next().await.map_err(Away::Mesh)? {
+                Some(home) if home == node => break,
+                Some(home) => return Err(Away::Remote(home)),
+                None => {}
+            }
+        }
+    }
+    state.borrow_mut().carry(index);
+    Ok(())
 }

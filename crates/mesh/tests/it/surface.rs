@@ -14,7 +14,9 @@ use mesh::card::addresses::Addresses;
 use mesh::card::{self, Card};
 use mesh::region::Founding;
 use mesh::status::Status;
-use mesh::{Config, Error, Member, Mesh, Stopped, Watch, change, claim, log, region};
+use mesh::{
+    Config, Error, Member, Mesh, Stopped, Watch, change, claim, log, region, used,
+};
 use raft::{Position, Term};
 use sim::Sim;
 use spec::Pointer;
@@ -54,6 +56,11 @@ type Named<T> = BTreeMap<Name, T>;
 
 fn assert_applies<'a, F: Future<Output = Result<Pointer, Error>>>(
     _: fn(&'a Mesh, Pointer, Named<Definition>, Named<Name>) -> F,
+) {
+}
+
+fn assert_gives_the_spec<'a, F: Future<Output = Result<used::Spec, Stopped>>>(
+    _: fn(&'a Mesh) -> F,
 ) {
 }
 
@@ -160,6 +167,7 @@ async fn create_config_on(
             voters: members.iter().map(|member| member.card.key()).collect(),
             members,
             definitions: BTreeMap::new(),
+            homes: BTreeMap::new(),
         },
         files: node.files(),
         dir: PathBuf::new(),
@@ -210,7 +218,7 @@ fn mismatch(proved: &str, own: &str) -> Result<(), sim::Error> {
 }
 
 #[test]
-fn a_node_opens_its_region_and_reads_its_member_a_home_and_the_pointer() {
+fn a_node_opens_its_region_and_reads_its_member_a_home_the_pointer_and_the_spec() {
     solo(|node, tasks| async move {
         let mesh = Mesh::open(create_config(&node, &tasks).await)
             .await
@@ -220,33 +228,21 @@ fn a_node_opens_its_region_and_reads_its_member_a_home_and_the_pointer() {
             root: spec::tree::empty(),
         };
         assert_eq!(mesh.pointer(), founding);
+        let spec = used::Spec {
+            pointer: Some(founding),
+            definitions: Rc::default(),
+            behind: None,
+        };
+        assert_eq!(mesh.spec().await, Ok(spec));
         assert_eq!(mesh.member(KEY), Some(create_member(1, Vec::new())));
         assert_eq!(mesh.member(OTHER), None);
+        assert_eq!(mesh.holder(public_key(1)), Some(KEY));
+        assert_eq!(mesh.holder(public_key(2)), None);
         let mut watch = mesh.watch(INDEX);
         assert_eq!(watch.next().await, Ok(None));
         drop(mesh);
         assert_eq!(watch.next().await, Err(Stopped::Dropped));
     });
-}
-
-// For one set of voters, the members and the voters are the same for each place, so
-// no rule that reads only them gives the key of each of the three nodes. With one
-// voter, two places are not voters. With three, two places are not the first voter.
-#[test]
-fn key_gives_the_key_of_the_config() {
-    for voters in [1..=1, 1..=3] {
-        for place in [1, 2, 3] {
-            let voters = voters.clone();
-            solo(move |node, tasks| async move {
-                let members = [1, 2, 3].map(|id| create_member(id, Vec::new()));
-                let mut config =
-                    create_voter_config(&node, &tasks, place, members.into()).await;
-                config.founding.voters = voters.map(key).collect();
-                let mesh = Mesh::open(config).await.unwrap();
-                assert_eq!(mesh.key(), key(place));
-            });
-        }
-    }
 }
 
 #[test]
@@ -372,6 +368,19 @@ fn a_region_with_two_records_of_one_node_does_not_open() {
 }
 
 #[test]
+fn a_region_with_two_members_of_one_public_key_does_not_open() {
+    solo(|node, tasks| async move {
+        let mut config = create_config(&node, &tasks).await;
+        let mut twin = create_member(1, Vec::new());
+        let card = twin.card.card().clone();
+        twin.card = card::Signed::sign(OTHER, card, &private_key(1));
+        config.founding.members.push(twin);
+        let unfit = region::Unfit::Held { key: KEY };
+        assert_eq!(Mesh::open(config).await.err(), Some(Error::Member(unfit)));
+    });
+}
+
+#[test]
 fn the_debug_of_a_config_does_not_show_the_private_key() {
     solo(|node, tasks| async move {
         let debug = format!("{:?}", create_config(&node, &tasks).await);
@@ -434,7 +443,6 @@ fn serve_refuses_a_message_that_is_not_valid_and_stops_its_stream() {
 
 #[test]
 fn each_call_of_a_mesh_has_the_signature_that_a_caller_holds() {
-    let _: fn(&Mesh) -> node::Key = Mesh::key;
     let _: fn(&Mesh) -> Pointer = Mesh::pointer;
     let _: fn(&Mesh, channel::Key) -> Watch = Mesh::watch;
     let _: fn(&Mesh, node::Key) -> Option<Member> = Mesh::member;
@@ -442,6 +450,7 @@ fn each_call_of_a_mesh_has_the_signature_that_a_caller_holds() {
     assert_serves(Mesh::serve);
     assert_sets(Mesh::set_home);
     assert_applies(Mesh::apply);
+    assert_gives_the_spec(Mesh::spec);
 }
 
 // The match has no wildcard arm, so a new case of `Error` does not compile here.
@@ -468,6 +477,8 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Problems(_)
         | Error::Quorum { .. }
         | Error::Blob(_)
+        | Error::Files(_)
+        | Error::Stray { .. }
         | Error::NotIndex(_)
         | Error::UnknownNode(_)
         | Error::Homes { .. } => {}
