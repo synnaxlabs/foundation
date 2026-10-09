@@ -112,7 +112,7 @@ fn checked<'a>(
         connectors: BTreeMap::new(),
         kinds,
         blocks: BTreeMap::new(),
-        writers: Vec::new(),
+        writers: BTreeMap::new(),
         nodes: Vec::new(),
     };
     let mut connectors: Vec<_> = names(documents, Kind::Connector).collect();
@@ -148,7 +148,6 @@ fn checked<'a>(
     }
     found.repeats();
     if found.diagnostics.is_empty() {
-        found.writers.sort_by_key(|writer| order(writer.at));
         Ok(found)
     } else {
         sort(&mut found.diagnostics);
@@ -197,9 +196,8 @@ struct Found<'a> {
     kinds: &'a Table,
     /// The block of each entry, by tree key.
     blocks: BTreeMap<Name, &'a Block>,
-    /// Each connector whose kind accepts its config, by the [`order`] of its node once
-    /// the check passes.
-    writers: Vec<Writer>,
+    /// Each connector whose kind accepts its config, by its name.
+    writers: BTreeMap<Name, Writer>,
     /// Each node that a checked `placement` block names, with its span.
     nodes: Vec<(Name, Option<Span>)>,
 }

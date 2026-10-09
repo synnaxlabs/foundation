@@ -172,8 +172,7 @@ impl Spec {
 /// Asserts that `config::plan::check` gives each problem of `planned` but
 /// `config.wrong-channel`, with no span, when `config::check` finds none in
 /// `documents`. It checks the definitions of the plan, or, when `plan` refuses, the
-/// definitions that the files make. The message of `config.writer-nodes` is left out,
-/// since the order of its nodes is the order of the files only in `plan`.
+/// definitions that the files make.
 fn agrees(
     documents: &[Document],
     applied: &BTreeMap<Name, Stored>,
@@ -209,11 +208,6 @@ fn agrees(
     };
     for problem in &mut expected {
         problem.1 = None;
-    }
-    for problem in expected.iter_mut().chain(&mut found) {
-        if problem.0 == "config.writer-nodes" {
-            problem.2.clear();
-        }
     }
     expected.sort();
     found.sort();
@@ -825,7 +819,7 @@ fn unreachable() -> Plan {
 }
 
 #[test]
-fn check_names_the_nodes_of_writer_nodes_in_the_order_of_the_connector_names() {
+fn names_the_nodes_of_writer_nodes_in_the_order_of_the_connector_names() {
     let text = format!(
         "{PLANT}\
 connector \"w2\" {{
@@ -852,8 +846,8 @@ connector \"w1\" {{
         )
     };
     let fix = "Run each connector that writes `a.time` on one node";
-    let at = (0, value(&text, "node", "\"n1\""));
-    let expected = problem("config.writer-nodes", at, &message("n2", "n1"), fix);
+    let at = (0, value(&text, "node", "\"n2\""));
+    let expected = problem("config.writer-nodes", at, &message("n1", "n2"), fix);
     assert_eq!(planned, [expected]);
     let expected = ("config.writer-nodes", None, message("n1", "n2"), fix.into());
     assert_eq!(problems(found.map(|()| unreachable())), [expected]);

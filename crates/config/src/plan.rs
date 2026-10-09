@@ -50,8 +50,8 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 ///   the one that wins for its nearest connector, the connector with the longest name
 ///   above it: at the label of the index's placement, or of the connector's when no
 ///   placement selects the index.
-/// - `config.writer-nodes` at the `node` of the first connector on a second node that
-///   writes an index or a channel on it.
+/// - `config.writer-nodes` at the `node` of the first connector, in name order, on a
+///   second node that writes an index or a channel on it.
 /// - `config.unknown-node` at each node that a connector or a placement names and that
 ///   is not in `members`. The fix names a member that is equal to it without case.
 ///
@@ -90,9 +90,7 @@ pub fn plan(
 /// # Errors
 ///
 /// The diagnostics of `kinds` for each connector whose kind or config it refuses.
-/// Else each problem of [`plan`] after `config.wrong-channel`, with no span. When
-/// connectors on two nodes write an index, `config.writer-nodes` names the node of the
-/// connector with the first name first.
+/// Else each problem of [`plan`] after `config.wrong-channel`, with no span.
 pub fn check(
     definitions: &BTreeMap<Name, definition::Definition>,
     members: &BTreeSet<Name>,
@@ -311,8 +309,8 @@ struct Model<'a> {
     on: BTreeMap<&'a Name, &'a Name>,
     /// Each connector and its node, in name order.
     connectors: Vec<(&'a Name, &'a Name)>,
-    /// Each connector that a kind checked, the first writer first.
-    writers: &'a [Writer],
+    /// Each connector that a kind checked, in name order.
+    writers: Vec<&'a Writer>,
     /// Each node that a placement names.
     nodes: &'a [(Name, Option<Span>)],
     /// The span of the label of each definition.
@@ -322,13 +320,16 @@ struct Model<'a> {
 }
 
 impl<'a> Model<'a> {
-    fn new(writers: &'a [Writer], nodes: &'a [(Name, Option<Span>)]) -> Self {
+    fn new(
+        writers: impl IntoIterator<Item = &'a Writer>,
+        nodes: &'a [(Name, Option<Span>)],
+    ) -> Self {
         Self {
             placements: Vec::new(),
             indexes: Vec::new(),
             on: BTreeMap::new(),
             connectors: Vec::new(),
-            writers,
+            writers: writers.into_iter().collect(),
             nodes,
             labels: BTreeMap::new(),
             homes: BTreeMap::new(),
@@ -337,7 +338,7 @@ impl<'a> Model<'a> {
 
     /// The model of the files, with their spans.
     fn found(found: &'a Found<'_>) -> Self {
-        let mut model = Self::new(&found.writers, &found.nodes);
+        let mut model = Self::new(found.writers.values(), &found.nodes);
         for (name, entry) in &found.entries {
             model.labels.insert(name, entry.label_span);
             match &entry.definition {

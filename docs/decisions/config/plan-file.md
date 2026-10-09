@@ -69,3 +69,6 @@
   node that applies, since both can change after `plan`. Decided by
   `laptop.architect-2`, 2026-10-08T21:36:36Z
   (https://github.com/synnaxlabs/foundation/issues/2013).
+  Both take the connectors of an index in name order, so `config.writer-nodes` names
+  the same nodes from each (`laptop.architect-2`, 2026-10-09T00:48:39Z:
+  https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).

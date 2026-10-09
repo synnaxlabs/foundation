@@ -37,11 +37,20 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     };
     let node = node.ok()?;
     let at = span(block, "node");
-    found.writers.push(Writer {
-        node: node.clone(),
-        at,
-        writes: channels.writes,
-    });
+    // A label that is no name has no entry, and `found.key` reports it.
+    if let [label] = block.labels.as_slice()
+        && let Ok(name) = read::label(label)
+    {
+        let writes = channels.writes;
+        found.writers.insert(
+            name,
+            Writer {
+                node: node.clone(),
+                at,
+                writes,
+            },
+        );
+    }
     let connector = Connector::new(kind, node, config);
     Some(Definition::Spec(definition::Definition::Connector(
         connector,
