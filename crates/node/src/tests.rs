@@ -2290,15 +2290,37 @@ mod port {
         read: Result<Option<Vec<u8>>, transport::Error>,
     }
 
+    /// Who dials the node.
+    enum Dialer {
+        /// A node with this key.
+        Node(PrivateKey),
+        /// A program.
+        Program,
+    }
+
+    /// A pool of 1 MiB to send on.
+    fn pool() -> Rc<block::Pool> {
+        let config = block::Config { budget: 1 << 20 };
+        let memory = block::Heap::new(config.reservation());
+        Rc::new(block::Pool::new(config, memory))
+    }
+
+    /// A part of a port at a free address of `host`, and a pool of 1 MiB to send on.
+    fn port(host: &sim::node::Node) -> (Rc<block::Pool>, transport::port::Part) {
+        let pool = pool();
+        let at = SocketAddr::new(host.addresses()[0], 0);
+        let bound = transport::Port::bind(&host.net(), at).expect("a port");
+        let part = bound.split(NonZeroUsize::MIN).pop().expect("one part");
+        (pool, part)
+    }
+
     /// A transport on `host` with `key`, at a free port, with its pool.
     fn transport(
         host: &sim::node::Node,
         tasks: env::tasks::Tasks,
         key: PrivateKey,
     ) -> (Transport, Rc<block::Pool>) {
-        let pool = block::Config { budget: 1 << 20 };
-        let memory = block::Heap::new(pool.reservation());
-        let pool = Rc::new(block::Pool::new(pool, memory));
+        let (pool, part) = port(host);
         let config = transport::Config {
             private_key: key,
             message_bytes_max: NonZeroUsize::new(1 << 16).unwrap(),
@@ -2310,25 +2332,41 @@ mod port {
             tasks,
             pool: Rc::clone(&pool),
         };
-        let at = SocketAddr::new(host.addresses()[0], 0);
-        let bound = transport::Port::bind(&host.net(), at).expect("a port");
-        let part = bound.split(NonZeroUsize::MIN).pop().expect("one part");
         (Transport::new(config, part).expect("a transport"), pool)
     }
 
-    /// Starts a peer on a new host of `sim` that dials the node at `listen` of
-    /// `host`, opens a two-way stream, sends `header` as its first message, then
-    /// sends until a send fails, and reads the reply half. Gives what the peer saw
-    /// once the run reaches it, or the error of the dial. The peer holds its session
-    /// until the session closes.
+    /// A program's transport on `host`, at a free port, with its pool.
+    fn program(
+        host: &sim::node::Node,
+        tasks: env::tasks::Tasks,
+    ) -> (transport::Client, Rc<block::Pool>) {
+        let (pool, part) = port(host);
+        let config = transport::client::Config {
+            clock: host.clock(),
+            entropy: host.entropy(),
+            tasks,
+            pool: Rc::clone(&pool),
+        };
+        (
+            transport::Client::new(config, part).expect("a client"),
+            pool,
+        )
+    }
+
+    /// Starts a peer on a new host of `sim` that dials the node at `listen` of `host`
+    /// as `dialer`, opens a two-way stream, sends each of `first`, then sends until a
+    /// send fails, and reads the reply half. Gives what the peer saw once the run
+    /// reaches it, or the error of the dial. The peer holds its session until the
+    /// session closes.
     fn dial(
         sim: &mut sim::Sim,
         host: &sim::node::Node,
-        header: &[u8],
+        dialer: Dialer,
+        first: &[&[u8]],
     ) -> Arc<Mutex<Option<Result<Seen, transport::Error>>>> {
         let peer = sim.node(sim::node::Config::default());
         let listen = listen(host);
-        let header = header.to_vec();
+        let first: Vec<Vec<u8>> = first.iter().map(|bytes| bytes.to_vec()).collect();
         let out = Arc::new(Mutex::new(None));
         let seen = Arc::clone(&out);
         let shard = env::shards::Config {
@@ -2337,9 +2375,23 @@ mod port {
         };
         let own = peer.clone();
         let started = peer.shards().start(shard, move |tasks| async move {
-            let (transport, pool) = transport(&own, tasks, CLIENT);
-            let dialed = transport.dial(KEY.public(), &[Address::Udp(listen)]).await;
-            let session = match dialed {
+            let at = [Address::Udp(listen)];
+            let (mut node, mut client) = (None, None);
+            let (session, pool) = match dialer {
+                Dialer::Node(key) => {
+                    let (transport, pool) = transport(&own, tasks, key);
+                    let session = transport.dial(KEY.public(), &at).await;
+                    node = Some(transport);
+                    (session, pool)
+                }
+                Dialer::Program => {
+                    let (program, pool) = program(&own, tasks);
+                    let session = program.dial(KEY.public(), &at).await;
+                    client = Some(program);
+                    (session, pool)
+                }
+            };
+            let session = match session {
                 Ok(session) => session,
                 Err(error) => {
                     *seen.lock().unwrap() = Some(Err(error));
@@ -2354,7 +2406,12 @@ mod port {
                 block.freeze()
             };
             let bytes_max = sender.bytes_max();
-            let mut sent = sender.send(message(&header)).await;
+            let mut sent = Ok(());
+            for bytes in &first {
+                if sent.is_ok() {
+                    sent = sender.send(message(bytes)).await;
+                }
+            }
             while sent.is_ok() {
                 own.clock().sleep(Span::MILLISECOND).await;
                 sent = sender.send(message(b"after")).await;
@@ -2369,18 +2426,19 @@ mod port {
                 read,
             }));
             session.closed().await;
+            drop((node, client));
         });
         drop(started.expect("the peer starts"));
         out
     }
 
-    /// What a peer sees when it sends `header` to a running node with `memory`, which
-    /// then stops cleanly.
-    fn rejected(header: &[u8], memory: Size) -> Seen {
-        let mut sim = sim::Sim::new(sim::Config::default());
-        let host = keyed(&mut sim, 2);
-        let node = Node::start(config(&host, memory, Box::new(heap)));
-        let seen = dial(&mut sim, &host, header);
+    /// Runs `sim` for an hour, stops `node` cleanly, and gives what the peer of
+    /// [`dial`] saw.
+    fn watch(
+        mut sim: sim::Sim,
+        node: Node,
+        seen: &Mutex<Option<Result<Seen, transport::Error>>>,
+    ) -> Seen {
         assert_eq!(sim.run_for(Span::HOUR), Ok(()));
         node.stop();
         assert_eq!(sim.run(), Ok(()));
@@ -2388,6 +2446,15 @@ mod port {
         let seen = seen.lock().unwrap().take();
         seen.expect("the peer ran")
             .expect("the dial reaches the node")
+    }
+
+    /// What `dialer` sees when it sends `first` to a running node with `memory`.
+    fn sees(dialer: Dialer, first: &[&[u8]], memory: Size) -> Seen {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = keyed(&mut sim, 2);
+        let node = Node::start(config(&host, memory, Box::new(heap)));
+        let seen = dial(&mut sim, &host, dialer, first);
+        watch(sim, node, &seen)
     }
 
     /// The node stops a stream it serves no protocol for, and resets its reply half,
@@ -2402,9 +2469,51 @@ mod port {
             bytes_max,
             sent,
             read,
-        } = rejected(&header, Size::MEBIBYTE);
+        } = sees(Dialer::Node(CLIENT), &[&header], Size::MEBIBYTE);
         assert_eq!(peer, Peer::Node(key));
         assert_eq!(bytes_max, 65_536);
+        assert_eq!(sent, transport::Error::Stopped { code });
+        assert_eq!(read, Err(transport::Error::Reset { code }));
+    }
+
+    /// The header of a hub stream, then an open of the channel 9, which no node
+    /// knows.
+    fn open_unknown() -> [Vec<u8>; 3] {
+        let header = wire::header::encode(wire::Protocol::Hub);
+        let open = wire::hub::Open {
+            mode: wire::hub::Mode::Complete { limit_bytes: 0 },
+            channels: 1,
+        };
+        let mut opened = vec![0; open.encoded_len()];
+        open.encode(&mut opened);
+        let mut keys = [0; wire::hub::keys::LEN];
+        wire::hub::keys::encode(&[types::channel::Key::from_u128(9)], &mut keys);
+        [header.to_vec(), opened, keys.to_vec()]
+    }
+
+    /// A node with no region has no members, so it stops a hub stream of a node, and
+    /// resets its reply half, with the code of a rejected header.
+    #[test]
+    fn rejects_a_hub_stream_of_a_node_with_no_region() {
+        let first = open_unknown();
+        let first: Vec<&[u8]> = first.iter().map(Vec::as_slice).collect();
+        let Seen { sent, read, .. } =
+            sees(Dialer::Node(CLIENT), &first, Size::MEBIBYTE);
+        let code = Code(wire::header::REJECTED);
+        assert_eq!(sent, transport::Error::Stopped { code });
+        assert_eq!(read, Err(transport::Error::Reset { code }));
+    }
+
+    /// The node stops a hub stream of a program, and resets its reply half, with the
+    /// code of a rejected header.
+    #[test]
+    fn rejects_a_hub_stream_of_a_program() {
+        let header = wire::header::encode(wire::Protocol::Hub);
+        let Seen {
+            peer, sent, read, ..
+        } = sees(Dialer::Program, &[&header], Size::MEBIBYTE);
+        let code = Code(wire::header::REJECTED);
+        assert_eq!(peer, Peer::Node(KEY.public()));
         assert_eq!(sent, transport::Error::Stopped { code });
         assert_eq!(read, Err(transport::Error::Reset { code }));
     }
@@ -2419,7 +2528,8 @@ mod port {
             Err(wire::header::Error::Protocol { number: 9 })
         );
         let code = Code(wire::header::REJECTED);
-        let Seen { sent, read, .. } = rejected(&header, Size::MEBIBYTE);
+        let Seen { sent, read, .. } =
+            sees(Dialer::Node(CLIENT), &[&header], Size::MEBIBYTE);
         assert_eq!(sent, transport::Error::Stopped { code });
         assert_eq!(read, Err(transport::Error::Reset { code }));
     }
@@ -2428,7 +2538,11 @@ mod port {
     #[test]
     fn a_node_whose_largest_block_is_below_64_kib_serves_its_port() {
         let header = wire::header::encode(wire::Protocol::Mesh);
-        let seen = rejected(&header, Size::from_bytes(128 << 10));
+        let seen = sees(
+            Dialer::Node(CLIENT),
+            &[&header],
+            Size::from_bytes(128 << 10),
+        );
         assert_eq!(seen.bytes_max, 57_344);
         let code = Code(wire::header::REJECTED);
         assert_eq!(seen.sent, transport::Error::Stopped { code });
@@ -2441,9 +2555,9 @@ mod port {
         let host = keyed(&mut sim, 2);
         let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
         let header = wire::header::encode(wire::Protocol::Mesh);
-        let first = dial(&mut sim, &host, &header);
+        let first = dial(&mut sim, &host, Dialer::Node(CLIENT), &[&header]);
         assert_eq!(sim.run_for(Span::SECOND), Ok(()));
-        let second = dial(&mut sim, &host, &header);
+        let second = dial(&mut sim, &host, Dialer::Node(CLIENT), &[&header]);
         assert_eq!(sim.run_for(Span::SECOND), Ok(()));
         let sent = |seen: &Arc<Mutex<Option<Result<Seen, _>>>>| {
             let seen = seen.lock().unwrap().take();
@@ -2523,7 +2637,12 @@ mod port {
         let host = keyed(&mut sim, 2);
         host.fail_file(Path::new("shard-1/ring"), env::files::Operation::Open);
         let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
-        let seen = dial(&mut sim, &host, &wire::header::encode(wire::Protocol::Mesh));
+        let seen = dial(
+            &mut sim,
+            &host,
+            Dialer::Node(CLIENT),
+            &[&wire::header::encode(wire::Protocol::Mesh)],
+        );
         assert_eq!(sim.run(), Ok(()));
         let seen = seen.lock().unwrap().take().expect("the peer ran");
         let unreachable = transport::Error::Unreachable {
@@ -3231,9 +3350,9 @@ mod port {
             start(host, region(&[member(OWN, &KEY, host)]))
         }
 
-        /// Starts the member [`OTHER`] of `members` on `host`: an endpoint with no
-        /// node, which opens and serves the mesh as a node's does. Runs `act` with the
-        /// mesh, then drops the mesh and its port.
+        /// Starts the member [`OTHER`] of `members` on `host` without a `Node`: an
+        /// endpoint and a hub with its key, which serve the mesh as a node's do. Runs
+        /// `act` with the mesh, then drops the mesh and its port.
         fn peer<F: Future<Output = ()> + 'static>(
             host: &sim::node::Node,
             members: Vec<Member>,
@@ -3257,15 +3376,31 @@ mod port {
                     clock: own.clock(),
                     entropy: own.entropy(),
                 };
-                let pool = block::Config { budget: 1 << 20 };
-                let memory = block::Heap::new(pool.reservation());
-                let pool = Rc::new(block::Pool::new(pool, memory));
+                let pool = super::pool();
+                let stop = crate::stop::Stop::default();
+                let (open, buffer, next, time) =
+                    super::super::home::create_open(&own, &tasks, 0, stop);
+                let opened =
+                    open.run(own.files(), Rc::new(buffer), tasks.clone()).await;
+                let home = opened.expect("the buffer opens");
+                let interner = next.await.expect("the open gives the interner");
+                let (key, entropy) = (identity.key, endpoint.entropy.clone());
                 let (transport, mesh) = endpoint
                     .open(identity, own.files(), pool, tasks.clone())
                     .await
                     .expect("the mesh opens");
                 let mesh = mesh.expect("the peer has a region");
-                let port = route::accept(transport, Some(mesh.clone()), tasks);
+                let hub = ::hub::Hub::new(::hub::Config {
+                    home,
+                    interner,
+                    tasks: tasks.clone(),
+                    node: key,
+                    time,
+                    entropy,
+                    mesh: Some(mesh.clone()),
+                });
+                hub.define(&region(&members).definitions);
+                let port = route::accept(transport, Some(mesh.clone()), hub, tasks);
                 let (mut port, mut act) = (pin!(port), pin!(act(mesh, own)));
                 poll_fn(|cx| {
                     let stopped = port.as_mut().poll(cx);
@@ -3314,14 +3449,53 @@ mod port {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let node = start_alone(&host);
-            let seen = dial(&mut sim, &host, header);
-            assert_eq!(sim.run_for(Span::HOUR), Ok(()));
-            node.stop();
-            assert_eq!(sim.run(), Ok(()));
-            assert_eq!(node.join(), Ok(()));
-            let seen = seen.lock().unwrap().take();
-            seen.expect("the peer ran")
-                .expect("the dial reaches the node")
+            let seen = dial(&mut sim, &host, Dialer::Node(CLIENT), &[header]);
+            watch(sim, node, &seen)
+        }
+
+        /// What `dialer` sees when it sends [`open_unknown`] to the node [`OWN`] of a
+        /// region with [`OTHER`].
+        ///
+        /// [`open_unknown`]: super::open_unknown
+        fn opened(dialer: Dialer) -> Seen {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let node = start(&hosts[0], region(&pair(&hosts)));
+            let first = super::open_unknown();
+            let first: Vec<&[u8]> = first.iter().map(Vec::as_slice).collect();
+            let seen = dial(&mut sim, &hosts[0], dialer, &first);
+            watch(sim, node, &seen)
+        }
+
+        /// The node gives a hub stream of a member to its hub, which stops an open of
+        /// a channel that the node does not know, and resets its reply half, with
+        /// `UNKNOWN`.
+        #[test]
+        fn a_hub_stream_of_a_member_goes_to_the_hub() {
+            let Seen { sent, read, .. } = opened(Dialer::Node(OTHER.1));
+            let code = Code(wire::hub::UNKNOWN);
+            assert_eq!(sent, transport::Error::Stopped { code });
+            assert_eq!(read, Err(transport::Error::Reset { code }));
+        }
+
+        /// The node stops a hub stream of a node that is not a member, and resets its
+        /// reply half, with the code of a rejected header.
+        #[test]
+        fn rejects_a_hub_stream_of_a_node_that_is_not_a_member() {
+            let Seen { sent, read, .. } = opened(Dialer::Node(CLIENT));
+            let code = Code(wire::header::REJECTED);
+            assert_eq!(sent, transport::Error::Stopped { code });
+            assert_eq!(read, Err(transport::Error::Reset { code }));
+        }
+
+        /// The node stops a hub stream of a program, and resets its reply half, with
+        /// the code of a rejected header.
+        #[test]
+        fn rejects_a_hub_stream_of_a_program_of_a_region() {
+            let Seen { sent, read, .. } = opened(Dialer::Program);
+            let code = Code(wire::header::REJECTED);
+            assert_eq!(sent, transport::Error::Stopped { code });
+            assert_eq!(read, Err(transport::Error::Reset { code }));
         }
 
         /// The mesh serves a mesh stream: at the first message that is not a mesh
@@ -3605,10 +3779,10 @@ mod port {
         }
 
         /// A stop of the node from a task on shard 0, in the poll that breaks the
-        /// node's UDP socket: the node sees its stop, the transport's, and the group's
-        /// `Dropped` at one poll, and its stop ranks first.
+        /// node's UDP socket: the node sees its stop and the transport's at one poll,
+        /// with the group still pending, and its stop ranks first.
         #[test]
-        fn a_stop_as_the_transport_and_the_group_stop_gives_no_error() {
+        fn a_stop_as_the_transport_of_a_mesh_stops_gives_no_error() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let node = Arc::new(std::sync::Mutex::new(start_alone(&host)));
