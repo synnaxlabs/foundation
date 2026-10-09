@@ -34,6 +34,11 @@ const OPTIONS: tcp::Options = tcp::Options {
 /// The size of the read buffer of each connection.
 const READ_BYTES: usize = 1 << 16;
 
+/// Gives a buffer for one read.
+fn read_buffer() -> Box<[u8]> {
+    vec![0; READ_BYTES].into_boxed_slice()
+}
+
 /// The most sends that wait on one connection. A send past it closes the connection.
 /// open62541 allocates each at most at the send buffer size of its channel. Sends wait
 /// from one pass to the next, and longer while a stream is full, so an owner keeps the
@@ -389,9 +394,13 @@ impl State {
     }
 
     /// Adds a connection with `callback` and `stream`, and gives its key.
-    fn insert(&self, callback: Callback, stream: Stream, buffer: Box<[u8]>) -> usize {
+    fn insert(&self, callback: Callback, stream: Stream) -> usize {
         let id = self.next.get();
         self.next.set(id + 1);
+        let buffer = match stream {
+            Stream::Open(_) => read_buffer(),
+            _ => Box::default(),
+        };
         let connection = Connection {
             callback: Some(callback),
             stream,
@@ -419,8 +428,7 @@ impl State {
             .expect(
                 "invariant: a listen connection keeps its callback while it listens",
             );
-        let buffer = vec![0; READ_BYTES].into_boxed_slice();
-        let id = self.insert(callback, Stream::Open(tcp), buffer);
+        let id = self.insert(callback, Stream::Open(tcp));
         self.call(id, ffi::ESTABLISHED, &mut []);
         self.wake(id);
     }
@@ -564,7 +572,7 @@ impl Connection {
                 Poll::Pending => Ok(Step::Waiting),
                 Poll::Ready(Ok(tcp)) => {
                     self.stream = Stream::Open(tcp);
-                    self.buffer = vec![0; READ_BYTES].into_boxed_slice();
+                    self.buffer = read_buffer();
                     Ok(Step::Established)
                 }
                 Poll::Ready(Err(e)) => Err(Failure::Net("connect", e)),
@@ -748,7 +756,7 @@ unsafe extern "C" fn open(
         context: Rc::new(Cell::new(context)),
         function: callback,
     };
-    let id = state.insert(callback, Stream::Connecting(connect), Box::default());
+    let id = state.insert(callback, Stream::Connecting(connect));
     state.call(id, ffi::OPENING, &mut []);
     state.wake(id);
     Status::GOOD.0
@@ -786,7 +794,7 @@ unsafe extern "C" fn listen(
         context: Rc::new(Cell::new(context)),
         function: callback,
     };
-    let id = state.insert(callback, Stream::Listening(listener), Box::default());
+    let id = state.insert(callback, Stream::Listening(listener));
     state.call(id, ffi::ESTABLISHED, &mut []);
     state.wake(id);
     Status::GOOD.0
