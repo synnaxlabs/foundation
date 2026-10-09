@@ -7336,6 +7336,8 @@ mod tests {
             });
         }
 
+        /// On `Endpoint` events, not through `Session`: no public peer can skip its
+        /// hello.
         #[test]
         fn end_a_silent_session_with_no_hello_at_idle_as_timed_out() {
             testing::run(1, |shard| {
@@ -7362,7 +7364,9 @@ mod tests {
 
         /// A peer that sends no hello goes silent, and the one wake after it comes past
         /// both the idle timeout and the hello's bound: at the handshake, when the idle
-        /// timeout is due first, and 1.5 s after it, when the bound is.
+        /// timeout is due first, and 1.5 s after it, when the bound is. On `Endpoint`,
+        /// not through `Session`: no public peer can skip its hello, and the test picks
+        /// the instant of the wake.
         #[test]
         fn end_a_silent_session_at_a_late_wake_as_timed_out() {
             for (quiet, wake) in [(0, 2_100), (1_500, 2_600)] {
@@ -7392,11 +7396,15 @@ mod tests {
         }
 
         /// Two nodes with an idle of 1 s, on links of 600 ms and 1.2 s RTT, which lose
-        /// the server's first two datagrams. Each hello arrives late, after `idle`, and
-        /// on the slower link after twice `idle`, but within the idle timeout of 3 PTO.
+        /// the server's first two datagrams. The client's hello arrives after `idle`,
+        /// and on the slower link after twice `idle`, but within the idle timeout of 3
+        /// PTO. The server's arrives at `Connected`. On `Endpoint`, not through
+        /// `Session`: the test drops exactly the server's first two datagrams, which
+        /// the loss of a `sim` link cannot pick.
         #[test]
         fn keep_a_session_whose_hello_a_short_cut_delays() {
-            for delay in [300, 600].map(Duration::from_millis) {
+            for (delay, after) in [(300, 1), (600, 2)] {
+                let delay = Duration::from_millis(delay);
                 testing::run(1, move |shard| {
                     let mut pair = Pair::new(shard, Span::SECOND, delay);
                     pair.dial(pair::SERVER_KEY.public());
@@ -7414,10 +7422,18 @@ mod tests {
                             side.events
                         );
                     }
+                    let late =
+                        pair.client.events[1].0.checked_sub(pair.client.events[0].0);
+                    assert!(
+                        late > Some(Duration::from_secs(after)),
+                        "{delay:?}: {late:?}"
+                    );
                 });
             }
         }
 
+        /// On `Endpoint` events, not through `Session`: no public peer can send its
+        /// hello at a chosen instant.
         #[test]
         fn keep_a_session_whose_peer_hello_arrives_before_twice_idle() {
             testing::run(1, |shard| {
@@ -7444,7 +7460,8 @@ mod tests {
         }
 
         /// The carrier sets its sleep only when the deadline changes, so one timeout
-        /// at a late wake must leave no deadline at or before it.
+        /// at a late wake must leave no deadline at or before it. On `Endpoint`: the
+        /// deadline is the carrier's input, and no `Session` call shows it.
         #[test]
         fn leave_no_past_deadline_after_a_late_wake() {
             for late in [100, 300, 600, 900].map(Duration::from_millis) {
