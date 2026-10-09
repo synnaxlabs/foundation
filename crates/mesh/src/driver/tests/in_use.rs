@@ -756,6 +756,7 @@ fn an_open_gives_the_error_of_each_failed_file_call_on_the_spec_in_use() {
     let calls = [
         (PathBuf::from(used::SPEC), Operation::CreateDir),
         (PathBuf::from(used::SPEC), Operation::List),
+        (PathBuf::from(used::SPEC), Operation::SyncDir),
         (file(older), Operation::Remove),
     ];
     for (path, operation) in calls {
@@ -1168,4 +1169,55 @@ fn a_call_ends_when_the_read_of_its_pointer_ends_after_a_later_pointer_commits()
         };
         assert_eq!(now(call.as_mut()).await, Poll::Ready(Ok(behind)));
     });
+}
+
+// The sync of the file of v2 fails, and the process dies before the retry. The next
+// open uses v2 from a file that no sync made durable, and removes the file of v1.
+// After a power cut, the open after that must still use v2, the spec it used last.
+#[test]
+fn an_open_uses_the_spec_it_used_last_after_a_power_cut() {
+    let (a, b) = (
+        create_subjects(&["plant.a"], 1),
+        create_subjects(&["plant.b"], 1),
+    );
+    let (first, second) = (pointer(1, &a), pointer(2, &b));
+    let mut found = Vec::new();
+    for seed in 0..8 {
+        let mut sim = Sim::new(sim::Config {
+            seed,
+            ..sim::Config::default()
+        });
+        let node = sim.node(sim::node::Config::default());
+        let (applied, next) = (a.clone(), b.clone());
+        sim.run_on(&node, move |node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            assert_eq!(
+                mesh.apply(base(), applied, BTreeMap::new()).await,
+                Ok(first)
+            );
+            assert_eq!(mesh.spec().await.unwrap().pointer, Some(first));
+            node.fail_file(Path::new(used::SPEC), Operation::SyncDir);
+            assert_eq!(mesh.apply(first, next, BTreeMap::new()).await, Ok(second));
+            assert_eq!(mesh.spec().await.unwrap().pointer, Some(first));
+        })
+        .unwrap();
+        sim.crash(&node, Crash::Process);
+        let used = b.clone();
+        sim.run_on(&node, move |node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+            assert_eq!(mesh.spec().await, Ok(in_use(second, &used)), "seed {seed}");
+        })
+        .unwrap();
+        sim.crash(&node, Crash::Power);
+        let pointer = sim
+            .run_on(&node, move |node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+                mesh.spec().await.unwrap().pointer
+            })
+            .unwrap();
+        if pointer != Some(second) {
+            found.push((seed, pointer.map(|pointer| pointer.version)));
+        }
+    }
+    assert_eq!(found, [], "(seed, version at the open) that is not v2");
 }

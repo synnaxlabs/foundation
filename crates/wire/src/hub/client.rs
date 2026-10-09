@@ -70,7 +70,7 @@ pub enum Refusal {
     /// [`MALFORMED`]: a message of the program does not decode, or breaks a rule of
     /// the client wire.
     Malformed,
-    /// [`BUSY`]: the node had no memory for a response.
+    /// [`BUSY`]: the node had no memory for a response or a request body.
     Busy,
     /// [`REFUSED`].
     Refused,
@@ -124,7 +124,7 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Malformed => "a message of the program broke the client wire",
-            Self::Busy => "the node had no memory for a response",
+            Self::Busy => "the node had no memory for a response or a request body",
             Self::Refused => {
                 "the spec has no such subject, does not list the key for it, or the \
                  signature is not valid"

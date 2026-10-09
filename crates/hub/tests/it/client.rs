@@ -136,6 +136,19 @@ fn closes_the_session_when_the_last_clone_drops() {
     assert_eq!(home.closed, transport::Error::PeerClosed { code: Code(0) });
 }
 
+/// The home keeps the end of each stream, whichever task the sim picks first.
+#[test]
+fn keeps_the_end_of_each_stream_at_each_seed() {
+    for seed in 0..16 {
+        let home = with_client(seed, |client, node| async move {
+            assert_eq!(client.request(b"ab").await, Ok(b"ba".to_vec()));
+            drop(client);
+            node.clock().sleep(QUIET).await;
+        });
+        assert_eq!(home.served.len(), 2, "seed {seed}: {:?}", home.served);
+    }
+}
+
 #[test]
 fn refuses_a_hello_of_a_key_the_spec_does_not_list() {
     let got = Arc::new(Mutex::new(None));
@@ -637,6 +650,74 @@ fn closes_the_session_on_a_challenge_that_is_not_valid() {
             assert_eq!(
                 client.request(b"ab").await,
                 Err(Error::Message(wire::hub::Error::Kind { kind: 0xff }))
+            );
+        },
+    );
+}
+
+/// A request in flight when a challenge that `wire` refuses ends the renewal gives
+/// that error, not the error of the close.
+#[test]
+fn gives_the_error_of_the_renewal_to_a_request_in_flight() {
+    raw(
+        135,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let _request = read_request(&session).await;
+            let sender = hello.sender.as_mut().expect("two-way");
+            let refused = own_pool().copy(&[0xff]).expect("room");
+            sender.send(refused).await.expect("sends");
+            drop(session.closed().await);
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            assert_eq!(
+                client.request(b"ab").await,
+                Err(Error::Message(wire::hub::Error::Kind { kind: 0xff }))
+            );
+        },
+    );
+}
+
+/// A request in flight when the node finishes the hello stream gives
+/// [`Error::Unanswered`], the error that ended the renewal.
+#[test]
+fn gives_an_unanswered_renewal_to_a_request_in_flight() {
+    raw(
+        136,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let _request = read_request(&session).await;
+            let sender = hello.sender.as_mut().expect("two-way");
+            sender.finish().expect("finishes");
+            drop(session.closed().await);
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            assert_eq!(client.request(b"ab").await, Err(Error::Unanswered));
+        },
+    );
+}
+
+/// A body over the cap gives [`Error::Body`] also once the renewal ended.
+#[test]
+fn gives_the_body_error_first_after_the_renewal_ended() {
+    raw(
+        152,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let sender = hello.sender.as_mut().expect("two-way");
+            let refused = own_pool().copy(&[0xff]).expect("room");
+            sender.send(refused).await.expect("sends");
+            drop(session.closed().await);
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            node.clock().sleep(LIFE).await;
+            let length = usize::try_from(BODY_BYTES_MAX).expect("fits") + 1;
+            assert_eq!(
+                client.request(&vec![0; length]).await,
+                Err(Error::Body { length })
             );
         },
     );
@@ -1227,7 +1308,15 @@ fn keeps_a_session_when_the_error_of_mesh_time_shrinks() {
             super::link::shrink_wall_error(&node, &tasks);
             let (test, session, link) =
                 accept(&node, &tasks, POOL, true, Some(rules())).await;
-            super::link::serve_streams(&node, &tasks, &session, &link, &seen).await;
+            super::link::serve_each(
+                &session,
+                &link,
+                &tasks,
+                &node.clock(),
+                &seen,
+                &Rc::default(),
+            )
+            .await;
             drop((link, test));
         },
         move |node, tasks, at| async move {

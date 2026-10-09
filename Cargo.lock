@@ -11,7 +11,9 @@ dependencies = [
  "env",
  "mesh",
  "node",
+ "ops",
  "proptest",
+ "serde_json",
  "sim",
  "spec",
  "transport",
@@ -424,8 +426,12 @@ name = "connector-opcua"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "connector-opcua",
  "counting",
  "divan",
+ "env",
+ "sim",
+ "types",
 ]
 
 [[package]]
@@ -1065,11 +1071,13 @@ dependencies = [
  "bytes",
  "clock",
  "codec",
+ "config-hcl",
  "connector",
  "connector-influx",
  "counting",
  "crc32c",
  "divan",
+ "document",
  "env",
  "estimate",
  "home",
