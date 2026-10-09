@@ -7,8 +7,9 @@ use env::thread::Error;
 
 /// Holds SIGINT and SIGTERM on the calling thread and each thread it starts later, and
 /// starts thread `signal`, which calls `fire` at the first, then takes them as with no
-/// hold. The thread has no handle: it lives until the process ends, to take the
-/// second signal. When the thread cannot start, the mask stays as it was.
+/// hold, so a signal that the caller blocked stays blocked. The thread has no handle:
+/// it lives until the process ends, to take the second signal. When the thread cannot
+/// start, the mask stays as it was.
 #[expect(
     clippy::disallowed_methods,
     reason = "an env Handle joins its thread, and this one never ends"
@@ -20,7 +21,7 @@ pub(crate) fn hold(fire: impl FnOnce() + Send + 'static) -> Result<(), Error> {
     let name = "signal";
     match thread::Builder::new()
         .name(name.to_owned())
-        .spawn(move || serve(&set, fire))
+        .spawn(move || serve(&set, &old, fire))
     {
         Ok(_) => Ok(()),
         Err(e) => {
@@ -47,13 +48,15 @@ fn set() -> libc::sigset_t {
     unsafe { set.assume_init() }
 }
 
-fn serve(set: &libc::sigset_t, fire: impl FnOnce()) -> ! {
+/// Calls `fire` at the first signal of `set`, then sets the mask of the thread to
+/// `old`, the mask before the hold.
+fn serve(set: &libc::sigset_t, old: &libc::sigset_t, fire: impl FnOnce()) -> ! {
     let mut signal = 0;
     // SAFETY: `set` is an initialized sigset, and `signal` an int that the call writes.
     let rc = unsafe { libc::sigwait(set, &raw mut signal) };
     assert_eq!(rc, 0, "invariant: sigwait of a valid set does not fail");
     fire();
-    mask(libc::SIG_UNBLOCK, set);
+    mask(libc::SIG_SETMASK, old);
     // A signal goes only to a thread that takes it, so this one stays.
     loop {
         // SAFETY: `pause` takes no arguments.

@@ -1,7 +1,8 @@
 //! `os::interrupt` holds the first SIGINT or SIGTERM and completes its future at it,
 //! and a second one ends the process. This binary has no test harness: the threads
 //! of a harness start before the hold, so a signal would end the process. With the
-//! argument `child`, it is the process that the test signals.
+//! argument `child`, it is the process that the test signals, and with `blocked`, one
+//! that blocks SIGTERM first.
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::ExitStatusExt;
@@ -20,10 +21,21 @@ const BOUND: Duration = Duration::from_secs(10);
 
 fn main() {
     match std::env::args_os().nth(1) {
-        Some(arg) if arg == "child" => child(),
+        Some(arg) if arg == "child" => {
+            block(&[]);
+            child();
+        }
+        Some(arg) if arg == "blocked" => {
+            block(&[libc::SIGTERM]);
+            child();
+        }
         #[cfg(target_os = "linux")]
-        Some(arg) if arg == "early" => early(),
+        Some(arg) if arg == "early" => {
+            block(&[]);
+            early();
+        }
         _ => {
+            a_blocked_sigterm_stays_blocked_after_the_first_signal();
             a_second_signal_ends_the_process();
             the_future_completes_at_the_first_signal();
             #[cfg(target_os = "linux")]
@@ -44,6 +56,52 @@ fn child() {
         writeln!(output, "fired").expect("a write to the test");
         sleep(BOUND).await;
     });
+}
+
+/// Sets the mask of the calling thread to `signals`. A child inherits the mask of the
+/// test, which holds the signals once a test has called `interrupt`.
+#[expect(unsafe_code, reason = "a signal mask is an OS call")]
+fn block(signals: &[libc::c_int]) {
+    let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+    // SAFETY: `set` is one sigset, which the call initializes.
+    let rc = unsafe { libc::sigemptyset(set.as_mut_ptr()) };
+    assert_eq!(rc, 0, "sigemptyset");
+    for &signal in signals {
+        // SAFETY: `set` is an initialized sigset, and `signal` a valid signal.
+        let rc = unsafe { libc::sigaddset(set.as_mut_ptr(), signal) };
+        assert_eq!(rc, 0, "sigaddset");
+    }
+    // SAFETY: `set` is an initialized sigset, and the old mask is not asked for.
+    let rc = unsafe {
+        libc::pthread_sigmask(libc::SIG_SETMASK, set.as_ptr(), std::ptr::null_mut())
+    };
+    assert_eq!(rc, 0, "pthread_sigmask");
+}
+
+/// With no hold, a SIGTERM that the caller blocks does not end the process. After
+/// the first SIGINT, the hold must give that back, as it does when its thread
+/// cannot start.
+fn a_blocked_sigterm_stays_blocked_after_the_first_signal() {
+    let mut child = Command::new(std::env::current_exe().expect("the test binary"))
+        .arg("blocked")
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("the child starts");
+    let pid = Pid::from_child(&child);
+    let mut lines = BufReader::new(child.stdout.take().expect("a pipe")).lines();
+    let mut line = || lines.next().expect("a line of the child").expect("a read");
+    assert_eq!(line(), "held", "the child holds the signals");
+    kill_process(pid, Signal::INT).expect("the test signals the child");
+    assert_eq!(line(), "fired", "the first SIGINT completes the future");
+    kill_process(pid, Signal::TERM).expect("the test signals the child");
+    runtime().block_on(async { sleep(QUIET).await });
+    let ended = child.try_wait().expect("a wait");
+    child.kill().unwrap_or(());
+    child.wait().expect("the child ends");
+    assert_eq!(
+        ended, None,
+        "a SIGTERM that the caller blocked ended the child"
+    );
 }
 
 fn a_second_signal_ends_the_process() {

@@ -166,7 +166,7 @@ pub fn net() -> env::net::Net {
 /// # Errors
 ///
 /// - [`Error::Dir`] when the OS cannot open or make `dir` or `dir/data`, or cannot open
-///   the parent of `dir`, which it syncs.
+///   or sync the directory that holds each.
 /// - [`Error::Thread`] when the I/O thread cannot start.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn files(
