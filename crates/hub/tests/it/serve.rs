@@ -88,9 +88,8 @@ pub(super) struct Peer {
 
 impl Peer {
     async fn send(&mut self, bytes: &[u8]) -> Result<(), transport::Error> {
-        let mut block = self.pool.alloc(bytes.len()).expect("the pool has room");
-        block.copy_from_slice(bytes);
-        self.sender.send(block.freeze()).await
+        let block = self.pool.copy(bytes).expect("the pool has room");
+        self.sender.send(block).await
     }
 
     /// Sends an open of `keys` in `mode`, the keys in one message.

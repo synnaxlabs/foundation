@@ -435,9 +435,8 @@ struct Stream {
 
 impl Stream {
     async fn send(&mut self, bytes: &[u8]) {
-        let mut block = self.pool.alloc(bytes.len()).expect("the pool has room");
-        block.copy_from_slice(bytes);
-        self.sender.send(block.freeze()).await.expect("sends");
+        let block = self.pool.copy(bytes).expect("the pool has room");
+        self.sender.send(block).await.expect("sends");
     }
 
     /// Sends a request of `length` bytes, signed over `body`, and `body` in messages
