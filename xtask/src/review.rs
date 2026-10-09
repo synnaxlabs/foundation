@@ -117,7 +117,8 @@ struct Round {
 /// A round comment that does not parse.
 #[derive(Debug)]
 struct Malformed {
-    /// It has a `Reviewers:`, `Range:`, or `Findings:` line, so it is not free-form.
+    /// It has a `Reviewers:`, `Range:`, or `Findings:` line, so it is not free-form,
+    /// or the check cannot read it ([`Shown::hiding`]).
     fixed: bool,
     problem: String,
 }
@@ -341,7 +342,7 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
 /// [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Parsed> {
     let body = normalized(body);
-    let shown = Shown::read(&body);
+    let shown = Shown::read(&body, old);
     let number = shown.number.or(shown.html_number.filter(|_| !old))?;
     let text = &shown.text;
     let lines = shown.fields().iter().copied();
@@ -349,7 +350,8 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
     let (reviewers, range) = (field("Reviewers: "), field("Range: "));
     let findings = field("Findings: ");
     let breakerless = lines.clone().any(|l| l.starts_with("Breaker: skipped"));
-    let fixed = reviewers.is_some() || range.is_some() || findings.is_some();
+    let fixed = [reviewers, range, findings].iter().any(Option::is_some)
+        || shown.hiding.is_some();
     let performance = |reviewers: Option<&BTreeSet<String>>| {
         let performer =
             reviewers.map_or_else(|| performer(text), |r| r.contains("performance"));
@@ -370,7 +372,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         format!("review round {number} has no `{name}:` line. Write the round {FORMAT}")
     };
     let fields = || {
-        if let Some((line, cause)) = shown.hiding.filter(|_| !old) {
+        if let Some((line, cause)) = shown.hiding {
             return Err(cause.problem(number, line));
         }
         let range = range.ok_or_else(|| missing("Range"))?.trim_matches('`');
@@ -488,8 +490,7 @@ struct Shown<'a> {
     /// The lines of text of each paragraph after the heading, at any depth, as GitHub
     /// shows them: without the indent or the marks of a list item or a quote. A
     /// footnote with no reference is not shown. A paragraph that comrak places in the
-    /// wrong lines ([`misplaced`]) gives each of its source lines from its start, and
-    /// after the indent and the marks of quotes.
+    /// wrong lines ([`misplaced`]) gives no line.
     text: Vec<Vec<&'a str>>,
     /// The first line of the comment that can hide text on GitHub or that the check
     /// cannot read, and its cause.
@@ -502,8 +503,9 @@ struct Shown<'a> {
 
 impl<'a> Shown<'a> {
     /// Reads `body` ([`normalized`]). Its round heading is the first top-level
-    /// `## Review round ` heading.
-    fn read(body: &'a str) -> Self {
+    /// `## Review round ` heading. In an `old` round, only a [`Cause::Misplaced`]
+    /// paragraph is [`Shown::hiding`].
+    fn read(body: &'a str, old: bool) -> Self {
         let mut shown = Self::default();
         let starts: Vec<usize> = std::iter::once(0)
             .chain(body.match_indices('\n').map(|(i, _)| i + 1))
@@ -541,13 +543,7 @@ impl<'a> Shown<'a> {
                 }
                 NodeValue::Paragraph if misplaced(node, data.sourcepos.end.line) => {
                     hiding.push((start, Cause::Misplaced));
-                    // A later line holds no mark of a list item or a footnote label.
-                    let text =
-                        &body[at(data.sourcepos.start)..source(data.sourcepos).end];
-                    let lines = text.split('\n');
-                    shown.text.push(
-                        lines.map(|l| l.trim_start_matches([' ', '>'])).collect(),
-                    );
+                    shown.text.push(Vec::new());
                 }
                 NodeValue::Paragraph => {
                     let last = data.sourcepos.end.line;
@@ -567,7 +563,11 @@ impl<'a> Shown<'a> {
             }
         }
         hiding.extend(tagged(body, &starts, &codes).map(|at| (at, Cause::Raw)));
-        let first = hiding.into_iter().min_by_key(|(at, _)| *at);
+        // An old round is taken as written, except where the check cannot read it.
+        let hiding = hiding
+            .into_iter()
+            .filter(|(_, cause)| !old || matches!(cause, Cause::Misplaced));
+        let first = hiding.min_by_key(|(at, _)| *at);
         shown.hiding =
             first.map(|(at, cause)| (body[at..line_end(body, at)].trim(), cause));
         shown

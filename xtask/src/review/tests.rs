@@ -1462,26 +1462,6 @@ fn hides_both_footnotes_with_no_reference_of_one_label() {
 }
 
 #[test]
-fn an_old_round_reads_no_hot_path_after_other_text_on_its_line() {
-    // A `2.` item cannot interrupt a paragraph, so GitHub shows the line
-    // `2. Hot path: send`.
-    for text in [
-        "See\n2. Hot path: `send`",
-        "[r]: https://x.y\nSee\n2. Hot path: `send`",
-        "> - [r]: https://x.y\n>   See\n>   2. Hot path: `send`",
-    ] {
-        let round = old(&format!(
-            "## Review round 1\n\nConfirmed a finding.\n\n{text}"
-        ));
-        assert_eq!(
-            check(&record(vec![round, bot(ROUND)])),
-            Vec::<String>::new(),
-            "{text}"
-        );
-    }
-}
-
-#[test]
 fn an_old_round_reads_the_first_footnote_of_a_label_with_a_reference() {
     // GitHub shows the first definition of a label, also in another case.
     for second in ["[^a]: y", "[^A]: y"] {
@@ -1603,22 +1583,51 @@ fn fails_a_paragraph_that_comrak_places_in_the_wrong_lines() {
 }
 
 #[test]
-fn an_old_round_reads_each_line_of_a_paragraph_that_comrak_places_in_the_wrong_lines() {
-    // GitHub shows `Hot path: send` as a line of text in each case.
-    for text in [
-        "[r]: https://x.y\nHot path: `send`",
-        "See [x](https://x.y \"a\nb\")\nHot path: `send`",
-        "> - See [x](\n>   https://x.y)\n>   Hot path: `send`",
+fn fails_an_old_round_with_a_paragraph_that_comrak_places_in_the_wrong_lines() {
+    // GitHub shows `Hot path: send` as a line of text in the first three cases, hides
+    // `Reviewers: performance` in a link title in the fourth, and shows
+    // `2. Hot path: send` in the fifth.
+    let performance = "review round 1 names no performance, which this round requires.";
+    for (text, line, named) in [
+        (
+            "[r]: https://x.y\nHot path: `send`",
+            "[r]: https://x.y",
+            false,
+        ),
+        (
+            "See [x](https://x.y \"a\nb\")\nHot path: `send`",
+            "See [x](https://x.y \"a",
+            false,
+        ),
+        (
+            "> - See [x](\n>   https://x.y)\n>   Hot path: `send`",
+            "> - See [x](",
+            false,
+        ),
+        (
+            "See [x](https://x.y \"a\nReviewers: performance\nb\")\nmore\n\n\
+             Hot path: `send`",
+            "See [x](https://x.y \"a",
+            true,
+        ),
+        (
+            "[r]: https://x.y\n2. Hot path: `send`",
+            "[r]: https://x.y",
+            false,
+        ),
     ] {
         let round = old(&format!(
             "## Review round 1\n\nConfirmed a finding.\n\n{text}"
         ));
-        assert_eq!(
-            check(&record(vec![round, bot(ROUND)])),
-            vec!["review round 1 names no performance, which this round requires."],
-            "{text}"
-        );
+        let mut problems = vec![misplaced(line).replace("round 3", "round 1")];
+        problems.extend(named.then(|| performance.to_string()));
+        assert_eq!(check(&record(vec![round, bot(ROUND)])), problems, "{text}");
     }
+    let round = old("## Review round x\n\nConfirmed a finding.\n\n[r]: https://x.y\nz");
+    assert_eq!(
+        check(&record(vec![round, bot(ROUND)])),
+        vec!["`## Review round x` has no round number"]
+    );
 }
 
 #[test]
