@@ -346,16 +346,17 @@ mod admit {
 
     #[test]
     fn refuses_a_hello_that_expires_past_the_cap() {
-        let earliest = |cap: Stamp| {
+        let unknown = Span::from_nanos(36_500 * Span::DAY.nanos());
+        let latest = |cap: Stamp| {
             Some(Interval {
-                earliest: cap - CAP,
-                latest: cap - CAP + Span::SECOND,
+                earliest: cap - CAP - unknown,
+                latest: cap - CAP,
             })
         };
-        admit(&listed(), earliest(EXPIRES), create_hello()).unwrap();
+        admit(&listed(), latest(EXPIRES), create_hello()).unwrap();
 
         let cap = EXPIRES - Span::NANOSECOND;
-        let error = admit(&listed(), earliest(cap), create_hello()).unwrap_err();
+        let error = admit(&listed(), latest(cap), create_hello()).unwrap_err();
 
         assert_eq!(
             error,
@@ -367,14 +368,12 @@ mod admit {
     }
 
     /// A hello that fails each check, with one failure removed at each step, gives
-    /// the refusal of the first check that still fails.
+    /// the refusal of the first check that still fails. No mesh time both expires
+    /// and caps a hello, so the last step fails the cap alone.
     #[test]
     fn refuses_a_hello_for_the_first_check_that_fails() {
         let other = node::Key::from_u128(7);
-        let wide = Some(Interval {
-            earliest: EXPIRES - CAP - CAP,
-            latest: EXPIRES,
-        });
+        let wide = Some(at(EXPIRES));
         let hello = Hello {
             via: other,
             ..create_hello()
@@ -421,13 +420,10 @@ mod admit {
                 now: EXPIRES
             }
         );
-        let wide = wide.map(|now| Interval {
-            latest: now.latest - Span::NANOSECOND,
-            ..now
-        });
-        let cap = EXPIRES - CAP;
+        let cap = EXPIRES - Span::NANOSECOND;
+        let early = Some(at(cap - CAP));
         assert_eq!(
-            refuse(&listed(), wide, &hello, &signature),
+            refuse(&listed(), early, &hello, &signature),
             Error::Capped {
                 expires: EXPIRES,
                 cap
@@ -607,10 +603,7 @@ mod renew {
     #[test]
     fn checks_a_renewal_as_a_first_hello() {
         let late = Some(at(EXPIRES + Span::MINUTE));
-        let capped = Some(Interval {
-            earliest: EXPIRES - CAP,
-            latest: EXPIRES - CAP + Span::SECOND,
-        });
+        let capped = Some(at(EXPIRES - CAP));
 
         assert_eq!(
             renew(&listed(), None, TEST_1, renewal()),

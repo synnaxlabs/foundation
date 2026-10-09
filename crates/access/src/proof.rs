@@ -11,7 +11,7 @@ use types::time::{Interval, Span, Stamp};
 
 use crate::Rules;
 
-/// How far past the earliest mesh time a hello may expire.
+/// How far past the latest mesh time a hello may expire.
 pub const CAP: Span = Span::from_nanos(15 * Span::MINUTE.nanos());
 
 const HELLO_TAG: &[u8] = b"foundation/hello/1";
@@ -91,7 +91,7 @@ impl Rules {
             });
         }
         live(&hello, now)?;
-        if let Some(cap) = now.earliest.checked_add(CAP)
+        if let Some(cap) = now.latest.checked_add(CAP)
             && hello.expires > cap
         {
             return Err(Error::Capped {
@@ -222,11 +222,11 @@ pub enum Error {
         /// The latest the mesh time can be.
         now: Stamp,
     },
-    /// The hello expires later than [`CAP`] past the earliest mesh time.
+    /// The hello expires later than [`CAP`] past the latest mesh time.
     Capped {
         /// When the hello expires.
         expires: Stamp,
-        /// The latest expiry that the node takes: [`CAP`] past the earliest mesh time.
+        /// The latest expiry that the node takes: [`CAP`] past the latest mesh time.
         cap: Stamp,
     },
     /// A renewal names another value of `field` than the hello it renews: the first
