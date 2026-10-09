@@ -111,9 +111,9 @@ const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 /// dropped. A peer whose dial it closes gets [`Error::Broken`], as for a refused dial,
 /// because QUIC sends no code before the handshake is confirmed. It refuses each dial
 /// from a peer until each session ended and each close drained. A close drains in
-/// about 3 PTO, and the transport waits at most 3 s for the drains after the last
-/// session ended. Then it frees its [`port::Part`], so a later dial gets no answer, and
-/// [`Transport::ended`] resolves.
+/// about 3 PTO, and the transport waits for the drains at most 3 s after the later of
+/// its drop and the end of the last session. Then it frees its [`port::Part`], so a
+/// later dial gets no answer, and [`Transport::ended`] resolves.
 pub struct Transport {
     carrier: quic::Carrier,
     public_key: PublicKey,
