@@ -83,3 +83,75 @@
   https://github.com/synnaxlabs/foundation/issues/1969#issuecomment-6066796714).
   Supersedes the argument of `Hub::define` in
   https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349.
+  Amended (2026-10-08T19:18:09Z, #340): the hub takes the region's mesh
+  (`hub::Config::mesh`, `None` for a node with no region), and `hub::Config::node` stays
+  the one source of this node's key. `define` never carries an index. A writer, a
+  reader, or an open that `Link::serve` gives waits until the mesh names a home for each
+  of its indexes. At this node, the first such session carries the index, once: a later
+  carry does nothing (`home::Shard::carry`), so the hub keeps no set of carried indexes
+  (`laptop.architect`, 2026-10-08T19:30:54Z:
+  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067505377). With no
+  mesh, this node is the home of each index. No frame comes before a session, so nothing
+  waits on the carry. When the home is another node, `writer::Error::Remote` and
+  `reader::Error::Remote` give it, and `serve` stops the stream with `NOT_HOME`. A
+  stopped mesh gives `Mesh` with why it stopped (code `FAILED` in `serve`). Trigger:
+  4d-b of #340 removes `reader::Error::Remote` when the hub reads from another node.
+  Decided by `laptop.architect`: the mesh (2026-10-08T18:42:42Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536), the
+  split and `reader::Error::Remote` (2026-10-08T18:51:16Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273), and one
+  carry rule (2026-10-08T19:18:09Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6067290747), which
+  supersedes "`define` carries at once" in item 2 of
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536.
+  Amended (2026-10-08T22:24:43Z, #2020): `Hub::set_definitions` replaces `Hub::define`.
+  It makes the channels of a spec's definitions the channels that sessions may name. A
+  known channel whose key, name, and definition stay keeps its sessions. Each other
+  known channel is removed, so a rename at the same key or a changed definition is a
+  removal and a new channel. The hub keeps the definition of each channel for this
+  compare. Each session on a removed channel ends at once, in the call: a writer gives
+  `writer::Failure::Removed` on this and each later write, and the home closes it; a
+  reader gives `reader::Ended::Removed` before any frame that waits, and a reader that
+  waits in `next` wakes; a served open stops with code `UNKNOWN`
+  (`serve::Error::Removed`). Each names the key of the first channel of the session that
+  was removed. Each per-call check of a session (`Writer::write`, `Session::take`,
+  `Credit::grant`) reads only a cell that the session shares with the hub, never a map,
+  so its cost stays the same while other sessions end. The hub finds a session by its
+  home key, as the shard never gives a key twice. The home stops carrying an index only
+  when its key is not an index of the new definitions (`Shard::shed`, HOME SURFACE), and
+  carries it again when it returns. A key holds at most two slots (`channel::Slots`):
+  its slot as an index, which never changes, as the buffer keys its tails by slot (X42),
+  and its slot as a data channel, which the hub retires at each removal. So a channel
+  defined later at a key gets a new slot, and a reader takes no series written under the
+  old definition. An index continues its seq after its key was a data channel, also
+  after a restart (`laptop.architect`, 2026-10-09T01:25:59Z:
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072361464). So a slot
+  names one definition of a data channel, and the newest frame of an index stays the
+  current value of each other channel on it (B4). Lost: a drop of the newest frame of
+  each index that a removed channel was on, as each other channel of the index then has
+  no current value until the next live frame; a copy of the newest frame without the
+  removed series, a new key set and a copy for the same result; and a check of each
+  frame in each session, a cost per frame for a change that comes at an apply
+  (`laptop.architect`, 2026-10-09T00:41:53Z:
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071897947). A served
+  open checks each key as its message arrives, and checks all of them again after it
+  waits for the home of its index, as a call between two messages of its keys run, or
+  during the wait, can remove one. Each open checks its names or keys again after it
+  waits for the home, and then carries each index and opens with no `await` between.
+  When the check gives another result, the open waits again (`laptop.architect`,
+  2026-10-09T00:55:16Z:
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072038723). The call
+  checks the definitions before it changes anything: two channels with one key or one
+  name, or a data channel whose index is not an index of the definitions, panic. This
+  changes "A known key or name panics", "The hub keeps the key, the sample type, and the
+  index of each", and "The PR that defines channels at each new spec decides what a
+  known, renamed, or removed channel does" in
+  https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349. Lost: a
+  session ends at its next call, under which a writer keeps the control of a removed
+  index until it calls, and a reader that waits in `next` needs a wake anyway; and the
+  home ends the sessions in `shed`, which knows no data channel, so a removed data
+  channel needs a second path; and a hub number for each session, a second key for the
+  same fact. Decided by `laptop.architect` (2026-10-08T22:24:43Z:
+  https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814;
+  2026-10-08T22:09:38Z:
+  https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6070012949).

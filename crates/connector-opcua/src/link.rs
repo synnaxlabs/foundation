@@ -296,14 +296,12 @@ fn the_copy_links_the_timer() {
     assert_eq!(distinct.len(), functions.len());
 }
 
-/// Each symbol outside the copy and `shim.c` that they may name, in glibc and in the
-/// outline atomics of libgcc: on x86-64 with GCC or Clang at each optimization level,
-/// and on 64-bit Arm with Clang at `-O2` and `-moutline-atomics`. None gives or takes a
-/// heap block, so no block crosses between the allocator of libc and `src/alloc.rs`.
-const OUTSIDE: [&str; 44] = [
+/// Each symbol outside the copy and `shim.c` that they may name in glibc: on x86-64
+/// with GCC or Clang at each optimization level, and on 64-bit Arm with Clang at
+/// `-O2` and `-moutline-atomics`. None gives or takes a heap block, so no block
+/// crosses between the allocator of libc and `src/alloc.rs`.
+const OUTSIDE: [&str; 35] = [
     "_GLOBAL_OFFSET_TABLE_",
-    "__aarch64_cas8_acq_rel",
-    "__aarch64_swp8_acq_rel",
     "__ctype_b_loc",
     "__errno_location",
     "__fprintf_chk",
@@ -329,13 +327,6 @@ const OUTSIDE: [&str; 44] = [
     "memmove",
     "memset",
     "printf",
-    "pthread_mutex_destroy",
-    "pthread_mutex_init",
-    "pthread_mutex_lock",
-    "pthread_mutex_unlock",
-    "pthread_mutexattr_destroy",
-    "pthread_mutexattr_init",
-    "pthread_mutexattr_settype",
     "puts",
     "stderr",
     "stdout",
@@ -346,6 +337,17 @@ const OUTSIDE: [&str; 44] = [
     "syslog",
     "write",
 ];
+
+/// At `UA_MULTITHREADING` 0 the copy takes no lock and calls no atomic, so the symbol
+/// tests fail on each such name only while the list holds none.
+#[test]
+fn the_list_holds_no_lock_and_no_atomic() {
+    let held: Vec<_> = OUTSIDE
+        .iter()
+        .filter(|name| name.starts_with("pthread_") || name.starts_with("__aarch64_"))
+        .collect();
+    assert!(held.is_empty(), "{held:?}");
+}
 
 /// The symbols that `nm` with `flag` gives for `files`.
 fn names(
@@ -369,10 +371,11 @@ fn names(
         .collect()
 }
 
-/// The symbols that `nm` with `flag` gives for the archives of this build.
+/// The symbols that `nm` with `flag` gives for the archive of this build, which holds
+/// the copy and the shim.
 fn symbols(flag: &str) -> std::collections::BTreeSet<String> {
     let out = std::path::Path::new(env!("OUT_DIR"));
-    names(&[out.join("libopen62541.a"), out.join("libshim.a")], flag)
+    names(&[out.join("libopen62541.a")], flag)
 }
 
 #[test]
@@ -382,6 +385,10 @@ fn symbols(flag: &str) -> std::collections::BTreeSet<String> {
 )]
 fn the_c_names_only_the_listed_symbols_outside_it() {
     let defined = symbols("--defined-only");
+    assert!(
+        defined.contains("shim_client_new"),
+        "the archive holds no shim"
+    );
     let undefined = symbols("--undefined-only");
     let outside: Vec<&str> =
         undefined.difference(&defined).map(String::as_str).collect();
@@ -466,4 +473,55 @@ fn the_c_on_64_bit_arm_names_only_the_listed_symbols_outside_it() {
         .filter(|name| !defined.contains(name) && !OUTSIDE.contains(&name.as_str()))
         .collect();
     assert!(unlisted.is_empty(), "the C names {unlisted:?}");
+}
+
+/// Clang defines no `__FLOAT_WORD_ORDER__`, so `config.h` must find the float order of
+/// each target from its other macros, or the copy encodes floats on its slow path with
+/// `long double` helpers. A big-endian target must not copy floats as they lie in
+/// memory. Each system header is empty, so only the predefined macros of the target
+/// decide the float order.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs Clang")]
+fn the_copy_copies_floats_as_they_lie_in_memory_on_little_endian_targets() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let generated = root.join("../../patches/open62541/src_generated");
+    let config = generated.join("open62541/config.h");
+    let empty = std::path::Path::new(env!("OUT_DIR")).join("empty");
+    std::fs::create_dir_all(&empty).unwrap();
+    let text = std::fs::read_to_string(&config).unwrap();
+    for header in text.lines().filter_map(|line| {
+        let line = line.strip_prefix('#')?.trim_start();
+        line.strip_prefix("include")?
+            .trim()
+            .strip_prefix('<')?
+            .strip_suffix('>')
+    }) {
+        let header = empty.join(header);
+        std::fs::create_dir_all(header.parent().unwrap()).unwrap();
+        std::fs::write(header, "").unwrap();
+    }
+    let arch = empty.join("arch.h");
+    std::fs::write(&arch, "").unwrap();
+    for (target, copied) in [
+        ("x86_64-linux-gnu", "1"),
+        ("aarch64-linux-gnu", "1"),
+        ("arm64-apple-macos", "1"),
+        ("aarch64_be-linux-gnu", "0"),
+    ] {
+        let output = std::process::Command::new("clang")
+            .arg(format!("--target={target}"))
+            .args(["-nostdinc", "-E", "-dM", "-x", "c"])
+            .arg(format!("-DUA_ARCH_HEADER=\"{}\"", arch.display()))
+            .arg(format!("-I{}", empty.display()))
+            .arg(&config)
+            .output()
+            .expect("needs Clang");
+        let errors = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{target}: {errors}");
+        let macros = String::from_utf8(output.stdout).unwrap();
+        let overlayable = macros
+            .lines()
+            .find_map(|line| line.strip_prefix("#define UA_BINARY_OVERLAYABLE_FLOAT "));
+        assert_eq!(overlayable, Some(copied), "{target}");
+    }
 }

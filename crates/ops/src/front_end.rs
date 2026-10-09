@@ -37,15 +37,11 @@ pub(crate) struct File {
 ///
 /// # Panics
 ///
-/// When `front_ends` is empty, or a front end gives an error with no problem.
+/// When a front end gives an error with no problem.
 pub(crate) fn read(
     files: &[File],
     front_ends: &BTreeMap<&'static str, FrontEnd>,
 ) -> Result<Vec<Document>, Vec<Diagnostic>> {
-    assert!(
-        !front_ends.is_empty(),
-        "invariant: `node` gives a front end"
-    );
     let mut documents = Vec::new();
     let mut diagnostics = Vec::new();
     for (file, source) in files.iter().zip(0..) {
@@ -110,7 +106,7 @@ pub(crate) fn unknown(
         [one] => one.clone(),
         [first, second] => format!("{first} or {second}"),
         [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
-        [] => unreachable!("invariant: `read` checks the table"),
+        [] => unreachable!("invariant: `Node::new` checks the table"),
     };
     let start = Position {
         offset: 0,

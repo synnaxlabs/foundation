@@ -21,7 +21,11 @@ type Attributes = fn(&mut Found<'_>, &Block) -> Option<Kind<Name>>;
 /// Checks a `channel` block and gives its channel, with each edge as a name. After a
 /// bad `kind`, it reports each attribute that no kind knows, and leaves each other
 /// attribute, since its problem depends on the kind.
-pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
+pub(crate) fn check(
+    found: &mut Found<'_>,
+    block: &Block,
+    _: Option<&Name>,
+) -> Option<Definition> {
     let attributes = found.attribute(block, "kind", |value| -> Result<Attributes, _> {
         match text(value, BAD_CHANNEL_KIND, "the channel kind", "\"index\"")? {
             "index" => Ok(index),

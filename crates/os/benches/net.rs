@@ -1,9 +1,11 @@
-//! The cost of one 64-byte round trip over the loopback: a write and a read on each
-//! end, through `os::net` and through a plain Tokio stream with the same options.
+//! The cost of writes over the loopback, through `os::net` and through a plain Tokio
+//! stream with the same options: one 64-byte round trip, one write of 1 MiB, and 256
+//! writes of 64 bytes back to back. The last two reach the unsent bound.
 
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -19,6 +21,8 @@ use tokio::runtime::{Builder, Runtime};
 const MESSAGE: [u8; 64] = [7; 64];
 /// One round trip per sample, so the median and the slowest are those of one trip.
 const TRIPS: u32 = 10_000;
+const BULK: usize = 1 << 20;
+const BURST: usize = 256;
 
 fn main() {
     divan::main();
@@ -28,7 +32,7 @@ fn options() -> tcp::Options {
     tcp::Options {
         send_buffer_bytes: 1 << 16,
         recv_buffer_bytes: 1 << 16,
-        unsent_bytes_max: 1 << 14,
+        unsent_bytes_max: NonZeroUsize::new(1 << 14).expect("invariant: 2^14 is not 0"),
         delayed: false,
     }
 }
@@ -98,6 +102,28 @@ async fn echo(mut stream: impl Io) {
     }
 }
 
+/// Reads `chunk` bytes, then sends one byte, until the peer closes.
+async fn sink(mut stream: impl Io, chunk: usize) {
+    let mut buffer = vec![0; chunk];
+    while read_all(&mut stream, &mut buffer).await {
+        write_all(&mut stream, &[1]).await;
+    }
+}
+
+/// Writes `bytes` and reads the sink's byte.
+async fn bulk(stream: &mut impl Io, bytes: &[u8]) {
+    write_all(stream, bytes).await;
+    assert!(read_all(stream, &mut [0; 1]).await, "the sink is up");
+}
+
+/// Writes `MESSAGE` `BURST` times and reads the sink's byte.
+async fn burst(stream: &mut impl Io) {
+    for _ in 0..BURST {
+        write_all(stream, &MESSAGE).await;
+    }
+    assert!(read_all(stream, &mut [0; 1]).await, "the sink is up");
+}
+
 /// A shard that runs `main`.
 fn shard<F: Future<Output = ()> + 'static>(
     main: impl FnOnce() -> F + Send + 'static,
@@ -120,8 +146,11 @@ fn runtime() -> Runtime {
         .expect("the runtime builds")
 }
 
-/// A client connected to an echo shard through `os::net`.
-fn connect_os(runtime: &Runtime) -> (Tcp, Handle) {
+/// A client connected through `os::net` to a shard that runs `serve` on the stream.
+fn connect_os<F: Future<Output = ()> + 'static>(
+    runtime: &Runtime,
+    serve: impl FnOnce(Tcp) -> F + Send + 'static,
+) -> (Tcp, Handle) {
     let net = os::net();
     let listen = tcp::Listen {
         local: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
@@ -135,10 +164,10 @@ fn connect_os(runtime: &Runtime) -> (Tcp, Handle) {
     };
     let server = shard(move || async move {
         let stream = poll_fn(|cx| listener.poll_accept(cx)).await;
-        echo(stream.expect("the client connects")).await;
+        serve(stream.expect("the client connects")).await;
     });
     let client = runtime.block_on(net.connect(&config));
-    (client.expect("the echo accepts"), server)
+    (client.expect("the shard accepts"), server)
 }
 
 fn apply(stream: &TcpStream) {
@@ -150,13 +179,16 @@ fn apply(stream: &TcpStream) {
     sockopt::set_tcp_nodelay(stream, true).expect("nodelay sets");
 }
 
-/// A client connected to an echo shard through Tokio alone, with the options of
-/// [`connect_os`] except the unsent bound.
+/// A client connected through Tokio alone, with the options of [`connect_os`] except
+/// the unsent bound, to a shard that runs `serve` on the stream.
 #[expect(
     clippy::disallowed_methods,
     reason = "the bench compares with Tokio alone"
 )]
-fn connect_tokio(runtime: &Runtime) -> (TcpStream, Handle) {
+fn connect_tokio<F: Future<Output = ()> + 'static>(
+    runtime: &Runtime,
+    serve: impl FnOnce(TcpStream) -> F + Send + 'static,
+) -> (TcpStream, Handle) {
     let listener = std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0));
     let listener = listener.expect("the loopback listens");
     let remote = listener
@@ -168,10 +200,10 @@ fn connect_tokio(runtime: &Runtime) -> (TcpStream, Handle) {
         let accepted = listener.expect("the runtime has I/O").accept().await;
         let (stream, _) = accepted.expect("the client connects");
         apply(&stream);
-        echo(stream).await;
+        serve(stream).await;
     });
     let client = runtime.block_on(TcpStream::connect(remote));
-    let client = client.expect("the echo accepts");
+    let client = client.expect("the shard accepts");
     apply(&client);
     (client, server)
 }
@@ -185,21 +217,75 @@ fn trips(bencher: Bencher<'_, '_>, runtime: &Runtime, client: &mut impl Io) {
 #[divan::bench(sample_size = 1, sample_count = TRIPS)]
 fn os_net(bencher: Bencher<'_, '_>) {
     let runtime = runtime();
-    let (mut client, server) = connect_os(&runtime);
+    let (mut client, server) = connect_os(&runtime, echo);
     trips(bencher, &runtime, &mut client);
-    // A drop before the close resets the echo, and a shard aborts at a panic.
+    close(&runtime, client, server);
+}
+
+/// Closes `client` before the drop, which would reset the peer, and a shard aborts
+/// at a panic.
+fn close(runtime: &Runtime, mut client: Tcp, server: Handle) {
     let closed = runtime.block_on(poll_fn(|cx| client.poll_close(cx)));
     closed.expect("the close queues the FIN");
     drop(client);
-    server.join().expect("the echo ends at the FIN");
+    server.join().expect("the shard ends at the FIN");
 }
 
 /// The same round trip through a plain Tokio stream, for comparison.
 #[divan::bench(sample_size = 1, sample_count = TRIPS)]
 fn tokio(bencher: Bencher<'_, '_>) {
     let runtime = runtime();
-    let (mut client, server) = connect_tokio(&runtime);
+    let (mut client, server) = connect_tokio(&runtime, echo);
     trips(bencher, &runtime, &mut client);
     drop(client);
     server.join().expect("the echo ends at the FIN");
+}
+
+/// One write of 1 MiB through `os::net`, then the sink's byte.
+#[divan::bench(sample_size = 1, sample_count = 300)]
+fn os_net_bulk(bencher: Bencher<'_, '_>) {
+    let runtime = runtime();
+    let (mut client, server) = connect_os(&runtime, |stream| sink(stream, BULK));
+    let bytes = vec![7; BULK];
+    bencher
+        .counter(divan::counter::BytesCount::new(BULK))
+        .bench_local(|| runtime.block_on(bulk(&mut client, &bytes)));
+    close(&runtime, client, server);
+}
+
+/// The same write through a plain Tokio stream, for comparison.
+#[divan::bench(sample_size = 1, sample_count = 300)]
+fn tokio_bulk(bencher: Bencher<'_, '_>) {
+    let runtime = runtime();
+    let (mut client, server) = connect_tokio(&runtime, |stream| sink(stream, BULK));
+    let bytes = vec![7; BULK];
+    bencher
+        .counter(divan::counter::BytesCount::new(BULK))
+        .bench_local(|| runtime.block_on(bulk(&mut client, &bytes)));
+    drop(client);
+    server.join().expect("the sink ends at the FIN");
+}
+
+/// 256 writes of 64 bytes back to back through `os::net`, then the sink's byte.
+#[divan::bench(sample_size = 1, sample_count = 2000)]
+fn os_net_burst(bencher: Bencher<'_, '_>) {
+    let runtime = runtime();
+    let (mut client, server) = connect_os(&runtime, |stream| sink(stream, BURST * 64));
+    bencher
+        .counter(divan::counter::ItemsCount::new(BURST))
+        .bench_local(|| runtime.block_on(burst(&mut client)));
+    close(&runtime, client, server);
+}
+
+/// The same writes through a plain Tokio stream, for comparison.
+#[divan::bench(sample_size = 1, sample_count = 2000)]
+fn tokio_burst(bencher: Bencher<'_, '_>) {
+    let runtime = runtime();
+    let (mut client, server) =
+        connect_tokio(&runtime, |stream| sink(stream, BURST * 64));
+    bencher
+        .counter(divan::counter::ItemsCount::new(BURST))
+        .bench_local(|| runtime.block_on(burst(&mut client)));
+    drop(client);
+    server.join().expect("the sink ends at the FIN");
 }

@@ -760,9 +760,9 @@ impl StreamsState {
         let mut queued = false;
         for dir in Dir::iter() {
             let diff = self.max_remote[dir as usize] - self.sent_max_remote[dir as usize];
-            // To reduce traffic, only announce updates if at least 1/8 of the flow control window
-            // has been consumed.
-            if diff > self.max_concurrent_remote_count[dir as usize] / 8 {
+            // Announce each freed stream at once: `MAX_STREAMS` carries only the latest
+            // limit, so a burst of freed streams still costs one frame per packet.
+            if diff > 0 {
                 pending.max_stream_id[dir as usize] = true;
                 queued = true;
             }

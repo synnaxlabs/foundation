@@ -37,8 +37,12 @@ impl Probe {
 
 impl Fixture {
     fn new() -> Self {
+        Self::with(sim::node::Config::default())
+    }
+
+    fn with(node: sim::node::Config) -> Self {
         let mut sim = Sim::new(sim::Config::default());
-        let node = sim.node(sim::node::Config::default());
+        let node = sim.node(node);
         let clock = node.clock();
         let events =
             Loop::new(env::clock::Clock::clone(&clock), &mut Rng::from_seed(0));
@@ -75,22 +79,68 @@ impl Fixture {
 
     /// Adds a timer that records `n`, and gives its key.
     fn add(&self, n: usize, interval_ms: f64, policy: ffi::Policy) -> u64 {
+        self.timer(record, number(n), interval_ms, policy)
+    }
+
+    /// Adds a timer that runs `callback` with `data`, and gives its key.
+    fn timer(
+        &self,
+        callback: ffi::Callback,
+        data: *mut c_void,
+        interval_ms: f64,
+        policy: ffi::Policy,
+    ) -> u64 {
+        self.try_timer(callback, data, interval_ms, None, policy)
+            .unwrap_or_else(|status| panic!("{status:?}"))
+    }
+
+    /// Adds a timer that runs `callback` with `data`, timed from `base` when given,
+    /// and gives its key, or the status of a refusal.
+    fn try_timer(
+        &self,
+        callback: ffi::Callback,
+        data: *mut c_void,
+        interval_ms: f64,
+        mut base: Option<i64>,
+        policy: ffi::Policy,
+    ) -> Result<u64, Status> {
         let mut key = 0;
-        // SAFETY: `record` reads the probe, which lives as long as the loop.
+        // SAFETY: each callback of the tests reads the probe, which lives as long as
+        // the loop, and a `data` that outlives the run.
         let status = Status(unsafe {
             (self.members().add_timer)(
                 self.events.raw(),
-                record,
+                callback,
                 self.application(),
-                ptr::without_provenance_mut(n),
+                data,
                 interval_ms,
-                ptr::null_mut(),
+                base.as_mut().map_or(ptr::null_mut(), ptr::from_mut),
                 policy,
                 &raw mut key,
             )
         });
-        assert_eq!(status, Status::GOOD);
-        key
+        (status == Status::GOOD).then_some(key).ok_or(status)
+    }
+
+    /// Changes the timer of `key`, timed from `base` when given, and gives the
+    /// status.
+    fn modify(
+        &self,
+        key: u64,
+        interval_ms: f64,
+        mut base: Option<i64>,
+        policy: ffi::Policy,
+    ) -> Status {
+        // SAFETY: the member takes its own loop and a key that it gave.
+        Status(unsafe {
+            (self.members().modify_timer)(
+                self.events.raw(),
+                key,
+                interval_ms,
+                base.as_mut().map_or(ptr::null_mut(), ptr::from_mut),
+                policy,
+            )
+        })
     }
 
     /// Gives a delayed callback that runs `callback` with `context`.
@@ -212,6 +262,21 @@ fn the_loop_reads_its_clock() {
     );
 }
 
+/// Four values of open62541's generator after a loop with `rng` of `seed`.
+fn draws(seed: u64) -> [u32; 4] {
+    let mut sim = Sim::new(sim::Config::default());
+    let clock = sim.node(sim::node::Config::default()).clock();
+    let _events = Loop::new(clock, &mut Rng::from_seed(seed));
+    // SAFETY: it draws from the generator of this thread.
+    std::array::from_fn(|_| unsafe { ffi::test::UA_UInt32_random() })
+}
+
+#[test]
+fn a_loop_sets_the_generator_of_open62541_from_its_rng() {
+    assert_eq!(draws(1), draws(1));
+    assert_ne!(draws(1), draws(2));
+}
+
 #[test]
 fn a_run_before_the_start_fails() {
     let f = Fixture::new();
@@ -283,17 +348,7 @@ fn a_timer_changes_its_interval_and_goes() {
     let start = f.now();
     let key = f.add(1, 10.0, ffi::CURRENT_TIME);
     f.advance(ms(5));
-    // SAFETY: the member takes its own loop and a key that it gave.
-    let status = Status(unsafe {
-        (f.members().modify_timer)(
-            f.events.raw(),
-            key,
-            50.0,
-            ptr::null_mut(),
-            ffi::ONCE,
-        )
-    });
-    assert_eq!(status, Status::GOOD);
+    assert_eq!(f.modify(key, 50.0, None, ffi::ONCE), Status::GOOD);
     assert_eq!(f.events.next(), Some(at(start, ms(55))));
     // SAFETY: as above.
     unsafe { (f.members().remove_timer)(f.events.raw(), key) };
@@ -301,6 +356,225 @@ fn a_timer_changes_its_interval_and_goes() {
     f.advance(ms(1000));
     f.run();
     assert_eq!(f.ran(), []);
+}
+
+/// Intervals whose due time or ticks leave the range of `i64` ticks, or that are
+/// not a number. The ticks of the fourth are below `i64::MIN`, though its due time from
+/// a clock past 1 s is not. The last is due within 1 s of the last date only after a
+/// run at the last tick of the clock.
+const OUT_OF_RANGE: [(f64, ffi::Policy); 6] = [
+    (922_337_203_685_477.0, ffi::CURRENT_TIME),
+    (f64::INFINITY, ffi::BASE_TIME),
+    (f64::NAN, ffi::ONCE),
+    (-922_337_203_690_000.0, ffi::ONCE),
+    (f64::NEG_INFINITY, ffi::ONCE),
+    (903_890_459_611_268.0, ffi::BASE_TIME),
+];
+
+#[test]
+fn a_timer_whose_due_time_leaves_the_range_of_the_clock_is_refused() {
+    let mut f = Fixture::new();
+    f.advance(ms(1000));
+    f.start();
+    for (interval_ms, policy) in OUT_OF_RANGE {
+        assert_eq!(
+            f.try_timer(record, number(1), interval_ms, None, policy),
+            Err(Status::BAD_OUT_OF_RANGE),
+            "{interval_ms}"
+        );
+    }
+    assert_eq!(f.events.next(), None);
+    f.run();
+    assert_eq!(f.ran(), []);
+}
+
+/// The interval, in ms, of a timer due `before` ticks before the last date, at
+/// `i64::MAX` ticks.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the loss is under 2,048 ticks, far inside the margins of the tests"
+)]
+fn due_before_the_last_date(f: &Fixture, before: f64) -> f64 {
+    let now = (f.now().0 / 100) as f64;
+    (i64::MAX as f64 - now - before) / 1.0e4
+}
+
+#[test]
+fn a_once_timer_due_within_1_s_of_the_last_date_is_refused() {
+    let mut f = Fixture::new();
+    f.advance(ms(1000));
+    f.start();
+    let within = due_before_the_last_date(&f, 5.0e6);
+    assert_eq!(
+        f.try_timer(record, number(1), within, None, ffi::ONCE),
+        Err(Status::BAD_OUT_OF_RANGE)
+    );
+    let outside = due_before_the_last_date(&f, 2.0e7);
+    f.try_timer(record, number(2), outside, None, ffi::ONCE)
+        .expect("a timer due 2 s before the last date is in range");
+    assert_eq!(f.events.next(), None, "it is due after the clock ends");
+    f.run();
+    assert_eq!(f.ran(), []);
+}
+
+/// The interval, in ms, of a repeated timer that is due `before` ticks before the last
+/// date when it runs at the last tick of the clock.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the loss is under 2,048 ticks, far inside the margins of the tests"
+)]
+fn repeated_before_the_last_date(before: f64) -> f64 {
+    (i64::MAX as f64 - (u64::MAX / 100) as f64 - before) / 1.0e4
+}
+
+/// A repeated timer is next due one interval after its run, which may come at the last
+/// tick of the clock, and its first due time may come long before an interval from
+/// now.
+#[test]
+fn a_repeated_timer_due_within_1_s_of_the_last_date_after_a_run_is_refused() {
+    let mut f = Fixture::new();
+    f.start();
+    let (now, _) = earliest_base(&f);
+    let within = repeated_before_the_last_date(5.0e6);
+    for policy in [ffi::CURRENT_TIME, ffi::BASE_TIME] {
+        for base in [None, Some(now + 30_000_000), Some(now - 10_000_000)] {
+            assert_eq!(
+                f.try_timer(record, number(1), within, base, policy),
+                Err(Status::BAD_OUT_OF_RANGE),
+                "{base:?}"
+            );
+        }
+    }
+    let outside = repeated_before_the_last_date(2.0e7);
+    // Timers due at one time run in an order that the heap sets.
+    for (n, policy, base) in [(1, ffi::CURRENT_TIME, 0), (2, ffi::BASE_TIME, 10_000)] {
+        let base = Some(now + 30_000_000 + base);
+        f.try_timer(record, number(n), outside, base, policy)
+            .expect("a repeated timer due 2 s before the last date is in range");
+    }
+    f.advance(ms(3001));
+    f.run();
+    assert_eq!(f.ran(), [1, 2]);
+    assert_eq!(f.events.next(), None, "each is due after the clock ends");
+    f.run();
+    assert_eq!(f.ran(), []);
+}
+
+/// The latest base in range of the last date.
+const LATEST_BASE: i64 = i64::MAX - 10_000_001;
+
+/// The ticks of the clock, and the earliest base in range of them.
+fn earliest_base(f: &Fixture) -> (i64, i64) {
+    let now = i64::try_from(f.now().0 / 100).unwrap();
+    (now, now - (i64::MAX - 10_000_000))
+}
+
+#[test]
+fn a_timer_from_a_base_out_of_range_of_the_clock_is_refused() {
+    let mut f = Fixture::new();
+    f.advance(ms(1000));
+    f.start();
+    let (now, earliest) = earliest_base(&f);
+    for base in [i64::MIN, earliest - 1, LATEST_BASE + 1, i64::MAX] {
+        for (interval_ms, policy) in [(3.0, ffi::BASE_TIME), (0.0, ffi::ONCE)] {
+            assert_eq!(
+                f.try_timer(record, number(1), interval_ms, Some(base), policy),
+                Err(Status::BAD_OUT_OF_RANGE),
+                "{base} {interval_ms}"
+            );
+        }
+    }
+    assert_eq!(f.events.next(), None);
+    f.try_timer(record, number(1), 3.0, Some(earliest), ffi::BASE_TIME)
+        .expect("the earliest base is in range");
+    let into = (i128::from(now) - i128::from(earliest)) % 30_000;
+    let due = i128::from(now) + 30_000 - into;
+    assert_eq!(
+        f.events.next(),
+        Some(Monotonic(u64::try_from(due * 100).unwrap())),
+        "the due time keeps the phase of the base"
+    );
+}
+
+/// A driver that runs the loop whenever the next due time has come finishes at the end
+/// of the clock, where the timers past it never run.
+#[test]
+fn a_timer_due_after_the_end_of_the_clock_is_never_next() {
+    let mut f = Fixture::with(sim::node::Config {
+        monotonic: Monotonic(u64::MAX - 1000),
+        ..sim::node::Config::default()
+    });
+    f.start();
+    let last = i64::try_from(u64::MAX / 100).unwrap();
+    for (n, base) in [(1, LATEST_BASE), (2, last + 1)] {
+        f.try_timer(record, number(n), 0.0, Some(base), ffi::ONCE)
+            .expect("the base is in range");
+    }
+    assert_eq!(f.events.next(), None);
+    f.try_timer(record, number(3), 0.0, Some(last), ffi::ONCE)
+        .expect("the last tick is in range");
+    assert_eq!(f.events.next(), Some(Monotonic(u64::MAX / 100 * 100)));
+    f.advance(Span::from_nanos(1000));
+    f.run();
+    assert_eq!(f.ran(), [3]);
+    assert_eq!(f.events.next(), None);
+}
+
+#[test]
+fn a_once_timer_from_the_earliest_base_or_a_past_interval_runs_at_the_next_run() {
+    let mut f = Fixture::new();
+    f.advance(ms(1000));
+    f.start();
+    let (_, earliest) = earliest_base(&f);
+    f.try_timer(record, number(1), 0.0, Some(earliest), ffi::ONCE)
+        .expect("the earliest base is in range");
+    f.add(2, -1000.0, ffi::ONCE);
+    f.add(3, -9.0e14, ffi::ONCE);
+    let key = f.add(4, 10.0, ffi::ONCE);
+    assert_eq!(f.modify(key, -1000.0, None, ffi::ONCE), Status::GOOD);
+    let key = f.add(5, 10.0, ffi::ONCE);
+    assert_eq!(f.modify(key, 0.0, Some(earliest), ffi::ONCE), Status::GOOD);
+    f.run();
+    let mut ran = f.ran();
+    ran.sort_unstable();
+    assert_eq!(ran, [1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn a_change_to_a_base_out_of_range_is_refused_and_keeps_the_timer() {
+    let mut f = Fixture::new();
+    f.advance(ms(1000));
+    f.start();
+    let start = f.now();
+    let (_, earliest) = earliest_base(&f);
+    let key = f.add(1, 10.0, ffi::ONCE);
+    for (interval_ms, policy) in [(3.0, ffi::BASE_TIME), (0.0, ffi::ONCE)] {
+        assert_eq!(
+            f.modify(key, interval_ms, Some(earliest - 1), policy),
+            Status::BAD_OUT_OF_RANGE,
+            "{interval_ms}"
+        );
+    }
+    assert_eq!(f.events.next(), Some(at(start, ms(10))));
+}
+
+#[test]
+fn a_change_to_an_interval_out_of_range_is_refused_and_keeps_the_timer() {
+    let mut f = Fixture::new();
+    f.start();
+    let start = f.now();
+    let key = f.add(1, 10.0, ffi::ONCE);
+    for (interval_ms, policy) in OUT_OF_RANGE {
+        assert_eq!(
+            f.modify(key, interval_ms, None, policy),
+            Status::BAD_OUT_OF_RANGE,
+            "{interval_ms}"
+        );
+    }
+    assert_eq!(f.events.next(), Some(at(start, ms(10))));
+    f.advance(ms(10));
+    f.run();
+    assert_eq!(f.ran(), [1]);
 }
 
 #[test]
@@ -317,6 +591,19 @@ fn delayed_callbacks_run_in_order_after_the_due_timers() {
     f.advance(ms(1));
     f.run();
     assert_eq!(f.ran(), [3, 1, 2]);
+    assert_eq!(f.events.next(), None);
+}
+
+#[test]
+fn a_delayed_callback_that_a_timer_queues_runs_after_the_due_timers_of_its_run() {
+    let mut f = Fixture::new();
+    f.start();
+    let mut later = f.delayed(record, number(1));
+    f.timer(queue, ptr::from_mut(&mut later).cast(), 1.0, ffi::ONCE);
+    f.add(2, 2.0, ffi::ONCE);
+    f.advance(ms(2));
+    f.run();
+    assert_eq!(f.ran(), [0, 2, 1]);
     assert_eq!(f.events.next(), None);
 }
 
@@ -470,6 +757,56 @@ fn a_client_runs_its_housekeeping_on_the_loop() {
     assert_eq!(f.events.next(), None);
 }
 
+unsafe extern "C" {
+    fn UA_Client_addTimedCallback(
+        client: *mut ffi::Client,
+        callback: ffi::Callback,
+        data: *mut c_void,
+        date: i64,
+        key: *mut u64,
+    ) -> u32;
+}
+
+/// Counts the runs in the `Cell<usize>` at `data`.
+unsafe extern "C" fn count(_: *mut c_void, data: *mut c_void) {
+    // SAFETY: `data` is the cell of the test, which outlives the client.
+    let runs = unsafe { &*data.cast::<Cell<usize>>() };
+    runs.set(runs.get() + 1);
+}
+
+/// The copy runs a once timer whose date has passed at the next run. A date before
+/// the epoch of the clock has passed too.
+#[test]
+fn a_timed_callback_at_a_past_date_runs_at_the_next_run() {
+    let f = Fixture::new();
+    // SAFETY: the loop lives until the client is deleted.
+    let client = unsafe { ffi::shim_client_new(f.events.raw()) };
+    assert!(!client.is_null());
+    // SAFETY: the client lives.
+    let status = Status(unsafe { ffi::UA_Client_run_iterate(client, 0) });
+    assert_eq!(status, Status::GOOD);
+    let runs = Cell::new(0_usize);
+    let mut key = 0;
+    // SAFETY: `count` reads `runs`, which outlives the client.
+    let status = Status(unsafe {
+        UA_Client_addTimedCallback(
+            client,
+            count,
+            ptr::from_ref(&runs).cast_mut().cast(),
+            -1_000_000_000_000,
+            &raw mut key,
+        )
+    });
+    assert_eq!(status, Status::GOOD);
+    assert_eq!(f.events.next(), Some(Monotonic(0)));
+    // SAFETY: the client lives.
+    let status = Status(unsafe { ffi::UA_Client_run_iterate(client, 0) });
+    assert_eq!(status, Status::GOOD);
+    assert_eq!(runs.get(), 1);
+    // SAFETY: the client lives, and the loop outlives it.
+    unsafe { ffi::UA_Client_delete(client) };
+}
+
 fn ms(n: i64) -> Span {
     Span::from_nanos(n * Span::MILLISECOND.nanos())
 }
@@ -505,6 +842,45 @@ fn long() -> CString {
 #[test]
 fn connect_to_a_long_url() {
     connect(&long());
+}
+
+/// Sends a request on a client with no channel, when `CHILD` is set. The copy then
+/// logs an error.
+#[test]
+fn send_with_no_channel() {
+    if !is_child() {
+        return;
+    }
+    let f = Fixture::new();
+    // SAFETY: the loop lives until the client is deleted.
+    let client = unsafe { ffi::shim_client_new(f.events.raw()) };
+    assert!(!client.is_null());
+    // SAFETY: the client lives, and with no channel the copy reads no other argument.
+    let status = Status(unsafe {
+        ffi::test::__UA_Client_AsyncService(
+            client,
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    });
+    assert_eq!(status.name(), "BadServerNotConnected");
+    // SAFETY: the client lives, and the loop outlives it.
+    unsafe { ffi::UA_Client_delete(client) };
+}
+
+#[test]
+fn an_error_goes_to_stderr() {
+    let output = child("event::tests::send_with_no_channel");
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8(output.stderr).unwrap(),
+        "connector-opcua: open62541 error: SecureChannel must be connected to send \
+         request\n"
+    );
 }
 
 #[test]

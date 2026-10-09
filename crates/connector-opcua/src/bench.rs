@@ -55,7 +55,8 @@ impl Client {
         client
     }
 
-    /// Gives the due time of the next timer, or `None` when no timer waits.
+    /// Gives the due time of the next timer, or `None` when no timer waits or the next
+    /// timer is due after the clock ends.
     #[must_use]
     pub fn next(&self) -> Option<Monotonic> {
         self.events.next()

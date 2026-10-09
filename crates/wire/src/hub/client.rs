@@ -26,6 +26,8 @@
 //! - [`Request`]: kind 5, the body's length (`u64`), and the signature (64).
 //! - [`Response`]: kind 5 and the body's length (`u64`).
 
+use std::fmt;
+
 use types::connection;
 use types::ed25519::PublicKey;
 use types::hello::Hello;
@@ -33,8 +35,9 @@ use types::name::Name;
 use types::node;
 use types::time::{Interval, Stamp};
 
-use super::Error;
-use crate::common::{Fields, Writer};
+use super::{BUSY, Error};
+use crate::common::{Fields, Writer, body};
+use crate::header::MALFORMED;
 
 const HELLO: u8 = 4;
 const REQUEST: u8 = 5;
@@ -62,6 +65,94 @@ pub const CAPPED: u32 = 25;
 /// Stop code: a renewal names another subject, key, `via`, or connection than the
 /// hello it renews.
 pub const CHANGED: u32 = 26;
+
+/// A code that a node stops a client stream or closes a client session with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// [`MALFORMED`]: a message of the program does not decode, or breaks a rule of
+    /// the client wire.
+    Malformed,
+    /// [`BUSY`]: the node had no memory for a response.
+    Busy,
+    /// [`REFUSED`].
+    Refused,
+    /// [`UNSYNCED`].
+    Unsynced,
+    /// [`STALE`].
+    Stale,
+    /// [`VIA`].
+    Via,
+    /// [`EXPIRED`].
+    Expired,
+    /// [`CAPPED`].
+    Capped,
+    /// [`CHANGED`].
+    Changed,
+}
+
+impl Refusal {
+    const ALL: [Self; 9] = [
+        Self::Malformed,
+        Self::Busy,
+        Self::Refused,
+        Self::Unsynced,
+        Self::Stale,
+        Self::Via,
+        Self::Expired,
+        Self::Capped,
+        Self::Changed,
+    ];
+
+    /// The refusal of `code`, or `None` for 0 or a code outside the set.
+    #[must_use]
+    pub fn from_code(code: u32) -> Option<Self> {
+        Self::ALL.into_iter().find(|refusal| refusal.code() == code)
+    }
+
+    /// The code on the wire.
+    #[must_use]
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::Malformed => MALFORMED,
+            Self::Busy => BUSY,
+            Self::Refused => REFUSED,
+            Self::Unsynced => UNSYNCED,
+            Self::Stale => STALE,
+            Self::Via => VIA,
+            Self::Expired => EXPIRED,
+            Self::Capped => CAPPED,
+            Self::Changed => CHANGED,
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Malformed => "a message of the program broke the client wire",
+            Self::Busy => "the node had no memory for a response",
+            Self::Refused => {
+                "the spec has no such subject, does not list the key for it, or the \
+                 signature is not valid"
+            }
+            Self::Unsynced => "the node has no mesh time yet",
+            Self::Stale => {
+                "the hello does not echo the nonce of the node's last \
+                 challenge"
+            }
+            Self::Via => "the hello names another node as via",
+            Self::Expired => "the hello expired",
+            Self::Capped => {
+                "the hello expires later than the cap past the earliest mesh \
+                 time"
+            }
+            Self::Changed => {
+                "a renewal names another subject, key, via, or connection than \
+                 the hello it renews"
+            }
+        })
+    }
+}
 
 /// The most bytes that the body of a request or a response holds: 16 MiB.
 pub const BODY_BYTES_MAX: u64 = 16 << 20;
@@ -284,16 +375,14 @@ impl Response {
 
 /// The rest of the body of one request or response.
 #[derive(Debug)]
-pub struct Body {
-    remain: usize,
-}
+pub struct Body(body::Count);
 
 impl Body {
     fn new(length: u64) -> Self {
         assert_body(length);
         let remain = usize::try_from(length)
             .expect("invariant: a usize holds a body of at most 16 MiB");
-        Self { remain }
+        Self(body::Count::new(remain))
     }
 
     /// Takes the next message of the body and gives its bytes.
@@ -303,21 +392,17 @@ impl Body {
     /// [`Error::Empty`] for an empty message, [`Error::Body`] for more bytes than
     /// remain, and [`Error::Trailing`] once the body ended.
     pub fn take<'m>(&mut self, message: &'m [u8]) -> Result<&'m [u8], Error> {
-        let (len, remain) = (message.len(), self.remain);
-        if remain == 0 {
+        if self.0.remain() == 0 {
             return Err(Error::Trailing);
         }
-        if len == 0 {
-            return Err(Error::Empty);
-        }
-        self.remain = remain.checked_sub(len).ok_or(Error::Body { len, remain })?;
+        self.0.take(message)?;
         Ok(message)
     }
 
     /// The bytes that remain. The body ended at 0.
     #[must_use]
     pub fn remain(&self) -> usize {
-        self.remain
+        self.0.remain()
     }
 
     /// Checks that the body ended, when its stream ends.
@@ -326,10 +411,7 @@ impl Body {
     ///
     /// [`Error::Unfinished`] when bytes of the body remain.
     pub fn end(&self) -> Result<(), Error> {
-        match self.remain {
-            0 => Ok(()),
-            remain => Err(Error::Unfinished { remain }),
-        }
+        Ok(self.0.end()?)
     }
 }
 

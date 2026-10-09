@@ -25,10 +25,12 @@ pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting"];
 pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
     ("connector-ni", "daqmx-stub"),
     ("hub", "buffer"),
+    ("hub", "blob"),
     ("access", "document"),
     ("config", "config-hcl"),
     ("config", "connector-influx"),
     ("ops", "config-hcl"),
+    ("ops", "transport"),
 ];
 
 /// Every crate with its layer and the workspace crates it may depend on.

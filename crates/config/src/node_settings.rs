@@ -2,6 +2,7 @@ use document::diagnostic::{Code, Diagnostic};
 use document::{Block, read};
 use spec::definition;
 use spec::node_settings::{Error, Policy};
+use types::name::Name;
 
 use crate::{Definition, Found};
 
@@ -10,7 +11,11 @@ const KEYS: [&str; 3] = ["select", "disk", "pool"];
 
 /// Checks a `node_settings` block and gives its policy. An unknown attribute stops the
 /// budget check, because it may be a budget under a wrong key.
-pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
+pub(crate) fn check(
+    found: &mut Found<'_>,
+    block: &Block,
+    _: Option<&Name>,
+) -> Option<Definition> {
     let unknown = found.unknown(block, &KEYS);
     let select = found.select(block, "nodes that it sets", "site_a.*");
     let disk = found.attribute(block, "disk", read::size);

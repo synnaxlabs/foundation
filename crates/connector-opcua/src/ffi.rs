@@ -13,6 +13,8 @@ impl Status {
     pub(crate) const GOOD: Self = Self(0);
     #[cfg(test)]
     pub(crate) const BAD_INTERNAL_ERROR: Self = Self(0x8002_0000);
+    #[cfg(test)]
+    pub(crate) const BAD_OUT_OF_RANGE: Self = Self(0x803C_0000);
 
     /// Gives the name of the code, such as `BadNodeIdUnknown`.
     pub(crate) fn name(self) -> &'static str {
@@ -304,5 +306,16 @@ pub(crate) mod test {
             client: *mut super::Client,
             url: *const std::ffi::c_char,
         ) -> u32;
+        pub(crate) fn __UA_Client_AsyncService(
+            client: *mut super::Client,
+            request: *const c_void,
+            request_type: *const c_void,
+            callback: *const c_void,
+            response_type: *const c_void,
+            data: *mut c_void,
+            key: *mut u32,
+        ) -> u32;
+
+        pub(crate) fn UA_UInt32_random() -> u32;
     }
 }

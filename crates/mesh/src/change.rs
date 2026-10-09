@@ -37,8 +37,8 @@ pub(crate) enum Change {
         /// What the ticket admits.
         options: Options,
     },
-    /// Moves the spec pointer from `base` to version `base.version + 1` at `root`, and
-    /// gives each index of `homes` that has no home its listed one.
+    /// Moves the spec pointer from `base` to [`pointer`] of `base`, `root`, and
+    /// `homes`, and gives each index of `homes` that has no home its listed one.
     Spec {
         /// The pointer that the change was made on.
         base: Pointer,
@@ -50,7 +50,8 @@ pub(crate) enum Change {
         /// The voters whose durable put of the chunks the proposer counted, at most
         /// [`HOLDERS_MAX`].
         holders: BTreeSet<node::Key>,
-        /// The home of each index that the change adds, at most [`HOMES_MAX`].
+        /// The home of each index that had no home in the proposer's state, at most
+        /// [`HOMES_MAX`]. At the apply, an index with a home keeps it.
         homes: BTreeMap<channel::Key, node::Key>,
     },
 }
@@ -69,6 +70,25 @@ pub(crate) struct Join {
     pub(crate) admission: [u8; 64],
     /// The node's status channel keys, by name under the node's name.
     pub(crate) status: Status,
+}
+
+/// The pointer after a `Spec` change of `base`, `root`, and `homes` applies: `base`
+/// when `root` is the root of `base` and `homes` is empty, as such a change changes
+/// nothing, and else version `base.version + 1` at `root`.
+///
+/// # Panics
+///
+/// When the pointer moves and `base.version` is `u64::MAX`.
+pub(crate) fn pointer(
+    base: Pointer,
+    root: Digest,
+    homes: &BTreeMap<channel::Key, node::Key>,
+) -> Pointer {
+    if root == base.root && homes.is_empty() {
+        base
+    } else {
+        base.next(root)
+    }
 }
 
 const HOME: u8 = 1;

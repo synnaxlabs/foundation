@@ -15,7 +15,7 @@ use raft::Voters;
 use spec::definition::Definition;
 
 use crate::card;
-use crate::change::{Change, Join, Malformed};
+use crate::change::{self, Change, Join, Malformed};
 use crate::member::Member;
 use crate::status::Status;
 use crate::ticket::{self, Options, Record};
@@ -109,6 +109,22 @@ impl State {
         self.members.get(&key)
     }
 
+    /// The name of each member.
+    pub(crate) fn names(&self) -> BTreeSet<Name> {
+        self.members
+            .values()
+            .map(|member| member.card.card().name.clone())
+            .collect()
+    }
+
+    /// The key of the member whose card holds `public_key`, or `None` when none does.
+    pub(crate) fn holder(&self, public_key: PublicKey) -> Option<node::Key> {
+        let mut members = self.members.iter();
+        let (&key, _) =
+            members.find(|(_, member)| member.public_key() == public_key)?;
+        Some(key)
+    }
+
     /// The record of the ticket with `public_key`, or `None` when none is recorded.
     #[cfg_attr(
         not(test),
@@ -128,6 +144,11 @@ impl State {
     /// The home of `index`, or `None` when none is set.
     pub(crate) fn home(&self, index: channel::Key) -> Option<node::Key> {
         self.homes.get(&index).copied()
+    }
+
+    /// The node of each home, in index key order.
+    pub(crate) fn homes(&self) -> impl Iterator<Item = node::Key> {
+        self.homes.values().copied()
     }
 
     /// The spec pointer.
@@ -159,7 +180,7 @@ impl State {
                 homes,
                 ..
             } => {
-                self.move_pointer(base, root, &holders)?;
+                self.move_pointer(base, root, &holders, &homes)?;
                 let mut moved = false;
                 for (index, home) in homes {
                     if let Entry::Vacant(vacant) = self.homes.entry(index) {
@@ -185,6 +206,7 @@ impl State {
         base: Pointer,
         root: Digest,
         holders: &BTreeSet<node::Key>,
+        homes: &BTreeMap<channel::Key, node::Key>,
     ) -> Result<(), Refused> {
         if base != self.pointer {
             return Err(Refused::Stale {
@@ -193,7 +215,7 @@ impl State {
             });
         }
         quorum(&self.voters, holders)?;
-        self.pointer = base.next(root);
+        self.pointer = change::pointer(base, root, homes);
         Ok(())
     }
 
@@ -279,11 +301,14 @@ impl State {
         if self.members.contains_key(&key) {
             return Err(Unfit::Duplicate { key });
         }
+        if let Some(key) = self.holder(card.card().public_key) {
+            return Err(Unfit::Held { key });
+        }
         let mut lower = Vec::with_capacity(names.len());
         for name in names {
             let folded = name.as_str().to_ascii_lowercase();
-            if let Some(&holder) = self.names.get(&folded) {
-                return Err(Unfit::Taken { name, key: holder });
+            if let Some(&taker) = self.names.get(&folded) {
+                return Err(Unfit::Taken { name, key: taker });
             }
             if lower.contains(&folded) {
                 return Err(Unfit::Taken { name, key });
@@ -460,6 +485,11 @@ pub enum Unfit {
         /// The node.
         key: node::Key,
     },
+    /// Another member's card holds the public key of the member's card.
+    Held {
+        /// The member that holds it.
+        key: node::Key,
+    },
     /// The member's name, or the name of one of its status channels, equals a name
     /// that a member holds, ignoring ASCII case.
     Taken {
@@ -492,6 +522,9 @@ impl fmt::Display for Unfit {
                 Name::MAX_BYTES
             ),
             Self::Duplicate { key } => write!(f, "node {key} is already a member"),
+            Self::Held { key } => {
+                write!(f, "the public key of the card is held by node {key}")
+            }
             Self::Taken { name, key } => {
                 write!(f, "the name {name} is taken by node {key}")
             }
@@ -511,7 +544,8 @@ mod tests {
     use super::*;
     use crate::common::{
         EPHEMERAL, EXPIRY, create_members, digest, home, index, join, key as node,
-        name, options, public, record, signed, spec, status, with_status,
+        member, name, options, private, public, record, signed, spec, status, ticket,
+        with_status,
     };
 
     const FOUNDING: Digest = Digest([1; 32]);
@@ -520,6 +554,16 @@ mod tests {
     // `FOUNDING`, and no home.
     fn create_state(prefix: Prefix, members: Vec<Member>) -> Result<State, Unfit> {
         State::new(prefix, members, FOUNDING, [node(1)].into(), BTreeMap::new())
+    }
+
+    // The card of node `id` with `name`, which holds the public key of node `holder`
+    // and which `holder` signed.
+    fn holding(id: u8, holder: u8, name: &str) -> card::Signed {
+        let card = card::Card {
+            public_key: public(holder),
+            ..signed(id, name).card().clone()
+        };
+        card::Signed::sign(node(id), card, &private(holder))
     }
 
     // Members 1 and 2, and single-use ticket 7 for `plant.edge`.
@@ -563,8 +607,25 @@ mod tests {
             root: digest(2),
         };
         assert_eq!(state.pointer(), moved);
+        assert_eq!(state.apply(homed(spec(1, 2, 2, &[]), &[(7, 1)])), Ok(true));
+        assert_eq!(state.pointer(), moved.next(digest(2)));
+    }
+
+    #[test]
+    fn a_spec_change_at_the_base_root_with_no_home_leaves_the_pointer() {
+        let mut state = state();
+        assert_eq!(state.apply(spec(0, 1, 2, &[3])), Ok(false));
+        let moved = state.pointer();
         assert_eq!(state.apply(spec(1, 2, 2, &[])), Ok(false));
-        assert_eq!(state.pointer().version, 2);
+        assert_eq!(state.pointer(), moved);
+        let refused = Refused::Stale {
+            base: Pointer {
+                version: 0,
+                root: FOUNDING,
+            },
+            pointer: moved,
+        };
+        assert_eq!(state.apply(spec(0, 1, 1, &[])), Err(refused));
     }
 
     /// `spec` with the home `[(index, home)]` of each pair of `homes`.
@@ -691,6 +752,24 @@ mod tests {
             );
             assert_eq!(state, before);
         }
+    }
+
+    #[test]
+    fn holder_gives_the_member_with_a_public_key() {
+        let state = state();
+        assert_eq!(state.holder(public(2)), Some(node(2)));
+        assert_eq!(state.holder(public(3)), None);
+    }
+
+    #[test]
+    fn new_refuses_two_members_with_one_public_key() {
+        let twin = Member {
+            card: holding(3, 1, "plant.node3"),
+            ..member(3)
+        };
+        let error =
+            create_state(name("plant").into(), vec![member(1), twin]).unwrap_err();
+        assert_eq!(error, Unfit::Held { key: node(1) });
     }
 
     #[test]
@@ -844,6 +923,27 @@ mod tests {
                 prefix: name("plant.edge")
             }))
         );
+        assert_eq!(state, before);
+    }
+
+    #[test]
+    fn a_join_with_the_public_key_of_a_member_is_refused() {
+        let mut state = state();
+        let before = state.clone();
+        let card = holding(3, 1, "plant.edge.a");
+        let mut join = join(7, 3, "plant.edge.a");
+        join.admission = ticket(7).admission(&card);
+        join.card = card::Unchecked {
+            key: node(3),
+            card: card.card().clone(),
+            signature: *card.signature(),
+        };
+        let held = Unfit::Held { key: node(1) };
+        assert_eq!(
+            held.to_string(),
+            format!("the public key of the card is held by node {}", node(1))
+        );
+        assert_eq!(state.apply(Change::Join(Box::new(join))), Err(held.into()));
         assert_eq!(state, before);
     }
 
@@ -1311,8 +1411,13 @@ mod tests {
                     }
                     (Ok(moved), Change::Spec { base, root, homes, .. }) => {
                         prop_assert_eq!(before.pointer(), base);
-                        let next = base.version.checked_add(1).unwrap();
-                        prop_assert_eq!(state.pointer(), Pointer { version: next, root });
+                        let next = if root == base.root && homes.is_empty() {
+                            base
+                        } else {
+                            let version = base.version.checked_add(1).unwrap();
+                            Pointer { version, root }
+                        };
+                        prop_assert_eq!(state.pointer(), next);
                         for (&index, &home) in &homes {
                             let kept = before.home(index).unwrap_or(home);
                             prop_assert_eq!(state.home(index), Some(kept));

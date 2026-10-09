@@ -4,6 +4,18 @@ use crate::lab::{Lab, Node};
 
 const HCL: &str = include_str!("fixtures/site.hcl");
 
+/// The placement that gives the index of `site.hcl` its home at the node `cloud`.
+const PLACEMENT: &str = r#"placement "site" {
+  select = "site.*"
+  home   = "cloud"
+}
+"#;
+
+/// `site.hcl` with [`PLACEMENT`].
+fn site() -> String {
+    format!("{HCL}{PLACEMENT}")
+}
+
 #[derive(Clone, Copy)]
 enum Front {
     Cli,
@@ -13,12 +25,12 @@ enum Front {
 fn plan_and_apply(lab: &mut Lab, node: Node, front: Front) -> Vec<String> {
     match front {
         Front::Cli => {
-            let changes = lab.plan(node, HCL);
-            lab.apply(node, HCL);
+            let changes = lab.plan(node, &site());
+            lab.apply(node, &site());
             changes
         }
         Front::Mcp => {
-            let (plan, changes) = lab.mcp_plan(node, HCL);
+            let (plan, changes) = lab.mcp_plan(node, &site());
             lab.mcp_apply(node, &plan);
             changes
         }
@@ -30,8 +42,9 @@ fn plan_and_apply(lab: &mut Lab, node: Node, front: Front) -> Vec<String> {
 fn check(front: Front) {
     let mut lab = Lab::new(1);
     let node = lab.start("cloud");
+    lab.mesh(&[node]);
     let changes = plan_and_apply(&mut lab, node, front);
-    assert_eq!(changes, ["site.temp", "site.time"], "first plan");
+    assert_eq!(changes, ["site", "site.temp", "site.time"], "first plan");
     lab.write(node, "site.temp", 1, 1);
     lab.run(Duration::from_secs(2));
     assert_eq!(lab.read(node, "admin", "site.temp").samples, 1, "applied");
@@ -40,14 +53,45 @@ fn check(front: Front) {
     lab.stop();
 }
 
+/// An index that `site.hcl` does not hold.
+const CLOCK: &str = r#"channel "site.clock" { kind = "index" }"#;
+
 #[test]
-#[ignore = "waits on #337"]
+fn a_second_plan_of_an_applied_channel_gives_no_change() {
+    let mut lab = Lab::new(1);
+    let node = lab.start("cloud");
+    lab.mesh(&[node]);
+    assert_eq!(
+        lab.plan(node, &site()),
+        ["site", "site.temp", "site.time"],
+        "first plan"
+    );
+    lab.apply(node, &site());
+    assert_eq!(lab.plan(node, &site()), Vec::<String>::new(), "second plan");
+    lab.stop();
+}
+
+#[test]
+fn an_applied_index_gets_a_home_and_keeps_it() {
+    let mut lab = Lab::new(1);
+    let node = lab.start("cloud");
+    lab.mesh(&[node]);
+    lab.apply(node, &site());
+    assert_eq!(lab.home(node, "site.time"), Some(node), "first apply");
+    lab.apply(node, &format!("{}{CLOCK}\n", site()));
+    assert_eq!(lab.home(node, "site.time"), Some(node), "first index");
+    assert_eq!(lab.home(node, "site.clock"), Some(node), "second index");
+    lab.stop();
+}
+
+#[test]
+#[ignore = "waits on #337, #340"]
 fn plan_and_apply_from_hcl_through_the_json_cli() {
     check(Front::Cli);
 }
 
 #[test]
-#[ignore = "waits on #337"]
+#[ignore = "waits on #337, #340"]
 fn plan_and_apply_through_mcp() {
     check(Front::Mcp);
 }

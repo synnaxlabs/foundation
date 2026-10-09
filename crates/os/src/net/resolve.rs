@@ -28,7 +28,7 @@ pub(super) async fn lookup(host: &str, port: u16) -> Result<Vec<SocketAddr>, Err
             // The future dropped when the send fails, so no one reads the answer.
             sender.send(getaddrinfo(&name, port)).unwrap_or_else(drop);
         });
-    started.map_err(|e| super::io_error(super::errno(&e)))?;
+    started.map_err(|e| super::from_io(&e))?;
     answer
         .await
         .expect("invariant: the resolve thread answers")

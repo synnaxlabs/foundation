@@ -519,3 +519,52 @@ proptest! {
         prop_assert_eq!(answered.take(&[0]), Err(Error::Trailing));
     }
 }
+
+#[test]
+fn gives_the_code_and_the_text_of_each_refusal() {
+    let cases = [
+        (
+            Refusal::Malformed,
+            2,
+            "a message of the program broke the client wire",
+        ),
+        (Refusal::Busy, 19, "the node had no memory for a response"),
+        (
+            Refusal::Refused,
+            20,
+            "the spec has no such subject, does not list the key for it, or the \
+             signature is not valid",
+        ),
+        (Refusal::Unsynced, 21, "the node has no mesh time yet"),
+        (
+            Refusal::Stale,
+            22,
+            "the hello does not echo the nonce of the node's last challenge",
+        ),
+        (Refusal::Via, 23, "the hello names another node as via"),
+        (Refusal::Expired, 24, "the hello expired"),
+        (
+            Refusal::Capped,
+            25,
+            "the hello expires later than the cap past the earliest mesh time",
+        ),
+        (
+            Refusal::Changed,
+            26,
+            "a renewal names another subject, key, via, or connection than the hello \
+             it renews",
+        ),
+    ];
+    for (refusal, code, text) in cases {
+        assert_eq!(refusal.code(), code);
+        assert_eq!(Refusal::from_code(code), Some(refusal));
+        assert_eq!(refusal.to_string(), text);
+    }
+}
+
+#[test]
+fn gives_no_refusal_for_0_or_a_code_outside_the_set() {
+    for code in [0, 1, 3, 16, 17, 18, 27, u32::MAX] {
+        assert_eq!(Refusal::from_code(code), None, "{code}");
+    }
+}

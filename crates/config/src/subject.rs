@@ -1,11 +1,13 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::slice;
 
-use document::Block;
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::value::{Kind, Value};
+use document::{Block, Span};
 use spec::definition;
 use spec::subject::{Error, Subject};
 use types::ed25519::PublicKey;
+use types::name::Name;
 
 use crate::openssh::{self, Error as Line};
 use crate::{Definition, Found};
@@ -18,7 +20,11 @@ const SUBJECT_IS_CONNECTOR: Code = Code::new("config.subject-is-connector");
 const KEYS: [&str; 1] = ["keys"];
 
 /// Checks a `subject` block and gives its subject.
-pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
+pub(crate) fn check(
+    found: &mut Found<'_>,
+    block: &Block,
+    _: Option<&Name>,
+) -> Option<Definition> {
     let unknown = found.unknown(block, &KEYS);
     let fix = "Add a `keys` attribute with the line of a `.pub` file, such as \
                \"ssh-ed25519 AAAA... alice@laptop\"";
@@ -36,21 +42,53 @@ fn not_connector(found: &mut Found<'_>, block: &Block) {
     let [label] = block.labels.as_slice() else {
         return;
     };
-    let Some(connector) = found.connectors.get(&*label.text.to_ascii_lowercase())
-    else {
-        return;
-    };
+    if let Some(connector) = found.connectors.get(&*label.text.to_ascii_lowercase()) {
+        let diagnostic = named_connector(&label.text, label.span, connector.span);
+        found.diagnostics.push(diagnostic);
+    }
+}
+
+/// `config.subject-is-connector` at each subject of `definitions` whose label is the
+/// name of a connector in any ASCII case, in name order.
+pub(crate) fn not_connectors(
+    definitions: &BTreeMap<Name, definition::Definition>,
+) -> Vec<Diagnostic> {
+    let connectors: BTreeSet<String> = definitions
+        .iter()
+        .filter(|(_, definition)| {
+            matches!(definition, definition::Definition::Connector(_))
+        })
+        .map(|(key, _)| key.as_str().to_ascii_lowercase())
+        .collect();
+    let subjects = definitions
+        .iter()
+        .filter(|(_, definition)| {
+            matches!(definition, definition::Definition::Subject(_))
+        })
+        .map(|(key, _)| crate::label(definition::Kind::Subject, key));
+    subjects
+        .filter(|label| connectors.contains(&label.as_str().to_ascii_lowercase()))
+        .map(|label| named_connector(label.as_str(), None, None))
+        .collect()
+}
+
+/// `config.subject-is-connector` at the subject `text`, with a note at `connector`.
+fn named_connector(
+    text: &str,
+    at: Option<Span>,
+    connector: Option<Span>,
+) -> Diagnostic {
     let mut diagnostic = Diagnostic::new(
         SUBJECT_IS_CONNECTOR,
-        label.span,
-        format!("the subject {:?} has the name of a connector", label.text),
+        at,
+        format!("the subject {text:?} has the name of a connector"),
         "Rename the subject or the connector".into(),
     );
-    diagnostic.notes.extend(connector.span.map(|span| Note {
+    diagnostic.notes.extend(connector.map(|span| Note {
         span,
         text: "the connector".into(),
     }));
-    found.diagnostics.push(diagnostic);
+    diagnostic
 }
 
 /// Reads one public key or a list of them as a subject.
