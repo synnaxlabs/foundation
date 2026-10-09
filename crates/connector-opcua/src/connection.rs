@@ -13,12 +13,12 @@ use std::io::IoSlice;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Poll, Waker, ready};
 
 use env::clock::{Clock, Sleep};
 use env::net::{self, Net, Tcp, tcp};
 use env::rng::Rng;
-use types::time::{Monotonic, Span};
+use types::time::Span;
 
 use crate::event::Loop;
 use crate::ffi::{self, Bytes, Status};
@@ -33,9 +33,12 @@ const OPTIONS: tcp::Options = tcp::Options {
 /// The size of the read buffer of each connection.
 const READ_BYTES: usize = 1 << 16;
 
-/// The most sends that wait on one connection. One write takes them all. A send past
-/// it closes the connection.
-const SENDS: usize = 16;
+/// The most messages that wait on one connection. A message past it closes the
+/// connection.
+const MESSAGES: usize = 16;
+
+/// The most sends that one write takes.
+const PARTS: usize = 16;
 
 /// How long a closed connection may write what waits before it drops its stream.
 const LINGER: Span = Span::from_nanos(10_000_000_000);
@@ -117,7 +120,7 @@ impl Manager {
             "one drive of a manager at a time"
         );
         let _held = Held(&state.held);
-        let mut sleep: Option<(Monotonic, Sleep)> = None;
+        let mut sleep: Option<Sleep> = None;
         poll_fn(|cx| {
             state.driving.set(true);
             let poll = loop {
@@ -132,13 +135,10 @@ impl Manager {
                 let Some(next) = self.events.next() else {
                     break Poll::Pending;
                 };
-                if sleep.as_ref().is_none_or(|(at, _)| *at != next) {
-                    sleep = Some((next, state.clock.sleep_until(next)));
-                }
-                let (_, timer) = sleep.as_mut().expect("invariant: set above");
-                match Pin::new(timer).poll(cx) {
-                    Poll::Ready(()) => sleep = None,
-                    Poll::Pending => break Poll::Pending,
+                let timer = sleep.get_or_insert_with(|| state.clock.sleep_until(next));
+                timer.reset(next);
+                if Pin::new(timer).poll(cx).is_pending() {
+                    break Poll::Pending;
                 }
             };
             state.driving.set(false);
@@ -406,7 +406,12 @@ struct Connection {
     sent: usize,
     /// It gives no more reads, and closes once its sends are written.
     closing: bool,
-    /// When a closing connection drops its stream, sends or not.
+    /// This side is closed for writing.
+    shut: bool,
+    /// The peer closed its side, so the stream can drop with no reset.
+    drained: bool,
+    /// When a closing connection drops its stream, with sends or a peer that has not
+    /// closed.
     linger: Option<Sleep>,
     /// Empty until the connect ends, and while a read callback holds it.
     buffer: Box<[u8]>,
@@ -454,16 +459,20 @@ impl Connection {
             }
             // A stream that drops with bytes it has not read resets, and the peer
             // loses what it has not read yet.
-            loop {
+            while !self.drained {
                 match tcp.poll_read(cx, &mut self.buffer) {
-                    Poll::Ready(Ok(0)) | Poll::Pending => break,
+                    Poll::Ready(Ok(0)) => self.drained = true,
                     Poll::Ready(Ok(_)) => {}
                     Poll::Ready(Err(e)) => return Err(("read", e)),
+                    Poll::Pending => break,
                 }
             }
         } else if !self.buffer.is_empty() {
             match tcp.poll_read(cx, &mut self.buffer) {
-                Poll::Ready(Ok(0)) => return Ok(Step::Ended),
+                Poll::Ready(Ok(0)) => {
+                    self.drained = true;
+                    return Ok(Step::Ended);
+                }
                 Poll::Ready(Ok(n)) => {
                     return Ok(Step::Read(std::mem::take(&mut self.buffer), n));
                 }
@@ -471,25 +480,21 @@ impl Connection {
                 Poll::Pending => {}
             }
         }
-        while !self.sends.is_empty() {
-            let mut parts = [IoSlice::new(&[]); SENDS];
-            let mut count = 0;
-            for (part, buffer) in parts.iter_mut().zip(&self.sends) {
-                *part = IoSlice::new(buffer.bytes());
-                count += 1;
-            }
-            parts[0] = IoSlice::new(&self.sends[0].bytes()[self.sent..]);
-            match tcp.poll_write(cx, &parts[..count]) {
-                Poll::Ready(Ok(n)) => advance(&mut self.sends, &mut self.sent, n),
-                Poll::Ready(Err(e)) => return Err(("write", e)),
-                Poll::Pending => return Ok(Step::Waiting),
-            }
+        match write(tcp, &mut self.sends, &mut self.sent, cx) {
+            Poll::Ready(Ok(())) => {}
+            Poll::Ready(Err(e)) => return Err(("write", e)),
+            Poll::Pending => return Ok(Step::Waiting),
         }
         if self.closing {
-            match tcp.poll_close(cx) {
-                Poll::Ready(Ok(())) => {}
-                Poll::Ready(Err(e)) => return Err(("close", e)),
-                Poll::Pending => return Ok(Step::Waiting),
+            if !self.shut {
+                match tcp.poll_close(cx) {
+                    Poll::Ready(Ok(())) => self.shut = true,
+                    Poll::Ready(Err(e)) => return Err(("close", e)),
+                    Poll::Pending => return Ok(Step::Waiting),
+                }
+            }
+            if !self.drained {
+                return Ok(Step::Waiting);
             }
             self.drop_stream();
             return Ok(Step::Ended);
@@ -504,6 +509,28 @@ impl Connection {
         self.sent = 0;
         self.linger = None;
     }
+}
+
+/// Writes `sends` to `tcp` until none waits. `sent` is the count of bytes of the
+/// first that were written.
+fn write(
+    tcp: &mut Tcp,
+    sends: &mut VecDeque<Buffer>,
+    sent: &mut usize,
+    cx: &mut Context<'_>,
+) -> Poll<Result<(), net::Error>> {
+    while !sends.is_empty() {
+        let mut parts = [IoSlice::new(&[]); PARTS];
+        let mut count = 0;
+        for (part, buffer) in parts.iter_mut().zip(&*sends) {
+            *part = IoSlice::new(buffer.bytes());
+            count += 1;
+        }
+        parts[0] = IoSlice::new(&sends[0].bytes()[*sent..]);
+        let n = ready!(tcp.poll_write(cx, &parts[..count]))?;
+        advance(sends, sent, n);
+    }
+    Poll::Ready(Ok(()))
 }
 
 /// Frees each buffer of `sends` that `n` more written bytes finish. `sent` is the
@@ -525,6 +552,12 @@ fn advance(sends: &mut VecDeque<Buffer>, sent: &mut usize, mut n: usize) {
 struct Buffer(Bytes);
 
 impl Buffer {
+    /// Whether it is the last chunk of its message: its chunk type, the fourth byte
+    /// of an OPC UA header, is not `C`.
+    fn ends_message(&self) -> bool {
+        self.bytes().get(3) != Some(&b'C')
+    }
+
     fn bytes(&self) -> &[u8] {
         if self.0.length == 0 {
             return &[];
@@ -595,6 +628,8 @@ unsafe extern "C" fn open(
             sends: VecDeque::new(),
             sent: 0,
             closing: false,
+            shut: false,
+            drained: false,
             linger: None,
             buffer: Box::default(),
         },
@@ -605,7 +640,8 @@ unsafe extern "C" fn open(
 }
 
 /// The hook of `sendWithConnection`: takes `buffer`, and queues it while the
-/// connection is open. A send past [`SENDS`] closes the connection.
+/// connection is open. A send that starts a message past [`MESSAGES`] closes the
+/// connection.
 unsafe extern "C" fn send(state: *mut c_void, id: usize, buffer: *mut Bytes) -> u32 {
     // SAFETY: C passes the state of `shim_cm_new`.
     let state = unsafe { self::state(state) };
@@ -622,9 +658,15 @@ unsafe extern "C" fn send(state: *mut c_void, id: usize, buffer: *mut Bytes) -> 
     if connection.closing || !matches!(connection.stream, Stream::Open(_)) {
         return Status::BAD_CONNECTION_CLOSED.0;
     }
-    if connection.sends.len() == SENDS {
+    let sends = &connection.sends;
+    // Each chunk of one message comes before a pass can write any, so the bound counts
+    // messages. A count only when the queue holds that many chunks keeps it cheap.
+    if sends.back().is_none_or(Buffer::ends_message)
+        && sends.len() >= MESSAGES
+        && sends.iter().filter(|b| b.ends_message()).count() == MESSAGES
+    {
         drop(table);
-        state.warn(id, format_args!("{SENDS} sends wait, so it closes"));
+        state.warn(id, format_args!("{MESSAGES} messages wait, so it closes"));
         state.end(id);
         return Status::BAD_CONNECTION_CLOSED.0;
     }
