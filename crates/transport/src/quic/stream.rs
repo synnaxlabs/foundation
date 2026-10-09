@@ -3735,7 +3735,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_sender_that_the_peer_stops_gives_only_its_freed_stream() {
+    fn a_reset_sender_that_the_peer_stops_gives_no_event() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let mut sender = open_sender(&mut pair, Class::Complete);
@@ -3747,10 +3747,7 @@ mod tests {
             pair.client.endpoint.reset(now, &mut sender, Code(9));
             pair.server.endpoint.stop(now, receiver, Code(9));
             pair.run(RUN);
-            let available = Event::Available {
-                key: key(&pair.client),
-            };
-            assert_eq!(events(&pair.client).split_off(seen), [&available]);
+            assert_eq!(pair.client.events.len(), seen, "{:?}", pair.client.events);
         });
     }
 
@@ -4232,12 +4229,11 @@ mod tests {
             let id = sender.key().id;
             let now = pair.now();
             pair.client.endpoint.reset(now, &mut sender, Code(9));
-            // The stop goes before the client's reset arrives. The link loses it and
-            // the next datagram, so the resent stop comes after the reset's ACK.
+            // The stop goes before the client's reset arrives, and the link loses it.
             let over = VarInt::from_u64(1 << 32).expect("a varint");
             let stopped = pair.server.connection().recv_stream(id).stop(over);
             stopped.expect("stopped");
-            pair.server.drops = 2;
+            pair.server.drops = 1;
             pair.run(Duration::ZERO);
             assert_ignored_late_stop(&mut pair, false, id);
         });
@@ -4528,11 +4524,7 @@ mod tests {
             let writable = Event::Writable {
                 stream: sender.key(),
             };
-            let available = Event::Available {
-                key: key(&pair.client),
-            };
-            let given = events(&pair.client);
-            assert_eq!(given[given.len() - 2..], [&writable, &available]);
+            assert_eq!(events(&pair.client).last(), Some(&&writable));
             let now = pair.now();
             for _ in 0..2 {
                 let written = pair::write(
@@ -4623,11 +4615,11 @@ mod tests {
         pair.run(RUN);
     }
 
-    /// Opens every stream the server allows from the client, each with "a", and
-    /// accepts each on the server.
-    fn open_all(pair: &mut Pair, shard: &Shard) -> (Vec<Sender>, Vec<Incoming>) {
+    /// Opens `n` streams from the client, each with "a", and accepts each on the
+    /// server.
+    fn open(pair: &mut Pair, shard: &Shard, n: u32) -> (Vec<Sender>, Vec<Incoming>) {
         let now = pair.now();
-        let senders = (0..testing::STREAMS_MAX)
+        let senders = (0..n)
             .map(|_| {
                 let mut sender = open_sender(pair, Class::Complete);
                 write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
@@ -4647,14 +4639,18 @@ mod tests {
     }
 
     #[test]
-    fn each_freed_stream_gives_a_max_streams_frame_with_or_without_a_wait() {
+    fn each_freed_stream_at_the_limit_gives_a_max_streams_frame_with_or_without_a_wait()
+    {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            let (mut senders, mut incoming) = open_all(&mut pair, shard);
+            let (mut senders, mut incoming) =
+                open(&mut pair, shard, testing::STREAMS_MAX);
             let before = announced(&mut pair);
             end(&mut pair, &mut senders[0], &mut incoming);
             assert_eq!(announced(&mut pair), before + 1, "a free, and no wait");
-            assert!(try_open(&mut pair).is_some());
+            let mut last = try_open(&mut pair).expect("a freed stream");
+            let now = pair.now();
+            write(&mut pair.client, now, &mut last, &[shard.block(b"a")]);
             assert!(try_open(&mut pair).is_none());
             pair.run(RUN);
             assert_eq!(announced(&mut pair), before + 1, "no stream is free");
@@ -4665,10 +4661,28 @@ mod tests {
     }
 
     #[test]
+    fn freed_streams_below_the_limit_give_a_max_streams_frame_once_an_eighth_is_free() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let batch = testing::STREAMS_MAX / 8 + 1;
+            let (mut senders, mut incoming) = open(&mut pair, shard, batch);
+            let before = announced(&mut pair);
+            let (last, first) = senders.split_last_mut().expect("a sender");
+            for sender in first {
+                end(&mut pair, sender, &mut incoming);
+            }
+            assert_eq!(announced(&mut pair), before);
+            end(&mut pair, last, &mut incoming);
+            assert_eq!(announced(&mut pair), before + 1);
+        });
+    }
+
+    #[test]
     fn a_burst_of_freed_streams_gives_one_max_streams_frame() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            let (mut senders, mut incoming) = open_all(&mut pair, shard);
+            let (mut senders, mut incoming) =
+                open(&mut pair, shard, testing::STREAMS_MAX);
             let before = announced(&mut pair);
             for sender in &mut senders[..2] {
                 let finished = pair.client.endpoint.finish(pair.now(), sender);
@@ -5841,11 +5855,8 @@ mod tests {
             let writable = |sender: &Sender| Event::Writable {
                 stream: sender.key(),
             };
-            let available = Event::Available {
-                key: key(&pair.client),
-            };
             let given = events(&pair.client).split_off(seen);
-            assert_eq!(given, [&writable(&second), &writable(&first), &available]);
+            assert_eq!(given, [&writable(&second), &writable(&first)]);
         });
     }
 
@@ -5954,10 +5965,7 @@ mod tests {
             let woken = Event::Writable {
                 stream: sender.key(),
             };
-            let available = Event::Available {
-                key: key(&pair.client),
-            };
-            assert_eq!(events(&pair.client).split_off(seen), [&woken, &available]);
+            assert_eq!(events(&pair.client).split_off(seen), [&woken]);
         });
     }
 
