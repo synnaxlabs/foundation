@@ -125,8 +125,9 @@
   loopback, with an MTU of 16,384 bytes, loses a larger datagram. Decided by
   `laptop.architect-2` (2026-10-08 22:35 UTC, #1965,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767). On
-  Apple, the `noq-udp` patch sends an IPv4 source as `IP_PKTINFO`, and `os` has no
-  check of its own. Decided by `laptop.architect-2` (2026-10-08 22:51 UTC, #1965,
+  Apple, with no `noq-udp` feature `fast-apple-datapath`, which no crate here enables,
+  the `noq-udp` patch sends an IPv4 source as `IP_PKTINFO`, and `os` has no check of
+  its own. Decided by `laptop.architect-2` (2026-10-08 22:51 UTC, #1965,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958).
   `os::net()` is behind the `os` cargo feature `net`, off by default, because Tokio has
   no `net` under `--cfg loom`. Decided by `laptop.architect-2` (2026-10-08 23:42 UTC,
