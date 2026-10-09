@@ -15,6 +15,8 @@ use hub::reader::{self, Ended, Mode};
 use spec::data_type::DataType;
 use transport::stream::{Receiver, Sender};
 use transport::{Address, Code, Session, Transport};
+use types::channel;
+use types::frame::key_set::{Group, Interner};
 use types::frame::{self, Path, Range};
 use types::time::Span;
 use wire::Protocol;
@@ -481,12 +483,12 @@ fn a_reader_whose_pool_has_no_room_for_its_open_gets_pool() {
 }
 
 /// A home's session and its end of the first hub stream that `transport` accepts,
-/// once it took the header, the open, and one message of keys, and sent `Opened`.
-async fn fake_open(transport: &Transport) -> (Session, Sender, Receiver) {
+/// once it took the header, the open, and one message of keys.
+async fn fake_accept(transport: &Transport) -> (Session, Sender, Receiver) {
     let session = transport.accept().await.expect("a session");
     let mut incoming = session.accept().await.expect("a stream");
     let mut receiver = incoming.receiver;
-    let mut sender = incoming.sender.take().expect("a two-way stream");
+    let sender = incoming.sender.take().expect("a two-way stream");
     for _ in 0..3 {
         receiver
             .recv()
@@ -494,6 +496,12 @@ async fn fake_open(transport: &Transport) -> (Session, Sender, Receiver) {
             .expect("a message")
             .expect("not finished");
     }
+    (session, sender, receiver)
+}
+
+/// [`fake_accept`], then `Opened` sent.
+async fn fake_open(transport: &Transport) -> (Session, Sender, Receiver) {
+    let (session, mut sender, receiver) = fake_accept(transport).await;
     send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
     (session, sender, receiver)
 }
@@ -971,17 +979,12 @@ fn a_reader_whose_home_replies_with_a_head_before_opened_stops_the_stream_as_mal
         15,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let session = transport.accept().await.expect("a session");
-            let mut incoming = session.accept().await.expect("a stream");
-            let mut sender = incoming.sender.take().expect("a two-way stream");
-            for _ in 0..3 {
-                incoming.receiver.recv().await.expect("a message");
-            }
+            let (_session, mut sender, mut receiver) = fake_accept(&transport).await;
             send_head(&mut sender, 1, &[(0, 8), (1, 16)])
                 .await
                 .expect("sends");
             let error = loop {
-                if let Err(error) = incoming.receiver.recv().await {
+                if let Err(error) = receiver.recv().await {
                     break error;
                 }
             };
@@ -1391,15 +1394,10 @@ fn a_reader_whose_home_finishes_the_stream_before_opened_stops_it_as_malformed()
         44,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let session = transport.accept().await.expect("a session");
-            let mut incoming = session.accept().await.expect("a stream");
-            let mut sender = incoming.sender.take().expect("a two-way stream");
-            for _ in 0..3 {
-                incoming.receiver.recv().await.expect("a message");
-            }
+            let (_session, mut sender, mut receiver) = fake_accept(&transport).await;
             sender.finish().expect("finishes");
             let error = loop {
-                if let Err(error) = incoming.receiver.recv().await {
+                if let Err(error) = receiver.recv().await {
                     break error;
                 }
             };
@@ -1566,7 +1564,13 @@ fn a_reader_whose_frame_is_larger_than_each_block_of_its_pool_stops_the_stream_w
             let Ended::Pool(block::Error::TooLarge { requested, .. }) = ended else {
                 panic!("not a frame too large for the pool: {ended:?}");
             };
-            assert!(requested > usize::try_from(BODY).expect("a usize"));
+            let mut interner = Interner::new();
+            let data = [(channel::Key::from_u128(2), I64)];
+            let index = channel::Key::from_u128(1);
+            let set = interner.intern(&[Group { index, data: &data }]);
+            let ends = [(0, 8), (1, usize::try_from(BODY).expect("a usize"))];
+            let layout = frame::Layout::from_ends(&set, &ends).expect("a layout");
+            assert_eq!(requested, layout.block_len());
             let expected = test.pool.alloc(requested).expect_err("too large");
             assert_eq!(ended, Ended::Pool(expected));
             until(&test.clock, &steps.stopped).await;
