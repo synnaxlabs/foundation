@@ -92,10 +92,10 @@
   #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415).
   Supersedes the removal of the feature in
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066303437, approved
-  in https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066705829. Trigger:
-  #2038 gives the loom models a cfg name of their own, and then removes the feature. On
-  `os`,
-  a peer that resets after the handshake gives `Ok` from `Net::connect`, and the stream
+  in https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066705829.
+  Trigger: #2038 gives the loom models a cfg name of their own, and then removes the
+  feature.
+  On `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and the stream
   reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of the
   connect, an IPv4-mapped address as plain IPv4, and any other address as given, with
   its scope and flow label. A caller that needs the kernel's peer there makes an
