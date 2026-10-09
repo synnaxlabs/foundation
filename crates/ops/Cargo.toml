@@ -10,6 +10,7 @@ clap = { workspace = true }
 config = { path = "../config" }
 connector = { path = "../connector" }
 document = { path = "../document" }
+mesh = { path = "../mesh" }
 schemars = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -20,4 +21,9 @@ types = { path = "../types" }
 workspace = true
 
 [dev-dependencies]
+blob = { path = "../blob" }
+block = { path = "../block", features = ["sim"] }
 config-hcl = { path = "../config-hcl" }
+env = { path = "../env" }
+sim = { path = "../sim" }
+transport = { path = "../transport" }

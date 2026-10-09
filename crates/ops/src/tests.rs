@@ -430,6 +430,10 @@ fn a_call_with_no_arguments_runs() {
 
 #[test]
 fn error_codes_and_fixes_match_the_golden_file() {
+    let pointer = spec::Pointer {
+        version: 0,
+        root: spec::tree::empty(),
+    };
     let every = [
         Error::Argument {
             message: String::new(),
@@ -444,6 +448,16 @@ fn error_codes_and_fixes_match_the_golden_file() {
         Error::Output {
             message: String::new(),
         },
+        Error::Plan(config::plan::Error::Malformed { at: 0 }),
+        Error::Behind(Box::new(mesh::used::Behind {
+            pointer,
+            cause: mesh::used::Cause::Problems(Vec::new()),
+        })),
+        Error::Stale {
+            base: pointer,
+            pointer,
+        },
+        Error::Apply(mesh::Error::NoVote),
     ];
     for error in &every {
         // A new variant fails this match, so it joins `every` and the golden file.
@@ -453,6 +467,10 @@ fn error_codes_and_fixes_match_the_golden_file() {
             | Error::Unknown { .. }
             | Error::Input { .. }
             | Error::Output { .. }
+            | Error::Plan(_)
+            | Error::Behind(_)
+            | Error::Stale { .. }
+            | Error::Apply(_)
             | Error::Config(_) => {}
         }
     }

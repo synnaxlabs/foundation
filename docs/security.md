@@ -31,7 +31,8 @@ attacker can use is a GitHub issue with the `security` label and a failing test.
 | Voter | Vote and stall its region; break `raft` safety (Node to node) | Forge a spec change or move a home outside placement |
 | Time source | Shift the clocks that follow it, within what the estimator accepts | |
 | Device | Send any bytes to a connector | Reach the core except through `hub` |
-| Local user | Read and write the node's files, and so hold its keys and cached secrets and become that member node | Read memory of the process |
+| Local user that runs the node | Read and write the node's files and memory, and so hold its keys and cached secrets and become that member node | |
+| Other local user | Read, write, or list a file or directory that the operator opens to it: one that is there with a wider mode, which `os` does not change, or one that an ACL of the data directory opens. With write, it can write the node's keys and so become that node | Read, write, or list another file or directory that `os` makes; read memory of the process |
 | Agent host | Use the key of the agent's subject, which the MCP process holds | Go past that subject's allows |
 | Dependency | Ship hostile or defective code in a crate we build | |
 
@@ -39,7 +40,7 @@ The reach of each node role is from BQ12. Placement is the trust decision: the h
 of an index is the authority for it.
 
 Accepted in v1 (BQ12): no end-to-end integrity of frames, so a member node can change
-what it forwards, commands included. Out of scope: a hostile operating system or
+what it forwards, commands included. Out of scope: a hostile operating system, root, or
 hardware.
 
 ## Trust boundaries and their state
@@ -117,8 +118,11 @@ state on `main`.
   counts such a datagram. A client opens only hub streams; `node` refuses the other
   protocols from a client. A node with a region gives each `Mesh` stream of a peer
   that proved a node key to `Mesh::serve`, which checks each message (NODE MESH), and
-  rejects a client's. `node` stops and resets each other stream until its protocol has
-  a server. It reads no datagram yet (#1661), and admits every peer (#1628).
+  rejects a client's. It gives a `Hub` stream to the hub only when a member of its
+  region has the peer's public key, once, at the header (NODE PORT); it rejects a
+  client's until #1744. `node` stops and resets each other stream until its protocol
+  has a server. It reads no datagram yet (#1661), and admits every peer to a session
+  (#1628).
 
 ### Subject to owner
 
@@ -277,8 +281,8 @@ state on `main`.
   `main` (#1441): when the disk cuts the file to zero bytes, or when the first sector
   of each header block reads as zero, an open takes the file for a ring with no
   checkpoint, removes it, and makes a new ring with no error. The CRC does not stop a
-  local user who writes the file: it is not a secret, and a header block has no tie
-  to its ring.
+  local user who can write the file (Who attacks): it is not a secret, and a header
+  block has no tie to its ring.
 - The engine landed (#161): `Buffer::open` reads the header blocks and walks the
   ring. #234 and #300 were robustness defects of this boundary, fixed in #356 and
   #348. They do not have the `security` label: each needed a writer of the file, or,
@@ -313,8 +317,8 @@ state on `main`.
   and no equality. The TLS configs do not write key bytes in `Debug`.
 - Open hardening: `PrivateKey` is `Clone` with a public field, and neither it nor the
   PKCS#8 copy in `tls` is cleared when dropped.
-- Node key material is on the node's local disk. A local user who reads it is that
-  node.
+- Node key material is on the node's local disk. A local user who can read it (Who
+  attacks) is that node.
 - `ctx.secret(name)` is the only path to a secret value (SECRET STORES AS ADAPTERS).
   The built-in store seals each value to the X25519 seal key of each node that may
   use it (BQ16, S8). The other adapters (an environment variable or a file, and the
@@ -408,8 +412,9 @@ not reached from the corpus: `transport::message` (#55), the QUIC hello
 (`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
 #336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
 mesh log files and the names of their directory (`mesh::log::scan` and
-`mesh::log::sequence`, #1746), each connector's protocol parser, the OPC UA binary
-decoding of open62541 (`UA_decodeBinary`, #1885), and `connector::reader::read`,
+`mesh::log::sequence`, #1746), the names in the directory of the spec in use
+(`mesh::driver::used::pointer`, #1746), each connector's protocol parser, the OPC UA
+binary decoding of open62541 (`UA_decodeBinary`, #1885), and `connector::reader::read`,
 `node::identity::decode` (#1994), `connector::http::uri`, and
 `connector_influx::Kind::parse`, which `config_check` reaches only from an input with a
 `connector` block of kind `influx`, and no input holds one yet (#1817).

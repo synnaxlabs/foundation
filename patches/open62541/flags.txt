@@ -8,7 +8,6 @@
 -fexceptions
 -ffunction-sections
 -fdata-sections
--pthread
 -fno-unwind-tables
 -fno-asynchronous-unwind-tables
 -fno-math-errno
