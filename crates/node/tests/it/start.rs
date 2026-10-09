@@ -225,6 +225,26 @@ fn a_file_of_the_data_directory_that_the_user_cannot_write_fails() {
     }
 }
 
+#[test]
+fn a_key_file_that_is_a_directory_fails_as_node_failed() {
+    let mut rig = Rig::new();
+    rig.start();
+    rig.stop();
+    let key = rig.dir.join("foundation-data/data/node.key");
+    std::fs::remove_file(&key).expect("remove the key file");
+    std::fs::create_dir(&key).expect("make a directory in its place");
+    assert_eq!(
+        ended(&rig.run(&["start"], b"")),
+        (
+            Some(1),
+            "",
+            "error[node.failed]: cannot use the data directory: open of node.key \
+             failed with OS error 21\n\
+             fix: Fix the cause that the message states, then start the node again\n"
+        )
+    );
+}
+
 /// Linux only: the test reads where each thread waits from `/proc`.
 #[cfg(target_os = "linux")]
 #[test]
