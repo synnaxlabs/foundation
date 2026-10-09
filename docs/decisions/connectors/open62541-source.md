@@ -139,7 +139,7 @@
   copy and of `shim.c` call no libc function that gives or takes a heap pointer. A
   crypto library that a later PR links keeps its own allocator. So the counting
   allocator of a test or benchmark binary counts C too. The copy check compiles
-  without `alloc.h`. A test reads the archives that `build.rs` makes with it, and
+  without `alloc.h`. A test reads the archive that `build.rs` makes with it, and
   fails on each symbol outside the copy and `shim.c` that its closed list does not
   hold. The list holds no clock function and no libc function that gives or takes a
   heap pointer. Lost: `UA_ENABLE_MALLOC_SINGLETON` (a global), `--wrap=malloc`
