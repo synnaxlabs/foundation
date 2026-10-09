@@ -32,7 +32,8 @@ case "$*" in
     echo "${LEFT:-}" ;;
 esac
 EOF
-# It logs the remote command, and runs it in $T/home with the stand-ins of the host.
+# It logs the remote command, and runs it in $T/home with the stand-ins of the host,
+# except the reads of `loadavg` and `lscpu`.
 cat >"$bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 while (($#)) && [[ $1 != ubuntu@* ]]; do shift; done
@@ -45,7 +46,10 @@ case "$*" in
 *)
     mkdir -p "$T/home/.cargo"
     [[ -e $T/home/.cargo/bin ]] || ln -s "$REMOTE" "$T/home/.cargo/bin"
-    cd "$T/home" && HOME=$T/home PATH="$REMOTE:/usr/bin:/bin" bash -c "$*" ;;
+    # Like `sshd`, it passes no local variable but the switches of a case.
+    cd "$T/home" && env -i T="$T" BIG="${BIG:-}" EDGE="${EDGE:-}" LONG="${LONG:-}" \
+        FAIL_RUN="${FAIL_RUN:-}" HOME="$T/home" PATH="$REMOTE:/usr/bin:/bin" \
+        bash -c "$*" ;;
 esac
 EOF
 export REMOTE=$root/remote
