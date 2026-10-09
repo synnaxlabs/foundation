@@ -100,7 +100,7 @@ mod tests {
 
     /// The name in the file of `bytes`.
     fn read(bytes: &[u8; LEN]) -> Result<Option<Name>, Error> {
-        decode(&sector::held(bytes, TAG))
+        decode(&sector::written(bytes, TAG).map_or(Held::Foreign, Held::Written))
     }
 
     #[test]
