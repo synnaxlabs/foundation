@@ -756,6 +756,7 @@ fn an_open_gives_the_error_of_each_failed_file_call_on_the_spec_in_use() {
     let calls = [
         (PathBuf::from(used::SPEC), Operation::CreateDir),
         (PathBuf::from(used::SPEC), Operation::List),
+        (PathBuf::from(used::SPEC), Operation::SyncDir),
         (file(older), Operation::Remove),
     ];
     for (path, operation) in calls {
