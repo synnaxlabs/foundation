@@ -267,21 +267,7 @@ pub(super) async fn open(opening: Opening<'_>) -> Result<Used, Error> {
     let held = dir.join(SPEC);
     files.create_dir(&held).await.map_err(Error::Files)?;
     files.sync_dir(dir).await.map_err(Error::Files)?;
-    let mut named = Vec::new();
-    for name in files.list(&held).await.map_err(Error::Files)? {
-        let path = held.join(&name);
-        let Some(pointer) = pointer(&name) else {
-            return Err(Error::Stray { path });
-        };
-        named.push((pointer, path));
-    }
-    named.sort_by_key(|(pointer, _)| pointer.version);
-    let file = named.pop();
-    // A power cut can undo a removal, which the next open makes again.
-    for (_, path) in &named {
-        files.remove(path).await.map_err(Error::Files)?;
-    }
-    let Some((pointer, _)) = file else {
+    let Some(pointer) = newest(files, &held).await? else {
         let problems = spec::region::check(prefix, &definitions);
         if problems.is_empty() {
             return Ok(Used {
@@ -323,6 +309,30 @@ pub(super) async fn open(opening: Opening<'_>) -> Result<Used, Error> {
         }),
         Err(cause) => Ok(behind(pointer, Done::Failed { cause, got })),
     }
+}
+
+// The pointer of the newest file in `held`, if any, after a sync of `held` and the
+// removal of each older file.
+async fn newest(files: &Files, held: &Path) -> Result<Option<Pointer>, Error> {
+    let mut named = Vec::new();
+    for name in files.list(held).await.map_err(Error::Files)? {
+        let path = held.join(&name);
+        let Some(pointer) = pointer(&name) else {
+            return Err(Error::Stray { path });
+        };
+        named.push((pointer, path));
+    }
+    named.sort_by_key(|(pointer, _)| pointer.version);
+    let Some((newest, _)) = named.pop() else {
+        return Ok(None);
+    };
+    // The newest file can be one whose create no sync made durable.
+    files.sync_dir(held).await.map_err(Error::Files)?;
+    // A power cut can undo a removal, which the next open makes again.
+    for (_, path) in &named {
+        files.remove(path).await.map_err(Error::Files)?;
+    }
+    Ok(Some(newest))
 }
 
 // The state of a node that uses no spec, because the read of the spec of
