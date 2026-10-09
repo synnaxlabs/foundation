@@ -2,6 +2,7 @@
 //! of a shard's home.
 
 mod channel;
+pub mod client;
 mod commit;
 mod link;
 pub mod reader;

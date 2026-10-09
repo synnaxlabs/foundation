@@ -73,6 +73,8 @@ pub(crate) struct Endpoint {
     window_bytes: usize,
     /// Indexed by noq-proto's handle.
     connections: Vec<Option<Connection>>,
+    /// The messages of the drained connections that waited for send budget room.
+    budget_waits: u64,
     /// The connections made so far.
     serial: u64,
     /// The connections that may have a datagram to send, each once, in the order
@@ -132,6 +134,7 @@ impl Endpoint {
             message_bytes_max: setup.message_bytes_max,
             window_bytes: setup.window_bytes,
             connections: Vec::new(),
+            budget_waits: 0,
             serial: 0,
             ready: VecDeque::new(),
             events: VecDeque::new(),
@@ -256,6 +259,13 @@ impl Endpoint {
     /// at once.
     pub(crate) fn refuse(&mut self) {
         self.refusing = true;
+    }
+
+    /// The messages that waited for room in the send budget of their connection, over
+    /// every connection, also those that drained.
+    pub(crate) fn budget_waits(&self) -> u64 {
+        let live = self.connections.iter().flatten();
+        self.budget_waits + live.map(|c| c.streams.budget_waits()).sum::<u64>()
     }
 
     /// `true` when each connection drained, so none sends again.
@@ -738,6 +748,7 @@ impl Endpoint {
         let entry = &mut self.connections[handle.0];
         let connection = entry.as_mut().expect("invariant: a live handle");
         if connection.drive(now, &mut self.inner, &self.pool, &mut self.events) {
+            self.budget_waits += connection.streams.budget_waits();
             *entry = None;
         } else {
             queue(&mut self.ready, connection);

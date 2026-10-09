@@ -168,6 +168,44 @@ fn a_vectored_write_reaches_the_peer_in_order() {
     });
 }
 
+/// An empty first part holds the write to no part on macOS, which caps each write.
+#[test]
+fn a_vectored_write_with_an_empty_first_part_takes_bytes() {
+    on_thread("net-write-empty-first", || async {
+        let net = net();
+        let (_listener, mut client, mut server) = create_pair(&net).await;
+        let big = vec![7; 2 * options().unsent_bytes_max];
+        let written = write(&mut client, &[&[], &big]).await;
+        assert!(matches!(written, Ok(1..)), "{written:?}");
+        let mut received = [0; 1];
+        read_exact(&mut server, &mut received).await;
+    });
+}
+
+/// The kernel takes at most 1024 parts, so the empty parts in front of the bytes go
+/// first.
+#[test]
+fn a_write_after_many_empty_parts_takes_bytes() {
+    on_thread("net-empty", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        let mut parts: Vec<&[u8]> = vec![&[]; 1100];
+        parts.push(b"hello");
+        assert_eq!(write(&mut client, &parts).await, Ok(5));
+    });
+}
+
+/// macOS refuses a `writev` of no parts with `EINVAL`, which would end the stream.
+#[test]
+fn a_write_of_no_parts_gives_0() {
+    on_thread("net-none", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[]).await, Ok(0));
+        assert_eq!(write(&mut client, &[&[7]]).await, Ok(1));
+    });
+}
+
 #[test]
 fn a_round_trip_runs_on_a_shard() {
     on_shard(|| async {
@@ -239,10 +277,8 @@ fn a_drop_after_close_delivers_the_bytes_the_kernel_still_holds() {
         let (_listener, mut client, mut server) = create_pair(&net).await;
         assert_eq!(write(&mut client, &[&[7]]).await, Ok(1));
         let bytes = vec![7; 1 << 20];
-        let Poll::Ready(queued) = write_once(&mut client, &bytes) else {
-            panic!("an empty send buffer takes bytes")
-        };
-        let queued = queued + 1;
+        let queued = write(&mut client, &[&bytes]).await;
+        let queued = queued.expect("an empty send buffer takes bytes") + 1;
         assert!(queued < 1 << 20, "the kernel holds the rest: {queued}");
         assert_eq!(close(&mut client).await, Ok(()));
         drop(client);
@@ -261,7 +297,8 @@ fn a_drop_after_close_delivers_the_bytes_the_kernel_still_holds() {
 
 /// With a peer that reads nothing, the kernel sends until the peer's receive buffer
 /// is full. The write then waits at the unsent bound, with most of the send buffer
-/// still free. Measured on Linux.
+/// still free. macOS waits for the write event once the bytes written since the last
+/// wait reach the bound, so the next poll that no event preceded waits.
 #[test]
 fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
     on_thread("net-unsent", || async {
@@ -277,15 +314,172 @@ fn a_write_waits_at_the_unsent_bound_not_the_send_buffer() {
             written += n;
             assert!(written < 1 << 20, "the send buffer never fills: {written}");
         }
-        assert!(
-            written > 1 << 16,
-            "the peer's buffer fills first: {written}"
+        if cfg!(target_os = "macos") {
+            let max = config.options.unsent_bytes_max;
+            assert!(written <= 2 * max, "a write waits for the event: {written}");
+        } else {
+            assert!(
+                written > 1 << 16,
+                "the peer's buffer fills first: {written}"
+            );
+        }
+    });
+}
+
+/// A write of no parts gives 0 at once, also when the send buffer is full.
+#[test]
+fn a_write_of_no_parts_gives_0_at_a_full_send_buffer() {
+    on_thread("net-none-full", || async {
+        let net = net();
+        let mut listener = listen(&net);
+        let mut config = connect_config(listener.local());
+        config.options.send_buffer_bytes = 1 << 20;
+        let mut client = net.connect(&config).await.expect("the listener accepts");
+        let _server = accept(&mut listener).await;
+        write(&mut client, &[&[7]]).await.expect("one byte");
+        let bytes = vec![7; 1 << 22];
+        while write_once(&mut client, &bytes).is_ready() {}
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(
+            client.poll_write(&mut cx, &[]),
+            Poll::Ready(Ok(0)),
+            "no parts"
         );
+        let empty = [IoSlice::new(&[]); 3];
+        let none = client.poll_write(&mut cx, &empty);
+        assert_eq!(none, Poll::Ready(Ok(0)), "empty parts");
+    });
+}
+
+/// A write of more parts than the kernel takes is not a full send buffer: below the
+/// unsent bound, the next write goes at once.
+#[test]
+fn a_write_of_many_parts_below_the_bound_waits_for_no_event() {
+    on_thread("net-many", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[&[7; 64]]).await, Ok(64));
+        let one = [7; 1];
+        let parts: Vec<_> = (0..2048).map(|_| IoSlice::new(&one)).collect();
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(client.poll_write(&mut cx, &parts), Poll::Ready(Ok(1024)));
+        assert_eq!(write_once(&mut client, &[7; 64]), Poll::Ready(64));
+    });
+}
+
+/// A write of no parts gives 0 after a reset, and leaves the reset to the next call.
+#[test]
+fn a_write_of_no_parts_after_an_unseen_reset_gives_0() {
+    on_thread("net-none-reset", || async {
+        let net = net();
+        let (_listener, client, mut server) = create_pair(&net).await;
+        let remote = reset_unseen(client, &mut server).await;
+        assert_eq!(write(&mut server, &[]).await, Ok(0));
+        assert_eq!(close(&mut server).await, Err(Error::Reset { remote }));
+        assert_eq!(write(&mut server, &[]).await, Ok(0));
+        let read = read(&mut server, &mut [0; 8]).await;
+        assert_eq!(read, Err(Error::Reset { remote }));
+    });
+}
+
+/// With a send buffer of the unsent bound, the kernel can refuse a write before the
+/// bytes since the last wait reach the bound. The write then waits.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_full_send_buffer_below_the_bound_makes_a_write_wait() {
+    on_thread("net-full", || async {
+        let net = net();
+        let mut listener = listen(&net);
+        let mut config = connect_config(listener.local());
+        config.options.send_buffer_bytes = config.options.unsent_bytes_max;
+        let mut client = net.connect(&config).await.expect("the listener accepts");
+        let _server = accept(&mut listener).await;
+        let bytes = vec![7; 1 << 20];
+        let bound = Duration::from_millis(250);
+        while let Ok(sent) =
+            tokio::time::timeout(bound, write(&mut client, &[&bytes])).await
+        {
+            sent.expect("the write takes bytes or waits");
+        }
+    });
+}
+
+/// On macOS, one write takes at most the unsent bound, since the kernel applies it
+/// only to the write event. An accepted stream keeps the bound of its listener.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_write_takes_at_most_the_unsent_bound() {
+    on_thread("net-cap", || async {
+        let net = net();
+        let mut config = listen_config(SocketAddr::new(LOCALHOST.into(), 0));
+        config.options.unsent_bytes_max = 1 << 13;
+        let mut listener = net.listen(&config).expect("the loopback has a free port");
+        let mut client = connect(&net, listener.local()).await;
+        let mut server = accept(&mut listener).await;
+        let bytes = vec![7; 1 << 20];
+        assert_eq!(write(&mut client, &[&bytes]).await, Ok(1 << 14));
+        assert_eq!(write(&mut server, &[&bytes]).await, Ok(1 << 13));
+    });
+}
+
+/// On macOS, a write takes only the rest of the unsent bound that earlier writes left.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_write_after_a_small_write_takes_the_rest_of_the_unsent_bound() {
+    on_thread("net-rest", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        let max = options().unsent_bytes_max;
+        assert_eq!(write(&mut client, &[&[7; 64]]).await, Ok(64));
+        assert_eq!(write(&mut client, &[&vec![7; 1 << 20]]).await, Ok(max - 64));
+    });
+}
+
+/// On macOS, a vectored write whose last part crosses the unsent bound takes the
+/// whole parts before it, in order.
+#[test]
+#[cfg(target_os = "macos")]
+fn a_vectored_write_across_the_unsent_bound_takes_the_whole_parts() {
+    on_thread("net-parts", || async {
+        let net = net();
+        let (_listener, mut client, mut server) = create_pair(&net).await;
+        let parts: [&[u8]; 3] = [&[1; 100], &[2; 100], &vec![3; 1 << 20]];
+        assert_eq!(write(&mut client, &parts).await, Ok(200));
+        let mut read = [0; 200];
+        read_exact(&mut server, &mut read).await;
+        assert_eq!(read, [[1; 100], [2; 100]].concat()[..]);
+    });
+}
+
+/// On macOS, whole parts that fill the unsent bound go in one write.
+#[test]
+#[cfg(target_os = "macos")]
+fn whole_parts_that_fill_the_unsent_bound_go_in_one_write() {
+    on_thread("net-fill", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        let half = vec![7; options().unsent_bytes_max / 2];
+        let written = write(&mut client, &[&half, &half, &[1]]).await;
+        assert_eq!(written, Ok(options().unsent_bytes_max));
+    });
+}
+
+/// Writes of 64 bytes that total less than the unsent bound each go at once, with no
+/// read on the peer: macOS waits for the write event only once the bound is reached.
+#[test]
+fn small_writes_below_the_unsent_bound_wait_for_no_event() {
+    on_thread("net-small", || async {
+        let net = net();
+        let (_listener, mut client, _server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[&[7; 64]]).await, Ok(64));
+        for _ in 2..options().unsent_bytes_max / 64 {
+            assert_eq!(write_once(&mut client, &[7; 64]), Poll::Ready(64));
+        }
     });
 }
 
 /// Linux takes the FIN before the RST: the read gives 0, and a write gives the reset.
-/// macOS gives the reset on the read.
+/// macOS takes both from a queue, so its read gives the reset or 0.
 #[test]
 fn a_drop_with_unread_bytes_after_close_resets_the_peer() {
     on_thread("net-unread", || async {
@@ -298,8 +492,7 @@ fn a_drop_with_unread_bytes_after_close_resets_the_peer() {
         drop(client);
         let reset = Err(Error::Reset { remote });
         let outcome = read(&mut server, &mut [0; 8]).await;
-        if cfg!(target_os = "macos") {
-            assert_eq!(outcome, reset);
+        if cfg!(target_os = "macos") && outcome == reset {
             return;
         }
         assert_eq!(outcome, Ok(0));
@@ -440,6 +633,7 @@ fn a_write_after_the_close_is_a_broken_pipe() {
         let net = net();
         let (_listener, mut client, _server) = create_pair(&net).await;
         assert_eq!(close(&mut client).await, Ok(()));
+        assert_eq!(write(&mut client, &[]).await, Ok(0), "no parts");
         let pipe = Err(Error::Io { code: 32 });
         assert_eq!(write(&mut client, &[b"late"]).await, pipe);
         assert_eq!(
@@ -518,6 +712,10 @@ async fn connect_reset(net: &Net, listener: &mut Listener, remote: SocketAddr) -
     let mut cx = Context::from_waker(Waker::noop());
     assert!(connecting.as_mut().poll(&mut cx).is_pending());
     drop(accept(listener).await);
+    // macOS takes the reset on loopback from a queue, in order: once a later
+    // handshake ends, the reset has come.
+    let after = connect(net, listener.local()).await;
+    drop((accept(listener).await, after));
     connecting.await.expect("the handshake completed")
 }
 
@@ -701,6 +899,68 @@ fn a_stream_poll_on_a_second_thread_panics() {
         let net = net();
         let (listener, mut client, server) = create_pair(&net).await;
         assert_eq!(write(&mut client, &[b"x"]).await, Ok(1));
+        (client, server, listener)
+    });
+    runtime().block_on(async {
+        drop(write(&mut client, &[b"y"]).await);
+    });
+}
+
+#[test]
+#[should_panic(expected = "a TCP stream polls only on the thread of its first poll")]
+fn a_write_of_no_bytes_on_a_second_thread_panics() {
+    let (mut client, _server, _listener) = on_thread("net-first", || async {
+        let net = net();
+        let (listener, mut client, server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[b"x"]).await, Ok(1));
+        (client, server, listener)
+    });
+    runtime().block_on(async {
+        drop(write(&mut client, &[b""]).await);
+    });
+}
+
+#[test]
+#[should_panic(expected = "a TCP stream polls only on the thread of its first poll")]
+fn a_lost_stream_on_a_second_thread_panics() {
+    let shut = runtime().handle().clone();
+    let (mut client, _listener) = on_thread("net-first", || async move {
+        let net = net();
+        let listener = listen(&net);
+        let mut client = connect(&net, listener.local()).await;
+        let _entered = shut.enter();
+        let mut cx = Context::from_waker(Waker::noop());
+        let written = client.poll_write(&mut cx, &[IoSlice::new(b"x")]);
+        assert!(
+            matches!(written, Poll::Ready(Err(Error::Io { code: 5 }))),
+            "{written:?}"
+        );
+        (client, listener)
+    });
+    runtime().block_on(async {
+        drop(write(&mut client, &[b"x"]).await);
+    });
+}
+
+#[test]
+fn a_first_write_of_no_bytes_needs_no_runtime() {
+    let (mut client, _server, _listener) = on_thread("net-first", || async {
+        let net = net();
+        let (listener, client, server) = create_pair(&net).await;
+        (client, server, listener)
+    });
+    let mut cx = Context::from_waker(Waker::noop());
+    let written = client.poll_write(&mut cx, &[]);
+    assert!(matches!(written, Poll::Ready(Ok(0))), "{written:?}");
+}
+
+#[test]
+#[should_panic(expected = "a TCP stream polls only on the thread of its first poll")]
+fn a_first_write_of_no_bytes_binds_the_thread() {
+    let (mut client, _server, _listener) = on_thread("net-first", || async {
+        let net = net();
+        let (listener, mut client, server) = create_pair(&net).await;
+        assert_eq!(write(&mut client, &[b""]).await, Ok(0));
         (client, server, listener)
     });
     runtime().block_on(async {

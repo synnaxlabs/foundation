@@ -88,6 +88,9 @@ pub(crate) struct Set {
     keys: Vec<Key>,
     /// The commits the buffer had ended at the last [`Set::woken`].
     commits: u64,
+    /// The number of the first reader key of each index the set carries next: above
+    /// each key of an index it shed, so that a key never names two readers.
+    first: u64,
 }
 
 /// The readers of one carried index.
@@ -110,11 +113,27 @@ impl Set {
         assert_eq!(place, self.entries.len(), "{place} is not the next place");
         self.entries.push(Entry {
             slot,
-            readers: Readers::new(live),
+            readers: Readers::after(live, self.first),
             listed: false,
         });
         // Room for every index, so that `applied` never grows the list.
         self.listed.reserve(self.entries.len());
+    }
+
+    /// Drops the readers of the index at `place`, and moves the readers of the last
+    /// place there, as `Vec::swap_remove` moves an item.
+    ///
+    /// # Panics
+    ///
+    /// If a reader of the index is open.
+    pub(crate) fn shed(&mut self, place: usize) {
+        let last = self.entries.len() - 1;
+        let entry = self.entries.swap_remove(place);
+        self.first = self.first.max(entry.readers.end());
+        self.listed.retain(|&listed| listed != place);
+        if let Some(listed) = self.listed.iter_mut().find(|listed| **listed == last) {
+            *listed = place;
+        }
     }
 
     /// Opens an unnamed complete reader on the index at `place` at seq `live`, with a

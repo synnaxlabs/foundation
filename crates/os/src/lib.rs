@@ -109,17 +109,18 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
     Ok(env::threads::Threads::new(threads::Driver::new(cores)))
 }
 
-/// The network of this machine. A stream or listener registers at its first poll
-/// with the I/O driver of the Tokio runtime current on that thread. Each thread that
-/// `os` starts has one.
+/// The network of this machine. A stream or listener registers at its first poll,
+/// other than a write of no bytes, with the I/O driver of the Tokio runtime current
+/// on that thread. Each thread that `os` starts has one.
 ///
 /// [`env::net::Net::resolve`] looks up a host name as each other program on this
 /// machine does, on an OS thread of its own for each lookup.
 ///
 /// # Panics
 ///
-/// - A poll of [`env::net::Net::connect`], or the first poll of a stream or listener,
-///   on a thread with no Tokio runtime or with no I/O driver.
+/// - A poll of [`env::net::Net::connect`], or the first poll of a stream or listener
+///   other than a write of no bytes, on a thread with no Tokio runtime or with no I/O
+///   driver.
 /// - [`env::net::Net::udp`]: this driver has no UDP yet.
 #[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
 #[must_use]
@@ -131,7 +132,9 @@ pub fn net() -> env::net::Net {
 /// handle of its I/O thread. `os` keeps its own entries in `dir`, so give it a
 /// directory that nothing else uses. `threads` starts I/O thread `name`, which runs
 /// each call of the disk and of its files in the order they reach it, and ends after
-/// the disk and its files drop. Give each shard a disk of its own.
+/// the disk and its files drop. Give each shard a disk of its own. The mode of each
+/// file and directory that it makes gives the group and other users no access. It does
+/// not change the mode of a file or directory that is there.
 ///
 /// # Errors
 ///

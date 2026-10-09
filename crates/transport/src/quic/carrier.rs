@@ -95,7 +95,10 @@ impl Carrier {
     /// What the carrier counted.
     pub(crate) fn status(&self) -> Status {
         let state = self.0.borrow();
-        state.waits.status(state.clock.now())
+        Status {
+            budget_waits: state.endpoint.budget_waits(),
+            ..state.waits.status(state.clock.now())
+        }
     }
 
     /// A handle that dials on this carrier, and that does not keep it from its drop.

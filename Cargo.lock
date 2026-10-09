@@ -421,6 +421,8 @@ name = "connector-opcua"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "counting",
+ "divan",
 ]
 
 [[package]]
@@ -1022,6 +1024,7 @@ dependencies = [
  "blob",
  "block",
  "clock",
+ "counting",
  "env",
  "proptest",
  "raft",
@@ -1056,13 +1059,18 @@ dependencies = [
  "blob",
  "block",
  "buffer",
+ "bytes",
  "clock",
  "codec",
+ "connector",
+ "connector-influx",
  "counting",
+ "crc32c",
  "divan",
  "env",
  "estimate",
  "home",
+ "http",
  "hub",
  "loom",
  "mesh",
