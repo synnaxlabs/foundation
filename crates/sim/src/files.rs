@@ -143,6 +143,9 @@ struct Flight {
     node: usize,
     /// The path of the call, or of the file for a call on an open file.
     path: PathBuf,
+    /// The path that the call is on: `path`, moved by each rename of the file of its
+    /// handle that ends while it is in flight.
+    on: PathBuf,
     call: Call,
     held: Option<Held>,
     /// A fault fails the call when it ends.
@@ -236,15 +239,12 @@ impl Files {
         }
         let mut at = Monotonic(now.0.saturating_add(delay));
         if let Some(path) = call.changes(&path) {
-            let file = match &call {
-                Call::Unlink { handle } => Some(handle.inode),
-                _ => None,
-            };
-            at = at.max(self.wait_end(node, path, file));
+            at = at.max(self.wait_end(node, path));
         }
         self.queue.insert((at, key));
         let flight = Flight {
             node,
+            on: path.clone(),
             path,
             call,
             held,
@@ -260,11 +260,11 @@ impl Files {
     /// The time that a call of `node` that changes what `path` names ends no earlier
     /// than: the end of the last call on `path` that a dropped future or handle left
     /// to run, or of a remove through a handle, live or not, or zero. A call on `path`
-    /// uses it, or the file that it names, or a file that a rename to it moves there,
-    /// or `file`, the file of a remove through a handle, which a remove of its path
-    /// that ended after a rename can have unlinked. A call through a handle is also on
-    /// the path that it was sent on.
-    fn wait_end(&self, node: usize, path: &Path, file: Option<u64>) -> Monotonic {
+    /// uses it, or the file that it names, or a file that a rename to it moves there.
+    /// A call through a handle is also on the path that it was sent on, which each
+    /// rename of its file moves, so it stays on the path after a remove of the path
+    /// unlinks the file.
+    fn wait_end(&self, node: usize, path: &Path) -> Monotonic {
         let path = disk::normal(path);
         let pending: Vec<_> = (self.queue.iter().rev())
             .map(|(at, key)| (*at, &self.flights[key]))
@@ -282,12 +282,11 @@ impl Files {
         let inodes: BTreeSet<_> = self.disks[node]
             .inode(&path)
             .into_iter()
-            .chain(file)
             .chain(moved)
             .collect();
         (pending.iter())
             .find(|(_, flight)| {
-                disk::normal(&flight.path) == path
+                disk::normal(&flight.on) == path
                     || (flight.call.handle())
                         .is_some_and(|handle| inodes.contains(&handle.inode))
             })
@@ -385,7 +384,15 @@ impl Files {
                 Ok(Done::Unit)
             }
             Call::Rename { handle, to } => {
-                disk.rename(*handle, &path, to).map(|()| Done::Unit)
+                let renamed = disk.rename(*handle, &path, to);
+                if renamed.is_ok() {
+                    let moved = (self.flights.values_mut()).filter(|flight| {
+                        let file = flight.call.handle().map(|handle| handle.inode);
+                        flight.node == node && file == Some(handle.inode)
+                    });
+                    moved.for_each(|flight| flight.on.clone_from(to));
+                }
+                renamed.map(|()| Done::Unit)
             }
             Call::Unlink { handle } => {
                 disk.unlink(handle.inode, &path).map(|()| Done::Unit)
