@@ -27,8 +27,8 @@ use wire::hub::client::{
     STALE, Signed, UNSYNCED, VIA,
 };
 
-use super::serve::{HOME, PORT, own_pool, public_key, transport};
 use super::{AREA, BODY_MAX, NODE, POOL, Test};
+use crate::net::{HOME, PORT, own_pool, public_key, transport};
 
 pub(super) const SUBJECT: &str = "ops.agent";
 /// The key that the spec lists for [`SUBJECT`].

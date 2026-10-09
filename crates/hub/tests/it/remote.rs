@@ -24,11 +24,11 @@ use wire::header::MALFORMED;
 use wire::hub::{Credit, Head, Refusal, Reply, ends};
 
 use super::region::OTHER;
-use super::serve::{HOME, PEER, PORT, own_pool, public_key, transport_sized};
 use super::{
     AREA, BODY_MAX, I64, POOL, TIME, Test, VALUE, fill, name, samples, without, write,
     write_series, write_wide,
 };
+use crate::net::{HOME, PEER, PORT, own_pool, public_key, transport_sized};
 
 /// The fewest bytes that a transport takes in one message.
 const MESSAGE_MIN: usize = 1472;

@@ -42,6 +42,11 @@ harness = false
 test = true
 
 [[bench]]
+name = "serve"
+harness = false
+test = true
+
+[[bench]]
 name = "woken"
 harness = false
 test = true

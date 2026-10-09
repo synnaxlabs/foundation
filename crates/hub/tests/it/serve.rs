@@ -3,7 +3,6 @@
 
 use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::{Path, PathBuf};
 use std::pin::pin;
 use std::rc::Rc;
@@ -11,18 +10,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
 use block::Pool;
 use env::files::Operation;
 use env::tasks::Tasks;
 use hub::{Link, Served, serve};
 use spec::data_type::DataType;
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Address, Class, Code, Port, Transport};
+use transport::{Address, Class, Code};
 use types::channel;
-use types::ed25519::{PrivateKey, PublicKey};
-use types::frame::Form;
 use types::frame::Path as FramePath;
+use types::frame::{self, Form};
 use types::sample::{Scalar, Type};
 use types::time::Span;
 use wire::Protocol;
@@ -33,61 +30,13 @@ use super::{
     AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, channels, definition,
     fill, name, region, scrambled, without, write, write_series, write_wide,
 };
+use crate::net::{HOME, PEER, PORT, accept, own_pool, public_key, transport};
 
-/// The UDP port of each transport.
-pub(super) const PORT: u16 = 7000;
-pub(super) const HOME: PrivateKey = PrivateKey([1; 32]);
-pub(super) const PEER: PrivateKey = PrivateKey([2; 32]);
 /// The peer's message limit: the least that `transport` takes, so the home cuts a
 /// body and its ends into several messages.
 const PEER_MESSAGE: usize = 1472;
 /// How long the peer waits for a reply that must not come.
 const QUIET: Span = Span::from_nanos(100_000_000);
-
-pub(super) fn public_key(key: &PrivateKey) -> PublicKey {
-    let pair = Ed25519KeyPair::from_seed_unchecked(&key.0).expect("a key pair");
-    PublicKey::new(pair.public_key().as_ref().try_into().expect("32 bytes"))
-        .expect("a public key")
-}
-
-/// A transport of `node` at `PORT` that proves `key` and takes messages of at most
-/// `message` bytes.
-pub(super) fn transport(
-    node: &sim::node::Node,
-    tasks: &Tasks,
-    pool: &Rc<Pool>,
-    key: PrivateKey,
-    message: usize,
-) -> Transport {
-    transport_sized(node, tasks, pool, key, (message, 1 << 20))
-}
-
-/// As [`transport`], with messages of at most `sizes.0` bytes and a window of
-/// `sizes.1` bytes.
-pub(super) fn transport_sized(
-    node: &sim::node::Node,
-    tasks: &Tasks,
-    pool: &Rc<Pool>,
-    key: PrivateKey,
-    (message, window): (usize, usize),
-) -> Transport {
-    let at = SocketAddr::new(node.addresses()[0], PORT);
-    let mut parts = Port::bind(&node.net(), at)
-        .expect("binds")
-        .split(NonZeroUsize::MIN);
-    let config = transport::Config {
-        private_key: key,
-        message_bytes_max: NonZeroUsize::new(message).expect("not 0"),
-        window_bytes: window,
-        streams_max: NonZeroU32::new(16).expect("not 0"),
-        idle: Span::from_nanos(60 * Span::SECOND.nanos()),
-        clock: node.clock(),
-        entropy: node.entropy(),
-        tasks: tasks.clone(),
-        pool: Rc::clone(pool),
-    };
-    Transport::new(config, parts.pop().expect("one part")).expect("a transport")
-}
 
 /// The reader's node: its end of one hub stream.
 pub(super) struct Peer {
@@ -136,15 +85,6 @@ impl Peer {
     async fn sleep(&self, span: Span) {
         self.node.clock().sleep(span).await;
     }
-}
-
-/// A pool for a transport, so a test that fills the hub's pool does not fill it.
-pub(super) fn own_pool() -> Rc<Pool> {
-    let config = block::Config { budget: 1 << 20 };
-    Rc::new(Pool::new(
-        config.clone(),
-        block::Heap::new(config.reservation()),
-    ))
 }
 
 /// Runs one remote reader session over a transport: the home's node makes a [`Test`]
@@ -244,17 +184,6 @@ pub(super) fn session_in<H, P>(
             .expect("starts"),
     );
     sim.run().expect("the run ends");
-}
-
-/// The first session of `transport`, and its first stream, after the stream's header.
-async fn accept(transport: &Transport) -> (transport::Session, Incoming) {
-    let session = transport.accept().await.expect("a session");
-    let mut incoming = session.accept().await.expect("a stream");
-    let header = incoming.receiver.recv().await.expect("a header");
-    let header = header.expect("the header comes before the finish");
-    assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
-    drop(header);
-    (session, incoming)
 }
 
 /// Runs a session whose home only serves it, and gives what `serve` returned, or
@@ -1031,6 +960,44 @@ fn sends_each_frame_through_the_places_of_the_open() {
             assert_eq!(got_values, values);
             assert_eq!(got_stamps, stamps);
         }
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
+/// A frame of both indexes, whose groups hold different seqs and counts: a session on
+/// `time-b` gets the range of its own group.
+#[test]
+fn sends_the_range_of_the_group_of_the_session() {
+    let home = |test: Test, link: Link, incoming| async move {
+        let mut writer = test.writer("a", &["value", "value-b"]).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            write(&mut writer, &[now], &[10]);
+            let stamps = [now + 1, now + 2];
+            let stamps_b = [now, now + 1, now + 2];
+            let series = [
+                (1, &stamps[..]),
+                (2, &[20, 30][..]),
+                (3, &stamps_b[..]),
+                (4, &[40, 50, 60][..]),
+            ];
+            let written = write_series(&mut writer, &series);
+            assert_eq!(written.len(), 2, "{written:?}");
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session(74, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[4, 3], 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        assert_eq!(got.head.range, frame::Range { seq: 0, count: 3 });
+        assert_eq!(places(&got), [0, 1]);
+        let [values, stamps] =
+            <[_; 2]>::try_from(decoded(&got, &[I64, STAMP])).expect("two series");
+        assert_eq!(values, [40, 50, 60]);
+        assert_eq!(stamps, [0, 1, 2].map(|at| stamps[0] + at));
         peer.sender.finish().expect("finishes");
         assert_eq!(peer.recv().await, Ok(None));
     });

@@ -24,12 +24,13 @@ use types::time::Span;
 use wire::hub::Mode;
 
 use super::definitions::{I32, write_i32};
-use super::serve::{HOME, PEER, Peer, own_pool, public_key, session_in, stopped};
+use super::serve::{Peer, session_in, stopped};
 use super::{
     AREA, BODY_MAX, I64, NODE, POOL, TIME, TIME_B, Test, applied, channels, config,
     definition, entry, keys, name, poll_once, reader, samples, without, write,
     write_series, writer, written,
 };
+use crate::net::{HOME, PEER, own_pool, public_key};
 
 /// The other member of the region, which is not a voter.
 pub(super) const OTHER: types::node::Key = types::node::Key::from_u128(2);
@@ -109,7 +110,7 @@ where
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, move |node, tasks| async move {
         let transport =
-            super::serve::transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+            crate::net::transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let region = open(&node, &tasks, Rc::new(transport), Vec::new()).await;
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
         let mut test = Test::new(node, tasks, layout, POOL, Some(region)).await;
