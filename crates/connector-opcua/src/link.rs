@@ -423,6 +423,46 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the shim calls {drawn:?}");
 }
 
+/// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
+/// cannot bind or call one. A file named `tests.rs`, this file, and the `test`
+/// module at the end of `ffi.rs` are only for tests.
+#[test]
+fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
+    let mut dirs = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    let mut drawn = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap();
+            if path.is_dir() {
+                dirs.push(path);
+                continue;
+            }
+            if path.extension() != Some("rs".as_ref())
+                || name == "tests.rs"
+                || name == "link.rs"
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let text = match name {
+                "ffi.rs" => {
+                    text.split_once("#[cfg(test)]\npub(crate) mod test {")
+                        .unwrap()
+                        .0
+                }
+                _ => &text,
+            };
+            for draw in ["UA_UInt32_random", "UA_Guid_random"] {
+                if text.contains(draw) {
+                    drawn.push(format!("{name}: {draw}"));
+                }
+            }
+        }
+    }
+    assert!(drawn.is_empty(), "the Rust names {drawn:?}");
+}
+
 /// GCC 10 and later default to `-moutline-atomics` on 64-bit Arm Linux, and so does
 /// Clang with libgcc 9.3.1 or later, or with `-rtlib=compiler-rt`. The host build does
 /// not show it. So this preprocesses each source of the copy as the host build does,
