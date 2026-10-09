@@ -90,12 +90,13 @@
   gives it with `Length`; nothing is written over either. There is no new `Error`
   variant, as the advice of `Error::Key` is wrong for this case, and no idempotent
   form: the lab calls it once, in `Lab::start`. The write runs the simulation to its
-  end, and a node that runs never ends, so a `Lab::start` after the first `Lab::run`
-  panics. No scenario adds a node after a run. Trigger: a scenario that does moves the
-  write into the run, before the node starts. Trigger: when #1744
-  lands, the lab founds its region through the node, and `create_key` stays only if a
-  tool still needs it. Lost: a second copy of the format in `acceptance`; a restart of
-  each node and a read of its key from outside `node`; a form that gives back only the
-  public key, as the lab signs each card with the private key. Decided by
+  end: a node that runs never ends, and a task of a test runs before its time. So a
+  `Lab::start` after the first `Lab::run` or a task of a test panics. No scenario adds
+  a node after a run. Trigger: a scenario that does moves the write into the run,
+  before the node starts. Trigger: when #1744 lands, the lab founds its region through
+  the node, and `create_key` stays only if a tool still needs it. Lost: a second copy of
+  the format in `acceptance`; a restart of each node and a read of its key from outside
+  `node`; a form that gives back only the public key, as the lab signs each card with
+  the private key. Decided by
   `laptop.architect-2` at 2026-10-08T23:23:28Z
   (https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6071015421).
