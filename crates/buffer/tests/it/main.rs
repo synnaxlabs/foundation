@@ -57,12 +57,17 @@ const COVER: usize = 512;
 const DATA: u8 = 1;
 const RESTART: u8 = 3;
 
+/// The disk that the files of a test are on.
+enum Disk {
+    Sim(sim::node::Node),
+    Memory(Memory),
+}
+
 /// What one test gets on its shard.
 struct Shard {
-    node: sim::node::Node,
-    /// The files of the test: the node's disk, or `memory`.
+    disk: Disk,
+    /// The files on `disk`.
     files: Files,
-    memory: Option<Memory>,
     pool: Rc<Pool>,
     clock: Clock,
     tasks: Tasks,
@@ -99,7 +104,22 @@ impl Shard {
     ///
     /// When the test runs on the node's disk.
     fn memory(&self) -> &Memory {
-        self.memory.as_ref().expect("the test runs on memory")
+        match &self.disk {
+            Disk::Memory(memory) => memory,
+            Disk::Sim(_) => panic!("the test runs on the node's disk"),
+        }
+    }
+
+    /// The node whose disk the test runs on.
+    ///
+    /// # Panics
+    ///
+    /// When the test runs on memory.
+    fn node(&self) -> &sim::node::Node {
+        match &self.disk {
+            Disk::Sim(node) => node,
+            Disk::Memory(_) => panic!("the test runs on memory"),
+        }
     }
 
     /// Makes the ring file with `len` zero bytes and no header, when no file is there.
@@ -113,7 +133,12 @@ impl Shard {
     }
 
     /// Whether a write handle holds the ring: a write open of it is then busy.
+    ///
+    /// # Panics
+    ///
+    /// When the test runs on memory, which never gives `Busy`.
     async fn ring_held(&self) -> bool {
+        self.node();
         match self.files.open(FilePath::new(RING), Mode::Write).await {
             Ok(_) => false,
             Err(FileError::Busy { .. }) => true,
@@ -125,7 +150,7 @@ impl Shard {
     async fn bytes(&self) -> Vec<u8> {
         let ring = self.files.open(FilePath::new(RING), Mode::Read).await;
         let ring = ring.expect("the ring opens");
-        let pool = scratch();
+        let pool = pool();
         let mut bytes = Vec::new();
         for at in (0..ring.len()).step_by(to_usize(BLOCK)) {
             let len = to_usize(BLOCK.min(ring.len() - at));
@@ -140,7 +165,7 @@ impl Shard {
     async fn put(&self, offset: usize, bytes: &[u8]) {
         let ring = self.files.open(FilePath::new(RING), Mode::Write).await;
         let ring = ring.expect("the ring opens to write");
-        let mut block = scratch().alloc(bytes.len()).expect("a block");
+        let mut block = pool().alloc(bytes.len()).expect("a block");
         block.copy_from_slice(bytes);
         let offset = u64::try_from(offset).expect("fits in u64");
         ring.write_at(offset, &[block.freeze()])
@@ -174,14 +199,21 @@ impl Shard {
 
     /// Opens a ring that passes its CRCs and that this build cannot read. The open
     /// must give `error`, leave the file as it was, and not sync it: a fault fails
-    /// the next sync of the ring, so an open that syncs it gives `Io`. The fault
-    /// stays armed, so the test ends after this call.
+    /// the next sync of the ring, so an open that syncs it gives `Io`.
     async fn open_refused(&self, layout: Layout, error: Error) {
         let before = self.bytes().await;
-        self.node.fail_file(FilePath::new(RING), Operation::Sync);
+        self.node().fail_file(FilePath::new(RING), Operation::Sync);
         let opened = self.open(layout, &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(error));
         assert!(self.bytes().await == before, "the open changed the ring");
+        let ring = self.files.open(FilePath::new(RING), Mode::Write).await;
+        let synced = ring.expect("the ring opens to write").sync().await;
+        let fault = FileError::Io {
+            path: RING.into(),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(synced, Err(fault), "the open synced the ring");
     }
 
     /// Puts `bytes` at `at` of the body of the record at `offset` of the area, and
@@ -402,12 +434,10 @@ fn entries(reads: &[Read]) -> Vec<Stored> {
     reads.iter().flat_map(|read| read.entries.clone()).collect()
 }
 
-/// Starts one shard of one node to run `main` until it returns, with the files in
-/// `memory`, or on the node's disk with none. A panic in `main` comes back from the
-/// run as [`sim::Error::Panicked`].
+/// Starts one shard of one node to run `main` until it returns, on the node's
+/// disk. A panic in `main` comes back from the run as [`sim::Error::Panicked`].
 fn start<F>(
     seed: u64,
-    memory: Option<Memory>,
     main: impl FnOnce(Shard) -> F + Send + 'static,
 ) -> (sim::Sim, env::thread::Handle)
 where
@@ -418,62 +448,50 @@ where
         name: DIR.into(),
         core: None,
     };
-    let own = node.clone();
     let handle = node
         .shards()
         .start(config, move |tasks| {
-            let config = block::Config { budget: POOL };
-            let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
-            let files = memory.as_ref().map_or_else(|| own.files(), Memory::files);
             main(Shard {
-                files,
-                memory,
-                pool: Rc::new(pool),
-                clock: own.clock(),
+                files: node.files(),
+                pool: Rc::new(pool()),
+                clock: node.clock(),
                 tasks,
-                entropy: own.entropy(),
-                node: own,
+                entropy: node.entropy(),
+                disk: Disk::Sim(node),
             })
         })
         .expect("the shard starts");
     (sim, handle)
 }
 
-/// Runs `main` on one shard of one node, with the node's disk, until it returns.
+/// Runs `main` as [`start`] does, until it returns.
 fn run<F>(seed: u64, main: impl FnOnce(Shard) -> F + Send + 'static)
 where
     F: Future<Output = ()> + 'static,
 {
-    run_on(seed, None, main);
-}
-
-/// Runs `main` on one shard of one node, with the files in `memory`, until it
-/// returns. Only a test that needs what `Memory` gives runs on it.
-fn run_on_memory<F>(
-    seed: u64,
-    memory: Memory,
-    main: impl FnOnce(Shard) -> F + Send + 'static,
-) where
-    F: Future<Output = ()> + 'static,
-{
-    run_on(seed, Some(memory), main);
-}
-
-/// Runs `main` as [`start`] does, until it returns.
-fn run_on<F>(
-    seed: u64,
-    memory: Option<Memory>,
-    main: impl FnOnce(Shard) -> F + Send + 'static,
-) where
-    F: Future<Output = ()> + 'static,
-{
-    let (mut sim, handle) = start(seed, memory, main);
+    let (mut sim, handle) = start(seed, main);
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
 }
 
-/// A scratch pool for the blocks of a test's own file calls.
-fn scratch() -> Pool {
+/// Runs `main` as [`run`] does, with the files in a new `Memory` in place of the
+/// node's disk. Only a test that needs what `Memory` gives runs on it.
+fn run_on_memory<F>(seed: u64, main: impl FnOnce(Shard) -> F + Send + 'static)
+where
+    F: Future<Output = ()> + 'static,
+{
+    run(seed, |shard| {
+        let memory = Memory::default();
+        main(Shard {
+            files: memory.files(),
+            disk: Disk::Memory(memory),
+            ..shard
+        })
+    });
+}
+
+/// A pool with the budget of a test's shard.
+fn pool() -> Pool {
     let config = block::Config { budget: POOL };
     Pool::new(config.clone(), Heap::new(config.reservation()))
 }
@@ -608,8 +626,7 @@ fn a_memory_empty_path_names_no_file() {
 
 #[test]
 fn a_new_ring_keeps_its_layout_across_opens() {
-    let memory = Memory::default();
-    run_on_memory(1, memory.clone(), |shard| async move {
+    run_on_memory(1, |shard| async move {
         let first = layout(AREA, BODY_MAX);
         let buffer = shard.open(first, &mut Slots::new()).await.expect("opens");
         assert_eq!(buffer.layout(), first);
@@ -621,14 +638,14 @@ fn a_new_ring_keeps_its_layout_across_opens() {
         assert_eq!(buffer.layout(), first);
         let reopened = &shard.bytes().await[..to_usize(AREA_START)];
         assert_eq!(reopened, header, "the reopen rewrote the header");
+        let bytes = shard.bytes().await;
+        assert_eq!(bytes.len(), to_usize(AREA_START + AREA));
+        assert_eq!(&bytes[..8], b"FNDNRING");
+        assert_eq!(
+            bytes[..to_usize(BLOCK)],
+            bytes[to_usize(BLOCK)..to_usize(AREA_START)]
+        );
     });
-    let bytes = memory.bytes(RING);
-    assert_eq!(bytes.len(), to_usize(AREA_START + AREA));
-    assert_eq!(&bytes[..8], b"FNDNRING");
-    assert_eq!(
-        bytes[..to_usize(BLOCK)],
-        bytes[to_usize(BLOCK)..to_usize(AREA_START)]
-    );
 }
 
 #[test]
@@ -642,7 +659,7 @@ fn pool_is_the_pool_of_the_config() {
 
 #[test]
 fn entries_are_durable_at_committed_and_recovered_at_open() {
-    run_on_memory(2, Memory::default(), |shard| async move {
+    run_on_memory(2, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -762,7 +779,7 @@ fn durable_moves_only_at_a_commit() {
 
 #[test]
 fn an_idle_buffer_wakes_no_task() {
-    let (mut sim, handle) = start(20, None, |shard| async move {
+    let (mut sim, handle) = start(20, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -782,7 +799,7 @@ fn an_idle_buffer_wakes_no_task() {
 /// Runs a buffer that idles while its shard wakes every one and a half commits,
 /// with `empty` empty appends at each wake. Returns the digest of the run.
 fn idle_with_wakes(empty: usize) -> u64 {
-    let (mut sim, handle) = start(27, None, move |shard| async move {
+    let (mut sim, handle) = start(27, move |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -812,7 +829,7 @@ fn empty_appends_wake_no_task() {
 /// once, and the task syncs nothing for it.
 #[test]
 fn committed_on_an_idle_buffer_resolves_at_once() {
-    run_on_memory(21, Memory::default(), |shard| async move {
+    run_on_memory(21, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -831,7 +848,7 @@ fn committed_on_an_idle_buffer_resolves_at_once() {
 
 #[test]
 fn the_first_append_after_an_idle_span_commits_after_one_commit() {
-    run_on_memory(22, Memory::default(), |shard| async move {
+    run_on_memory(22, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -852,7 +869,7 @@ fn the_first_append_after_an_idle_span_commits_after_one_commit() {
 
 #[test]
 fn a_busy_buffer_keeps_one_deadline_per_commit() {
-    run_on_memory(42, Memory::default(), |shard| async move {
+    run_on_memory(42, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -877,7 +894,7 @@ fn a_busy_buffer_keeps_one_deadline_per_commit() {
 /// wakes it, and the deadline that just passed fires at once.
 #[test]
 fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
-    run_on_memory(43, Memory::default(), |shard| async move {
+    run_on_memory(43, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -907,7 +924,7 @@ fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
 #[test]
 fn a_deadline_that_passes_during_a_sync_fires_when_the_sync_ends() {
     for (tenths, seed) in [(10, 45), (11, 46), (30, 140)] {
-        run_on_memory(seed, Memory::default(), move |shard| async move {
+        run_on_memory(seed, move |shard| async move {
             let mut slots = Slots::new();
             let buffer = shard
                 .open(layout(AREA, BODY_MAX), &mut slots)
@@ -959,7 +976,7 @@ fn a_dropped_idle_buffer_ends_its_task_at_once() {
 
 #[test]
 fn a_batch_past_the_open_group_starts_the_next_record() {
-    run_on_memory(4, Memory::default(), |shard| async move {
+    run_on_memory(4, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1219,7 +1236,7 @@ fn a_failed_append_holds_no_part() {
 /// sync fails the reopen.
 #[test]
 fn a_reopen_syncs_the_ring_once() {
-    run_on_memory(26, Memory::default(), |shard| async move {
+    run_on_memory(26, |shard| async move {
         let ring = layout(AREA, BODY_MAX);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
@@ -1258,7 +1275,7 @@ fn a_reopen_syncs_the_ring_once() {
 
 #[test]
 fn a_failed_sync_ends_the_buffer_with_its_error() {
-    run_on_memory(7, Memory::default(), |shard| async move {
+    run_on_memory(7, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1300,7 +1317,7 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
 /// makes no commit, and a failed commit does not count.
 #[test]
 fn commits_counts_the_commits_that_ended() {
-    run_on_memory(29, Memory::default(), |shard| async move {
+    run_on_memory(29, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1345,7 +1362,7 @@ fn commits_counts_the_commits_that_ended() {
 /// a commit runs goes in the next one, and so does a `committed` future made then.
 #[test]
 fn commits_moves_before_an_entry_appended_during_the_commit_is_durable() {
-    run_on_memory(30, Memory::default(), |shard| async move {
+    run_on_memory(30, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1376,7 +1393,7 @@ fn commits_moves_before_an_entry_appended_during_the_commit_is_durable() {
 /// sees the entries of that commit durable, across every record of the commit.
 #[test]
 fn durable_changes_only_at_a_commit_that_moves_commits() {
-    run_on_memory(132, Memory::default(), |shard| async move {
+    run_on_memory(132, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1426,7 +1443,7 @@ fn durable_changes_only_at_a_commit_that_moves_commits() {
 
 #[test]
 fn a_drop_ends_the_commit_task() {
-    run_on_memory(8, Memory::default(), |shard| async move {
+    run_on_memory(8, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1466,7 +1483,7 @@ fn a_drop_ends_the_commit_task() {
 /// drop writes the entry.
 #[test]
 fn a_commit_on_an_entry_queued_at_the_drop_resolves_at_the_next_deadline() {
-    run_on_memory(136, Memory::default(), |shard| async move {
+    run_on_memory(136, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1500,7 +1517,7 @@ fn a_commit_on_an_entry_queued_at_the_drop_resolves_at_the_next_deadline() {
 
 #[test]
 fn committed_waits_for_an_entry_appended_during_a_commit() {
-    run_on_memory(19, Memory::default(), |shard| async move {
+    run_on_memory(19, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1531,7 +1548,7 @@ fn committed_waits_for_an_entry_appended_during_a_commit() {
 
 #[test]
 fn an_entry_below_the_tail_is_a_broken_invariant() {
-    let (mut sim, _handle) = start(9, None, |shard| async move {
+    let (mut sim, _handle) = start(9, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1558,7 +1575,7 @@ fn an_entry_below_the_tail_is_a_broken_invariant() {
 
 #[test]
 fn an_entry_past_the_last_seq_is_a_broken_invariant() {
-    let (mut sim, _handle) = start(11, None, |shard| async move {
+    let (mut sim, _handle) = start(11, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -3243,18 +3260,13 @@ fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
             shard
                 .tamper_block(unaligned, TAIL_AT, &u64::MAX.to_le_bytes())
                 .await;
-            let before = shard.bytes().await;
             if taken {
-                shard.node.fail_file(FilePath::new(RING), Operation::Sync);
-            }
-            let opened = shard.open(ring, &mut Slots::new()).await;
-            let refused = Err(Error::Unaligned { tail: u64::MAX });
-            let expected = if taken { refused } else { Ok(()) };
-            let case = format!("newer: {newer:?}, the block at {unaligned}");
-            assert_eq!(opened.map(drop), expected, "{case}");
-            if taken {
-                let after = shard.bytes().await;
-                assert!(after == before, "{case}: the open changed the ring");
+                let refused = Error::Unaligned { tail: u64::MAX };
+                shard.open_refused(ring, refused).await;
+            } else {
+                let opened = shard.open(ring, &mut Slots::new()).await;
+                let case = format!("newer: {newer:?}, the block at {unaligned}");
+                assert_eq!(opened.map(drop), Ok(()), "{case}");
             }
         });
     }
@@ -3675,7 +3687,7 @@ fn the_end_of_the_task_wakes_the_last_waker_of_each_end() {
 /// An `End` taken at a drop during a sync that then fails gives its error.
 #[test]
 fn an_end_taken_at_a_drop_during_a_failing_sync_gives_its_error() {
-    run_on_memory(120, Memory::default(), |shard| async move {
+    run_on_memory(120, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -3989,7 +4001,7 @@ proptest! {
 
 #[test]
 fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_its_deadline() {
-    run_on_memory(40, Memory::default(), |shard| async move {
+    run_on_memory(40, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4028,7 +4040,7 @@ fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_its_dead
 
 #[test]
 fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
-    run_on_memory(41, Memory::default(), |shard| async move {
+    run_on_memory(41, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4269,7 +4281,7 @@ fn one_entry_of_the_entry_max_commits_and_is_recovered() {
 /// durable.
 #[test]
 fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
-    run_on_memory(120, Memory::default(), |shard| async move {
+    run_on_memory(120, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4337,7 +4349,7 @@ fn a_drop_after_an_abandoned_commit_ends_the_task_at_once() {
 /// Both resolve well: every entry appended before each call is durable.
 #[test]
 fn a_commit_made_after_its_entries_synced_resolves_well_after_a_later_failure() {
-    run_on_memory(122, Memory::default(), |shard| async move {
+    run_on_memory(122, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4371,7 +4383,7 @@ fn a_commit_made_after_its_entries_synced_resolves_well_after_a_later_failure() 
 /// that sync only: it resolves when the sync ends, not one commit span later.
 #[test]
 fn a_commit_awaited_during_a_slow_sync_resolves_when_the_sync_ends() {
-    run_on_memory(124, Memory::default(), |shard| async move {
+    run_on_memory(124, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4397,7 +4409,7 @@ fn a_commit_awaited_during_a_slow_sync_resolves_when_the_sync_ends() {
 /// resolves well when that deadline syncs, also when the next one fails.
 #[test]
 fn a_commit_made_during_a_sync_resolves_with_that_sync() {
-    run_on_memory(131, Memory::default(), |shard| async move {
+    run_on_memory(131, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4483,7 +4495,7 @@ fn a_commit_outlives_the_borrow_of_its_buffer() {
 /// sync's result, and the ring closes when the future drops.
 #[test]
 fn a_commit_held_past_the_drop_during_a_sync_resolves_with_the_sync() {
-    run_on_memory(134, Memory::default(), |shard| async move {
+    run_on_memory(134, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4516,7 +4528,7 @@ fn a_commit_held_past_the_drop_during_a_sync_resolves_with_the_sync() {
 /// with the error that ended the buffer.
 #[test]
 fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
-    run_on_memory(135, Memory::default(), |shard| async move {
+    run_on_memory(135, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4549,7 +4561,7 @@ fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
 /// task ended, here after it wrote that append, so a reopen recovers both entries.
 #[test]
 fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
-    run_on_memory(137, Memory::default(), |shard| async move {
+    run_on_memory(137, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4591,7 +4603,7 @@ fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
 /// commit: not at once, and not at its next deadline.
 #[test]
 fn a_drop_with_nothing_queued_ends_the_task_at_the_commit_in_flight() {
-    run_on_memory(162, Memory::default(), |shard| async move {
+    run_on_memory(162, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4615,7 +4627,7 @@ fn a_drop_with_nothing_queued_ends_the_task_at_the_commit_in_flight() {
 /// the entries queued at the drop, nor waits for its next deadline.
 #[test]
 fn a_drop_ends_the_task_at_a_failed_commit_in_flight() {
-    run_on_memory(161, Memory::default(), |shard| async move {
+    run_on_memory(161, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4662,7 +4674,7 @@ fn a_commit_on_an_entry_queued_at_the_drop_resolves_with_a_failed_write() {
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        shard.node.fail_file(FilePath::new(RING), Operation::Sync);
+        shard.node().fail_file(FilePath::new(RING), Operation::Sync);
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -4694,7 +4706,7 @@ fn a_synced_commit_held_past_the_drop_resolves_well_after_a_failed_write() {
             .expect("queues");
         buffer.committed().await.expect("commits");
         let first = buffer.committed();
-        shard.node.fail_file(FilePath::new(RING), Operation::Sync);
+        shard.node().fail_file(FilePath::new(RING), Operation::Sync);
         buffer
             .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
             .expect("queues");
@@ -5145,7 +5157,7 @@ fn a_read_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
         let frame = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
         buffer.append([frame]).expect("queues");
         buffer.committed().await.expect("commits");
-        shard.node.fail_file(FilePath::new(RING), Operation::Sync);
+        shard.node().fail_file(FilePath::new(RING), Operation::Sync);
         buffer
             .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
             .expect("queues");
