@@ -73,11 +73,13 @@
   https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6043389350). So
   bytes that wait for a block never use up the credit that a started message needs,
   and a peer that breaks the send rule holds at most the receive budget and stops only
-  its own connection. After an error, a read holds no bytes of the message. The read
-  of the endpoint clears the message reader, and no other part does, because only it
-  sees each error, also that of a connection that closed before the reader ran.
-  Decided by `laptop.architect-2` (#1672:
-  https://github.com/synnaxlabs/foundation/issues/1672#issuecomment-6049625317 and
+  its own connection. After a read gives an error, the receiver holds no bytes
+  of a message, except the message that a `TooLarge` of `recv_into` keeps (below).
+  The read of the endpoint clears the message reader, and no other part does, because
+  only it sees each error, also that of a connection that closed before the reader
+  ran. Decided by `laptop.architect-2` (#1672, 2026-10-08 00:28 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1672#issuecomment-6049625317, and
+  07:14 UTC:
   https://github.com/synnaxlabs/foundation/issues/1672#issuecomment-6054670282).
   Each node's first one-way stream is its hello, with no class byte:
   (id, value) pairs, both QUIC varints, ids strictly increasing, then the stream end. Id
