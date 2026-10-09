@@ -224,7 +224,8 @@ fn failure(start: &Start, error: &node::Error, budget: Budget, kept: bool) -> Fa
         node::Error::Budget => (
             BUDGET,
             format!(
-                "the file `budget` in the data directory {data} is not a node's budgets"
+                "the file `budget` in the data directory {data} does not hold budgets \
+                 that a node wrote"
             ),
             "Remove it, and the next start computes the budgets again from the free \
              memory and disk"
@@ -464,9 +465,10 @@ mod tests {
             failure(&start(), &node::Error::Budget, budget, false),
             Failure {
                 code: BUDGET,
-                message: "the file `budget` in the data directory foundation-data is \
-                          not a node's budgets"
-                    .to_owned(),
+                message:
+                    "the file `budget` in the data directory foundation-data does \
+                          not hold budgets that a node wrote"
+                        .to_owned(),
                 fix: "Remove it, and the next start computes the budgets again from \
                       the free memory and disk"
                     .to_owned(),

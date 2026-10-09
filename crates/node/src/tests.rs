@@ -765,7 +765,9 @@ mod buffer {
         let host = host(&mut sim, 2);
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let shards = ["shard-0", "shard-1"];
-        let made = ["lock", "name", "node.key", "shard-0", "shard-1", "shards-2"];
+        let made = [
+            "budget", "lock", "name", "node.key", "shard-0", "shard-1", "shards-2",
+        ];
         assert_eq!(listed(&mut sim, &host, ""), made.map(PathBuf::from));
         for shard in shards {
             assert_eq!(listed(&mut sim, &host, shard), [PathBuf::from("ring")]);
@@ -993,10 +995,10 @@ mod buffer {
             assert_eq!(sim.run(), Ok(()), "at {after:?}");
             assert_eq!(node.join(), Ok(()), "at {after:?}");
             let mut listed = listed(&mut sim, &host, "");
-            let key = PathBuf::from("node.key");
-            // Shard 0 reads the key once each ring has opened.
-            if listed.contains(&key) {
-                listed.retain(|name| *name != key);
+            let late = ["budget", "node.key"].map(PathBuf::from);
+            // Shard 0 keeps the budgets, then reads the key, once each ring has opened.
+            if listed.contains(&late[0]) {
+                listed.retain(|name| !late.contains(name));
                 assert_eq!(listed, all, "at {after:?}");
             }
             let made: Vec<PathBuf> = if listed.is_empty() {
@@ -1258,6 +1260,7 @@ mod directory {
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let listed = listed(&mut sim, &host, "");
         let made = [
+            "budget",
             "lock",
             "name",
             "node.key",
@@ -1371,7 +1374,8 @@ mod directory {
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let listed = listed(&mut sim, &host, "");
         let made = [
-            "lock", "name", "node.key", "shard-0", "shard-1", &name, "shards-2",
+            "budget", "lock", "name", "node.key", "shard-0", "shard-1", &name,
+            "shards-2",
         ];
         assert_eq!(listed, made.map(PathBuf::from));
     }
@@ -1395,7 +1399,8 @@ mod directory {
             .expect("the run ends");
             assert_eq!(run_on(&mut sim, &host), Ok(()), "{name}");
             let mut made = [
-                "lock", "name", "node.key", "shard-0", "shard-1", &name, "shards-2",
+                "budget", "lock", "name", "node.key", "shard-0", "shard-1", &name,
+                "shards-2",
             ];
             made.sort_unstable();
             let made = made.map(PathBuf::from);
@@ -1787,7 +1792,9 @@ mod lock {
         first.stop();
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(first.join(), Ok(()));
-        let made = ["lock", "name", "node.key", "shard-0", "shard-1", "shards-2"];
+        let made = [
+            "budget", "lock", "name", "node.key", "shard-0", "shard-1", "shards-2",
+        ];
         assert_eq!(listed(&mut sim, &host, ""), made.map(PathBuf::from));
     }
 
@@ -1813,7 +1820,9 @@ mod lock {
             assert_eq!(joined[claimed], Ok(()), "seed {seed}");
             assert_eq!(joined[1 - claimed], Err(busy()), "seed {seed}");
             seen[claimed] = true;
-            let made = ["lock", "name", "node.key", "shard-0", "shard-1", "shards-2"];
+            let made = [
+                "budget", "lock", "name", "node.key", "shard-0", "shard-1", "shards-2",
+            ];
             let made = made.map(PathBuf::from);
             assert_eq!(listed(&mut sim, &host, ""), made, "seed {seed}");
         }
@@ -3470,7 +3479,7 @@ mod port {
         const OPEN: Span = Span::from_nanos(10_000_000);
         /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
         /// fails from [`OPEN`] stops the group in the sim.
-        const WRITE: i64 = 1_793_161_050;
+        const WRITE: i64 = 1_793_392_348;
 
         /// Why the group stops when a write of [`LOG`] fails.
         fn write_failed() -> ::mesh::Stopped {
@@ -5791,8 +5800,8 @@ mod budget {
         }
         assert_eq!(
             Error::Budget.to_string(),
-            "the file `budget` in the data directory is not a node's budgets; remove \
-             it, and the next start computes them again"
+            "the file `budget` in the data directory does not hold budgets that a \
+             node wrote; remove it, and the next start writes it again"
         );
     }
 

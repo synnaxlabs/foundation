@@ -171,7 +171,7 @@ fn a_budget_file_that_holds_no_budgets_fails() {
             Some(1),
             "",
             "error[node.budget]: the file `budget` in the data directory \
-             foundation-data is not a node's budgets\n\
+             foundation-data does not hold budgets that a node wrote\n\
              fix: Remove it, and the next start computes the budgets again from the \
              free memory and disk\n"
         )

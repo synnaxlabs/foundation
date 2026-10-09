@@ -57,9 +57,10 @@ pub struct Config<M> {
     pub clock: env::clock::Clock,
     /// The OS clock, a source of mesh time.
     pub wall: env::wall::Wall,
-    /// The node's budgets. Once each shard has opened its buffer, the start keeps them
-    /// in the file `budget` of the data directory when it is not there. A file that is
-    /// there stays as it is. Get the kept ones with [`budget`] before the start.
+    /// The node's budgets. Once each shard has opened its buffer, the start writes them
+    /// to the file `budget` of the data directory when that file is not there. A file
+    /// that is there stays as it is, also when it holds other budgets. Get the kept
+    /// ones with [`budget`] before the start.
     pub budget: Budget,
     /// Reserves `len` bytes of address space for one shard's pool. `node` calls it in
     /// order of core, once for each shard, until a shard gets no memory or does not
@@ -1030,8 +1031,8 @@ pub enum Error {
     },
     /// The data directory holds no node name, and the start gave none.
     Unnamed,
-    /// The file `budget` in the data directory is not budgets that a node wrote. The
-    /// node does not write over it.
+    /// The file `budget` in the data directory does not hold budgets that a node
+    /// wrote. The node does not write over it.
     Budget,
 }
 
@@ -1089,8 +1090,8 @@ impl fmt::Display for Error {
                 "the data directory holds no node name; give the node a name",
             ),
             Self::Budget => f.write_str(
-                "the file `budget` in the data directory is not a node's budgets; \
-                 remove it, and the next start computes them again",
+                "the file `budget` in the data directory does not hold budgets that a \
+                 node wrote; remove it, and the next start writes it again",
             ),
         }
     }
