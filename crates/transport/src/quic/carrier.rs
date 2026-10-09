@@ -216,10 +216,11 @@ impl Dialer {
 
 impl Drop for Carrier {
     /// Refuses each later dial from a peer until each connection drained, and closes
-    /// each session that no caller accepted with code 0.
+    /// with code 0 each handshake in flight and each session that no caller accepted.
     fn drop(&mut self) {
         let mut state = self.0.borrow_mut();
-        state.endpoint.refuse();
+        let now = state.clock.now();
+        state.endpoint.refuse(now);
         for key in state.accepted.take().into_iter().flatten() {
             state.sessions.remove(&key);
             state.close(key, Code(0));
@@ -281,10 +282,10 @@ impl State {
                     slot.wake_status();
                     return;
                 }
-                let Some(accepted) = &mut self.accepted else {
-                    self.close(key, Code(0));
-                    return;
-                };
+                // The task dispatches each event of its poll in that poll, and the
+                // drop of the carrier ends each handshake in flight.
+                let accepted = (self.accepted.as_mut())
+                    .expect("invariant: no handshake finishes after the carrier drops");
                 accepted.push_back(key);
                 let slot = Slot {
                     peer: Some(peer),
@@ -1203,7 +1204,7 @@ mod tests {
     }
 
     #[test]
-    fn a_handshake_that_finishes_after_the_carrier_drops_closes_with_code_0() {
+    fn a_handshake_in_flight_when_the_carrier_drops_ends_in_the_drain() {
         let (mut sim, client, server) = nodes(0);
         let late = sim.node(sim::node::Config::default());
         link(&mut sim, &late, &server, slow());
@@ -1228,7 +1229,12 @@ mod tests {
             let before = node.clock().now();
             let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
-            let closed = Error::PeerClosed { code: Code(0) };
+            // QUIC sends a close in the handshake as a transport error.
+            let reason = "aborted by peer: the application or application protocol \
+                          caused the connection to be closed during the handshake";
+            let closed = Error::Broken {
+                reason: reason.into(),
+            };
             assert_eq!(session.closed().await, closed);
             assert!(node.clock().now() - before < IDLE);
         });

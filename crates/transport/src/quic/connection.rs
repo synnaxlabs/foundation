@@ -248,6 +248,17 @@ impl Connection {
         }
     }
 
+    /// Closes with code 0 a connection that a peer dialed and whose handshake is in
+    /// flight, which the caller does not know. Gives whether it did.
+    pub(super) fn refuse(&mut self, now: Instant) -> bool {
+        if !matches!(self.state, State::Accepting) {
+            return false;
+        }
+        self.end();
+        self.inner.close(now, VarInt::from_u32(0), Bytes::new());
+        true
+    }
+
     /// Ends a live connection after the socket broke, and gives its
     /// [`Event::Closed`] with [`Error::Network`] when the caller has the key.
     pub(super) fn fail(&mut self, error: &env::net::Error) -> Option<Event> {

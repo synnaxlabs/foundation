@@ -691,6 +691,60 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
+    /// Drops a transport while the handshake of a peer that gets no answer is in
+    /// flight, and asserts that `ended` resolves within 3 PTO with no round-trip
+    /// sample, not at the idle time. Each PTO is 1024 ms: 333 ms, 4 times its half,
+    /// and the ack delay of 25 ms. When `silent`, the peer sends nothing after its
+    /// first packet; else it sends that packet again on each PTO.
+    fn ended_after_a_handshake_in_flight(silent: bool) {
+        let (mut sim, client, server) = testing::nodes(0);
+        let cut = sim::link::Config {
+            loss: 1.0,
+            ..sim::link::Config::default()
+        };
+        sim.link(&server, &client, cut);
+        let at = testing::address(&server);
+        let idle = testing::spans(Span::SECOND, 30);
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let part = testing::part(&node.net(), at);
+            let transport = Transport::new(Config { idle, ..config }, part);
+            let transport = transport.expect("a transport");
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 500))
+                .await;
+            let ended = transport.ended();
+            let before = node.clock().now();
+            drop(transport);
+            ended.await;
+            let waited = node.clock().now() - before;
+            let drain = testing::spans(Span::MILLISECOND, 3 * 1024);
+            assert!(waited <= drain, "the stop waited {waited:?}");
+        });
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let part = testing::part(&node.net(), testing::address(&node));
+            let setup = testing::setup(&Config { idle, ..config });
+            let carrier = crate::quic::Carrier::new(setup, part);
+            let dialed = carrier.connect(SERVER.public(), at).await;
+            assert_eq!(dialed.err(), Some(Error::TimedOut));
+        });
+        if silent {
+            let first = testing::spans(Span::MILLISECOND, 100);
+            assert_eq!(sim.run_for(first), Ok(()));
+            sim.link(&client, &server, cut);
+        }
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn ended_resolves_in_the_drain_after_a_handshake_in_flight_of_a_silent_peer() {
+        ended_after_a_handshake_in_flight(true);
+    }
+
+    #[test]
+    fn ended_resolves_in_the_drain_after_a_handshake_in_flight_that_repeats() {
+        ended_after_a_handshake_in_flight(false);
+    }
+
     #[test]
     fn ended_resolves_once_the_socket_breaks() {
         let (mut sim, _, server) = testing::nodes(0);
