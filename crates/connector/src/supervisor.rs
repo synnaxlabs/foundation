@@ -127,9 +127,7 @@ impl Supervisor {
             }
         };
         let runs = self.runs(kind, &name, config, cancel, &writer, &status);
-        let end = writer.during(runs).await;
-        cancel.race(writer.settle()).await;
-        end
+        writer.during(runs).await
     }
 
     /// Runs the connector and restarts it, as [`Self::run`] says, and writes its

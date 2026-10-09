@@ -217,7 +217,7 @@ pub(crate) struct Writer {
 impl Writer {
     /// Opens the writer of the status channels of `connector`, whose kind named
     /// `counts`, as the connector, and gives the status that it writes. `clock` times
-    /// the writes, and `cancel` ends a wait of a change of state.
+    /// the writes, and `cancel` ends each wait for the home.
     pub(crate) async fn open(
         hub: &hub::Hub,
         connector: &Name,
@@ -325,8 +325,18 @@ impl Writer {
 
     /// Polls `run` to its end. Meanwhile it writes the status that a kind staged or
     /// the home did not apply, at most once each [`PERIOD`] after the last write.
+    /// Then it writes it the same way until the home applied it, the writer writes no
+    /// more, or `cancel` is cancelled.
     pub(crate) async fn during<T>(&self, run: impl Future<Output = T>) -> T {
-        beside(run, self.flush()).await
+        let output = beside(run, self.flush()).await;
+        self.cancel
+            .race(async {
+                while self.values.staged.get() {
+                    self.write_staged().await;
+                }
+            })
+            .await;
+        output
     }
 
     #[expect(
@@ -344,14 +354,6 @@ impl Writer {
                 Poll::Pending
             })
             .await;
-            self.write_staged().await;
-        }
-    }
-
-    /// Writes the status until the home applied it or the writer writes no more, at
-    /// most once each [`PERIOD`] after the last write.
-    pub(crate) async fn settle(&self) {
-        while self.values.staged.get() {
             self.write_staged().await;
         }
     }
@@ -391,7 +393,8 @@ struct Session {
     restarts: u64,
     /// Set at the first start, after which each start is a restart.
     started: bool,
-    /// Set while the last change of state is in no frame that the home applied.
+    /// Set while the last change of state waits for a frame that the home applies,
+    /// until the writer writes no more.
     unapplied: bool,
 }
 
