@@ -54,15 +54,18 @@
   2026-10-08T06:29:55Z):
   https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053784863 and
   https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6053878785.
-  Each decoder reads only heads. `Put::body` and `Reply::body` give the
-  `wire::blob::Body` that the caller counts the body with: `take` refuses an empty
-  message and a message longer than the rest, `remain` gives the bytes to come (0 for
-  absent and stored, and the next message is a head), and `end` gives
-  `Error::Unfinished` (`MALFORMED`) when the stream ends with bytes to come. This is the
-  shape of CLIENT HELLO, and the counter is one crate-private type in `wire::common`
-  that the hub bodies also use. Supersedes `FromRequester::Body`, `FromServer`, and
-  `body` of each decoder. Lost: decoders that give a head or a body (a head-or-body enum
-  where the caller knows which comes, lost in CLIENT HELLO); one public body type for
-  `hub` and `blob` (each caller matches a third error type, and the texts of
-  `hub::Error` change). Decided by `laptop.architect` (2026-10-08T16:52:55Z):
+  Each decoder reads only heads. `Put::body` and `Reply::body` give a
+  `wire::blob::Body`. The caller counts the body with it, and decodes the next message
+  as a head once the body ended. `take` refuses an empty message and a message longer
+  than the rest, `remain` gives the bytes to come (0 for absent and stored, and the next
+  message is a head), and `end` gives `Error::Unfinished` (`MALFORMED`) when the stream
+  ends with bytes to come. This is the shape of CLIENT HELLO, and the counter is one
+  crate-private type in `wire::common` that the hub bodies also use. Supersedes
+  `FromRequester::Body`, `FromServer`, and `body` of each decoder. Lost: decoders that
+  give a head or a body (a head-or-body enum where the caller knows which comes, lost in
+  CLIENT HELLO); one public body type for `hub` and `blob` (each caller matches a third
+  error type, and the texts of `hub::Error` change). Decided by `laptop.architect`
+  (2026-10-09T01:57:16Z):
+  https://github.com/synnaxlabs/foundation/issues/1681#issuecomment-6072682474, under
+  the OK of 2026-10-08T16:52:55Z:
   https://github.com/synnaxlabs/foundation/pull/1918#issuecomment-6064815697.

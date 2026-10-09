@@ -13,8 +13,8 @@
 //!
 //! [`Server`] decodes the heads from the requester, and [`Requester`] those from the
 //! server. Each takes from its caller the most bytes a chunk may have, and refuses a
-//! longer chunk at its head. The caller counts each body with the [`Body`] of its
-//! head, which checks that the body holds exactly the bytes of the head. The receiver
+//! longer chunk at its head. The caller counts a body with the [`Body`] of its put or
+//! reply, and decodes the next message as a head once the body ended. The receiver
 //! checks the digest over the whole chunk.
 //!
 //! A message that a decoder refuses stops the stream with [`Error::code`] of its error.
@@ -268,7 +268,8 @@ impl Server {
         Self { chunk_bytes_max }
     }
 
-    /// Decodes the next head from the requester.
+    /// Decodes the next get or put from the requester. The body of a put follows,
+    /// unless its `len` is 0: count it with [`Put::body`].
     ///
     /// # Errors
     ///
