@@ -22,8 +22,7 @@ pub(crate) struct Table {
     key: PublicKey,
     /// Runs the dials and the pings.
     tasks: Tasks,
-    /// Dials on the transport's carrier, and takes the sessions that wait there for
-    /// `accept`.
+    /// Dials and accepts on the transport's carrier.
     carrier: quic::Handle,
     /// This table, for its tasks. A strong handle would keep the sessions for
     /// `accept` open after the transport drops.
@@ -117,22 +116,19 @@ pub(crate) async fn dial(
 }
 
 /// Waits for the next session for `accept`: one that a dial made, else one that a
-/// peer opened on `carrier` and that the table does not hold.
+/// peer opened and that the table does not hold.
 ///
 /// # Errors
 ///
 /// As [`Transport::accept`](crate::Transport::accept).
-pub(crate) async fn accept(
-    table: &RefCell<Table>,
-    carrier: &quic::Carrier,
-) -> Result<Session, Error> {
+pub(crate) async fn accept(table: &RefCell<Table>) -> Result<Session, Error> {
     poll_fn(|cx| {
         let mut table = table.borrow_mut();
         loop {
             if let Some(session) = table.poll_ready(cx) {
                 return Poll::Ready(Ok(session));
             }
-            let session = ready!(carrier.poll_accept(cx)).map(Session::new)?;
+            let session = ready!(table.carrier.poll_accept(cx)).map(Session::new)?;
             if let Some(session) = table.arrive(session) {
                 return Poll::Ready(Ok(session));
             }
@@ -142,8 +138,8 @@ pub(crate) async fn accept(
 }
 
 impl Table {
-    /// An empty table for the node `key`, whose dials and pings run on `tasks`, and
-    /// whose dials run on `dialer`.
+    /// An empty table for the node `key`, which dials and accepts on `carrier`, and
+    /// runs its dials and pings on `tasks`.
     pub(crate) fn new(
         key: PublicKey,
         tasks: Tasks,

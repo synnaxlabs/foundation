@@ -86,10 +86,11 @@ impl Carrier {
         Ok(session)
     }
 
-    /// As [`Carrier::poll_accept`].
+    /// As [`Handle::poll_accept`].
     #[cfg(test)]
     pub(crate) async fn accept(&self) -> Result<Session, Error> {
-        poll_fn(|cx| self.poll_accept(cx)).await
+        let handle = self.handle();
+        poll_fn(|cx| handle.poll_accept(cx)).await
     }
 
     /// What the carrier counted.
@@ -101,44 +102,14 @@ impl Carrier {
         }
     }
 
-    /// A handle that dials on this carrier, and that does not keep it from its drop.
+    /// A handle that dials and accepts on this carrier, and that does not keep it
+    /// from its drop.
     pub(crate) fn handle(&self) -> Handle {
         Handle(Rc::clone(&self.0))
     }
-
-    /// Ready with the next session that a peer dialed. Each that connects comes
-    /// once, and it may have ended since.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Network`] when the socket broke and each session that connected
-    /// before was given.
-    pub(crate) fn poll_accept(
-        &self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Session, Error>> {
-        let mut state = self.0.borrow_mut();
-        if let Some(key) = state.accepted.as_mut().and_then(VecDeque::pop_front) {
-            return Poll::Ready(Ok(self.session(key)));
-        }
-        if let Some(error) = &state.failed {
-            return Poll::Ready(Err(Error::Network {
-                error: error.clone(),
-            }));
-        }
-        register(&mut state.accepting, cx.waker());
-        Poll::Pending
-    }
-
-    fn session(&self, key: connection::Key) -> Session {
-        Session {
-            state: Rc::clone(&self.0),
-            key,
-        }
-    }
 }
 
-/// Dials on a [`Carrier`]. Clones share the carrier.
+/// Dials and accepts on a [`Carrier`]. Clones share the carrier.
 #[derive(Clone)]
 pub(crate) struct Handle(Rc<RefCell<State>>);
 
@@ -174,6 +145,27 @@ impl Handle {
             state: Rc::clone(&self.0),
             key,
         })
+    }
+
+    /// Ready with the next session that a peer dialed. Each that connects comes
+    /// once, and it may have ended since.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Network`] when the socket broke and each session that connected
+    /// before was given.
+    pub(crate) fn poll_accept(&self, cx: &Context<'_>) -> Poll<Result<Session, Error>> {
+        if let Some(session) = self.accepted() {
+            return Poll::Ready(Ok(session));
+        }
+        let mut state = self.0.borrow_mut();
+        if let Some(error) = &state.failed {
+            return Poll::Ready(Err(Error::Network {
+                error: error.clone(),
+            }));
+        }
+        register(&mut state.accepting, cx.waker());
+        Poll::Pending
     }
 
     /// Starts a dial to `remote` that `peer` must answer, and gives its session,
@@ -228,9 +220,9 @@ struct State {
     /// Each connection that a [`Session`] holds or that no caller accepted yet.
     sessions: BTreeMap<connection::Key, Slot>,
     /// The connections peers dialed, in the order they connected, for
-    /// [`Carrier::poll_accept`]. `None` once the carrier dropped.
+    /// [`Handle::poll_accept`]. `None` once the carrier dropped.
     accepted: Option<VecDeque<connection::Key>>,
-    /// The wakers of the [`Carrier::poll_accept`] calls that wait.
+    /// The wakers of the [`Handle::poll_accept`] calls that wait.
     accepting: Vec<Waker>,
     /// What broke the socket.
     failed: Option<env::net::Error>,

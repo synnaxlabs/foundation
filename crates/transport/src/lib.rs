@@ -220,7 +220,7 @@ impl Transport {
     /// }
     /// ```
     pub async fn accept(&self) -> Result<Session, Error> {
-        table::accept(&self.table, &self.carrier).await
+        table::accept(&self.table).await
     }
 
     /// What this transport counted since [`Transport::new`].
