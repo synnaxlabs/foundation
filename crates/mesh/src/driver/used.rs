@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::future::poll_fn;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use types::digest::Digest;
 use types::name::{Name, Prefix};
 use types::time::Span;
 
-use super::{Group, Mesh};
+use super::{Group, Mesh, Slot};
 use crate::error::{Error, Stopped};
 use crate::used::{Behind, Cause, Spec};
 use spec::Pointer;
@@ -433,9 +434,20 @@ pub(super) async fn keep(
             Gave::Read(Err(cause), got) => Done::Failed { cause, got },
         };
         let Some(group) = group.upgrade() else { return };
-        let mut group = group.borrow_mut();
-        group.used.settle(pointer, done);
-        group.wake_calls();
+        group.borrow_mut().settle_used(pointer, done);
+    }
+}
+
+impl Group {
+    // Records what the job for `pointer` gave, and wakes each call, and each watch when
+    // the pointer in use moved.
+    fn settle_used(&mut self, pointer: Pointer, done: Done) {
+        let before = self.used.spec.pointer;
+        self.used.settle(pointer, done);
+        self.wake_calls();
+        if self.used.spec.pointer != before {
+            self.wake_watches();
+        }
     }
 }
 
@@ -542,6 +554,56 @@ impl Mesh {
             Poll::Pending
         })
         .await
+    }
+
+    /// A watch of the spec that this node uses.
+    #[must_use]
+    pub fn watch_spec(&self) -> Watch {
+        Watch {
+            slot: Slot::new(&self.group),
+            given: None,
+            called: false,
+        }
+    }
+}
+
+/// A watch of the spec that a node uses.
+pub struct Watch {
+    slot: Slot,
+    // The pointer in use that the last call of `next` gave.
+    given: Option<Pointer>,
+    // Whether `next` returned before.
+    called: bool,
+}
+
+impl fmt::Debug for Watch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Watch")
+            .field("given", &self.given)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Watch {
+    /// The first call returns the spec in use at once. Each later call waits until
+    /// the pointer in use differs from the one it last returned, and returns the
+    /// newest spec: two changes between calls give one result. A change of only
+    /// `behind` does not wake it.
+    ///
+    /// # Errors
+    ///
+    /// [`Stopped`], the cause, at once, on each call after the group stops or each
+    /// [`Mesh`] of it drops, as [`crate::Watch::next`] does.
+    pub async fn next(&mut self) -> Result<Spec, Stopped> {
+        let spec = poll_fn(|cx| {
+            self.slot.poll(cx, |group| {
+                let spec = &group.used.spec;
+                (!self.called || self.given != spec.pointer).then(|| spec.clone())
+            })
+        })
+        .await?;
+        (self.given, self.called) = (spec.pointer, true);
+        Ok(spec)
     }
 }
 

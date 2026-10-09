@@ -1010,6 +1010,31 @@ fn each_member_keeps_the_last_spec_when_a_committed_spec_has_a_problem() {
     }
 }
 
+// The spec watch of each member, the leader that proposes too, wakes for each spec that
+// takes effect, and for no spec with a problem.
+#[test]
+fn the_spec_watch_of_each_member_gives_each_spec_that_takes_effect() {
+    let (mut cluster, leader, ..) = Cluster::led(0);
+    let (a, admin_spec, b) = (
+        create_subjects(&["plant.a"], 1),
+        create_admin(),
+        create_subjects(&["plant.b"], 1),
+    );
+    let (first, second) = (pointer(1, &a), pointer(2, &admin_spec));
+    for (at, definitions) in [(base(), &a), (first, &admin_spec), (second, &b)] {
+        let puts = IDS.map(|id| (id, definitions.clone())).into();
+        cluster.board.lock().unwrap().puts = puts;
+        cluster.run(seconds(1));
+        cluster.apply(leader, at, definitions);
+        cluster.run(seconds(5));
+    }
+    let board = cluster.board();
+    let watched = [Some(first), Some(pointer(3, &b))];
+    for id in IDS {
+        assert_eq!(board.watched[&id], watched, "node {id}");
+    }
+}
+
 // The member holds the spec in use and the newest pointer, never a pointer that a newer
 // one replaced.
 #[test]
@@ -1220,4 +1245,108 @@ fn an_open_uses_the_spec_it_used_last_after_a_power_cut() {
         }
     }
     assert_eq!(found, [], "(seed, version at the open) that is not v2");
+}
+
+#[test]
+fn a_watch_of_the_spec_gives_the_spec_in_use_and_then_the_newest_new_one() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let mut watch = mesh.watch_spec();
+        assert_eq!(watch.next().await, Ok(in_use(base(), &BTreeMap::new())));
+        let a = create_subjects(&["plant.a"], 1);
+        let first = {
+            let mut waits = pin!(watch.next());
+            assert!(now(waits.as_mut()).await.is_pending());
+            let first = mesh.apply(base(), a.clone(), BTreeMap::new()).await;
+            let first = first.unwrap();
+            assert_eq!(waits.await, Ok(in_use(first, &a)));
+            first
+        };
+        let b = create_subjects(&["plant.b"], 1);
+        let c = create_subjects(&["plant.c"], 1);
+        let second = mesh.apply(first, b, BTreeMap::new()).await.unwrap();
+        let third = mesh.apply(second, c.clone(), BTreeMap::new()).await;
+        let third = third.unwrap();
+        assert_eq!(mesh.spec().await, Ok(in_use(third, &c)));
+        assert_eq!(watch.next().await, Ok(in_use(third, &c)));
+        assert!(now(pin!(watch.next())).await.is_pending());
+    });
+}
+
+// A spec with problems changes only `behind`, so the watch waits on.
+#[test]
+fn a_committed_spec_with_problems_wakes_no_watch_of_the_spec() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let mut watch = mesh.watch_spec();
+        assert_eq!(watch.next().await, Ok(in_use(base(), &BTreeMap::new())));
+        let mut waits = pin!(watch.next());
+        let second = commit(&mesh, base(), &create_admin()).await;
+        let behind = mesh.spec().await.unwrap().behind;
+        let cause = Some(Behind {
+            pointer: second,
+            cause: admin(),
+        });
+        assert_eq!(behind, cause);
+        assert!(now(waits.as_mut()).await.is_pending());
+        let a = create_subjects(&["plant.a"], 1);
+        let third = mesh.apply(second, a.clone(), BTreeMap::new()).await;
+        assert_eq!(waits.await, Ok(in_use(third.unwrap(), &a)));
+    });
+}
+
+#[test]
+fn a_watch_of_the_spec_gives_the_cause_when_each_mesh_drops() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let mut watch = mesh.watch_spec();
+        assert_eq!(watch.next().await, Ok(in_use(base(), &BTreeMap::new())));
+        let given = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&given);
+        tasks.spawn(async move {
+            *slot.borrow_mut() = Some(watch.next().await);
+        });
+        node.clock().sleep(TICK).await;
+        assert_eq!(*given.borrow(), None);
+        drop(mesh);
+        node.clock().sleep(TICK).await;
+        assert_eq!(given.take(), Some(Err(Stopped::Dropped)));
+    });
+}
+
+#[test]
+fn a_watch_of_the_spec_gives_the_cause_on_each_call_after_the_group_stops() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let mut watch = mesh.watch_spec();
+        assert_eq!(watch.next().await, Ok(in_use(base(), &BTreeMap::new())));
+        let given = Rc::new(RefCell::new(None));
+        let slot = Rc::clone(&given);
+        tasks.spawn(async move {
+            *slot.borrow_mut() = Some(watch.next().await);
+            *slot.borrow_mut() = Some(watch.next().await);
+        });
+        node.clock().sleep(TICK).await;
+        assert_eq!(*given.borrow(), None);
+        let stopped = super::send::stop(&node, &mesh);
+        node.clock().sleep(TICK).await;
+        assert_eq!(given.take(), Some(Err(stopped)));
+    });
+}
+
+#[test]
+fn a_dropped_watch_of_the_spec_leaves_no_waker() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
+        let held = Arc::new(Idle);
+        let waker = Waker::from(Arc::clone(&held));
+        let mut cx = Context::from_waker(&waker);
+        let mut watch = mesh.watch_spec();
+        assert_eq!(watch.next().await, Ok(in_use(base(), &BTreeMap::new())));
+        assert!(pin!(watch.next()).poll(&mut cx).is_pending());
+        drop(waker);
+        assert_eq!(Arc::strong_count(&held), 2);
+        drop(watch);
+        assert_eq!(Arc::strong_count(&held), 1);
+    });
 }
