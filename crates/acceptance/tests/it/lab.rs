@@ -726,7 +726,7 @@ impl Lab {
         _subject: &str,
         _channel: &str,
     ) -> Received {
-        todo!("waits on #340")
+        todo!("waits on #274")
     }
 
     /// Reads every sample of `channel` on `node`, as `subject`. For short runs only.
@@ -1297,4 +1297,37 @@ fn a_channel_at_a_node_in_no_mesh_panics() {
 fn a_channel_made_twice_panics() {
     let (mut lab, a, _) = pair();
     lab.channel(a, "a.value");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: `start` after the first run or a task")]
+fn a_start_after_a_reader_panics() {
+    let (mut lab, _, b) = pair();
+    lab.reader(b, "a.value");
+    lab.start("c");
+}
+
+#[test]
+#[should_panic(expected = "the reader ended")]
+fn received_after_the_reader_ended_panics() {
+    let (mut lab, a, b) = pair();
+    let reader = lab.reader(b, "a.value");
+    lab.cut(a, b);
+    lab.run(Duration::from_secs(120));
+    lab.received(reader);
+}
+
+#[test]
+#[should_panic(expected = "lab failure: the writer opens")]
+fn a_send_at_a_node_that_is_not_the_home_panics() {
+    let (mut lab, _, b) = pair();
+    lab.send(b, "a.value", &[1.0]);
+    lab.run(Duration::from_secs(1));
+}
+
+#[test]
+#[should_panic(expected = "lab failure: no send wrote to a.value")]
+fn samples_with_no_send_panic() {
+    let (mut lab, a, _) = pair();
+    lab.samples(a, "admin", "a.value");
 }
