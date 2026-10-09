@@ -34,7 +34,9 @@ pub(crate) struct Rig {
 impl Rig {
     /// Makes a temporary directory for the test on this thread, with a name that no
     /// directory has: a run that was killed keeps its directory, and a later run can
-    /// get the same PID.
+    /// get the same PID. Its data directory keeps a pool budget of 1 GiB and a disk
+    /// budget of 256 MiB ([`Rig::keep`]), so a first start does not take a quarter of
+    /// the host's free disk.
     pub(crate) fn new() -> Self {
         let thread = std::thread::current();
         let test = thread.name().expect("invariant: libtest names the thread");
@@ -49,11 +51,31 @@ impl Rig {
                 Err(error) => panic!("make {}: {error}", dir.display()),
             }
         };
-        Self {
+        let rig = Self {
             dir,
             clock: os::clock(),
             node: None,
-        }
+        };
+        rig.keep(1 << 30, 256 << 20);
+        rig
+    }
+
+    /// The path of the file `budget` of the data directory `foundation-data`.
+    pub(crate) fn budget(&self) -> PathBuf {
+        self.dir.join("foundation-data/data/budget")
+    }
+
+    /// Writes the file [`Rig::budget`] as a node keeps its budgets: the tag, `pool`
+    /// and `disk` (little-endian), and the CRC32C of those 35 bytes.
+    pub(crate) fn keep(&self, pool: u64, disk: u64) {
+        let mut bytes = b"foundation/budget/1".to_vec();
+        bytes.extend(pool.to_le_bytes());
+        bytes.extend(disk.to_le_bytes());
+        bytes.extend(crc32c::crc32c(&bytes).to_le_bytes());
+        let path = self.budget();
+        let data = path.parent().expect("invariant: a file of a directory");
+        std::fs::create_dir_all(data).expect("make the data directory");
+        std::fs::write(path, bytes).expect("write the budget file");
     }
 
     /// Writes `hcl` to `plant.hcl`.
