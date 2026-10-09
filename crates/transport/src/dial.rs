@@ -2,7 +2,7 @@
 //! address, staggered, until one gives a session.
 
 use std::future::poll_fn;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV6};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -159,15 +159,25 @@ impl Dial<'_> {
 }
 
 /// Where a datagram to `remote` goes, or `None` when its port is 0 or its IP is
-/// unspecified. An IPv4-mapped IP becomes IPv4, the form in which a socket at `[::]`
-/// gives the source of each reply: a mapped remote would make each reply come from an
-/// unknown peer. Any other address keeps its scope and flow label, for the same reason.
+/// unspecified. It is `remote` in the form in which a socket at `[::]` gives the
+/// source of each reply, as a remote in another form would make each reply come from
+/// an unknown peer: an IPv4-mapped IP becomes IPv4, and an IPv6 address has no flow
+/// label, and a scope only when its IP is link-local.
 fn route(remote: SocketAddr) -> Option<SocketAddr> {
     let remote = match remote {
         SocketAddr::V6(v6) if let Some(v4) = v6.ip().to_ipv4_mapped() => {
             SocketAddr::new(v4.into(), v6.port())
         }
-        _ => remote,
+        SocketAddr::V6(v6) => {
+            let ip = *v6.ip();
+            let scope = if ip.is_unicast_link_local() {
+                v6.scope_id()
+            } else {
+                0
+            };
+            SocketAddrV6::new(ip, v6.port(), 0, scope).into()
+        }
+        SocketAddr::V4(_) => remote,
     };
     (remote.port() != 0 && !remote.ip().is_unspecified()).then_some(remote)
 }
@@ -289,10 +299,15 @@ mod tests {
     }
 
     #[test]
-    fn a_route_keeps_the_scope_and_flow_label_of_an_ipv6_address() {
+    fn a_route_keeps_the_scope_of_a_link_local_address_and_no_flow_label() {
         let ip = "fe80::1".parse().expect("an IPv6 address");
-        let scoped = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 7, 2));
-        assert_eq!(super::route(scoped), Some(scoped));
+        let remote = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 7, 2));
+        let route = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 2));
+        assert_eq!(super::route(remote), Some(route));
+        let ip = "fd00::1".parse().expect("an IPv6 address");
+        let remote = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 7, 2));
+        let route = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 0));
+        assert_eq!(super::route(remote), Some(route));
     }
 
     #[test]
