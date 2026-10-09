@@ -181,11 +181,11 @@ impl Rules {
     }
 }
 
-/// Refuses a hello once the latest mesh time reaches `expires`.
-fn live(expires: Stamp, now: Interval) -> Result<(), Error> {
-    if now.latest >= expires {
+/// Refuses a hello once the latest mesh time reaches `ends`.
+fn live(ends: Stamp, now: Interval) -> Result<(), Error> {
+    if now.latest >= ends {
         return Err(Error::Expired {
-            expires,
+            expires: ends,
             now: now.latest,
         });
     }
