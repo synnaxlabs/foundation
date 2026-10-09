@@ -1,0 +1,6 @@
+# A stand-in for crates.io, so the graphs resolve offline.
+[source.crates-io]
+replace-with = "vendor"
+
+[source.vendor]
+directory = "vendor"
