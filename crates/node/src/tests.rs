@@ -459,6 +459,23 @@ fn host(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
     })
 }
 
+/// Takes the lock of the data directory of `host` once the node frees it. Gives the
+/// lock, and whether it waited.
+async fn take_lock(host: &sim::node::Node) -> (env::files::File, bool) {
+    let (files, clock) = (host.files(), host.clock());
+    let mut waited = false;
+    loop {
+        let mode = env::files::Mode::Create { len: 0 };
+        match files.open(Path::new("lock"), mode).await {
+            Err(env::files::Error::Busy { .. }) => {
+                waited = true;
+                clock.sleep(Span::from_nanos(1_000)).await;
+            }
+            opened => break (opened.expect("the lock opens"), waited),
+        }
+    }
+}
+
 /// A host of `sim` with `cores` cores, whose data directory holds the key [`OWN`]
 /// and the private key [`KEY`].
 fn keyed(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
@@ -1774,19 +1791,8 @@ mod lock {
             node.stop();
             let (waited, rings) = sim
                 .run_on(&host, |host, _| async move {
+                    let (lock, waited) = take_lock(&host).await;
                     let files = host.files();
-                    let clock = host.clock();
-                    let mut waited = false;
-                    let lock = loop {
-                        let mode = env::files::Mode::Create { len: 0 };
-                        match files.open(Path::new("lock"), mode).await {
-                            Err(env::files::Error::Busy { .. }) => {
-                                waited = true;
-                                clock.sleep(Span::from_nanos(1_000)).await;
-                            }
-                            opened => break opened.expect("the lock opens"),
-                        }
-                    };
                     let mut rings = Vec::new();
                     for core in 0..3 {
                         let ring = crate::directory::shard(core).join("ring");
@@ -2836,7 +2842,7 @@ mod port {
         node.stop();
         let seen = Arc::clone(&events);
         sim.run_on(&host, move |host, _| async move {
-            let lock = take_lock(&host).await;
+            let (lock, _) = take_lock(&host).await;
             let bound = transport::Port::bind(&host.net(), listen).map(drop);
             seen.lock().unwrap().push(Event::Locked(bound));
             drop(lock);
@@ -2893,20 +2899,6 @@ mod port {
         assert!(waited <= drain, "the stop held the lock {waited:?}");
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(node.join(), Ok(()));
-    }
-
-    /// Takes the lock of the data directory of `host` once the node frees it.
-    async fn take_lock(host: &sim::node::Node) -> env::files::File {
-        let (files, clock) = (host.files(), host.clock());
-        loop {
-            let mode = env::files::Mode::Create { len: 0 };
-            match files.open(Path::new("lock"), mode).await {
-                Err(env::files::Error::Busy { .. }) => {
-                    clock.sleep(Span::from_nanos(1_000)).await;
-                }
-                opened => break opened.expect("the lock opens"),
-            }
-        }
     }
 
     mod key {
@@ -4093,19 +4085,8 @@ mod port {
             Result<(), env::files::Error>,
         ) {
             sim.run_on(host, |host, _| async move {
+                let (lock, waited) = take_lock(&host).await;
                 let files = host.files();
-                let clock = host.clock();
-                let mut waited = false;
-                let lock = loop {
-                    let mode = env::files::Mode::Create { len: 0 };
-                    match files.open(Path::new("lock"), mode).await {
-                        Err(env::files::Error::Busy { .. }) => {
-                            waited = true;
-                            clock.sleep(Span::from_nanos(1_000)).await;
-                        }
-                        opened => break opened.expect("the lock opens"),
-                    }
-                };
                 let udp = env::net::udp::Config {
                     local: listen(&host),
                     send_buffer_bytes: 1 << 16,
