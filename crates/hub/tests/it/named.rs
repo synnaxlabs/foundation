@@ -136,6 +136,50 @@ fn ends_a_named_complete_reader_behind_when_it_resumes_before_a_released_frame()
 }
 
 #[test]
+fn resumes_a_named_complete_reader_past_a_frame_released_before_its_position() {
+    run(16, |test| async move {
+        let mut keep = test
+            .hub
+            .reader(unnamed(&["value"], Mode::Complete))
+            .await
+            .expect("opens");
+        let mut writer = test.writer("w", &["value"]).await;
+        write(&mut writer, &[test.now()], &[7]);
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let first = test.hub.reader(open).await.expect("opens");
+        let received = keep.next().await.expect("a frame");
+        assert_eq!(samples(&received, 2), [7]);
+        test.clock.sleep(SETTLE).await;
+        drop(first);
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        write(&mut writer, &[test.now()], &[8]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(samples(&received, 2), [8]);
+    });
+}
+
+#[test]
+fn resumes_each_later_open_of_a_named_complete_reader_at_the_same_position() {
+    run(17, |test| async move {
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut first = test.hub.reader(open).await.expect("opens");
+        let mut writer = test.writer("w", &["value"]).await;
+        write(&mut writer, &[test.now()], &[7]);
+        first.next().await.expect("a frame");
+        test.clock.sleep(SETTLE).await;
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let second = test.hub.reader(open).await.expect("opens");
+        test.clock.sleep(SETTLE).await;
+        drop(second);
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        write(&mut writer, &[test.now()], &[8]);
+        assert_eq!(reader.next().await.expect_err("behind"), Ended::Behind);
+    });
+}
+
+#[test]
 fn opens_a_named_complete_reader_at_the_live_frames_once_its_hold_ends() {
     run(15, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);
