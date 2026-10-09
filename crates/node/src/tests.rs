@@ -3996,5 +3996,61 @@ mod port {
                 assert_eq!(node.join(), Ok(()), "cut {cut}");
             }
         }
+
+        /// A line that `ssh-keygen -t ed25519` wrote, and its key.
+        const OPERATOR: &str = concat!(
+            "ssh-ed25519 ",
+            "AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg",
+        );
+        const OPERATOR_KEY: [u8; 32] = [
+            0x65, 0x55, 0xb8, 0xe4, 0x7c, 0x24, 0xa6, 0x29, 0x01, 0xc5, 0x8b, 0x31,
+            0x4b, 0xde, 0x69, 0xd9, 0x89, 0xd7, 0x05, 0x00, 0x99, 0x81, 0xa0, 0x20,
+            0x3b, 0x6a, 0x96, 0x11, 0x5e, 0xed, 0x88, 0x60,
+        ];
+
+        /// A node whose region has founding definitions plans no change for files
+        /// with the same definitions, at its first open and at a second open with
+        /// the same region.
+        #[test]
+        fn a_plan_of_the_founding_definitions_gives_no_change() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let mut region = region(&[member(OWN, &KEY, &host)]);
+            let key = types::ed25519::PublicKey::new(OPERATOR_KEY).unwrap();
+            let subject = Subject::new([key].into()).unwrap();
+            let label = Kind::Subject.key("plant.operator").unwrap();
+            region.definitions = [(label, Definition::Subject(subject))].into();
+            let text =
+                format!("subject \"plant.operator\" {{ keys = [\"{OPERATOR}\"] }}\n");
+            for open in ["first", "second"] {
+                let node = start(&host, region.clone());
+                let planned = Arc::new(Mutex::new(None));
+                let out = Arc::clone(&planned);
+                let files = vec![(std::path::PathBuf::from("plant.hcl"), text.clone())];
+                node.operate(move |ops| async move {
+                    let plan = ops.plan(files).await;
+                    *out.lock().unwrap() = Some(plan.map(|(_, output)| output));
+                });
+                assert_eq!(sim.run_for(Span::SECOND), Ok(()), "{open} open");
+                node.stop();
+                assert_eq!(sim.run(), Ok(()), "{open} open");
+                assert_eq!(node.join(), Ok(()), "{open} open");
+                let output = planned.lock().unwrap().take().expect("a plan");
+                let output =
+                    output.unwrap_or_else(|error| panic!("{open} open: {error}"));
+                let changes = output["changes"].as_array().map(Vec::len);
+                assert_eq!(changes, Some(0), "{open} open: {output}");
+            }
+        }
+
+        /// `operate` refuses a node with no region, which has no mesh to operate on.
+        #[test]
+        #[should_panic(expected = "`operate` on a node with no region")]
+        fn operate_refuses_a_node_with_no_region() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            node.operate(|_| async {});
+        }
     }
 }

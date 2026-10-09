@@ -18,7 +18,10 @@ blob = { path = "../blob" }
 block = { path = "../block" }
 buffer = { path = "../buffer" }
 clock = { path = "../clock" }
+config-hcl = { path = "../config-hcl" }
+connector = { path = "../connector" }
 crc32c = { workspace = true }
+document = { path = "../document" }
 env = { path = "../env" }
 estimate = { path = "../estimate" }
 home = { path = "../home" }
@@ -34,7 +37,6 @@ wire = { path = "../wire" }
 [dev-dependencies]
 bytes = { workspace = true }
 codec = { path = "../codec" }
-connector = { path = "../connector" }
 connector-influx = { path = "../connector-influx", features = ["sim"] }
 counting = { path = "../counting" }
 divan = { workspace = true }

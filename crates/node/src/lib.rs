@@ -21,6 +21,7 @@ mod task;
 #[cfg(not(loom))]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::iter;
@@ -31,6 +32,8 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
+use document::diagnostic::Diagnostic;
+use document::{Document, Source};
 use env::thread::Handle;
 use types::ed25519::PrivateKey;
 use types::frame::key_set::Interner;
@@ -115,6 +118,8 @@ pub struct Node {
     failed: Option<Error>,
     /// The tasks for shard 0's hub.
     queue: task::Queue<task::Task>,
+    /// The node has a region, so shard 0 has an `ops::Node`.
+    regional: bool,
 }
 
 /// A started shard, with its error once it fails.
@@ -213,6 +218,7 @@ impl Node {
             shards: Vec::new(),
             failed: Some(error),
             queue: task::pair().0,
+            regional: false,
         }
     }
 
@@ -236,6 +242,7 @@ impl Node {
         let cores = shards.cores().get();
         let handoff::Chain { first, last, links } = handoff::chain(cores);
         let (queue, inbox) = task::pair();
+        let regional = endpoint.region.is_some();
         let (mesh, clock) = clock::Clock::new(monotonic.clone());
         let serve = Serve {
             interner: last,
@@ -291,6 +298,7 @@ impl Node {
             shards: started,
             failed: error,
             queue,
+            regional,
         }
     }
 
@@ -309,7 +317,29 @@ impl Node {
     where
         F: Future<Output = ()> + 'static,
     {
-        self.queue.push(Box::new(move |hub| Box::pin(task(hub))));
+        self.queue
+            .push(Box::new(move |handles| Box::pin(task(handles.hub.clone()))));
+    }
+
+    /// Calls `task` with the operations on the node's mesh on shard 0, in the order
+    /// and with the guarantees of [`Node::spawn`]. Each new channel that an apply
+    /// makes gets a UUIDv7 key at mesh time.
+    ///
+    /// # Panics
+    ///
+    /// When [`Config::region`] is `None`: the node has no mesh.
+    pub fn operate<F>(&self, task: impl FnOnce(Rc<ops::Node>) -> F + Send + 'static)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        assert!(self.regional, "`operate` on a node with no region");
+        self.queue.push(Box::new(move |handles| {
+            let ops = handles
+                .ops
+                .as_ref()
+                .expect("invariant: a node with a region opens its mesh");
+            Box::pin(task(Rc::clone(ops)))
+        }));
     }
 
     /// Asks every shard to end. A shard then starts no claim of the data directory
@@ -738,6 +768,9 @@ impl Serve {
             Ok(opened) => opened,
             Err(error) => return fail(error),
         };
+        let ops = mesh.as_ref().map(|mesh| {
+            Rc::new(operations(mesh.clone(), self.time.clone(), entropy.clone()))
+        });
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
@@ -778,12 +811,41 @@ impl Serve {
                 // a task's drop.
                 ended.map(|error| error.map_or((), fail))
             });
-            self.inbox.serve(hub, tasks, stop).await;
+            self.inbox
+                .serve(task::Handles { hub, ops }, tasks, stop)
+                .await;
         }
         if let Some(ended) = ended {
             ended.await;
         }
     }
+}
+
+/// The operations on `mesh`. A new channel key is a UUIDv7 at the latest edge of mesh
+/// time read through `time`, with random bits from `entropy`.
+fn operations(
+    mesh: mesh::Mesh,
+    time: clock::Reader,
+    entropy: env::entropy::Entropy,
+) -> ops::Node {
+    let key = move || {
+        // The time only orders keys, so a key before mesh time or 1970 has the time 0.
+        let at = time
+            .now()
+            .mesh
+            .map_or(Stamp::EPOCH, |mesh| mesh.latest.max(Stamp::EPOCH));
+        let mut random = [0; 16];
+        entropy.fill(&mut random);
+        types::channel::Key::v7(at, u128::from_le_bytes(random))
+    };
+    let front_ends = BTreeMap::from([("hcl", ops::FrontEnd { read: hcl })]);
+    ops::Node::new(mesh, key, front_ends, connector::kind::Table::new())
+}
+
+/// The HCL front end.
+fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
+    config_hcl::read(source, text)
+        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
 /// How shard 0's serve ends, from one poll of each cause, in rank order: a stop of
