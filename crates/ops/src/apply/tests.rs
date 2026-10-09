@@ -524,6 +524,7 @@ fn refuses_a_plan_on_a_node_that_uses_no_spec_as_behind() {
             .await
             .expect_err("a node behind");
         assert_eq!(error, Error::Behind(Box::new(behind.clone())));
+        assert_eq!(error.status(), 1);
         assert_eq!(
             error.text(),
             format!(
@@ -533,6 +534,11 @@ fn refuses_a_plan_on_a_node_that_uses_no_spec_as_behind() {
                 behind.pointer.root
             )
         );
+        let error = apply(path(), b"plan", &mesh, keys(0))
+            .await
+            .expect_err("no plan");
+        let version = config::plan::Error::Version { found: b'p' };
+        assert_eq!(error, Error::Plan(version));
         assert_eq!(mesh.pointer(), behind.pointer);
     });
 }
@@ -635,4 +641,64 @@ fn refuses_a_plan_with_no_change_at_an_old_base_as_stale() {
         assert_eq!(error, Error::Stale { base, pointer });
         assert_eq!(mesh.pointer(), pointer);
     });
+}
+
+#[test]
+fn applies_a_plan_with_no_home_and_then_a_plan_with_only_a_home() {
+    solo(|mesh| async move {
+        let (_, mut site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        let homes = std::mem::take(&mut site.homes);
+        assert!(!homes.is_empty());
+        apply(path(), &site.encode(), &mesh, keys(0))
+            .await
+            .expect("a plan with no home applies");
+        let pointer = mesh.pointer();
+        assert_eq!(pointer.version, 1);
+        let spec = mesh.spec().await.expect("a spec");
+        let Definition::Channel(time) = &spec.definitions[&name("site.time")] else {
+            panic!("a channel at site.time");
+        };
+        let key = time.key;
+        assert_eq!(mesh.watch(key).next().await, Ok(None));
+        let mut only = site.clone();
+        only.base = pointer;
+        only.changes.clear();
+        only.homes = homes;
+        let applied = apply(path(), &only.encode(), &mesh, keys(10))
+            .await
+            .expect("a plan with only a home applies");
+        assert_eq!(applied.pointer, plan::Pointer::from(mesh.pointer()));
+        assert_eq!(mesh.pointer().version, 2);
+        assert_eq!(mesh.watch(key).next().await, Ok(Some(NODE)));
+    });
+}
+
+#[test]
+fn refuses_a_plan_on_a_node_that_uses_an_old_spec_as_behind() {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let ran = sim.run_on(&node, |node, tasks| async move {
+        let definitions = spec::founding::create(ADMIN.public());
+        let mesh = open(&node, &tasks, definitions).await;
+        let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        apply(path(), &site.encode(), &mesh, keys(0))
+            .await
+            .expect("an apply");
+        let first = mesh.pointer();
+        let site = placed_site();
+        let (_, both) =
+            plan_on(&mesh, &[("site.hcl", &site), ("plant.hcl", PLANT)]).await;
+        node.fail_file(Path::new("spec"), env::files::Operation::SyncDir);
+        apply(path(), &both.encode(), &mesh, keys(10))
+            .await
+            .expect("a second apply");
+        let spec = mesh.spec().await.expect("a spec");
+        assert_eq!(spec.pointer, Some(first));
+        let behind = spec.behind.expect("a node behind");
+        let error = apply(path(), &both.encode(), &mesh, keys(20))
+            .await
+            .expect_err("a node behind");
+        assert_eq!(error, Error::Behind(Box::new(behind)));
+    });
+    assert_eq!(ran, Ok(()));
 }
