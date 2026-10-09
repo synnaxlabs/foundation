@@ -1140,8 +1140,8 @@ impl Streams {
 
     /// When the peer's hello is due on a connection whose idle timeout `idle` gives:
     /// twice it after the handshake, while the hello has not arrived. A cut that the
-    /// connection lives through ends within the idle timeout, and the hello that it
-    /// held back arrives within a PTO after that. Calls `idle` only while it waits.
+    /// connection lives through ends within the idle timeout. Calls `idle` only while
+    /// it waits.
     pub(super) fn deadline(&self, idle: impl FnOnce() -> Duration) -> Option<Instant> {
         self.peer.since().map(|since| since + 2 * idle())
     }
