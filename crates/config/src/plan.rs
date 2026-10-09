@@ -578,10 +578,7 @@ impl<'f> Located<'f> {
 /// A unit of failover: connectors on one node, linked by the indexes that they write.
 /// An index joins the unit of its writers when they are on one node.
 struct Unit<'f> {
-    /// Its connectors, in name order.
-    connectors: Vec<&'f Name>,
-    /// Its indexes, in name order.
-    indexes: Vec<&'f Name>,
+    linked: Linked<'f>,
     /// The fix of each of its diagnostics, or `None` when no placement wins for a
     /// connector or an index of it.
     fix: Option<Fix<'f>>,
@@ -643,17 +640,16 @@ fn connectors<'f>(
                     "the placement `{p}` names the home `{home}`, but the connector \
                      `{name}` runs on the node `{node}`"
                 ),
-                text(fix, &unit.connectors),
+                text(fix, &unit.linked.connectors),
             ));
         } else {
             diagnostics.extend(unplaced(model.label(name), placed));
         }
     }
-    let linked: BTreeMap<_, _> = units
+    let joined = units
         .iter()
-        .flat_map(|unit| unit.indexes.iter().map(move |index| (*index, unit)))
-        .collect();
-    for (name, unit) in linked {
+        .flat_map(|unit| unit.linked.indexes.iter().map(move |name| (*name, unit)));
+    for (name, unit) in joined {
         let index = &indexes[name];
         let Ok(placed) = &index.placed else {
             continue;
@@ -672,7 +668,7 @@ fn connectors<'f>(
             SPLIT_PLACEMENT,
             model.label(at),
             message,
-            text(fix, &unit.connectors),
+            text(fix, &unit.linked.connectors),
         ));
     }
 }
@@ -715,15 +711,13 @@ fn units<'f>(
         home(placement).is_some_and(|home| home != node)
     };
     let unit = |linked: Linked<'f>| {
-        let Linked {
-            connectors,
-            indexes: names,
-        } = linked;
+        let connectors = &linked.connectors;
         let node = located[connectors[0]].connector.node;
         let mut winners = connectors.iter().filter_map(|c| located[c].winner());
         let target = winners.next();
         let spread = |p: &Name| nodes[p].iter().any(|other| *other != node);
-        let owners: BTreeSet<_> = names
+        let owners: BTreeSet<_> = linked
+            .indexes
             .iter()
             .filter_map(|name| indexes[name].placed.as_ref().ok()?.placement)
             .collect();
@@ -744,11 +738,7 @@ fn units<'f>(
             (None, []) => None,
             (None, _) => Some(Fix::Regroup { owners, node }),
         };
-        Unit {
-            connectors,
-            indexes: names,
-            fix,
-        }
+        Unit { linked, fix }
     };
     (linked.into_iter().map(unit).collect(), of)
 }

@@ -2758,3 +2758,22 @@ fn names_the_home_at_each_connector_home_of_the_target_of_a_unit() {
         &text("n"),
     );
 }
+
+#[test]
+fn takes_the_target_of_a_unit_from_the_first_connector_that_a_placement_wins_for() {
+    let refused = writers(
+        &["a", "b"],
+        &["\"i.time\""; 2],
+        &(placement("t1", "\"a\"", "n")
+            + &placement("t2", "\"a\"", "n")
+            + &placement("q", "\"b\"", "n")
+            + &placement("p", "\"i.time\"", "n")),
+    );
+    let found = problems(Spec::create_empty().plan(&[&refused], &["n"]));
+    let split: Vec<_> = found
+        .into_iter()
+        .filter(|problem| problem.0 == "config.split-placement")
+        .map(|problem| problem.3)
+        .collect();
+    assert_eq!(split, [wins("q", "`a` and `b`")]);
+}
