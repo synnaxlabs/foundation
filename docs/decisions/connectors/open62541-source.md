@@ -231,21 +231,24 @@
   randomness of `env` at `new`. `drive(run)` moves each connection on and polls `run`
   with the context of the drive until `run` gives a value, so `run` can poll its own
   sources. One drive of a manager runs at a time. A connect, a send, or a close from
-  `run` or from another task on that thread wakes the drive, and the drive writes
-  what the last `run` sent before it gives the value. At most 256 sends wait on one
-  connection: a send past them closes the connection. open62541 allocates each send
-  at the send buffer size of its channel, so this bounds the memory of a connection
-  at 256 send buffers. A client or server on the manager keeps its
-  `localMaxChunkCount` at most 256, since open62541 gives each chunk of a message
-  before a pass can write one. A close writes what waits, closes its side, then reads
-  and drops what the peer sends until the peer closes its side, so that the drop
-  sends no reset. It drops the stream with a warning 10 s after the first close, so
-  that a peer that reads slowly or never closes cannot hold it. Each connect, read,
-  write, or close error gives a warning through the logger of the loop, then
-  `CLOSING`. The wake of a send on the thread of the drive: decided by
+  `run` or from another task on that thread wakes the drive, and before the drive
+  gives the value, it writes what the last `run` sent, as far as each stream takes
+  it. At most 256 sends wait on one connection: a send past them closes the
+  connection. open62541 allocates each send at the send buffer size of its channel,
+  so this bounds the memory of a connection at 256 send buffers. A client or server
+  on the manager keeps its `localMaxChunkCount` at most 256, since open62541 gives
+  each chunk of a message before a pass can write one. A close writes what waits,
+  closes its side, then reads and drops what the peer sends until the peer closes its
+  side, so that the drop sends no reset. It drops the stream with a warning 10 s after
+  the first close, so that a peer that reads slowly or never closes cannot hold it.
+  Each connect, read, write, or close error gives a warning through the logger of the
+  loop, then `CLOSING`. The wake of a send on the thread of the drive: decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6074418284,
   2026-10-09 04:43 UTC). The rest, before the send bound and the context of `run`:
   approved by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6085824086,
-  2026-10-09 17:22 UTC). The send bound and the context of `run`: approval owed.
+  2026-10-09 17:22 UTC). The send bound and the context of `run`: approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086043036,
+  2026-10-09 17:36 UTC).
