@@ -15,6 +15,8 @@ use tokio::sync::Notify;
 use tokio::time::timeout;
 
 #[cfg(target_os = "linux")]
+mod full;
+#[cfg(target_os = "linux")]
 #[path = "../../common/gso.rs"]
 mod gso;
 

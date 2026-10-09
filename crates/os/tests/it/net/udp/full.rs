@@ -2,13 +2,7 @@
 //! answers each `sendmsg` and `epoll_ctl` of the test thread, so each test runs on a
 //! thread of its own.
 
-// Lets Clippy treat the helpers as test code.
-#![cfg(test)]
-#![cfg(target_os = "linux")]
-
-#[path = "common/gso.rs"]
-mod gso;
-#[path = "common/seccomp.rs"]
+#[path = "../../../common/seccomp.rs"]
 mod seccomp;
 
 use std::future::poll_fn;
@@ -23,6 +17,8 @@ use std::time::Duration;
 use env::net::Error;
 use env::net::udp::{self, Meta, Receiver, Sender, Transmit};
 
+use super::gso;
+
 /// How long a receive waits before it takes that no more datagrams come.
 const SILENCE: Duration = Duration::from_millis(300);
 
@@ -34,30 +30,26 @@ fn answer_calls(mut plan: impl FnMut(i64, usize) -> Option<i32> + Send + 'static
 }
 
 /// Runs `body` on a thread of its own, so the filter of one test stays on it.
-fn on_thread<F: Future<Output = ()>>(body: impl FnOnce() -> F + Send + 'static) {
-    #[expect(clippy::disallowed_methods, reason = "the filter needs a thread")]
-    let handle = std::thread::spawn(|| {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_io()
-            .enable_time()
-            .build()
-            .unwrap();
-        runtime.block_on(body());
-    });
-    handle.join().unwrap();
+fn on_thread<F: Future<Output = ()> + 'static>(
+    body: impl FnOnce() -> F + Send + 'static,
+) {
+    super::on_thread("udp-full", body);
+}
+
+/// A socket on the IPv4 loopback.
+fn config() -> udp::Config {
+    udp::Config {
+        local: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
+        send_buffer_bytes: 1 << 20,
+        recv_buffer_bytes: 1 << 20,
+    }
 }
 
 /// A sender with GSO off and a receiver, both on the IPv4 loopback.
 async fn pair() -> (Sender, Receiver) {
-    let net = os::net();
-    let config = udp::Config {
-        local: SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 0),
-        send_buffer_bytes: 1 << 20,
-        recv_buffer_bytes: 1 << 20,
-    };
-    let (mut sender, _) = net.udp(&config).unwrap();
+    let (mut sender, _) = os::net().udp(&config()).unwrap();
     gso::refuse(sender.local());
-    let (_, mut receiver) = net.udp(&config).unwrap();
+    let (_, mut receiver) = os::net().udp(&config()).unwrap();
     let off = batch(&receiver, b"wwww");
     poll_fn(|cx| sender.poll_send(cx, &off)).await.unwrap();
     assert_eq!(receive(&mut receiver).await, [b"ww", b"ww"]);
