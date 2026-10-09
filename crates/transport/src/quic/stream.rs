@@ -6953,6 +6953,77 @@ mod tests {
             });
         }
 
+        /// Backlogs `streams` `Complete` streams with messages of [`MESSAGE_MAX`]
+        /// bytes, and gives `Latest` a sample of `sample` bytes with `try_write` at
+        /// each [`STEP`], on a pair with a window of twice [`MESSAGE_MAX`]. Gives the
+        /// bytes the server read of `Latest` and of `Complete`.
+        fn try_send_against_a_backlog(
+            shard: &Shard,
+            streams: usize,
+            sample: usize,
+        ) -> (usize, usize) {
+            let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+            let sides = [
+                (&mut pair.client, pair::CLIENT_KEY, pair::CLIENT_SHARD),
+                (&mut pair.server, pair::SERVER_KEY, pair::SERVER_SHARD),
+            ];
+            for (side, private_key, index) in sides {
+                let config = Config {
+                    window_bytes: 2 * MESSAGE_MAX,
+                    ..shard.config(private_key, Span::SECOND)
+                };
+                side.endpoint =
+                    Endpoint::new(&testing::setup(&config), index, NonZeroUsize::MIN);
+            }
+            pair.dial(pair::SERVER_KEY.public());
+            pair.run(RUN);
+            let (mut receivers, mut read) = (Vec::new(), [0; 4]);
+            let mut completes: Vec<_> = (0..streams)
+                .map(|_| open_sender(&mut pair, Class::Complete))
+                .collect();
+            let mut latest = open_sender(&mut pair, Class::Latest);
+            let message = shard.block(&vec![1; MESSAGE_MAX]);
+            let sample = shard.block(&vec![2; sample]);
+            let mut pending = None;
+            for _ in 0..2000 {
+                if pending.is_none() {
+                    pending = Some(sample.clone());
+                }
+                send(&mut pair, &mut latest, &mut pending);
+                pair.run(STEP);
+                take(&mut pair, &mut receivers, &mut read);
+                refill_each(&mut pair, &mut completes, &message);
+            }
+            let [_, latest, complete, _] = read;
+            (latest, complete)
+        }
+
+        #[test]
+        fn latest_on_try_send_gets_a_share_at_a_window_of_twice_the_message_limit() {
+            testing::run(1, |shard| {
+                for streams in [1, 3] {
+                    let (latest, complete) =
+                        try_send_against_a_backlog(shard, streams, MESSAGE_MAX);
+                    assert!(
+                        8 * latest >= complete,
+                        "{streams} streams: {latest} of `Latest`, {complete}"
+                    );
+                }
+            });
+        }
+
+        // A sample in noq-proto's hands holds the next one back, so a small sample
+        // goes at the pace of the credit, not of the share.
+        #[test]
+        fn small_latest_samples_on_try_send_go_each_round_trip_against_a_backlog() {
+            testing::run(1, |shard| {
+                let round_trips = 2000 * STEP.as_millis() / (2 * DELAY.as_millis());
+                let least = 1000 * usize::try_from(round_trips).expect("small");
+                let (latest, _) = try_send_against_a_backlog(shard, 3, 1000);
+                assert!(latest >= least, "{latest} of `Latest`");
+            });
+        }
+
         #[test]
         fn latest_that_offers_twice_its_share_shares_the_send_budget_one_to_three() {
             for bytes in [MESSAGE_MAX / 4, MESSAGE_MAX / 8, MESSAGE_MAX / 16] {
