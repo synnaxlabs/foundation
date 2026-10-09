@@ -50,6 +50,7 @@ pub mod port;
 mod quic;
 mod session;
 pub mod stream;
+mod table;
 #[cfg(test)]
 mod testing;
 #[cfg_attr(
@@ -66,7 +67,9 @@ mod tls;
     expect(dead_code, reason = "the QUIC carrier is the first user")
 )]
 mod varint;
+mod wake;
 
+use std::cell::RefCell;
 use std::fmt;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::rc::Rc;
@@ -82,6 +85,8 @@ pub use error::Error;
 pub use port::Port;
 pub use session::{Peer, Session};
 
+use table::Table;
+
 /// Ethernet's 1500 bytes less the IPv4 and UDP headers: the largest datagram this
 /// node takes.
 const PAYLOAD_IPV4: u16 = 1472;
@@ -93,17 +98,22 @@ const MESSAGE_BYTES_MIN: usize = PAYLOAD_IPV4 as usize;
 /// The rule that a pool breaks when its largest block is below [`MESSAGE_BYTES_MIN`].
 const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 
-/// The sessions of one shard. It dials peers and accepts the sessions the node
-/// routes to this shard. It stays on the thread that made it. `node` binds one
-/// [`Port`] and splits it into one part for each shard.
+/// The sessions of one shard. It keeps one session to each node, shared by every
+/// caller: [`Transport::dial`] gives the open one. It dials peers and accepts the
+/// sessions the node routes to this shard. It stays on the thread that made it.
+/// `node` binds one [`Port`] and splits it into one part for each shard.
 ///
-/// Dropping it closes each session that no caller accepted with `Code(0)`, and the
-/// sessions it gave stay open. It refuses each dial from a peer until each of its
-/// connections drained: each session ended, and each handshake in flight finished
-/// or timed out. Then it frees its [`port::Part`], so a later dial gets no answer.
+/// A session that a dial made stays open until `accept` takes it, also when each caller
+/// of `dial` dropped it. Dropping the transport closes each session that no caller
+/// accepted with `Code(0)`, and the sessions it gave stay open. It refuses each dial
+/// from a peer until each of its connections drained: each session ended, and each
+/// handshake in flight finished or timed out. Then it frees its [`port::Part`], so a
+/// later dial gets no answer.
 pub struct Transport {
     carrier: quic::Carrier,
     public_key: PublicKey,
+    table: Rc<RefCell<Table>>,
+    tasks: env::tasks::Tasks,
 }
 
 impl Transport {
@@ -126,9 +136,12 @@ impl Transport {
     /// ```
     pub fn new(config: Config, part: port::Part) -> Result<Self, Error> {
         let public_key = config.private_key.public();
+        let tasks = config.tasks.clone();
         Ok(Self {
             carrier: quic::Carrier::new(config.setup()?, part),
             public_key,
+            table: Rc::default(),
+            tasks,
         })
     }
 
@@ -144,12 +157,19 @@ impl Transport {
         self.public_key
     }
 
-    /// Connects to `peer` at one of `addresses`, and checks that the peer holds
-    /// `peer`'s private key. It tries direct UDP addresses first, then direct TCP,
-    /// then relays. It starts the next address 250 ms after the newest attempt
-    /// started, or at once when it fails, and keeps the first session that completes
-    /// (RFC 8305). An address where some other key answers counts as a failure,
-    /// because addresses can be stale.
+    /// Gives the session to the node `peer`: the open one, from a dial or from the
+    /// peer, when this transport has one, else a new one from a dial at `addresses`.
+    /// A call while a dial to `peer` runs waits for that dial and gets its result, so
+    /// it tries none of its own addresses. Dropping the future stops the wait, not
+    /// the dial.
+    ///
+    /// A dial tries direct UDP addresses first, then direct TCP, then relays. It
+    /// starts the next address 250 ms after the newest attempt started, or at once
+    /// when it fails, and keeps the first session that completes (RFC 8305). An
+    /// address where some other key answers counts as a failure, because addresses
+    /// can be stale.
+    ///
+    /// A dial that fails gives the session that `peer` opened meanwhile, if one did.
     ///
     /// # Errors
     ///
@@ -174,13 +194,14 @@ impl Transport {
         peer: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        let dialed = dial::dial(&self.carrier, peer, addresses).await;
-        dialed.map(Session::new)
+        table::dial(&self.table, &self.carrier, &self.tasks, peer, addresses).await
     }
 
-    /// Waits for the next session that a peer opened and the node routed to this
-    /// shard. The peer has completed the handshake; the caller decides whether to
-    /// admit it and closes it if not. Handshakes that fail never reach the caller.
+    /// Waits for the next new session: one that a dial on this transport made, or
+    /// one that a peer opened and the node routed to this shard. Each comes once.
+    /// The peer has completed the handshake. The caller decides whether to admit it,
+    /// closes it if not, and takes the streams that the peer opens on it. Handshakes
+    /// that fail never reach the caller.
     ///
     /// # Errors
     ///
@@ -197,7 +218,7 @@ impl Transport {
     /// }
     /// ```
     pub async fn accept(&self) -> Result<Session, Error> {
-        self.carrier.accept().await.map(Session::new)
+        table::accept(&self.table, &self.carrier).await
     }
 
     /// What this transport counted since [`Transport::new`].

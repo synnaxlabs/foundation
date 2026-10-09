@@ -7,20 +7,52 @@ use std::thread::{self, ThreadId};
 
 use rustix::io::Errno;
 
-/// A socket that registers at its first poll with the I/O driver of the Tokio runtime
-/// of that thread, and then polls only on that thread.
-pub(super) enum Socket<Idle, Live> {
-    /// Not polled yet. It moves between threads freely.
+/// A socket that binds to the thread of its first poll, and then polls only on that
+/// thread. The first poll that needs the socket registers it with the I/O driver of
+/// the Tokio runtime of that thread.
+pub(super) struct Socket<Idle, Live> {
+    state: State<Idle, Live>,
+    /// The thread of the first poll. Before it, the socket moves between threads
+    /// freely.
+    thread: Option<ThreadId>,
+}
+
+enum State<Idle, Live> {
     Idle(Idle),
-    /// Registered on `thread`.
-    Live { socket: Live, thread: ThreadId },
+    Live(Live),
     /// The registration failed with `code`, which each poll gives again.
-    Lost { code: Errno },
+    Lost {
+        code: Errno,
+    },
 }
 
 impl<Idle, Live> Socket<Idle, Live> {
-    /// The live socket, for a poll. The first poll registers it with `register`.
-    /// `kind` names the socket in the panic. Gives the code of a failed registration.
+    /// A socket that no poll bound or registered yet.
+    pub(super) fn new(idle: Idle) -> Self {
+        Self {
+            state: State::Idle(idle),
+            thread: None,
+        }
+    }
+
+    /// Binds the socket to this thread at the first poll, with no registration.
+    /// `kind` names the socket in the panic.
+    ///
+    /// # Panics
+    ///
+    /// A poll on a thread other than that of the first poll.
+    pub(super) fn bind(&mut self, kind: &str) {
+        let current = thread::current().id();
+        let thread = *self.thread.get_or_insert(current);
+        assert_eq!(
+            thread, current,
+            "a TCP {kind} polls only on the thread of its first poll"
+        );
+    }
+
+    /// The live socket, for a poll. It binds the socket as [`Socket::bind`] does,
+    /// and the first call registers it with `register`. Gives the code of a failed
+    /// registration.
     ///
     /// # Panics
     ///
@@ -30,33 +62,23 @@ impl<Idle, Live> Socket<Idle, Live> {
         kind: &str,
         register: impl FnOnce(Idle) -> io::Result<Live>,
     ) -> Result<&mut Live, Errno> {
-        if let Self::Idle(_) = self {
-            let Self::Idle(idle) =
-                std::mem::replace(self, Self::Lost { code: Errno::IO })
-            else {
+        self.bind(kind);
+        if let State::Idle(_) = self.state {
+            let lost = State::Lost { code: Errno::IO };
+            let State::Idle(idle) = std::mem::replace(&mut self.state, lost) else {
                 unreachable!("invariant: the state was checked above");
             };
-            *self = match register(idle) {
-                Ok(socket) => Self::Live {
-                    socket,
-                    thread: thread::current().id(),
-                },
-                Err(e) => Self::Lost {
+            self.state = match register(idle) {
+                Ok(socket) => State::Live(socket),
+                Err(e) => State::Lost {
                     code: super::errno(&e),
                 },
             };
         }
-        match self {
-            Self::Live { socket, thread } => {
-                assert_eq!(
-                    *thread,
-                    thread::current().id(),
-                    "a TCP {kind} polls only on the thread of its first poll"
-                );
-                Ok(socket)
-            }
-            Self::Lost { code } => Err(*code),
-            Self::Idle(_) => unreachable!("invariant: the first poll registered"),
+        match &mut self.state {
+            State::Live(socket) => Ok(socket),
+            State::Lost { code } => Err(*code),
+            State::Idle(_) => unreachable!("invariant: the first poll registered"),
         }
     }
 
@@ -66,10 +88,10 @@ impl<Idle, Live> Socket<Idle, Live> {
         Idle: AsFd,
         Live: AsFd,
     {
-        match self {
-            Self::Idle(idle) => Some(idle.as_fd()),
-            Self::Live { socket, .. } => Some(socket.as_fd()),
-            Self::Lost { .. } => None,
+        match &self.state {
+            State::Idle(idle) => Some(idle.as_fd()),
+            State::Live(socket) => Some(socket.as_fd()),
+            State::Lost { .. } => None,
         }
     }
 }
@@ -87,7 +109,7 @@ mod tests {
 
     #[test]
     fn a_failed_registration_gives_its_code_on_each_poll() {
-        let mut socket: Socket<(), ()> = Socket::Idle(());
+        let mut socket: Socket<(), ()> = Socket::new(());
         let failed =
             |()| Err(io::Error::from_raw_os_error(Errno::MFILE.raw_os_error()));
         assert_eq!(socket.live("stream", failed), Err(Errno::MFILE));
@@ -97,14 +119,14 @@ mod tests {
 
     #[test]
     fn a_failure_with_no_os_code_is_eio() {
-        let mut socket: Socket<(), ()> = Socket::Idle(());
+        let mut socket: Socket<(), ()> = Socket::new(());
         let failed = |()| Err(io::Error::other("no code"));
         assert_eq!(socket.live("stream", failed), Err(Errno::IO));
     }
 
     #[test]
     fn a_lost_socket_has_no_descriptor() {
-        let mut socket: Socket<OwnedFd, OwnedFd> = Socket::Idle(dup_stdin());
+        let mut socket: Socket<OwnedFd, OwnedFd> = Socket::new(dup_stdin());
         assert!(socket.fd().is_some());
         let failed = |_| Err(io::Error::from_raw_os_error(Errno::MFILE.raw_os_error()));
         let lost = socket.live("stream", failed).map(|_| ());
@@ -114,7 +136,7 @@ mod tests {
 
     #[test]
     fn a_registration_runs_once() {
-        let mut socket: Socket<u8, u8> = Socket::Idle(3);
+        let mut socket: Socket<u8, u8> = Socket::new(3);
         assert_eq!(socket.live("stream", |n| Ok(n + 1)), Ok(&mut 4));
         let again = |_| unreachable!("a live socket registers no second time");
         assert_eq!(socket.live("stream", again), Ok(&mut 4));
