@@ -3,10 +3,9 @@ use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 
-use connector::cancel;
-use connector::kind::{self, Channels, Context, Table};
+use connector::kind::Table;
 use document::diagnostic::{Code, Diagnostic, Note};
-use document::{Document, Position, Source, Span};
+use document::{Position, Source, Span};
 use spec::channel::{self, Channel, Data};
 use spec::data_type::DataType;
 use spec::definition::Definition;
@@ -16,73 +15,9 @@ use types::name::Name;
 use types::sample;
 
 use super::{Output, plan};
+use crate::common::{PLANT, Reader, SITE, files, front_ends, hcl, name, placed_site};
 use crate::error::Error;
 use crate::front_end::{self, File, FrontEnd};
-
-const PLANT: &str = include_str!("../../../acceptance/tests/it/fixtures/plant.hcl");
-const SITE: &str = include_str!("../../../acceptance/tests/it/fixtures/site.hcl");
-
-/// A kind whose channels are the labels of its `read` blocks, which it writes. It takes
-/// each attribute, so it stands in for each kind of the fixtures.
-struct Reader;
-
-impl kind::Kind for Reader {
-    type Config = Vec<Name>;
-
-    fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
-        let reads = config
-            .blocks
-            .iter()
-            .filter(|block| &*block.keyword == "read");
-        Ok(reads
-            .map(|block| block.labels[0].text.parse().expect("a name"))
-            .collect())
-    }
-
-    fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
-        Ok(Channels {
-            reads: Vec::new(),
-            writes: writes.clone(),
-        })
-    }
-
-    fn discover(
-        &self,
-        _: &cancel::Token,
-    ) -> impl Future<Output = Result<Vec<Document>, kind::Error>> {
-        std::future::ready(Ok(Vec::new()))
-    }
-
-    fn run(
-        &self,
-        _: Context<Vec<Name>>,
-    ) -> impl Future<Output = Result<(), kind::Error>> {
-        std::future::ready(Ok(()))
-    }
-}
-
-fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
-    config_hcl::read(source, text)
-        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
-}
-
-fn front_ends() -> BTreeMap<&'static str, FrontEnd> {
-    BTreeMap::from([("hcl", FrontEnd { read: hcl })])
-}
-
-fn name(text: &str) -> Name {
-    text.parse().expect("a name")
-}
-
-fn files(files: &[(&str, &str)]) -> Vec<File> {
-    files
-        .iter()
-        .map(|(path, text)| File {
-            path: PathBuf::from(path),
-            text: (*text).to_owned(),
-        })
-        .collect()
-}
 
 fn empty() -> spec::Pointer {
     spec::Pointer {
@@ -105,6 +40,7 @@ fn run(
         &front_ends(),
         &kinds,
     )
+    .map(|(output, _)| output)
 }
 
 fn problems(texts: &[(&str, &str)]) -> Error {
@@ -120,11 +56,6 @@ fn channel(key: u128, kind: channel::Kind) -> Definition {
         key: Key::from_u128(key),
         kind,
     })
-}
-
-/// `site.hcl` with a placement that homes its index on `edge`.
-fn placed_site() -> String {
-    format!("{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n")
 }
 
 const INDEX: channel::Kind = channel::Kind::Index {
@@ -531,7 +462,7 @@ fn gives_the_exact_path_in_the_json_of_a_place() {
 fn picks_the_front_end_by_the_text_after_the_last_dot() {
     let placed = placed_site();
     let planned = run(&[("site.v2.hcl", &placed)], &BTreeMap::new()).expect("a plan");
-    assert_eq!(planned.added, 3);
+    assert_eq!(planned.counts.added, 3);
 }
 
 #[test]
@@ -581,6 +512,36 @@ fix: Rename the file to a UTF-8 name
 
 error[ops.path-not-utf8]: the path \"a\\xFF.yaml\" is not UTF-8
 fix: Rename the file to a UTF-8 name
+"
+    );
+}
+
+#[test]
+fn gives_a_path_that_is_not_utf8_in_file_order_with_the_other_problems() {
+    let mut files = files(&[("a.hcl", "channel {\n"), ("a.txt", "")]);
+    files.insert(1, bytes(&[b"a\xff.hcl"], "").remove(0));
+    let error = plan(
+        &files,
+        empty(),
+        &BTreeMap::new(),
+        &BTreeSet::new(),
+        &front_ends(),
+        &Table::new(),
+    )
+    .expect_err("problems");
+    assert_eq!(
+        error.text(),
+        "\
+error[hcl.syntax]: the file needs a key, a block, or the end of the body here
+  --> a.hcl:2:1
+fix: Write it here, or correct the text here or before it
+
+error[ops.path-not-utf8]: the path \"a\\xFF.hcl\" is not UTF-8
+fix: Rename the file to a UTF-8 name
+
+error[ops.unknown-extension]: no config syntax reads this file
+  --> a.txt:1:1
+fix: Use a file that ends in `.hcl`
 "
     );
 }

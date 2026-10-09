@@ -1197,15 +1197,21 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 name = "ops"
 version = "0.0.0"
 dependencies = [
+ "blob",
+ "block",
  "clap",
  "config",
  "config-hcl",
  "connector",
  "document",
+ "env",
+ "mesh",
  "schemars",
  "serde",
  "serde_json",
+ "sim",
  "spec",
+ "transport",
  "types",
 ]
 
@@ -1219,6 +1225,7 @@ dependencies = [
  "env",
  "getrandom 0.4.3",
  "libc",
+ "noq-udp",
  "os",
  "proptest",
  "rustix",

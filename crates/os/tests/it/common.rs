@@ -22,12 +22,57 @@ pub(crate) fn panicked(name: &str) -> Result<(), Panicked> {
     Err(Panicked { name: name.into() })
 }
 
+/// Runs `child` in a new process of this test binary that runs only the calling test,
+/// and asserts that the process aborts at a panic that unwinds into the unwind of
+/// another panic.
+pub(crate) fn assert_aborts(child: impl FnOnce()) {
+    use std::os::unix::process::ExitStatusExt;
+    const CHILD: &str = "OS_IT_CHILD";
+    const SIGABRT: i32 = 6;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the parent sets it for the child"
+    )]
+    if std::env::var_os(CHILD).is_some() {
+        child();
+        return;
+    }
+    let thread = std::thread::current();
+    let test = thread.name().expect("invariant: libtest names the thread");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.signal(), Some(SIGABRT), "{stderr}");
+    assert!(
+        stderr.contains("panic in a destructor during cleanup"),
+        "{stderr}"
+    );
+}
+
 /// Panics when it drops.
 pub(crate) struct Bomb;
 
 impl Drop for Bomb {
     fn drop(&mut self) {
         panic!("bomb");
+    }
+}
+
+/// A future that panics when it drops, and in its poll when `faulty`.
+pub(crate) struct Armed {
+    pub(crate) faulty: bool,
+    pub(crate) _bomb: Bomb,
+}
+
+impl Future for Armed {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
+        assert!(!self.faulty, "body");
+        Poll::Ready(())
     }
 }
 

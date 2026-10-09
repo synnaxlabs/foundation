@@ -5,6 +5,7 @@
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -31,7 +32,7 @@ fn options() -> tcp::Options {
     tcp::Options {
         send_buffer_bytes: 1 << 16,
         recv_buffer_bytes: 1 << 16,
-        unsent_bytes_max: 1 << 14,
+        unsent_bytes_max: NonZeroUsize::new(1 << 14).expect("invariant: 2^14 is not 0"),
         delayed: false,
     }
 }
