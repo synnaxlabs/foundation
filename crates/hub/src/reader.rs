@@ -160,7 +160,7 @@ pub enum Error {
     /// The reader is named and the node has no mesh time yet. Open it again later.
     Unsynced,
     /// The reader is named, and the home of its index is `home`, another node. A named
-    /// reader opens only at this node's home until it can open across nodes.
+    /// reader opens only at the home of its index.
     Remote {
         /// The home.
         home: types::node::Key,
@@ -193,8 +193,8 @@ impl fmt::Display for Error {
             ),
             Self::Remote { home } => write!(
                 f,
-                "the home of the index of the named reader is node {home}, and a named \
-                 reader opens only at this node"
+                "the home of the index of the reader is node {home}, and a named reader \
+                 opens only at this node"
             ),
             Self::Mesh(stopped) => write!(f, "the mesh stopped: {stopped}"),
             Self::Transport(error) => {

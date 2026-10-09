@@ -279,3 +279,16 @@
   would compute the midpoint again, and a change of the home's rule would make its
   stamps `Ahead`. Connector time sync adds what it needs with its own caller. Lost: a
   writer that stamps the frame, because only the caller knows when it read each sample.
+  A reader opens from `hub::reader::Config { select, mode, subject, name, hold }`: it
+  reads each channel whose name `select` matches at the open, which share one index, or
+  the open gives `ManyIndexes` with the least matched name and the least name on
+  another index. A named reader has one session for each subject and name at the home
+  of its index: a later open takes over the session, which ends with
+  `Ended::Replaced`. A named open before mesh time gives `Unsynced`. A hold on an
+  unnamed or latest reader panics (#1742 plan:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). A
+  named reader whose index has its home at another node gives
+  `reader::Error::Remote { home }` (`laptop.architect`, 2026-10-09T19:33:23Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6087879895).
+  Trigger: #1155 removes `reader::Error::Remote` when a named reader opens across
+  nodes.
