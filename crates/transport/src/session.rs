@@ -43,20 +43,9 @@ impl Session {
         Weak(Rc::downgrade(&self.0))
     }
 
-    /// Whether the session is open: no caller closed it, and it has not ended.
-    pub(crate) fn live(&self) -> bool {
-        self.0.live()
-    }
-
-    /// Pings the peer, and gives a future that completes when the peer acknowledges
-    /// the ping or a later packet. The future does not keep the session open.
-    ///
-    /// # Errors
-    ///
-    /// Why the session ended, as [`Session::closed`] gives it, and
-    /// [`Error::Closed`] with `Code(0)` once the session dropped.
-    pub(crate) fn ping(&self) -> impl Future<Output = Result<(), Error>> + use<> {
-        self.0.ping()
+    /// The carrier's session under this one.
+    pub(crate) fn quic(&self) -> &quic::Session {
+        &self.0
     }
 
     /// Who is on the other end.

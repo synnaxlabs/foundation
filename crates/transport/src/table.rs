@@ -231,7 +231,7 @@ impl Table {
         let Peer::Node(node) = session.peer() else {
             return Some(session);
         };
-        if !session.live() {
+        if !session.quic().live() {
             return Some(session);
         }
         let lower = self.key < node;
@@ -264,7 +264,7 @@ impl Table {
     /// session wins.
     fn prove(&self, node: PublicKey, open: &Session, mut held: session::Weak) {
         let this = rc::Weak::clone(&self.this);
-        let mut ping = open.ping();
+        let mut ping = open.quic().ping();
         self.tasks.spawn(async move {
             loop {
                 // An error needs no case: the pinged session is then not open.
@@ -279,7 +279,7 @@ impl Table {
                 let open = entry.session.open();
                 if let (Some(session), Some(open)) = (newer, &open) {
                     held = session.downgrade();
-                    ping = open.ping();
+                    ping = open.quic().ping();
                     continue;
                 }
                 entry.proving = false;
@@ -305,7 +305,7 @@ impl Table {
         if entry.dial.is_some() {
             return None;
         }
-        let held = entry.held.take().filter(Session::live)?;
+        let held = entry.held.take().filter(|held| held.quic().live())?;
         entry.replace(&held, false);
         self.push(held.clone());
         Some(held)
@@ -1230,7 +1230,7 @@ mod tests {
             node.clock()
                 .sleep(testing::spans(Span::MILLISECOND, 40))
                 .await;
-            assert!(!won.live());
+            assert!(!won.quic().live());
             let third = sessions.borrow_mut().pop().expect("the third session");
             third.close(Code(8));
             linger(&node).await;
@@ -1440,7 +1440,7 @@ mod tests {
             node.clock()
                 .sleep(testing::spans(Span::MILLISECOND, 100))
                 .await;
-            assert!(dialed.live(), "{:?}", dialed.closed().await);
+            assert!(dialed.quic().live(), "{:?}", dialed.closed().await);
             linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
@@ -1472,7 +1472,7 @@ mod tests {
             node.clock()
                 .sleep(testing::spans(Span::MILLISECOND, 100))
                 .await;
-            assert!(dialed.live(), "{:?}", dialed.closed().await);
+            assert!(dialed.quic().live(), "{:?}", dialed.closed().await);
             linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
@@ -1838,7 +1838,7 @@ mod tests {
             node.clock()
                 .sleep(testing::spans(Span::MILLISECOND, 100))
                 .await;
-            assert!(dialed.live(), "{:?}", dialed.closed().await);
+            assert!(dialed.quic().live(), "{:?}", dialed.closed().await);
             linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
