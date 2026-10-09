@@ -138,6 +138,12 @@ impl Handle {
         Ok(())
     }
 
+    /// How many wakers wait in `poll_accept`.
+    #[cfg(test)]
+    pub(crate) fn accept_wakers(&self) -> usize {
+        self.0.borrow().accepting.len()
+    }
+
     /// The next session that a peer dialed and that no accept took, without a wait.
     pub(crate) fn accepted(&self) -> Option<Session> {
         let key = self.0.borrow_mut().accepted.as_mut()?.pop_front()?;

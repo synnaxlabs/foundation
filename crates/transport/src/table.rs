@@ -100,10 +100,11 @@ pub(crate) async fn dial(
             let started = Rc::clone(&attempt);
             table.tasks.spawn(async move {
                 let mut dial = pin!(dial::dial(&carrier, node, &addresses));
-                // A session from the peer that ends the attempt drops the dial.
+                // A session from the peer that ends the attempt drops the dial. The
+                // take task can run after this one in the instant that both connect.
                 let dialed = poll_fn(|cx| {
                     if let Some(table) = this.upgrade() {
-                        table.borrow_mut().poll_take(cx);
+                        table.borrow_mut().take();
                     }
                     if started.poll(cx).is_ready() {
                         return Poll::Ready(None);
@@ -147,13 +148,14 @@ pub(crate) async fn accept(table: &RefCell<Table>) -> Result<Session, Error> {
 
 impl Table {
     /// An empty table for the node `key`, which dials and accepts on `carrier`, and
-    /// runs its dials and pings on `tasks`.
+    /// runs its dials and pings on `tasks`. A task on `tasks` takes each session
+    /// that a peer opens as it comes.
     pub(crate) fn new(
         key: PublicKey,
         tasks: Tasks,
         carrier: quic::Handle,
     ) -> Rc<RefCell<Self>> {
-        Rc::new_cyclic(|this| {
+        let table = Rc::new_cyclic(|this| {
             RefCell::new(Self {
                 key,
                 tasks,
@@ -164,7 +166,16 @@ impl Table {
                 ready: VecDeque::new(),
                 accepting: Vec::new(),
             })
-        })
+        });
+        let this = Rc::downgrade(&table);
+        table.borrow().tasks.spawn(async move {
+            poll_fn(|cx| match this.upgrade() {
+                Some(table) => table.borrow_mut().poll_take(cx),
+                None => Poll::Ready(()),
+            })
+            .await;
+        });
+        table
     }
 
     /// The open session to `node`, or else the dial that runs for it, or else a new
@@ -221,12 +232,14 @@ impl Table {
     }
 
     /// As [`Table::take`], and wakes `cx` when the next session waits in the carrier.
-    fn poll_take(&mut self, cx: &Context<'_>) {
-        while let Poll::Ready(Ok(session)) = self.carrier.poll_accept(cx) {
+    /// Ready when the socket broke, which `accept` gives from the carrier.
+    fn poll_take(&mut self, cx: &Context<'_>) -> Poll<()> {
+        while let Ok(session) = ready!(self.carrier.poll_accept(cx)) {
             if let Some(session) = self.arrive(Session::new(session)) {
                 self.push(session);
             }
         }
+        Poll::Ready(())
     }
 
     /// Takes `session`, which a peer dialed, and gives it back when it goes to
@@ -1368,6 +1381,23 @@ mod tests {
             let dialed = transport.dial(SERVER.public(), &slow).await;
             let dialed = dialed.expect("the server's session");
             assert_eq!(dialed.closed().await, Error::PeerClosed { code: Code(1) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // Only a session from a peer empties the carrier's accept wakers, so a dial
+    // task that waits there leaves its waker after it ends.
+    #[test]
+    fn dials_with_no_session_from_a_peer_keep_no_wakers_in_the_carrier() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let dead = dead(&server);
+        testing::transport(&client, CLIENT, move |transport, _| async move {
+            for _ in 0..50 {
+                let dialed = transport.dial(SERVER.public(), &dead).await;
+                assert!(dialed.is_err());
+            }
+            let wakers = transport.table.borrow().carrier.accept_wakers();
+            assert_eq!(wakers, 1, "only the task that takes sessions waits");
         });
         assert_eq!(sim.run(), Ok(()));
     }
