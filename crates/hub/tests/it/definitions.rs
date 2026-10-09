@@ -1,7 +1,9 @@
 //! What a call of `set_definitions` does to the sessions on each channel.
 
+use std::path::Path as FilePath;
 use std::pin::pin;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 
 use hub::home::Outcome;
 use hub::reader::{self, Ended, Mode};
@@ -12,8 +14,8 @@ use types::frame::{Form, Range};
 use types::sample::{Scalar, Type};
 
 use super::{
-    I64, LIVE, applied, channels, config, definition, entry, name, poll_flagged,
-    poll_once, run, samples, without, write, write_series, written,
+    I64, LIVE, RING, SETTLE, applied, channels, config, definition, entry, name,
+    poll_flagged, poll_once, run, samples, without, write, write_series, written,
 };
 
 const I32: Type = Type::Scalar(Scalar::I32);
@@ -304,4 +306,44 @@ fn gives_a_latest_reader_no_series_of_a_channel_that_moved_away_and_back() {
         let mut reader = test.reader(&["value"], Mode::Latest).await;
         assert!(poll_once(reader.next()).is_pending(), "no frame waits");
     });
+}
+
+/// The ring bytes after 8 writers on `value` open and then end: by a removal of
+/// `value` when `removed`, else by drops in open order.
+fn ring_after_writers_end(removed: bool) -> Vec<u8> {
+    let ring = Arc::new(Mutex::new(Vec::new()));
+    let out = Arc::clone(&ring);
+    run(34, move |test| async move {
+        let mut writers = Vec::new();
+        for n in 0..8 {
+            writers.push(test.writer(&format!("w{n}"), &["value"]).await);
+        }
+        test.clock.sleep(SETTLE).await;
+        if removed {
+            test.hub.set_definitions(&without(&["value"]));
+        } else {
+            writers.into_iter().for_each(drop);
+        }
+        test.clock.sleep(SETTLE).await;
+        let file = test
+            .node
+            .files()
+            .open(FilePath::new(RING), env::files::Mode::Read)
+            .await
+            .expect("opens");
+        let block = test.pool.alloc(1 << 16).expect("a block");
+        let read = file.read_at(0, block).await.expect("reads");
+        *out.lock().expect("not poisoned") = read.to_vec();
+    });
+    Arc::try_unwrap(ring)
+        .expect("the run ended")
+        .into_inner()
+        .expect("not poisoned")
+}
+
+#[test]
+fn closes_the_writers_of_a_removal_in_open_order() {
+    let (removal, drops) =
+        (ring_after_writers_end(true), ring_after_writers_end(false));
+    assert!(removal == drops, "the handoff records differ");
 }
