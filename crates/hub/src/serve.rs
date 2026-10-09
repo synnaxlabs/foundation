@@ -8,7 +8,7 @@ use std::fmt;
 use std::future::poll_fn;
 use std::pin::pin;
 use std::rc::Rc;
-use std::task::Poll;
+use std::task::{Context, Poll};
 
 use block::{Block, Unique};
 use transport::stream::{Incoming, Part, Receiver, Sender};
@@ -310,10 +310,10 @@ async fn open(
     if class != wanted {
         return Err(Error::Class(class));
     }
-    let pending = Pending::new(state);
-    let (mut keys, mut index) = (Vec::new(), None);
+    let mut opening = Opening::new(state);
+    let mut keys = Vec::new();
     loop {
-        let Some(message) = receiver.recv().await? else {
+        let Some(message) = opening.recv(receiver).await? else {
             return Ok(None);
         };
         let FromReader::Keys { keys: run, last } = home.decode(&message)? else {
@@ -321,13 +321,13 @@ async fn open(
         };
         let start = keys.len();
         keys.extend(run);
-        pending.check(&keys[start..], &mut index)?;
+        opening.check(&keys[start..])?;
         if last {
             break;
         }
     }
-    let at = position(&keys, index)?;
-    let Some(granted) = wait_for(&pending, keys[at], home, receiver).await? else {
+    let at = opening.position(&keys)?;
+    let Some(granted) = wait_for(&opening, home, receiver).await? else {
         return Ok(None);
     };
     let slots = state.borrow_mut().slots(keys[at], &keys);
@@ -358,25 +358,17 @@ async fn open(
     }))
 }
 
-/// The position of `index` in `keys`.
-fn position(
-    keys: &[channel::Key],
-    index: Option<channel::Key>,
-) -> Result<usize, Error> {
-    index
-        .and_then(|index| keys.iter().position(|&key| key == index))
-        .ok_or(Error::NoIndex)
-}
-
 /// A served open from its first key to its session, which a removal of a channel that
 /// it checked ends.
-struct Pending<'s> {
+struct Opening<'s> {
     state: &'s Rc<RefCell<State>>,
     key: u64,
     removal: Removal,
+    /// The index of the keys checked, which the first key sets.
+    index: Option<channel::Key>,
 }
 
-impl<'s> Pending<'s> {
+impl<'s> Opening<'s> {
     fn new(state: &'s Rc<RefCell<State>>) -> Self {
         let mut borrowed = state.borrow_mut();
         let key = borrowed.opened;
@@ -387,28 +379,39 @@ impl<'s> Pending<'s> {
             state,
             key,
             removal,
+            index: None,
         }
     }
 
-    /// Fails with the first channel of the open that a call removed.
-    fn removed(&self) -> Result<(), Error> {
-        self.removal
-            .get()
-            .map_or(Ok(()), |key| Err(Error::Removed(key)))
+    /// Fails with the first channel of the open that a call removed. Else sets the
+    /// waker that such a call wakes.
+    fn watch(&self, cx: &Context<'_>) -> Result<(), Error> {
+        if let Some(key) = self.removal.get() {
+            return Err(Error::Removed(key));
+        }
+        let mut state = self.state.borrow_mut();
+        state.waiting.insert(self.key, cx.waker().clone());
+        Ok(())
     }
 
-    /// Checks that each of `keys` is known and on `index`, which the first key sets
-    /// when it is `None`, and adds them to the channels of the open.
-    fn check(
-        &self,
-        keys: &[channel::Key],
-        index: &mut Option<channel::Key>,
-    ) -> Result<(), Error> {
-        self.removed()?;
+    /// Reads the next message of the peer. Fails at once when a call removes a
+    /// channel of the open.
+    async fn recv(&self, receiver: &mut Receiver) -> Result<Option<Block>, Error> {
+        let mut recv = pin!(receiver.recv());
+        poll_fn(|cx| {
+            self.watch(cx)?;
+            recv.as_mut().poll(cx).map_err(Error::from)
+        })
+        .await
+    }
+
+    /// Checks that each of `keys` is known and on the index of the open, and adds them
+    /// to the channels of the open.
+    fn check(&mut self, keys: &[channel::Key]) -> Result<(), Error> {
         let mut state = self.state.borrow_mut();
         for &key in keys {
             let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
-            if *index.get_or_insert(of) != of {
+            if *self.index.get_or_insert(of) != of {
                 return Err(Error::ManyIndexes);
             }
         }
@@ -416,22 +419,31 @@ impl<'s> Pending<'s> {
         Ok(())
     }
 
-    /// Waits until the mesh names this node the home of `index`. Fails at once when a
-    /// call removes a channel of the open.
-    async fn home(&self, index: channel::Key) -> Result<(), Error> {
+    /// The position of the index of the open in `keys`, the keys it checked.
+    fn position(&self, keys: &[channel::Key]) -> Result<usize, Error> {
+        self.index
+            .and_then(|index| keys.iter().position(|&key| key == index))
+            .ok_or(Error::NoIndex)
+    }
+
+    /// Waits until the mesh names this node the home of the index. Fails at once when
+    /// a call removes a channel of the open.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the open checked no key.
+    async fn home(&self) -> Result<(), Error> {
+        let index = self.index.expect("invariant: the open checked a key");
         let mut homed = pin!(crate::home(self.state, index));
         poll_fn(|cx| {
-            self.removed()?;
-            let mut state = self.state.borrow_mut();
-            state.waiting.insert(self.key, cx.waker().clone());
-            drop(state);
+            self.watch(cx)?;
             homed.as_mut().poll(cx).map_err(Error::from)
         })
         .await
     }
 }
 
-impl Drop for Pending<'_> {
+impl Drop for Opening<'_> {
     fn drop(&mut self) {
         let mut state = self.state.borrow_mut();
         state.opens.remove(self.key);
@@ -439,16 +451,16 @@ impl Drop for Pending<'_> {
     }
 }
 
-/// Waits until the mesh names this node the home of `index`, and reads the peer
-/// meanwhile. Gives the highest grant that the peer sent, 0 for none, or `None` when
-/// the peer finished first. Fails at once when a call removes a channel of `pending`.
+/// Waits until the mesh names this node the home of the index of `opening`, and reads
+/// the peer meanwhile. Gives the highest grant that the peer sent, 0 for none, or
+/// `None` when the peer finished first. Fails at once when a call removes a channel of
+/// `opening`.
 async fn wait_for(
-    pending: &Pending<'_>,
-    index: channel::Key,
+    opening: &Opening<'_>,
     home: &mut Home,
     receiver: &mut Receiver,
 ) -> Result<Option<u64>, Error> {
-    let mut homed = pin!(pending.home(index));
+    let mut homed = pin!(opening.home());
     let mut granted = 0;
     loop {
         let mut recv = pin!(receiver.recv());
@@ -616,12 +628,18 @@ impl Cut {
     }
 }
 
+#[cfg(test)]
+#[path = "../tests/common/shard.rs"]
+#[expect(dead_code, reason = "the tests use only the shard")]
+mod shard;
+
 // These tests call the private `head`, `runs`, and `Cut::next`, so each case of the
 // pure parts has a test; the tests through `Link::serve` check them on the wire.
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
     use std::sync::Arc;
+    use std::task::Waker;
 
     use types::frame::key_set::{Group, Interner};
     use types::frame::{Draft, Form, Path};
@@ -630,6 +648,37 @@ mod tests {
     use super::*;
 
     const I64: Type = Type::Scalar(Scalar::I64);
+
+    /// An open leaves no entry in the hub once it drops, also when it set its waker.
+    #[test]
+    fn an_open_keeps_no_entry_once_it_drops() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let ran = sim.run_on(&node, |node, tasks| async move {
+            let (home, interner, _, time) =
+                super::shard::shard(&node, tasks.clone()).await;
+            let hub = crate::Hub::new(crate::Config {
+                home,
+                interner,
+                tasks,
+                node: types::node::Key::from_u128(1),
+                time,
+                entropy: node.entropy(),
+                mesh: None,
+            });
+            let entries = || {
+                let state = hub.0.borrow();
+                (state.opens.0.len(), state.waiting.len())
+            };
+            let opening = Opening::new(&hub.0);
+            let cx = Context::from_waker(Waker::noop());
+            assert_eq!(opening.watch(&cx), Ok(()));
+            assert_eq!(entries(), (1, 1));
+            drop(opening);
+            assert_eq!(entries(), (0, 0));
+        });
+        assert_eq!(ran, Ok(()));
+    }
 
     fn key(key: u128) -> channel::Key {
         channel::Key::from_u128(key)

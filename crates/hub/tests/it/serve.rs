@@ -446,9 +446,9 @@ fn stops_an_open_session_with_unknown_when_its_channel_is_removed() {
     );
 }
 
-/// Opens `[value, time]` in two messages of the keys run, `SETTLE` twice apart, and
-/// waits for the stop with `UNKNOWN`.
-async fn open_in_two_messages(mut peer: Peer) {
+/// Sends the open of `[value, time]` and only the first message of its keys run,
+/// which holds `value`, and waits for the stop with `UNKNOWN`.
+async fn open_first_of_two(mut peer: Peer) {
     let open = Open {
         mode: Mode::Complete {
             limit_bytes: 1 << 20,
@@ -458,20 +458,17 @@ async fn open_in_two_messages(mut peer: Peer) {
     let mut out = vec![0; open.encoded_len()];
     open.encode(&mut out);
     peer.send(&out).await.expect("sends the open");
-    for key in [2, 1] {
-        let mut out = vec![0; keys::LEN];
-        keys::encode(&[channel::Key::from_u128(key)], &mut out);
-        peer.send(&out).await.expect("sends a key");
-        peer.sleep(SETTLE).await;
-        peer.sleep(SETTLE).await;
-    }
+    let mut out = vec![0; keys::LEN];
+    keys::encode(&[channel::Key::from_u128(2)], &mut out);
+    peer.send(&out).await.expect("sends a key");
     stopped_as_unknown(&mut peer).await;
 }
 
-/// The removal comes after the home checked the first message of the keys run.
+/// The removal comes after the home checked the first message of the keys run, and
+/// ends the open while it waits for the second.
 #[test]
 fn stops_an_open_whose_keys_run_spans_a_removal_with_unknown() {
-    let served = removed(71, open_in_two_messages);
+    let served = removed(71, open_first_of_two);
     let removed = serve::Error::Removed(channel::Key::from_u128(2));
     assert_eq!(served, Some(Err(removed)));
 }
@@ -484,18 +481,18 @@ fn stops_an_open_whose_keys_run_spans_a_removal_undone_with_unknown() {
         hub.set_definitions(&without(&["value"]));
         hub.set_definitions(&channels());
     };
-    let served = changed(81, change, open_in_two_messages);
+    let served = changed(81, change, open_first_of_two);
     let removed = serve::Error::Removed(channel::Key::from_u128(2));
     assert_eq!(served, Some(Err(removed)));
 }
 
-/// The open reads its removal before it checks `time`, which the call also removed.
+/// The open names the first of its channels that the call removed.
 #[test]
 fn stops_an_open_whose_keys_run_spans_a_removal_of_its_later_key_with_the_first() {
     let change = |hub: &hub::Hub| {
         hub.set_definitions(&without(&["time", "value", "value-c"]));
     };
-    let served = changed(82, change, open_in_two_messages);
+    let served = changed(82, change, open_first_of_two);
     let removed = serve::Error::Removed(channel::Key::from_u128(2));
     assert_eq!(served, Some(Err(removed)));
 }
@@ -658,32 +655,6 @@ fn finishes_when_the_peer_finishes_while_the_open_waits_for_a_home() {
     assert_eq!(served, Some(Ok(())));
 }
 
-/// An open that ends while it waits for a home leaves no entry in the hub.
-#[test]
-fn keeps_no_open_that_ended_while_it_waited_for_a_home() {
-    let home = |test: Test, link: Link, incoming| async move {
-        assert_eq!(serve(&link, incoming).await, Ok(()));
-        let state = format!("{:?}", test.hub);
-        assert!(
-            state.contains("opens: Sessions({}), waiting: {}"),
-            "{state}"
-        );
-    };
-    session_in(
-        83,
-        Class::Complete,
-        false,
-        true,
-        home,
-        |mut peer| async move {
-            peer.open(Mode::Complete { limit_bytes: 0 }, &[1, 2]).await;
-            peer.sleep(SETTLE).await;
-            peer.sender.finish().expect("finishes");
-            assert_eq!(peer.recv().await, Ok(None));
-        },
-    );
-}
-
 #[test]
 fn ends_with_the_error_of_the_stream_when_the_peer_resets_it_while_the_open_waits_for_a_home()
  {
@@ -742,7 +713,7 @@ fn keeps_the_highest_credit_sent_while_the_open_waits_for_a_home() {
 /// `time`, while the home calls `change` once `SETTLE` passes and then names this node
 /// the home. Gives what `serve` returned.
 fn changed_homeless(
-    seed: u64,
+    n: u64,
     change: impl FnOnce(&hub::Hub) + Send + 'static,
 ) -> Option<Result<(), serve::Error>> {
     let result = Arc::new(Mutex::new(None));
@@ -757,17 +728,10 @@ fn changed_homeless(
         });
         *kept.lock().expect("not poisoned") = Some(serve(&link, incoming).await);
     };
-    session_in(
-        seed,
-        Class::Latest,
-        false,
-        true,
-        home,
-        |mut peer| async move {
-            peer.open(Mode::Latest, &[2, 1]).await;
-            stopped_as_unknown(&mut peer).await;
-        },
-    );
+    session_in(n, Class::Latest, false, true, home, |mut peer| async move {
+        peer.open(Mode::Latest, &[2, 1]).await;
+        stopped_as_unknown(&mut peer).await;
+    });
     result.lock().expect("not poisoned").take()
 }
 

@@ -91,7 +91,7 @@ struct State {
     wakers: hash::Map<::home::reader::Key, Waker>,
     /// Each served open from its first key to its session, by a key from `opened`.
     opens: Sessions<u64>,
-    /// The waker of each open in `opens` that waits for its home.
+    /// The waker of each open in `opens`.
     waiting: hash::Map<u64, Waker>,
     /// The count of served opens.
     opened: u64,
@@ -263,8 +263,8 @@ fn checked<'d>(
     named
 }
 
-/// The open sessions of one kind, by home key, with the channels of each. A session
-/// is open while it is here.
+/// The open sessions of one kind, by key, with the channels of each. A session is
+/// open while it is here.
 #[derive(Debug)]
 struct Sessions<K>(hash::Map<K, Open>);
 
@@ -302,7 +302,7 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
             removal: removal.clone(),
         };
         let added = self.0.insert(key, open);
-        assert!(added.is_none(), "invariant: the home gives each key once");
+        assert!(added.is_none(), "invariant: each key is added once");
         removal
     }
 
@@ -482,8 +482,8 @@ enum Away {
 }
 
 /// Waits until the mesh names this node the home of `index`. With no mesh, this node
-/// is the home. It changes no state, so the caller checks its channels again after
-/// it, then carries `index` with no `await` between.
+/// is the home. It changes no state, so the caller checks its channels again, or reads
+/// its removal, after it, then carries `index` with no `await` between.
 async fn home(
     state: &Rc<RefCell<State>>,
     index: types::channel::Key,
