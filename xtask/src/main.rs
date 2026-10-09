@@ -17,7 +17,7 @@ mod select;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, Output};
 
 use serde_json::Value;
 
@@ -164,12 +164,40 @@ impl Nightly {
     /// A command that runs cargo of this toolchain through rustup, at the workspace
     /// root.
     fn cargo(&self) -> Command {
+        self.tool("cargo")
+    }
+
+    /// The host triple of this toolchain, or the error of `rustc -vV`.
+    fn host(&self) -> Result<String, String> {
+        let output = self
+            .tool("rustc")
+            .arg("-vV")
+            .output()
+            .map_err(|e| format!("rustup: {e}"))?;
+        host(&output)
+    }
+
+    /// A command that runs `tool` of this toolchain through rustup, at the workspace
+    /// root.
+    fn tool(&self, tool: &str) -> Command {
         let mut command = Command::new("rustup");
         command
             .current_dir(&self.root)
-            .args(["run", &self.pin, "cargo"]);
+            .args(["run", &self.pin, tool]);
         command
     }
+}
+
+/// The host triple in `output`, from `rustc -vV`, or its stderr when it failed.
+fn host(output: &Output) -> Result<String, String> {
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).into_owned());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .map(str::to_string)
+        .ok_or_else(|| format!("`rustc -vV` gives no host: {text}"))
 }
 
 /// The toolchain in `rust-toolchain-nightly` of the workspace at `root`.
@@ -196,6 +224,17 @@ fn fixture() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture")
 }
 
+/// An output of a process that exits with `code`.
+#[cfg(test)]
+fn output(code: i32, stdout: &str, stderr: &str) -> Output {
+    use std::os::unix::process::ExitStatusExt;
+    Output {
+        status: std::process::ExitStatus::from_raw(code << 8),
+        stdout: stdout.into(),
+        stderr: stderr.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +258,48 @@ mod tests {
                 root.join("rust-toolchain-nightly").display()
             ))
         );
+    }
+
+    #[test]
+    fn host_reads_the_host_of_rustc() {
+        let text = "rustc 1.93.0-nightly (abc 2026-10-01)\nbinary: rustc\n\
+                    host: x86_64-unknown-linux-gnu\nrelease: 1.93.0-nightly\n";
+        assert_eq!(
+            host(&output(0, text, "")),
+            Ok("x86_64-unknown-linux-gnu".into())
+        );
+        let text = "rustc 1.93.0-nightly\nrelease: 1.93.0\n";
+        assert_eq!(
+            host(&output(0, text, "")),
+            Err(format!("`rustc -vV` gives no host: {text}"))
+        );
+    }
+
+    #[test]
+    fn nightly_reads_the_host_of_the_pin() {
+        let root = std::env::temp_dir()
+            .join(format!("xtask-nightly-host-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let toolchain = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../rust-toolchain.toml"),
+        )
+        .unwrap();
+        let channel = toolchain
+            .lines()
+            .find_map(|line| line.strip_prefix("channel = "))
+            .unwrap()
+            .trim_matches('"');
+        std::fs::write(root.join("rust-toolchain-nightly"), channel).unwrap();
+        let host = nightly(&root).unwrap().host();
+        std::fs::remove_dir_all(&root).unwrap();
+        let host = host.unwrap();
+        assert!(host.starts_with(std::env::consts::ARCH), "{host}");
+    }
+
+    #[test]
+    fn host_names_the_error_of_rustc() {
+        let error = "error: toolchain 'nightly-x' is not installed\n";
+        assert_eq!(host(&output(1, "", error)), Err(error.to_string()));
     }
 
     #[test]
