@@ -6,6 +6,7 @@ mod build;
 mod cfg;
 mod field;
 mod files;
+mod fuzz;
 mod globals;
 mod map;
 mod miri;
@@ -33,12 +34,22 @@ fn main() -> ExitCode {
         ["oracles"] => oracles::check(root),
         [name @ ("loom" | "shuttle")] => cfg::test(root, name),
         ["miri"] => miri::run(root),
+        ["fuzz"] => fuzz::run(root, fuzz::SECONDS),
+        ["fuzz", seconds] => seconds
+            .parse()
+            .map_err(|e| {
+                vec![format!(
+                    "`{seconds}` is not a positive count of seconds: {e}"
+                )]
+            })
+            .and_then(|seconds| fuzz::run(root, seconds)),
         ["open62541"] => open62541::check(root),
         ["open62541", tag] => open62541::run(root, open62541::URL, tag),
         ["review", pr, head] => return review::run(root, pr, head),
         _ => {
             eprintln!(
                 "usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>\n       \
+                 cargo xtask fuzz [seconds]\n       \
                  cargo xtask open62541 [tag]\n       \
                  cargo xtask review <pr> <head sha>"
             );
