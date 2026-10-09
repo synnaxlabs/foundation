@@ -627,6 +627,19 @@ fn opens_no_writer_with_a_lease_of_zero() {
     });
 }
 
+/// A writer on an unknown channel fails before the node has mesh time.
+#[test]
+fn opens_no_writer_on_an_unknown_name_before_the_node_has_mesh_time() {
+    unsynced(10, |test| async move {
+        let Poll::Ready(opened) = poll_once(test.hub.writer(config("a", &["nothing"])))
+        else {
+            panic!("the open fails before mesh time");
+        };
+        let error = opened.expect_err("no channel is named nothing");
+        assert_eq!(error, writer::Error::Unknown(name("nothing")));
+    });
+}
+
 /// A writer that waits for mesh time finds a channel that a call removed meanwhile
 /// unknown.
 #[test]

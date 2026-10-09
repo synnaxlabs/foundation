@@ -157,12 +157,12 @@ impl Writer {
         if channels.is_empty() {
             return Err(Error::Empty);
         }
-        // Each mesh time reaches the first stamp. No `await` comes between the last
-        // home check and the carry.
-        let time = state.borrow().time.reach(Stamp::from_nanos(i64::MIN));
-        time.await;
         let (mut keys, groups) = loop {
             let (_, groups) = resolve(&state.borrow(), &channels)?;
+            // Each mesh time reaches the first stamp. Once the node has mesh time, it
+            // is ready at once.
+            let time = state.borrow().time.reach(Stamp::from_nanos(i64::MIN));
+            time.await;
             for (index, _) in &groups {
                 crate::home(state, *index).await?;
             }
