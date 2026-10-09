@@ -360,7 +360,10 @@ impl<'a> Package<'a> {
             }
         }
         if resolved.is_empty() {
-            return Err(format!("`{}` has no dependency named `{name}`", self.id));
+            return Err(format!(
+                "`{}` has no requirement that its edge `{name}` to `{}` resolves",
+                self.id, dependency.id
+            ));
         }
         Ok(resolved)
     }
@@ -835,15 +838,9 @@ mod tests {
     #[test]
     fn names_an_edge_that_no_requirement_names() {
         let fuzz = fuzz(&[types(), release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
-        assert_eq!(
-            unpatched(&root(), &fuzz),
-            Err(format!("`{TYPES}` has no dependency named `noq_proto`"))
-        );
+        assert_eq!(unpatched(&root(), &fuzz), Err(unresolved(&id("1.3.0"))));
         let copied = self::fuzz(&[types(), copy()], &[(TYPES, PATCHED)]);
-        assert_eq!(
-            unpatched(&root(), &copied),
-            Err(format!("`{TYPES}` has no dependency named `noq_proto`"))
-        );
+        assert_eq!(unpatched(&root(), &copied), Err(unresolved(PATCHED)));
     }
 
     #[test]
@@ -852,6 +849,13 @@ mod tests {
             requirement["source"] = json!("git+https://github.com/x/noq");
         };
         assert_eq!(paired("noq_proto", git), Ok(Vec::new()));
+    }
+
+    /// The error for an edge `noq_proto` of `types` to `to` that nothing resolves.
+    fn unresolved(to: &str) -> String {
+        format!(
+            "`{TYPES}` has no requirement that its edge `noq_proto` to `{to}` resolves"
+        )
     }
 
     /// The `fuzz` graph in which `types` needs `noq-proto` `^1.3` as `change` makes it,
@@ -869,7 +873,7 @@ mod tests {
 
     #[test]
     fn pairs_an_edge_with_a_requirement_by_rename_package_kind_and_target() {
-        let unnamed = Err(format!("`{TYPES}` has no dependency named `noq_proto`"));
+        let unnamed = Err(unresolved(&id("1.3.0")));
         let refused = Ok(vec![format!(
             "fuzz/Cargo.toml builds `noq-proto` `^1.3` of `{TYPES}` from \
              `/r/noq-proto-1.3.0/Cargo.toml`, not from the copy \
