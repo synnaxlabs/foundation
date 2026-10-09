@@ -1,5 +1,9 @@
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
-  trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
+  trait that `os` and `sim` implement. A driver of `tasks` may also pass each task to
+  one of theirs, as a driver that counts tasks does (`laptop.architect-2`,
+  2026-10-09T01:25:39Z:
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072358016).
+  `clock::Clock`: monotonic time as
   `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
   `wall::Wall`: the OS wall clock, which only `clock` reads (a lint).
   `entropy::Entropy`: random bytes from the OS, or from the run's seed in simulation.
