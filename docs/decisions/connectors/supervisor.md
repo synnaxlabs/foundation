@@ -93,7 +93,10 @@
   is cancelled, so no state replaces a state that the home did not apply. After
   `Failure::Removed` or `home::Error::Disk`, no change of state waits
   (`laptop.architect-2`, 2026-10-09T21:46:07Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089790301). After
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089790301).
+  Supersedes "at once" in rule 3 of
+  https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6054035730 and in
+  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6067099903. After
   `Failure::Removed` or `home::Error::Disk` the call writes no more status. Each other
   refusal is a defect of `connector`, and panics (`laptop.architect-2`,
   2026-10-09T19:41:05Z:
