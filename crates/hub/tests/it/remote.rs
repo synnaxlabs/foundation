@@ -3041,7 +3041,9 @@ fn lets_go_of_the_transport_once_the_hub_each_session_and_each_link_drop() {
                 .expect("the session of the reader");
             let link = test.hub.link(session);
             let held = Rc::strong_count(&transport);
-            let Test { clock, hub, .. } = test;
+            let Test {
+                clock, hub, region, ..
+            } = test;
             drop((hub, writer, link, reader));
             assert_eq!(
                 Rc::strong_count(&transport),
@@ -3053,6 +3055,13 @@ fn lets_go_of_the_transport_once_the_hub_each_session_and_each_link_drop() {
                 Rc::strong_count(&transport),
                 held - 1,
                 "the hub let go of the transport"
+            );
+            drop(region);
+            clock.sleep(Span::from_nanos(1)).await;
+            assert_eq!(
+                Rc::strong_count(&transport),
+                1,
+                "no task holds the transport"
             );
         },
     );
