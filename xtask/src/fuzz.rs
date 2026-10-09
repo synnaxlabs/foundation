@@ -206,7 +206,8 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
     let members = field::list(graph, "workspace_members")?;
     let mut bins = Vec::new();
     for package in field::list(graph, "packages")? {
-        if !members.contains(&package["id"]) {
+        let id = field::text(package, "id")?;
+        if !members.iter().any(|member| *member == id) {
             continue;
         }
         for target in field::list(package, "targets")? {
@@ -392,6 +393,23 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_stale_root_lock() {
+        let root = crate::fixture().join("stale-root");
+        let problems = check(&root).unwrap_err();
+        let refusal = format!(
+            "error: cannot update the lock file {} because --locked was passed to \
+             prevent this",
+            root.join("Cargo.lock").display()
+        );
+        assert_eq!(problems.len(), 1);
+        assert!(
+            problems[0].lines().any(|line| line == refusal),
+            "{}",
+            problems[0]
+        );
+    }
+
+    #[test]
     fn refuses_a_stale_fuzz_lock() {
         let root = crate::fixture().join("stale");
         let problems = check(&root).unwrap_err();
@@ -499,6 +517,8 @@ mod tests {
         assert!(compatible("0.9.0", "0.9.7"));
         assert!(compatible("0.0.3", "0.0.3"));
         assert!(compatible("0.0.0", "0.0.0"));
+        assert!(compatible("0.0.3-alpha.1", "0.0.3"));
+        assert!(compatible("0.0.3+b", "0.0.3"));
         assert!(!compatible("0.0.0", "0.0.1"));
         assert!(compatible("1.3.0-alpha.1", "1.0.0"));
         assert!(!compatible("0.9.0", "1.3.0"));
@@ -555,6 +575,14 @@ mod tests {
         assert_eq!(
             bins(&kindless),
             Err("JSON has no array field `kind`".to_string())
+        );
+        let keyless = json!({
+            "workspace_members": ["m"],
+            "packages": [{ "targets": [target("a", "bin")] }],
+        });
+        assert_eq!(
+            bins(&keyless),
+            Err("JSON has no string field `id`".to_string())
         );
     }
 
