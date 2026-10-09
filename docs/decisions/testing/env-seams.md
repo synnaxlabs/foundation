@@ -327,4 +327,6 @@
   (`laptop.architect-2`, 2026-10-09T04:57:56Z:
   https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074581669; the failed
   registration, 2026-10-09T05:02:07Z:
-  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074628714).
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074628714; the gap
+  with no free descriptor, 2026-10-09T05:11:51Z:
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074731187).
