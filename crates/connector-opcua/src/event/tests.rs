@@ -415,6 +415,7 @@ fn a_batch_does_not_hang_on_the_other_timers() {
         f.run();
         let ran: Vec<usize> = f.ran().into_iter().filter(|&n| n <= 2).collect();
         assert_eq!(ran, [1, 2], "with {others} other timers");
+        // Held, so each pass gets new heap addresses.
         kept.push(f);
     }
 }
