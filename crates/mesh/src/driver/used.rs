@@ -424,7 +424,7 @@ pub(super) async fn keep(
         let Some(gave) = gave.await else {
             continue;
         };
-        let done = done(gave, &files, &held, pointer).await;
+        let done = hold(gave, &files, &held, pointer).await;
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
         let moved = group.used.settle(pointer, done);
@@ -477,8 +477,8 @@ async fn read(
     Ok((definitions, kept))
 }
 
-// What the job for `pointer` gave, once the file in `held` names a read with no problem.
-async fn done(gave: Gave, files: &Files, held: &Path, pointer: Pointer) -> Done {
+// Names `pointer` in `held` when its read has no problem, and gives what its job gave.
+async fn hold(gave: Gave, files: &Files, held: &Path, pointer: Pointer) -> Done {
     match gave {
         Gave::Got(digest, got) => Done::Got(digest, got),
         Gave::Read(Ok((definitions, chunks)), got) => {
