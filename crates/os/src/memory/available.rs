@@ -30,7 +30,7 @@ mod linux {
     use std::path::{Component, Path, PathBuf};
 
     use procfs_core::process::MountInfo;
-    use procfs_core::{FromBufRead, Meminfo, ProcError, ProcessCGroups};
+    use procfs_core::{FromBufRead, ProcError, ProcessCGroups};
 
     /// The files of a cgroup that give its limit and its use, and the key in
     /// `memory.stat` of its inactive file pages.
@@ -55,10 +55,7 @@ mod linux {
     /// The available bytes of the process, whose file system root is `root`.
     pub(super) fn available(root: &Path) -> io::Result<u64> {
         let file = root.join("proc/meminfo");
-        let meminfo: Meminfo = parse(&file, &read(&file)?)?;
-        let mut least = meminfo.mem_available.ok_or_else(|| {
-            invalid(format!("{} has no MemAvailable", file.display()))
-        })?;
+        let mut least = mem_available(&file, &read(&file)?)?;
         let file = root.join("proc/self/cgroup");
         let Some(cgroups) = optional(&file)? else {
             // A kernel with no cgroups.
@@ -167,6 +164,24 @@ mod linux {
         Ok(Some(limit.saturating_sub(usage.saturating_sub(inactive))))
     }
 
+    /// The bytes of `MemAvailable` in `text`, the text of `file`. Not
+    /// `procfs_core::Meminfo`, which fails when a field that this does not use is not
+    /// there, as under gVisor.
+    fn mem_available(file: &Path, text: &str) -> io::Result<u64> {
+        let line = text
+            .lines()
+            .find_map(|line| line.strip_prefix("MemAvailable:"))
+            .ok_or_else(|| invalid(format!("{} has no MemAvailable", file.display())))?
+            .trim();
+        let kib = line.strip_suffix(" kB").ok_or_else(|| {
+            invalid(format!(
+                "{} gives MemAvailable with no unit: {line}",
+                file.display()
+            ))
+        })?;
+        Ok(number(file, kib)?.saturating_mul(1024))
+    }
+
     /// The value that `procfs_core` parses from `text`, the text of `file`.
     fn parse<T: FromBufRead>(file: &Path, text: &str) -> io::Result<T> {
         T::from_buf_read(text.as_bytes()).map_err(|error| {
@@ -241,14 +256,9 @@ mod linux {
         }
 
         const MIB: u64 = 1 << 20;
-        /// Each field that `procfs_core` needs, and `MemAvailable`.
-        const MEMINFO: &str = "MemTotal: 16777216 kB\nMemFree: 1048576 kB\n\
-                               MemAvailable: 8388608 kB\nBuffers: 0 kB\nCached: 0 kB\n\
-                               SwapCached: 0 kB\nActive: 0 kB\nInactive: 0 kB\n\
-                               SwapTotal: 0 kB\nSwapFree: 0 kB\nDirty: 0 kB\n\
-                               Writeback: 0 kB\nMapped: 0 kB\nSlab: 0 kB\n\
-                               Committed_AS: 0 kB\nVmallocTotal: 0 kB\n\
-                               VmallocUsed: 0 kB\nVmallocChunk: 0 kB\n";
+        const MEMINFO: &str = "MemTotal:       16777216 kB\n\
+                               MemFree:         1048576 kB\n\
+                               MemAvailable:    8388608 kB\n";
         const V2_MOUNT: &str = "37 31 0:31 / /sys/fs/cgroup rw,nosuid shared:8 - \
                                 cgroup2 cgroup2 rw,nsdelegate\n";
 
@@ -520,18 +530,36 @@ mod linux {
         }
 
         #[test]
-        fn meminfo_with_no_mem_total_is_an_error() {
-            let root = Root::new("no-total");
-            root.write("proc/meminfo", &MEMINFO.replace("MemTotal", "Other"));
+        fn mem_available_with_no_unit_is_an_error() {
+            let root = Root::new("no-unit");
+            root.write("proc/meminfo", "MemAvailable:    8388608\n");
             let error = root.available().unwrap_err();
             let file = root.0.join("proc/meminfo");
             assert_eq!(
                 (error.kind(), error.to_string()),
                 (
                     io::ErrorKind::InvalidData,
-                    format!("{}: Internal Unwrap Error: NoneError", file.display())
+                    format!(
+                        "{} gives MemAvailable with no unit: 8388608",
+                        file.display()
+                    )
                 )
             );
+        }
+
+        /// gVisor writes no `Slab`, `Committed_AS`, or `Vmalloc*`.
+        #[test]
+        fn a_meminfo_with_only_mem_available_gives_it() {
+            let root = Root::new("gvisor");
+            root.write("proc/meminfo", "MemAvailable:    1048576 kB\nShmem: 0 kB\n");
+            assert_eq!(root.available().unwrap(), 1024 * MIB);
+        }
+
+        #[test]
+        fn a_mem_available_over_u64_bytes_saturates() {
+            let root = Root::new("huge");
+            root.write("proc/meminfo", "MemAvailable: 18014398509481984 kB\n");
+            assert_eq!(root.available().unwrap(), u64::MAX);
         }
 
         #[test]
@@ -606,13 +634,10 @@ mod linux {
         #[test]
         fn this_process_has_memory_available() {
             let file = Path::new("/proc/meminfo");
-            let meminfo: Meminfo = parse(file, &read(file).unwrap()).unwrap();
+            let mem_available = mem_available(file, &read(file).unwrap()).unwrap();
             let available = crate::memory::available().unwrap().bytes();
             assert!(available > 0, "{available}");
-            assert!(
-                available <= meminfo.mem_available.unwrap() * 2,
-                "{available}"
-            );
+            assert!(available <= mem_available * 2, "{available}");
         }
     }
 }
