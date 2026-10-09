@@ -719,14 +719,15 @@ fn ignorable(c: char) -> bool {
     )
 }
 
-/// `text` with each line ended by `\n`, with no spaces or tabs at the end of a line,
-/// and with each tab in the spaces, tabs, and `>` at the start of a line replaced by
-/// spaces to the next multiple of 4 columns. None of these changes what GitHub shows.
-/// A line number then gives the offset of its line, and comrak gives the right column
-/// after a tab that a quote or a list item takes in part.
+/// `text` with no byte order mark at its start, with each line ended by `\n`, with no
+/// spaces or tabs at the end of a line, and with each tab in the spaces, tabs, and `>`
+/// at the start of a line replaced by spaces to the next multiple of 4 columns. None of
+/// these changes what GitHub shows. A line number then gives the offset of its line,
+/// and comrak gives the right column after a tab that a quote or a list item takes in
+/// part.
 fn normalized(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
-    for line in lines(text) {
+    for line in lines(text.strip_prefix('\u{feff}').unwrap_or(text)) {
         let line = line.trim_end_matches([' ', '\t']);
         let content = line.trim_start_matches([' ', '\t', '>']);
         let start = normalized.len();
@@ -751,8 +752,6 @@ fn normalized(text: &str) -> String {
 /// ([`RENAMED`]), and an invisible character ([`texts`]) is put before `<!` and a
 /// lowercase letter, which starts no HTML block on GitHub.
 fn unblocked(body: &str) -> Option<String> {
-    // Both parsers drop it, so the first line starts after it.
-    let body = body.strip_prefix('\u{feff}').unwrap_or(body);
     let mut text = String::with_capacity(body.len());
     for line in body.split_inclusive('\n') {
         let rest = bare(line);

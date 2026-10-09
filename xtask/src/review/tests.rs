@@ -1515,11 +1515,11 @@ fn fails_raw_html_before_a_heading_that_github_shows_and_comrak_does_not() {
 }
 
 #[test]
-fn fails_raw_html_after_a_byte_order_mark_before_a_heading_that_github_shows() {
+fn fails_raw_html_after_a_byte_order_mark_at_the_start() {
     let found = ROUND.replace("Findings: none", "Findings: 2");
     let at = found.find("## Review round 3").unwrap();
-    for line in ["\u{feff}<search", "\u{feff}<!x", "\u{feff}<SEARCH x"] {
-        let last = format!("{line}\n{}", &found[at..]);
+    for line in ["<search", "<!x", "<SEARCH x", "<source", "<SOURCE x"] {
+        let last = format!("\u{feff}{line}\n{}", &found[at..]);
         assert_eq!(
             check(&record(vec![bot(ROUND), bot(&last)])),
             vec![raw(line)],
