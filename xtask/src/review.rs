@@ -745,76 +745,61 @@ fn normalized(text: &str) -> String {
 }
 
 /// The round number of the first top-level heading that has one ([`number`]) in `body`
-/// read as GitHub reads its HTML blocks: with each `source` tag at the start of a line
-/// ([`bare`]) read as an `option` tag, and each HTML block that GitHub does not start
-/// ([`unknown`]) read as lines of a paragraph. GitHub reads HTML blocks by an older
-/// spec, in which a `source` tag starts one.
+/// read as GitHub reads its HTML blocks, by an older spec. At the start of each line
+/// ([`bare`]), each tag whose name the two specs list in a different way is renamed
+/// ([`RENAMED`]), and an invisible character ([`texts`]) is put before `<!` and a
+/// lowercase letter, which starts no HTML block on GitHub.
 fn unblocked(body: &str) -> Option<String> {
-    let mut text = body.to_owned();
-    for start in std::iter::once(0).chain(body.match_indices('\n').map(|(i, _)| i + 1))
-    {
-        let line = &body[start..line_end(body, start)];
+    let mut text = String::with_capacity(body.len());
+    for line in body.split_inclusive('\n') {
         let rest = bare(line);
-        if opens(rest, "source") {
-            // Same length: the offsets stay.
-            let at = start + line.len() - rest.len();
-            let name = at + if rest.starts_with("</") { 2 } else { 1 };
-            text.replace_range(name..name + 6, "option");
+        text.push_str(&line[..line.len() - rest.len()]);
+        let lowercase = rest
+            .strip_prefix("<!")
+            .is_some_and(|after| after.starts_with(|c: char| c.is_ascii_lowercase()));
+        if lowercase {
+            text.push('\u{200B}');
+        }
+        let name = rest.strip_prefix("</").or_else(|| rest.strip_prefix('<'));
+        let renamed = name.and_then(|name| {
+            let (from, to) = RENAMED.iter().find(|(from, _)| opens(name, from))?;
+            Some((name, from, to))
+        });
+        match renamed {
+            Some((name, from, to)) => {
+                text.push_str(&rest[..rest.len() - name.len()]);
+                text.push_str(to);
+                text.push_str(&name[from.len()..]);
+            }
+            None => text.push_str(rest),
         }
     }
-    // A line of such a block can start another one once the block is gone.
-    loop {
-        let starts: Vec<usize> = std::iter::once(0)
-            .chain(text.match_indices('\n').map(|(i, _)| i + 1))
-            .collect();
-        let arena = Arena::new();
-        let root = parse_document(&arena, &text, &options());
-        let mut unknowns: Vec<usize> = root
-            .descendants()
-            .filter_map(|node| {
-                let data = node.data.borrow();
-                let NodeValue::HtmlBlock(_) = data.value else {
-                    return None;
-                };
-                let LineColumn { line, column } = data.sourcepos.start;
-                let from = starts[line - 1] + column - 1;
-                let at = text.len() - text[from..].trim_start_matches(' ').len();
-                unknown(&text[at..]).then_some(at)
-            })
-            .collect();
-        if unknowns.is_empty() {
-            return root.children().find_map(number);
-        }
-        // Footnotes come last in the tree, so its order is not the source order.
-        unknowns.sort_unstable();
-        for at in unknowns.into_iter().rev() {
-            // Invisible ([`texts`]), and it keeps the tag as inline HTML.
-            text.insert(at, '\u{200B}');
-        }
-    }
+    let arena = Arena::new();
+    parse_document(&arena, &text, &options())
+        .children()
+        .find_map(number)
 }
 
-/// Whether `line`, the first line of an HTML block as comrak reads it, starts a line
-/// of a paragraph on GitHub: a `search` tag, or `<!` and a lowercase letter. GitHub
-/// reads HTML blocks by an older spec, with no `search` tag and only an uppercase
-/// letter after `<!`.
-fn unknown(line: &str) -> bool {
-    let declaration = line
-        .strip_prefix("<!")
-        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_lowercase()));
-    opens(line, "search") || declaration
-}
+/// Each tag name that starts an HTML block of type 6 in one of the two specs only, and
+/// a name of the same length that does the same in comrak. GitHub's older spec lists
+/// `source` and not `search`. `xearch` is in no list, so comrak starts a block there
+/// only by type 7, as GitHub does at `search`.
+const RENAMED: [(&str, &str); 2] = [("source", "option"), ("search", "xearch")];
 
-/// Whether `line` starts with an open or a close tag named `name`, of 6 ASCII letters
-/// in any case, as the start of an HTML block of type 6.
-fn opens(line: &str, name: &str) -> bool {
-    let tag = line.strip_prefix("</").or_else(|| line.strip_prefix('<'));
-    tag.and_then(|t| Some((t.get(..6)?, &t[6..])))
-        .is_some_and(|(tag, rest)| {
-            let ends = [' ', '\t', '\n', '>'];
-            tag.eq_ignore_ascii_case(name)
-                && (rest.is_empty() || rest.starts_with(ends) || rest.starts_with("/>"))
-        })
+/// The characters that end the name of a tag that starts an HTML block of type 6, other
+/// than `/>`.
+const ENDS: [char; 6] = [' ', '\t', '\n', '\u{b}', '\u{c}', '>'];
+
+/// Whether `text`, the text after the `<` or `</` of a tag, starts with `name`, of
+/// ASCII letters, in any case, and then ends the name as the start of an HTML block of
+/// type 6 does.
+fn opens(text: &str, name: &str) -> bool {
+    text.get(..name.len())
+        .is_some_and(|tag| tag.eq_ignore_ascii_case(name))
+        && {
+            let rest = &text[name.len()..];
+            rest.is_empty() || rest.starts_with(ENDS) || rest.starts_with("/>")
+        }
 }
 
 /// The round number of `heading`: the text after `Review round` when it is a heading

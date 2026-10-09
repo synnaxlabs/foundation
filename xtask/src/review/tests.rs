@@ -1464,6 +1464,10 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
             "{heading}"
         );
     }
+}
+
+#[test]
+fn fails_raw_html_before_a_heading_that_github_shows_and_comrak_does_not() {
     let found = ROUND.replace("Findings: none", "Findings: 2");
     let notes = "x[^1]\n\n[^1]: <search\n    <search\n    <search\n\n";
     for (front, heading, line) in [
@@ -1474,16 +1478,6 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
             "<SEARCH x\n<!-- x -->\nReview round 3\n---",
             "<SEARCH x",
         ),
-        (
-            "",
-            "</search>\n<!-- x -->\nReview round 3\n---",
-            "</search>",
-        ),
-        (
-            "",
-            "<search/>\n<!-- x -->\nReview round 3\n---",
-            "<search/>",
-        ),
         ("", "<!doctype x>\n## Review round 3", "<!doctype x>"),
         ("", "<search\n<?a?>\nReview round 3\n---", "<search"),
         ("", "<search\n<!----- x -->\nReview round 3\n---", "<search"),
@@ -1492,6 +1486,22 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
         ("", "> <source x\nReview round 3\n---", "> <source x"),
         ("", "- <source\nReview round 3\n---", "- <source"),
         ("", "- </SOURCE>a\nReview round 3\n---", "- </SOURCE>a"),
+        ("", "<source>a\n<textarea\n\n## Review round 3", "<source>a"),
+        ("", "<search\ta\n## Review round 3", "<search\ta"),
+        ("", "<search\u{b}a\n## Review round 3", "<search\u{b}a"),
+        ("", "<search\u{c}a\n## Review round 3", "<search\u{c}a"),
+        ("", "x\n<search>\n## Review round 3", "<search>"),
+        (
+            "",
+            "</search x=\"1\">\n## Review round 3",
+            "</search x=\"1\">",
+        ),
+        ("", "<!x\n<!x\n## Review round 3", "<!x"),
+        (
+            "",
+            "<search\n## Review round 2\n\n## Review round 3",
+            "<search",
+        ),
         (notes, "a\n<search\n## Review round 3", "[^1]: <search"),
         (notes, "é\n<search\n## Review round 3", "[^1]: <search"),
     ] {
@@ -1499,6 +1509,25 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
         assert_eq!(
             check(&record(vec![bot(ROUND), bot(&last)])),
             vec![raw(line)],
+            "{heading}"
+        );
+    }
+}
+
+#[test]
+fn passes_a_round_whose_heading_github_hides_in_an_html_block() {
+    let found = ROUND.replace("Findings: none", "Findings: 2");
+    // GitHub starts a block of type 7 at a complete tag alone on its line.
+    for heading in [
+        "<search>\n## Review round 3",
+        "<search x=\"1\">\n## Review round 3",
+        "</search>\n<!-- x -->\nReview round 3\n---",
+        "<search/>\n<!-- x -->\nReview round 3\n---",
+    ] {
+        let last = found.replace("## Review round 3", heading);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&last)])),
+            Vec::<String>::new(),
             "{heading}"
         );
     }
