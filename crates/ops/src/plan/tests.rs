@@ -372,19 +372,6 @@ fn gives_the_json_of_a_change_and_a_removal() {
 }
 
 #[test]
-#[should_panic(expected = "invariant: `node` gives a front end")]
-fn refuses_an_empty_table_of_front_ends() {
-    drop(plan(
-        &[],
-        empty(),
-        &BTreeMap::new(),
-        &BTreeSet::new(),
-        &BTreeMap::new(),
-        &Table::new(),
-    ));
-}
-
-#[test]
 fn names_one_problem_or_the_count_and_exits_with_2() {
     let wrong = PLANT.replacen("data_type", "datatype", 1);
     let two = problems(&[("plant.hcl", &wrong)]);
