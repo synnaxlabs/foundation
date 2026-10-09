@@ -42,8 +42,8 @@ impl<Idle, Live> Socket<Idle, Live> {
     ///
     /// A poll on a thread other than that of the first poll.
     pub(super) fn bind(&mut self, kind: &str) {
-        let current = thread::current().id();
-        on_thread(kind, *self.thread.get_or_insert(current));
+        let thread = *self.thread.get_or_insert_with(|| thread::current().id());
+        on_thread(kind, thread);
     }
 
     /// The live socket, for a poll. It binds the socket as [`Socket::bind`] does,

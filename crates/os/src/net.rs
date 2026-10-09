@@ -103,7 +103,7 @@ fn peer(
     match named {
         Ok(peer) => Ok(canonical(peer)),
         Err(_) if reset => Ok(remote),
-        Err(e) => Err(io_error(errno(&e))),
+        Err(e) => Err(from_io(&e)),
     }
 }
 
