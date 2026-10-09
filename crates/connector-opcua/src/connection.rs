@@ -389,8 +389,9 @@ impl Drop for Held<'_> {
 #[derive(Clone)]
 struct Callback {
     application: *mut c_void,
-    /// One slot for each call, since a callback can write it and then run the loop,
-    /// which gives the `CLOSING`.
+    /// The one slot of the connection that each call gives C. It is an `Rc`, so that
+    /// the slot lives on after a `CLOSING` takes the callback in a run of the loop
+    /// that the call makes.
     context: Rc<Cell<*mut c_void>>,
     function: ffi::ConnectionCallback,
 }

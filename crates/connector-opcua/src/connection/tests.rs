@@ -1640,7 +1640,7 @@ fn a_write_to_a_reset_stream_gives_closing_and_a_warning() {
 
 /// Records the call, with a `CLOSING` as one byte: 1 when the context is the
 /// application. On a read, sets the context to the application, closes, and runs the
-/// loop when `ran`.
+/// loop when `nested`.
 #[expect(clippy::too_many_arguments, reason = "a test callback")]
 unsafe fn mark(
     cm: *mut ffi::ConnectionManager,
@@ -1650,7 +1650,7 @@ unsafe fn mark(
     state: ConnectionState,
     params: *const KeyValueMap,
     message: Bytes,
-    ran: bool,
+    nested: bool,
 ) {
     if state == ffi::CLOSING {
         // SAFETY: `open` passes the calls of a live side.
@@ -1670,7 +1670,7 @@ unsafe fn mark(
         let members = unsafe { &*cm.cast::<Members>() };
         // SAFETY: the member takes its own manager.
         assert_eq!(Status(unsafe { (members.close)(cm, id) }), Status::GOOD);
-        if ran {
+        if nested {
             let el = members.event_loop;
             // SAFETY: the loop of the manager lives through the test.
             let run = unsafe { (*el).run };
