@@ -6939,8 +6939,7 @@ mod tests {
         }
 
         #[test]
-        fn one_latest_stream_on_try_send_gets_its_share_while_complete_fills_the_budget()
-         {
+        fn one_latest_stream_on_try_send_gets_its_share_against_a_full_budget() {
             testing::run(1, |shard| {
                 let mut pair = narrow(shard);
                 let classes = iter::once(Class::Latest).chain([Class::Complete; 8]);
@@ -7245,8 +7244,7 @@ mod tests {
         }
 
         #[test]
-        fn room_goes_to_a_waiting_complete_while_a_complete_holds_room_and_none_is_owed()
-         {
+        fn room_a_complete_frees_goes_to_a_waiting_complete_while_none_is_owed() {
             testing::run(1, |shard| {
                 let mut pair = narrow(shard);
                 let [first, latest, complete, catch_up, waiting] = [
