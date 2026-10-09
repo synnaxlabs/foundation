@@ -38,7 +38,7 @@ use raft::{Entry, Hard, Term};
 use types::digest::Digest;
 
 use crate::bytes::{
-    block, put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
+    put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
 };
 use crate::entry;
 
@@ -435,7 +435,7 @@ async fn write_in_blocks(
             .expect("invariant: a block of the log is one sector or more");
         let len = if over == 0 { chunk } else { over }.min(bytes.len());
         let (rest, part) = bytes.split_at(bytes.len().saturating_sub(len));
-        let block = block(pool, part)?;
+        let block = pool.copy(part)?;
         let offset = at.saturating_add(wide(rest.len()));
         file.write_at(offset, &[block]).await?;
         *bytes = rest;
@@ -856,7 +856,7 @@ mod tests {
     async fn put(node: &sim::node::Node, file: &str, offset: u64, bytes: &[u8]) {
         let path = Path::new(DIR).join(file);
         let file = node.files().open(&path, Mode::Write).await.unwrap();
-        let block = block(&create_pool(), bytes).unwrap();
+        let block = create_pool().copy(bytes).unwrap();
         file.write_at(offset, &[block]).await.unwrap();
         file.sync().await.unwrap();
     }

@@ -10,7 +10,6 @@ use transport::{Class, Session};
 
 use super::{Mesh, TICK, header};
 use crate::applied::{Floor, Outcome};
-use crate::bytes::block;
 use crate::change::Change;
 use crate::error::Error;
 use crate::message::Message;
@@ -46,7 +45,7 @@ async fn forward(session: &Session, pool: &Pool, change: Change) -> Option<Posit
     sender.send(header(pool).ok()?).await.ok()?;
     let proposal = Message::Propose { change };
     sender
-        .send(block(pool, &proposal.encode()).ok()?)
+        .send(pool.copy(&proposal.encode()).ok()?)
         .await
         .ok()?;
     // The stream ends only after the answer. A try that drops before it resets the

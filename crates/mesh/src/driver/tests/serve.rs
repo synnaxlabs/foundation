@@ -22,7 +22,7 @@ struct Peer {
 
 impl Peer {
     async fn send(&self, sender: &mut Sender, bytes: &[u8]) {
-        let block = crate::bytes::block(&self.pool, bytes).unwrap();
+        let block = self.pool.copy(bytes).unwrap();
         sender.send(block).await.unwrap();
     }
 

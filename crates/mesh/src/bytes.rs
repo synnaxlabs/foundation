@@ -6,20 +6,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use block::{Block, Pool};
 use raft::{Change, Grant, Position, Proof, Signature, Term, Voters};
 use types::channel;
 use types::ed25519::PublicKey;
 use types::name::Name;
 use types::node;
 use types::time::{Span, Stamp};
-
-/// A block of `pool` that holds `bytes`.
-pub(crate) fn block(pool: &Pool, bytes: &[u8]) -> Result<Block, block::Error> {
-    let mut block = pool.alloc(bytes.len())?;
-    block.copy_from_slice(bytes);
-    Ok(block.freeze())
-}
 
 /// Takes `N` bytes.
 pub(crate) fn take<const N: usize>(bytes: &mut &[u8]) -> Option<[u8; N]> {

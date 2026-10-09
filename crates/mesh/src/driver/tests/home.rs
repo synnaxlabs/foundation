@@ -462,7 +462,7 @@ impl Leader {
             loop {
                 if !silent.get() {
                     let beat = proven(2, 1, Body::Heartbeat { commit: 0 });
-                    let beat = block(&pool, &Message::Raft(beat).encode()).unwrap();
+                    let beat = pool.copy(&Message::Raft(beat).encode()).unwrap();
                     beats.send(beat).await.unwrap();
                 }
                 clock.sleep(BEAT).await;
