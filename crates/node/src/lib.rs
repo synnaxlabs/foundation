@@ -865,30 +865,27 @@ impl Serve {
         let port = route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
         // `serve` drops the port's future, which holds the mesh, before the wait.
         let handles = task::Handles { hub, ops };
-        serve(self.inbox, handles, tasks, port, group, guard, fail).await;
+        let stop = stop(guard, port, group, fail);
+        self.inbox.serve(handles, tasks, stop).await;
         if let Some(ended) = ended {
             ended.await;
         }
     }
 }
 
-/// Runs each task given to `inbox` with `handles` on `tasks`, and serves the node's
-/// `port`, until `guard` completes, `port` ends, or `group` ends, by the rank of
-/// [`end`]. Gives `fail` the error of a port or a group that ends it, before it drops
-/// the tasks given that still run.
-async fn serve(
-    inbox: task::Inbox<task::Task>,
-    handles: task::Handles,
-    tasks: env::tasks::Tasks,
+/// Serves the node's `port`, and completes when `guard` completes, `port` ends, or
+/// `group` ends, by the rank of [`end`]. Gives `fail` the error of a port or a group
+/// that ends it as it completes, so before `Inbox::serve` drops the tasks.
+async fn stop(
+    guard: Guard,
     port: impl Future<Output = transport::Error>,
     group: impl Future<Output = mesh::Stopped>,
-    guard: Guard,
     fail: impl Fn(Error),
 ) {
     let mut port = pin!(port);
     let mut group = pin!(group);
     let mut guard = pin!(guard);
-    let stop = poll_fn(|cx| {
+    poll_fn(|cx| {
         let ended = end(
             guard.as_mut().poll(cx),
             port.as_mut().poll(cx),
@@ -897,8 +894,8 @@ async fn serve(
         // Set before the tasks drop, so that `join` ranks it above a panic in a task's
         // drop.
         ended.map(|error| error.map_or((), &fail))
-    });
-    inbox.serve(handles, tasks, stop).await;
+    })
+    .await;
 }
 
 /// A new channel key: a UUIDv7 at mesh time read through `time`, with random bits
