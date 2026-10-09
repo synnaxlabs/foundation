@@ -62,8 +62,9 @@
   message is a head), and `end` gives `Error::Unfinished` (`MALFORMED`) when the stream
   ends with bytes to come. This is the shape of CLIENT HELLO, and the counter is one
   crate-private type in `wire::common::body` that the hub bodies also use. Supersedes
-  the body check, `body` of each decoder, and `FromServer` of
-  https://github.com/synnaxlabs/foundation/issues/1227#issuecomment-6046483057.
+  the body check, `body` of each decoder, `FromServer`, and the `Body` arm of
+  `FromRequester` of
+  https://github.com/synnaxlabs/foundation/issues/1227#issuecomment-6046483057, so
   `FromRequester` holds only gets and puts. Lost: decoders that give a head or a body (a
   head-or-body enum where the caller knows which comes, lost in CLIENT HELLO); one
   public body type for `hub` and `blob` (each caller matches a third error type, and the
