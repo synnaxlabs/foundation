@@ -6,7 +6,9 @@
   than 1/8 of the window is free, so with `streams_max` 16 a `Session::open` that
   waited got no stream until three streams ended. Cost: `MAX_STREAMS` carries only the
   latest limit, so a burst of freed streams costs one frame per packet, not one per
-  stream, and the frame goes in the packet that acks the end in the common case. Lost:
+  stream. A two-way stream frees when the ACK of its reply's end arrives, and that
+  packet needs no ACK, so the frame goes alone in a new packet and the peer acks it:
+  one request and reply costs 2 datagrams each way, where the release sends 1. Lost:
   a `MAX_STREAMS` only to a peer that sent `STREAMS_BLOCKED`, with that frame sent at
   once (a peer on another QUIC stack, or on the release, waits up to a third of the
   idle timeout for its `STREAMS_BLOCKED` to go); a `streams_max` under 8, so that 1/8
