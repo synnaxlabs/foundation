@@ -63,10 +63,12 @@
   one second later. The status writer that does not open panics on an unknown or
   remote channel, which is a defect of `node`, and gives `Ok` when the mesh stopped
   (`laptop.architect-2`, 2026-10-09T18:46:26Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6087144669). The
-  tests define the status channels with `connector::testing::create_status`, behind
-  `sim`, which gives their definitions with keys from a `channel::Key` on. `sim` also
-  turns on the optional dependency on `spec`, whose `Definition` the helper gives.
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6087144669).
+  `status::channels` replaces the public `status::TIME` and `status::CHANNELS`, so one
+  call gives each name and type (same ruling). The tests define the status channels
+  with `connector::testing::create_status`, behind `sim`, which gives their
+  definitions with keys from a `channel::Key` on. `sim` also turns on the optional
+  dependency on `spec`, whose `Definition` the helper gives.
   `connector::status::channels` panics on a status name over `Name::MAX_BYTES`: the
   counts come from a kind's code, so the name is internal. Lost: a helper that calls
   `Hub::set_definitions` itself, because each call replaces all definitions and a
