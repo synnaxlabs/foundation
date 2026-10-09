@@ -1,6 +1,6 @@
 //! Runs a test of this binary again in a child process, with the C flags it picks.
 
-use std::process::Command;
+use std::process::{Command, Output};
 
 /// The variable that marks a child process.
 const MARK: &str = "CONNECTOR_OPCUA_CHILD";
@@ -13,6 +13,16 @@ pub(crate) fn running() -> bool {
     )]
     let mark = std::env::var_os(MARK);
     mark.is_some()
+}
+
+/// Runs the test `name` in a child process with the environment of this one, and
+/// gives its output.
+pub(crate) fn output(name: &str) -> Output {
+    Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", name])
+        .env(MARK, "1")
+        .output()
+        .unwrap()
 }
 
 /// Runs the test `name` in a child process, and asserts that it passes. The child

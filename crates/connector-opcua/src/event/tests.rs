@@ -7,6 +7,7 @@ use sim::Sim;
 use types::time::{Monotonic, Span};
 
 use super::Loop;
+use crate::child;
 use crate::ffi::{self, DelayedCallback, EventLoop, Status};
 
 /// Ticks of 100 ns from 1601 to 1970, the epoch of `dateTime_now`.
@@ -690,32 +691,10 @@ fn the_drop_runs_64_passes_of_delayed_callbacks() {
     assert_eq!(drop_queuing(63), (0..=63).rev().collect::<Vec<_>>());
 }
 
-/// The variable that marks a child process of a test.
-const CHILD: &str = "CONNECTOR_OPCUA_CHILD";
-
-/// Tells whether this process is a child that `child` started.
-fn is_child() -> bool {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the parent test marks its child process"
-    )]
-    let child = std::env::var_os(CHILD).is_some();
-    child
-}
-
-/// Runs the test `name` of this binary in a child process, and gives its output.
-fn child(name: &str) -> std::process::Output {
-    std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", name])
-        .env(CHILD, "1")
-        .output()
-        .unwrap()
-}
-
 /// Runs a 65th pass of a drop, when `CHILD` is set.
 #[test]
 fn drop_65_passes() {
-    if is_child() {
+    if child::running() {
         drop_queuing(64);
     }
 }
@@ -725,7 +704,7 @@ fn drop_65_passes() {
 fn the_drop_aborts_after_64_passes() {
     use std::os::unix::process::ExitStatusExt;
     const SIGABRT: i32 = 6;
-    let output = child("event::tests::drop_65_passes");
+    let output = child::output("event::tests::drop_65_passes");
     assert_eq!(output.status.signal(), Some(SIGABRT));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
@@ -814,7 +793,7 @@ fn ms(n: i64) -> Span {
 /// Connects a client to `url`, which is not valid, when `CHILD` is set. The copy then
 /// logs a warning and an info message.
 fn connect(url: &CStr) {
-    if !is_child() {
+    if !child::running() {
         return;
     }
     let f = Fixture::new();
@@ -848,7 +827,7 @@ fn connect_to_a_long_url() {
 /// logs an error.
 #[test]
 fn send_with_no_channel() {
-    if !is_child() {
+    if !child::running() {
         return;
     }
     let f = Fixture::new();
@@ -874,7 +853,7 @@ fn send_with_no_channel() {
 
 #[test]
 fn an_error_goes_to_stderr() {
-    let output = child("event::tests::send_with_no_channel");
+    let output = child::output("event::tests::send_with_no_channel");
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
@@ -885,7 +864,7 @@ fn an_error_goes_to_stderr() {
 
 #[test]
 fn a_warning_goes_to_stderr_and_an_info_message_does_not() {
-    let output = child("event::tests::connect_to_a_bad_url");
+    let output = child::output("event::tests::connect_to_a_bad_url");
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
@@ -895,7 +874,7 @@ fn a_warning_goes_to_stderr_and_an_info_message_does_not() {
 
 #[test]
 fn a_long_line_is_cut_to_512_bytes_with_its_newline() {
-    let output = child("event::tests::connect_to_a_long_url");
+    let output = child::output("event::tests::connect_to_a_long_url");
     assert!(output.status.success());
     let line = format!(
         "connector-opcua: open62541 warning: Endpoint URL is invalid: {}",
