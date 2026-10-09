@@ -275,7 +275,7 @@ mod tests {
     use spec::definition::Definition;
     use types::authority::Authority;
     use types::channel;
-    use types::frame::{Form, Label, Path};
+    use types::frame::{self, Form, Label, Path};
     use types::sample::{Scalar, Type};
 
     const BAD: Code = Code::new("test.bad");
@@ -1443,6 +1443,91 @@ mod tests {
         assert_eq!(statuses.len(), 13, "{statuses:?}");
         assert_eq!(statuses.last().map(|(_, samples)| samples[3]), Some(10_000));
         assert_eq!(states(&statuses)[11..], [(3, 0, 0), (2, 0, 0)]);
+    }
+
+    /// A kind with the count `samples`. Its run takes frames of the shape of a
+    /// status frame from the shard's pool until it has no room, sets the count to 7,
+    /// gives the frames back at 1.5 s, and returns `Ok` at 3 s. When `full`, it takes
+    /// the room that came back again at 900 ms, so the pool is full at the flush at
+    /// 1 s. Else the home has no room to take that flush's frame, and loses it.
+    struct Hog {
+        full: bool,
+    }
+
+    impl Kind for Hog {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Tally::check(&Tally::new("samples"), &())
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+            let channels = ["state", "class", "restarts", "samples"]
+                .map(|c| name(&format!("plant.tally.status.{c}")))
+                .into();
+            let writer = ctx.writer(channels, Authority(1), None).await;
+            let writer = writer.expect("the writer opens");
+            let series: Vec<_> = (writer.set().entries().iter().enumerate())
+                .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
+                .collect();
+            let mut held = Vec::new();
+            let mut fill = || loop {
+                match writer.draft(Form::Raw, &series) {
+                    Ok(draft) => held.push(draft),
+                    Err(error) => break error,
+                }
+            };
+            let full = fill();
+            assert!(matches!(full, frame::Error::Pool(_)), "{full}");
+            ctx.count("samples").set(7);
+            ctx.clock().sleep(ms(900)).await;
+            if self.full {
+                let full = fill();
+                assert!(matches!(full, frame::Error::Pool(_)), "{full}");
+            }
+            ctx.clock().sleep(ms(600)).await;
+            drop(held);
+            ctx.clock().sleep(ms(1_500)).await;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn writes_a_count_again_when_the_pool_has_no_room_for_its_frame() {
+        assert_eq!(hogged(Hog { full: true }), HOGGED);
+    }
+
+    #[test]
+    fn writes_a_count_again_when_the_home_loses_its_frame() {
+        assert_eq!(hogged(Hog { full: false }), HOGGED);
+    }
+
+    /// The status of `Hog`: the count of the flush at 1 s is written at 2 s.
+    const HOGGED: [(Span, i64, i64); 4] = [
+        (Span::ZERO, 0, 0),
+        (Span::from_nanos(2_000_000_000), 0, 7),
+        (Span::from_nanos(3_000_000_000), 3, 7),
+        (Span::from_nanos(3_000_000_001), 2, 7),
+    ];
+
+    /// The time, `state`, and count of each status frame of `hog`.
+    fn hogged(hog: Hog) -> Vec<(Span, i64, i64)> {
+        let statuses = tally(hog);
+        statuses
+            .iter()
+            .map(|(at, samples)| (*at, samples[0], samples[3]))
+            .collect()
     }
 
     /// The status frames of one connector of `kind`, `plant.tally`, with the count

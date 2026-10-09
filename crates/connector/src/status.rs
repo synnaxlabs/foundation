@@ -16,7 +16,7 @@ use std::task::{self, Poll, Wake, Waker};
 
 use env::clock::Clock;
 use types::authority::Authority;
-use types::frame::{Draft, Form, Label, Path};
+use types::frame::{self, Draft, Form, Label, Path};
 use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Monotonic, Span, Stamp};
@@ -411,8 +411,11 @@ impl Session {
     ///
     /// When the home refuses the frame for a cause that only a defect gives.
     fn send(&mut self, values: &Values, stamp: Stamp) -> Result<(), Stamp> {
+        let Some(draft) = self.frame(values, stamp) else {
+            values.stage();
+            return Ok(());
+        };
         self.last = Some(stamp);
-        let draft = self.frame(values, stamp);
         match self.hub.write(Label::Path(Path::Live), draft) {
             // After either failure, the hub gives it again on each later write.
             Ok([Outcome::Applied { .. }])
@@ -453,12 +456,14 @@ impl Session {
         Ok(())
     }
 
-    /// A frame of the last value of each status channel at `stamp`.
-    fn frame(&self, values: &Values, stamp: Stamp) -> Draft {
-        let mut draft = self
-            .hub
-            .draft(Form::Raw, &self.series)
-            .expect("invariant: the series follow the key set");
+    /// A frame of the last value of each status channel at `stamp`, or `None` when
+    /// the shard's pool has no room for it now.
+    fn frame(&self, values: &Values, stamp: Stamp) -> Option<Draft> {
+        let mut draft = match self.hub.draft(Form::Raw, &self.series) {
+            Ok(draft) => draft,
+            Err(frame::Error::Pool(_)) => return None,
+            Err(error) => panic!("invariant: the series follow the key set: {error}"),
+        };
         let supervisor = [
             u64::from(self.state as u8),
             u64::from(self.class as u8),
@@ -479,7 +484,7 @@ impl Session {
             bytes.copy_from_slice(&sample.to_le_bytes()[..len]);
         }
         draft.set_count(self.group, 1);
-        draft
+        Some(draft)
     }
 }
 
