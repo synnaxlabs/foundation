@@ -51,3 +51,17 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
     shim.file(root.join("src/shim.c"));
     Builds { library, shim }
 }
+
+/// Whether `probe` compiles C with `-fsanitize=address`, by its compiler and its
+/// flags, `CFLAGS` included.
+///
+/// # Panics
+///
+/// When the compiler cannot preprocess a file.
+pub(crate) fn asan(mut probe: Build) -> bool {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = probe.file(root.join("build/asan.c")).expand();
+    output
+        .split(|&byte| byte == b'\n')
+        .any(|line| line.trim_ascii() == b"connector_opcua_asan")
+}

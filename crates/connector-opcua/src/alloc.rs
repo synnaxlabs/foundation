@@ -21,6 +21,33 @@ fn layout(size: usize) -> Option<Layout> {
     Layout::from_size_align(size.checked_add(ALIGN)?, ALIGN).ok()
 }
 
+#[cfg(asan)]
+unsafe extern "C" {
+    fn __asan_poison_memory_region(addr: *const c_void, size: usize);
+    fn __asan_unpoison_memory_region(addr: *const c_void, size: usize);
+}
+
+/// Makes the address sanitizer report each access to the header of `block`, so a C
+/// write just before a block is an error, as one past it is.
+#[cfg(asan)]
+fn poison(block: *mut u8) {
+    // SAFETY: the call only marks the bytes, which are in `block`.
+    unsafe { __asan_poison_memory_region(block.cast(), ALIGN) };
+}
+
+#[cfg(not(asan))]
+fn poison(_: *mut u8) {}
+
+/// Lets this module read and free the header of `block` again.
+#[cfg(asan)]
+fn unpoison(block: *mut u8) {
+    // SAFETY: as in `poison`.
+    unsafe { __asan_unpoison_memory_region(block.cast(), ALIGN) };
+}
+
+#[cfg(not(asan))]
+fn unpoison(_: *mut u8) {}
+
 /// Writes `size` into the header of `block` and gives the pointer after the header,
 /// or NULL when `block` is NULL.
 ///
@@ -34,6 +61,7 @@ unsafe fn stamp(block: *mut u8, size: usize) -> *mut c_void {
     }
     // SAFETY: the block starts with a header of `ALIGN` bytes, aligned to `ALIGN`.
     unsafe { block.cast::<usize>().write(size) };
+    poison(block);
     // SAFETY: the block holds at least its header.
     unsafe { block.add(ALIGN) }.cast()
 }
@@ -47,6 +75,7 @@ unsafe fn stamp(block: *mut u8, size: usize) -> *mut c_void {
 unsafe fn block(ptr: *mut c_void) -> (*mut u8, Layout) {
     // SAFETY: `stamp` put the header just before `ptr`, in the same block.
     let block = unsafe { ptr.cast::<u8>().sub(ALIGN) };
+    unpoison(block);
     // SAFETY: `stamp` wrote the size there.
     let size = unsafe { block.cast::<usize>().read() };
     // SAFETY: `layout(size)` was valid when the block was made.
@@ -100,10 +129,14 @@ unsafe extern "C" fn connector_opcua_realloc(
         return ptr::null_mut();
     };
     // SAFETY: the caller gives a live pointer of these functions.
-    let (block, old) = unsafe { block(ptr) };
-    // SAFETY: `block` is a live block of `old`, from the global allocator, and `new`
-    // has the same alignment and a valid size.
-    let block = unsafe { alloc::realloc(block, old, new.size()) };
+    let (old_block, old) = unsafe { block(ptr) };
+    // SAFETY: `old_block` is a live block of `old`, from the global allocator, and
+    // `new` has the same alignment and a valid size.
+    let block = unsafe { alloc::realloc(old_block, old, new.size()) };
+    if block.is_null() {
+        // `ptr` stays live.
+        poison(old_block);
+    }
     // SAFETY: `block` is NULL or a block of `new`.
     unsafe { stamp(block, size) }
 }

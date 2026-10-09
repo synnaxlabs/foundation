@@ -125,3 +125,77 @@ fn free_of_null_does_nothing() {
     // SAFETY: NULL is allowed.
     unsafe { free(std::ptr::null_mut()) };
 }
+
+/// Writes 1 byte before `ptr` with C's `memset`, which the address sanitizer checks.
+#[cfg(asan)]
+fn write_before(ptr: *mut c_void) {
+    unsafe extern "C" {
+        fn memset(
+            dest: *mut c_void,
+            byte: std::ffi::c_int,
+            count: usize,
+        ) -> *mut c_void;
+    }
+    // SAFETY: the byte before `ptr` is in the header of its block.
+    let before = unsafe { ptr.cast::<u8>().sub(1) };
+    // SAFETY: `before` is in a live block.
+    unsafe { memset(before.cast(), 0, 1) };
+}
+
+#[cfg(asan)]
+#[test]
+fn writes_before_a_block_of_malloc() {
+    if crate::child::running() {
+        write_before(malloc(8));
+    }
+}
+
+#[cfg(asan)]
+#[test]
+fn writes_before_a_block_of_calloc() {
+    if crate::child::running() {
+        write_before(calloc(2, 4));
+    }
+}
+
+#[cfg(asan)]
+#[test]
+fn writes_before_a_block_of_realloc() {
+    if crate::child::running() {
+        // SAFETY: the block of `malloc` is live.
+        write_before(unsafe { realloc(malloc(8), 64) });
+    }
+}
+
+#[cfg(asan)]
+#[test]
+fn writes_before_a_block_that_a_failed_realloc_keeps() {
+    if crate::child::running() {
+        let ptr = malloc(8);
+        // SAFETY: `ptr` is live.
+        assert!(unsafe { realloc(ptr, HUGE) }.is_null());
+        write_before(ptr);
+    }
+}
+
+#[cfg(asan)]
+#[test]
+fn asan_reports_a_write_before_a_block() {
+    for name in [
+        "alloc::tests::writes_before_a_block_of_malloc",
+        "alloc::tests::writes_before_a_block_of_calloc",
+        "alloc::tests::writes_before_a_block_of_realloc",
+        "alloc::tests::writes_before_a_block_that_a_failed_realloc_keeps",
+    ] {
+        let output = crate::child::output(
+            name,
+            [("ASAN_OPTIONS", "allocator_may_return_null=1")],
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success()
+                && stderr.contains("ERROR: AddressSanitizer: use-after-poison"),
+            "{name}: {stderr}"
+        );
+    }
+}

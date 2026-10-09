@@ -13,6 +13,9 @@ fn main() {
     )]
     let target = std::env::var("TARGET").expect("cargo sets TARGET");
     println!("cargo::rustc-env=CONNECTOR_OPCUA_TARGET={target}");
+    // Set when C is built with ASan: `src/alloc.rs` then poisons the
+    // header of each block.
+    println!("cargo::rustc-check-cfg=cfg(asan)");
     #[cfg(feature = "open62541")]
     build();
 }
@@ -25,6 +28,7 @@ fn build() {
     println!("cargo::rerun-if-changed={}", copy.display());
     println!("cargo::rerun-if-changed=src/shim.c");
     println!("cargo::rerun-if-changed=src/alloc.h");
+    println!("cargo::rerun-if-changed=build/asan.c");
     let read = |name| {
         let path = copy.join(name);
         std::fs::read_to_string(&path)
@@ -34,6 +38,9 @@ fn build() {
         compiler::builds(&copy, &read("flags.txt"), &read("sources.txt"));
     if let Err(e) = compiler::check(&library.get_compiler()) {
         panic!("{e}");
+    }
+    if compiler::asan(cc::Build::new()) {
+        println!("cargo::rustc-cfg=asan");
     }
     library.compile("open62541");
     // The copy calls into the shim, so the shim links after it.

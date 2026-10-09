@@ -123,6 +123,54 @@ mod tests {
         }
     }
 
+    /// The build of a probe in this process, with the compiler and the `CFLAGS` of its
+    /// environment.
+    fn probe() -> cc::Build {
+        let mut probe = cc::Build::new();
+        probe
+            .target(TARGET)
+            .host(TARGET)
+            .opt_level(0)
+            .cargo_metadata(false)
+            .cargo_warnings(false);
+        probe
+    }
+
+    #[test]
+    fn asan_is_true_in_a_child_process() {
+        if child::running() {
+            assert!(compiler::asan(probe()));
+        }
+    }
+
+    #[test]
+    fn asan_is_false_in_a_child_process() {
+        if child::running() {
+            assert!(!compiler::asan(probe()));
+        }
+    }
+
+    #[test]
+    fn asan_is_true_only_with_address_sanitizer_in_cflags() {
+        child::run(
+            "tests::asan_is_true_in_a_child_process",
+            Some("-fsanitize=address"),
+        );
+        child::run(
+            "tests::asan_is_true_in_a_child_process",
+            Some("-O1 -fsanitize=undefined,address"),
+        );
+        child::run("tests::asan_is_false_in_a_child_process", None);
+        child::run(
+            "tests::asan_is_false_in_a_child_process",
+            Some("-fsanitize=undefined"),
+        );
+        child::run(
+            "tests::asan_is_false_in_a_child_process",
+            Some("-fsanitize=address -fno-sanitize=address"),
+        );
+    }
+
     #[test]
     fn the_shim_fails_on_a_warning_with_or_without_cflags() {
         for cflags in [None, Some("-O1")] {
