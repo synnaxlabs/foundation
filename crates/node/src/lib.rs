@@ -822,8 +822,8 @@ fn channel_key(
     entropy: &env::entropy::Entropy,
 ) -> types::channel::Key {
     // The time only orders keys, so a key before mesh time or 1970 has the time 0.
-    // Not an edge or the midpoint of the interval: each moves back when an edge stops
-    // at the end of the stamp range or the error shrinks.
+    // Not an edge or the midpoint of the interval: an edge moves back when the error
+    // changes, and the midpoint when one edge stops at the end of the stamp range.
     let at = match time.status() {
         clock::Status::Synced(mesh) | clock::Status::Holdover(mesh, _) => {
             mesh.time().max(Stamp::EPOCH)
