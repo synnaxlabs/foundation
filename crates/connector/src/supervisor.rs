@@ -67,10 +67,11 @@ impl Supervisor {
     ///
     /// Returns `Ok` when `run` returns `Ok`, when `cancel` is cancelled and the run
     /// returned, or when the mesh stopped before the status channels opened. It
-    /// returns, with `Ok` or an error, only once each task of its last run ended, and
-    /// the home applied its last status frame or `cancel` is cancelled. A drop of the
-    /// future cancels the run and does not wait for its tasks: to wait, cancel
-    /// `cancel` and await the future. The future is not `Send`: call it on a shard.
+    /// returns, with `Ok` or an error, only once each task of
+    /// its last run ended, and the home applied its last status frame or `cancel` is
+    /// cancelled. A drop of the future cancels the run and does not wait for its
+    /// tasks: to wait, cancel `cancel` and await the future. The future is not `Send`:
+    /// call it on a shard.
     ///
     /// # Errors
     ///
@@ -591,6 +592,14 @@ mod tests {
         let steps = vec![Step::Device(Span::ZERO)];
         let out = supervise("script", steps, config(), Some(Span::from_nanos(1)));
         let want = [(0, 0, 0), (3, 2, 0), (1, 2, 0), (2, 2, 0)];
+        assert_eq!(states(&out.statuses), want);
+    }
+
+    #[test]
+    fn writes_no_waiting_after_a_cancel() {
+        let steps = vec![Step::Linger(ms(30))];
+        let out = supervise("script", steps, config(), Some(ms(50)));
+        let want = [(0, 0, 0), (3, 2, 0), (2, 2, 0)];
         assert_eq!(states(&out.statuses), want);
     }
 
@@ -1233,8 +1242,9 @@ mod tests {
     }
 
     /// A kind with the count `samples`. Its run sets it to 1 at 500 ms and returns
-    /// `Ok` at 600 ms. A task of the run sets it to 2 at 800 ms and ends at 2 s.
-    struct Late;
+    /// `Ok` at 600 ms. A task of the run sets it to the value, if given, at 800 ms
+    /// and ends at 2 s.
+    struct Late(Option<u64>);
 
     impl Kind for Late {
         type Config = ();
@@ -1256,9 +1266,12 @@ mod tests {
 
         async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
             let (late, clock) = (ctx.status().count("samples"), ctx.clock().clone());
+            let value = self.0;
             ctx.tasks().spawn(async move {
                 clock.sleep(ms(800)).await;
-                late.set(2);
+                if let Some(value) = value {
+                    late.set(value);
+                }
                 clock.sleep(ms(1_200)).await;
             });
             ctx.clock().sleep(ms(500)).await;
@@ -1270,7 +1283,7 @@ mod tests {
 
     #[test]
     fn writes_a_change_of_counts_alone_a_second_after_a_write_of_the_supervisor() {
-        let statuses = tally(Late);
+        let statuses = tally(Late(Some(2)));
         let got: Vec<_> = statuses
             .iter()
             .map(|(at, samples)| (*at, samples[0], samples[3]))
@@ -1281,6 +1294,17 @@ mod tests {
             (ms(1_600), 3, 2),
             (ms(2_000), 2, 2),
         ];
+        assert_eq!(got, want);
+    }
+
+    #[test]
+    fn writes_no_count_that_a_write_of_the_supervisor_wrote() {
+        let statuses = tally(Late(None));
+        let got: Vec<_> = statuses
+            .iter()
+            .map(|(at, samples)| (*at, samples[0], samples[3]))
+            .collect();
+        let want = [(Span::ZERO, 0, 0), (ms(600), 3, 1), (ms(2_000), 2, 1)];
         assert_eq!(got, want);
     }
 
