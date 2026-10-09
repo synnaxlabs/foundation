@@ -230,7 +230,7 @@ mod tests {
     use std::pin::{Pin, pin};
     use std::rc::Rc;
 
-    use types::time::Span;
+    use types::time::{Monotonic, Span};
 
     use crate::testing::{self, CLIENT, IDLE, SERVER, join, poll_once, spans};
     use crate::{Address, Class, Code, Config, Error, Transport, message, stream};
@@ -556,10 +556,13 @@ mod tests {
     /// the sim link, well under the keep-alive at a third of [`IDLE`].
     const FREE_WAIT: Span = Span::from_nanos(10_000_000);
 
-    /// Opens [`testing::STREAMS_MAX`] streams on `side` and sends one message on each.
-    async fn fill(side: &testing::Side) -> Vec<(stream::Sender, stream::Receiver)> {
+    /// Opens `count` streams on `side` and sends one message on each.
+    async fn fill(
+        side: &testing::Side,
+        count: u32,
+    ) -> Vec<(stream::Sender, stream::Receiver)> {
         let mut held = Vec::new();
-        for _ in 0..testing::STREAMS_MAX {
+        for _ in 0..count {
             let (mut sender, receiver) =
                 side.session.open(Class::Complete).await.expect("a stream");
             sender.send(side.block(b"a")).await.expect("sent");
@@ -568,10 +571,11 @@ mod tests {
         held
     }
 
-    /// Accepts each stream of [`fill`] on `side`, and reads the message of the first.
-    async fn accept_filled(side: &testing::Side) -> Vec<stream::Incoming> {
+    /// Accepts the `count` streams of [`fill`] on `side`, and reads the message of the
+    /// first.
+    async fn accept_filled(side: &testing::Side, count: u32) -> Vec<stream::Incoming> {
         let mut held = Vec::new();
-        for _ in 0..testing::STREAMS_MAX {
+        for _ in 0..count {
             held.push(side.session.accept().await.expect("a stream"));
         }
         let read = held[0].receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
@@ -584,6 +588,25 @@ mod tests {
         let mut last = side.session.accept().await.expect("a stream");
         let read = last.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
         assert_eq!(read, Ok(Some(b"b".to_vec())));
+    }
+
+    /// Polls `opened` until it gives a stream, and fails once it waits past
+    /// [`FREE_WAIT`] after `freed`.
+    async fn open_within(
+        side: &testing::Side,
+        mut opened: Pin<
+            &mut impl Future<Output = Result<(stream::Sender, stream::Receiver), Error>>,
+        >,
+        freed: Monotonic,
+    ) -> stream::Sender {
+        loop {
+            if let Some(opened) = poll_once(opened.as_mut()).await {
+                return opened.expect("a stream").0;
+            }
+            let waited = side.node.clock().now() - freed;
+            assert!(waited <= FREE_WAIT, "the open waited {waited:?}");
+            side.node.clock().sleep(spans(Span::MILLISECOND, 1)).await;
+        }
     }
 
     /// The read at the end of a half that its peer finished, or reset when `reset`.
@@ -604,7 +627,7 @@ mod tests {
             0,
             |config| config,
             move |side| async move {
-                let mut held = fill(&side).await;
+                let mut held = fill(&side, testing::STREAMS_MAX).await;
                 let (mut sender, mut receiver) = held.remove(0);
                 let read = receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
                 assert_eq!(read, ended(reset));
@@ -617,14 +640,12 @@ mod tests {
                 }
                 let freed = side.node.clock().now();
                 drop((sender, receiver));
-                let (mut sender, _receiver) = opened.await.expect("a stream");
-                let waited = side.node.clock().now() - freed;
-                assert!(waited <= FREE_WAIT, "the open waited {waited:?}");
+                let mut sender = open_within(&side, opened, freed).await;
                 sender.send(side.block(b"b")).await.expect("sent");
                 side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
             },
             move |side| async move {
-                let mut held = accept_filled(&side).await;
+                let mut held = accept_filled(&side, testing::STREAMS_MAX).await;
                 let mut first = held.remove(0);
                 if reset {
                     first.sender = None;
@@ -657,7 +678,7 @@ mod tests {
             0,
             |config| config,
             |side| async move {
-                let mut held = fill(&side).await;
+                let mut held = fill(&side, testing::STREAMS_MAX).await;
                 let mut opened = pin!(side.session.open(Class::Complete));
                 assert!(poll_once(opened.as_mut()).await.is_none());
                 let (sender, mut receiver) = held.remove(0);
@@ -669,7 +690,7 @@ mod tests {
                 side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
             },
             |side| async move {
-                let mut held = accept_filled(&side).await;
+                let mut held = accept_filled(&side, testing::STREAMS_MAX).await;
                 let mut first = held.remove(0);
                 let reply = first.sender.as_mut().expect("a reply half");
                 reply.finish().expect("finished");
@@ -691,13 +712,7 @@ mod tests {
             0,
             |config| config,
             |side| async move {
-                let mut held = Vec::new();
-                for _ in 0..testing::STREAMS_MAX - 1 {
-                    let (mut sender, receiver) =
-                        side.session.open(Class::Complete).await.expect("a stream");
-                    sender.send(side.block(b"a")).await.expect("sent");
-                    held.push((sender, receiver));
-                }
+                let mut held = fill(&side, testing::STREAMS_MAX - 1).await;
                 // The last stream that the peer allows: open, but nothing sent yet.
                 let (mut unsent, _unsent_receiver) =
                     side.session.open(Class::Complete).await.expect("a stream");
@@ -710,26 +725,14 @@ mod tests {
                 sender.finish().expect("finished");
                 let freed = side.node.clock().now();
                 drop((sender, receiver));
-                let mut sender = loop {
-                    if let Some(opened) = poll_once(opened.as_mut()).await {
-                        break opened.expect("a stream").0;
-                    }
-                    let waited = side.node.clock().now() - freed;
-                    assert!(waited <= FREE_WAIT, "the open waited {waited:?}");
-                    side.node.clock().sleep(spans(Span::MILLISECOND, 1)).await;
-                };
+                let mut sender = open_within(&side, opened, freed).await;
                 sender.send(side.block(b"b")).await.expect("sent");
                 unsent.send(side.block(b"b")).await.expect("sent");
                 side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
             },
             |side| async move {
-                let mut held = Vec::new();
-                for _ in 0..testing::STREAMS_MAX - 1 {
-                    held.push(side.session.accept().await.expect("a stream"));
-                }
+                let mut held = accept_filled(&side, testing::STREAMS_MAX - 1).await;
                 let mut first = held.remove(0);
-                let read = first.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
-                assert_eq!(read, Ok(Some(b"a".to_vec())));
                 let reply = first.sender.as_mut().expect("a reply half");
                 reply.finish().expect("finished");
                 let read = first.receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
