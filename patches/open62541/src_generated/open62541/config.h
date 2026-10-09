@@ -78,7 +78,7 @@
 /* #undef UA_ENABLE_SUBSCRIPTIONS_ALARMS_CONDITIONS */
 
 /* Multithreading */
-#define UA_MULTITHREADING 100
+#define UA_MULTITHREADING 0
 
 /* Advanced Options */
 #define UA_ENABLE_STATUSCODE_DESCRIPTIONS
@@ -220,18 +220,15 @@
 /**
  * Thread-local variables
  * ---------------------- */
-#if UA_MULTITHREADING >= 100
-# if defined(_MSC_VER)
-#  define UA_THREAD_LOCAL __declspec(thread)
-# elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
-#  define UA_THREAD_LOCAL _Thread_local /* C11 or newer */
-# elif defined(__GNUC__) || defined(__clang__)
-#  define UA_THREAD_LOCAL __thread
-# else
-#  error "No thread-local storage keyword available on this compiler."
-# endif
+/* At each level of UA_MULTITHREADING: each thread runs its own clients and servers. */
+#if defined(_MSC_VER)
+# define UA_THREAD_LOCAL __declspec(thread)
+#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L
+# define UA_THREAD_LOCAL _Thread_local /* C11 or newer */
+#elif defined(__GNUC__) || defined(__clang__)
+# define UA_THREAD_LOCAL __thread
 #else
-# define UA_THREAD_LOCAL
+# error "No thread-local storage keyword available on this compiler."
 #endif
 
 /**
@@ -715,6 +712,9 @@ UA_STATIC_ASSERT(sizeof(bool) == 1, cannot_overlay_integers_with_large_bool);
 #if defined(_WIN32)
 # define UA_FLOAT_LITTLE_ENDIAN 1
 #elif defined(__i386__) || defined(__x86_64__) || defined(__amd64__)
+# define UA_FLOAT_LITTLE_ENDIAN 1
+#elif (defined(__aarch64__) || defined(__arm64__)) && defined(__BYTE_ORDER__) && \
+    (__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__) /* Clang defines no __FLOAT_WORD_ORDER__ */
 # define UA_FLOAT_LITTLE_ENDIAN 1
 #elif defined(__FLOAT_WORD_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && \
     (__FLOAT_WORD_ORDER__ == __ORDER_LITTLE_ENDIAN__) /* Defined only in GCC */

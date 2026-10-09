@@ -2,6 +2,7 @@
 //! of a shard's home.
 
 mod channel;
+pub mod client;
 mod commit;
 mod link;
 pub mod reader;
@@ -39,9 +40,15 @@ pub mod home {
     }
 }
 
+/// The `mesh` items that hub calls give, so that layer 3 names them through `hub`.
+pub mod mesh {
+    pub use ::mesh::Stopped;
+}
+
 /// The hub of one shard: it opens writer and reader sessions on the indexes of the
-/// shard's home, and serves each hub stream of a transport session through a
-/// [`Link`]. It is not `Send`: each call is on the shard's thread. Clones share it.
+/// shard's home, and serves each hub stream of a transport session that its caller
+/// gives to a [`Link`]. It is not `Send`: each call is on the shard's thread. Clones
+/// share it.
 #[derive(Clone, Debug)]
 pub struct Hub(Rc<RefCell<State>>);
 
@@ -61,6 +68,10 @@ pub struct Config {
     pub time: clock::Reader,
     /// The source of each challenge's nonce.
     pub entropy: env::entropy::Entropy,
+    /// The region's mesh, or `None` for a node with no region. The mesh names the home
+    /// of each index and the address of each member. With `None`, this node is the
+    /// home of each index.
+    pub mesh: Option<::mesh::Mesh>,
 }
 
 /// The state of one shard's hub, which each session shares. No borrow of it lasts
@@ -84,6 +95,7 @@ struct State {
     entropy: env::entropy::Entropy,
     /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
     rules: access::Rules,
+    mesh: Option<::mesh::Mesh>,
 }
 
 impl Hub {
@@ -102,6 +114,7 @@ impl Hub {
             node,
             time,
             entropy,
+            mesh,
         } = config;
         let state = Rc::new(RefCell::new(State {
             home,
@@ -116,6 +129,7 @@ impl Hub {
             time,
             entropy,
             rules: access::Rules::default(),
+            mesh,
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)
@@ -123,7 +137,7 @@ impl Hub {
 
     /// Makes each channel of `definitions` known to sessions, the indexes first, so
     /// their order does not matter. It skips each definition that is not a channel. The
-    /// home carries each index at once.
+    /// home carries an index from the first session that finds this node is its home.
     ///
     /// # Panics
     ///
@@ -147,24 +161,20 @@ impl Hub {
         }
     }
 
-    /// Opens a writer session on `config.channels` and the index of each. It opens at
-    /// the first poll.
+    /// Opens a writer session on `config.channels` and the index of each. While the
+    /// mesh names no home for an index, it waits for one.
     ///
     /// # Errors
     ///
     /// [`writer::Error::Empty`] for no name, [`writer::Error::Unknown`] for the first
-    /// name that no channel has, else [`writer::Error::Home`] when the home refuses
-    /// the writer.
-    #[expect(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "a remote writer will wait for its home"
-    )]
+    /// name that no channel has, then, for the first index whose home is not this
+    /// node, [`writer::Error::Remote`], or [`writer::Error::Mesh`] when the mesh
+    /// stopped. Else [`writer::Error::Home`] when the home refuses the writer.
     pub async fn writer(
         &self,
         config: writer::Config,
     ) -> Result<Writer, writer::Error> {
-        Writer::open(&self.0, config)
+        Writer::open(&self.0, config).await
     }
 
     /// Opens a reader session on `channels`, which share one index, as
@@ -177,18 +187,15 @@ impl Hub {
     ///
     /// For the first name that breaks a rule: [`reader::Error::Unknown`] for a name
     /// that no channel has, and [`reader::Error::ManyIndexes`] for a channel on
-    /// another index than the first. [`reader::Error::Empty`] for no name.
-    #[expect(
-        clippy::unused_async,
-        clippy::unused_async_trait_impl,
-        reason = "a remote reader will wait for its home"
-    )]
+    /// another index than the first. [`reader::Error::Empty`] for no name. Then
+    /// [`reader::Error::Remote`] when the home of the index is not this node, and
+    /// [`reader::Error::Mesh`] when the mesh stopped.
     pub async fn reader(
         &self,
         channels: &[Name],
         mode: reader::Mode,
     ) -> Result<Reader, reader::Error> {
-        Reader::open(&self.0, channels, mode)
+        Reader::open(&self.0, channels, mode).await
     }
 
     /// Sets the access rules that each later hello and request is checked against.
@@ -198,8 +205,8 @@ impl Hub {
         self.0.borrow_mut().rules = rules;
     }
 
-    /// The hub's part of `session`. Give each hub stream of the session to
-    /// [`Link::serve`].
+    /// The hub's part of `session`. Give to [`Link::serve`] each hub stream of the
+    /// session that the caller does not reject.
     #[must_use]
     pub fn link(&self, session: transport::Session) -> Link {
         Link::new(Rc::clone(&self.0), session)
@@ -216,11 +223,7 @@ impl State {
             "a channel with key {key} or name {name} is known already"
         );
         let (data_type, index) = match &channel.kind {
-            Kind::Index { .. } => {
-                let slot = self.interner.slots().assign(key);
-                self.home.carry(slot);
-                (Type::Scalar(Scalar::Stamp), key)
-            }
+            Kind::Index { .. } => (Type::Scalar(Scalar::Stamp), key),
             Kind::Data(data) => {
                 let index = *data.index();
                 assert!(
@@ -237,6 +240,12 @@ impl State {
             index,
         };
         self.channels.insert(name.clone(), channel);
+    }
+
+    /// Carries `index` at the home. A later carry does nothing.
+    fn carry(&mut self, index: types::channel::Key) {
+        let slot = self.interner.slots().assign(index);
+        self.home.carry(slot);
     }
 
     /// Wakes each reader that the home names as having a frame to take or a miss to
@@ -259,4 +268,39 @@ impl State {
             waker.wake();
         }
     }
+}
+
+/// Why the home did not carry an index for a session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Away {
+    /// The mesh names this other node as the home.
+    Remote(types::node::Key),
+    /// The mesh stopped.
+    Mesh(::mesh::Stopped),
+}
+
+/// Waits until the mesh names a home for `index`, then carries `index` at the home
+/// when the home is this node. With no mesh, this node is the home.
+async fn carry(
+    state: &Rc<RefCell<State>>,
+    index: types::channel::Key,
+) -> Result<(), Away> {
+    let (watch, node) = {
+        let state = state.borrow();
+        (
+            state.mesh.as_ref().map(|mesh| mesh.watch(index)),
+            state.node,
+        )
+    };
+    if let Some(mut watch) = watch {
+        loop {
+            match watch.next().await.map_err(Away::Mesh)? {
+                Some(home) if home == node => break,
+                Some(home) => return Err(Away::Remote(home)),
+                None => {}
+            }
+        }
+    }
+    state.borrow_mut().carry(index);
+    Ok(())
 }

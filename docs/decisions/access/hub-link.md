@@ -1,8 +1,8 @@
 - **HUB LINK (2026-10-08)** `Hub::link(session)` gives a `hub::Link` for one transport
-  session. `node` calls `Link::serve` for each hub stream once it reads its header. On
-  a client link, the first stream given to `serve` is its hello stream, and each later
-  one a request stream; `serve` takes the role at the call (`laptop.architect`,
-  2026-10-08T18:56:15Z,
+  session. `node` calls `Link::serve` for each hub stream that NODE PORT serves once it
+  reads its header. On a client link, the first stream given to `serve` is its hello
+  stream, and each later one a request stream; `serve` takes the role at the call
+  (`laptop.architect`, 2026-10-08T18:56:15Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066908418).
   `hub::Config` gets `node` (the `via` that `admit` checks), `time` (`clock::Reader`),
   and `entropy` (the nonces). The link waits for a hello's expiry with
@@ -63,9 +63,14 @@
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6067215617).
   Supersedes the rule by the send of the first request of
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066239520.
-  `node` gives `hub::Config::node` from `node::Config::key`, as it does for the
-  transport and the mesh, and never a zero key. #1660 changes only where `node` gets
-  the key. The test waits on #1744, whose client hello is the first that a `node` test
-  can admit through `Hub::link`, with `via` set to the node's key. Decided by
-  `laptop.architect` (2026-10-08T18:36:19Z,
+  `node` gives `hub::Config::node` from the key in `node.key` (NODE PORT), as it does
+  for the transport and the mesh, and never a zero key. The test waits on #1744, whose
+  client hello is the first that a `node` test can admit through `Hub::link`, with
+  `via` set to the node's key. Decided by `laptop.architect` (2026-10-08T18:36:19Z,
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400).
+  Amended by #1660, where the key moves from `node::Config` to `node.key`
+  (https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831); the
+  sentence is by `laptop.architect` (2026-10-08T21:42:22Z,
+  https://github.com/synnaxlabs/foundation/pull/1991#issuecomment-6069608203).
+  Supersedes the `node::Config::key` clause of
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6066571400.

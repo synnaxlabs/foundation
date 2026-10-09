@@ -1,6 +1,8 @@
 //! Reads, subscribes to, and writes OPC UA servers through open62541, compiled in with
 //! the feature `open62541`.
 
+#[cfg(feature = "open62541")]
+mod alloc;
 // Only `link` calls it until the event loop of #435 does.
 #[cfg(test)]
 #[cfg(feature = "open62541")]
@@ -95,13 +97,18 @@ mod tests {
             [Path::new(env!("CARGO_MANIFEST_DIR")).join("src/shim.c")]
         );
         let dirs = ["/copy/deps", "/copy/include"];
+        let header = format!(
+            "-DUA_ARCH_HEADER=\"{}/src/alloc.h\"",
+            env!("CARGO_MANIFEST_DIR")
+        );
         for path in ["/missing/gcc", "/missing/clang"] {
             let shim = args(&tool(shim.clone(), path));
             assert_eq!(includes(&shim), dirs, "{path}: {shim:?}");
-            for arg in ["-Wall", "-Wextra", "-Werror", "-std=c99"] {
+            for arg in ["-Wall", "-Wextra", "-Werror", "-std=c99", &header] {
                 assert!(shim.iter().any(|a| a == arg), "{path}: {arg} in {shim:?}");
             }
             let library = args(&tool(library.clone(), path));
+            assert!(library.contains(&header), "{path}: {library:?}");
             assert_eq!(includes(&library), dirs, "{path}: {library:?}");
             assert!(
                 library.iter().any(|a| a == "-std=c99"),

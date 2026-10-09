@@ -52,10 +52,16 @@
   https://github.com/synnaxlabs/foundation/pull/1978#issuecomment-6067470813). A
   founding node builds it from its config, and a node that joins takes it whole from its
   join answer. It derives `PartialEq` and `Eq` and has no constructor: `Mesh::open`
-  stays its one check, of the members and voters. It checks no definition or home. The
-  node that founds the region checks the definitions (SPEC CHANGE). Nothing checks the
-  homes (`laptop.architect`, 2026-10-08T18:35:16Z:
-  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). `Start`
+  stays its one check: this node, each voter, and the node of each home must be a
+  member (`Error::NotMember`). It refuses no definition. A founding spec with problems
+  is not an error of the open: when no file names a pointer, the node uses no spec until
+  a valid change takes effect (SPEC IN USE; `laptop.architect`, 2026-10-08T15:42:09Z:
+  https://github.com/synnaxlabs/foundation/pull/1897#issuecomment-6063561498). The node
+  that founds the region checks the definitions (SPEC CHANGE). Changed by
+  `laptop.architect` (2026-10-08T21:26:46Z:
+  https://github.com/synnaxlabs/foundation/pull/1978#issuecomment-6069370914), which
+  changes "with no check at `Mesh::open`" of
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633. `Start`
   lost, because `driver.rs` holds `raft::Start`, which changes at each open
   (`laptop.architect`, 2026-10-08T10:34:37Z:
   https://github.com/synnaxlabs/foundation/issues/1859#issuecomment-6057975061).
@@ -132,3 +138,21 @@
   the group; `env::files::Files::within`, because `env` then gives two ways to scope
   the files of a crate, beside `buffer::Config::dir`. A change that wants it later
   moves `buffer` and `mesh` together.
+  `Mesh::holder(PublicKey) -> Option<node::Key>` gives the member whose card holds a
+  public key, by a scan of the members, so a caller such as `node` serves a `Hub` stream
+  of a peer only when a member holds the key that its transport proves. It gives the
+  key, not a `Member`, which a caller reads with `Mesh::member` when it needs the
+  record. At most one member holds a key: `region::State::fits` refuses a second with
+  `Unfit::Held`, at open and at each join. No change replaces a card yet; the change
+  that first does so checks `Held` against each other member. Lost: a map by public key,
+  a second copy that each write of the members must keep in step; `Option<Member>`,
+  which clones the names, addresses, and status at each stream, and which a caller can
+  keep after the record changes; `admits -> bool`, which fits only one caller. Decided
+  by `laptop.architect` (2026-10-08T22:29:26Z:
+  https://github.com/synnaxlabs/foundation/issues/2023#issuecomment-6070338077). The
+  scan makes `region::State::new` O(n²) in the members: 129 µs at 255 members on a
+  shared Intel Xeon Platinum 8488C, accepted by `laptop.architect`
+  (2026-10-08T23:10:50Z:
+  https://github.com/synnaxlabs/foundation/pull/2021#issuecomment-6070861987). Trigger
+  for a map by public key: a caller of `holder` for each message, or a measured
+  `State::new` over 10 ms.

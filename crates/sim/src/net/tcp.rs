@@ -594,7 +594,7 @@ impl<'a> Tcp<'a> {
         }
         let held = end.outbox.len() + (end.sent - end.acked);
         let room = end.options.send_buffer_bytes.saturating_sub(held);
-        if end.outbox.len() >= end.options.unsent_bytes_max || room == 0 {
+        if end.outbox.len() >= end.options.unsent_bytes_max.get() || room == 0 {
             return (Poll::Pending, end.writing.replace(waker.clone()));
         }
         let mut n = 0;
@@ -919,6 +919,8 @@ impl<'a> Tcp<'a> {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
+
     use env::rng::Rng;
 
     use super::*;
@@ -941,7 +943,7 @@ mod tests {
         let options = tcp::Options {
             send_buffer_bytes: 1,
             recv_buffer_bytes: 1,
-            unsent_bytes_max: 1,
+            unsent_bytes_max: NonZeroUsize::MIN,
             delayed: false,
         };
         let end = End::new(Pair { local, peer }, 2, Phase::Open, options, 1);
@@ -981,7 +983,7 @@ mod tests {
         let options = tcp::Options {
             send_buffer_bytes: 1 << 20,
             recv_buffer_bytes: 1 << 20,
-            unsent_bytes_max: 1 << 14,
+            unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
             delayed: false,
         };
         let mut end = End::new(Pair { local, peer }, 1, Phase::Open, options, 0);
@@ -1002,7 +1004,7 @@ mod tests {
         let options = tcp::Options {
             send_buffer_bytes: 1,
             recv_buffer_bytes: 1,
-            unsent_bytes_max: 1,
+            unsent_bytes_max: NonZeroUsize::MIN,
             delayed: false,
         };
         let mut wire = Wire::new(link::Config::default(), Rng::from_seed(0));

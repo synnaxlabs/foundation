@@ -61,9 +61,11 @@ type under test, other than in the test of a hand-written `Debug` impl itself, i
 the only kill. `.cargo/mutants.toml` lists the few functions it skips. Each entry is as
 narrow as one function. Its comment says why no caller or peer can see the mutant, or
 names the test that kills it in a job that the mutants run does not see (Miri, loom,
-another OS). A mutant that a test could kill but none does links its open issue. Miri
-and cargo-fuzz run on one pinned nightly, named in `rust-toolchain-nightly`, that only
-those gates use.
+another OS). A mutant made by hand that `cargo mutants` never makes, and that only
+such an assertion kills, gets no entry, since one matches nothing. The doc of that test
+says why no caller or peer can see the mutant, and the round comment links that doc. A
+mutant that a test could kill but none does links its open issue. Miri and cargo-fuzz
+run on one pinned nightly, named in `rust-toolchain-nightly`, that only those gates use.
 
 ## Process tests
 

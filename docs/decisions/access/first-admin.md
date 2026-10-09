@@ -53,3 +53,17 @@
   removal of `spec::key::reserved` and the public `Definition::kind` approved by
   `laptop.architect` (2026-10-08T11:11:39Z,
   https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6058589907).
+  A client's plan never changes a founding definition. Else a subject that may apply
+  in the root region can change or remove the admin's key or policy, and no later plan
+  shows it. The `ops` apply refuses a plan with a change at a reserved label through
+  `config::plan::Plan::definitions` (`Mismatch`, PLAN FILE), before it proposes
+  anything. `ops` has no label check of its own, as that is a second guard of one
+  rule. Lost: the check in `Mesh::apply`, a rule of a client's input and not of region
+  state; no `apply` grant on a reserved name in `access::Rules::grant`, which gives one
+  action an exception away from the code that reads the plan. Decided by
+  `laptop.architect` (2026-10-08T12:36:57Z, part 2 of
+  https://github.com/synnaxlabs/foundation/pull/1862#issuecomment-6060015621), changed
+  by `laptop.architect` (2026-10-08T22:57:18Z,
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070697149) and
+  `laptop.architect-2` (2026-10-08T19:20:33Z,
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179).

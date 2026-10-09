@@ -19,10 +19,28 @@
   task ends its shard, and its `Handle::join` returns `thread::Panicked`. A dropped
   `Handle` would leave its thread running, so it is `#[must_use]`. On `os`, a shard is a
   Tokio `LocalRuntime` and `spawn_local` runs `Tasks`; on `sim`, the deterministic
-  scheduler runs them. No other crate calls Tokio's timers or spawn. `env::files`
-  (#37) gives files under one data directory, with owned blocks and a sync that
-  poisons the file on failure (S4). One handle at a time holds a file open to write,
-  until it drops and its calls end; another write open fails with `Busy` (#392).
+  scheduler runs them. No other crate calls Tokio's timers or spawn. This changes "A
+  panic in any task ends its shard" (https://github.com/synnaxlabs/foundation/pull/18)
+  for the cases below (2026-10-08, #871). As anywhere in Rust, a panic that unwinds into
+  the unwind of another panic aborts the process. On `os`, a panic in the poll or the
+  drop of a task that code spawns with `tokio::spawn` on a shard or a dedicated thread,
+  or with `tokio::task::spawn_local` on a shard, not through `Tasks`, does not end it:
+  Tokio catches the panic. Tokio drops such a task during the unwind of a panic in its
+  poll, so a panic that unwinds out of that drop aborts the process. A panic in the drop
+  of the payload of a panic can escape Tokio's catches and end the shard or the thread.
+  A release build aborts at any panic. Of the Foundation crates that `node` links, only
+  `os` depends on Tokio, so only vendor code can spawn such a task. Lost: Tokio's
+  `unhandled_panic` setting. It needs `--cfg tokio_unstable` in every build, and a
+  `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` value, as the loom job and the cfg runs of
+  `cargo xtask` set, replaces the flags of `.cargo/config.toml`. Decided by
+  `laptop.architect-2` (2026-10-08T23:08:19Z, #871,
+  https://github.com/synnaxlabs/foundation/issues/871#issuecomment-6070831264),
+  approved by `laptop.architect` (2026-10-09T01:09:48Z, #2033,
+  https://github.com/synnaxlabs/foundation/pull/2033#issuecomment-6072192755).
+  `env::files` (#37) gives files under one data directory, with owned blocks and a
+  sync that poisons the file on failure (S4). One handle at a time holds a file open
+  to write, until it drops and its calls end; another write open fails with `Busy`
+  (#392).
   `File::close` ends after the calls of its handle end; a drop closes without a wait
   (#516). Each `os` platform picks its own mechanism (#121). `env::net` (#44) gives UDP
   sockets that move GSO and GRO batches with ECN and the local address, TCP streams, and
@@ -41,16 +59,72 @@
   Rejected: one I/O thread for every socket, as `os::files` uses; each message would
   cross a thread (C2 puts a parked wake at 4 to 9 us), and every socket would wait
   behind one thread. Socket options come from `rustix`, and `TCP_NOTSENT_LOWAT`, which
-  it lacks, from one `libc::setsockopt`. Until #119 lands, `os::net()` is behind the
-  cargo feature `net`, and its `udp` panics ("os::net has no UDP driver yet"); #119
-  removes the feature and the panic. Decided by `laptop.architect-2` (2026-10-08
+  it lacks, from one `libc::setsockopt`. Decided by `laptop.architect-2` (2026-10-08
   02:32 UTC, #120,
   https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). On
-  `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and the
-  stream reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of
-  the connect, an IPv4-mapped address as plain IPv4, and any other address as given,
-  with its scope and flow label. A caller that needs the kernel's peer there makes an
-  interface change to `env::net`. Decided by `laptop.architect-2` (2026-10-08 15:42 UTC,
+  `os`, a UDP socket uses `noq-udp` for its socket calls: GSO, GRO, `recvmmsg`, ECN,
+  the local address, and don't-fragment. `os` binds with `rustix`, with `IPV6_V6ONLY`
+  off on an IPv6 socket, and routes as `sim` does: a socket on `::` sends IPv4 as
+  `::ffff:a.b.c.d`, and any other socket that gets a destination of the other family
+  gives `Unreachable`. A `Transmit` goes out in one `sendmsg`, with GSO; there is no
+  `sendmmsg`. After `EIO` or `EINVAL` on a GSO send, `noq-udp` stores 1 as its
+  `max_gso_segments`, and from then on each datagram goes out alone; that is the only
+  GSO flag. Each half has its own `dup` of the socket. The receiver registers for
+  readable at its first poll, in a `OnceLock`, so no lock is on the receive path. A
+  sender registers for writable at its first poll and after `EAGAIN`, and drops the
+  registration when the send ends: Linux wakes each `EPOLLOUT` registration of a socket
+  for each datagram that the socket sends (1,000 wakes for 1,000 sends on box2), so a
+  sender that stays registered on each shard would wake each parked shard. Decided by
+  `laptop.architect-2` (2026-10-08 18:27 UTC, #119,
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). A send
+  ends at its first `Ready`, also with an error or a failed wait for writable. A send
+  that the caller drops while it waits keeps the registration until the next send of
+  that sender ends. Supersedes "the next send that succeeds deregisters it" of item 3
+  of https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541.
+  Decided by `laptop.architect-2` (2026-10-09 00:34 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071816983).
+  The first poll of a UDP half binds it to its thread, whatever its result. A failed
+  `dup` or registration gives `Io` for that poll alone, and the next poll tries again;
+  nothing stores a failure. For a source that is not local or is of the other family,
+  `os` gives the kernel's answer (on Linux, `Unreachable` or `Io { code: 22 }`), and
+  `sim` gives `Io { code: 99 }`. For port 0, `os` gives the kernel's answer. Until
+  #1972 patches `noq-udp`, such a transmit can turn GSO and the IPv4 ECN mark off for
+  the life of the socket. Decided by `laptop.architect-2` (2026-10-08 18:56 and 19:02
+  UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066909518,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6067014743).
+  Supersedes "or the errno" of item 2 of
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541: a
+  failure is not stored. One exception: `os` gives `Io { code: 22 }` for each IPv6
+  source on an IPv4 socket, mapped too, or an unspecified source in any form. Linux
+  skips the `IPV6_PKTINFO` of the first and reads the second as no source, and sends
+  each from an address of its choice. Decided by `laptop.architect-2` (2026-10-08 20:06
+  and 20:38 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068090235,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068606545).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068520601,
+  which refused only `0.0.0.0`. On macOS, `os` has no GSO, so `batch_max` is 1, and the
+  loopback, with an MTU of 16,384 bytes, loses a larger datagram. Decided by
+  `laptop.architect-2` (2026-10-08 22:35 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767). Until
+  #1972 patches noq-udp to send an IPv4 source as `IP_PKTINFO` on Apple, macOS ignores
+  each IPv4 source and sends from an address of its choice, with no error. Decided by
+  `laptop.architect-2` (2026-10-08 22:51 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958).
+  `os::net()` is behind the `os` cargo feature `net`, off by default, because Tokio has
+  no `net` under `--cfg loom`. Decided by `laptop.architect-2` (2026-10-08 23:42 UTC,
+  #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415).
+  Supersedes the removal of the feature in
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066303437, approved
+  in https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066705829, and
+  item 2 of https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843,
+  which removed it when the last of #119 and #1095 merged. Trigger: #2038 gives the
+  loom models a cfg name of their own, and then removes the feature. On `os`, a peer
+  that resets after the handshake gives `Ok` from `Net::connect`, and the stream reads
+  `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of the connect,
+  an IPv4-mapped address as plain IPv4, and any other address as given, with its scope
+  and flow label. A caller that needs the kernel's peer there makes an interface
+  change to `env::net`. Decided by `laptop.architect-2` (2026-10-08 15:42 UTC,
   #1789, https://github.com/synnaxlabs/foundation/pull/1789#issuecomment-6063559667).
   Amended (2026-10-07, #995): `env::net` also gives name lookups.
   `Net::resolve` gives an IP literal, also an IPv6 address in brackets, with no
@@ -148,3 +222,52 @@
   (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6050977855). The
   `Poisoned` sentence: `laptop.architect-2`, 2026-10-08T02:41:37Z
   (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051075955).
+  Amended (2026-10-08T17:19:48Z, #1921): on macOS, an accepted socket does not keep
+  the receive buffer of its listener, so `os` sets the options of the listener again
+  on each accepted socket, on every OS. The listener still sets them before `listen`:
+  the window scale of the SYN-ACK comes from its receive buffer. On macOS, a socket
+  option on a socket that a reset ended gives `EINVAL`. On `ENOTCONN` or `EINVAL`
+  from a call on the socket, `os` reads the pending error and gives it: a pending
+  error ends the stream, and with none the call gives `Io` with the code. Decided by
+  `laptop.architect-2` (2026-10-08T17:19:48Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065277473; the
+  one rule for `ENOTCONN` or `EINVAL`, 2026-10-08T18:12:38Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6066172138).
+  Measured on macOS (#1921): a create of a path with a trailing slash gives `ENOTDIR`
+  for a file and `NotFound` for no file, not `EISDIR`, and an unlink of a directory
+  gives `EPERM`, not `EISDIR`. No code reads these codes.
+  Amended (2026-10-08T17:46:08Z, #1921): macOS applies `TCP_NOTSENT_LOWAT` only to the
+  write event, not to the write itself. So on macOS, `os` counts the bytes written since
+  the count last reached the bound. When the count reaches `unsent_bytes_max`, the next
+  write waits for the write event, which honors the bound. So the unsent bytes stay at
+  most twice the bound, with one wait per `unsent_bytes_max` bytes. On macOS with
+  `delayed`, XNU also posts the write event under one segment, so the unsent bytes stay
+  at most the bound plus the larger of the bound and one segment. Decided by
+  `laptop.architect-2` (2026-10-08T17:46:08Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065728469; the last
+  two sentences, 2026-10-08T18:12:38Z:
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6066172138).
+  Supersedes the second item of
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065283346
+  (2026-10-08T17:20:09Z), and the last sentence of the record text of
+  https://github.com/synnaxlabs/foundation/issues/1921#issuecomment-6065728469
+  (2026-10-08T17:46:08Z).
+  Amended (2026-10-08T19:21:24Z, #1977): a write of no bytes gives `Ok(0)` at once, with
+  no wait and no error, also after a reset or `poll_close`. It writes nothing, so it has
+  nothing to report; the next write of bytes, read, or close reports a reset or a close.
+  `os` and `sim` each return after the thread check (and, in `sim`, the crash check),
+  before any other step, so the two agree with no shared logic. The thread check binds
+  the stream to its thread, also at a first poll that writes no bytes. Lost: `Ok(0)` or
+  the error that ended the stream, which needs a read of `SO_ERROR` in `os` and the
+  close and reset states in both drivers, for a call that no caller makes; and a wait as
+  for a write of bytes, which needs the kernel's unsent count on each such call and is
+  not exact on macOS. Decided by `laptop.architect-2` (2026-10-08T19:21:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1977#issuecomment-6067346540; the
+  order, 2026-10-08T19:44:46Z:
+  https://github.com/synnaxlabs/foundation/pull/1938#issuecomment-6067736678).
+  Amended (2026-10-08T17:39:11Z, #1940): `tcp::Options::unsent_bytes_max` is a
+  `NonZeroUsize`. A bound of 0 has no meaning in its doc, and the drivers did not agree
+  on it: Linux and the macOS kernel read it as no bound, `os` on macOS wrote 1 byte per
+  call, and `sim` never wrote. No caller gives 0.
+  Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/1940).

@@ -9,9 +9,12 @@ dependencies = [
  "block",
  "connector-influx",
  "env",
+ "mesh",
  "node",
  "proptest",
  "sim",
+ "spec",
+ "transport",
  "types",
 ]
 
@@ -421,6 +424,8 @@ name = "connector-opcua"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "counting",
+ "divan",
 ]
 
 [[package]]
@@ -855,6 +860,7 @@ version = "0.0.0"
 dependencies = [
  "access",
  "aws-lc-rs",
+ "blob",
  "block",
  "buffer",
  "clock",
@@ -862,6 +868,7 @@ dependencies = [
  "counting",
  "env",
  "home",
+ "mesh",
  "sim",
  "spec",
  "transport",
@@ -1020,6 +1027,7 @@ dependencies = [
  "blob",
  "block",
  "clock",
+ "counting",
  "env",
  "proptest",
  "raft",
@@ -1054,13 +1062,18 @@ dependencies = [
  "blob",
  "block",
  "buffer",
+ "bytes",
  "clock",
  "codec",
+ "connector",
+ "connector-influx",
  "counting",
+ "crc32c",
  "divan",
  "env",
  "estimate",
  "home",
+ "http",
  "hub",
  "loom",
  "mesh",
@@ -1187,15 +1200,21 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 name = "ops"
 version = "0.0.0"
 dependencies = [
+ "blob",
+ "block",
  "clap",
  "config",
  "config-hcl",
  "connector",
  "document",
+ "env",
+ "mesh",
  "schemars",
  "serde",
  "serde_json",
+ "sim",
  "spec",
+ "transport",
  "types",
 ]
 
@@ -1209,6 +1228,7 @@ dependencies = [
  "env",
  "getrandom 0.4.3",
  "libc",
+ "noq-udp",
  "os",
  "proptest",
  "rustix",
