@@ -82,5 +82,8 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 4 | `acceptance` | Runs the MVP acceptance scenarios against whole meshes built from `node`. Test-only. | all crates |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |
 
+`fuzz` holds the fuzz targets, outside the workspace. It is test-only, builds on the
+pinned nightly, may depend on any crate, and no crate depends on it.
+
 Outside the binary: the Rust SDK reuses `block`, `types`, `codec`, and `wire`; other
 SDKs hand-write their data path against golden vectors (D12).
