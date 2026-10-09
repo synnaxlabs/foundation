@@ -196,7 +196,9 @@ fn ends_the_sessions_of_a_data_channel_that_moves_to_another_index() {
         let writer = test.writer("b", &["value", "value-b"]).await;
         let entries = writer.set().entries();
         let keys: Vec<_> = entries.iter().map(|entry| entry.key.as_u128()).collect();
-        assert_eq!(keys, [3, 2, 4]);
+        // The move keeps the data slot of `value`, which is lower than the slot of
+        // `time-b`.
+        assert_eq!(keys, [2, 3, 4]);
     });
 }
 
@@ -359,6 +361,27 @@ fn gives_a_latest_reader_of_a_changed_channel_no_series_of_the_removed_one() {
         let mut out = [0; 4];
         codec::decode(I32, 1, bytes, &mut out).expect("decodes");
         assert_eq!(i32::from_le_bytes(out), 20);
+    });
+}
+
+/// A latest reader on a renamed channel takes the newest frame with the series written
+/// under the old name: a rename keeps the history of the channel.
+#[test]
+fn gives_a_latest_reader_of_a_renamed_channel_the_series_of_its_old_name() {
+    run(47, |test| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        assert_eq!(write(&mut writer, &[now], &[10]), [applied(0)]);
+        let mut renamed = channels();
+        let value = renamed
+            .remove(&name("value"))
+            .expect("a channel of the test");
+        renamed.insert(name("level"), value);
+        test.hub.set_definitions(&renamed);
+        let mut reader = test.reader(&["level"], Mode::Latest).await;
+        let received = reader.next().await.expect("the newest frame");
+        assert_eq!(keys(&received), [1, 2]);
+        assert_eq!(samples(&received, 2), [10]);
     });
 }
 

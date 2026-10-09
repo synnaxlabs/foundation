@@ -1580,7 +1580,7 @@ mod home {
             let mut interner = next.await.expect("the open gives the interner");
             let (index, values) = (Key::from_u128(1), Key::from_u128(2));
             let slot = interner.slots().index(index);
-            interner.slots().data(values);
+            interner.slots().data(values, Type::Scalar(Scalar::I64));
             let set = interner.intern(&[Group {
                 index,
                 data: &[(values, Type::Scalar(Scalar::I64))],

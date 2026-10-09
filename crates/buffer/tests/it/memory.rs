@@ -1,4 +1,6 @@
-//! A file driver over memory, a stand-in until `sim` has files (#114).
+//! A file driver over memory. It counts syncs and can slow each one (#1016), and
+//! its calls end at once, which the `alloc` binary needs (#2136). Only a test that
+//! needs this runs on it, until #517 and #2136 move it to `sim`.
 
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
@@ -64,17 +66,6 @@ impl Memory {
     /// When there is no file at `path`.
     pub(crate) fn bytes(&self, path: &str) -> Vec<u8> {
         lock(&self.file(path)).clone()
-    }
-
-    /// Puts `bytes` at `offset` of a file, as a crash or a defect would.
-    ///
-    /// # Panics
-    ///
-    /// When there is no file at `path`, or the bytes end past it.
-    pub(crate) fn put(&self, path: &str, offset: usize, bytes: &[u8]) {
-        let file = self.file(path);
-        let mut file = lock(&file);
-        file[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
 
     fn file(&self, path: &str) -> Bytes {

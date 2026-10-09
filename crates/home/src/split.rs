@@ -1305,7 +1305,7 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame is of key set 1, not of key set 0")]
             fn on_a_frame_of_another_key_set() {
-                let mut interner = create_interner(&[1, 2]);
+                let mut interner = create_interner(&[1, 2], &[]);
                 let set = interner.intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[],
