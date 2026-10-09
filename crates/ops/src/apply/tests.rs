@@ -365,7 +365,7 @@ fn leaves_out_each_count_of_zero() {
             root: spec::tree::empty(),
         };
         let applied = Applied {
-            file: "a\n.plan".to_owned(),
+            file: "a\\b\n.plan".to_owned(),
             pointer: plan::Pointer::from(pointer),
             counts: Counts {
                 added,
@@ -376,14 +376,17 @@ fn leaves_out_each_count_of_zero() {
         };
         applied.text()
     };
-    assert_eq!(applied(0, 0, 0, 0), "Applied a\\n.plan: no change.\n");
+    assert_eq!(applied(0, 0, 0, 0), "Applied a\\\\b\\n.plan: no change.\n");
     assert_eq!(
         applied(1, 2, 3, 2),
-        "Applied a\\n.plan: 1 added, 2 changed, 3 removed, 2 homes listed.\n"
+        "Applied a\\\\b\\n.plan: 1 added, 2 changed, 3 removed, 2 homes listed.\n"
     );
-    assert_eq!(applied(0, 2, 0, 0), "Applied a\\n.plan: 2 changed.\n");
-    assert_eq!(applied(0, 0, 3, 0), "Applied a\\n.plan: 3 removed.\n");
-    assert_eq!(applied(0, 0, 0, 1), "Applied a\\n.plan: 1 home listed.\n");
+    assert_eq!(applied(0, 2, 0, 0), "Applied a\\\\b\\n.plan: 2 changed.\n");
+    assert_eq!(applied(0, 0, 3, 0), "Applied a\\\\b\\n.plan: 3 removed.\n");
+    assert_eq!(
+        applied(0, 0, 0, 1),
+        "Applied a\\\\b\\n.plan: 1 home listed.\n"
+    );
 }
 
 #[test]
