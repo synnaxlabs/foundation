@@ -13,7 +13,7 @@ exclude_re = [
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
   # The build and the runs need the pinned nightly and cargo-fuzz, which no test has. A
   # crash planted in a target must fail the fuzz CI job of #2100 (#2105).
-  'xtask/src/fuzz\.rs:.*(replace run_one ->| in run$)',
+  'xtask/src/fuzz\.rs:.*(replace (run_one|host) ->| in run$)',
   # Calls the GitHub API. The review workflow runs it on each PR: a round with findings
   # shows that it fails.
   'xtask/src/review\.rs:.*(replace run ->| in run$)',
