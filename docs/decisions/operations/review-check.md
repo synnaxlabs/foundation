@@ -32,8 +32,9 @@
   the first top-level block after it, and the end lines are the last one, each when it
   is a paragraph. A code block, an HTML block, a list, a quote, or a table is not a
   paragraph, so a list after the `Hot path:` line fails. A footnote with no reference
-  is not shown, so its lines do not count. The footnotes are the last blocks, as
-  GitHub shows them. A round comment posted after the cutoff fails when it holds raw
+  is not shown, so its lines do not count, and of the footnotes of one label only the
+  first is shown. The footnotes are the last blocks, as GitHub shows them. A round
+  comment posted after the cutoff fails when it holds raw
   HTML outside a code span or a code block: an HTML block or inline HTML as `comrak`
   reads it, or a line of text whose source, after the indent and the marks of quotes,
   list items, and footnote labels, starts with `<` and a letter, `!`, `/`, or `?` and
