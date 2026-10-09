@@ -82,6 +82,23 @@ fn run<F: Future<Output = ()>>(body: impl FnOnce(Files, PathBuf) -> F) {
 }
 
 #[test]
+fn a_disk_that_drops_while_the_test_panics_stays_mounted() {
+    let mut data = PathBuf::new();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(|_, path| {
+            data = path;
+            async { panic!("the test broke") }
+        });
+    }));
+    unwound.expect_err("the test panics");
+    let mount = data.parent().expect("the data directory is on the mount");
+    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap();
+    assert!(mounts.contains(mount.to_str().unwrap()), "{mounts}");
+    check(sudo("umount").arg("-l").arg(mount));
+    std::fs::remove_dir_all(mount.parent().unwrap()).unwrap();
+}
+
+#[test]
 fn a_create_past_the_free_bytes_gives_full_and_keeps_no_blocks() {
     run(|files, _| async move {
         let free = files.free().await.unwrap();
