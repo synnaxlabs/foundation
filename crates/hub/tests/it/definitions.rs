@@ -189,3 +189,48 @@ fn ends_the_sessions_of_a_data_channel_that_moves_to_another_index() {
         assert_eq!(keys, [3, 2, 4]);
     });
 }
+
+/// A data channel whose index is renamed at the same key keeps its definition, but
+/// each session on it holds the index, so each ends.
+#[test]
+fn ends_the_sessions_on_the_data_of_a_renamed_index() {
+    run(35, |test| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let mut reader = test.reader(&["value"], Mode::Complete).await;
+        let mut renamed = channels();
+        let time = renamed
+            .remove(&name("time"))
+            .expect("a channel of the test");
+        renamed.insert(name("clock"), time);
+        test.hub.set_definitions(&renamed);
+        let removed = Key::from_u128(1);
+        let ended = reader.next().await.expect_err("the reader ended");
+        assert_eq!(ended, Ended::Removed(removed));
+        let now = test.now();
+        let failure = written(&mut writer, &[(1, &[now]), (2, &[10])]);
+        assert_eq!(failure, Err(Failure::Removed(removed)));
+    });
+}
+
+/// A call that panics on its definitions changes nothing.
+#[test]
+fn keeps_each_session_through_a_call_that_panics() {
+    run(36, |test| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let mut panicking = without(&["value"]);
+        panicking.insert(name("other"), definition(9, DataType::Sample(I64), 8));
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            test.hub.set_definitions(&panicking);
+        }))
+        .expect_err("the call panics");
+        assert_eq!(
+            panicked.downcast_ref::<String>().map(String::as_str),
+            Some(
+                "the index 00000000-0000-0000-0000-000000000008 of channel other is \
+                 not an index of the definitions"
+            )
+        );
+        let now = test.now();
+        assert_eq!(write(&mut writer, &[now], &[10]), [applied(0)]);
+    });
+}

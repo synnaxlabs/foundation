@@ -1521,6 +1521,27 @@ fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff() {
     }
 }
 
+/// The handoff of a writer that a removal closes reaches the commit.
+#[test]
+fn gives_a_reader_the_error_of_a_failed_sync_of_the_handoff_of_a_removal() {
+    run(16, |test| async move {
+        let mut complete = test.reader(&["value-c"], Mode::Complete).await;
+        let writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        test.node.fail_file(FilePath::new(RING), Operation::Sync);
+        test.hub.set_definitions(&without(&["value"]));
+        test.clock.sleep(SETTLE).await;
+        let failed = Ended::Buffer(env::files::Error::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        });
+        let next = poll_once(complete.next()).map(Result::err);
+        assert_eq!(next, Poll::Ready(Some(failed)));
+        drop(writer);
+    });
+}
+
 #[test]
 fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff_in_a_failed_write() {
     run(18, |test| async move {

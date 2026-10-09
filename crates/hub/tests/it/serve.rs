@@ -28,8 +28,8 @@ use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Mode, Open, Reader, keys};
 
 use super::{
-    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, fill, scrambled,
-    without, write, write_series, write_wide,
+    AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, channels, fill,
+    scrambled, without, write, write_series, write_wide,
 };
 
 /// The UDP port of each transport.
@@ -310,6 +310,49 @@ fn stops_an_open_of_an_unknown_key_with_unknown() {
         "the open names channel 00000000-0000-0000-0000-000000000009, which this \
          node does not know"
     );
+}
+
+/// The home stops the open at the message of the unknown key, before the rest of the
+/// keys run comes.
+#[test]
+fn stops_an_open_at_the_message_of_an_unknown_key() {
+    let served = served(72, Class::Complete, false, |mut peer| async move {
+        let open = Open {
+            mode: Mode::Complete { limit_bytes: 0 },
+            channels: 2,
+        };
+        let mut out = vec![0; open.encoded_len()];
+        open.encode(&mut out);
+        peer.send(&out).await.expect("sends the open");
+        let mut out = vec![0; keys::LEN];
+        keys::encode(&[channel::Key::from_u128(9)], &mut out);
+        peer.send(&out).await.expect("sends a key");
+        stopped_as_unknown(&mut peer).await;
+    });
+    let unknown = serve::Error::Unknown(channel::Key::from_u128(9));
+    assert_eq!(served, Some(Err(unknown)));
+}
+
+#[test]
+fn keeps_an_open_session_through_a_call_with_the_same_definitions() {
+    let home = |test: Test, link: Link, incoming| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let (hub, clock, now) = (test.hub.clone(), test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            hub.set_definitions(&channels());
+            write(&mut writer, &[now], &[10]);
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session(73, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[2, 1], 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        assert_eq!(decoded(&got, &[I64, STAMP])[0], [10]);
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
 }
 
 /// Runs a session whose home removes the channel `value` (key 2) once `SETTLE` passes,
