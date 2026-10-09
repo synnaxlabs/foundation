@@ -1624,3 +1624,31 @@ fn a_file_removed_while_open_gives_the_path_of_its_open() {
     .unwrap();
     assert_eq!(node.file_closes(), [PathBuf::from("a")]);
 }
+
+#[test]
+fn an_open_whose_future_dropped_closes_no_descriptor() {
+    for ended in [false, true] {
+        let mut sim = sim(0);
+        let node = sim.node(node::Config {
+            disk_bytes: MIB,
+            ..node::Config::default()
+        });
+        sim.run_on(&node, move |node, _| async move {
+            let (files, clock) = (node.files(), node.clock());
+            let mut open =
+                Box::pin(files.open(Path::new("a"), Mode::Create { len: 0 }));
+            poll_fn(|cx| {
+                assert!(open.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            if ended {
+                clock.sleep(Span::MILLISECOND).await;
+            }
+            drop(open);
+            clock.sleep(Span::MILLISECOND).await;
+        })
+        .unwrap();
+        assert_eq!(node.file_closes(), Vec::<PathBuf>::new(), "ended: {ended}");
+    }
+}
