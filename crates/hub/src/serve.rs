@@ -17,7 +17,7 @@ use types::channel::{self, Slot};
 use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use wire::header::MALFORMED;
-use wire::hub::client::STALE;
+use wire::hub::client::Refusal;
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
 use crate::reader::{Credit, Ended, Session};
@@ -77,8 +77,8 @@ impl Error {
             | Self::NoIndex
             | Self::Unadmitted
             | Self::Pending => Some(Code(MALFORMED)),
-            Self::Access(error) => Some(Code(client::code(error))),
-            Self::Stale => Some(Code(STALE)),
+            Self::Access(error) => Some(Code(client::refusal(error).code())),
+            Self::Stale => Some(Code(Refusal::Stale.code())),
             Self::Unknown(_) => Some(Code(UNKNOWN)),
             Self::NotHome => Some(Code(NOT_HOME)),
             Self::Buffer(_) | Self::Mesh(_) => Some(Code(FAILED)),
