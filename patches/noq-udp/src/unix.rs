@@ -385,7 +385,6 @@ impl UdpSocketState {
 
 #[cfg(not(any(apple, target_os = "openbsd", target_os = "netbsd")))]
 fn send(
-    #[allow(unused_variables)] // only used on Linux
     state: &UdpSocketState,
     io: SockRef<'_>,
     transmit: &Transmit<'_>,
