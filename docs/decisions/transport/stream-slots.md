@@ -12,7 +12,7 @@
   release. At the limit, a lone frame for each freed stream, which the peer acks;
   `MAX_STREAMS` carries only the latest limit, so a burst of freed streams costs one
   frame per packet. Lost: a `MAX_STREAMS` at each freed stream, at any count (shape
-  (b): the frame goes alone in a new packet, since the ACK that frees a two-way
+  (b): the frame goes alone in a new packet, as the ACK that frees a two-way
   stream needs no ACK, so one request and reply cost 2 datagrams each way, where the
   release sends 1); a `MAX_STREAMS` only to a peer that sent `STREAMS_BLOCKED`, with
   that frame sent at once (a peer on another QUIC stack, or on the release, waits up
