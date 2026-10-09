@@ -14,5 +14,6 @@
 | Mesh clock state | Memory per node; any shard reads its time and status (`Reader::now`, `Reader::status`); published as `<node>.clock.offset`, `.clock.error`, and the status | `clock`; `node` publishes | `hub.now()`, `home` (fence, stamp limits) | `clock` |
 | Operation table | Binary | The build | CLI, MCP, embedded docs | `ops` |
 | Node key material | `node.key` on node-local disk | `node` (makes it at its first start or with `node::create_key`, writes it back at each start) | `transport`, `node` | `node` |
+| Node name | `name` on node-local disk | `node` (writes it at its first start, under `lock`) | `node`, `node::name` (the CLI) | `node` |
 | Per-node settings (disk budget, pool budget, data directory) | Budgets: a policy in the spec; data directory: a start argument (NODE SETTINGS) | `apply`; whoever starts the node | `buffer`, `block` | `node` |
 | SDK guide, JSON schemas for editors | Generated from kinds and the operation table | `ops`, `init` | Agents, editors | `ops` |
