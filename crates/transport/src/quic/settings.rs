@@ -65,7 +65,7 @@ pub(crate) struct Setup {
     pub(crate) role: Role,
     /// The largest message this side takes: at least 1472, at most `pool.largest()`.
     pub(crate) message_bytes_max: usize,
-    /// At least `message_bytes_max`.
+    /// At least twice `message_bytes_max`.
     pub(crate) window_bytes: usize,
     pub(crate) streams_max: NonZeroU32,
     /// Positive.
