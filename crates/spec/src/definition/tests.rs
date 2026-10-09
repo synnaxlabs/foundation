@@ -12,12 +12,15 @@ fn selector(texts: &[&str]) -> Selector {
 
 fn policy() -> Definition {
     let allow = [Action::Read, Action::Write].into_iter().collect();
-    Definition::Access(Policy::new(
-        selector(&["ops.*"]),
-        selector(&["site_a.**", "!site_a.@secrets.**"]),
-        allow,
-        Authority(9),
-    ))
+    Definition::Access(
+        Policy::new(
+            selector(&["ops.*"]),
+            selector(&["site_a.**", "!site_a.@secrets.**"]),
+            allow,
+            Authority(9),
+        )
+        .unwrap(),
+    )
 }
 
 /// Writes a pattern as a file writes it: a leading `!` is the exclusion flag.
@@ -60,7 +63,8 @@ fn reads_what_it_writes() {
 #[test]
 fn writes_no_authority_without_write() {
     let read = [Action::Read].into_iter().collect();
-    let policy = Policy::new(selector(&["a"]), selector(&["b"]), read, Authority(9));
+    let policy =
+        Policy::new(selector(&["a"]), selector(&["b"]), read, Authority(9)).unwrap();
     let bytes = Definition::Access(policy).encode();
     assert_eq!(bytes, access(&[b"a"], &[b"b"], 0b1, 0));
 }
@@ -240,14 +244,15 @@ fn stores_an_exclusion_of_the_longest_name() {
     let longest = "a".repeat(Name::MAX_BYTES);
     let excluded = format!("!{longest}");
     let select = Selector::new(["**", excluded.as_str()]).unwrap();
-    let policy = Policy::new(selector(&["a"]), select, Actions::NONE, Authority(0));
+    let read = [Action::Read].into_iter().collect();
+    let policy = Policy::new(selector(&["a"]), select, read, Authority(0)).unwrap();
     let definition = Definition::Access(policy);
     let bytes = definition.encode();
     let stored = [
         &[1][..],
         &255_u64.to_le_bytes(),
         longest.as_bytes(),
-        &[0, 0],
+        &[1, 0],
     ]
     .concat();
     assert!(bytes.ends_with(&stored));
@@ -265,6 +270,20 @@ fn refuses_bits_that_name_no_action() {
     assert_eq!(
         error.to_string(),
         "the actions 0b01000001 at byte 38 name no action"
+    );
+}
+
+#[test]
+fn refuses_actions_that_allow_nothing() {
+    let bytes = access(&[b"a"], &[b"b"], 0, 0);
+    let error = Error::Access {
+        at: 38,
+        error: access::Error::Empty,
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "the access policy at byte 38: an access policy allows no action"
     );
 }
 
@@ -1264,17 +1283,14 @@ fn access_strategy() -> impl Strategy<Value = Definition> {
     (
         selectors(),
         selectors(),
-        prop::sample::subsequence(Action::ALL.to_vec(), 0..=6),
+        prop::sample::subsequence(Action::ALL.to_vec(), 1..=6),
         any::<u8>(),
     )
         .prop_map(|(subjects, select, allow, authority)| {
             let allow = allow.into_iter().collect();
-            Definition::Access(Policy::new(
-                subjects,
-                select,
-                allow,
-                Authority(authority),
-            ))
+            Definition::Access(
+                Policy::new(subjects, select, allow, Authority(authority)).unwrap(),
+            )
         })
 }
 

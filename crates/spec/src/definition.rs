@@ -77,7 +77,7 @@ use types::name::{self, Name, Selector, Written};
 use types::sample::{self, Scalar};
 use types::time::Span;
 
-use crate::access::{Action, Actions, Policy};
+use crate::access::{self, Action, Actions, Policy};
 use crate::channel::{self, Channel, Data};
 use crate::compression::{self, Mode};
 use crate::connector::Connector;
@@ -756,9 +756,10 @@ impl<'a> Reader<'a> {
     fn access(&mut self) -> Result<Policy, Error> {
         let subjects = self.patterns()?;
         let select = self.patterns()?;
-        let at = self.at();
+        let actions = self.at();
         let bits = self.byte()?;
-        let allow = Actions::from_bits(bits).ok_or(Error::Actions { at, bits })?;
+        let allow =
+            Actions::from_bits(bits).ok_or(Error::Actions { at: actions, bits })?;
         let at = self.at();
         let authority = Authority(self.byte()?);
         if authority.0 != 0 && !allow.contains(Action::Write) {
@@ -767,7 +768,8 @@ impl<'a> Reader<'a> {
                 found: authority,
             });
         }
-        Ok(Policy::new(subjects, select, allow, authority))
+        Policy::new(subjects, select, allow, authority)
+            .map_err(|error| Error::Access { at: actions, error })
     }
 }
 
@@ -876,6 +878,13 @@ pub enum Error {
         at: usize,
         /// Why they make no policy.
         error: node_settings::Error,
+    },
+    /// An access policy's actions make no policy.
+    Access {
+        /// Where the actions are.
+        at: usize,
+        /// Why they make no policy.
+        error: access::Error,
     },
     /// A placement's nodes make no policy.
     Placement {
@@ -995,6 +1004,9 @@ impl fmt::Display for Error {
             ),
             Self::Budget { at, error } => {
                 write!(f, "the budgets at byte {at}: {error}")
+            }
+            Self::Access { at, error } => {
+                write!(f, "the access policy at byte {at}: {error}")
             }
             Self::Placement { at, error } => {
                 write!(f, "the placement at byte {at}: {error}")

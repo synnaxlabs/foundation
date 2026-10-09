@@ -1635,7 +1635,8 @@ mod tests {
                 selector(&["edge.**"]),
                 actions.iter().copied().collect(),
                 Authority(authority),
-            );
+            )
+            .unwrap();
             let entry = Entry {
                 definition: Definition::Spec(definition::Definition::Access(policy)),
                 label_span: at(0, 1),
@@ -1817,15 +1818,18 @@ mod tests {
 
         #[test]
         fn refuses_an_empty_allow() {
-            assert_eq!(
-                check(&access(&attributes(list(vec![]), None))),
-                Err(vec![refused(
-                    "config.empty-allow",
-                    at(0, 15),
-                    "the `allow` list holds no action",
-                    "Add one or more actions, such as \"read\"",
-                )])
-            );
+            for authority in [None, Some(3)] {
+                assert_eq!(
+                    check(&access(&attributes(list(vec![]), authority))),
+                    Err(vec![refused(
+                        "config.empty-allow",
+                        at(0, 15),
+                        "the `allow` list holds no action",
+                        "Add one or more actions, such as \"read\"",
+                    )]),
+                    "{authority:?}"
+                );
+            }
         }
 
         #[test]

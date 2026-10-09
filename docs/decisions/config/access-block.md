@@ -30,3 +30,12 @@
   (https://github.com/synnaxlabs/foundation/pull/1781#issuecomment-6052187547).
   Supersedes the silent `authority` of
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
+  `spec::access::Policy::new` refuses an empty `allow` with
+  `spec::access::Error::Empty`, and the decoder refuses stored actions that allow
+  nothing with
+  `spec::definition::Error::Access { at, error }`, as it maps `placement::Error`.
+  `config` maps `Error::Empty` to `config.empty-allow` at the span of the `allow` value,
+  with the same message and fix, before it checks `authority`. The rule is in `spec`
+  once, and `config::plan::check` holds no copy. Decided by `laptop.architect-2`,
+  2026-10-09T00:48:39Z
+  (https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
