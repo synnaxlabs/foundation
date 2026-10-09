@@ -317,8 +317,11 @@
   https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073119953; the socket
   that the C library keeps open, 2026-10-09T02:42:31Z:
   https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073170413). Amended
-  (2026-10-09, #2108): A drop of an `os` listener stops its listen at once on Linux,
-  also while a child holds a copy of the socket, from its fork to its exec. macOS has no
-  call that stops the listen of a copy, so there a connect in that window succeeds and
-  resets at the exec (`laptop.architect-2`, 2026-10-09T04:57:56Z:
-  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074581669).
+  (2026-10-09, #2108): an `os` listener stops its listen at once on Linux when it drops
+  or its registration fails, also while a child holds a copy of the socket, from its
+  fork to its exec. macOS has no call that stops the listen of a copy, so there a
+  connect in that window succeeds and resets at the exec (`laptop.architect-2`,
+  2026-10-09T04:57:56Z:
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074581669; the
+  failed registration, 2026-10-09T05:02:07Z:
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074628714).
