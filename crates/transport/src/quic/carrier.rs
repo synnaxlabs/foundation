@@ -204,8 +204,9 @@ impl Handle {
 }
 
 impl Drop for Carrier {
-    /// Refuses each later dial from a peer until each connection drained, and closes
-    /// each session that no caller accepted with code 0.
+    /// Refuses each later dial from a peer until each connection drained, closes
+    /// each session that no caller accepted with code 0, and wakes each wait in
+    /// [`Handle::poll_accept`].
     fn drop(&mut self) {
         let mut state = self.0.borrow_mut();
         state.endpoint.refuse();
@@ -213,6 +214,7 @@ impl Drop for Carrier {
             state.sessions.remove(&key);
             state.close(key, Code(0));
         }
+        state.accepting.drain(..).for_each(Waker::wake);
         state.wake();
     }
 }
