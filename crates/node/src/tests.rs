@@ -3406,7 +3406,10 @@ mod port {
                     node: key,
                     time,
                     entropy,
-                    mesh: Some(mesh.clone()),
+                    region: Some(::hub::Region {
+                        mesh: mesh.clone(),
+                        transport: Rc::clone(&transport),
+                    }),
                 });
                 hub.define(&region(&members).definitions);
                 let port = route::accept(transport, Some(mesh.clone()), hub, tasks);
