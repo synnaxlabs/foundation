@@ -17,7 +17,7 @@ use std::time::Duration;
 use env::net::Error;
 use env::net::udp::{self, Meta, Receiver, Sender, Transmit};
 
-use super::gso;
+use super::{gso, runtime};
 
 /// How long a receive waits before it takes that no more datagrams come.
 const SILENCE: Duration = Duration::from_millis(300);
@@ -172,4 +172,31 @@ fn a_failed_registration_restarts_the_next_transmit_at_its_first_datagram() {
         let datagrams = [b"ab", b"cd", b"AB", b"CD", b"EF", b"GH"];
         assert_eq!(receive(&mut receiver).await, datagrams);
     });
+}
+
+#[test]
+fn a_failed_wait_restarts_the_next_transmit_at_its_first_datagram() {
+    #[expect(clippy::disallowed_methods, reason = "the filter needs a thread")]
+    let handle = std::thread::spawn(|| {
+        let first = runtime();
+        let (mut sender, gone) = first.block_on(pair());
+        answer_calls(|nr, k| {
+            let full = nr == libc::SYS_sendmsg && (k == 2 || k == 3);
+            full.then_some(libc::EAGAIN)
+        });
+        let waiting = batch(&gone, b"abcdefgh");
+        let mut cx = Context::from_waker(Waker::noop());
+        let full = first.block_on(async { sender.poll_send(&mut cx, &waiting) });
+        assert_eq!(full, Poll::Pending);
+        drop(first);
+        runtime().block_on(async {
+            let (_, mut receiver) = os::net().udp(&config()).unwrap();
+            let failed = Poll::Ready(Err(Error::Io { code: libc::EIO }));
+            assert_eq!(sender.poll_send(&mut cx, &waiting), failed);
+            send(&mut sender, &batch(&receiver, b"ABCDEFGH")).await;
+            let datagrams = [b"AB", b"CD", b"EF", b"GH"];
+            assert_eq!(receive(&mut receiver).await, datagrams);
+        });
+    });
+    handle.join().unwrap();
 }
