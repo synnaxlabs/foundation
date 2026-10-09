@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use types::channel;
 
-use crate::error::{self, Error, Problem};
+use crate::error::{self, Error};
 use crate::front_end;
 use crate::plan::{self, Action, Counts};
 use crate::used;
@@ -17,11 +17,14 @@ mod tests;
 
 /// Applies the plan in `bytes`, read from the plan file at `path`, to the spec of
 /// `mesh`. A new channel gets its key from `key`, as
-/// [`config::plan::Plan::definitions`] states.
+/// [`config::plan::Plan::definitions`] states. `kinds` holds the connector kinds of the
+/// node that applies. The members are those of `mesh` at the apply.
 ///
 /// # Errors
 ///
-/// - [`Error::Config`] with `ops.path-not-utf8` when `path` is not UTF-8.
+/// - [`Error::Config`] with `ops.path-not-utf8` when `path` is not UTF-8, or with each
+///   problem of [`config::plan::check`] on the definitions after the plan, with no
+///   place.
 /// - [`Error::Plan`] when `bytes` are not a plan, or when the plan holds a change that
 ///   `plan` does not make from the spec at its base, such as one at a reserved label.
 /// - [`Error::Behind`] when the node does not use the newest spec.
@@ -37,11 +40,12 @@ pub(crate) async fn apply(
     path: &Path,
     bytes: &[u8],
     mesh: &mesh::Mesh,
+    kinds: &connector::kind::Table,
     key: impl FnMut() -> channel::Key,
 ) -> Result<Applied, Error> {
-    let file = path.to_str().ok_or_else(|| {
-        Error::Config(vec![Problem::of(front_end::not_utf8(path), &[])])
-    })?;
+    let file = path
+        .to_str()
+        .ok_or_else(|| Error::config(vec![front_end::not_utf8(path)], &[]))?;
     let planned = config::plan::Plan::decode(bytes).map_err(Error::Plan)?;
     let (pointer, applied) = used::spec(mesh).await?;
     // `definitions` reads the definitions at the base, so the compare comes first.
@@ -57,6 +61,8 @@ pub(crate) async fn apply(
         pointer
     } else {
         let definitions = planned.definitions(&applied, key).map_err(Error::Plan)?;
+        config::plan::check(&definitions, &mesh.names(), kinds)
+            .map_err(|diagnostics| Error::config(diagnostics, &[]))?;
         mesh.apply(planned.base, definitions, planned.homes)
             .await
             .map_err(|error| match error {
