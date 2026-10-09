@@ -923,7 +923,7 @@ mod tests {
                 assert!(matches!(read, Ok(Poll::Pending)), "{read:?}");
                 assert_eq!(reader.chunks.capacity(), CHUNKS_MAX);
             }
-            source.bytes.extend([2; LONG]);
+            source.bytes.extend(iter::repeat_n(2, LONG));
             source.open = false;
             assert_eq!(
                 read_all(&mut reader, &pool, &mut source),
