@@ -7308,8 +7308,8 @@ mod tests {
         }
 
         /// On `Endpoint` events, not through `Session`: no public peer can skip its
-        /// hello, and a `sim` link cannot lose only the datagrams of a hello, so no
-        /// public peer holds a live connection with no hello past the bound.
+        /// hello, and a `sim` link that loses a hello loses other datagrams too, so
+        /// only a foreign peer pins the time and the close of the bound.
         #[test]
         fn end_a_session_whose_peer_sends_no_hello_for_twice_idle() {
             testing::run(1, |shard| {
@@ -7401,7 +7401,8 @@ mod tests {
 
         /// A connection whose socket broke, with no hello from a live peer, gives no
         /// second [`Event::Closed`] and no fault when the hello's bound passes. On
-        /// `Endpoint` events, not through `Session`: no public peer can skip its hello.
+        /// `Endpoint` events, not through `Session`: the carrier stops at a broken
+        /// socket, so only a direct caller of `Endpoint` runs a timer after `fail`.
         #[test]
         fn end_a_failed_session_once_when_the_bound_passes() {
             testing::run(1, |shard| {

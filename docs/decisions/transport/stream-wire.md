@@ -87,7 +87,7 @@
   has not arrived twice the idle timeout after the handshake breaks the protocol, with
   the reason `a peer with no hello`. A check that comes only after the peer was also
   silent for the idle timeout ends the session as timed out (`laptop.architect-2`,
-  #2149, 2026-10-09:
+  #2149, 2026-10-09 16:42 UTC:
   https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085189583). The idle
   timeout is QUIC's: `idle`, or 3 PTO when that is longer. The second idle timeout is
   for the probe that resends a hello that a cut the session lives through (PROBE GAP)
