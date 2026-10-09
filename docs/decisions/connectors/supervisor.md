@@ -95,10 +95,6 @@
   `Failure::Removed` or `home::Error::Disk`, no change of state waits
   (`laptop.architect-2`, 2026-10-09T21:46:07Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6089790301).
-  While the shard's pool gives no frame, a change of state waits also after its status
-  channels were removed, until the pool frees or `cancel` is cancelled
-  (`laptop.architect-2`, 2026-10-09T23:16:59Z:
-  https://github.com/synnaxlabs/foundation/pull/2173#issuecomment-6090887547).
   Supersedes "at once" in rule 3 of
   https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6054035730 and
   "The frame's time is when the wait started" in
@@ -108,7 +104,12 @@
   `Failure::Removed` or `home::Error::Disk` the call writes no more status. Each other
   refusal is a defect of `connector`, and panics (`laptop.architect-2`,
   2026-10-09T19:41:05Z:
-  https://github.com/synnaxlabs/foundation/pull/2173#issuecomment-6087998186). A frame
+  https://github.com/synnaxlabs/foundation/pull/2173#issuecomment-6087998186). While
+  the shard's pool gives no frame, a change of state waits also after its status
+  channels were removed or its disk failed, until the pool frees or `cancel` is
+  cancelled (`laptop.architect-2`, 2026-10-09T23:16:59Z and 2026-10-09T23:33:09Z:
+  https://github.com/synnaxlabs/foundation/pull/2173#issuecomment-6090887547 and
+  https://github.com/synnaxlabs/foundation/pull/2173#issuecomment-6091053596). A frame
   that the home refuses as `Backwards` is stamped again after the stamp that the
   refusal gives, and written again at once, one time. A writer starts with no last
   stamp, so its first frame can be at or before the last frame of the writer before it
