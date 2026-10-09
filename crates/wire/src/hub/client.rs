@@ -59,9 +59,6 @@ pub const VIA: u32 = 23;
 /// Stop code: the hello expired.
 pub const EXPIRED: u32 = 24;
 
-/// Stop code: the hello expires later than the cap past the latest mesh time.
-pub const CAPPED: u32 = 25;
-
 /// Stop code: a renewal names another subject, key, `via`, or connection than the
 /// hello it renews.
 pub const CHANGED: u32 = 26;
@@ -84,14 +81,12 @@ pub enum Refusal {
     Via,
     /// [`EXPIRED`].
     Expired,
-    /// [`CAPPED`].
-    Capped,
     /// [`CHANGED`].
     Changed,
 }
 
 impl Refusal {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 8] = [
         Self::Malformed,
         Self::Busy,
         Self::Refused,
@@ -99,7 +94,6 @@ impl Refusal {
         Self::Stale,
         Self::Via,
         Self::Expired,
-        Self::Capped,
         Self::Changed,
     ];
 
@@ -120,7 +114,6 @@ impl Refusal {
             Self::Stale => STALE,
             Self::Via => VIA,
             Self::Expired => EXPIRED,
-            Self::Capped => CAPPED,
             Self::Changed => CHANGED,
         }
     }
@@ -142,10 +135,6 @@ impl fmt::Display for Refusal {
             }
             Self::Via => "the hello names another node as via",
             Self::Expired => "the hello expired",
-            Self::Capped => {
-                "the hello expires later than the cap past the latest mesh \
-                 time"
-            }
             Self::Changed => {
                 "a renewal names another subject, key, via, or connection than \
                  the hello it renews"

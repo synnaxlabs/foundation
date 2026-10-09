@@ -1220,3 +1220,48 @@ fn connects_to_a_node_whose_mesh_time_has_an_error_of_minutes() {
 fn connects_to_a_node_whose_mesh_time_has_an_unknown_error() {
     connects_at_wall_error(171, None);
 }
+
+/// A node with no time source admits a program, then gets one, so its error
+/// shrinks from unknown to 10 ms. The program's session lives on: its renewals pass.
+#[test]
+fn keeps_a_session_when_the_error_of_mesh_time_shrinks() {
+    let (got, served) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(Vec::new())));
+    let (kept, seen) = (Arc::clone(&got), Arc::clone(&served));
+    run_program(
+        172,
+        move |node, tasks| async move {
+            node.set_wall_error(None);
+            let (test, session, link) =
+                accept(&node, &tasks, POOL, true, Some(rules())).await;
+            let shrink = node.clone();
+            tasks.spawn(async move {
+                shrink.clock().sleep(Span::MINUTE).await;
+                shrink.set_wall_error(Some(Span::from_nanos(10_000_000)));
+            });
+            while let Ok(mut incoming) = session.accept().await {
+                let (link, seen, clock) =
+                    (link.clone(), Arc::clone(&seen), node.clock());
+                tasks.spawn(async move {
+                    header(&mut incoming).await;
+                    let result =
+                        super::link::answer(link.serve(incoming), &clock).await;
+                    seen.lock().expect("not poisoned").push(result.map(drop));
+                });
+            }
+            drop((link, test));
+        },
+        move |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            node.clock()
+                .sleep(Span::from_nanos(2 * LIFE.nanos() + Span::SECOND.nanos()))
+                .await;
+            let late = client.request(b"late").await;
+            *kept.lock().expect("not poisoned") = Some(late);
+            drop(client);
+            node.clock().sleep(QUIET).await;
+        },
+    );
+    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
+    let got = got.lock().expect("not poisoned").take();
+    assert_eq!(got, Some(Ok(b"etal".to_vec())), "the home gave {served:?}");
+}

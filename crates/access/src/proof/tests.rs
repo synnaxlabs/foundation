@@ -344,32 +344,47 @@ mod admit {
         );
     }
 
+    /// The cap counts from the latest edge, here with an error of 36500 days.
     #[test]
-    fn refuses_a_hello_that_expires_past_the_cap() {
+    fn holds_a_hello_that_expires_past_the_cap_live_until_the_cap() {
         let unknown = Span::from_nanos(36_500 * Span::DAY.nanos());
-        let latest = |cap: Stamp| {
-            Some(Interval {
-                earliest: cap - CAP - unknown,
-                latest: cap - CAP,
-            })
-        };
-        admit(&listed(), latest(EXPIRES), create_hello()).unwrap();
+        let latest = EXPIRES - Span::NANOSECOND - CAP;
+        let now = Some(Interval {
+            earliest: latest - unknown,
+            latest,
+        });
+        let body = b"open site_a.pt_1";
 
-        let cap = EXPIRES - Span::NANOSECOND;
-        let error = admit(&listed(), latest(cap), create_hello()).unwrap_err();
+        let admitted = admit(&listed(), now, create_hello()).unwrap();
 
+        let ends = latest + CAP;
+        assert_eq!(admitted.ends(), ends);
+        let before = Some(at(ends - Span::NANOSECOND));
         assert_eq!(
-            error,
-            Error::Capped {
-                expires: EXPIRES,
-                cap
-            }
+            listed().verify(&admitted, before, body, &signed(body)),
+            Ok(())
+        );
+        assert_eq!(
+            listed().verify(&admitted, Some(at(ends)), body, &signed(body)),
+            Err(Error::Expired {
+                expires: ends,
+                now: ends
+            })
         );
     }
 
+    #[test]
+    fn ends_a_hello_that_expires_before_the_cap_at_its_expiry() {
+        assert_eq!(admitted().ends(), EXPIRES);
+
+        let cap = Some(at(EXPIRES - CAP));
+        let admitted = admit(&listed(), cap, create_hello()).unwrap();
+
+        assert_eq!(admitted.ends(), EXPIRES);
+    }
+
     /// A hello that fails each check, with one failure removed at each step, gives
-    /// the refusal of the first check that still fails. No mesh time both expires
-    /// and caps a hello, so the last step fails the cap alone.
+    /// the refusal of the first check that still fails.
     #[test]
     fn refuses_a_hello_for_the_first_check_that_fails() {
         let other = node::Key::from_u128(7);
@@ -420,15 +435,6 @@ mod admit {
                 now: EXPIRES
             }
         );
-        let cap = EXPIRES - Span::NANOSECOND;
-        let early = Some(at(cap - CAP));
-        assert_eq!(
-            refuse(&listed(), early, &hello, &signature),
-            Error::Capped {
-                expires: EXPIRES,
-                cap
-            }
-        );
     }
 
     #[test]
@@ -466,6 +472,7 @@ mod admit {
         let admitted = admit(&listed(), now, hello.clone()).unwrap();
 
         assert_eq!(admitted.hello(), &hello);
+        assert_eq!(admitted.ends(), hello.expires);
     }
 
     #[test]
@@ -626,13 +633,25 @@ mod renew {
                 now: EXPIRES + Span::MINUTE,
             })
         );
-        assert_eq!(
-            renew(&listed(), capped, TEST_1, renewal()),
-            Err(Error::Capped {
-                expires: EXPIRES + Span::MINUTE,
-                cap: EXPIRES,
-            })
-        );
+        let signature = sign(&pair(TEST_1), &super::hello(&renewal()));
+        let renewed = listed().renew(&admitted(), capped, renewal(), &signature);
+        assert_eq!(renewed.map(|renewed| renewed.ends()), Ok(EXPIRES));
+    }
+
+    /// A renewal set from the latest edge before a drop of a day is taken, and lives
+    /// only until the cap past the latest edge at the renewal.
+    #[test]
+    fn holds_a_renewal_after_a_drop_of_the_latest_edge_until_the_cap() {
+        let dropped = NOW.map(|now| Interval {
+            earliest: now.earliest - Span::DAY,
+            latest: now.latest - Span::DAY,
+        });
+        let signature = sign(&pair(TEST_1), &super::hello(&renewal()));
+
+        let renewed = listed().renew(&admitted(), dropped, renewal(), &signature);
+
+        let ends = NOW.unwrap().latest - Span::DAY + CAP;
+        assert_eq!(renewed.map(|renewed| renewed.ends()), Ok(ends));
     }
 
     /// A spec that no longer lists the key refuses the renewal of a hello that it
@@ -838,15 +857,6 @@ fn names_each_refusal_and_its_fix() {
             "the hello expired at 1970-01-01T00:00:02.000000000Z, at or before the \
              mesh time 1970-01-01T00:00:03.000000000Z",
             "Send a new hello with a later expiry",
-        ),
-        (
-            Error::Capped {
-                expires: Stamp::from_nanos(2_000_000_000),
-                cap: Stamp::from_nanos(1_000_000_000),
-            },
-            "the hello expires at 1970-01-01T00:00:02.000000000Z, after the cap \
-             1970-01-01T00:00:01.000000000Z",
-            "Send a hello that expires within 15 minutes",
         ),
     ];
     for (error, message, fix) in cases {

@@ -11,7 +11,7 @@ use types::time::{Interval, Span, Stamp};
 
 use crate::Rules;
 
-/// How far past the latest mesh time a hello may expire.
+/// How far past the latest mesh time at its admission the node holds a hello live.
 pub const CAP: Span = Span::from_nanos(15 * Span::MINUTE.nanos());
 
 const HELLO_TAG: &[u8] = b"foundation/hello/1";
@@ -48,14 +48,22 @@ pub fn request(connection: connection::Key, body: &[u8]) -> Vec<u8> {
 #[derive(Clone, Debug)]
 pub struct Admitted {
     hello: Hello,
+    ends: Stamp,
 }
 
 impl Admitted {
-    /// The hello: its subject for audit, and `expires`, at which the owner closes the
-    /// sessions of the connection.
+    /// The hello, with its subject for audit.
     #[must_use]
     pub fn hello(&self) -> &Hello {
         &self.hello
+    }
+
+    /// When the hello stops being live at this node: the earlier of its `expires` and
+    /// [`CAP`] past the latest mesh time at its admission. The owner closes the
+    /// sessions of the connection at this stamp.
+    #[must_use]
+    pub fn ends(&self) -> Stamp {
+        self.ends
     }
 }
 
@@ -70,7 +78,7 @@ impl Rules {
     ///
     /// The first that applies, in order: [`Error::Unsynced`], [`Error::Unknown`],
     /// [`Error::Unlisted`], [`Error::Signature`], [`Error::Via`],
-    /// [`Error::Expired`], [`Error::Capped`].
+    /// [`Error::Expired`].
     pub fn admit(
         &self,
         now: Option<Interval>,
@@ -90,16 +98,12 @@ impl Rules {
                 peer,
             });
         }
-        live(&hello, now)?;
-        if let Some(cap) = now.latest.checked_add(CAP)
-            && hello.expires > cap
-        {
-            return Err(Error::Capped {
-                expires: hello.expires,
-                cap,
-            });
-        }
-        Ok(Admitted { hello })
+        live(hello.expires, now)?;
+        let ends = now
+            .latest
+            .checked_add(CAP)
+            .map_or(hello.expires, |cap| hello.expires.min(cap));
+        Ok(Admitted { hello, ends })
     }
 
     /// Checks `hello`, signed with `signature`, which renews `admitted` on its
@@ -111,7 +115,7 @@ impl Rules {
     /// The first that applies, in order: [`Error::Changed`] when `hello` names another
     /// value of a [`Field`] than `admitted`, then [`Error::Unsynced`],
     /// [`Error::Unknown`], [`Error::Unlisted`], [`Error::Signature`],
-    /// [`Error::Expired`], [`Error::Capped`].
+    /// [`Error::Expired`].
     pub fn renew(
         &self,
         admitted: &Admitted,
@@ -133,9 +137,9 @@ impl Rules {
     }
 
     /// Checks that `body`, signed with `signature`, is a request of the connection of
-    /// `admitted`, at mesh time `now`: its subject still lists its key, the hello has
-    /// not expired, and the key signed [`request`] of the hello's connection and
-    /// `body`.
+    /// `admitted`, at mesh time `now`: its subject still lists its key, the hello is
+    /// live until [`Admitted::ends`], and the key signed [`request`] of the hello's
+    /// connection and `body`.
     ///
     /// # Errors
     ///
@@ -155,7 +159,7 @@ impl Rules {
             .key
             .verify(&request(hello.connection, body), signature)
             .map_err(|_bad| Error::Signature)?;
-        live(hello, now)
+        live(admitted.ends, now)
     }
 
     /// Refuses `hello` unless the spec lists its key for its subject.
@@ -177,11 +181,11 @@ impl Rules {
     }
 }
 
-/// Refuses `hello` once the latest mesh time reaches its expiry.
-fn live(hello: &Hello, now: Interval) -> Result<(), Error> {
-    if now.latest >= hello.expires {
+/// Refuses a hello once the latest mesh time reaches `expires`.
+fn live(expires: Stamp, now: Interval) -> Result<(), Error> {
+    if now.latest >= expires {
         return Err(Error::Expired {
-            expires: hello.expires,
+            expires,
             now: now.latest,
         });
     }
@@ -221,13 +225,6 @@ pub enum Error {
         expires: Stamp,
         /// The latest the mesh time can be.
         now: Stamp,
-    },
-    /// The hello expires later than [`CAP`] past the latest mesh time.
-    Capped {
-        /// When the hello expires.
-        expires: Stamp,
-        /// The latest expiry that the node takes: [`CAP`] past the latest mesh time.
-        cap: Stamp,
     },
     /// A renewal names another value of `field` than the hello it renews: the first
     /// that differs, in the order of [`Field`].
@@ -276,7 +273,6 @@ impl Error {
             Self::Signature => "Sign the exact bytes with the key of the hello",
             Self::Via { .. } => "Name the node that the program connects to as `via`",
             Self::Expired { .. } => "Send a new hello with a later expiry",
-            Self::Capped { .. } => "Send a hello that expires within 15 minutes",
             Self::Changed { .. } => {
                 "Renew with the subject, key, `via`, and connection of the hello it \
                  renews"
@@ -303,9 +299,6 @@ impl fmt::Display for Error {
                 f,
                 "the hello expired at {expires}, at or before the mesh time {now}"
             ),
-            Self::Capped { expires, cap } => {
-                write!(f, "the hello expires at {expires}, after the cap {cap}")
-            }
             Self::Changed { field } => {
                 write!(
                     f,

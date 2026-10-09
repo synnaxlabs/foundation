@@ -21,8 +21,8 @@ use types::time::Span;
 use wire::Protocol;
 use wire::header::MALFORMED;
 use wire::hub::client::{
-    CAPPED, CHANGED, Challenge, EXPIRED, REFUSED, Request, Response, STALE, Signed,
-    UNSYNCED, VIA,
+    CHANGED, Challenge, EXPIRED, REFUSED, Request, Response, STALE, Signed, UNSYNCED,
+    VIA,
 };
 
 use super::serve::{HOME, PORT, own_pool, public_key, transport};
@@ -290,7 +290,7 @@ pub(super) async fn header(incoming: &mut Incoming) {
 
 /// What `serve` gave for one stream, once it replied to a request with its body
 /// reversed after [`HOLD`].
-async fn answer(
+pub(super) async fn answer(
     serve: impl Future<Output = Result<Served, serve::Error>>,
     clock: &env::clock::Clock,
 ) -> Result<Got, serve::Error> {
@@ -1027,24 +1027,35 @@ fn empty_request() -> [u8; Request::LEN] {
     out
 }
 
-/// A hello whose expiry is past the cap is refused, so a renewal cannot hold a
-/// session for longer than the cap.
+/// A hello whose expiry is past the cap lives only until the cap, so a renewal cannot
+/// hold a session for longer than the cap.
 #[test]
-fn refuses_a_hello_past_the_cap() {
-    let home = session(96, true, |mut agent| async move {
+fn closes_the_session_at_the_cap_of_a_hello_past_it() {
+    let cap = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&cap);
+    let home = session(96, true, move |mut agent| async move {
         let challenge = agent.hello.challenge().await;
         let mut hello = Agent::hello(challenge);
         hello.expires = challenge.now.latest + access::proof::CAP + Span::SECOND;
+        *kept.lock().expect("not poisoned") =
+            Some(challenge.now.latest + access::proof::CAP);
         agent.send_hello(hello, &AGENT).await;
-        assert_eq!(agent.closed().await, closed_with(CAPPED));
+        assert_eq!(agent.closed().await, closed_with(EXPIRED));
     });
+    let cap = cap.lock().expect("not poisoned").expect("a hello");
+    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
+        home.served.as_slice()
+    else {
+        panic!("one expiry, not {:?}", home.served);
+    };
+    let soon = Span::from_nanos(10_000_000);
     assert!(
-        matches!(
-            home.served.as_slice(),
-            [Err(serve::Error::Access(Refusal::Capped { .. }))]
-        ),
-        "{:?}",
-        home.served
+        *at >= cap && *at < cap + soon,
+        "the hello ends at the cap: {at:?}, {cap:?}"
+    );
+    assert!(
+        *now >= *at && *now < *at + soon,
+        "the node closed the session at the cap: {now:?}, {at:?}"
     );
 }
 
