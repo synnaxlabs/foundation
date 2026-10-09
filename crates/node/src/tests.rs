@@ -4217,6 +4217,30 @@ mod port {
             }
         }
 
+        /// A node with a region whose port does not bind drops a task of `operate`
+        /// uncalled, as `spawn` does, and `join` gives the port error.
+        #[test]
+        fn operate_on_a_regional_node_that_failed_drops_the_task() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let udp = env::net::udp::Config {
+                local: listen(&host),
+                send_buffer_bytes: 1 << 16,
+                recv_buffer_bytes: 1 << 16,
+            };
+            let held = host.net().udp(&udp).expect("the port binds");
+            let node = start(&host, region(&[member(OWN, &KEY, &host)]));
+            node.operate(|_| async {});
+            assert_eq!(sim.run(), Ok(()));
+            let listen = listen(&host);
+            let error = Error::Port {
+                listen,
+                error: env::net::Error::AddressInUse { local: listen },
+            };
+            assert_eq!(node.join(), Err(error));
+            drop(held);
+        }
+
         /// `operate` refuses a node with no region, which has no mesh to operate on.
         #[test]
         #[should_panic(expected = "`operate` on a node with no region")]

@@ -180,16 +180,20 @@ impl Node {
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let cores = config.shards.cores().get();
+        let regional = config.region.is_some();
         let parts = match parts(config.budget, config.disk, cores) {
             Ok(parts) => parts,
             Err(small) => {
                 let count =
                     u64::try_from(cores).expect("invariant: a core count fits a u64");
-                return Self::failed(Error::Disk {
+                let min =
+                    types::byte::Size::from_bytes(small.min.saturating_mul(count));
+                let error = Error::Disk {
                     disk: config.disk,
                     cores,
-                    min: types::byte::Size::from_bytes(small.min.saturating_mul(count)),
-                });
+                    min,
+                };
+                return Self::failed(error, regional);
             }
         };
         let Ok(count) = u32::try_from(cores) else {
@@ -199,7 +203,7 @@ impl Node {
             Ok(bound) => bound.split(NonZeroUsize::MIN).pop(),
             Err(error) => {
                 let listen = config.listen;
-                return Self::failed(Error::Port { listen, error });
+                return Self::failed(Error::Port { listen, error }, regional);
             }
         };
         let endpoint = Endpoint {
@@ -211,14 +215,15 @@ impl Node {
         Self::launch(config, endpoint, parts.into_iter().zip(0..count))
     }
 
-    /// A node that failed with `error` before any shard started.
-    fn failed(error: Error) -> Self {
+    /// A node that failed with `error` before any shard started. `regional` is whether
+    /// its config has a region.
+    fn failed(error: Error, regional: bool) -> Self {
         Self {
             stop: Stop::default(),
             shards: Vec::new(),
             failed: Some(error),
             queue: task::pair().0,
-            regional: false,
+            regional,
         }
     }
 
