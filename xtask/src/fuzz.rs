@@ -28,7 +28,7 @@ const MAX_LEN: u64 = 16 * 1024;
 /// finds, and then when the build fails or a target fails. cargo-fuzz keeps the input
 /// of a crash in `fuzz/artifacts/<target>/`.
 pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
-    let targets = targets(root)?;
+    let targets = check(root)?;
     let nightly = crate::nightly(root).map_err(|e| vec![e])?;
     let built = nightly
         .cargo()
@@ -112,7 +112,7 @@ fn folders(dir: &Path) -> Result<Vec<String>, Vec<String>> {
 /// same name in `folders` and each folder with no target.
 fn unmatched(targets: &[&str], folders: &[String]) -> Vec<String> {
     if targets.is_empty() {
-        return vec!["`cargo fuzz list` names no target".to_string()];
+        return vec!["fuzz/Cargo.toml has no bin target".to_string()];
     }
     let inputless = targets
         .iter()
@@ -183,13 +183,12 @@ fn report(target: &str, output: &Output) -> (String, Result<(), String>) {
     }
 }
 
-/// The targets of `fuzz/` at `root`, read from its graph with no build. It fails when
-/// `fuzz/Cargo.lock` is stale, on each problem of [`unpatched`], when `fuzz/` has no
-/// target, and when the targets and the folders of `oracles/fuzz/` do not match.
-fn targets(root: &Path) -> Result<Vec<String>, Vec<String>> {
-    let graph = |dir: &str| {
-        crate::metadata(&root.join(dir), &["--locked"]).map_err(|e| vec![e])
-    };
+/// Checks `fuzz/` at `root` before the build and returns its targets, read from its
+/// graph. It fails when `fuzz/Cargo.lock` is stale, on each problem of [`unpatched`],
+/// when `fuzz/` has no target, and when the targets and the folders of `oracles/fuzz/`
+/// do not match.
+fn check(root: &Path) -> Result<Vec<String>, Vec<String>> {
+    let graph = |dir: &str| crate::graph(&root.join(dir)).map_err(|e| vec![e]);
     let fuzz = graph("fuzz")?;
     let mut problems = unpatched(&graph(".")?, &fuzz).map_err(|e| vec![e])?;
     let targets = bins(&fuzz).map_err(|e| vec![e])?;
@@ -236,12 +235,12 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
             name,
             version,
             manifest,
-            copy,
+            copied,
         } = *package;
         if root.iter().any(|p| p.id == id) {
             continue;
         }
-        if copy {
+        if copied {
             problems.push(format!(
                 "fuzz/Cargo.toml builds `{name}` from the copy `{manifest}`, which the \
                  root Cargo.toml does not build. Give fuzz/Cargo.toml the \
@@ -250,7 +249,7 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
         }
         // Beside the copy, a release meets a requirement that the copy cannot.
         if root.iter().any(|p| {
-            p.copy
+            p.copied
                 && p.name == name
                 && compatible(version, p.version)
                 && !fuzz.iter().any(|f| f.id == p.id)
@@ -273,7 +272,7 @@ struct Package<'a> {
     version: &'a str,
     manifest: &'a str,
     /// Whether the package is a copy under the folder `copies` of [`Package::read`].
-    copy: bool,
+    copied: bool,
 }
 
 impl<'a> Package<'a> {
@@ -293,13 +292,14 @@ impl<'a> Package<'a> {
             name: field::text(package, "name")?,
             version: field::text(package, "version")?,
             manifest,
-            copy: Path::new(manifest).starts_with(copies),
+            copied: Path::new(manifest).starts_with(copies),
         })
     }
 }
 
-/// Whether `a` and `b` share their leftmost nonzero part, so that one caret requirement
-/// can resolve to either, as a `[patch.crates-io]` entry needs.
+/// Whether `a` and `b` share their leftmost nonzero part, so that a copy of one can
+/// meet a caret requirement that the other meets. It ignores a prerelease part, so it
+/// is also true for a prerelease, which a caret requirement of a release leaves out.
 fn compatible(a: &str, b: &str) -> bool {
     let series = |version: &str| {
         let parts: Vec<&str> = version.split(['.', '-', '+']).take(3).collect();
@@ -362,7 +362,7 @@ mod tests {
             })
             .collect();
         files.sort_unstable();
-        let mut targets = targets(&root).unwrap();
+        let mut targets = check(&root).unwrap();
         targets.sort_unstable();
         assert!(targets.contains(&"types_name".to_string()));
         assert_eq!(targets, files);
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn refuses_a_target_and_a_folder_that_do_not_match() {
         assert_eq!(
-            targets(&crate::fixture().join("unmatched")),
+            check(&crate::fixture().join("unmatched")),
             Err(vec![
                 "fuzz target `a` has no inputs in oracles/fuzz/a/".to_string(),
                 "oracles/fuzz/b/ has no fuzz target".to_string(),
@@ -394,7 +394,7 @@ mod tests {
     #[test]
     fn refuses_a_stale_fuzz_lock() {
         let root = crate::fixture().join("stale");
-        let problems = targets(&root).unwrap_err();
+        let problems = check(&root).unwrap_err();
         let lock = root.join("fuzz/Cargo.lock");
         let refused = format!(
             "error: cannot update the lock file {} because --locked was passed to \
@@ -408,7 +408,7 @@ mod tests {
 
     #[test]
     fn a_locked_graph_holds_each_package_of_the_lock() {
-        let graph = crate::metadata(&crate::fixture(), &["--locked"]).unwrap();
+        let graph = crate::graph(&crate::fixture()).unwrap();
         let mut names: Vec<_> = graph["packages"]
             .as_array()
             .unwrap()
@@ -698,7 +698,7 @@ mod tests {
     fn refuses_no_targets() {
         assert_eq!(
             unmatched(&[], &["spec_tree".to_string()]),
-            ["`cargo fuzz list` names no target"]
+            ["fuzz/Cargo.toml has no bin target"]
         );
     }
 

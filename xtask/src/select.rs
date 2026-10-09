@@ -128,7 +128,7 @@ mod tests {
         use super::*;
 
         fn check(matches: impl Fn(&str) -> bool) -> Vec<String> {
-            let metadata = crate::metadata(&crate::fixture(), &["--no-deps"]).unwrap();
+            let metadata = crate::metadata(&crate::fixture()).unwrap();
             let picked = packages(&metadata, matches).unwrap();
             picked.into_iter().map(|p| p.name).collect()
         }

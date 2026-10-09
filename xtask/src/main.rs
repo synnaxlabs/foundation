@@ -65,7 +65,7 @@ fn main() -> ExitCode {
 /// Checks every dependency of the workspace at `root` against the crate map in
 /// `map.rs`.
 fn layers(root: &Path) -> Result<(), Vec<String>> {
-    let metadata = metadata(root, &["--no-deps"]).map_err(|e| vec![e])?;
+    let metadata = metadata(root).map_err(|e| vec![e])?;
     let packages = metadata["packages"].as_array().cloned().unwrap_or_default();
     let members: BTreeSet<&str> =
         packages.iter().filter_map(|p| p["name"].as_str()).collect();
@@ -128,8 +128,19 @@ fn violation(entry: &map::Crate, dep: &str) -> String {
     )
 }
 
-/// Runs `cargo metadata` with `flags` on the package or workspace at `dir`.
-fn metadata(dir: &Path, flags: &[&str]) -> Result<Value, String> {
+/// Runs `cargo metadata` on the members of the workspace at `root`.
+fn metadata(root: &Path) -> Result<Value, String> {
+    metadata_with(root, &["--no-deps"])
+}
+
+/// The resolved dependency graph of the workspace at `dir`. It fails when the lock of
+/// the workspace is stale.
+fn graph(dir: &Path) -> Result<Value, String> {
+    metadata_with(dir, &["--locked"])
+}
+
+/// Runs `cargo metadata` with `flags` on the workspace at `dir`.
+fn metadata_with(dir: &Path, flags: &[&str]) -> Result<Value, String> {
     let output = cargo()
         .current_dir(dir)
         .args(["metadata", "--format-version", "1"])
@@ -234,7 +245,7 @@ mod tests {
             .split("models:\n")
             .nth(1)
             .expect("ci.yaml has a models filter");
-        let metadata = metadata(&root, &["--no-deps"]).unwrap();
+        let metadata = metadata(&root).unwrap();
         let by_cfg = |name| select::packages(&metadata, |s| select::names_cfg(s, name));
         let tasks = [
             ("loom", by_cfg("loom").unwrap()),
@@ -254,7 +265,7 @@ mod tests {
 
     #[test]
     fn miri_skips_only_crates_that_name_unsafe_code() {
-        let metadata = metadata(&fixture().join("../.."), &["--no-deps"]).unwrap();
+        let metadata = metadata(&fixture().join("../..")).unwrap();
         let named = select::packages(&metadata, |s| select::has_word(s, "unsafe_code"));
         let (named, checked) = (named.unwrap(), miri::packages(&metadata).unwrap());
         for name in miri::SKIPPED {

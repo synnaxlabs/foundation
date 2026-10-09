@@ -29,7 +29,7 @@ pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
 }
 
 fn problems(root: &Path) -> Result<Vec<String>, String> {
-    let metadata = crate::metadata(root, &["--no-deps"])?;
+    let metadata = crate::metadata(root)?;
     let workspace = PathBuf::from(field::text(&metadata, "workspace_root")?);
     let oracles = workspace.join("oracles");
     let (targets, mut problems) = targets(&metadata, &oracles)?;

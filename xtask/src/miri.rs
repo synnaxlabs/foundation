@@ -32,7 +32,7 @@ pub(crate) fn packages(metadata: &Value) -> Result<Vec<select::Package>, String>
 /// fails or runs no tests.
 pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let nightly = crate::nightly(root).map_err(|e| vec![e])?;
-    let metadata = crate::metadata(root, &["--no-deps"]).map_err(|e| vec![e])?;
+    let metadata = crate::metadata(root).map_err(|e| vec![e])?;
     let packages = packages(&metadata).map_err(|e| vec![e])?;
     if packages.is_empty() {
         eprintln!("no crate names `unsafe_code`, so Miri has nothing to check");
@@ -101,7 +101,7 @@ mod tests {
 
     #[test]
     fn packages_are_the_crates_that_name_unsafe_code() {
-        let metadata = crate::metadata(&crate::fixture(), &["--no-deps"]).unwrap();
+        let metadata = crate::metadata(&crate::fixture()).unwrap();
         let picked = packages(&metadata).unwrap();
         let names: Vec<_> = picked.into_iter().map(|p| p.name).collect();
         assert_eq!(names, ["model"]);
