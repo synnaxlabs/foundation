@@ -165,30 +165,25 @@ impl Client {
             .ok()
             .filter(|&length| length <= BODY_BYTES_MAX)
             .ok_or(Error::Body { length: body.len() })?;
-        let mut open = Open {
-            taken: Some(shared.turn.take().await),
-            receiver: None,
-            begun: false,
-            tasks: &shared.tasks,
-        };
         shared
-            .exchange(&mut open, body, length)
+            .exchange(body, length)
             .await
             .map_err(|error| shared.ended.borrow().clone().unwrap_or(error))
     }
 }
 
 impl Shared {
-    /// Sends the request of `body`, whose length is `length`, under `open`, and gives
-    /// the body of the response. Gives each error of [`Client::request`] but
+    /// Takes the turn, sends the request of `body`, whose length is `length`, and
+    /// gives the body of the response. Gives each error of [`Client::request`] but
     /// [`Error::Body`], with the error of the close in place of the error that ended
     /// the renewal.
-    async fn exchange(
-        &self,
-        open: &mut Open<'_>,
-        body: &[u8],
-        length: u64,
-    ) -> Result<Vec<u8>, Error> {
+    async fn exchange(&self, body: &[u8], length: u64) -> Result<Vec<u8>, Error> {
+        let mut open = Open {
+            taken: Some(self.turn.take().await),
+            receiver: None,
+            begun: false,
+            tasks: &self.tasks,
+        };
         let (mut sender, receiver) = self.session.open(Class::Complete).await?;
         let receiver = open.receiver.insert(receiver);
         self.send(&mut sender, &wire::header::encode(Protocol::Hub))
