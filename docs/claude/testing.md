@@ -95,9 +95,10 @@ logic that a simulated test can reach.
 - A PR that adds a target adds inputs that reach each state of its decoder. A PR that
   adds or changes an arm that a target reaches adds an input that reaches it, and never
   defers it: a fuzz input needs no approval.
+- Each PR runs every target for 60 seconds. A nightly schedule runs them longer on
+  the ARM runner, which is idle at night.
 - `cargo xtask fuzz [seconds]` runs every target on the pinned nightly, with its
-  inputs in `oracles/fuzz/`. Each PR runs it for 60 seconds. A nightly schedule runs it
-  longer on the ARM runner, which is idle at night.
+  inputs in `oracles/fuzz/`.
 
 Simulation checks liveness as well as safety: after faults stop, the mesh converges
 within a bound (r16 60). A failed run prints its replay value, and CI runs that value
