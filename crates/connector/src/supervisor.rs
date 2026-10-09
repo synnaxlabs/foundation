@@ -820,6 +820,48 @@ mod tests {
     }
 
     #[test]
+    fn writes_the_last_status_after_the_tasks_of_a_run_while_the_pool_is_full() {
+        let (statuses, returned) = run_on(|node, tasks| async move {
+            let script = Script {
+                steps: Mutex::new([Step::Refuse(ms(1_000))].into()),
+                ..Script::default()
+            };
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            let hog = hub::writer::Config {
+                subject: name("plant.script"),
+                authority: Authority(1),
+                lease: None,
+                channels: vec![name("plant.script.status.state")],
+            };
+            let hog = inputs.hub.writer(hog).await.expect("opens");
+            let clock = node.clock();
+            let sleeper = clock.clone();
+            tasks.spawn(async move {
+                sleeper.sleep(ms(500)).await;
+                let held = fill(&hog);
+                sleeper.sleep(ms(2_000)).await;
+                drop(held);
+            });
+            let (supervisor, start) = (Supervisor::new(inputs), clock.now());
+            let name = name("plant.script");
+            let result = supervisor
+                .run("script", name, &config(), &Token::new())
+                .await;
+            assert_eq!(config_errors(result), [bad()]);
+            let returned = clock.now() - start;
+            clock.sleep(ms(5_000)).await;
+            let statuses = statuses.borrow().clone();
+            (statuses, returned)
+        });
+        let last = statuses.last().map(|(at, samples)| (*at, samples[0]));
+        assert_eq!(last, Some((ms(3_000), 2)), "{statuses:?}");
+        assert_eq!(returned, ms(3_000), "returns once the home applied state 2");
+    }
+
+    #[test]
     fn writes_no_status_for_a_config_that_does_not_parse() {
         let out = supervise("modbus", vec![Step::Done], config(), None);
         assert!(out.statuses.is_empty(), "{:?}", out.statuses);
