@@ -81,7 +81,9 @@ pub(super) fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
 }
 
 /// A child that another thread spawns holds a copy of the socket until its exec. On
-/// Linux a shutdown stops the listen of each copy, so a drop refuses at once.
+/// Linux a shutdown stops the listen of each copy, so a drop refuses at once. macOS
+/// gives `ENOTCONN` for a shutdown of a listener. A failed registration closes the
+/// socket with no shutdown.
 impl Drop for Listener {
     fn drop(&mut self) {
         #[cfg(target_os = "linux")]
