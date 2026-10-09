@@ -1199,6 +1199,26 @@ mod tests {
     }
 
     #[test]
+    fn a_ping_gives_closed_with_code_0_once_its_session_drops() {
+        let (mut sim, client, server) = nodes(0);
+        let at = address(&server);
+        testing::carrier(&server, SERVER, |carrier, _| async move {
+            let session = carrier.accept().await.expect("a session");
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+        });
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            let session = carrier.connect(SERVER.public(), at).await;
+            let session = session.expect("a session");
+            let ping = session.ping();
+            drop(session);
+            assert_eq!(ping.await, Err(Error::Closed { code: Code(0) }));
+            node.clock().sleep(Span::MILLISECOND).await;
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_dial_after_the_last_drop_is_refused() {
         let (mut sim, client, server) = nodes(0);
         let late = sim.node(sim::node::Config::default());
