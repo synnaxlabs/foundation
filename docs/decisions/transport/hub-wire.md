@@ -96,8 +96,8 @@
   home had no memory for a reply"), and the meaning of 19 in item 3 of
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483 ("the node
   had no memory for a reply or a request body"). #2012 replaces the meaning of 19 with
-  one text for both causes
-  (https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074). Until
+  one text for both causes (`laptop.architect`, 2026-10-09T00:12:49Z,
+  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074). Until
   then, the meaning of 19 is the one this record gives above, from 6071260886
   (`laptop.architect`, 2026-10-09T00:13:01Z,
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6071579227). A reset
