@@ -95,8 +95,8 @@ pub fn plan(
 ///
 /// 1. `config.private-key` for each string of a definition that holds a private key.
 /// 2. The diagnostics of `kinds` for each connector whose kind or config it refuses,
-///    then `config.duplicate-name` and `config.subject-is-connector` as
-///    [`crate::check`] gives them.
+///    then `config.duplicate-name`, whose earlier name is the first in name order,
+///    and `config.subject-is-connector`.
 /// 3. Each problem of the rules of [`plan`] from `config.unplaced` to
 ///    `config.unknown-node`.
 pub fn check(

@@ -35,7 +35,8 @@
   nothing with
   `spec::definition::Error::Access { at, error }`, as it maps `placement::Error`.
   `config` maps `Error::Empty` to `config.empty-allow` at the span of the `allow` value,
-  with the same message and fix, before it checks `authority`. The rule is in `spec`
+  with the same message and fix, before it checks `authority`, and only when each other
+  attribute of the block reads. The rule is in `spec`
   once, and `config::plan::check` holds no copy. Decided by `laptop.architect-2`,
   2026-10-09T00:48:39Z
   (https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).

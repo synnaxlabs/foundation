@@ -42,7 +42,8 @@
 //! it.
 //!
 //! `allow` holds one bit per action: read 0, write 1, plan 2, apply 3, secret 4, and
-//! admin 5. `authority` is zero when `allow` does not hold write.
+//! admin 5, and holds at least one. `authority` is zero when `allow` does not hold
+//! write.
 //!
 //! A node settings budget of 0 bytes is no budget, because a policy cannot hold zero.
 //! A policy sets at least one budget.

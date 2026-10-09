@@ -1793,6 +1793,16 @@ mod tests {
         }
 
         #[test]
+        fn refuses_an_empty_allow_only_when_each_other_attribute_reads() {
+            let mut attributes = attributes(list(vec![]), None);
+            attributes[0].1 = Kind::Integer(5);
+            let codes = check(&access(&attributes)).map_err(|found| {
+                found.iter().map(|d| d.code.as_str()).collect::<Vec<_>>()
+            });
+            assert_eq!(codes, Err(vec!["document.bad-selector"]));
+        }
+
+        #[test]
         fn refuses_an_authority_that_is_not_from_0_to_255() {
             for (authority, message) in [
                 (Kind::Integer(256), "the authority 256 is not from 0 to 255"),

@@ -128,6 +128,16 @@ fn refuses_tree_keys_that_differ_only_in_case_as_check_of_the_files_does() {
 }
 
 #[test]
+fn refuses_each_later_key_against_the_first_of_its_case() {
+    let found = checked([writer("AB"), writer("Ab"), writer("ab")]);
+    let expected = [
+        duplicate("Ab", "connector", "AB", "`connector`"),
+        duplicate("ab", "connector", "AB", "`connector`"),
+    ];
+    assert_eq!(found, expected);
+}
+
+#[test]
 fn refuses_the_name_of_a_channel_and_a_connector_that_differ_only_in_case() {
     let index = ChannelKind::Index {
         error: None,
@@ -160,6 +170,7 @@ fn refuses_a_subject_at_the_name_of_a_connector_in_any_case_as_check_of_the_file
         checked([writer("w"), subject("W")]),
         slice::from_ref(&expected)
     );
+    assert_eq!(checked([writer("W"), subject("w")]), [named_connector("w")]);
     let subject = "subject \"W\" {\n  keys = \"ssh-ed25519 \
                    AAAAC3NzaC1lZDI1NTE5AAAAIGVVuOR8JKYpAcWLMUveadmJ1wUAmYGgIDtqlhFe7Yhg \
                    alice@laptop\"\n}\n";
