@@ -1070,6 +1070,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn names_an_edge_to_a_release_that_only_a_path_requirement_names() {
+        let mut needing = needs(types(), "noq-proto", "^1.3");
+        needing["dependencies"][0]["source"] = Value::Null;
+        let fuzz = fuzz(&[needing, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+        assert_eq!(unpatched(&root(), &fuzz), Err(unresolved(&id("1.3.0"))));
+    }
+
+    #[test]
+    fn names_the_copy_of_the_name_of_the_requirement() {
+        let udp = "path+file:///w/patches/noq-udp#noq-udp@1.3.0";
+        let mut root = root();
+        root["packages"] = json!([
+            package("noq-udp", udp, "/w/patches/noq-udp/Cargo.toml"),
+            copy(),
+            types(),
+        ]);
+        let types = needs(types(), "noq-proto", "^1.3");
+        let fuzz = fuzz(&[types, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
+        assert_eq!(unpatched(&root, &fuzz), Ok(vec![missed()]));
+    }
+
     /// The error for an edge `noq_proto` of `types` to `to` that nothing resolves.
     fn unresolved(to: &str) -> String {
         format!(
