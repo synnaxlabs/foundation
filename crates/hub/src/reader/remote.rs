@@ -168,7 +168,7 @@ impl Remote {
         } = &mut *self;
         let next = poll_fn(|cx| {
             ready!(streak.poll(cx));
-            if queue.borrow().ended.is_none() {
+            if matches!(out, Some(Out::Sending(_))) && queue.borrow().ended.is_none() {
                 poll_credit(out, credit, limit, cx);
             }
             let polled = queue.borrow_mut().poll_take(cx);
@@ -200,14 +200,13 @@ impl Remote {
         let Some(taken) = self.credit else {
             return Ok(());
         };
-        if self.queue.borrow().ended.is_some() {
-            return Ok(());
-        }
         let limit_bytes = taken + WINDOW;
         let Some(Out::Idle(sender)) = &mut self.out else {
             return Ok(());
         };
-        if limit_bytes - self.limit.get() < WINDOW / 2 {
+        if limit_bytes - self.limit.get() < WINDOW / 2
+            || self.queue.borrow().ended.is_some()
+        {
             return Ok(());
         }
         let mut block = self
