@@ -21,11 +21,12 @@
   `buffer::Error::Files` of `node::Error::Buffer`. Its message is "cannot write the data
   directory {data}: {error}", and its fix "Let this user make and write {data} and each
   file in it, or give another directory with `--data`". Each other `Directory` error but
-  `Busy` is `node.failed`. `Node::stopper` gives a `Stopper` that stops the node from
-  another thread. A stop after the node ended does nothing. Lost: a line that `node`
-  writes itself, a second owner of the output form; an entry of the table with a flag
-  that each of its four users skips. Decided by `laptop.architect-2`
-  (2026-10-08T02:21:16Z,
+  `Busy` is `node.failed`. Lost: `node.data` for the claim of `lock` alone, which leaves
+  a ring that the user cannot write on `node.failed`. `Node::stopper` gives a `Stopper`
+  that stops the node from another thread. A stop after the node ended does nothing.
+  Lost: a line that `node` writes itself, a second owner of the output form; an entry of
+  the table with a flag that each of its four users skips. Decided by
+  `laptop.architect-2` (2026-10-08T02:21:16Z,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6050855867;
   2026-10-08T05:00:46Z, `--name` and the line,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6052649826;
@@ -42,7 +43,8 @@
   https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090093334;
   2026-10-09T22:24:30Z, `Start::line` in place of `Start::running`,
   https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090256620;
-  2026-10-09T22:36:49Z, `node.data` by its cause, which amends item 2 of 6086905545,
+  2026-10-09T22:36:49Z, `node.data` by its cause, which supersedes item 2 of
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545,
   https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090417728).
   `--listen`, and the files `address` and `admin.key`, come with #1744
   (https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6053227526).
