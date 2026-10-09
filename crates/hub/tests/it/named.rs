@@ -8,7 +8,9 @@ use types::channel::Key;
 use types::name::Selector;
 use types::time::Span;
 
-use super::{name, poll_flagged, run, samples, unnamed, unsynced, without, write};
+use super::{
+    SETTLE, name, poll_flagged, run, samples, unnamed, unsynced, without, write,
+};
 
 /// A reader of `subject` named `reader` on `value`, with a hold of `hold`.
 fn named(subject: &str, reader: &str, mode: Mode, hold: Span) -> reader::Config {
@@ -63,6 +65,36 @@ fn wakes_a_named_reader_that_waits_when_a_later_open_takes_it_over() {
         let _reader = test.hub.reader(open).await.expect("opens");
         assert!(woken.0.load(Ordering::Relaxed), "the open wakes the reader");
         assert_eq!(next.await.expect_err("replaced"), Ended::Replaced);
+    });
+}
+
+#[test]
+fn ends_a_replaced_reader_with_replaced_before_the_frames_that_wait() {
+    run(13, |test| async move {
+        let open = named("a", "r", Mode::Complete, Span::ZERO);
+        let mut replaced = test.hub.reader(open).await.expect("opens");
+        let mut writer = test.writer("w", &["value"]).await;
+        write(&mut writer, &[test.now()], &[7]);
+        test.clock.sleep(SETTLE).await;
+        let open = named("a", "r", Mode::Latest, Span::ZERO);
+        let _reader = test.hub.reader(open).await.expect("opens");
+        let ended = replaced.next().await.expect_err("replaced");
+        assert_eq!(ended, Ended::Replaced);
+    });
+}
+
+#[test]
+fn opens_a_named_reader_on_each_index_on_its_own() {
+    run(14, |test| async move {
+        let open = named("a", "r", Mode::Latest, Span::ZERO);
+        let mut first = test.hub.reader(open).await.expect("opens");
+        let mut open = named("a", "r", Mode::Latest, Span::ZERO);
+        open.select = Selector::new(["value-b"]).expect("a selector");
+        let _other = test.hub.reader(open).await.expect("opens");
+        let mut writer = test.writer("w", &["value"]).await;
+        write(&mut writer, &[test.now()], &[7]);
+        let received = first.next().await.expect("a frame");
+        assert_eq!(samples(&received, 2), [7]);
     });
 }
 

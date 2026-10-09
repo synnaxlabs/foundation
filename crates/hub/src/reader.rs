@@ -51,11 +51,12 @@ pub struct Config {
     /// Which frames it gets.
     pub mode: Mode,
     /// The subject that opens the reader. A named reader belongs to it: an open by the
-    /// same subject and name takes over the session, and an open by another subject
-    /// opens another reader.
+    /// same subject and name on the same index takes over the session, and an open by
+    /// another subject opens another reader.
     pub subject: Name,
-    /// The reader's name, or `None`. A named reader has at most one session: an open
-    /// takes over the session of the same subject and name. A named complete reader
+    /// The reader's name, or `None`. A named reader has at most one session on each
+    /// index: an open takes over the session of the same subject and name on its
+    /// index. A named complete reader
     /// that opens while the home holds its position resumes where its last complete
     /// session opened, and ends with [`Ended::Behind`] once a frame since then was
     /// released.
@@ -80,7 +81,8 @@ pub struct Received<'a> {
 pub enum Ended {
     /// The shard's buffer failed.
     Buffer(env::files::Error),
-    /// A complete reader missed a frame ([`Mode::Complete`]).
+    /// A complete reader missed a frame ([`Mode::Complete`]), or a named one resumed
+    /// before a released frame ([`Config::name`]).
     Behind,
     /// A channel of the reader was removed from the definitions.
     Removed(channel::Key),
@@ -383,7 +385,8 @@ impl Reader {
     ///
     /// # Errors
     ///
-    /// [`Ended::Removed`] once a channel of the reader is removed, before any frame
+    /// [`Ended::Removed`] once a channel of the reader is removed, or
+    /// [`Ended::Replaced`] once a later open takes over the session, before any frame
     /// that waits. Else [`Ended`] once no frame waits and the session can give no
     /// more. Either on this and every later call: [`Ended::Behind`] before
     /// [`Ended::Buffer`].
