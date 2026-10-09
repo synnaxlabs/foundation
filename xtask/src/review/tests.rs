@@ -1414,6 +1414,41 @@ fn fails_a_footnote_label_after_a_lone_carriage_return_in_a_code_block() {
 }
 
 #[test]
+fn fails_a_footnote_label_on_the_first_line() {
+    let hidden = format!("[^a\\]: x\n\n{ROUND}");
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![label("[^a\\]: x")]);
+}
+
+#[test]
+fn fails_a_footnote_label_after_a_lone_carriage_return() {
+    // GitHub reads the label as a footnote and hides it.
+    let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\na\r[^a\\]: x\n\n");
+    assert_ne!(hidden, ROUND);
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![label("[^a\\]: x")]);
+}
+
+#[test]
+fn fails_a_footnote_label_after_the_marks_inside_a_footnote_definition() {
+    for line in ["[^1]: - [^a\\]: x", "[^1]: > [^a\\]: x"] {
+        let hidden =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{line}\n\n"));
+        assert_ne!(hidden, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&hidden)])),
+            vec![label(line)],
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn names_the_first_line_that_can_hide_text() {
+    let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n<b>\n\n[^a\\]: x\n\n");
+    assert_ne!(hidden, ROUND);
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<b>")]);
+}
+
+#[test]
 fn fails_raw_html_after_a_lone_carriage_return_in_a_code_block() {
     let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n    c\r<!-- x\n");
     assert_ne!(hidden, ROUND);
