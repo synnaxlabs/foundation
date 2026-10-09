@@ -45,11 +45,9 @@ mod linux {
     pub(super) fn available(root: &Path) -> io::Result<u64> {
         let meminfo = read(&root.join("proc/meminfo"))?;
         let mut least = mem_available(&meminfo)?;
-        let cgroups = match fs::read_to_string(root.join("proc/self/cgroup")) {
-            Ok(text) => text,
+        let Some(cgroups) = optional(&root.join("proc/self/cgroup"))? else {
             // A kernel with no cgroups.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(least),
-            Err(e) => return Err(e),
+            return Ok(least);
         };
         for mount in read(&root.join("proc/self/mountinfo"))?.lines() {
             let Some((point, files, inside)) = hierarchy(mount, &cgroups)? else {
@@ -107,11 +105,9 @@ mod linux {
 
     /// The room left in the cgroup `dir`, or `None` when it has no limit.
     fn room(dir: &Path, files: &Files) -> io::Result<Option<u64>> {
-        let limit = match fs::read_to_string(dir.join(files.limit)) {
-            Ok(text) => text,
+        let Some(limit) = optional(&dir.join(files.limit))? else {
             // The root cgroup, or one whose parent gives it no memory controller.
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
+            return Ok(None);
         };
         let limit = limit.trim();
         if limit == "max" {
@@ -148,6 +144,15 @@ mod linux {
     fn read(file: &Path) -> io::Result<String> {
         fs::read_to_string(file)
             .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", file.display())))
+    }
+
+    /// The text of `file`, or `None` when it does not exist.
+    fn optional(file: &Path) -> io::Result<Option<String>> {
+        match read(file) {
+            Ok(text) => Ok(Some(text)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     #[cfg(test)]
@@ -267,11 +272,11 @@ mod linux {
             root.write("proc/meminfo", MEMINFO)
                 .write(
                     "proc/self/cgroup",
-                    "5:cpu,cpuacct:/docker/x\n4:memory:/docker/x\n0::/\n",
+                    "5:cpu,cpuacct:/docker/y\n4:memory:/docker/x\n0::/\n",
                 )
                 .write(
                     "proc/self/mountinfo",
-                    "40 31 0:35 /docker/x /sys/fs/cgroup/cpu rw - cgroup cgroup \
+                    "40 31 0:35 /docker/y /sys/fs/cgroup/cpu rw - cgroup cgroup \
                      rw,cpu,cpuacct\n\
                      41 31 0:36 /docker/x /sys/fs/cgroup/memory rw - cgroup cgroup \
                      rw,memory\n",
@@ -285,6 +290,26 @@ mod linux {
                     &format!("{}\n", 12 * MIB),
                 );
             assert_eq!(root.available().unwrap(), 500 * MIB);
+        }
+
+        /// The memory files under the `cpu` mount stand in for a cgroup that the
+        /// code must not read.
+        #[test]
+        fn a_v1_hierarchy_of_another_controller_does_not_count() {
+            let root = Root::new("v1-cpu");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "5:cpu:/docker/x\n4:memory:/docker/x\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "40 31 0:35 /docker/x /sys/fs/cgroup/cpu rw - cgroup cgroup \
+                     rw,cpu\n",
+                )
+                .write(
+                    "sys/fs/cgroup/cpu/memory.limit_in_bytes",
+                    &format!("{MIB}\n"),
+                )
+                .write("sys/fs/cgroup/cpu/memory.usage_in_bytes", "0\n");
+            assert_eq!(root.available().unwrap(), 8192 * MIB);
         }
 
         #[test]
@@ -328,6 +353,37 @@ mod linux {
         }
 
         #[test]
+        fn a_cgroup_list_that_cannot_be_read_is_an_error() {
+            let root = Root::new("cgroup-dir");
+            root.write("proc/meminfo", MEMINFO);
+            fs::create_dir_all(root.0.join("proc/self/cgroup")).unwrap();
+            let error = root.available().unwrap_err();
+            let file = root.0.join("proc/self/cgroup");
+            assert_eq!(
+                (error.kind(), error.to_string()),
+                (
+                    io::ErrorKind::IsADirectory,
+                    format!("{}: Is a directory (os error 21)", file.display())
+                )
+            );
+        }
+
+        #[test]
+        fn a_limit_that_cannot_be_read_is_an_error() {
+            let root = v2("v2-dir");
+            fs::create_dir_all(root.0.join("sys/fs/cgroup/a/b/memory.max")).unwrap();
+            let error = root.available().unwrap_err();
+            let file = root.0.join("sys/fs/cgroup/a/b/memory.max");
+            assert_eq!(
+                (error.kind(), error.to_string()),
+                (
+                    io::ErrorKind::IsADirectory,
+                    format!("{}: Is a directory (os error 21)", file.display())
+                )
+            );
+        }
+
+        #[test]
         fn a_short_line_of_mountinfo_is_an_error() {
             let root = v2("v2-short");
             root.write("proc/self/mountinfo", "37 31 0:31 /\n");
@@ -344,7 +400,7 @@ mod linux {
         #[test]
         fn this_process_has_memory_available() {
             let meminfo = fs::read_to_string("/proc/meminfo").unwrap();
-            let available = available(Path::new("/")).unwrap();
+            let available = crate::memory::available().unwrap().bytes();
             assert!(available > 0, "{available}");
             assert!(
                 available <= mem_available(&meminfo).unwrap() * 2,
@@ -383,19 +439,48 @@ mod macos {
         }
         // SAFETY: zeros are a valid value, and the call wrote the rest.
         let stats = unsafe { stats.assume_init() };
+        Ok(bytes(&stats, page()))
+    }
+
+    /// The bytes of the free, inactive, and purgeable pages of `stats`, in pages of
+    /// `page` bytes.
+    fn bytes(stats: &libc::vm_statistics64, page: u64) -> u64 {
         let pages = u64::from(stats.free_count)
             + u64::from(stats.inactive_count)
             + u64::from(stats.purgeable_count);
-        let page = u64::try_from(rustix::param::page_size())
-            .expect("invariant: a page size fits 64 bits");
-        Ok(pages.saturating_mul(page))
+        pages.saturating_mul(page)
+    }
+
+    /// The bytes of a page of this host.
+    fn page() -> u64 {
+        u64::try_from(rustix::param::page_size())
+            .expect("invariant: a page size fits 64 bits")
     }
 
     #[cfg(test)]
     mod tests {
+        use std::mem::MaybeUninit;
+
+        use super::*;
+
         #[test]
-        fn this_host_has_memory_available() {
-            assert!(super::available().unwrap() > 0);
+        fn the_free_inactive_and_purgeable_pages_are_available() {
+            // SAFETY: zeros are a valid value.
+            let mut stats =
+                unsafe { MaybeUninit::<libc::vm_statistics64>::zeroed().assume_init() };
+            stats.free_count = 3;
+            stats.inactive_count = 5;
+            stats.purgeable_count = 7;
+            stats.active_count = 11;
+            stats.wire_count = 13;
+            assert_eq!(bytes(&stats, 16384), 15 * 16384);
+        }
+
+        #[test]
+        fn this_host_has_whole_pages_available() {
+            let available = available().unwrap();
+            assert!(available > 0, "{available}");
+            assert_eq!(available % page(), 0, "{available}");
         }
     }
 }
