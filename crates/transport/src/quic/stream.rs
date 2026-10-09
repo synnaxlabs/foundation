@@ -8055,11 +8055,11 @@ mod tests {
         }
 
         /// Sends a light load of `light` against a backlog of the other class of the
-        /// share for 1000 [`STEP`]s, drains both, then backlogs both for 600, `light`
-        /// first. Gives how far `light` went ahead in the second phase, and the peer
-        /// window: the bytes of `light` that noq-proto took past the share of the
-        /// bytes it took of the other. A read counts only whole messages, so it
-        /// can show two messages more.
+        /// share for 1000 [`STEP`]s, drains both, then backlogs both with messages of
+        /// [`PART`] bytes for 600, `light` first. Gives how far `light` went ahead in
+        /// the second phase, and the peer window: the bytes of `light` that
+        /// noq-proto took past the share of the bytes it took of the other. A read
+        /// counts only whole messages, so it can show two messages more.
         fn ahead_after_a_light_load(shard: &Shard, light: Class) -> (isize, usize) {
             let mut pair = connected(shard);
             let heavy = other(light).expect("a class of the share");
@@ -8087,13 +8087,14 @@ mod tests {
             for _ in 0..8 {
                 flush(&mut pair, &mut receivers, &mut read, &[]);
             }
+            let part = shard.block(&vec![0; PART]);
             let (mut light_took, mut heavy_took) = (0, 0);
             for _ in 0..600 {
                 pair.run(STEP);
                 light_took +=
-                    refill_each(&mut pair, slice::from_mut(&mut lightly), &big);
+                    refill_each(&mut pair, slice::from_mut(&mut lightly), &part);
                 heavy_took +=
-                    refill_each(&mut pair, slice::from_mut(&mut backlogged), &big);
+                    refill_each(&mut pair, slice::from_mut(&mut backlogged), &part);
                 take(&mut pair, &mut receivers, &mut read);
             }
             let ahead = match light {
@@ -8106,6 +8107,11 @@ mod tests {
             (ahead, window)
         }
 
+        /// The size of a message after the light load. A class goes ahead by its
+        /// credit and the rest of one message, so a small message lets the lead show
+        /// a cap 2% too high.
+        const PART: usize = MESSAGE_MAX / 16;
+
         /// Runs [`ahead_after_a_light_load`] at three seeds, and checks the lead
         /// against the credit of `light`, `credit` windows, and the rest of one
         /// message. Seeds 23 and 228 shift the reads by two messages.
@@ -8113,7 +8119,7 @@ mod tests {
             for seed in [1, 23, 228] {
                 testing::run(seed, move |shard| {
                     let (ahead, window) = ahead_after_a_light_load(shard, light);
-                    let bound = (credit * window + MESSAGE_MAX).cast_signed();
+                    let bound = (credit * window + PART).cast_signed();
                     assert!(ahead <= bound, "seed {seed}: {ahead} of {bound}");
                 });
             }
