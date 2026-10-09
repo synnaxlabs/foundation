@@ -17,7 +17,7 @@ use tokio::net::UdpSocket;
 use tokio::runtime::{Builder, Runtime};
 
 #[cfg(target_os = "linux")]
-#[path = "../tests/it/net/udp/gso.rs"]
+#[path = "../tests/common/gso.rs"]
 mod gso;
 
 /// The size of each datagram of a batch: a QUIC packet on a 1,280-byte path.
