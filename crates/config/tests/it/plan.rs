@@ -2777,3 +2777,26 @@ fn takes_the_target_of_a_unit_from_the_first_connector_that_a_placement_wins_for
         .collect();
     assert_eq!(split, [wins("q", "`a` and `b`")]);
 }
+
+#[test]
+fn reports_the_splits_at_one_placement_in_unit_order() {
+    let refused = writers(
+        &["a", "b"],
+        &["\"a.time\"", "\"b.time\""],
+        &(placement("p", "\"a.time\", \"b.time\"", "n")
+            + &placement("q", "\"a\", \"b\"", "n")),
+    );
+    let found = problems(Spec::create_empty().plan(&[&refused], &["n"]));
+    let found: Vec<_> = found
+        .into_iter()
+        .filter(|problem| problem.0 == "config.split-placement")
+        .map(|problem| problem.2)
+        .collect();
+    let split = |index: &str, connector: &str| {
+        format!(
+            "the placement `p` wins for the index `{index}`, but the placement `q` \
+             wins for the connector `{connector}`"
+        )
+    };
+    assert_eq!(found, [split("a.time", "a"), split("b.time", "b")]);
+}
