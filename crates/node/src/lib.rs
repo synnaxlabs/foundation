@@ -267,7 +267,6 @@ impl Node {
         let roles = Role::all(mesh, wall, first, serve, config.name, cores);
         let mut started = Vec::new();
         let mut error = None;
-        let pinnable = shards.pinnable();
         for (core, ((((config, layout), number), role), (take, give))) in
             parts.zip(roles).zip(links).enumerate()
         {
@@ -281,7 +280,7 @@ impl Node {
             };
             let shard = env::shards::Config {
                 name: format!("shard-{core}"),
-                core: pinnable.then_some(core),
+                core: shards.pinnable().then_some(core),
             };
             let guard = stop.guard();
             let failed = Arc::new(OnceLock::new());
@@ -817,29 +816,24 @@ impl Serve {
         };
         // Once each buffer opened, so a budget that gives a shard too little is not
         // kept.
-        if let Err(error) = budget::keep(&files, self.budget).await {
-            return fail(error);
-        }
-        let identity =
-            match identity::load(&files, &self.time, &self.endpoint.entropy).await {
-                Ok(identity) => identity,
-                Err(error) => return fail(error),
-            };
+        let loaded = async {
+            budget::keep(&files, self.budget).await?;
+            identity::load(&files, &self.time, &self.endpoint.entropy).await
+        };
+        let Ok(identity) = loaded.await.map_err(fail) else {
+            return;
+        };
         let (key, entropy) = (identity.key, self.endpoint.entropy.clone());
         let clock = self.endpoint.clock.clone();
         // The endpoint's open takes the founding, so the definitions go first.
-        let definitions = self
-            .endpoint
-            .region
-            .as_ref()
-            .map(|region| region.definitions.clone());
-        let (transport, mesh) = match self
+        let founding = self.endpoint.region.as_ref();
+        let definitions = founding.map(|founding| founding.definitions.clone());
+        let opened = self
             .endpoint
             .open(identity, files, pool, tasks.clone())
-            .await
-        {
-            Ok(opened) => opened,
-            Err(error) => return fail(error),
+            .await;
+        let Ok((transport, mesh)) = opened.map_err(fail) else {
+            return;
         };
         let region = mesh.clone().map(|mesh| hub::Region {
             mesh,
@@ -1095,8 +1089,8 @@ impl fmt::Display for Error {
                 "the data directory holds no node name; give the node a name",
             ),
             Self::Budget => f.write_str(
-                "the file `budget` in the data directory is not a node's budgets; remove \
-                 it, and the next start computes them again",
+                "the file `budget` in the data directory is not a node's budgets; \
+                 remove it, and the next start computes them again",
             ),
         }
     }
