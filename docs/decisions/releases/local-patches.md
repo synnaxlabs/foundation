@@ -33,7 +33,11 @@
   approved at `8df01ff28` by `laptop.architect` at 2026-10-09T07:11:50Z,
   https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076247492, and
   `laptop.architect-2` at 2026-10-09T07:14:50Z,
-  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076285542).
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076285542; this
+  text approved at `13fcc225a` by `laptop.architect` at 2026-10-09T07:29:12Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076487552, and
+  `laptop.architect-2` at 2026-10-09T07:29:40Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6076494258).
   Supersedes the text, item 2 (an optional dependency that is off passes), and item 3
   (the pair by edge name) of
   https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391, the text
