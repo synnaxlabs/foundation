@@ -1690,6 +1690,55 @@ fn a_complete_reader_whose_waiting_credit_fails_to_send_sends_no_later_credit() 
 }
 
 #[test]
+fn a_complete_reader_whose_waiting_credit_fails_to_send_ends_at_a_frame_past_the_grant()
+{
+    const BODY: usize = 16_320;
+    const FIRST: usize = 40;
+    remote_sized(
+        46,
+        sim::link::Config::default(),
+        [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
+        move |node, _, transport, steps| async move {
+            let (session, mut sender, receiver) = fake_open(&transport).await;
+            let _second = session.accept().await.expect("a second stream");
+            for _ in 0..FIRST {
+                send_frame(&mut sender, BODY).await.expect("sends");
+            }
+            node.clock().sleep(Span::from_nanos(500_000_000)).await;
+            receiver.stop(Code(0));
+            node.clock().sleep(Span::from_nanos(500_000_000)).await;
+            let stopped = loop {
+                if let Err(error) = send_frame(&mut sender, BODY).await {
+                    break error;
+                }
+            };
+            let malformed = Code(Refusal::Malformed.code());
+            assert_eq!(stopped, transport::Error::Stopped { code: malformed });
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let names = define_many(&test, 1000);
+            let hub = test.hub.clone();
+            test.tasks.spawn(async move {
+                drop(hub.reader(&names, Mode::Complete).await);
+            });
+            let (charges, ended) = super::take_all(&mut reader).await;
+            let window = u64::try_from(WINDOW).expect("a u64");
+            assert_eq!(
+                (charges.len(), ended),
+                (
+                    64,
+                    Ended::Credit {
+                        limit_bytes: window
+                    }
+                )
+            );
+        },
+    );
+}
+
+#[test]
 fn a_complete_reader_whose_credit_the_stream_refuses_sends_no_later_credit() {
     const BODY: usize = 16_320;
     const ALL: usize = 33;
@@ -1820,6 +1869,63 @@ fn a_complete_reader_whose_pool_has_no_room_for_a_frame_while_a_credit_waits_res
                 }
             };
             assert_eq!(ended, Ended::Pool(expected));
+        },
+    );
+}
+
+#[test]
+fn a_complete_reader_whose_credit_fails_to_send_ends_at_a_frame_past_the_grant_it_sent()
+{
+    let body = |n: usize| if n % 32 == 31 { 14_272 } else { 16_320 };
+    let window = u64::try_from(WINDOW).expect("a u64");
+    assert_eq!(
+        (0..64).map(|n| frame::charge(2, body(n))).sum::<u64>(),
+        window
+    );
+    remote(
+        53,
+        sim::link::Config::default(),
+        move |node, _, transport, steps| async move {
+            let (_, mut sender, receiver) = fake_open(&transport).await;
+            // The home reads no credit, so the only grant sent is the open's window.
+            receiver.stop(Code(0));
+            node.clock().sleep(Span::from_nanos(500_000_000)).await;
+            for n in 0..64 {
+                send_frame(&mut sender, body(n)).await.expect("sends");
+            }
+            node.clock().sleep(Span::from_nanos(1_000_000_000)).await;
+            let stopped = loop {
+                if let Err(error) = send_frame(&mut sender, body(0)).await {
+                    break error;
+                }
+            };
+            let malformed = Code(Refusal::Malformed.code());
+            assert_eq!(stopped, transport::Error::Stopped { code: malformed });
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        move |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            for _ in 0..64 {
+                reader.next().await.expect("a frame");
+            }
+            let mut past = 0;
+            let ended = loop {
+                match reader.next().await {
+                    Ok(_) => past += 1,
+                    Err(ended) => break ended,
+                }
+            };
+            assert_eq!(
+                (past, ended),
+                (
+                    0,
+                    Ended::Credit {
+                        limit_bytes: window
+                    }
+                )
+            );
+            until(&test.clock, &steps.stopped).await;
         },
     );
 }

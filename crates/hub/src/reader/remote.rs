@@ -32,7 +32,8 @@ pub(super) struct Remote {
     /// The grant that the home has, and the charge of each frame given back, for a
     /// complete reader.
     credit: Option<(u64, u64)>,
-    /// The limit of the last credit put on its way, which the task checks.
+    /// The limit of the last credit put on its way, which the task checks. A failed
+    /// send sets it back to the grant that the home has.
     limit: Rc<Cell<u64>>,
     /// The reader's key set. Place `n` of the open is entry `n`.
     set: Arc<KeySet>,
@@ -163,12 +164,13 @@ impl Remote {
             queue,
             out,
             credit,
+            limit,
             streak,
             ..
         } = &mut *self;
         let next = poll_fn(|cx| {
             ready!(streak.poll(cx));
-            poll_credit(out, credit, cx);
+            poll_credit(out, credit, limit, cx);
             let polled = queue.borrow_mut().poll_take(cx);
             streak.count(&polled);
             polled
@@ -220,6 +222,7 @@ impl Remote {
             }
             Ok(Some(block)) => block,
             Err(_) => {
+                self.limit.set(*granted);
                 (self.out, self.credit) = (None, None);
                 return Ok(());
             }
@@ -457,16 +460,21 @@ impl fmt::Debug for Out {
 }
 
 /// Polls the credit that `out` has on its way, and raises the grant in `credit` once
-/// the stream holds it. A send that fails clears both, as [`Remote::grant`] says.
+/// the stream holds it. A send that fails clears both, as [`Remote::grant`] says, and
+/// sets `limit` back to the grant that the home has.
 fn poll_credit(
     out: &mut Option<Out>,
     credit: &mut Option<(u64, u64)>,
+    limit: &Cell<u64>,
     cx: &mut Context<'_>,
 ) {
     if let Some(Out::Sending(sending)) = out
         && let Poll::Ready((sender, limit_bytes, sent)) = sending.as_mut().poll(cx)
     {
         if sent.is_err() {
+            if let Some((granted, _)) = credit {
+                limit.set(*granted);
+            }
             (*out, *credit) = (None, None);
             return;
         }
