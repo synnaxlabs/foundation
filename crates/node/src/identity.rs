@@ -118,7 +118,7 @@ pub(crate) fn encode(identity: &Identity) -> [u8; LEN] {
     bytes
 }
 
-/// The identity in `bytes`, or `None` for zero bytes or another tag or checksum.
+/// The identity in `bytes`, or `None` for another tag or checksum.
 #[cfg(any(test, feature = "sim"))]
 fn decode(bytes: &[u8; LEN]) -> Option<Identity> {
     match sector::held(bytes, TAG) {

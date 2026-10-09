@@ -21,7 +21,7 @@ pub(crate) enum Held<const N: usize> {
     /// The bytes that a node wrote, with the tag and a checksum that matches.
     Written([u8; N]),
     /// A file that no node wrote: another tag or checksum. For [`read`], also another
-    /// length, no bytes, or `N` zero bytes, which [`publish`] never leaves.
+    /// length.
     Foreign,
 }
 
@@ -39,7 +39,12 @@ pub(crate) async fn open<const N: usize>(
     tag: &[u8],
 ) -> Result<(File, Held<N>), env::files::Error> {
     let file = files.open(path, Mode::Create { len: N as u64 }).await?;
-    let held = held(&bytes(&file).await?, tag);
+    let bytes = bytes(&file).await?;
+    let held = if bytes == [0; N] {
+        Held::Nothing
+    } else {
+        held(&bytes, tag)
+    };
     Ok((file, held))
 }
 
@@ -63,10 +68,7 @@ pub(crate) async fn read<const N: usize>(
     if file.len() != N as u64 {
         return Ok(Held::Foreign);
     }
-    match held(&bytes(&file).await?, tag) {
-        Held::Nothing => Ok(Held::Foreign),
-        held => Ok(held),
-    }
+    Ok(held(&bytes(&file).await?, tag))
 }
 
 /// Makes `path` in `files` with `bytes`, which [`checksum`] completed, and makes it
@@ -109,12 +111,11 @@ pub(crate) async fn write<const N: usize>(
     files.sync_dir(Path::new("")).await
 }
 
-/// What `bytes` hold, for a file whose tag is `tag`.
+/// What `bytes` hold, for a file whose tag is `tag`: [`Held::Written`] or
+/// [`Held::Foreign`].
 pub(crate) fn held<const N: usize>(bytes: &[u8; N], tag: &[u8]) -> Held<N> {
     let (body, sum) = bytes.split_at(N - 4);
-    if *bytes == [0; N] {
-        Held::Nothing
-    } else if body.starts_with(tag) && crc32c::crc32c(body).to_le_bytes() == *sum {
+    if body.starts_with(tag) && crc32c::crc32c(body).to_le_bytes() == *sum {
         Held::Written(*bytes)
     } else {
         Held::Foreign
