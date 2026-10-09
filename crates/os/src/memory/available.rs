@@ -26,8 +26,11 @@ mod linux {
     use std::ffi::OsString;
     use std::fs;
     use std::io;
-    use std::os::unix::ffi::OsStringExt;
-    use std::path::{Path, PathBuf};
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    use std::path::{Component, Path, PathBuf};
+
+    use procfs_core::process::MountInfo;
+    use procfs_core::{FromBufRead, Meminfo, ProcError, ProcessCGroups};
 
     /// The files of a cgroup that give its limit and its use, and the key in
     /// `memory.stat` of its inactive file pages.
@@ -51,16 +54,30 @@ mod linux {
 
     /// The available bytes of the process, whose file system root is `root`.
     pub(super) fn available(root: &Path) -> io::Result<u64> {
-        let meminfo = read(&root.join("proc/meminfo"))?;
-        let mut least = mem_available(&meminfo)?;
-        let Some(cgroups) = optional(&root.join("proc/self/cgroup"))? else {
+        let file = root.join("proc/meminfo");
+        let meminfo: Meminfo = parse(&file, &read(&file)?)?;
+        let mut least = meminfo.mem_available.ok_or_else(|| {
+            invalid(format!("{} has no MemAvailable", file.display()))
+        })?;
+        let file = root.join("proc/self/cgroup");
+        let Some(cgroups) = optional(&file)? else {
             // A kernel with no cgroups.
             return Ok(least);
         };
-        for mount in read(&root.join("proc/self/mountinfo"))?.lines() {
-            let Some((point, files, inside)) = hierarchy(mount, &cgroups)? else {
+        let cgroups: ProcessCGroups = parse(&file, &cgroups)?;
+        let file = root.join("proc/self/mountinfo");
+        for line in read(&file)?.lines() {
+            // Its error names a file of `procfs_core` as a bug, and no field.
+            let mount = MountInfo::from_line(line).map_err(|_bug| {
+                invalid(format!(
+                    "{} has a line that is no mount: {line}",
+                    file.display()
+                ))
+            })?;
+            let Some((files, inside)) = hierarchy(&mount, &cgroups) else {
                 continue;
             };
+            let point = unescape(mount.mount_point.as_os_str().as_bytes());
             let top = root.join(point.strip_prefix("/").unwrap_or(&point));
             let mut dir = top.join(inside);
             loop {
@@ -75,49 +92,36 @@ mod linux {
         Ok(least)
     }
 
-    /// For a line of `mountinfo` that mounts a memory cgroup hierarchy, its mount
-    /// point, its files, and the cgroup of the process inside the mount, from the
-    /// lines of `cgroups`. `None` for another mount, or a cgroup outside it.
+    /// For a mount of a memory cgroup hierarchy, its files and the cgroup of the
+    /// process inside the mount. `None` for another mount, or a cgroup outside it.
     fn hierarchy(
-        line: &str,
-        cgroups: &str,
-    ) -> io::Result<Option<(PathBuf, Files, PathBuf)>> {
-        let bad = || invalid(format!("a line of mountinfo has too few fields: {line}"));
-        let (mount, kind) = line.split_once(" - ").ok_or_else(bad)?;
-        let mount: Vec<&str> = mount.split(' ').collect();
-        let kind: Vec<&str> = kind.split(' ').collect();
-        let (Some(&mount_root), Some(&point), Some(&fs_type), Some(&options)) =
-            (mount.get(3), mount.get(4), kind.first(), kind.get(2))
-        else {
-            return Err(bad());
+        mount: &MountInfo,
+        cgroups: &ProcessCGroups,
+    ) -> Option<(Files, PathBuf)> {
+        let (files, controller) = match mount.fs_type.as_str() {
+            "cgroup2" => (V2, None),
+            "cgroup" if mount.super_options.contains_key("memory") => {
+                (V1, Some("memory"))
+            }
+            _ => return None,
         };
-        let (files, controller) = match fs_type {
-            "cgroup2" => (V2, ""),
-            "cgroup" if options.split(',').any(|o| o == "memory") => (V1, "memory"),
-            _ => return Ok(None),
-        };
-        let path = cgroups.lines().find_map(|cgroup| {
-            let mut fields = cgroup.splitn(3, ':');
-            let (_, controllers, path) =
-                (fields.next()?, fields.next()?, fields.next()?);
-            let found = if controller.is_empty() {
-                controllers.is_empty()
-            } else {
-                controllers.split(',').any(|c| c == controller)
-            };
-            found.then_some(path)
-        });
-        let mount_root = unescape(mount_root);
-        let inside =
-            path.and_then(|path| Path::new(path).strip_prefix(&mount_root).ok());
-        Ok(inside.map(|inside| (unescape(point), files, inside.to_path_buf())))
+        let cgroup = cgroups.0.iter().find(|cgroup| match controller {
+            None => cgroup.controllers.is_empty(),
+            Some(controller) => cgroup.controllers.iter().any(|c| c == controller),
+        })?;
+        let inside = Path::new(&cgroup.pathname)
+            .strip_prefix(unescape(mount.root.as_bytes()))
+            .ok()?;
+        // A cgroup outside the root of the cgroup namespace starts with `..`.
+        let outside = inside.components().any(|c| c == Component::ParentDir);
+        (!outside).then(|| (files, inside.to_path_buf()))
     }
 
     /// A path field of `mountinfo`, where the kernel writes each space, tab, newline,
     /// and backslash as `\` and three octal digits.
-    fn unescape(field: &str) -> PathBuf {
+    fn unescape(field: &[u8]) -> PathBuf {
         let mut bytes = Vec::with_capacity(field.len());
-        let mut rest = field.as_bytes();
+        let mut rest = field;
         loop {
             let (byte, after) = match rest {
                 [
@@ -163,20 +167,16 @@ mod linux {
         Ok(Some(limit.saturating_sub(usage.saturating_sub(inactive))))
     }
 
-    /// The bytes of `MemAvailable` in the text of `/proc/meminfo`.
-    fn mem_available(meminfo: &str) -> io::Result<u64> {
-        let line = meminfo
-            .lines()
-            .find_map(|line| line.strip_prefix("MemAvailable:"))
-            .ok_or_else(|| invalid("/proc/meminfo has no MemAvailable".to_owned()))?
-            .trim();
-        let kib = line.strip_suffix(" kB").ok_or_else(|| {
-            invalid(format!(
-                "/proc/meminfo gives MemAvailable with no unit: {line}"
-            ))
-        })?;
-        let kib = number(Path::new("/proc/meminfo"), kib)?;
-        Ok(kib.saturating_mul(1024))
+    /// The value that `procfs_core` parses from `text`, the text of `file`.
+    fn parse<T: FromBufRead>(file: &Path, text: &str) -> io::Result<T> {
+        T::from_buf_read(text.as_bytes()).map_err(|error| {
+            let error = match error {
+                // Its text calls a line of `procfs_core` a bug.
+                ProcError::InternalError(error) => error.msg,
+                error => error.to_string(),
+            };
+            invalid(format!("{}: {error}", file.display()))
+        })
     }
 
     /// An error for a file of the OS that does not hold what it must.
@@ -241,9 +241,14 @@ mod linux {
         }
 
         const MIB: u64 = 1 << 20;
-        const MEMINFO: &str = "MemTotal:       16777216 kB\n\
-                               MemFree:         1048576 kB\n\
-                               MemAvailable:    8388608 kB\n";
+        /// Each field that `procfs_core` needs, and `MemAvailable`.
+        const MEMINFO: &str = "MemTotal: 16777216 kB\nMemFree: 1048576 kB\n\
+                               MemAvailable: 8388608 kB\nBuffers: 0 kB\nCached: 0 kB\n\
+                               SwapCached: 0 kB\nActive: 0 kB\nInactive: 0 kB\n\
+                               SwapTotal: 0 kB\nSwapFree: 0 kB\nDirty: 0 kB\n\
+                               Writeback: 0 kB\nMapped: 0 kB\nSlab: 0 kB\n\
+                               Committed_AS: 0 kB\nVmallocTotal: 0 kB\n\
+                               VmallocUsed: 0 kB\nVmallocChunk: 0 kB\n";
         const V2_MOUNT: &str = "37 31 0:31 / /sys/fs/cgroup rw,nosuid shared:8 - \
                                 cgroup2 cgroup2 rw,nsdelegate\n";
 
@@ -389,6 +394,23 @@ mod linux {
             assert_eq!(root.available().unwrap(), 8192 * MIB);
         }
 
+        /// A process outside the root of its cgroup namespace sees its cgroup as
+        /// `/../x`: outside each mount, whose root is `/`.
+        #[test]
+        fn a_cgroup_outside_the_namespace_root_is_outside_the_mount() {
+            let root = Root::new("v2-outside-ns");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "0::/../x\n")
+                .write("proc/self/mountinfo", V2_MOUNT)
+                .write("sys/fs/cgroup/memory.max", &format!("{MIB}\n"))
+                .write("sys/fs/cgroup/memory.current", "0\n")
+                .write("sys/fs/cgroup/memory.stat", "inactive_file 0\n")
+                .write("sys/fs/x/memory.max", &format!("{}\n", MIB / 2))
+                .write("sys/fs/x/memory.current", "0\n")
+                .write("sys/fs/x/memory.stat", "inactive_file 0\n");
+            assert_eq!(root.available().unwrap(), 8192 * MIB);
+        }
+
         /// The kernel writes a space and a backslash in the root of a mount as
         /// `\040` and `\134`.
         #[test]
@@ -476,20 +498,6 @@ mod linux {
         }
 
         #[test]
-        fn mem_available_with_no_unit_is_an_error() {
-            let root = Root::new("no-unit");
-            root.write("proc/meminfo", "MemAvailable:    8388608\n");
-            let error = root.available().unwrap_err();
-            assert_eq!(
-                (error.kind(), error.to_string()),
-                (
-                    io::ErrorKind::InvalidData,
-                    "/proc/meminfo gives MemAvailable with no unit: 8388608".to_owned()
-                )
-            );
-        }
-
-        #[test]
         fn a_kernel_with_no_cgroups_gives_mem_available() {
             let root = Root::new("none");
             root.write("proc/meminfo", MEMINFO);
@@ -499,13 +507,29 @@ mod linux {
         #[test]
         fn meminfo_with_no_mem_available_is_an_error() {
             let root = Root::new("no-available");
-            root.write("proc/meminfo", "MemTotal: 16777216 kB\n");
+            root.write("proc/meminfo", &MEMINFO.replace("MemAvailable", "Other"));
             let error = root.available().unwrap_err();
+            let file = root.0.join("proc/meminfo");
             assert_eq!(
                 (error.kind(), error.to_string()),
                 (
                     io::ErrorKind::InvalidData,
-                    "/proc/meminfo has no MemAvailable".to_owned()
+                    format!("{} has no MemAvailable", file.display())
+                )
+            );
+        }
+
+        #[test]
+        fn meminfo_with_no_mem_total_is_an_error() {
+            let root = Root::new("no-total");
+            root.write("proc/meminfo", &MEMINFO.replace("MemTotal", "Other"));
+            let error = root.available().unwrap_err();
+            let file = root.0.join("proc/meminfo");
+            assert_eq!(
+                (error.kind(), error.to_string()),
+                (
+                    io::ErrorKind::InvalidData,
+                    format!("{}: Internal Unwrap Error: NoneError", file.display())
                 )
             );
         }
@@ -566,22 +590,27 @@ mod linux {
             let root = v2("v2-short");
             root.write("proc/self/mountinfo", "37 31 0:31 /\n");
             let error = root.available().unwrap_err();
+            let file = root.0.join("proc/self/mountinfo");
             assert_eq!(
                 (error.kind(), error.to_string()),
                 (
                     io::ErrorKind::InvalidData,
-                    "a line of mountinfo has too few fields: 37 31 0:31 /".to_owned()
+                    format!(
+                        "{} has a line that is no mount: 37 31 0:31 /",
+                        file.display()
+                    )
                 )
             );
         }
 
         #[test]
         fn this_process_has_memory_available() {
-            let meminfo = fs::read_to_string("/proc/meminfo").unwrap();
+            let file = Path::new("/proc/meminfo");
+            let meminfo: Meminfo = parse(file, &read(file).unwrap()).unwrap();
             let available = crate::memory::available().unwrap().bytes();
             assert!(available > 0, "{available}");
             assert!(
-                available <= mem_available(&meminfo).unwrap() * 2,
+                available <= meminfo.mem_available.unwrap() * 2,
                 "{available}"
             );
         }
@@ -591,38 +620,37 @@ mod linux {
 #[cfg(target_os = "macos")]
 mod macos {
     use std::io;
-    use std::mem::MaybeUninit;
+
+    use mach2::host_info::HOST_VM_INFO64_COUNT;
+    use mach2::kern_return::KERN_SUCCESS;
+    use mach2::vm_statistics::vm_statistics64;
 
     /// The bytes of the free, inactive, and purgeable pages.
     pub(super) fn available() -> io::Result<u64> {
-        let mut stats = MaybeUninit::<libc::vm_statistics64>::zeroed();
-        let mut count = libc::HOST_VM_INFO64_COUNT;
+        let mut stats = vm_statistics64::default();
+        let mut count = HOST_VM_INFO64_COUNT;
         // SAFETY: a call with no arguments.
-        #[expect(deprecated, reason = "libc points to the mach2 crate, which we lack")]
-        let host = unsafe { libc::mach_host_self() };
-        // SAFETY: `stats` holds `count` integers, the most the call writes, and it
-        // starts as zeros, a valid value.
+        let host = unsafe { mach2::mach_init::mach_host_self() };
+        // SAFETY: `stats` holds `count` integers, the most the call writes.
         let code = unsafe {
             libc::host_statistics64(
                 host,
                 libc::HOST_VM_INFO64,
-                stats.as_mut_ptr().cast(),
+                (&raw mut stats).cast(),
                 &raw mut count,
             )
         };
-        if code != libc::KERN_SUCCESS {
+        if code != KERN_SUCCESS {
             return Err(io::Error::other(format!(
                 "host_statistics64 failed with {code}"
             )));
         }
-        // SAFETY: zeros are a valid value, and the call wrote the rest.
-        let stats = unsafe { stats.assume_init() };
         Ok(bytes(&stats, page()))
     }
 
     /// The bytes of the free, inactive, and purgeable pages of `stats`, in pages of
     /// `page` bytes.
-    fn bytes(stats: &libc::vm_statistics64, page: u64) -> u64 {
+    fn bytes(stats: &vm_statistics64, page: u64) -> u64 {
         let pages = u64::from(stats.free_count)
             + u64::from(stats.inactive_count)
             + u64::from(stats.purgeable_count);
@@ -641,14 +669,14 @@ mod macos {
 
         #[test]
         fn the_free_inactive_and_purgeable_pages_are_available() {
-            // SAFETY: zeros are a valid value.
-            let mut stats =
-                unsafe { MaybeUninit::<libc::vm_statistics64>::zeroed().assume_init() };
-            stats.free_count = 3;
-            stats.inactive_count = 5;
-            stats.purgeable_count = 7;
-            stats.active_count = 11;
-            stats.wire_count = 13;
+            let stats = vm_statistics64 {
+                free_count: 3,
+                inactive_count: 5,
+                purgeable_count: 7,
+                active_count: 11,
+                wire_count: 13,
+                ..vm_statistics64::default()
+            };
             assert_eq!(bytes(&stats, 16384), 15 * 16384);
         }
 
