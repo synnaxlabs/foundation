@@ -50,9 +50,9 @@ use crate::{handoff, order, split, stored};
 /// #     let mut slots = Slots::new();
 /// #     let mut interner = Interner::new();
 /// #     let index = slots.index(stamps);
-/// #     slots.index(values);
+/// #     slots.data(values);
 /// #     interner.slots().index(stamps);
-/// #     interner.slots().index(values);
+/// #     interner.slots().data(values);
 /// #     let set = interner.intern(&[Group {
 /// #         index: stamps,
 /// #         data: &[(values, Type::Scalar(Scalar::I64))],
@@ -943,7 +943,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, data_type, key, values};
+    use crate::common::{create_interner, create_pool, data_type, intern, key, values};
     use crate::reader::complete::Charge;
 
     const DIR: &str = "shard-0";
@@ -1105,7 +1105,7 @@ mod tests {
                     }
                 })
                 .collect();
-            (shard, create_interner().intern(&groups))
+            (shard, intern(&groups))
         }
 
         /// The bytes of the ring file.
@@ -1179,7 +1179,7 @@ mod tests {
 
     /// Two indexes: slot 0 with an `i64` channel at slot 1, then slot 2 alone.
     fn two_indexes() -> Arc<KeySet> {
-        create_interner().intern(&[
+        intern(&[
             Group {
                 index: key(Slot::new(0)),
                 data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I64))],
@@ -1193,7 +1193,7 @@ mod tests {
 
     /// The key set of one index, at a slot that [`Test::shard`] does not carry.
     fn not_carried() -> Arc<KeySet> {
-        create_interner().intern(&[Group {
+        intern(&[Group {
             index: key(Slot::new(3)),
             data: &[],
         }])
@@ -1787,7 +1787,7 @@ mod tests {
         run(73, |test| async move {
             let mut shard = test.open(AREA, 2).await;
             shard.carry(Slot::new(1));
-            let set = create_interner().intern(&[Group {
+            let set = intern(&[Group {
                 index: key(Slot::new(1)),
                 data: &[(key(Slot::new(0)), Type::Scalar(Scalar::I64))],
             }]);
@@ -2068,11 +2068,11 @@ mod tests {
     fn records_a_handoff_with_room_at_close_when_an_earlier_one_has_none() {
         run(25, |test| async move {
             let set = two_indexes();
-            let zero = create_interner().intern(&[Group {
+            let zero = intern(&[Group {
                 index: key(Slot::new(0)),
                 data: &[],
             }]);
-            let two = create_interner().intern(&[Group {
+            let two = intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &[],
             }]);
@@ -2764,7 +2764,7 @@ mod tests {
             let buffer = test.create_buffer(AREA, 4087, 1).await;
             let mut shard = test.over(buffer).await;
             shard.carry(Slot::new(0));
-            let set = create_interner().intern(&[Group {
+            let set = intern(&[Group {
                 index: key(Slot::new(0)),
                 data: &[],
             }]);
@@ -2834,7 +2834,7 @@ mod tests {
     #[test]
     fn stores_a_body_under_its_index_when_a_data_channel_has_a_lower_slot() {
         run(46, |test| async move {
-            let set = create_interner().intern(&[Group {
+            let set = intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I64))],
             }]);
@@ -3782,7 +3782,7 @@ mod tests {
 
         /// The key set of the index at slot 2 alone.
         fn only_two() -> Arc<KeySet> {
-            create_interner().intern(&[Group {
+            intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &[],
             }])
@@ -3842,7 +3842,7 @@ mod tests {
                 index: key(Slot::new(slot)),
                 data: &[],
             });
-            create_interner().intern(&groups)
+            intern(&groups)
         }
 
         /// Shed at place 0 moves the index at place 2 there, and not the one at
@@ -4780,7 +4780,7 @@ mod tests {
     /// and gives the run.
     fn write_of_another_key_set(seed: u64, label: Label) -> Result<(), sim::Error> {
         let (mut sim, _handle) = start(seed, move |test| async move {
-            let mut interner = create_interner();
+            let mut interner = create_interner(&[0, 2]);
             let group = Group {
                 index: key(Slot::new(2)),
                 data: &[],
@@ -4872,7 +4872,7 @@ mod tests {
                 .zip(&series[1..])
                 .map(|(slot, &(data_type, _))| (key(Slot::new(slot)), data_type))
                 .collect();
-            let set = create_interner().intern(&[Group {
+            let set = intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &data,
             }]);
