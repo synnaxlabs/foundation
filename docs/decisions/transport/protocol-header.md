@@ -17,11 +17,12 @@
   would then have two meanings. Decided by `laptop.architect` on #2148
   (2026-10-09T13:37:25Z,
   https://github.com/synnaxlabs/foundation/issues/2148#issuecomment-6082041865).
-  Supersedes the sentence of #75, approved on #90, that gave codes 1 to 15 to the header
-  alone. A client session (`Peer::Client`) opens only hub streams, its hello stream is
-  the first hub stream, and the node's `Challenge` is the first message on it (CLIENT
-  HELLO); `node` refuses the other four protocols from a client. The stream and client
-  rules are approved by the coordinator on #90. The hello stream was changed by
+  Supersedes the sentence of #75 that gave codes 1 to 15 to the header alone, merged in
+  https://github.com/synnaxlabs/foundation/pull/90 (2026-10-05), which has no approval
+  comment to link. A client session (`Peer::Client`) opens only hub streams, its hello
+  stream is the first hub stream, and the node's `Challenge` is the first message on it
+  (CLIENT HELLO); `node` refuses the other four protocols from a client. The stream and
+  client rules are approved by the coordinator on #90. The hello stream was changed by
   `laptop.architect` at 2026-10-08T09:53:58Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526).
   Rejected: a version agreed once per session (the format flag's flip reaches nodes at
