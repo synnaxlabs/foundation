@@ -623,8 +623,8 @@ impl Shard {
         };
         let buffer = Buffer::open(config, &mut table).await?;
         let mut slots: Vec<Slot> =
-            (0..INDEXES).map(|index| table.assign(key(index))).collect();
-        let edited: Vec<Slot> = (0..=table.assign(SPARE).get())
+            (0..INDEXES).map(|index| table.index(key(index))).collect();
+        let edited: Vec<Slot> = (0..=table.data(SPARE).get())
             .map(Slot::new)
             .filter(|slot| !slots.contains(slot))
             .collect();
