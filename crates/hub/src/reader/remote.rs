@@ -22,9 +22,9 @@ use wire::hub::{Credit, FromHome, Head, Open, Refusal, keys};
 use super::{Ended, Error, Mode, Streak, WINDOW};
 use crate::State;
 
-/// A reader session on one stream to the home. A task takes each frame off the stream
-/// as it arrives and sends each credit, so an idle caller never holds the window or
-/// the send turn of the session.
+/// A reader session on one stream to the home. A task opens the stream, takes each
+/// frame off it as it arrives, and sends each credit, so an idle caller never holds
+/// the window or the send turn of the session.
 #[derive(Debug)]
 pub(super) struct Remote {
     queue: Rc<RefCell<Queue>>,
@@ -81,6 +81,8 @@ impl Sessions {
 /// The frames that the task took and the caller has not, and why the session ended.
 #[derive(Debug, Default)]
 struct Queue {
+    /// The result of the open, until [`Remote::open`] takes it.
+    opened: Option<Result<(), Error>>,
     frames: VecDeque<Frame>,
     /// Why the session ended. The caller gets it after each frame in `frames`.
     ended: Option<Ended>,
@@ -112,9 +114,10 @@ struct Inbound {
 
 impl Remote {
     /// Opens a session of `mode` on the channels of `data`, each with its sample type,
-    /// and their index `index` at `home`, another node, and waits for the home to open
-    /// it. Then spawns the task that takes its frames. A removal of a channel during
-    /// the open ends the session at its first take.
+    /// and their index `index` at `home`, another node. Spawns the task of the
+    /// session, which dials the home, opens the session, and then takes its frames,
+    /// and waits until the home opened it. A removal of a channel during the open
+    /// ends the session at its first take.
     pub(super) async fn open(
         state: &Rc<RefCell<State>>,
         home: types::node::Key,
@@ -133,63 +136,25 @@ impl Remote {
             .collect();
         let group = Group { index, data: &data };
         let set = state.borrow_mut().interner.intern(&[group]);
-        let (class, wire_mode, credit) = match mode {
-            Mode::Complete => (
-                Class::Complete,
-                wire::hub::Mode::Complete {
-                    limit_bytes: WINDOW,
-                },
-                Some(0),
-            ),
-            Mode::Latest => (Class::Latest, wire::hub::Mode::Latest, None),
-        };
-        let open = Open {
-            mode: wire_mode,
-            channels: u32::try_from(set.entries().len())
-                .expect("invariant: a key set holds at most 2^32 entries"),
-        };
-        let (mut sender, mut receiver) = dial(state, home)
-            .await?
-            .open(class)
-            .await
-            .map_err(Error::Transport)?;
-        let mut decoder = wire::hub::Reader::new(&open);
-        let opened = handshake(
-            state,
-            (&mut sender, &mut receiver),
-            &mut decoder,
-            &open,
-            &set,
-        )
-        .await;
-        if let Err(error) = opened {
-            let refusal = match error {
-                Error::Message(_) => Some(Refusal::Malformed),
-                Error::Pool(_) => Some(Refusal::Busy),
-                _ => None,
-            };
-            if let Some(refusal) = refusal {
-                receiver.stop(Code(refusal.code()));
-                sender.reset(Code(refusal.code()));
-            }
-            return Err(error);
-        }
-        let limit = Rc::new(Cell::new(WINDOW));
-        let checked = credit.map(|_| Rc::clone(&limit));
-        let inbound = Inbound::new(state, receiver, decoder, &set, checked);
-        let latest = mode == Mode::Latest;
-        let receiving = receive(Rc::downgrade(&queue), inbound, latest);
-        let granting = grant(Rc::downgrade(&queue), Rc::clone(state), sender, limit);
-        state.borrow().tasks.spawn(run(receiving, granting));
+        let task = session(
+            Rc::downgrade(&queue),
+            Rc::clone(state),
+            home,
+            mode,
+            Arc::clone(&set),
+        );
+        state.borrow().tasks.spawn(task);
         let mask = Mask::new(&set, set.entries().iter().map(|entry| entry.slot));
-        Ok(Self {
+        let remote = Self {
             queue,
-            credit,
+            credit: (mode == Mode::Complete).then_some(0),
             asked: WINDOW,
             set,
             mask,
             streak: Streak::default(),
-        })
+        };
+        poll_fn(|cx| remote.queue.borrow_mut().poll_open(cx)).await?;
+        Ok(remote)
     }
 
     /// Adds the charge of `frame`, which the reader gave back, to the credit.
@@ -248,6 +213,27 @@ impl Drop for Remote {
 }
 
 impl Queue {
+    /// The result of the open once the task has it, else `Ok` once the session
+    /// ended, else `Pending` with the waker kept.
+    fn poll_open(&mut self, cx: &Context<'_>) -> Poll<Result<(), Error>> {
+        if let Some(opened) = self.opened.take() {
+            return Poll::Ready(opened);
+        }
+        if self.ended.is_some() {
+            return Poll::Ready(Ok(()));
+        }
+        keep(&mut self.taker, cx);
+        Poll::Pending
+    }
+
+    /// Keeps `opened`, the result of the open, and wakes the caller.
+    fn open(&mut self, opened: Result<(), Error>) {
+        self.opened = Some(opened);
+        if let Some(taker) = self.taker.take() {
+            taker.wake();
+        }
+    }
+
     /// The oldest frame, else the end, else `Pending` with the waker kept.
     fn poll_take(&mut self, cx: &Context<'_>) -> Poll<Result<Frame, Ended>> {
         if let Some(frame) = self.frames.pop_front() {
@@ -290,6 +276,60 @@ fn keep(slot: &mut Option<Waker>, cx: &Context<'_>) {
     {
         *slot = Some(cx.waker().clone());
     }
+}
+
+/// Opens the session of `queue`, a reader of `mode` on `set`, at `home`, and gives
+/// `queue` the result. Then takes its frames and sends its credits. Stops with no
+/// result once the session ended or the [`Remote`] dropped.
+async fn session(
+    queue: Weak<RefCell<Queue>>,
+    state: Rc<RefCell<State>>,
+    home: types::node::Key,
+    mode: Mode,
+    set: Arc<KeySet>,
+) {
+    let (class, wire_mode) = match mode {
+        Mode::Complete => (
+            Class::Complete,
+            wire::hub::Mode::Complete {
+                limit_bytes: WINDOW,
+            },
+        ),
+        Mode::Latest => (Class::Latest, wire::hub::Mode::Latest),
+    };
+    let open = Open {
+        mode: wire_mode,
+        channels: u32::try_from(set.entries().len())
+            .expect("invariant: a key set holds at most 2^32 entries"),
+    };
+    let mut decoder = wire::hub::Reader::new(&open);
+    let opened = {
+        let mut opening = pin!(connect(&state, home, class, &mut decoder, &open, &set));
+        poll_fn(|cx| match poll_end(&queue, cx) {
+            Poll::Ready(_) => Poll::Ready(None),
+            Poll::Pending => opening.as_mut().poll(cx).map(Some),
+        })
+        .await
+    };
+    let (Some(opened), Some(waiting)) = (opened, queue.upgrade()) else {
+        return;
+    };
+    let (sender, receiver) = match opened {
+        Ok(streams) => {
+            waiting.borrow_mut().open(Ok(()));
+            streams
+        }
+        Err(error) => {
+            waiting.borrow_mut().open(Err(error));
+            return;
+        }
+    };
+    drop(waiting);
+    let limit = Rc::new(Cell::new(WINDOW));
+    let checked = (mode == Mode::Complete).then(|| Rc::clone(&limit));
+    let inbound = Inbound::new(&state, receiver, decoder, &set, checked);
+    let receiving = receive(Weak::clone(&queue), inbound, mode == Mode::Latest);
+    run(receiving, grant(queue, state, sender, limit)).await;
 }
 
 /// Polls `receiving` and `granting`, the two halves of the task of a session, until
@@ -556,6 +596,39 @@ async fn dial(
         .dial(card.public_key, card.addresses.as_slice())
         .await
         .map_err(Error::Transport)
+}
+
+/// Opens a stream of `class` to `home`, and opens the session of `open` on `set` with
+/// `decoder`. A reply that breaks HUB WIRE, or a pool with no block for a message,
+/// stops the stream with its refusal.
+async fn connect(
+    state: &Rc<RefCell<State>>,
+    home: types::node::Key,
+    class: Class,
+    decoder: &mut wire::hub::Reader,
+    open: &Open,
+    set: &KeySet,
+) -> Result<(Sender, Receiver), Error> {
+    let (mut sender, mut receiver) = dial(state, home)
+        .await?
+        .open(class)
+        .await
+        .map_err(Error::Transport)?;
+    let opened =
+        handshake(state, (&mut sender, &mut receiver), decoder, open, set).await;
+    if let Err(error) = opened {
+        let refusal = match error {
+            Error::Message(_) => Some(Refusal::Malformed),
+            Error::Pool(_) => Some(Refusal::Busy),
+            _ => None,
+        };
+        if let Some(refusal) = refusal {
+            receiver.stop(Code(refusal.code()));
+            sender.reset(Code(refusal.code()));
+        }
+        return Err(error);
+    }
+    Ok((sender, receiver))
 }
 
 /// Sends the header, `open`, and the keys of `set` on `sender`, and waits for the

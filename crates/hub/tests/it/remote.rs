@@ -2605,9 +2605,7 @@ fn a_removal_of_a_channel_while_a_remote_reader_opens_ends_it_at_its_first_take(
         7,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (_session, mut sender, receiver) = fake_accept(&transport).await;
-            until(&node.clock(), &steps.again).await;
-            send(&mut sender, 1, |out| Reply::Opened.encode(out)).await;
+            let (_session, _sender, receiver) = fake_accept(&transport).await;
             reset_by_removal(node, receiver, &steps).await;
         },
         |test, steps| async move {
@@ -2620,6 +2618,82 @@ fn a_removal_of_a_channel_while_a_remote_reader_opens_ends_it_at_its_first_take(
             let ended = reader.next().await.map(|_| ());
             assert_eq!(ended, Err(Ended::Removed(VALUE)));
             until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
+
+#[test]
+fn a_credit_waits_for_no_idle_caller_of_another_open() {
+    const FRAMES: usize = 63;
+    const BODY: usize = 16_320;
+    remote_sized(
+        12,
+        sim::link::Config::default(),
+        [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
+        move |node, _, transport, steps| async move {
+            let (session, mut sender, mut receiver) = fake_open(&transport).await;
+            let mut second = session.accept().await.expect("a second stream");
+            for _ in 0..FRAMES {
+                send_frame(&mut sender, BODY).await.expect("sends");
+            }
+            until(&node.clock(), &steps.again).await;
+            // The home takes each message of the second stream from now on.
+            let credit = loop {
+                match race(receiver.recv(), second.receiver.recv()).await {
+                    Ok(credit) => break credit,
+                    Err(Err(_)) => break receiver.recv().await,
+                    Err(keys) => drop(keys.expect("a message").expect("open")),
+                }
+            };
+            let credit = credit.expect("a credit").expect("open");
+            assert_eq!(credit.len(), Credit::LEN);
+            send_frame(&mut sender, BODY).await.expect("sends");
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let names = define_many(&test, 1000);
+            let hub = test.hub.clone();
+            let mut second = Box::pin(hub.reader(&names, Mode::Complete));
+            let polled = race(
+                second.as_mut(),
+                test.clock.sleep(Span::from_nanos(300_000_000)),
+            )
+            .await;
+            assert!(polled.is_err(), "the second open waits for room");
+            // The caller of the second open stops polling it, and keeps it.
+            steps.again.store(true, Ordering::Relaxed);
+            for _ in 0..FRAMES {
+                reader.next().await.expect("a frame");
+            }
+            let deadline = test.clock.sleep(Span::from_nanos(3_000_000_000));
+            let next = race(reader.next(), deadline).await;
+            assert!(matches!(next, Ok(Ok(_))), "the frame after the credit came");
+            drop(second);
+        },
+    );
+}
+#[test]
+fn a_removal_ends_a_remote_reader_that_waits_for_a_stream() {
+    remote(
+        22,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            hub_home(node, tasks, transport, steps, |_| async {}).await;
+        },
+        |test, _| async move {
+            let mut readers = Vec::new();
+            for _ in 0..STREAMS {
+                readers.push(test.reader(&["value-c"], Mode::Complete).await);
+            }
+            let names = [name("value")];
+            let mut opening = pin!(test.hub.reader(&names, Mode::Complete));
+            let wait = test.clock.sleep(Span::from_nanos(1_000_000_000));
+            assert!(race(opening.as_mut(), wait).await.is_err(), "no stream");
+            test.hub.set_definitions(&without(&["value"]));
+            let wait = test.clock.sleep(Span::from_nanos(5_000_000_000));
+            let opened = race(opening.as_mut(), wait).await;
+            assert!(opened.is_ok(), "the removal ends the open that waits");
         },
     );
 }
