@@ -236,9 +236,17 @@ state on `main`.
   (`env::files`, RAFT DURABILITY, #352 item 3). The node gets `Error::IndexPastLog`
   only once the leader's commit passes its last entry. Not built (#648): the node
   shows the error in its status.
-- The `clock`, `replica`, and `blob` protocols are not built. To attack when they
-  land: who may be a time source, and a binary that a peer serves under a hash it
-  does not match (C9d).
+- The `clock` and `replica` protocols are not built. To attack when they land: who
+  may be a time source, and a binary that a peer serves under a hash it does not
+  match (C9d).
+- `blob::peer::serve` gives any chunk whose digest the peer names, and stores any
+  chunk that hashes to its digest (BLOB PEER). It trusts no length: a head over the
+  largest block of the pool stops the stream with `TOO_LARGE`, a body is counted
+  against its head, and a chunk is stored only when its bytes hash to the digest, else
+  `MISMATCH`. A peer can fill the disk only to the free floor of the store, plus at
+  most one chunk for each put in flight; then each put stops with `FULL`. Each stream
+  holds at most one chunk in memory. Who may open a blob stream is not built: `node`
+  rejects each one until it routes them from member nodes only (#1229).
 
 ### Time source to `estimate`
 
