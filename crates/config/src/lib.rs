@@ -26,9 +26,9 @@ const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
 
-/// The check of one kind of block: its definition, or `None` after it reports why the
-/// block gives none.
-type Check = fn(&mut Found<'_>, &Block) -> Option<Definition>;
+/// The check of one kind of block, with its tree key when its label gives one: its
+/// definition, or `None` after it reports why the block gives none.
+type Check = fn(&mut Found<'_>, &Block, Option<&Name>) -> Option<Definition>;
 
 /// Each kind of block, whose name is its keyword, and its check.
 const KINDS: [(Kind, Check); 7] = [
@@ -112,7 +112,7 @@ fn checked<'a>(
         connectors: BTreeMap::new(),
         kinds,
         blocks: BTreeMap::new(),
-        nodes: Vec::new(),
+        writes: BTreeMap::new(),
     };
     let mut connectors: Vec<_> = names(documents, Kind::Connector).collect();
     connectors.sort_by_key(|(_, label)| order(label.span));
@@ -134,7 +134,8 @@ fn checked<'a>(
                 continue;
             };
             let key = found.key(block, *kind);
-            let definition = check_block(&mut found, block);
+            let name = key.as_ref().map(|(name, _)| name);
+            let definition = check_block(&mut found, block, name);
             if let (Some((key, label_span)), Some(definition)) = (key, definition) {
                 let entry = Entry {
                     definition,
@@ -195,8 +196,9 @@ struct Found<'a> {
     kinds: &'a Table,
     /// The block of each entry, by tree key.
     blocks: BTreeMap<Name, &'a Block>,
-    /// Each node that a checked `placement` block names, with its span.
-    nodes: Vec<(Name, Option<Span>)>,
+    /// The channels that each connector writes to the mesh, as its kind checks them, by
+    /// tree key.
+    writes: BTreeMap<Name, Vec<Name>>,
 }
 
 /// A problem that is already in the diagnostics.

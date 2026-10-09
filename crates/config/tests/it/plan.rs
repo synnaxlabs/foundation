@@ -2,12 +2,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::slice;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use config::plan::Plan;
 use config::{Definition, Entry};
 use connector::cancel;
 use connector::kind::{self, Channels, Context, Kind, Table};
-use document::diagnostic::Diagnostic;
+use document::diagnostic::{Code, Diagnostic};
 use document::encoding::Checked;
 use document::{Document, Source, read as reader};
 use spec::Pointer;
@@ -276,6 +277,47 @@ impl Kind for Commander {
         &self,
         _: Context<Vec<Name>>,
     ) -> impl Future<Output = Result<(), kind::Error>> {
+        std::future::ready(Ok(()))
+    }
+}
+
+/// A kind that writes `a.time` on its first check and refuses each later check, as a
+/// device that goes away does.
+#[derive(Default)]
+struct Once {
+    checks: AtomicUsize,
+}
+
+impl Kind for Once {
+    type Config = ();
+
+    fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+        Ok(())
+    }
+
+    fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+        if self.checks.fetch_add(1, Ordering::SeqCst) > 0 {
+            return Err(vec![Diagnostic::new(
+                Code::new("once.gone"),
+                None,
+                "the device is gone".into(),
+                "Connect the device".into(),
+            )]);
+        }
+        Ok(Channels {
+            reads: Vec::new(),
+            writes: vec![name("a.time")],
+        })
+    }
+
+    fn discover(
+        &self,
+        _: &cancel::Token,
+    ) -> impl Future<Output = Result<Vec<Document>, kind::Error>> {
+        std::future::ready(Ok(Vec::new()))
+    }
+
+    fn run(&self, _: Context<()>) -> impl Future<Output = Result<(), kind::Error>> {
         std::future::ready(Ok(()))
     }
 }
@@ -2401,4 +2443,32 @@ placement \"a\" {
         "Name a node of the mesh",
     );
     assert_eq!(planned, [expected]);
+}
+
+#[test]
+fn checks_each_connector_once_in_a_plan() {
+    let text = "\
+channel \"a.time\" {
+  kind = \"index\"
+}
+placement \"a\" {
+  select = \"**\"
+  home = \"n\"
+}
+connector \"a\" {
+  kind = \"once\"
+  node = \"n\"
+}
+";
+    let kinds = Table::new().with("once", Once::default());
+    let spec = Spec::create_empty();
+    let plan = config::plan::plan(
+        &[read(0, text)],
+        spec.pointer,
+        &spec.definitions(),
+        &BTreeSet::from([name("n")]),
+        &kinds,
+    )
+    .expect("the one check of the connector passes");
+    assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("n"))]));
 }
