@@ -40,5 +40,9 @@
   rule is in `spec` once, and `config::plan::check` holds no copy. Supersedes the
   `config.empty-allow` of an empty list whatever the other attributes give, of
   https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
-  Decided by `laptop.architect-2`, 2026-10-09T00:48:39Z
-  (https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
+  `Error::Empty` in `spec`: `laptop.architect-2`, 2026-10-09T00:48:39Z
+  (https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872). The
+  condition, the order before `authority`, and the supersede: `laptop.architect-2`,
+  2026-10-09T03:19:32Z, item 1 of
+  https://github.com/synnaxlabs/foundation/pull/2067#issuecomment-6073571855. Lost: a
+  copy of the rule in `config`, which shows `config.empty-allow` one round earlier.
