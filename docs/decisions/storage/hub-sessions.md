@@ -277,3 +277,14 @@
   would compute the midpoint again, and a change of the home's rule would make its
   stamps `Ahead`. Connector time sync adds what it needs with its own caller. Lost: a
   writer that stamps the frame, because only the caller knows when it read each sample.
+  `writer::Writer::entries` gives the entry of each channel of
+  `writer::Config::channels`, in that order: its position in the entries of
+  `Writer::set`, as `Writer::draft` and `Draft::series_mut` take it. A channel named
+  twice has the same entry twice. A layer 3 caller knows only names, so each writer of
+  a kind needs this map. `Writer::open` computes it once, because the key set of a
+  writer never changes. Lost: `Writer::entry(&Name) -> Option<usize>`, because each
+  caller built `Config::channels`, so it knows the order, and a name not in the config
+  is a defect of the caller. Lost: a `hub` draft that takes the position of a channel
+  in `Config::channels`, because it would repeat each method of `Draft`
+  (`laptop.architect`, 2026-10-09T18:47:52Z:
+  https://github.com/synnaxlabs/foundation/issues/2170#issuecomment-6087166096).
