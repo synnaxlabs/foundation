@@ -1,0 +1,16 @@
+[package]
+name = "selfdev"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+p = "1.3"
+
+[dev-dependencies]
+me = { package = "selfdev", path = "." }
+
+[patch.crates-io]
+p = { path = "../../patches/p" }

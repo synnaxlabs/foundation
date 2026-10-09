@@ -334,7 +334,8 @@ impl<'a> Package<'a> {
 
     /// The requirements of the package that `edge` of its node in the resolve, to
     /// `dependency`, resolves: those on `dependency` under the name of the edge, of a
-    /// kind and target of the edge. It fails when none is.
+    /// kind and target of the edge. Cargo names an edge from a package to itself by the
+    /// lib target, whatever the rename. It fails when none is.
     fn requirements(
         &self,
         dependency: &Package<'_>,
@@ -348,8 +349,10 @@ impl<'a> Package<'a> {
                 continue;
             }
             let named = match requirement["rename"].as_str() {
-                Some(rename) => rename.replace('-', "_") == name,
-                None => dependency.lib()? == name,
+                Some(rename) if dependency.id != self.id => {
+                    rename.replace('-', "_") == name
+                }
+                _ => dependency.lib()? == name,
             };
             let kind = kinds.iter().any(|kind| {
                 kind["kind"] == requirement["kind"]
@@ -669,6 +672,11 @@ mod tests {
     #[test]
     fn passes_a_requirement_from_git_that_the_copy_meets() {
         assert_eq!(patched("git"), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn passes_a_renamed_dev_requirement_on_the_package_itself() {
+        assert_eq!(patched("selfdev"), Ok(Vec::new()));
     }
 
     #[test]
