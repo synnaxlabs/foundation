@@ -135,7 +135,7 @@ fn unmatched(targets: &[&str], folders: &[String]) -> Vec<String> {
 
 /// cargo-fuzz on the pinned nightly, for the host triple of that nightly.
 struct Cargo {
-    nightly: crate::Nightly,
+    nightly: crate::nightly::Toolchain,
     host: String,
 }
 
@@ -144,7 +144,7 @@ impl Cargo {
     /// for the triple that it was itself built for unless it gets `--target`, and a
     /// musl build of it cannot build a sanitized target.
     fn new(root: &Path) -> Result<Self, String> {
-        let nightly = crate::nightly(root)?;
+        let nightly = crate::nightly::Toolchain::read(root)?;
         let host = nightly.host()?;
         Ok(Self { nightly, host })
     }
@@ -445,7 +445,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::output;
+    use crate::common::output;
 
     const PATCHED: &str = "path+file:///w/patches/noq-proto#noq-proto@1.3.0";
     const TYPES: &str = "path+file:///w/crates/types#0.0.0";
@@ -1298,10 +1298,7 @@ mod tests {
 
     fn arm() -> Cargo {
         Cargo {
-            nightly: crate::Nightly {
-                root: "/w".into(),
-                pin: "nightly-x".to_string(),
-            },
+            nightly: crate::nightly::Toolchain::new("/w", "nightly-x"),
             host: "aarch64-unknown-linux-gnu".to_string(),
         }
     }
