@@ -158,7 +158,7 @@ pub(crate) struct Files {
     done: BTreeMap<u64, (usize, Ended)>,
     /// The waker of each close that waits for the calls of its descriptor, by the key
     /// of its handle.
-    closes: BTreeMap<u64, Waker>,
+    closing: BTreeMap<u64, Waker>,
     rng: Rng,
     /// The last tick. A call's key is the tick of its start, a file or directory
     /// that it makes takes the same key, and a write takes a tick when it ends. One
@@ -177,7 +177,7 @@ impl Files {
             flights: BTreeMap::new(),
             queue: BTreeSet::new(),
             done: BTreeMap::new(),
-            closes: BTreeMap::new(),
+            closing: BTreeMap::new(),
             rng,
             tick: disk::ROOT,
             digest: DefaultHasher::new(),
@@ -199,19 +199,25 @@ impl Files {
         self.tick
     }
 
-    /// Starts `call` of `node` on `path` at true time `now`, keeping `held` until it
-    /// ends, and returns its key.
+    /// Starts `call` of `node` on `path`, or with no `path` on the path of its
+    /// descriptor now, at true time `now`, keeping `held` until it ends, and returns
+    /// its key.
     pub(crate) fn submit(
         &mut self,
         now: Monotonic,
         node: usize,
-        path: &Path,
+        path: Option<&Path>,
         call: Call,
         held: Option<Held>,
     ) -> u64 {
+        let path = match (path, call.handle()) {
+            (Some(path), _) => path.to_path_buf(),
+            (None, Some(handle)) => self.disks[node].path(handle).to_path_buf(),
+            (None, None) => unreachable!("invariant: a call with no path has a handle"),
+        };
         let key = self.tick();
         let delay = self.rng.below(DELAYS);
-        let fault = (node, disk::normal(path), call.operation());
+        let fault = (node, disk::normal(&path), call.operation());
         let fault = self.faults.iter().position(|aimed| *aimed == fault);
         let failed = fault.map(|at| self.faults.remove(at)).is_some();
         let disk = &mut self.disks[node];
@@ -227,7 +233,7 @@ impl Files {
         self.queue.insert((at, key));
         let flight = Flight {
             node,
-            path: path.to_path_buf(),
+            path,
             call,
             held,
             failed,
@@ -264,7 +270,7 @@ impl Files {
                 (flight.node, flight.dropped, flight.waker.take());
             let kind = mem::discriminant(&flight.call);
             let close = flight.call.handle().map(|handle| handle.key);
-            wakers.extend(close.and_then(|key| self.closes.remove(&key)));
+            wakers.extend(close.and_then(|key| self.closing.remove(&key)));
             let ended = self.apply(key, flight);
             (due, key, kind, ended.result.is_ok()).hash(&mut self.digest);
             if dropped {
@@ -405,7 +411,7 @@ impl Files {
                 .expect("invariant: a queued call is in flight");
             flight.dropped = true;
             let close = flight.call.handle().map(|handle| handle.key);
-            closes.extend(close.and_then(|key| self.closes.remove(&key)));
+            closes.extend(close.and_then(|key| self.closing.remove(&key)));
             let kind = mem::discriminant(&flight.call);
             let drawn = (matches!(flight.call, Call::Open(Mode::Create { .. }))
                 && !flight.failed
@@ -454,7 +460,7 @@ impl Files {
         if calls.all(|held| held.key != handle.key) {
             return (Poll::Ready(()), Some(waker));
         }
-        (Poll::Pending, self.closes.insert(handle.key, waker))
+        (Poll::Pending, self.closing.insert(handle.key, waker))
     }
 
     /// Makes `handle`, which an open of `path` on `node` gave, a descriptor.
@@ -464,13 +470,13 @@ impl Files {
 
     /// Closes descriptor `handle` of `node`. Returns the waker of its close, to drop
     /// after the lock is released.
-    pub(crate) fn release(&mut self, node: usize, handle: Handle) -> Option<Waker> {
+    pub(crate) fn close(&mut self, node: usize, handle: Handle) -> Option<Waker> {
         self.disks[node].close(handle);
-        self.closes.remove(&handle.key)
+        self.closing.remove(&handle.key)
     }
 
     /// The path of each descriptor that `node` closed, in order.
-    pub(crate) fn closed(&self, node: usize) -> Vec<PathBuf> {
+    pub(crate) fn closes(&self, node: usize) -> Vec<PathBuf> {
         self.disks[node].closes().to_vec()
     }
 }

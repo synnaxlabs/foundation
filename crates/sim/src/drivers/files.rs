@@ -1,6 +1,5 @@
 //! The `env::files` drivers of a simulated node.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -14,12 +13,13 @@ use crate::files::{Call, Done, Ended, Held};
 use crate::state::lock;
 
 impl Node {
-    /// Starts `call` on `path` now, keeping `held` until it ends.
+    /// Starts `call` on `path`, or with no `path` on the path of its descriptor, now,
+    /// keeping `held` until it ends.
     ///
     /// # Panics
     ///
     /// Outside a thread that the sim started, and on a thread of another node.
-    fn submit(&self, path: &Path, call: Call, held: Option<Held>) -> Wait {
+    fn submit(&self, path: Option<&Path>, call: Call, held: Option<Held>) -> Wait {
         self.running("a file call");
         let mut state = lock(&self.shared);
         let now = state.now();
@@ -39,7 +39,7 @@ impl Node {
         call: Call,
         map: impl FnOnce(Done) -> T + 'a,
     ) -> Request<'a, T> {
-        let wait = self.submit(path, call, None);
+        let wait = self.submit(Some(path), call, None);
         Box::pin(async move { Ok(map(wait.await.result?)) })
     }
 }
@@ -56,13 +56,8 @@ impl env::files::Driver for Node {
             };
             lock(&self.shared).files().opened(self.node, handle, path);
             let node = self.clone();
-            let path = RefCell::new(path.to_path_buf());
-            let descriptor: Box<dyn env::files::Descriptor> = Box::new(Descriptor {
-                node,
-                path,
-                handle,
-                len,
-            });
+            let descriptor: Box<dyn env::files::Descriptor> =
+                Box::new(Descriptor { node, handle, len });
             descriptor
         })
     }
@@ -130,8 +125,6 @@ impl Drop for Wait {
 /// One open file of a node. A drop closes it.
 struct Descriptor {
     node: Node,
-    /// Its path now: a rename changes it.
-    path: RefCell<PathBuf>,
     handle: Handle,
     len: u64,
 }
@@ -149,7 +142,7 @@ impl env::files::Descriptor for Descriptor {
             bytes,
         };
         let held = Some(Held::Parts(parts.to_vec()));
-        let wait = self.node.submit(&self.path.borrow(), call, held);
+        let wait = self.node.submit(None, call, held);
         Box::pin(async move { wait.await.result.map(drop) })
     }
 
@@ -160,9 +153,7 @@ impl env::files::Descriptor for Descriptor {
             offset,
             len,
         };
-        let wait = self
-            .node
-            .submit(&self.path.borrow(), call, Some(Held::Into(into)));
+        let wait = self.node.submit(None, call, Some(Held::Into(into)));
         Box::pin(async move {
             let Ended { result, held } = wait.await;
             let (Done::Read(bytes), Some(Held::Into(mut into))) = (result?, held)
@@ -178,7 +169,8 @@ impl env::files::Descriptor for Descriptor {
         let call = Call::Sync {
             handle: self.handle,
         };
-        self.node.request(&self.path.borrow(), call, drop)
+        let wait = self.node.submit(None, call, None);
+        Box::pin(async move { wait.await.result.map(drop) })
     }
 
     fn rename<'a>(&'a self, from: &'a Path, to: &'a Path) -> Request<'a, ()> {
@@ -186,12 +178,8 @@ impl env::files::Descriptor for Descriptor {
             handle: self.handle,
             to: to.to_path_buf(),
         };
-        let wait = self.node.submit(from, call, None);
-        Box::pin(async move {
-            wait.await.result?;
-            *self.path.borrow_mut() = to.to_path_buf();
-            Ok(())
-        })
+        let wait = self.node.submit(Some(from), call, None);
+        Box::pin(async move { wait.await.result.map(drop) })
     }
 
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
@@ -205,7 +193,7 @@ impl env::files::Descriptor for Descriptor {
         let call = Call::Unlink {
             handle: self.handle,
         };
-        let wait = self.node.submit(&path, call, None);
+        let wait = self.node.submit(Some(&path), call, None);
         Box::pin(async move {
             let result = wait.await.result.map(drop);
             Close(Some(*self)).await;
@@ -221,7 +209,7 @@ impl Drop for Descriptor {
         // node.
         let unused = lock(&self.node.shared)
             .files()
-            .release(self.node.node, self.handle);
+            .close(self.node.node, self.handle);
         drop(unused);
     }
 }

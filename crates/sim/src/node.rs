@@ -221,7 +221,7 @@ impl Node {
     /// its names. A crash closes each descriptor of the node, a leaked one too.
     #[must_use]
     pub fn file_closes(&self) -> Vec<PathBuf> {
-        lock(&self.0.shared).files().closed(self.0.node)
+        lock(&self.0.shared).files().closes(self.0.node)
     }
 
     /// Makes the next call of `operation` on `path` on the node fail with

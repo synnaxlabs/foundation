@@ -345,6 +345,14 @@ impl Disk {
         self.descriptors.insert(handle.key, normal(path));
     }
 
+    /// The path of descriptor `handle` now.
+    pub(crate) fn path(&self, handle: Handle) -> &Path {
+        let Some(path) = self.descriptors.get(&handle.key) else {
+            unreachable!("invariant: a descriptor has a path")
+        };
+        path
+    }
+
     /// Closes descriptor `handle`: drops its hold and logs its path.
     pub(crate) fn close(&mut self, handle: Handle) {
         self.release(handle);
@@ -376,12 +384,12 @@ impl Disk {
 
     /// Crashes the disk by `crash`. Each hold drops and each descriptor closes, as at
     /// the death of the process that held the files, and each file that only a hold
-    /// kept is freed. After a
-    /// `Power` crash, each directory goes back to its durable entries with the changes
-    /// of a prefix of the log, what they no longer reach is freed, and each sector
-    /// keeps its durable bytes or its bytes after one write that no sync covered, by
-    /// `rng`. The prefix draws from `rng` only when the log is not empty. Returns the
-    /// number of changes that a `Power` crash kept, or 0 after a `Process` crash.
+    /// kept is freed. After a `Power` crash, each directory goes back to its durable
+    /// entries with the changes of a prefix of the log, what they no longer reach is
+    /// freed, and each sector keeps its durable bytes or its bytes after one write that
+    /// no sync covered, by `rng`. The prefix draws from `rng` only when the log is not
+    /// empty. Returns the number of changes that a `Power` crash kept, or 0 after a
+    /// `Process` crash.
     pub(crate) fn crash(&mut self, crash: Crash, rng: &mut Rng) -> u64 {
         self.closes
             .extend(mem::take(&mut self.descriptors).into_values());
