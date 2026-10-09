@@ -87,7 +87,7 @@ pub fn plan(
 
 /// Checks `definitions`, the definitions of a spec by tree key, with `members` and
 /// `kinds` as [`plan`] takes them. Run it on the result of [`Plan::definitions`] before
-/// an apply, since a plan file that `plan` did not make can hold what `plan` refuses.
+/// an apply, because a plan file that `plan` did not make can hold what `plan` refuses.
 ///
 /// # Errors
 ///
