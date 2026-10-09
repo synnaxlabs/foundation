@@ -131,8 +131,10 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
 /// send of that sender ends. Each thread that `os` starts has a runtime with an I/O
 /// driver. Needs the cargo feature `net`.
 ///
-/// Each socket is closed on exec. On macOS, a child that another thread spawns while
-/// `os` opens or accepts a socket may hold it, and its port, until the child ends.
+/// Each socket that `os` opens is closed on exec. On macOS, a child that another
+/// thread spawns while `os` opens or accepts a socket may hold it, and its port, until
+/// the child ends. On macOS, a child that another thread spawns during a lookup may
+/// also hold the sockets that the C library opens for that lookup.
 ///
 /// [`env::net::Net::resolve`] looks up a host name as each other program on this
 /// machine does, on an OS thread of its own for each lookup.
