@@ -272,10 +272,11 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
                 }
                 reported.push(copy.id);
                 problems.push(format!(
-                    "fuzz/Cargo.toml does not build `{}` `{}` of `{}` from the copy \
-                     `{}` that meets it. Give fuzz/Cargo.toml the [patch.crates-io] \
-                     table of the root Cargo.toml. Cargo does not use the copy when \
-                     fuzz/ also needs a release of its series that it does not meet.",
+                    "fuzz/Cargo.toml may not build `{}` `{}` of `{}` from the copy \
+                     `{}`: the requirement meets the copy and another package of its \
+                     name that fuzz/ builds. Give fuzz/Cargo.toml the \
+                     [patch.crates-io] table of the root Cargo.toml, and narrow the \
+                     requirement so that only the copy meets it.",
                     copy.name,
                     requirement["req"].as_str().unwrap_or_default(),
                     dependent.id,
@@ -608,11 +609,11 @@ mod tests {
     /// The problem of the requirement `^1.3` of `types` on `noq-proto`.
     fn missed() -> String {
         format!(
-            "fuzz/Cargo.toml does not build `noq-proto` `^1.3` of `{TYPES}` from the \
-             copy `/w/patches/noq-proto/Cargo.toml` that meets it. Give \
-             fuzz/Cargo.toml the [patch.crates-io] table of the root Cargo.toml. Cargo \
-             does not use the copy when fuzz/ also needs a release of its series that \
-             it does not meet."
+            "fuzz/Cargo.toml may not build `noq-proto` `^1.3` of `{TYPES}` from the \
+             copy `/w/patches/noq-proto/Cargo.toml`: the requirement meets the copy \
+             and another package of its name that fuzz/ builds. Give fuzz/Cargo.toml \
+             the [patch.crates-io] table of the root Cargo.toml, and narrow the \
+             requirement so that only the copy meets it."
         )
     }
 
@@ -635,13 +636,22 @@ mod tests {
     /// `patched`.
     fn unmet(req: &str, dependent: &str) -> String {
         format!(
-            "fuzz/Cargo.toml does not build `p` `{req}` of `{dependent}` from the copy \
-             `{}/patches/p/Cargo.toml` that meets it. Give fuzz/Cargo.toml the \
-             [patch.crates-io] table of the root Cargo.toml. Cargo does not use the \
-             copy when fuzz/ also needs a release of its series that it does not \
-             meet.",
+            "fuzz/Cargo.toml may not build `p` `{req}` of `{dependent}` from the copy \
+             `{}/patches/p/Cargo.toml`: the requirement meets the copy and another \
+             package of its name that fuzz/ builds. Give fuzz/Cargo.toml the \
+             [patch.crates-io] table of the root Cargo.toml, and narrow the \
+             requirement so that only the copy meets it.",
             crate::fixture().join("patched").display()
         )
+    }
+
+    #[test]
+    fn refuses_a_wide_requirement_that_resolves_to_the_copy_beside_a_later_series() {
+        let dependent = format!(
+            "path+file://{}#0.0.0",
+            crate::fixture().join("patched/cases/later").display()
+        );
+        assert_eq!(patched("later"), Ok(vec![unmet(">=1.3", &dependent)]));
     }
 
     #[test]
