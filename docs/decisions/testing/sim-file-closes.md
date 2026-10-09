@@ -3,7 +3,7 @@
   since the run started: the path of its open, or of its last rename, with only its
   names. A rename that ends after its future dropped counts, when it ends before the
   close. A file removed while open still gives that path. A crash closes each descriptor
-  of the node, a leaked one too. An open whose future dropped made no descriptor and
+  of the node, a leaked one too, in the order that their opens started. An open whose future dropped made no descriptor and
   adds nothing. A test asserts from it the order of two closes in one poll, which no
   probe can see. Lost: a close stamp per path, since two closes in one poll have the
   same instant (#1835, decided by `laptop.architect-2`, 2026-10-09 04:51 UTC:

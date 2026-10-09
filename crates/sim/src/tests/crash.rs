@@ -1646,6 +1646,51 @@ fn a_crash_closes_the_leaked_files_in_the_order_of_their_opens() {
 }
 
 #[test]
+fn a_crash_closes_the_leaked_files_in_the_order_that_their_opens_started() {
+    let mut ended_first = BTreeSet::new();
+    for seed in 0..32 {
+        let (mut sim, node) = disk(seed);
+        let ended = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&ended);
+        crash_after(&mut sim, &node, Crash::Process, move |node| async move {
+            let files = node.files();
+            let mut x = pin!(files.open(Path::new("x"), Mode::Create { len: 0 }));
+            let mut y = pin!(files.open(Path::new("y"), Mode::Create { len: 0 }));
+            let (mut fx, mut fy) = (None, None);
+            poll_fn(|cx| {
+                if fx.is_none()
+                    && let Poll::Ready(file) = x.as_mut().poll(cx)
+                {
+                    log.lock().unwrap().push("x");
+                    fx = Some(file.unwrap());
+                }
+                if fy.is_none()
+                    && let Poll::Ready(file) = y.as_mut().poll(cx)
+                {
+                    log.lock().unwrap().push("y");
+                    fy = Some(file.unwrap());
+                }
+                if fx.is_some() && fy.is_some() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+            Box::leak(Box::new((fx, fy)));
+            pending::<()>().await;
+        });
+        ended_first.insert(ended.lock().unwrap()[0]);
+        assert_eq!(
+            node.file_closes(),
+            ["x", "y"].map(PathBuf::from),
+            "seed {seed}"
+        );
+    }
+    assert_eq!(ended_first, BTreeSet::from(["x", "y"]));
+}
+
+#[test]
 fn a_file_dropped_before_its_dropped_rename_ends_gives_the_path_of_its_open() {
     for seed in 0..8 {
         let (mut sim, node) = disk(seed);
