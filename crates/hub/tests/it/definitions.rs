@@ -1,5 +1,6 @@
 //! What a call of `set_definitions` does to the sessions on each channel.
 
+use std::collections::BTreeMap;
 use std::path::Path as FilePath;
 use std::pin::pin;
 use std::sync::atomic::Ordering;
@@ -14,6 +15,7 @@ use spec::definition::Definition;
 use spec::unit::Unit;
 use types::channel::Key;
 use types::frame::{Form, Range};
+use types::name::Name;
 use types::sample::{Scalar, Type};
 
 use super::{
@@ -510,12 +512,12 @@ fn gives_a_latest_reader_no_frame_of_an_index_that_was_a_data_channel_between() 
     });
 }
 
-/// The seq of a write on `value-b` after a restart, where the first call of the new
-/// hub defines `time-b` as a data channel when `data`, before the index again.
-fn seq_after_restart(seed: u64, data: bool) -> u64 {
+/// The seq of a write on `value-b` after a restart, where the new hub gets `first`, if
+/// any, before the definitions of `channels`.
+fn seq_after_restart(n: u64, first: Option<BTreeMap<Name, Definition>>) -> u64 {
     let out = Arc::new(Mutex::new(None));
     let set = Arc::clone(&out);
-    run(seed, move |test| async move {
+    run(n, move |test| async move {
         let mut writer = test.writer("a", &["value-b"]).await;
         let now = test.now();
         assert_eq!(
@@ -537,10 +539,8 @@ fn seq_after_restart(seed: u64, data: bool) -> u64 {
         drop(commit);
         clock.sleep(SETTLE).await;
         let hub = reopen(&node, tasks, mesh.clone()).await;
-        if data {
-            let mut data = without(&["time-b", "value-b"]);
-            data.insert(name("time-b"), definition(3, DataType::Sample(I64), 1));
-            hub.set_definitions(&data);
+        if let Some(first) = first {
+            hub.set_definitions(&first);
         }
         hub.set_definitions(&channels());
         let mut writer = hub.writer(config("b", &["value-b"])).await.expect("opens");
@@ -601,14 +601,16 @@ async fn reopen(
 /// Control: an index defined at the first call after a restart continues its seq.
 #[test]
 fn continues_the_seq_of_an_index_after_a_restart() {
-    assert_eq!(seq_after_restart(42, false), 1);
+    assert_eq!(seq_after_restart(42, None), 1);
 }
 
 /// An index whose key is a data channel at the first call after a restart, and then
 /// an index again, continues its seq from the buffer.
 #[test]
 fn continues_the_seq_of_an_index_that_is_a_data_channel_after_a_restart() {
-    assert_eq!(seq_after_restart(42, true), 1);
+    let mut data = without(&["time-b", "value-b"]);
+    data.insert(name("time-b"), definition(3, DataType::Sample(I64), 1));
+    assert_eq!(seq_after_restart(42, Some(data)), 1);
 }
 
 /// The ring bytes after 8 writers on `value` open and then end: by a removal of
