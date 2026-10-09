@@ -7,7 +7,7 @@
   never the full name); `card.name` is the one copy of the node's name in region state.
   The node's own copy is its file `name` (NODE NAME). Supersedes "the one copy of the
   node's name" of
-  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6030855135
+  https://github.com/synnaxlabs/foundation/issues/242#issuecomment-6031533205
   (`laptop.architect`, 2026-10-09T19:53:33Z,
   https://github.com/synnaxlabs/foundation/pull/2172#issuecomment-6088190305).
   The joining node gives its own release's names; the voters assign the keys at join
