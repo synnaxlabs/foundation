@@ -32,28 +32,44 @@ case "$*" in
     echo "${LEFT:-}" ;;
 esac
 EOF
-# It logs the remote command, and the `RUSTFLAGS` that a shell reads from it.
+# It logs the remote command, and runs it in $T/home with the stand-ins of the host.
 cat >"$bin/ssh" <<'EOF'
 #!/usr/bin/env bash
-while [[ $1 != ubuntu@* ]]; do shift; done
+while (($#)) && [[ $1 != ubuntu@* ]]; do shift; done
+(($#)) || { echo "ssh: no ubuntu@ host" >&2; exit 255; }
 shift
 echo "ssh $*" >>"$T/calls"
-flags=$(sed -nE 's/.*(RUSTFLAGS=([^ \\]|\\.)*).*/\1/p' <<<"$*")
-[[ -z $flags ]] || bash -c "$flags; echo \"\$RUSTFLAGS\"" >>"$T/rustflags"
 case "$*" in
 *loadavg*) echo "0.01 0.02 0.03 1/2 3" ;;
 *lscpu*) echo "Xeon, 96 CPUs, 6.8" ;;
-*"cargo bench"*)
-    echo run >>"$T/runs"
-    run=$(($(wc -l <"$T/runs")))
-    [[ -z ${BIG:-} ]] || { head -c 70000 /dev/zero | tr '\0' x && echo; }
-    [[ -z ${EDGE:-} ]] || { echo ab && echo "table $run" && yes 1234567 | head -1873; }
-    [[ -z ${LONG:-} ]] || head -c 20000 /dev/zero | tr '\0' x
-    echo "table $run"
-    [[ $run != "${FAIL_RUN:-}" ]] || { echo "bench error" >&2; exit 101; } ;;
+*)
+    mkdir -p "$T/home/.cargo"
+    [[ -e $T/home/.cargo/bin ]] || ln -s "$REMOTE" "$T/home/.cargo/bin"
+    cd "$T/home" && HOME=$T/home PATH="$REMOTE:/usr/bin:/bin" bash -c "$*" ;;
 esac
-[[ $* != *" bash -s "* ]] || cat >/dev/null
 EOF
+export REMOTE=$root/remote
+mkdir "$REMOTE"
+# The stand-ins of the host. `cargo` logs the `RUSTFLAGS` it gets.
+cat >"$REMOTE/cargo" <<'EOF'
+#!/usr/bin/env bash
+echo "$RUSTFLAGS" >>"$T/rustflags"
+[[ $* != *--no-run* ]] || exit 0
+echo run >>"$T/runs"
+run=$(($(wc -l <"$T/runs")))
+[[ -z ${BIG:-} ]] || { head -c 70000 /dev/zero | tr '\0' x && echo; }
+[[ -z ${EDGE:-} ]] || { echo ab && echo "table $run" && yes 1234567 | head -1873; }
+[[ -z ${LONG:-} ]] || head -c 20000 /dev/zero | tr '\0' x
+echo "table $run"
+[[ $run != "${FAIL_RUN:-}" ]] || { echo "bench error" >&2; exit 101; }
+EOF
+cat >"$REMOTE/git" <<'EOF'
+#!/usr/bin/env bash
+[[ $1 != init ]] || mkdir -p "${!#}"
+EOF
+for tool in rustup sudo curl; do
+    printf '#!/usr/bin/env bash\n' >"$REMOTE/$tool"
+done
 cat >"$bin/curl" <<'EOF'
 #!/usr/bin/env bash
 echo 198.51.100.7
@@ -102,7 +118,7 @@ user) echo bench-bot ;;
     fi ;;
 esac
 EOF
-chmod +x "$bin"/*
+chmod +x "$bin"/* "$REMOTE"/*
 
 failures=0
 today=$(date -u +%F)
@@ -159,7 +175,7 @@ box2.red-team, cap 2.67 USD, ends by" &&
 Still running from this run: none." &&
     [[ $(posted 1047 | grep -c "^table") == 4 ]]'
 check "each remote cargo gets the aligned flags, named in the report" eval '
-    [[ $(wc -l <"$T/rustflags") == 5 &&
+    [[ $(wc -l <"$T/rustflags") == 6 &&
         $(sort -u "$T/rustflags") == "$aligned" ]] &&
     has "$(posted 1047)" "\`RUSTFLAGS=\"$aligned\"\`"'
 check "each filter goes to the host as one argument" eval '
