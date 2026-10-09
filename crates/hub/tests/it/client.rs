@@ -1184,14 +1184,11 @@ fn sends_a_body_at_the_cap_from_a_pool_of_one_chunk_on_each_link() {
     }
 }
 
-/// Connects to a home whose node has mesh time with `wall_error`. Gives the result
-/// of `connect` and of the home's `serve`.
-fn connect_at_wall_error(
-    seed: u64,
-    wall_error: Option<Span>,
-) -> (Option<Result<(), Error>>, Option<Result<(), serve::Error>>) {
-    let (got, served) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
-    let (kept, seen) = (Arc::clone(&got), Arc::clone(&served));
+/// Asserts that a program connects to a home whose node has mesh time with
+/// `wall_error`.
+fn connects_at_wall_error(seed: u64, wall_error: Option<Span>) {
+    let (connected, served) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+    let (client_end, home_end) = (Arc::clone(&connected), Arc::clone(&served));
     run_program(
         seed,
         move |node, tasks| async move {
@@ -1201,28 +1198,25 @@ fn connect_at_wall_error(
             let mut hello = session.accept().await.expect("a hello stream");
             header(&mut hello).await;
             let result = link.serve(hello).await.map(drop);
-            *seen.lock().expect("not poisoned") = Some(result);
+            *home_end.lock().expect("not poisoned") = Some(result);
             drop((link, test));
         },
         move |node, tasks, at| async move {
-            let connected = connect(&node, tasks, at, AGENT).await.map(drop);
-            *kept.lock().expect("not poisoned") = Some(connected);
+            let result = connect(&node, tasks, at, AGENT).await.map(drop);
+            *client_end.lock().expect("not poisoned") = Some(result);
         },
     );
-    let got = got.lock().expect("not poisoned").take();
     let served = served.lock().expect("not poisoned").take();
-    (got, served)
+    let connected = connected.lock().expect("not poisoned").take();
+    assert_eq!(connected, Some(Ok(())), "the home gave {served:?}");
 }
 
 #[test]
 fn connects_to_a_node_whose_mesh_time_has_an_error_of_minutes() {
-    let three = Span::from_nanos(3 * Span::MINUTE.nanos());
-    let (got, served) = connect_at_wall_error(170, Some(three));
-    assert_eq!(got, Some(Ok(())), "the home gave {served:?}");
+    connects_at_wall_error(170, Some(Span::from_nanos(3 * Span::MINUTE.nanos())));
 }
 
 #[test]
 fn connects_to_a_node_whose_mesh_time_has_an_unknown_error() {
-    let (got, served) = connect_at_wall_error(171, None);
-    assert_eq!(got, Some(Ok(())), "the home gave {served:?}");
+    connects_at_wall_error(171, None);
 }
