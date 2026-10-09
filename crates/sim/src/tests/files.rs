@@ -1714,3 +1714,21 @@ fn each_descriptor_of_a_renamed_file_gives_the_path_of_the_rename() {
     .unwrap();
     assert_eq!(node.file_closes(), ["b", "b"].map(PathBuf::from));
 }
+
+#[test]
+fn a_rename_onto_a_taken_name_keeps_the_path_of_its_open() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    sim.run_on(&node, |node, _| async move {
+        create(&node, "b", 0).await.close().await;
+        let mut file = create(&node, "a", 0).await;
+        let found = file.rename(Path::new("b")).await;
+        assert_eq!(found, Err(Error::Exists { path: "b".into() }));
+        drop(file);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), ["b", "a"].map(PathBuf::from));
+}
