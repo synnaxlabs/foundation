@@ -4000,6 +4000,95 @@ mod port {
             assert_eq!(of_new, transport::Error::Stopped { code });
         }
 
+        /// A node outside the region holds the 256th place and dials again, while a
+        /// program dials too. A program refused while the old session holds the place
+        /// leaves it to the node's new session. When both arrive at once, exactly one
+        /// gets the place, since the transport closes the old session as the new one
+        /// arrives.
+        #[test]
+        fn a_node_that_dials_again_at_the_bound_races_a_program_for_its_place() {
+            let admitted = Some(transport::Error::Stopped {
+                code: Code(wire::header::REJECTED),
+            });
+            let refused = Some(transport::Error::PeerClosed {
+                code: Code(wire::session::REFUSED),
+            });
+            for seed in 0..4 {
+                let seen = redial_with_program(seed, true);
+                assert_eq!(seen, (admitted.clone(), refused.clone()), "seed {seed}");
+            }
+            for seed in 0..16 {
+                let seen = redial_with_program(seed, false);
+                let one = [
+                    (admitted.clone(), refused.clone()),
+                    (refused.clone(), admitted.clone()),
+                ];
+                assert!(one.contains(&seen), "seed {seed}: {seen:?}");
+            }
+        }
+
+        /// What the new session of [`CLIENT`] and a program saw, when 255 programs and
+        /// the old session of [`CLIENT`] fill the bound. [`CLIENT`] dials again once
+        /// the program's session is done when `after`, else at the program's dial.
+        fn redial_with_program(
+            seed: u64,
+            after: bool,
+        ) -> (Option<transport::Error>, Option<transport::Error>) {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let node = start(&hosts[0], region(&pair(&hosts)));
+            let listen = listen(&hosts[0]);
+            let attacker = sim.node(sim::node::Config::default());
+            let (of_node, of_program) =
+                (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+            let (seen_node, seen_program) =
+                (Arc::clone(&of_node), Arc::clone(&of_program));
+            let shard = env::shards::Config {
+                name: "peer".into(),
+                core: None,
+            };
+            let own = attacker.clone();
+            let started = attacker.shards().start(shard, move |tasks| async move {
+                let at = [Address::Udp(listen)];
+                let (programs, _) = program(&own, tasks.clone());
+                let (late, late_pool) = program(&own, tasks.clone());
+                let mut held = Vec::new();
+                for _ in 0..255 {
+                    held.push(
+                        programs.dial(KEY.public(), &at).await.expect("a session"),
+                    );
+                }
+                let (first, _) = transport(&own, tasks.clone(), CLIENT);
+                let old = first.dial(KEY.public(), &at).await.expect("a session");
+                own.clock().sleep(Span::SECOND).await;
+                let (second, pool) = transport(&own, tasks.clone(), CLIENT);
+                let (other, out) = (own.clone(), Arc::clone(&seen_program));
+                tasks.spawn(async move {
+                    let session =
+                        late.dial(KEY.public(), &at).await.expect("a session");
+                    let sent = sent_clock(&session, &late_pool, &other).await;
+                    *out.lock().unwrap() = Some(sent);
+                    other.clock().sleep(Span::MINUTE).await;
+                    drop((session, late));
+                });
+                while after && seen_program.lock().unwrap().is_none() {
+                    own.clock().sleep(Span::MILLISECOND).await;
+                }
+                let new = second.dial(KEY.public(), &at).await.expect("a session");
+                *seen_node.lock().unwrap() = Some(sent_clock(&new, &pool, &own).await);
+                own.clock().sleep(Span::MINUTE).await;
+                drop((held, programs, first, second, new, old));
+            });
+            drop(started.expect("the peer starts"));
+            assert_eq!(sim.run_for(Span::MINUTE), Ok(()));
+            drop(node);
+            let of_node = of_node.lock().unwrap().take();
+            (of_node, of_program.lock().unwrap().take())
+        }
+
         /// The error of the first send that fails on a one-way stream of `session`
         /// whose header names the clock protocol, which the node rejects.
         async fn sent_clock(

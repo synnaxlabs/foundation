@@ -140,12 +140,16 @@
   gives peers outside the region (`Peer::Client`, and a `Peer::Node` whose key no member
   holds in this node's view) at most 256 places, one for each session of a program and
   one for the key of a node. It closes each session that gets no place at once with
-  `Code(wire::session::REFUSED)`. A node's new session takes the place of its old one,
-  which the transport closes (ONE SESSION PER PEER). It never refuses a member, so a
-  flood of programs cannot lock the region out. Trigger: the PR that adds the change
-  kind that removes a member (MESH DRIVER). That change also closes each session of that
-  node, with the code of a refused session, and so ends its `Hub` and `Mesh` streams.
-  The node then admits it again as any other peer. Supersedes the deferrals of
+  `Code(wire::session::REFUSED)`. A node's new session takes the place of its old one
+  when the old one still holds it at `accept`. The transport closes the old session as
+  the new one arrives (ONE SESSION PER PEER), so at the bound another peer can take the
+  place first (`laptop.architect-2`, 15:18 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2153#issuecomment-6083798077). It never
+  refuses a member, so a flood of programs cannot lock the region out. Trigger: the PR
+  that adds the change kind that removes a member (MESH DRIVER). That change also closes
+  each session of that node, with the code of a refused session, and so ends its `Hub`
+  and `Mesh` streams. The node then admits it again as any other peer. Supersedes the
+  deferrals of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669 (item 5,
   2026-10-07 21:09 UTC) and
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609 (23:41
