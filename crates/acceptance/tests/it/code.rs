@@ -42,6 +42,7 @@ fn plan_and_apply(lab: &mut Lab, node: Node, front: Front) -> Vec<String> {
 fn check(front: Front) {
     let mut lab = Lab::new(1);
     let node = lab.start("cloud");
+    lab.mesh(&[node]);
     let changes = plan_and_apply(&mut lab, node, front);
     assert_eq!(changes, ["site", "site.temp", "site.time"], "first plan");
     lab.write(node, "site.temp", 1, 1);
@@ -84,13 +85,13 @@ fn an_applied_index_gets_a_home_and_keeps_it() {
 }
 
 #[test]
-#[ignore = "waits on #337"]
+#[ignore = "waits on #337, #340"]
 fn plan_and_apply_from_hcl_through_the_json_cli() {
     check(Front::Cli);
 }
 
 #[test]
-#[ignore = "waits on #337"]
+#[ignore = "waits on #337, #340"]
 fn plan_and_apply_through_mcp() {
     check(Front::Mcp);
 }
