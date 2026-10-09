@@ -1947,15 +1947,9 @@ unsafe extern "C" fn note(
     calls.borrow_mut().push((id, state, notes.join(&b' ')));
 }
 
-/// Gives the calls of [`note`] on a side that listens at `local` with no `address`
-/// and accepts one stream from the peer.
-fn notes(local: IpAddr) -> Vec<(usize, ConnectionState, String)> {
-    notes_of(local, &[])
-}
-
 /// Gives the calls of [`note`] on a side that listens at `local` with the extra
 /// params `params` and accepts one stream from the peer.
-fn notes_of(
+fn notes(
     local: IpAddr,
     params: &'static [(&'static str, Value<'static>)],
 ) -> Vec<(usize, ConnectionState, String)> {
@@ -2015,7 +2009,7 @@ fn a_listen_gives_its_address_and_port_and_an_accept_the_address_of_the_peer() {
     let local = network.local.addresses()[0];
     let peer = network.peer.addresses()[0];
     drop(network);
-    let calls = notes(local);
+    let calls = notes(local, &[]);
     assert_eq!(
         calls[..2],
         [
@@ -2035,7 +2029,7 @@ fn a_listen_on_each_address_gives_no_address_or_port() {
     let network = Network::new();
     let peer = network.peer.addresses()[0];
     drop(network);
-    let calls = notes(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let calls = notes(IpAddr::V4(Ipv4Addr::UNSPECIFIED), &[]);
     assert_eq!(
         calls[..2],
         [
@@ -2051,14 +2045,14 @@ fn a_listen_gives_the_host_of_its_address_as_its_listen_address() {
     let local = network.local.addresses()[0];
     drop(network);
     let listen = format!("listen-address=plc.example listen-port={PORT}");
-    let scalar = notes_of(local, &[("address", Value::String("plc.example"))]);
+    let scalar = notes(local, &[("address", Value::String("plc.example"))]);
     assert_eq!(scalar[0], (1, ffi::ESTABLISHED, listen.clone()));
-    let array = notes_of(
+    let array = notes(
         IpAddr::V4(Ipv4Addr::UNSPECIFIED),
         &[("address", Value::Strings(&[c"plc.example"]))],
     );
     assert_eq!(array[0], (1, ffi::ESTABLISHED, listen));
-    let empty = notes_of(local, &[("address", Value::Strings(&[]))]);
+    let empty = notes(local, &[("address", Value::Strings(&[]))]);
     assert_eq!(
         empty[0],
         (
