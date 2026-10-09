@@ -3595,12 +3595,12 @@ mod port {
             })
         }
 
-        /// The region of `members`, whose founding spec holds the index `plant.time`
-        /// (key 1), with its home at [`OWN`], and the data channel `plant.value` (key
-        /// 2).
-        fn founded(members: &[Member]) -> Founding {
+        /// The region of the node [`OWN`] on `host` alone, whose founding spec holds
+        /// the index `plant.time` (key 1), with its home at [`OWN`], and the data
+        /// channel `plant.value` (key 2).
+        fn founded(host: &sim::node::Node) -> Founding {
             use super::super::hub::{I64, data, index};
-            let mut founding = region(members);
+            let mut founding = region(&[member(OWN, &KEY, host)]);
             let channels = [("plant.time", index(1)), ("plant.value", data(2, I64, 1))];
             for (name, channel) in channels {
                 let name = name.parse().unwrap();
@@ -3623,7 +3623,7 @@ mod port {
             stamp: i64,
         ) -> Option<(Vec<i64>, Vec<i64>)> {
             use super::super::hub::{samples, write, writer};
-            let node = start(host, founded(&[member(OWN, &KEY, host)]));
+            let node = start(host, founded(host));
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
             node.spawn(move |hub| async move {
@@ -3710,8 +3710,9 @@ mod port {
         fn a_reader_of_a_channel_whose_home_is_another_node_dials_the_home() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
-            let members = [member(OWN, &KEY, &host), member(OTHER.0, &OTHER.1, &host)];
-            let mut founding = founded(&members);
+            let mut founding = founded(&host);
+            founding.members.push(member(OTHER.0, &OTHER.1, &host));
+            founding.voters.insert(OTHER.0);
             founding
                 .homes
                 .insert(types::channel::Key::from_u128(1), OTHER.0);
@@ -3744,12 +3745,12 @@ mod port {
             start(host, region(&[member(OWN, &KEY, host)]))
         }
 
-        /// Starts the member [`OTHER`] of `region` on `host` without a `Node`: an
+        /// Starts the member [`OTHER`] of `members` on `host` without a `Node`: an
         /// endpoint and a hub with its key, which serve the mesh as a node's do. Runs
         /// `act` with the mesh, then drops the mesh and its port.
         fn peer<F: Future<Output = ()> + 'static>(
             host: &sim::node::Node,
-            region: Founding,
+            members: Vec<Member>,
             act: impl FnOnce(::mesh::Mesh, sim::node::Node) -> F + Send + 'static,
         ) {
             let shard = env::shards::Config {
@@ -3766,7 +3767,7 @@ mod port {
                 };
                 let endpoint = Endpoint {
                     part: bound.split(NonZeroUsize::MIN).pop().expect("one part"),
-                    region: Some(region.clone()),
+                    region: Some(region(&members)),
                     clock: own.clock(),
                     entropy: own.entropy(),
                 };
@@ -3795,7 +3796,7 @@ mod port {
                         transport: Rc::clone(&transport),
                     }),
                 });
-                hub.set_definitions(&region.definitions);
+                hub.set_definitions(&region(&members).definitions);
                 let clock = own.clock();
                 let port =
                     route::accept(transport, Some(mesh.clone()), hub, clock, tasks);
@@ -3830,7 +3831,7 @@ mod port {
             let node = start(&hosts[0], region(&members));
             let set = Arc::new(Mutex::new(Vec::new()));
             let out = Arc::clone(&set);
-            peer(&hosts[1], region(&members), move |mesh, _| async move {
+            peer(&hosts[1], members, move |mesh, _| async move {
                 let set = mesh.set_home(INDEX, OTHER.0).await;
                 out.lock().unwrap().push(set);
             });
@@ -3849,10 +3850,9 @@ mod port {
         fn a_stop_frees_the_port_while_a_reader_holds_a_session_to_a_home() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
-            let mut founding = founded(&pair(&hosts));
-            founding.homes.insert(channel::Key::from_u128(1), OTHER.0);
+            let founding = paired(&hosts, OTHER.0);
             let node = start(&hosts[0], founding.clone());
-            peer(&hosts[1], founding, |_, host| async move {
+            peer_hub(&hosts[1], founding, |_, _, host| async move {
                 host.clock().sleep(Span::MINUTE).await;
             });
             let opened = Arc::new(Mutex::new(None));
@@ -4677,8 +4677,8 @@ mod port {
 
         /// Starts the peer [`OTHER`] of `members` on `host`, which sets a home in the
         /// mesh, one after another, until a set waits [`TEN`].
-        fn set_homes(host: &sim::node::Node, members: &[Member]) {
-            peer(host, region(members), |mesh, host| async move {
+        fn set_homes(host: &sim::node::Node, members: Vec<Member>) {
+            peer(host, members, |mesh, host| async move {
                 let clock = host.clock();
                 for key in 100.. {
                     let key = channel::Key::from_u128(key);
@@ -4714,7 +4714,7 @@ mod port {
                 let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
                 let members = pair(&hosts);
                 let node = start(&hosts[0], region(&members));
-                set_homes(&hosts[1], &members);
+                set_homes(&hosts[1], members);
                 let after = Span::from_nanos(after);
                 assert_eq!(sim.run_for(after), Ok(()), "at {after:?}");
                 node.stop();
@@ -4749,7 +4749,7 @@ mod port {
             let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
             let members = pair(&hosts);
             let node = start(&hosts[0], region(&members));
-            set_homes(&hosts[1], &members);
+            set_homes(&hosts[1], members);
             assert_eq!(sim.run_for(Span::from_nanos(1_700_000_000)), Ok(()));
             hosts[0].fail_file(Path::new(LOG), env::files::Operation::WriteAt);
             let (waited, port, _, _) = probe(&mut sim, &hosts[0]);
@@ -4823,7 +4823,7 @@ mod port {
                 let node = start(&hosts[0], region(&members));
                 let set = Arc::new(Mutex::new(Vec::new()));
                 let out = Arc::clone(&set);
-                peer(&hosts[1], region(&members), move |mesh, host| async move {
+                peer(&hosts[1], members.clone(), move |mesh, host| async move {
                     let set = mesh.set_home(INDEX, OTHER.0).await;
                     out.lock().unwrap().push(set);
                     host.clock().sleep(TEN).await;
