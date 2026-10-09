@@ -122,6 +122,11 @@ impl Fixture {
         (status == Status::GOOD).then_some(key).ok_or(status)
     }
 
+    fn remove(&self, key: u64) {
+        // SAFETY: the member takes its own loop and a key that it gave.
+        unsafe { (self.members().remove_timer)(self.events.raw(), key) };
+    }
+
     /// Changes the timer of `key`, timed from `base` when given, and gives the
     /// status.
     fn modify(
@@ -341,6 +346,29 @@ fn a_base_time_timer_keeps_its_phase_after_a_missed_cycle() {
     assert_eq!(f.events.next(), Some(at(start, ms(30))));
 }
 
+/// open62541 ranks timers with equal due times by address, so the second set takes the
+/// memory of the first, which the allocator gives back in another order.
+#[test]
+fn timers_due_at_one_time_run_in_the_order_of_their_adds() {
+    let mut f = Fixture::new();
+    f.start();
+    let order: Vec<usize> = (1..=32).collect();
+    for _ in 0..2 {
+        let keys: Vec<u64> = order
+            .iter()
+            .map(|&n| f.add(n, 10.0, ffi::BASE_TIME))
+            .collect();
+        for _ in 0..3 {
+            f.advance(ms(10));
+            f.run();
+            assert_eq!(f.ran(), order);
+        }
+        for key in keys {
+            f.remove(key);
+        }
+    }
+}
+
 #[test]
 fn a_timer_changes_its_interval_and_goes() {
     let mut f = Fixture::new();
@@ -350,8 +378,7 @@ fn a_timer_changes_its_interval_and_goes() {
     f.advance(ms(5));
     assert_eq!(f.modify(key, 50.0, None, ffi::ONCE), Status::GOOD);
     assert_eq!(f.events.next(), Some(at(start, ms(55))));
-    // SAFETY: as above.
-    unsafe { (f.members().remove_timer)(f.events.raw(), key) };
+    f.remove(key);
     assert_eq!(f.events.next(), None);
     f.advance(ms(1000));
     f.run();
@@ -446,9 +473,8 @@ fn a_repeated_timer_due_within_1_s_of_the_last_date_after_a_run_is_refused() {
         }
     }
     let outside = repeated_before_the_last_date(2.0e7);
-    // Timers due at one time run in an order that the heap sets.
-    for (n, policy, base) in [(1, ffi::CURRENT_TIME, 0), (2, ffi::BASE_TIME, 10_000)] {
-        let base = Some(now + 30_000_000 + base);
+    for (n, policy) in [(1, ffi::CURRENT_TIME), (2, ffi::BASE_TIME)] {
+        let base = Some(now + 30_000_000);
         f.try_timer(record, number(n), outside, base, policy)
             .expect("a repeated timer due 2 s before the last date is in range");
     }

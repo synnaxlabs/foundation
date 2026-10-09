@@ -22,7 +22,20 @@ cmpId(const UA_UInt64 *a, const UA_UInt64 *b) {
     return (*a < *b) ? ZIP_CMP_LESS : ZIP_CMP_MORE;
 }
 
-ZIP_FUNCTIONS(UA_TimerTree, UA_TimerEntry, treeEntry, UA_DateTime, nextTime, cmpDateTime)
+/* Orders by due time, then by id, so that entries due at one time run in the order
+ * of their adds. Each key must be the nextTime of an entry. */
+static enum ZIP_CMP
+cmpDue(const UA_DateTime *a, const UA_DateTime *b) {
+    enum ZIP_CMP order = cmpDateTime(a, b);
+    if(order != ZIP_CMP_EQ)
+        return order;
+    const size_t at = offsetof(UA_TimerEntry, nextTime);
+    const UA_TimerEntry *x = (const UA_TimerEntry*)((const char*)a - at);
+    const UA_TimerEntry *y = (const UA_TimerEntry*)((const char*)b - at);
+    return cmpId(&x->id, &y->id);
+}
+
+ZIP_FUNCTIONS(UA_TimerTree, UA_TimerEntry, treeEntry, UA_DateTime, nextTime, cmpDue)
 ZIP_FUNCTIONS(UA_TimerIdTree, UA_TimerEntry, idTreeEntry, UA_UInt64, id, cmpId)
 
 static UA_DateTime
@@ -309,10 +322,14 @@ UA_DateTime
 UA_Timer_process(UA_Timer *t, UA_DateTime now) {
     UA_LOCK(&t->timerMutex);
 
-    /* Move all entries <= now to the processTree */
+    /* Move all entries <= now to the processTree. The bound is an entry, as cmpDue
+     * needs, after each real entry due at now. */
+    UA_TimerEntry bound;
+    bound.nextTime = now;
+    bound.id = UA_UINT64_MAX;
     UA_TimerTree processTree;
     ZIP_INIT(&processTree);
-    ZIP_UNZIP(UA_TimerTree, &t->tree, &now, &processTree, &t->tree);
+    ZIP_UNZIP(UA_TimerTree, &t->tree, &bound.nextTime, &processTree, &t->tree);
 
     /* Consistency check. The smallest not-processed entry isn't ready. */
     UA_assert(!ZIP_MIN(UA_TimerTree, &t->tree) ||
