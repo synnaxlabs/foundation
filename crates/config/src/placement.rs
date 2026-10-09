@@ -68,9 +68,8 @@ pub(crate) fn spans(block: &Block) -> BTreeMap<Name, Option<Span>> {
     let values = attributes.flat_map(|attribute| read::items(&attribute.value));
     let mut spans = BTreeMap::new();
     for value in values {
-        if let Ok(node) = read::name(value) {
-            spans.entry(node).or_insert(value.span);
-        }
+        let node = read::name(value).expect("invariant: `check` read each node");
+        spans.entry(node).or_insert(value.span);
     }
     spans
 }
