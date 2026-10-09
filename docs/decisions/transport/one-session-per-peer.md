@@ -24,6 +24,8 @@
      ends: the held one wins, and goes to the waiters and to `accept`. The loser closes
      with `Code(0)`. A restarted peer answers a ping on an old session with a
      stateless reset (`cid::Issuer`), so the old session ends within one round trip.
+     Keys that are equal get no rule: no caller dials the node's own key, and two
+     nodes with one key are a misconfiguration.
   5. Clients. A client session never enters the table, and `dial` never gives one. Two
      sessions from one client both stay open.
   6. Shards. The table is per `Transport`, so per shard. Until #77, a node runs one

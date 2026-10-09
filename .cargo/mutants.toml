@@ -90,8 +90,6 @@ exclude_re = [
   # A pair or a refusal at or below the lowest floor only takes memory: no outcome
   # reads it.
   'crates/mesh/src/applied\.rs:.*replace Applied::trim with \(\)',
-  # Equal keys mean a session from the node's own key: a dial of itself, which no
-  # caller makes, or a second node with the same key, a misconfiguration. ONE
-  # SESSION PER PEER gives neither case a rule, so no test can pin `<`.
+  # Equal keys get no rule (ONE SESSION PER PEER, rule 4), so no test can pin `<`.
   'crates/transport/src/table\.rs:.*replace < with <= in Table::arrive',
 ]
