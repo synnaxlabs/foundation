@@ -25,7 +25,9 @@
   2026-10-09T18:30:45Z, `running`, `fail`, `Failure`, and the `Stopper` doc,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545;
   2026-10-09T19:31:23Z, `start` as a `Command` variant, which amends the first, and the
-  line, https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6087849613).
+  line, https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6087849613;
+  2026-10-09T21:35:43Z, `node.budget`, `node.disk`, and `node.memory`,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601).
   `main` writes the line on a thread of its own, so a standard output that nobody
   reads blocks neither shard 0 nor the stop. `main` drops the handles of that thread
   and of the thread that waits for the signal, since each waits only on the process

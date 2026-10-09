@@ -27,7 +27,8 @@
   subtraction saturates, since the files are read one after another. Lost: `active_file`
   too. Decided by `laptop.architect-2` (2026-10-09T22:37:18Z,
   https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6090424579, which
-  supersedes the cgroup doc in item 2 of 6088506863). The node keeps its budgets in the
+  supersedes item 2, the cgroup doc, of
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6088506863). The node keeps its budgets in the
   file `budget` of its data directory: one sector with the tag `foundation/budget/1`,
   the two budgets as `u64`, and a CRC32C. `node::budget` reads it outside the lock.
   Under the lock, once each shard has opened its buffer, shard 0 writes it when it is
@@ -51,5 +52,6 @@
   `node.failed`, which gives no fix for a cause that has one. Decided by
   `laptop.architect-2` on #1732 (2026-10-09T21:35:43Z,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601;
-  2026-10-09T22:37:18Z, the text of `Refused`, which names the part of the shard,
+  2026-10-09T22:37:18Z, the text of `Refused`, which names the part of the shard and
+  supersedes the `Refused` text of 6089651601,
   https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6090424579).
