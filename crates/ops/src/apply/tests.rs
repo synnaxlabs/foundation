@@ -502,6 +502,41 @@ fn leaves_out_each_count_of_zero() {
 }
 
 #[test]
+fn gives_the_json_of_an_apply() {
+    let pointer = plan::Pointer::from(Pointer {
+        version: 1,
+        root: spec::tree::empty(),
+    });
+    let root = pointer.root.clone();
+    let applied = Applied {
+        file: "site.plan".to_owned(),
+        pointer,
+        counts: Counts {
+            added: 1,
+            changed: 2,
+            removed: 3,
+        },
+        homes: 4,
+    };
+    let value = serde_json::to_value(&applied).expect("JSON");
+    assert_eq!(
+        value,
+        serde_json::json!({
+            "file": "site.plan",
+            "pointer": {"version": 1, "root": root},
+            "added": 1,
+            "changed": 2,
+            "removed": 3,
+            "homes": 4,
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<Applied>(value).expect("an apply"),
+        applied
+    );
+}
+
+#[test]
 fn refuses_a_plan_on_a_node_that_uses_no_spec_as_behind() {
     let mut definitions = spec::founding::create(ADMIN.public());
     let subject = Subject::new(vec![PrivateKey([8; 32]).public()]).expect("a subject");
