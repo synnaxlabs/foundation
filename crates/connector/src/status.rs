@@ -251,7 +251,6 @@ impl Writer {
             group,
             last: None,
             wrote: Monotonic::default(),
-            closed: false,
             state: State::Running,
             class: Class::None,
             restarts: 0,
@@ -363,9 +362,6 @@ struct Session {
     last: Option<Stamp>,
     /// When the last write was, by the node's clock.
     wrote: Monotonic,
-    /// Set once a status channel is removed or a commit failed: the writer writes no
-    /// more.
-    closed: bool,
     state: State,
     class: Class,
     restarts: u64,
@@ -386,9 +382,6 @@ impl Session {
     fn write(&mut self, values: &Values, now: Monotonic) {
         values.staged.set(false);
         self.wrote = now;
-        if self.closed {
-            return;
-        }
         let now = self.hub.now();
         let stamp = self.last.map_or(now, |last| now.max(after(last)));
         if let Err(before) = self.send(values, stamp)
@@ -414,7 +407,9 @@ impl Session {
         self.last = Some(stamp);
         let draft = self.frame(values, stamp);
         match self.hub.write(Label::Path(Path::Live), draft) {
-            Ok([Outcome::Applied { .. }]) => {}
+            // After either failure, the hub gives it again on each later write.
+            Ok([Outcome::Applied { .. }])
+            | Err(Failure::Removed(_) | Failure::Home(home::Error::Disk(_))) => {}
             Ok(
                 [
                     Outcome::Refused {
@@ -443,9 +438,6 @@ impl Session {
             ) => panic!("the home refuses a status frame: {refusal}"),
             Ok(outcomes) => {
                 panic!("invariant: a frame of one group has one outcome: {outcomes:?}")
-            }
-            Err(Failure::Removed(_) | Failure::Home(home::Error::Disk(_))) => {
-                self.closed = true;
             }
             Err(Failure::Home(
                 error @ (home::Error::Resend | home::Error::Full | home::Error::Large),
