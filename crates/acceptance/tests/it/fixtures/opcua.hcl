@@ -9,7 +9,7 @@ channel "dev.q" {
   index = "dev.q_time"
 }
 placement "dev" {
-  select = "dev.q_time"
+  select = ["dev", "dev.*"]
   home   = "edge"
 }
 
