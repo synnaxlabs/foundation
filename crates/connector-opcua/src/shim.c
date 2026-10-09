@@ -203,16 +203,16 @@ static UA_DateTime el_next_timer(UA_EventLoop *el) {
 }
 
 /* Whether the ticks of `interval_ms`, their due time from `now` give or take the 1 s
-   that the copy may move it by to batch timers, and the distance from `base` to `now`
-   fit in `UA_DateTime`. False for NaN. The copy casts, adds, and subtracts them
-   unchecked. `now` is never negative, so ticks above `-room` give a due time above it
-   too. */
+   that the copy may move it by to batch timers, `base`, and the distance from `base`
+   to `now` fit in `UA_DateTime`. False for NaN. The copy casts, adds, and subtracts
+   them unchecked, and a once timer is due at its base. `now` is never negative, so
+   ticks above `-room` give a due time above it too. */
 static UA_Boolean in_range(UA_DateTime now, UA_Double interval_ms,
                            const UA_DateTime *base) {
     const UA_DateTime room = UA_INT64_MAX - UA_DATETIME_SEC;
     UA_Double ticks = interval_ms * UA_DATETIME_MSEC;
     return ticks < (UA_Double)room - (UA_Double)now && ticks > -(UA_Double)room &&
-           (!base || *base >= now - room);
+           (!base || (*base >= now - room && *base < room));
 }
 
 static UA_StatusCode el_add_timer(UA_EventLoop *el, UA_Callback cb, void *application,

@@ -409,6 +409,9 @@ fn a_timer_due_within_1_s_of_the_end_of_the_clock_is_refused() {
     assert!(f.events.next().is_some_and(|due| due > f.now()));
 }
 
+/// The latest base in range of the clock.
+const LATEST_BASE: i64 = i64::MAX - 10_000_001;
+
 /// The ticks of the clock, and the earliest base in range of them.
 fn earliest_base(f: &Fixture) -> (i64, i64) {
     let now = i64::try_from(f.now().0 / 100).unwrap();
@@ -421,7 +424,7 @@ fn a_timer_from_a_base_out_of_range_of_the_clock_is_refused() {
     f.advance(ms(1000));
     f.start();
     let (now, earliest) = earliest_base(&f);
-    for base in [i64::MIN, earliest - 1] {
+    for base in [i64::MIN, earliest - 1, LATEST_BASE + 1, i64::MAX] {
         for (interval_ms, policy) in [(3.0, ffi::BASE_TIME), (0.0, ffi::ONCE)] {
             assert_eq!(
                 f.try_timer(record, number(1), interval_ms, Some(base), policy),
@@ -440,6 +443,15 @@ fn a_timer_from_a_base_out_of_range_of_the_clock_is_refused() {
         Some(Monotonic(u64::try_from(due * 100).unwrap())),
         "the due time keeps the phase of the base"
     );
+}
+
+#[test]
+fn a_once_timer_from_the_latest_base_waits() {
+    let mut f = Fixture::new();
+    f.start();
+    f.try_timer(record, number(1), 0.0, Some(LATEST_BASE), ffi::ONCE)
+        .expect("the latest base is in range");
+    assert_eq!(f.events.next(), Some(Monotonic(u64::MAX)));
 }
 
 #[test]
