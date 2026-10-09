@@ -40,9 +40,10 @@ const PERIOD: Span = Span::SECOND;
 #[must_use]
 pub fn channels(connector: &Name, counts: &[Name]) -> (Name, Vec<(Name, Type)>) {
     let status = |last: &str| -> Name {
-        format!("{connector}.status.{last}")
-            .parse()
-            .expect("the name of a status channel fits in a name")
+        let text = format!("{connector}.status.{last}");
+        text.parse().unwrap_or_else(|error| {
+            panic!("the status channel `{text}` is not a name: {error}")
+        })
     };
     let supervisor = SUPERVISOR.iter().map(|&(name, sample)| (name, sample));
     let counts = counts
@@ -383,5 +384,19 @@ mod tests {
         ];
         assert_eq!(time, name("plant.modbus.status.time"));
         assert_eq!(channels, want);
+    }
+
+    #[test]
+    fn panics_on_a_status_channel_longer_than_a_name() {
+        let connector = "c".repeat(245);
+        let connector = name(&connector);
+        let panic = std::panic::catch_unwind(|| drop(channels(&connector, &[])));
+        let panic = panic.expect_err("a status name over the limit panics");
+        let message = panic.downcast::<String>().expect("a formatted message");
+        let want = format!(
+            "the status channel `{connector}.status.state` is not a name: a name or \
+             pattern is 258 bytes long, more than the limit of 255 bytes"
+        );
+        assert_eq!(*message, want);
     }
 }

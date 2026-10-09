@@ -4,6 +4,7 @@ use env::clock::Clock;
 use env::entropy::Entropy;
 use env::tasks::Tasks;
 use spec::definition::Definition;
+use types::channel;
 use types::name::Name;
 
 use crate::kind::Table;
@@ -59,7 +60,7 @@ pub(crate) async fn create_config(
 }
 
 /// The first key of the status channels that [`create_config`] defines.
-pub(crate) const STATUS: u128 = 100;
+pub(crate) const STATUS: channel::Key = channel::Key::from_u128(100);
 
 /// The definitions of the status channels of `connector`, with no count, with keys
 /// from [`STATUS`] on.

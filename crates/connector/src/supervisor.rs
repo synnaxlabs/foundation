@@ -437,10 +437,10 @@ mod tests {
         tasks.spawn(async move {
             let mut first = None;
             while let Ok(received) = reader.next().await {
-                let stamps = series(&received, STATUS);
+                let stamps = series(&received, STATUS.as_u128());
                 let samples: Vec<_> = keys
                     .clone()
-                    .map(|key| series(&received, STATUS + key))
+                    .map(|key| series(&received, STATUS.as_u128() + key))
                     .collect();
                 let mut into = into.borrow_mut();
                 for (i, stamp) in stamps.into_iter().enumerate() {

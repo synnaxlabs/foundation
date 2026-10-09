@@ -48,21 +48,24 @@ pub async fn create_config(
 pub fn create_status(
     connector: &Name,
     counts: &[Name],
-    first: u128,
+    first: channel::Key,
 ) -> Vec<(Name, Definition)> {
     let (time, channels) = status::channels(connector, counts);
-    let index = channel::Key::from_u128(first);
+    let index = first;
     let kind = Kind::Index {
         error: None,
         control: None,
     };
     let time = (time, Definition::Channel(Channel { key: index, kind }));
-    let channels = (first + 1..).zip(channels).map(|(key, (name, sample))| {
-        let data = Data::new(index, None, DataType::Sample(sample), None);
-        let data = data.expect("invariant: a status channel has no unit");
-        let key = channel::Key::from_u128(key);
-        let kind = Kind::Data(data);
-        (name, Definition::Channel(Channel { key, kind }))
-    });
+    let channels =
+        (first.as_u128() + 1..)
+            .zip(channels)
+            .map(|(key, (name, sample))| {
+                let data = Data::new(index, None, DataType::Sample(sample), None);
+                let data = data.expect("invariant: a status channel has no unit");
+                let key = channel::Key::from_u128(key);
+                let kind = Kind::Data(data);
+                (name, Definition::Channel(Channel { key, kind }))
+            });
     std::iter::once(time).chain(channels).collect()
 }

@@ -272,7 +272,8 @@ fn connector_run(config: Document) -> Result<(), Error> {
         let kinds = Table::new().with("influx", Kind);
         let inputs = testing::create_config(env, node.net(), kinds).await;
         let connector = "influx".parse().expect("a name");
-        let status = testing::create_status(&connector, &[], 1);
+        let status =
+            testing::create_status(&connector, &[], types::channel::Key::from_u128(1));
         inputs
             .hub
             .set_definitions(status.iter().map(|(name, def)| (name, def)));

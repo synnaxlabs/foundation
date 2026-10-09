@@ -65,4 +65,10 @@
   (`laptop.architect-2`, 2026-10-09T18:46:26Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6087144669). The
   tests define the status channels with `connector::testing::create_status`, behind
-  `sim`.
+  `sim`, which gives their definitions with keys from a `channel::Key` on. `sim` also
+  turns on the optional dependency on `spec`, whose `Definition` the helper gives.
+  `connector::status::channels` panics on a status name over `Name::MAX_BYTES`: the
+  counts come from a kind's code, so the name is internal. Lost: a helper that calls
+  `Hub::set_definitions` itself, because each call replaces all definitions and a
+  test sets its own in the same call (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6087430425).
