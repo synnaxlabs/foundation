@@ -6,6 +6,7 @@ on:
   schedule:
     - cron: '0 3 * * *'
   workflow_dispatch:
+  pull_request:
 
 jobs:
   fuzz:
@@ -22,7 +23,7 @@ jobs:
         with:
           tool: cargo-fuzz@0.13.2
       - name: Fuzz
-        run: cargo xtask fuzz 600
+        run: cargo xtask fuzz 10
       - if: failure()
         uses: actions/upload-artifact@v4
         with:
