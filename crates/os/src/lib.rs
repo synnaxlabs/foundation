@@ -138,7 +138,8 @@ pub fn threads() -> Result<env::threads::Threads, Error> {
 /// [`env::net::Net::resolve`] looks up a host name as each other program on this
 /// machine does, on an OS thread of its own for each lookup. On macOS, a child that
 /// another thread spawns during a lookup may hold the sockets that the C library opens
-/// for it.
+/// for it, and each child spawned after the first lookup holds a socket that the C
+/// library keeps open.
 ///
 /// # Panics
 ///
