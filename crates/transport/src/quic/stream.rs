@@ -3464,6 +3464,10 @@ mod tests {
             assert_eq!(share.order(), Order::RANK);
         }
 
+        /// A cap one byte higher, or a floor one byte lower, changes the order only
+        /// while the credit sits on that byte, so it moves at most one message by one
+        /// turn. No seam test sees it: `ahead_after_a_light_load` reads the same bytes
+        /// (3145728 and 1026731). This test is its only kill.
         #[test]
         fn a_class_is_owed_at_most_one_peer_window_of_latest() {
             for (latest, owed) in [(99, 297), (100, 300), (101, 300)] {
@@ -8104,8 +8108,8 @@ mod tests {
         fn latest_after_a_light_load_goes_at_most_one_window_ahead() {
             testing::run(1, |shard| {
                 let (ahead, window) = ahead_after_a_light_load(shard, Class::Latest);
-                let bound = (window + MESSAGE_MAX).cast_signed();
-                assert!(ahead <= bound, "{ahead} of {bound}");
+                let bound = window.cast_signed();
+                assert!(ahead < bound, "{ahead} of {bound}");
             });
         }
 
@@ -8113,7 +8117,7 @@ mod tests {
         fn complete_after_a_light_load_goes_at_most_three_windows_ahead() {
             testing::run(1, |shard| {
                 let (ahead, window) = ahead_after_a_light_load(shard, Class::Complete);
-                let bound = (3 * window + MESSAGE_MAX).cast_signed();
+                let bound = (3 * window).cast_signed();
                 assert!(ahead <= bound, "{ahead} of {bound}");
             });
         }
