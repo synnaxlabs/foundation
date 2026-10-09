@@ -192,14 +192,13 @@ impl Writer {
             })
             .collect();
         let set = borrowed.interner.intern(&groups);
-        let entries = keys
+        let entry_of: hash::Map<channel::Key, usize> = set
+            .entries()
             .iter()
-            .map(|&key| {
-                let entries = set.entries();
-                let entry = entries.iter().position(|entry| entry.key == key);
-                entry.expect("invariant: the key set holds each channel of the config")
-            })
+            .enumerate()
+            .map(|(at, entry)| (entry.key, at))
             .collect();
+        let entries = keys.iter().map(|key| entry_of[key]).collect();
         let writer = ::home::writer::Writer {
             subject,
             authority,
