@@ -33,12 +33,9 @@ pub(crate) fn copy_of(local: SocketAddr) -> OwnedFd {
                 Err(Errno::BADF) => continue,
                 Err(e) => panic!("a copy of descriptor {fd}: {e:?}"),
             };
-            let name = match rustix::net::getsockname(&copy) {
-                Ok(name) => name,
-                Err(Errno::NOTSOCK) => continue,
-                Err(e) => panic!("the name of descriptor {fd}: {e:?}"),
-            };
-            if SocketAddr::try_from(name).ok() == Some(local) {
+            // Only the listener must have a name: an error means another descriptor.
+            let name = rustix::net::getsockname(&copy).ok();
+            if name.and_then(|n| SocketAddr::try_from(n).ok()) == Some(local) {
                 return copy;
             }
         }
