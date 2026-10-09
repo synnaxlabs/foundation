@@ -148,6 +148,26 @@ fn raw(line: &str) -> String {
     )
 }
 
+/// The problem of a round 3 with `[^` outside a footnote reference in `line`.
+fn bracket(line: &str) -> String {
+    format!(
+        "review round 3 has `[^` outside a footnote reference, which can hide text on \
+         GitHub, in the line `{line}`. Put the line in a code span, in the format of \
+         .claude/skills/review/SKILL.md, \"Round comment\"."
+    )
+}
+
+/// The problem of a round 3 with a paragraph that comrak places in the wrong lines,
+/// from `line`.
+fn short(line: &str) -> String {
+    format!(
+        "review round 3 has a link or an image with a line break after its text, or a \
+         link reference definition, in a paragraph, which the check cannot read, in \
+         the line `{line}`. Put the line in a code span, in the format of \
+         .claude/skills/review/SKILL.md, \"Round comment\"."
+    )
+}
+
 /// The problem of a round 3 that does not end with its `name:` line.
 fn unended(name: &str) -> String {
     format!(
@@ -1329,7 +1349,6 @@ fn passes_a_footnote_with_no_reference_that_hides_no_field() {
 fn fails_raw_html_on_a_line_inside_a_span() {
     let cases = [
         ("a `x\n<source y` z", "<source y` z"),
-        ("[x](https://x.y \"t\n<source y\")", "<source y\")"),
         ("a `x\n<div>` b", "<div>` b"),
         ("a `x\n> <source y`", "> <source y`"),
         (
@@ -1348,7 +1367,7 @@ fn fails_raw_html_on_a_line_inside_a_span() {
     }
     let definition = ROUND.replace(
         "## Review round 3\n\n",
-        "## Review round 3\n\n[x]: /u \"t\n<source y\"\n",
+        "## Review round 3\n\n[x]: /u \"t\n<source y\"\n\n",
     );
     assert_ne!(definition, ROUND);
     assert_eq!(
@@ -1380,29 +1399,140 @@ fn reads_a_line_after_a_tab_that_a_list_item_takes_in_part() {
 }
 
 #[test]
-fn expands_each_tab_at_the_start_of_a_line_to_the_next_multiple_of_4() {
-    // The last line starts at an odd offset, and its tabs are at columns 2 and 4.
+fn fails_a_round_with_a_footnote_reference_over_a_line_break() {
+    // GitHub shows each `[^` up to a `]` on a later line as `[^]`.
+    let end = ROUND.replace("Public surface: none\n", "Public surface: none [^x\n");
+    let end = end.replace("Hot path: none", "Hot path: none ]");
     assert_eq!(
-        normalized("\ta\n \tb\n>\t c\r\n  \t\td\te \t"),
-        "    a\n    b\n>    c\n        d\te"
+        check(&record(vec![bot(&end)])),
+        vec![bracket("Public surface: none [^x")]
     );
-}
-
-#[test]
-fn names_the_first_line_that_can_hide_text() {
     for (text, line) in [
-        ("<b>\n\n<source x", "<b>"),
-        ("<source x\n\n<b>", "<source x"),
+        ("a [^*f*\ng]", "a [^*f*"),
+        ("a [^x `]`\nb ]", "a [^x `]`"),
+        ("a [^x] [^y\nz]", "a [^x] [^y"),
+        ("- a\n\n  b [^x\n  c ]", "b [^x"),
     ] {
         let hidden =
             ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
         assert_ne!(hidden, ROUND);
         assert_eq!(
             check(&record(vec![bot(&hidden)])),
-            vec![raw(line)],
+            vec![bracket(line)],
             "{text}"
         );
     }
+}
+
+#[test]
+fn passes_a_footnote_mark_in_a_link_or_a_code_span() {
+    for text in [
+        "a [^x\nb](u)",
+        "a `[^x`",
+        "```\n[^x\n```",
+        "a [^] [^x]",
+        "a [^x *y* z]",
+    ] {
+        let shown =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(shown, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&shown)])),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn hides_both_footnotes_with_no_reference_of_one_label() {
+    let notes = format!("{ROUND}\n\n[^a]: x\n\n[^a]: y");
+    assert_eq!(check(&record(vec![bot(&notes)])), Vec::<String>::new());
+}
+
+#[test]
+fn an_old_round_reads_a_tab_after_a_quote_mark_to_the_next_multiple_of_4() {
+    // Each line starts at an odd offset.
+    let round = |text: &str| {
+        old(&format!(
+            "## Review round 1\n\nConfirmed a finding.\n\n{text}"
+        ))
+    };
+    let unnamed = vec![
+        "review round 1 names no performance, which this round requires.".to_string(),
+    ];
+    // The quote takes the space, and the tab is 2 columns of indent.
+    let quoted = round("> \tHot path: `send`");
+    assert_eq!(check(&record(vec![quoted, bot(ROUND)])), unnamed);
+    // A lazy line of the inner quote, whose text starts with `é`.
+    let lazy = round("> > a\n>\t\u{e9}Hot path: `send`");
+    assert_eq!(check(&record(vec![lazy, bot(ROUND)])), Vec::<String>::new());
+}
+
+#[test]
+fn passes_a_code_block_in_a_footnote_with_no_reference() {
+    for note in ["```\n    <b>\n    ```", "    <b>"] {
+        let hidden = format!("{ROUND}\n\n[^a]: x\n\n    {note}");
+        assert_eq!(
+            check(&record(vec![bot(&hidden)])),
+            Vec::<String>::new(),
+            "{note}"
+        );
+    }
+}
+
+#[test]
+fn names_the_first_line_that_can_hide_text() {
+    for (text, problem) in [
+        ("<b>\n\n<source x", raw("<b>")),
+        ("<source x\n\n<b>", raw("<source x")),
+        ("[^x\nb ]\n\n<b>", bracket("[^x")),
+        ("<b>\n\n[^x\nb ]", raw("<b>")),
+        ("a[^1]\n\n[^1]: a <b>\n\nc <i>", raw("[^1]: a <b>")),
+        (
+            "[x](https://x.y \"t\n<source y\")",
+            short("[x](https://x.y \"t"),
+        ),
+    ] {
+        let hidden =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(hidden, ROUND);
+        assert_eq!(check(&record(vec![bot(&hidden)])), vec![problem], "{text}");
+    }
+}
+
+#[test]
+fn fails_a_paragraph_that_comrak_places_in_the_wrong_lines() {
+    // GitHub shows `Findings: 2` and the second `Hot path:` line. comrak places each
+    // line after the link or the definition too early.
+    let fields = ROUND.replace(
+        "Reviewers: reviewer\n",
+        "Reviewers: reviewer, [x](https://x.y \"a\nRange: `38cba24f..c77c67d7`\n\
+         Findings: none\n\")\nFindings: 2\n",
+    );
+    let end = ROUND.replace(
+        "Deferred: none",
+        "Deferred: none [x](https://x.y \"a\nPublic surface: none\nHot path: none\n\")",
+    );
+    let end = format!("{end}\nHot path: `send`");
+    let link = ROUND.replace("Deferred: none", "Deferred: none [x](\nhttps://x.y)");
+    let definition =
+        ROUND.replace("Deferred: none", "[x]: https://x.y\nDeferred: none");
+    for (comment, line) in [
+        (fields, "Reviewers: reviewer, [x](https://x.y \"a"),
+        (end, "Deferred: none [x](https://x.y \"a"),
+        (link, "Deferred: none [x]("),
+        (definition, "[x]: https://x.y"),
+    ] {
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![short(line)],
+            "{comment}"
+        );
+    }
+    let text = ROUND.replace("Deferred: none", "Deferred: none [x\ny](https://x.y)");
+    assert_eq!(check(&record(vec![bot(&text)])), Vec::<String>::new());
 }
 
 #[test]
@@ -1578,6 +1708,7 @@ fn reads_only_a_top_level_round_heading() {
         "<b>a</b>\n\n~~~\n## Review round 2\n~~~",
         "So:\n\n```\n## Review round <n>\n\nReviewers: reviewer\n```\n\nA Vec<u8>.",
         "See:\n\n```\n## Review round 4\n```\n\n<details>\n\nx",
+        "- a\n\n  ## Review round 2",
     ] {
         let comment = bot(&format!("{quoted}\n\nNo fields."));
         assert_eq!(

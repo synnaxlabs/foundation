@@ -25,6 +25,12 @@ const BOT: &str = "synnax-foundation-factory[bot]";
 const FORMAT: &str =
     "in the format of .claude/skills/review/SKILL.md, \"Round comment\".";
 
+/// The causes of [`Shown::hiding`].
+const RAW: &str = "raw HTML, which can hide text on GitHub";
+const MARKED: &str = "`[^` outside a footnote reference, which can hide text on GitHub";
+const SHORT: &str = "a link or an image with a line break after its text, or a link \
+                     reference definition, in a paragraph, which the check cannot read";
+
 /// The names of the lines that end each round comment, in order.
 const END: [&str; 3] = ["Deferred", "Public surface", "Hot path"];
 
@@ -324,10 +330,10 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         format!("review round {number} has no `{name}:` line. Write the round {FORMAT}")
     };
     let fields = || {
-        if let Some(line) = shown.html.filter(|_| !old) {
+        if let Some((line, cause)) = shown.hiding.filter(|_| !old) {
             return Err(format!(
-                "review round {number} has raw HTML, which can hide text on GitHub, in \
-                 the line `{line}`. Put the line in a code span, {FORMAT}"
+                "review round {number} has {cause}, in the line `{line}`. Put the line \
+                 in a code span, {FORMAT}"
             ));
         }
         let range = range.ok_or_else(|| missing("Range"))?.trim_matches('`');
@@ -421,16 +427,14 @@ fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
 }
 
 /// Options for the GitHub extensions that change which lines are text: tables,
-/// footnotes, strikethrough, task lists, autolinks, and quote kinds.
+/// footnotes, and task lists. Each footnote stays in place ([`Shown::read`] moves it).
 fn options() -> Options<'static> {
     let mut options = Options::default();
     let extension = &mut options.extension;
     extension.table = true;
     extension.footnotes = true;
-    extension.strikethrough = true;
     extension.tasklist = true;
-    extension.autolink = true;
-    extension.alerts = true;
+    options.parse.leave_footnote_definitions = true;
     options
 }
 
@@ -448,8 +452,11 @@ struct Shown<'a> {
     /// shows them: without the indent or the marks of a list item or a quote. A
     /// footnote with no reference is not shown.
     text: Vec<Vec<&'a str>>,
-    /// The first line of the comment with raw HTML, which can hide text on GitHub.
-    html: Option<&'a str>,
+    /// The first line of the comment that can hide text on GitHub or that the check
+    /// cannot read, and what in it does: raw HTML, `[^` in its text outside a
+    /// footnote reference ([`marked`]), or the start of a paragraph that comrak
+    /// places in the wrong lines ([`short`]).
+    hiding: Option<(&'a str, &'static str)>,
     /// The text after `## Review round ` in the first line in a top-level HTML block
     /// that starts with it. GitHub reads some HTML blocks as text, and then shows the
     /// line as a heading.
@@ -466,15 +473,31 @@ impl<'a> Shown<'a> {
             .collect();
         let at = |at: LineColumn| starts[at.line - 1] + at.column - 1;
         let line_start = |line: usize| starts[line - 1];
-        let (mut html, mut codes) = (None, Vec::new());
+        let source = |Sourcepos { start, end }: Sourcepos| {
+            line_start(start.line)..line_end(body, line_start(end.line))
+        };
         let arena = Arena::new();
         let root = parse_document(&arena, body, &options());
+        // The code blocks of a footnote that GitHub does not show still hold its lines.
+        let mut codes = Vec::new();
+        for node in root.descendants().collect::<Vec<_>>() {
+            let data = node.data.borrow();
+            match &data.value {
+                NodeValue::CodeBlock(_) => {
+                    codes.push(at(data.sourcepos.start)..source(data.sourcepos).end);
+                }
+                NodeValue::FootnoteDefinition(note) if note.total_references == 0 => {
+                    node.detach();
+                }
+                NodeValue::FootnoteDefinition(_) => root.append(node),
+                _ => {}
+            }
+        }
+        let mut hiding = Vec::new();
         for node in root.descendants() {
             let data = node.data.borrow();
-            let Sourcepos { start, end } = data.sourcepos;
+            let start = line_start(data.sourcepos.start.line);
             let top = node.parent().is_some_and(|p| p.same_node(root));
-            let source =
-                || line_start(start.line)..line_end(body, line_start(end.line));
             let index =
                 matches!(data.value, NodeValue::Paragraph).then(|| shown.text.len());
             if top && shown.number.is_some() {
@@ -482,22 +505,29 @@ impl<'a> Shown<'a> {
             }
             match &data.value {
                 NodeValue::Heading(_) if top && shown.number.is_none() => {
-                    shown.number = heading(&body[source()]);
+                    shown.number = heading(&body[source(data.sourcepos)]);
                     shown.text.clear();
                 }
-                NodeValue::Paragraph => shown.text.push(texts(body, node, at)),
-                NodeValue::CodeBlock(_) => codes.push(at(start)..source().end),
+                NodeValue::Paragraph => {
+                    if short(node, data.sourcepos.end.line) {
+                        hiding.push((start, SHORT));
+                    }
+                    shown.text.push(texts(body, node, at));
+                }
+                NodeValue::Text(text) if marked(text) => hiding.push((start, MARKED)),
                 NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) => {
-                    html = html.or(Some(line_start(start.line)));
-                    let block = top.then(|| &body[source()]);
+                    hiding.push((start, RAW));
+                    let block = top.then(|| &body[source(data.sourcepos)]);
                     let number = || block?.split('\n').find_map(heading);
                     shown.html_number = shown.html_number.or_else(number);
                 }
                 _ => {}
             }
         }
-        let at = html.into_iter().chain(tagged(body, &starts, &codes)).min();
-        shown.html = at.map(|at| body[at..line_end(body, at)].trim());
+        hiding.extend(tagged(body, &starts, &codes).map(|at| (at, RAW)));
+        let first = hiding.into_iter().min_by_key(|(at, _)| *at);
+        shown.hiding =
+            first.map(|(at, cause)| (body[at..line_end(body, at)].trim(), cause));
         shown
     }
 
@@ -521,6 +551,21 @@ impl<'a> Shown<'a> {
             .flatten()
             .map_or(&[][..], |i| self.text[i].as_slice())
     }
+}
+
+/// Whether `text`, a span of text on one line, holds a `[^` with no `]` after it.
+/// GitHub then reads a `]` on a later line as the end of a footnote reference.
+fn marked(text: &str) -> bool {
+    text.match_indices("[^")
+        .any(|(i, _)| !text[i + 2..].contains(']'))
+}
+
+/// Whether comrak places each span of `paragraph` before its last line `last`. It
+/// does after a link or an image with a line break after its text, and after a link
+/// reference definition, and then each line it gives after them is wrong.
+fn short<'n>(paragraph: &'n AstNode<'n>, last: usize) -> bool {
+    let mut spans = paragraph.descendants().skip(1);
+    spans.all(|span| span.data.borrow().sourcepos.end.line < last)
 }
 
 /// The lines of text of `paragraph` in `body`, each from the start of its first span
@@ -585,10 +630,11 @@ fn heading(line: &str) -> Option<&str> {
 
 /// The first of the line starts `starts` of `body` whose line, after the indent and
 /// the marks of quotes, list items, and footnote labels ([`note`]), starts with raw
-/// HTML: `<` and a letter, `!`, `/`, or `?` that is not an autolink. A line in a code block
-/// (`codes`) does not count. GitHub reads some of these lines as an HTML block where
-/// comrak does not, such as `<source>`. GitHub reads the blocks of a comment before its
-/// spans, so a line inside a code span, a link, or a link definition counts too.
+/// HTML: `<` and a letter, `!`, `/`, or `?` that is not an autolink. A line in a code
+/// block (`codes`) does not count. GitHub reads some of these lines as an HTML block
+/// where comrak does not, such as `<source>`. GitHub reads the blocks of a comment
+/// before its spans, so a line inside a code span, a link, or a link definition counts
+/// too.
 fn tagged(body: &str, starts: &[usize], codes: &[Range<usize>]) -> Option<usize> {
     starts.iter().copied().find(|&start| {
         let line = &body[start..line_end(body, start)];
@@ -610,9 +656,7 @@ fn tag(text: &str) -> bool {
         let root = parse_document(&arena, text, &options());
         root.descendants().any(|node| {
             let data = node.data.borrow();
-            let start = data.sourcepos.start;
-            matches!(data.value, NodeValue::Link(_))
-                && (start.line, start.column) == (1, 1)
+            matches!(data.value, NodeValue::Link(_)) && data.sourcepos.start.column == 1
         })
     };
     text.strip_prefix('<').is_some_and(|l| l.starts_with(opens)) && !autolink()
