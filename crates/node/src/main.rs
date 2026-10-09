@@ -28,9 +28,6 @@ const DISK: Code = Code::new("node.disk");
 const MEMORY: Code = Code::new("node.memory");
 const BUDGET: Code = Code::new("node.budget");
 const FAILED: Code = Code::new("node.failed");
-/// The fix of [`DATA`].
-const WRITABLE: &str =
-    "Give with `--data` a directory that this user can make and write";
 
 fn main() -> ExitCode {
     let run = ops::cli(
@@ -55,10 +52,9 @@ fn node(start: &Start) -> Result<(), Failure> {
     let threads = os::threads().map_err(failed)?;
     let known = known(start, &threads)?;
     let (called, call) = mpsc::channel();
-    let mut line = Vec::new();
-    start.running(&known.name, &mut line);
-    // Its own thread, which lives until the process ends, so a standard output that
-    // nobody reads blocks neither shard 0 nor the stop.
+    let line = start.line(&known.name);
+    // Its own thread, so a standard output that nobody reads blocks neither shard 0
+    // nor the stop.
     let show = threads.start("show", move || async move {
         #[expect(
             clippy::disallowed_methods,
@@ -66,7 +62,9 @@ fn node(start: &Start) -> Result<(), Failure> {
         )]
         let called = call.recv();
         if called.is_ok() {
-            io::stdout().lock().write_all(&line).unwrap_or(());
+            // A write that fails changes nothing: the node runs either way. The
+            // line ends in a newline, so standard output flushes it.
+            io::stdout().write_all(line.as_bytes()).unwrap_or(());
         }
     });
     let show = show.map_err(failed)?;
@@ -240,17 +238,10 @@ fn quarter(free: u64, most: Size) -> (Size, Origin) {
     }
 }
 
-/// The failure of a data directory that `os` could not open or make.
+/// The failure of a data directory `dir` that `os` could not open or make.
 fn data(dir: &Path, error: os::Error) -> Failure {
     match error {
-        os::Error::Dir(error) => Failure {
-            code: DATA,
-            message: format!(
-                "cannot open or make the data directory {}: {error}",
-                dir.display()
-            ),
-            fix: WRITABLE.to_owned(),
-        },
+        os::Error::Dir(error) => unwritable(dir, error),
         error => failed(error),
     }
 }
@@ -311,11 +302,11 @@ fn failure(dir: &Path, error: &node::Error) -> Failure {
             format!("another node runs in {data}"),
             "Stop that node, or give another data directory with `--data`".to_owned(),
         ),
-        node::Error::Directory(error) => (
-            DATA,
-            format!("cannot use the data directory {data}: {error}"),
-            WRITABLE.to_owned(),
-        ),
+        node::Error::Directory(error @ env::files::Error::Io { code, .. })
+        | node::Error::Buffer {
+            error: buffer::Error::Files(error @ env::files::Error::Io { code, .. }),
+            ..
+        } if refused(*code) => return unwritable(dir, error),
         node::Error::Unnamed => (
             UNNAMED,
             format!("the data directory {data} holds no node"),
@@ -377,6 +368,27 @@ fn source(dir: &Path, from: Origin, resource: Resource) -> (String, String) {
     }
 }
 
+/// Whether the OS error `code` says that this user cannot write the file.
+fn refused(code: i32) -> bool {
+    matches!(
+        io::Error::from_raw_os_error(code).kind(),
+        io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+    )
+}
+
+/// The failure of a data directory `dir` that this user cannot write.
+fn unwritable(dir: &Path, error: impl std::fmt::Display) -> Failure {
+    let dir = dir.display();
+    Failure {
+        code: DATA,
+        message: format!("cannot write the data directory {dir}: {error}"),
+        fix: format!(
+            "Let this user make and write {dir} and each file in it, or give another \
+             directory with `--data`"
+        ),
+    }
+}
+
 /// The failure for an error that the user cannot fix by a change to the command.
 fn failed(error: impl std::fmt::Display) -> Failure {
     Failure {
@@ -390,11 +402,14 @@ fn failed(error: impl std::fmt::Display) -> Failure {
 /// These tests call the functions of `main`, since a process test cannot set what
 /// they need: a host with a known free memory and free disk (`quarter`, and the texts
 /// of a default budget), or a buffer error that only a failing host makes (`Refused`,
-/// `Exhausted`, another buffer error). So they are the only kill of the mutants of
+/// `Exhausted`, another buffer error), or a file system that refuses a write with
+/// `EPERM` or `EROFS` (`failure`). So they are the only kill of the mutants of
 /// `quarter` and of the arms of `stopped` and `source` for a default budget. The
 /// process tests in `tests/it/start.rs` cover each kept budget.
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     /// The data directory of `foundation start` with no `--data`.
@@ -663,5 +678,87 @@ mod tests {
         };
         let known = known(budget, Origin::Quarter);
         assert_eq!(stopped(dir(), &error, &known), failed(&error));
+    }
+
+    /// A failed open of `path` with the OS error `code`.
+    fn io(path: &str, code: i32) -> env::files::Error {
+        env::files::Error::Io {
+            path: PathBuf::from(path),
+            operation: env::files::Operation::Open,
+            code,
+        }
+    }
+
+    /// The failure of the data directory `foundation-data` for `error`.
+    fn of(error: &node::Error) -> Failure {
+        failure(dir(), error)
+    }
+
+    #[test]
+    fn each_refusal_of_a_write_is_node_data() {
+        const EACCES: i32 = 13;
+        const EPERM: i32 = 1;
+        const EROFS: i32 = 30;
+        for code in [EACCES, EPERM, EROFS] {
+            let ring = node::Error::Buffer {
+                core: 2,
+                error: buffer::Error::Files(io("shard-2/ring", code)),
+            };
+            let reason = io::Error::from_raw_os_error(code);
+            for (error, file) in [
+                (node::Error::Directory(io("node.key", code)), "node.key"),
+                (ring, "shard-2/ring"),
+            ] {
+                assert_eq!(
+                    of(&error),
+                    Failure {
+                        code: DATA,
+                        message: format!(
+                            "cannot write the data directory foundation-data: open of \
+                             {file} failed with OS error {code}"
+                        ),
+                        fix: "Let this user make and write foundation-data and each \
+                              file in it, or give another directory with `--data`"
+                            .to_owned(),
+                    },
+                    "{reason}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_file_error_that_is_no_refusal_is_node_failed() {
+        const ENOSPC: i32 = 28;
+        let failed = |message: &str| Failure {
+            code: FAILED,
+            message: message.to_owned(),
+            fix: "Fix the cause that the message states, then start the node again"
+                .to_owned(),
+        };
+        let lost = env::files::Error::NotFound {
+            path: PathBuf::from("lock"),
+        };
+        assert_eq!(
+            of(&node::Error::Directory(lost)),
+            failed("cannot use the data directory: path lock is not there")
+        );
+        assert_eq!(
+            of(&node::Error::Directory(io("node.key", ENOSPC))),
+            failed(
+                "cannot use the data directory: open of node.key failed with OS error 28"
+            )
+        );
+        let ring = node::Error::Buffer {
+            core: 2,
+            error: buffer::Error::Files(io("shard-2/ring", ENOSPC)),
+        };
+        assert_eq!(
+            of(&ring),
+            failed(
+                "cannot open the buffer of shard-2: a file call failed: open of \
+                 shard-2/ring failed with OS error 28"
+            )
+        );
     }
 }

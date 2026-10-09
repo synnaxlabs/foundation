@@ -1,6 +1,6 @@
 //! `foundation start`: a node on a data directory until SIGTERM.
 
-use crate::rig::{Process, Rig};
+use crate::rig::Rig;
 use crate::text;
 
 /// The exit status, the standard output, and the standard error of `output`.
@@ -30,6 +30,20 @@ fn a_node_prints_that_it_runs_as_json() {
         (
             Some(0),
             "{\"name\":\"edge\",\"data\":\"foundation-data\"}\n",
+            ""
+        )
+    );
+}
+
+#[test]
+fn a_data_directory_with_a_newline_prints_one_line() {
+    let mut rig = Rig::new();
+    rig.start_with(&["--name", "edge", "--data", "a\nb"]);
+    assert_eq!(
+        ended(&rig.stop()),
+        (
+            Some(0),
+            "node edge runs in a\\nb. Stop it with Ctrl-C.\n",
             ""
         )
     );
@@ -119,9 +133,29 @@ fn a_data_directory_that_is_a_file_fails() {
         (
             Some(1),
             "",
-            "error[node.data]: cannot open or make the data directory plain: \
-             Not a directory (os error 20)\n\
-             fix: Give with `--data` a directory that this user can make and write\n"
+            "error[node.data]: cannot write the data directory plain: Not a directory \
+             (os error 20)\n\
+             fix: Let this user make and write plain and each file in it, or give \
+             another directory with `--data`\n"
+        )
+    );
+}
+
+/// The path shows as the line of `a_data_directory_with_a_newline_prints_one_line`
+/// shows it.
+#[test]
+fn a_data_directory_with_a_newline_that_is_a_file_fails_on_one_line() {
+    let rig = Rig::new();
+    std::fs::write(rig.dir.join("a\nb"), "").expect("write the file");
+    assert_eq!(
+        ended(&rig.run(&["start", "--data", "a\nb", "--name", "edge"], b"")),
+        (
+            Some(1),
+            "",
+            "error[node.data]: cannot write the data directory a\\nb: Not a directory \
+             (os error 20)\n\
+             fix: Let this user make and write a\\nb and each file in it, or give \
+             another directory with `--data`\n"
         )
     );
 }
@@ -236,9 +270,10 @@ fn a_data_directory_that_the_user_cannot_write_fails() {
         (
             Some(1),
             "",
-            "error[node.data]: cannot use the data directory foundation-data: open of \
-             lock failed with OS error 13\n\
-             fix: Give with `--data` a directory that this user can make and write\n"
+            "error[node.data]: cannot write the data directory foundation-data: open \
+             of lock failed with OS error 13\n\
+             fix: Let this user make and write foundation-data and each file in it, or \
+             give another directory with `--data`\n"
         )
     );
 }
@@ -259,9 +294,10 @@ fn a_new_data_directory_in_a_directory_that_the_user_cannot_write_fails() {
         (
             Some(1),
             "",
-            "error[node.data]: cannot open or make the data directory read: \
-             Permission denied (os error 13)\n\
-             fix: Give with `--data` a directory that this user can make and write\n"
+            "error[node.data]: cannot write the data directory read: Permission \
+             denied (os error 13)\n\
+             fix: Let this user make and write read and each file in it, or give \
+             another directory with `--data`\n"
         )
     );
 }
@@ -285,51 +321,150 @@ fn a_key_file_that_holds_no_key_fails() {
     );
 }
 
+#[test]
+fn a_file_of_the_data_directory_that_the_user_cannot_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut rig = Rig::new();
+    rig.start();
+    rig.stop();
+    let mode = |mode| std::fs::Permissions::from_mode(mode);
+    for (file, call) in [("node.key", "open"), ("shard-0/ring", "open")] {
+        let path = rig.dir.join("foundation-data/data").join(file);
+        std::fs::set_permissions(&path, mode(0o400)).expect("make it read-only");
+        let output = rig.run(&["start"], b"");
+        std::fs::set_permissions(&path, mode(0o600)).expect("make it writable");
+        assert_eq!(
+            ended(&output),
+            (
+                Some(1),
+                "",
+                format!(
+                    "error[node.data]: cannot write the data directory foundation-data: \
+                     {call} of {file} failed with OS error 13\n\
+                     fix: Let this user make and write foundation-data and each file in \
+                     it, or give another directory with `--data`\n"
+                )
+                .as_str()
+            ),
+            "{file}"
+        );
+    }
+}
+
+#[test]
+fn a_key_file_that_is_a_directory_fails_as_node_failed() {
+    let mut rig = Rig::new();
+    rig.start();
+    rig.stop();
+    let key = rig.dir.join("foundation-data/data/node.key");
+    std::fs::remove_file(&key).expect("remove the key file");
+    std::fs::create_dir(&key).expect("make a directory in its place");
+    assert_eq!(
+        ended(&rig.run(&["start"], b"")),
+        (
+            Some(1),
+            "",
+            "error[node.failed]: cannot use the data directory: open of node.key \
+             failed with OS error 21\n\
+             fix: Fix the cause that the message states, then start the node again\n"
+        )
+    );
+}
+
+#[test]
+fn a_ring_that_is_a_directory_fails_as_node_failed() {
+    let mut rig = Rig::new();
+    rig.start();
+    rig.stop();
+    let buffer = rig.dir.join("foundation-data/data/shard-0/ring");
+    std::fs::remove_file(&buffer).expect("remove the ring");
+    std::fs::create_dir(&buffer).expect("make a directory in its place");
+    assert_eq!(
+        ended(&rig.run(&["start"], b"")),
+        (
+            Some(1),
+            "",
+            "error[node.failed]: cannot open the buffer of shard-0: a file call failed: \
+             open of shard-0/ring failed with OS error 21\n\
+             fix: Fix the cause that the message states, then start the node again\n"
+        )
+    );
+}
+
+/// Linux only: the test reads the threads of the node from `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_node_whose_standard_output_is_closed_runs_and_exits_0_at_sigterm() {
+    let rig = Rig::new();
+    let (reader, writer) = std::io::pipe().expect("make a pipe");
+    drop(reader);
+    let mut node = rig.spawn(&["start", "--name", "edge"], writer.into());
+    let pid = node.pid();
+    // `show` starts before `files-0`, and ends only after its write.
+    rig.wait("the thread `show` ends after its write of the line", || {
+        let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).expect("list");
+        let names: Vec<String> = (tasks.map(|task| task.expect("read").path()))
+            .map(|task| std::fs::read_to_string(task.join("comm")).unwrap_or_default())
+            .collect();
+        let runs = |name: &str| names.iter().any(|n| n.trim_end() == name);
+        let ended = runs("files-0") && !runs("show");
+        ended.then_some(()).ok_or_else(|| names.concat())
+    });
+    node.term();
+    let status = rig.wait("the node exits at SIGTERM", || {
+        node.exited().ok_or_else(String::new)
+    });
+    assert_eq!((status.code(), node.errors().as_str()), (Some(0), ""));
+}
+
 /// Linux only: the test reads where each thread waits from `/proc`.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_node_whose_standard_output_nobody_reads_exits_0_at_sigterm() {
     use std::io::Write;
-    use std::process::{Command, Stdio};
 
     let rig = Rig::new();
     let (reader, mut writer) = std::io::pipe().expect("make a pipe");
     let stdout = writer.try_clone().expect("clone the pipe");
-    // It fills the pipe long before the node starts, and ends when the test drops
-    // `reader`.
+    let wchan = |task: &std::path::Path| {
+        std::fs::read_to_string(task.join("wchan")).unwrap_or_default()
+    };
+    let (sent, filler) = std::sync::mpsc::channel();
+    // It fills the pipe, and ends when the test drops `reader`.
     #[expect(
         clippy::disallowed_methods,
         reason = "a process test fills a pipe of another process"
     )]
-    std::thread::spawn(move || while writer.write_all(&[0; 4096]).is_ok() {});
-    let node = Command::new(env!("CARGO_BIN_EXE_foundation"))
-        .args(["start", "--name", "edge"])
-        .current_dir(&rig.dir)
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start the node");
-    let mut node = Process(node);
-    let pid = node.0.id().to_string();
+    std::thread::spawn(move || {
+        let task = std::fs::read_link("/proc/thread-self").expect("read the task");
+        let task = std::path::Path::new("/proc").join(task);
+        sent.send(task).expect("the test waits for the task");
+        while writer.write_all(&[0; 4096]).is_ok() {}
+    });
+    let filler = rig.wait("the filler sends its task", || {
+        filler.try_recv().map_err(|error| error.to_string())
+    });
+    rig.wait("the pipe is full", || {
+        let wait = wchan(&filler);
+        wait.contains("pipe_write").then_some(()).ok_or(wait)
+    });
+    let mut node = rig.spawn(&["start", "--name", "edge"], stdout.into());
+    let pid = node.pid();
     rig.wait(
         "a thread of the node waits in its write of the line",
         || {
             let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).expect("list");
             let waits: Vec<String> = (tasks.map(|task| task.expect("read").path()))
-                .filter_map(|task| std::fs::read_to_string(task.join("wchan")).ok())
+                .map(|task| wchan(&task))
                 .collect();
             let blocked = waits.iter().any(|wait| wait.contains("pipe_write"));
             blocked.then_some(()).ok_or_else(|| waits.join("\n"))
         },
     );
-    let sent = Command::new("kill").arg(&pid).status().expect("run kill");
-    assert!(sent.success(), "send SIGTERM to {pid}");
+    node.term();
     let status = rig.wait("the node exits at SIGTERM", || {
-        node.0
-            .try_wait()
-            .expect("check the node")
-            .ok_or_else(String::new)
+        node.exited().ok_or_else(String::new)
     });
     drop(reader);
     assert_eq!(status.code(), Some(0));

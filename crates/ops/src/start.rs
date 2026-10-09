@@ -5,7 +5,7 @@ use document::diagnostic::Code;
 use serde_json::Value;
 use types::name::Name;
 
-use crate::error::Error;
+use crate::error::{self, Error};
 
 /// The arguments of `foundation start`.
 #[derive(Debug, PartialEq, Eq)]
@@ -32,25 +32,21 @@ pub struct Failure {
 }
 
 impl Start {
-    /// Writes that the node `name` runs in [`Start::data`] to `output`, as one line of
-    /// text or JSON, and flushes it. A write that fails changes nothing: the node runs
-    /// either way. JSON gives the data directory with each byte that is not UTF-8 as
-    /// U+FFFD.
-    pub fn running(&self, name: &Name, mut output: impl Write) {
-        let text = if self.json {
+    /// The line that tells that the node `name` runs in [`Start::data`], as text or
+    /// JSON, with its newline. Each gives the data directory lossily, as
+    /// `Path::to_string_lossy` does. Text also escapes it as [`Start::fail`] does: the
+    /// line stays one line, and a literal `\n` in the path reads apart from a newline.
+    #[must_use]
+    pub fn line(&self, name: &Name) -> String {
+        if self.json {
             // By hand, as a `json!` object sorts its keys.
             let name = Value::from(name.as_str());
             let data = Value::from(self.data.to_string_lossy());
             format!("{{\"name\":{name},\"data\":{data}}}\n")
         } else {
-            let data = self.data.display();
+            let data = error::escape(&self.data.to_string_lossy());
             format!("node {name} runs in {data}. Stop it with Ctrl-C.\n")
-        };
-        drop(
-            output
-                .write_all(text.as_bytes())
-                .and_then(|()| output.flush()),
-        );
+        }
     }
 
     /// Writes `failure` to `errors` as [`crate::cli`] writes its own errors, and gives
