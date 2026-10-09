@@ -5,20 +5,18 @@
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 #![cfg(target_os = "linux")]
-#![expect(unsafe_code, reason = "a seccomp filter is an OS call")]
 
 #[path = "common/gso.rs"]
 mod gso;
+#[path = "common/seccomp.rs"]
+mod seccomp;
 
-use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
@@ -28,92 +26,11 @@ use env::net::udp::{self, Meta, Receiver, Sender, Transmit};
 /// How long a receive waits before it takes that no more datagrams come.
 const SILENCE: Duration = Duration::from_millis(300);
 
-/// Gives the `k`th call `nr` of this thread, from 0, the errno of `plan(nr, k)`, and
-/// runs it when that is `None`. It holds `sendmsg` and `epoll_ctl` only.
-fn answer_calls(plan: impl FnMut(i64, usize) -> Option<i32> + Send + 'static) {
-    use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_K, BPF_LD, BPF_RET, BPF_W};
-
-    let (sender, listener) = mpsc::channel();
-    // Started before the filter, so its own calls never wait on itself.
-    #[expect(clippy::disallowed_methods, reason = "the test answers the filter")]
-    std::thread::spawn(move || answer(&listener.recv().unwrap(), plan));
-    let op = |code: u32, jt, k| libc::sock_filter {
-        code: u16::try_from(code).unwrap(),
-        jt,
-        jf: 0,
-        k,
-    };
-    let call = |nr: libc::c_long| u32::try_from(nr).unwrap();
-    let mut filter = [
-        op(BPF_LD | BPF_W | BPF_ABS, 0, 0),
-        op(BPF_JMP | BPF_JEQ | BPF_K, 2, call(libc::SYS_sendmsg)),
-        op(BPF_JMP | BPF_JEQ | BPF_K, 1, call(libc::SYS_epoll_ctl)),
-        op(BPF_RET | BPF_K, 0, libc::SECCOMP_RET_ALLOW),
-        op(BPF_RET | BPF_K, 0, libc::SECCOMP_RET_USER_NOTIF),
-    ];
-    let program = libc::sock_fprog {
-        len: u16::try_from(filter.len()).unwrap(),
-        filter: filter.as_mut_ptr(),
-    };
-    // The kernel reads each argument as a whole register.
-    let (one, zero): (libc::c_ulong, libc::c_ulong) = (1, 0);
-    // SAFETY: the call sets one flag of this thread.
-    let rc = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, one, zero, zero, zero) };
-    assert_eq!(rc, 0, "{}", std::io::Error::last_os_error());
-    let mode = libc::c_ulong::from(libc::SECCOMP_SET_MODE_FILTER);
-    let flags = libc::SECCOMP_FILTER_FLAG_NEW_LISTENER;
-    // SAFETY: `program` points at `filter`, which outlives the call. The kernel copies
-    // it.
-    let fd =
-        unsafe { libc::syscall(libc::SYS_seccomp, mode, flags, &raw const program) };
-    let fd = i32::try_from(fd).unwrap();
-    assert!(fd >= 0, "{}", std::io::Error::last_os_error());
-    // SAFETY: the kernel gave the listener to this process alone.
-    sender.send(unsafe { OwnedFd::from_raw_fd(fd) }).unwrap();
-}
-
-/// Answers each call that the filter of `listener` holds, as `plan` says.
-fn answer(listener: &OwnedFd, mut plan: impl FnMut(i64, usize) -> Option<i32>) {
-    let data = libc::seccomp_data {
-        nr: 0,
-        arch: 0,
-        instruction_pointer: 0,
-        args: [0; 6],
-    };
-    let mut counts = BTreeMap::new();
-    loop {
-        let mut held = libc::seccomp_notif {
-            id: 0,
-            pid: 0,
-            flags: 0,
-            data,
-        };
-        let receive = libc::SECCOMP_IOCTL_NOTIF_RECV;
-        // SAFETY: `held` is a whole `seccomp_notif` for the kernel to fill.
-        if unsafe { libc::ioctl(listener.as_raw_fd(), receive, &raw mut held) } != 0 {
-            return;
-        }
-        let mut reply = libc::seccomp_notif_resp {
-            id: held.id,
-            val: 0,
-            error: 0,
-            flags: 0,
-        };
-        let nr = i64::from(held.data.nr);
-        let k = counts.entry(nr).or_insert(0);
-        let answer = plan(nr, *k);
-        *k += 1;
-        match answer {
-            Some(errno) => reply.error = -errno,
-            None => {
-                reply.flags =
-                    u32::try_from(libc::SECCOMP_USER_NOTIF_FLAG_CONTINUE).unwrap();
-            }
-        }
-        let send = libc::SECCOMP_IOCTL_NOTIF_SEND;
-        // SAFETY: `reply` is a whole `seccomp_notif_resp`.
-        unsafe { libc::ioctl(listener.as_raw_fd(), send, &raw mut reply) };
-    }
+/// Gives the `k`th `sendmsg` or `epoll_ctl` of this thread, from 0, the errno of
+/// `plan(nr, k)`, and runs it when that is `None`.
+fn answer_calls(mut plan: impl FnMut(i64, usize) -> Option<i32> + Send + 'static) {
+    let calls = [libc::SYS_sendmsg, libc::SYS_epoll_ctl];
+    seccomp::answer_calls(&calls, move |data, k| plan(i64::from(data.nr), k));
 }
 
 /// Runs `body` on a thread of its own, so the filter of one test stays on it.
