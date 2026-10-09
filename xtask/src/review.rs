@@ -38,10 +38,6 @@ enum Cause {
     /// definition, in a paragraph: comrak then places its text in the wrong lines
     /// ([`misplaced`]).
     Misplaced,
-    /// A field or an [`END`] name that GitHub shows at the start of a line, and that
-    /// the source of the line does not start with, as with an escape, an entity, or
-    /// emphasis ([`disguised`]).
-    Name,
 }
 
 impl Cause {
@@ -69,13 +65,6 @@ impl Cause {
                 ),
                 "Write each link and image on one line, and put a blank line after each \
                  link reference definition",
-            ),
-            Cause::Name => (
-                format!(
-                    "a field or end line name that is not plain text, which the check \
-                     does not read, in the line `{line}`"
-                ),
-                "Write each name as plain text",
             ),
         };
         format!("review round {number} has {cause}. {remedy}, {FORMAT}")
@@ -331,7 +320,7 @@ fn approval(record: &Record, head: &str) -> Option<String> {
 
 /// Reports whether a `Reviewers:` line in `text` ([`Shown::text`]) names
 /// `performance`.
-fn performer(text: &[Vec<&str>]) -> bool {
+fn performer(text: &[Vec<String>]) -> bool {
     text.iter()
         .flatten()
         .filter_map(|l| l.strip_prefix("Reviewers: "))
@@ -356,7 +345,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
     let shown = Shown::read(&body, old);
     let number = shown.number.or(shown.html_number.filter(|_| !old))?;
     let text = &shown.text;
-    let lines = shown.fields().iter().copied();
+    let lines = shown.fields().iter().map(String::as_str);
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
     let (reviewers, range) = (field("Reviewers: "), field("Range: "));
     let findings = field("Findings: ");
@@ -425,7 +414,7 @@ fn lines(text: &str) -> impl Iterator<Item = &str> + Clone {
 
 /// Whether the end lines `paragraph` of round `number` name a hot path ([`function`]).
 /// The paragraph must be the [`END`] lines in order and nothing else.
-fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
+fn hot(paragraph: &[String], number: u32) -> Result<bool, String> {
     let (values, read) = entries(paragraph);
     let [deferred, surface, hot] = END;
     for (i, name) in END.into_iter().enumerate() {
@@ -448,7 +437,7 @@ fn hot(paragraph: &[&str], number: u32) -> Result<bool, String> {
 
 /// Whether a round posted before [`CUTOFF`] names a hot path: a `Hot path:` line in
 /// `text` ([`Shown::text`]) names a function ([`function`]).
-fn named(text: &[Vec<&str>]) -> bool {
+fn named(text: &[Vec<String>]) -> bool {
     let start = format!("{}:", END[2]);
     text.iter().any(|p| {
         (0..p.len())
@@ -459,7 +448,7 @@ fn named(text: &[Vec<&str>]) -> bool {
 /// The [`END`] entries at the start of `lines`, each as its name and value, and the
 /// number of lines they take. An entry starts at the start of a line with its name,
 /// and may wrap onto the lines after it.
-fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
+fn entries(lines: &[String]) -> (Vec<(&'static str, String)>, usize) {
     let mut values: Vec<(&str, String)> = Vec::new();
     for (i, line) in lines.iter().enumerate() {
         let name = END
@@ -476,14 +465,15 @@ fn entries(lines: &[&str]) -> (Vec<(&'static str, String)>, usize) {
     (values, lines.len())
 }
 
-/// Options for the GitHub extensions that change which lines are text: tables,
-/// footnotes, and task lists. Each footnote stays in place ([`Shown::read`] moves it).
+/// Options for the GitHub extensions that change which lines are text or what they
+/// show: tables, footnotes, task lists, and strikethrough. Each footnote stays in place ([`Shown::read`] moves it).
 fn options() -> Options<'static> {
     let mut options = Options::default();
     let extension = &mut options.extension;
     extension.table = true;
     extension.footnotes = true;
     extension.tasklist = true;
+    extension.strikethrough = true;
     options.parse.leave_footnote_definitions = true;
     options
 }
@@ -499,10 +489,9 @@ struct Shown<'a> {
     /// `None` for any other block. The footnotes come last, as GitHub shows them.
     blocks: Vec<Option<usize>>,
     /// The lines of text of each paragraph after the heading, at any depth, as GitHub
-    /// shows them: without the indent or the marks of a list item or a quote. A
-    /// footnote with no reference is not shown. A paragraph that comrak places in the
-    /// wrong lines ([`misplaced`]) gives no line.
-    text: Vec<Vec<&'a str>>,
+    /// shows them ([`texts`]). A footnote with no reference is not shown. A paragraph
+    /// that comrak places in the wrong lines ([`misplaced`]) gives no line.
+    text: Vec<Vec<String>>,
     /// The first line of the comment that can hide text on GitHub or that the check
     /// cannot read, and its cause.
     hiding: Option<(&'a str, Cause)>,
@@ -562,11 +551,7 @@ impl<'a> Shown<'a> {
                         bracket(node, last)
                             .map(|line| (line_start(line), Cause::Bracket)),
                     );
-                    hiding.extend(
-                        disguised(body, node, at)
-                            .map(|line| (line_start(line), Cause::Name)),
-                    );
-                    shown.text.push(texts(body, node, at));
+                    shown.text.push(texts(node));
                 }
                 NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) => {
                     hiding.push((start, Cause::Raw));
@@ -590,19 +575,19 @@ impl<'a> Shown<'a> {
 
     /// The lines of the fields: the first block after the round heading, or none when
     /// it is not a paragraph.
-    fn fields(&self) -> &[&'a str] {
+    fn fields(&self) -> &[String] {
         self.paragraph(self.blocks.first())
     }
 
     /// The end lines: the last block after the fields, or none when it is not a
     /// paragraph or the fields are the only block.
-    fn end(&self) -> &[&'a str] {
+    fn end(&self) -> &[String] {
         self.paragraph(self.blocks.get(1..).and_then(<[_]>::last))
     }
 
     /// The lines of `block`, one of [`Shown::blocks`], or none when it is not a
     /// paragraph.
-    fn paragraph(&self, block: Option<&Option<usize>>) -> &[&'a str] {
+    fn paragraph(&self, block: Option<&Option<usize>>) -> &[String] {
         block
             .copied()
             .flatten()
@@ -620,53 +605,6 @@ fn bracket<'n>(paragraph: &'n AstNode<'n>, last: usize) -> Option<usize> {
         let text = matches!(&data.value, NodeValue::Text(t) if t.contains("[^"));
         (text && line < last).then_some(line)
     })
-}
-
-/// The first line of `paragraph` that GitHub shows with a field or an [`END`] name at
-/// its start, while its source does not start with that name. The check reads each
-/// name in the source ([`texts`]).
-fn disguised<'n>(
-    body: &str,
-    paragraph: &'n AstNode<'n>,
-    at: impl Fn(LineColumn) -> usize,
-) -> Option<usize> {
-    let names = ["Reviewers", "Range", "Findings", "Breaker"]
-        .into_iter()
-        .chain(END);
-    let titled = |text: &str| {
-        let mut names = names.clone();
-        names.any(|n| {
-            text.strip_prefix(n)
-                .is_some_and(|rest| rest.starts_with(':'))
-        })
-    };
-    // Each line as its number, the offset of its first span, and the text shown.
-    let mut lines: Vec<(usize, usize, String)> = Vec::new();
-    let mut fresh = true;
-    for span in paragraph.descendants().skip(1) {
-        let data = span.data.borrow();
-        let text = match &data.value {
-            NodeValue::SoftBreak | NodeValue::LineBreak => {
-                fresh = true;
-                continue;
-            }
-            NodeValue::Text(text) => text.as_ref(),
-            NodeValue::Code(code) => code.literal.as_str(),
-            _ => "",
-        };
-        if fresh {
-            let start = data.sourcepos.start;
-            lines.push((start.line, at(start), String::new()));
-            fresh = false;
-        }
-        if let Some((_, _, shown)) = lines.last_mut() {
-            shown.push_str(text);
-        }
-    }
-    let mut lines = lines.into_iter();
-    lines
-        .find(|(_, start, shown)| titled(shown) && !titled(&body[*start..]))
-        .map(|(line, ..)| line)
 }
 
 /// Whether comrak places each span of `paragraph` before its last line `last`. It
@@ -714,26 +652,66 @@ fn same(a: &str, b: &str) -> bool {
         .any(|n| matches!(n.data.borrow().value, NodeValue::FootnoteReference(_)))
 }
 
-/// The lines of text of `paragraph` in `body`, each from the start of its first span
-/// (`at` gives its offset) to the end of its line of source.
-fn texts<'a, 'n>(
-    body: &'a str,
-    paragraph: &'n AstNode<'n>,
-    at: impl Fn(LineColumn) -> usize,
-) -> Vec<&'a str> {
-    let mut lines = Vec::new();
+/// The lines of text of `paragraph` as GitHub shows them: its text and code spans,
+/// each image as U+FFFC in place of its text, no invisible character (Unicode default ignorable), and
+/// each run of white space as one space, trimmed. A character that looks like another
+/// stays itself.
+fn texts<'n>(paragraph: &'n AstNode<'n>) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
     let mut fresh = true;
     for span in paragraph.descendants().skip(1) {
         let data = span.data.borrow();
-        if matches!(data.value, NodeValue::SoftBreak | NodeValue::LineBreak) {
-            fresh = true;
-        } else if fresh {
-            let start = at(data.sourcepos.start);
-            lines.push(&body[start..line_end(body, start)]);
+        let text = match &data.value {
+            NodeValue::SoftBreak | NodeValue::LineBreak => {
+                fresh = true;
+                continue;
+            }
+            NodeValue::Text(text) => text.as_ref(),
+            NodeValue::Code(code) => code.literal.as_str(),
+            NodeValue::Image(_) => "\u{FFFC}",
+            _ => "",
+        };
+        if fresh {
+            lines.push(String::new());
             fresh = false;
+        }
+        let image = |node: &'n AstNode<'n>| {
+            matches!(node.data.borrow().value, NodeValue::Image(_))
+        };
+        if let Some(line) = lines.last_mut()
+            && !span.ancestors().skip(1).any(image)
+        {
+            line.extend(text.chars().filter(|&c| !ignorable(c)));
         }
     }
     lines
+        .iter()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+        .collect()
+}
+
+/// Whether `c` is a Unicode default ignorable code point, which shows as nothing.
+fn ignorable(c: char) -> bool {
+    matches!(
+        c,
+        '\u{AD}'
+            | '\u{34F}'
+            | '\u{61C}'
+            | '\u{115F}'..='\u{1160}'
+            | '\u{17B4}'..='\u{17B5}'
+            | '\u{180B}'..='\u{180F}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{206F}'
+            | '\u{3164}'
+            | '\u{FE00}'..='\u{FE0F}'
+            | '\u{FEFF}'
+            | '\u{FFA0}'
+            | '\u{FFF0}'..='\u{FFF8}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0000}'..='\u{E0FFF}'
+    )
 }
 
 /// `text` with each line ended by `\n`, with no spaces or tabs at the end of a line,

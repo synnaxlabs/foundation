@@ -608,34 +608,67 @@ fn fails_an_earlier_round_with_fields_and_no_number() {
 }
 
 #[test]
-fn fails_a_name_that_github_shows_but_its_source_does_not_start_with() {
-    // GitHub shows each name as plain text at the start of its line.
-    let name = |line: &str| {
-        format!(
-            "review round 3 has a field or end line name that is not plain text, which \
-             the check does not read, in the line `{line}`. Write each name as plain \
-             text, {FORMAT}"
-        )
-    };
+fn reads_each_name_as_github_shows_it() {
+    // GitHub shows each line with `Hot path:` at its start.
+    for line in [
+        "&#72;ot path: `send`",
+        "**Hot path:** `send`",
+        "`Hot path:` `send`",
+        "~~Hot path:~~ `send`",
+        "` `Hot path: `send`",
+        "&#32;Hot path: `send`",
+        "&#9;Hot path: `send`",
+        "&#10;Hot path: `send`",
+        "&nbsp;Hot path: `send`",
+        "&#8203;Hot path: `send`",
+        "&ZeroWidthSpace;Hot path: `send`",
+        "&shy;Hot path: `send`",
+        "&#xFEFF;Hot path: `send`",
+        "Hot&nbsp;path: `send`",
+        "Hot&#8203; path: `send`",
+        "Hot&#x2003;&#x2003;path: `send`",
+    ] {
+        let comment =
+            ROUND.replace("Hot path: none", &format!("{line}\nHot path: none"));
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec!["review round 3 has a second `Hot path:` line in its end lines."],
+            "{line}"
+        );
+    }
+    for line in ["Findings\\: 2", "&#32;Findings: 2"] {
+        let comment =
+            ROUND.replace("Findings: none", &format!("{line}\nFindings: none"));
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![
+                "review round 3 has findings (2). Fix or answer them, then run another \
+                 round."
+            ],
+            "{line}"
+        );
+    }
     for (plain, shown) in [
         ("Reviewers: reviewer", "Reviewers\\: reviewer"),
-        ("Findings: none", "Findings\\: 2\nFindings: none"),
         ("Deferred: none", "Deferred\\: none"),
         ("Hot path: none", "Hot path\\: none"),
-        ("Hot path: none", "&#72;ot path: `send`\nHot path: none"),
-        ("Hot path: none", "**Hot path:** `send`\nHot path: none"),
-        ("Hot path: none", "`Hot path:` `send`\nHot path: none"),
+        // GitHub shows the image, not its text.
+        ("Hot path: none", "![Hot path:](x) `send`\nHot path: none"),
+        // A Cyrillic `о` in place of the Latin one.
+        ("Hot path: none", "H\u{43e}t path: `send`\nHot path: none"),
     ] {
         let comment = ROUND.replace(plain, shown);
         assert_ne!(comment, ROUND);
-        let line = shown.lines().next().unwrap();
         assert_eq!(
             check(&record(vec![bot(&comment)])),
-            vec![name(line)],
+            Vec::<String>::new(),
             "{shown}"
         );
     }
-    // In an old round, only a name at the start of the source of its line counts.
+}
+
+#[test]
+fn an_old_round_counts_a_name_where_github_shows_it() {
     let entity =
         old("## Review round 1\n\nConfirmed a finding.\n\n&#72;ot path: `send`");
     let escaped = old(
@@ -643,14 +676,14 @@ fn fails_a_name_that_github_shows_but_its_source_does_not_start_with() {
          Hot path: `send`",
     );
     for (round, problems) in [
-        (entity, Vec::<String>::new()),
         (
-            escaped,
+            entity,
             vec![
                 "review round 1 names no performance, which this round requires."
                     .to_string(),
             ],
         ),
+        (escaped, Vec::new()),
     ] {
         assert_eq!(check(&record(vec![round, bot(ROUND)])), problems);
     }
