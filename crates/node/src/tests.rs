@@ -4236,12 +4236,16 @@ mod port {
                 ops.apply(path, &plan).await.expect("an apply");
                 let spec = ops.mesh().spec().await.expect("a spec");
                 let label = Kind::Channel.key("plant.time").unwrap();
-                let Some(Definition::Channel(channel)) = spec.definitions.get(&label) else {
+                let Some(Definition::Channel(channel)) = spec.definitions.get(&label)
+                else {
                     panic!("a channel at plant.time");
                 };
                 *out.lock().unwrap() = Some(channel.key);
             });
-            assert_eq!(sim.run_for(Span::from_nanos(30 * Span::SECOND.nanos())), Ok(()));
+            assert_eq!(
+                sim.run_for(Span::from_nanos(30 * Span::SECOND.nanos())),
+                Ok(())
+            );
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));

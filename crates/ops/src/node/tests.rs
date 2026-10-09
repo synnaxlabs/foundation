@@ -38,10 +38,17 @@ async fn planned(mesh: &Mesh, files: Vec<(PathBuf, String)>) -> Value {
         .collect();
     let base = spec.pointer.expect("a spec in use");
     let names = mesh.names();
-    plan::plan(&files, base, &spec.definitions, &names, &front_ends(), &kinds())
-        .expect("a plan")
-        .0
-        .json()
+    plan::plan(
+        &files,
+        base,
+        &spec.definitions,
+        &names,
+        &front_ends(),
+        &kinds(),
+    )
+    .expect("a plan")
+    .0
+    .json()
 }
 
 fn site() -> Vec<(PathBuf, String)> {
