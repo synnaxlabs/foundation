@@ -1,5 +1,6 @@
 //! A TCP listener: the kernel's socket, polled through Tokio.
 
+use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::task::{Context, Poll, ready};
@@ -7,7 +8,8 @@ use std::task::{Context, Poll, ready};
 use env::net::{Error, listener, tcp};
 use rustix::io::Errno;
 use rustix::net::{SocketType, ipproto, sockopt};
-use tokio::net::TcpListener;
+use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 
 use super::socket::Socket;
 use super::stream::Stream;
@@ -15,7 +17,7 @@ use super::{apply, bind, canonical, from_io, in_use, io_error};
 
 /// A listening socket.
 pub(super) struct Listener {
-    socket: Socket<std::net::TcpListener, TcpListener>,
+    socket: Socket<std::net::TcpListener, AsyncFd<std::net::TcpListener>>,
     local: SocketAddr,
     /// Set again on each accepted stream.
     options: tcp::Options,
@@ -80,6 +82,59 @@ pub(super) fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
     Ok(fd)
 }
 
+impl Drop for Listener {
+    fn drop(&mut self) {
+        if let Some(fd) = self.socket.fd() {
+            stop(fd);
+        }
+    }
+}
+
+/// Stops the listen of `fd`. A child that another thread spawns holds a copy of the
+/// socket until its exec. On Linux a shutdown stops the listen of each copy, so a
+/// connect is refused at once. macOS gives `ENOTCONN` for a shutdown of a listener.
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(unused_variables, reason = "macOS has no call that stops the listen")
+)]
+fn stop(fd: BorrowedFd<'_>) {
+    #[cfg(target_os = "linux")]
+    match rustix::net::shutdown(fd, rustix::net::Shutdown::Read) {
+        // An operator aborted the socket (`ss -K`), or a stop came before: the listen
+        // is stopped.
+        Ok(()) | Err(Errno::NOTCONN) => {}
+        Err(e) => panic!("invariant: the listener {fd:?} shuts down: {e:?}"),
+    }
+}
+
+/// Registers `listener` with the I/O driver of this thread. A failed registration
+/// stops the listen before the socket closes.
+fn register(
+    listener: std::net::TcpListener,
+) -> io::Result<AsyncFd<std::net::TcpListener>> {
+    AsyncFd::try_with_interest(listener, Interest::READABLE).map_err(|failed| {
+        let (listener, error) = failed.into_parts();
+        stop(listener.as_fd());
+        error
+    })
+}
+
+/// Accepts one stream, non-blocking and closed on exec, or registers `cx` for the next.
+fn accept(
+    listener: &AsyncFd<std::net::TcpListener>,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<(std::net::TcpStream, SocketAddr)>> {
+    loop {
+        let mut ready = ready!(listener.poll_read_ready(cx))?;
+        if let Ok(accepted) = ready.try_io(|listener| listener.get_ref().accept()) {
+            return Poll::Ready(accepted.and_then(|(stream, peer)| {
+                stream.set_nonblocking(true)?;
+                Ok((stream, peer))
+            }));
+        }
+    }
+}
+
 impl listener::Driver for Listener {
     fn local(&self) -> SocketAddr {
         self.local
@@ -91,11 +146,9 @@ impl listener::Driver for Listener {
     ) -> Poll<Result<Box<dyn tcp::Driver>, Error>> {
         let listener = self
             .socket
-            .live("TCP listener", TcpListener::from_std)
+            .live("TCP listener", register)
             .map_err(io_error)?;
-        let (stream, peer) =
-            ready!(listener.poll_accept(cx)).map_err(|e| from_io(&e))?;
-        let stream = stream.into_std().map_err(|e| from_io(&e))?;
+        let (stream, peer) = ready!(accept(listener, cx)).map_err(|e| from_io(&e))?;
         let stream = self.accepted(stream, peer)?;
         Poll::Ready(Ok(Box::new(stream)))
     }
