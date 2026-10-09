@@ -402,17 +402,23 @@ fn a_command_that_the_kernel_reaped_drops() {
     assert_ne!(reaped, "panic", "the test fails");
 }
 
-/// Runs [`a_command_that_the_kernel_reaped_drops`] in a test binary that ignores
-/// `SIGCHLD`, so the kernel reaps each command it starts, and gives the report.
-fn drop_a_command_that_the_kernel_reaped(reaped: &str) -> String {
+/// The test binary that runs [`a_command_that_the_kernel_reaped_drops`] with
+/// [`REAPED`] set to `reaped`. It ignores `SIGCHLD`, so the kernel reaps each command
+/// it starts.
+fn reaped(reaped: &str) -> Command {
     let binary = std::env::current_exe().expect("the test binary");
-    let output = Command::new("perl")
+    let mut command = Command::new("perl");
+    command
         .args(["-e", "$SIG{CHLD} = 'IGNORE'; exec @ARGV or die"])
         .arg(binary)
         .args(["--exact", "rig::a_command_that_the_kernel_reaped_drops"])
-        .env(REAPED, reaped)
-        .output()
-        .expect("run the test binary");
+        .env(REAPED, reaped);
+    command
+}
+
+/// Runs [`reaped`] and gives the report of the test harness.
+fn drop_a_command_that_the_kernel_reaped(reaped: &str) -> String {
+    let output = self::reaped(reaped).output().expect("run the test binary");
     assert_eq!(
         output.status.code(),
         Some(101),
@@ -437,19 +443,13 @@ fn a_failed_kill_panics() {
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "needs perl and /proc")]
 fn a_failed_kill_while_the_test_panics_with_a_closed_stderr_does_not_abort() {
-    let binary = std::env::current_exe().expect("the test binary");
-    let mut child = Command::new("perl")
-        .args(["-e", "$SIG{CHLD} = 'IGNORE'; exec @ARGV or die"])
-        .arg(binary)
-        .args(["--exact", "rig::a_command_that_the_kernel_reaped_drops"])
+    let (reader, writer) = std::io::pipe().expect("a pipe");
+    drop(reader);
+    let output = reaped("panic")
         .arg("--nocapture")
-        .env(REAPED, "panic")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(writer)
+        .output()
         .expect("run the test binary");
-    drop(child.stderr.take());
-    let output = child.wait_with_output().expect("wait for the test binary");
     let report = String::from_utf8(output.stdout).expect("UTF-8");
     assert_eq!(output.status.code(), Some(101), "{report}");
 }
