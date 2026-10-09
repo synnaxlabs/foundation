@@ -6,6 +6,8 @@
 
 mod one_node;
 mod rig;
+#[cfg(unix)]
+mod start;
 mod status;
 
 use rig::Rig;

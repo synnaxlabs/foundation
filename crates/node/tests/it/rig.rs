@@ -21,13 +21,14 @@ const PATIENCE: Span = Span::from_nanos(90_000_000_000);
 /// The time between two checks of a wait.
 const POLL: Duration = Duration::from_millis(100);
 
-/// One `foundation` node in a temporary directory of its own. Drop removes the
-/// directory, except while the thread panics: a failed test keeps it.
+/// One `foundation` node in a temporary directory of its own. Drop kills the node and
+/// removes the directory, except while the thread panics: a failed test keeps it.
 #[derive(Debug)]
 pub(crate) struct Rig {
     /// The working directory of each command. It holds `plant.hcl`.
     pub(crate) dir: PathBuf,
     clock: Clock,
+    node: Option<Running>,
 }
 
 impl Rig {
@@ -51,6 +52,7 @@ impl Rig {
         Self {
             dir,
             clock: os::clock(),
+            node: None,
         }
     }
 
@@ -62,7 +64,52 @@ impl Rig {
     /// Starts `foundation start --name edge`, with each listener of the node on port 0
     /// of loopback, and waits until it prints that the node runs.
     pub(crate) fn start(&mut self) {
-        todo!("waits on #1732")
+        self.start_with(&["--name", "edge"]);
+    }
+
+    /// [`Rig::start`] with `args` in place of `--name edge`. Panics when a node runs,
+    /// when the node exits before it prints a line, or when 90 s pass first.
+    pub(crate) fn start_with(&mut self, args: &[&str]) {
+        assert!(self.node.is_none(), "a node runs");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
+        command.arg("start").args(args).current_dir(&self.dir);
+        // The node reads no input.
+        let (mut node, _) = Running::new(command);
+        let started = poll(&self.clock, PATIENCE, || match node.ended() {
+            Some(status) => Ok(Some(status)),
+            None if node.stdout.text().contains('\n') => Ok(None),
+            None => Err(node.seen()),
+        });
+        match started {
+            Ok(None) => self.node = Some(node),
+            Ok(Some(status)) => {
+                panic!("the node exited with {status}:\n{}", node.seen())
+            }
+            Err(seen) => {
+                node.process.end();
+                late("the node prints that it runs", PATIENCE, &seen)
+            }
+        }
+    }
+
+    /// Stops the node of [`Rig::start`] with SIGTERM, and gives its output when it
+    /// exits and closes its pipes. Panics when no node runs, or when 90 s pass first.
+    #[cfg(unix)]
+    pub(crate) fn stop(&mut self) -> Output {
+        let mut node = self.node.take().expect("a node runs");
+        let pid = node.process.0.id().to_string();
+        let sent = Command::new("kill").arg(&pid).status().expect("run kill");
+        assert!(sent.success(), "send SIGTERM to {pid}");
+        let ended = poll(&self.clock, PATIENCE, || {
+            node.ended().ok_or_else(|| node.seen())
+        });
+        match ended {
+            Ok(status) => node.output(status),
+            Err(seen) => {
+                node.process.end();
+                late("the node exits at SIGTERM", PATIENCE, &seen)
+            }
+        }
     }
 
     /// Runs `foundation` with `args` in [`Rig::dir`], with `input` on its standard
@@ -366,8 +413,11 @@ impl Capture {
 impl Drop for Rig {
     fn drop(&mut self) {
         // While the thread panics, a remove can block and a second panic aborts the
-        // test binary.
+        // test binary. The drop of the node kills it.
         if !std::thread::panicking() {
+            if let Some(mut node) = self.node.take() {
+                node.process.end();
+            }
             std::fs::remove_dir_all(&self.dir).expect("remove the directory");
         }
     }
@@ -699,3 +749,40 @@ fn a_wait_past_its_limit_panics_with_the_last_state() {
     );
 }
 
+#[test]
+fn a_node_that_exits_before_it_runs_panics_with_its_output() {
+    let mut rig = Rig::new();
+    let start = std::panic::AssertUnwindSafe(|| rig.start_with(&[]));
+    let panic = std::panic::catch_unwind(start).expect_err("the start panics");
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some(
+            "the node exited with exit status: 1:\nstdout:\n\nstderr:\n\
+             error[node.unnamed]: the data directory foundation-data holds no node\n\
+             fix: Give the new node a name with `--name`\n"
+        )
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_rig_ends_its_node_before_it_removes_the_directory() {
+    let mut rig = Rig::new();
+    rig.start();
+    let pid = rig
+        .node
+        .as_ref()
+        .expect("a node")
+        .process
+        .0
+        .id()
+        .to_string();
+    let dir = rig.dir.clone();
+    drop(rig);
+    assert!(!dir.exists(), "{} is still there", dir.display());
+    let alive = Command::new("kill")
+        .args(["-0", &pid])
+        .output()
+        .expect("kill -0");
+    assert_eq!(alive.status.code(), Some(1), "{pid} still runs");
+}
