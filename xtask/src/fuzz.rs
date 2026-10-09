@@ -1305,7 +1305,7 @@ mod tests {
 
     #[test]
     fn new_builds_for_the_host_of_the_pin() {
-        let root = crate::common::stable_root("xtask-fuzz-host");
+        let root = crate::common::create_stable_root("xtask-fuzz-host");
         let cargo = Cargo::new(&root);
         std::fs::remove_dir_all(&root).unwrap();
         let build = cargo.unwrap().build();

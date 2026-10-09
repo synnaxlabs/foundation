@@ -76,7 +76,7 @@ fn parse_host(output: &Output) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::{output, stable_root};
+    use crate::common::{create_stable_root, output};
     use crate::fixture;
 
     #[test]
@@ -117,7 +117,7 @@ mod tests {
 
     #[test]
     fn reads_the_host_of_the_pin() {
-        let root = stable_root("xtask-nightly-host");
+        let root = create_stable_root("xtask-nightly-host");
         let host = Toolchain::read(&root).unwrap().host();
         std::fs::remove_dir_all(&root).unwrap();
         let host = host.unwrap();

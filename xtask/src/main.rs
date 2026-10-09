@@ -175,7 +175,7 @@ mod common {
 
     /// A new folder named `name` in the temp folder whose `rust-toolchain-nightly`
     /// pins the installed toolchain of `rust-toolchain.toml`. The caller removes it.
-    pub(crate) fn stable_root(name: &str) -> PathBuf {
+    pub(crate) fn create_stable_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let toolchain = std::fs::read_to_string(
