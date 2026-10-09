@@ -117,6 +117,7 @@
   as the composition root. Trigger: when the lab reaches the node through the CLI,
   remove `Node::operate` if nothing else calls it, and make `ops::Node::plan`, `apply`,
   and `mesh` crate-private. Lost: a `call(body)` dispatch, which is a table entry of
-  #1744; typed methods on `node::Node`; a `hub` that gives the mesh. Decided by
-  `laptop.architect-2` (2026-10-09T01:55:14Z,
+  #1744; typed methods on `ops::Node` that make `Output`, `Applied`, `Error`, and
+  `Problem` public; a `hub` that gives the mesh. Decided by `laptop.architect-2`
+  (2026-10-09T01:55:14Z,
   https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6072660664).
