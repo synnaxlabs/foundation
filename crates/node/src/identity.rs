@@ -173,5 +173,49 @@ mod tests {
             bytes[bit / 8] ^= 1 << (bit % 8);
             prop_assert!(decode(&bytes).is_none());
         }
+
+        #[test]
+        fn decodes_only_the_tag_and_the_checksum_and_encodes_the_same_bytes(
+            bytes in any::<[u8; LEN]>(),
+        ) {
+            check(&bytes)?;
+        }
+
+        #[test]
+        fn decodes_a_checksum_only_with_the_tag(body in any::<[u8; 64]>()) {
+            check(&with_checksum(body))?;
+        }
+
+        #[test]
+        fn decodes_each_key_and_private_key_after_the_tag(rest in any::<[u8; 48]>()) {
+            let mut body = [0; 64];
+            body[..16].copy_from_slice(TAG);
+            body[16..].copy_from_slice(&rest);
+            let bytes = with_checksum(body);
+            let identity = decode(&bytes).expect("decodes");
+            prop_assert_eq!(encode(&identity), bytes);
+        }
+    }
+
+    fn with_checksum(body: [u8; 64]) -> [u8; LEN] {
+        let mut bytes = [0; LEN];
+        bytes[..64].copy_from_slice(&body);
+        bytes[64..].copy_from_slice(&crc32c::crc32c(&body).to_le_bytes());
+        bytes
+    }
+
+    /// `decode` gives an identity exactly when `bytes` has the tag and the checksum,
+    /// and that identity encodes to `bytes`.
+    fn check(bytes: &[u8; LEN]) -> Result<(), TestCaseError> {
+        let valid = bytes[..16] == *TAG
+            && bytes[64..] == crc32c::crc32c(&bytes[..64]).to_le_bytes();
+        match decode(bytes) {
+            Some(identity) => {
+                prop_assert!(valid, "decodes {bytes:02x?}");
+                prop_assert_eq!(encode(&identity), *bytes);
+            }
+            None => prop_assert!(!valid, "refuses {bytes:02x?}"),
+        }
+        Ok(())
     }
 }

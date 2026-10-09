@@ -410,6 +410,12 @@ not reached from the corpus: `transport::message` (#55), the QUIC hello
 mesh log files and the names of their directory (`mesh::log::scan` and
 `mesh::log::sequence`, #1746), each connector's protocol parser, the OPC UA binary
 decoding of open62541 (`UA_decodeBinary`, #1885), and `connector::reader::read`,
-`node::identity::decode` (#1994), `connector::http::uri`, and
-`connector_influx::Kind::parse`, which `config_check` reaches only from an input with a
-`connector` block of kind `influx`, and no input holds one yet (#1817).
+`connector::http::uri`, and `connector_influx::Kind::parse`, which `config_check`
+reaches only from an input with a `connector` block of kind `influx`, and no input holds
+one yet (#1817).
+
+`node::identity::decode` needs no target. It reads a fixed 68 bytes of `node.key` and
+has only two compares, the tag and the CRC32C. Its unit tests give it any 68 bytes, any
+64 bytes with their CRC32C, and the tag with any key and private key. Each test checks
+that it refuses exactly the bytes with a wrong tag or CRC32C, and that an identity it
+gives encodes to the same bytes.
