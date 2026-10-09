@@ -106,10 +106,13 @@ fn refuses_a_plan_of_a_spec_that_changed_and_proposes_nothing() {
             .await
             .expect("an apply");
         let pointer = mesh.pointer();
-        let error = apply(path(), &plant.encode(), &mesh, &kinds(), keys(10))
-            .await
-            .expect_err("a stale plan");
-        assert_eq!(error, Error::Stale { base, pointer });
+        let error = refuses(
+            &mesh,
+            &plant.encode(),
+            &kinds(),
+            Error::Stale { base, pointer },
+        )
+        .await;
         assert_eq!(
             error.text(),
             format!(
@@ -119,7 +122,6 @@ fn refuses_a_plan_of_a_spec_that_changed_and_proposes_nothing() {
                 pointer.root, base.root
             )
         );
-        assert_eq!(mesh.pointer(), pointer);
     });
 }
 
@@ -172,11 +174,13 @@ fn refuses_a_stale_plan_with_a_founding_change_as_stale() {
             .await
             .expect("an apply");
         let pointer = mesh.pointer();
-        let error = apply(path(), &founding.encode(), &mesh, &kinds(), keys(10))
-            .await
-            .expect_err("a stale plan");
-        assert_eq!(error, Error::Stale { base, pointer });
-        assert_eq!(mesh.pointer(), pointer);
+        refuses(
+            &mesh,
+            &founding.encode(),
+            &kinds(),
+            Error::Stale { base, pointer },
+        )
+        .await;
     });
 }
 
@@ -249,7 +253,6 @@ fn one(
 #[test]
 fn refuses_a_change_of_a_founding_definition_and_proposes_nothing() {
     solo(|mesh| async move {
-        let base = mesh.pointer();
         let founding = spec::founding::create(ADMIN.public());
         let (subject, access) = (name("@admin.@subject"), name("@admin.@access"));
         let other =
@@ -271,11 +274,10 @@ fn refuses_a_change_of_a_founding_definition_and_proposes_nothing() {
             ),
         ];
         for (planned, at) in cases {
-            let error = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
-                .await
-                .expect_err("a founding definition");
             let mismatch = config::plan::Error::Mismatch { name: name(at) };
-            assert_eq!(error, Error::Plan(mismatch));
+            let error =
+                refuses(&mesh, &planned.encode(), &kinds(), Error::Plan(mismatch))
+                    .await;
             assert_eq!(
                 error.text(),
                 format!(
@@ -284,7 +286,6 @@ fn refuses_a_change_of_a_founding_definition_and_proposes_nothing() {
                      with `foundation plan`, and apply it with no edits\n"
                 )
             );
-            assert_eq!(mesh.pointer(), base);
         }
     });
 }
@@ -329,7 +330,13 @@ fn refuses_a_plan_that_plan_refuses_and_proposes_nothing() {
             ),
         ];
         for (planned, problem) in cases {
-            refuses(&mesh, &planned, &kinds(), vec![problem]).await;
+            refuses(
+                &mesh,
+                &planned.encode(),
+                &kinds(),
+                Error::Config(vec![problem]),
+            )
+            .await;
         }
     });
 }
@@ -387,7 +394,13 @@ fn refuses_a_plan_that_breaks_a_rule_on_names_or_private_keys() {
             ),
         ];
         for (planned, problem) in cases {
-            refuses(&mesh, &planned, &kinds(), vec![problem]).await;
+            refuses(
+                &mesh,
+                &planned.encode(),
+                &kinds(),
+                Error::Config(vec![problem]),
+            )
+            .await;
         }
     });
 }
@@ -464,20 +477,16 @@ fn problem(code: &str, message: &str, fix: &str) -> crate::error::Problem {
     }
 }
 
-/// Applies `planned` with `kinds`, and asserts that the apply gives the `Config`
-/// `problems` and proposes nothing.
-async fn refuses(
-    mesh: &Mesh,
-    planned: &config::plan::Plan,
-    kinds: &Table,
-    problems: Vec<crate::error::Problem>,
-) {
+/// Applies `bytes` with `kinds`, asserts that the apply gives `expected` and proposes
+/// nothing, and returns the error.
+async fn refuses(mesh: &Mesh, bytes: &[u8], kinds: &Table, expected: Error) -> Error {
     let base = mesh.pointer();
-    let error = apply(path(), &planned.encode(), mesh, kinds, keys(0))
+    let error = apply(path(), bytes, mesh, kinds, keys(0))
         .await
-        .expect_err("a plan that check refuses");
-    assert_eq!(error, Error::Config(problems));
+        .expect_err("a refused plan");
+    assert_eq!(error, expected);
     assert_eq!(mesh.pointer(), base);
+    error
 }
 
 const A_TIME: &str = "channel \"a.time\" { kind = \"index\" }\n";
@@ -556,7 +565,7 @@ fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
             ),
         ];
         for (planned, problems) in cases {
-            refuses(&mesh, &planned, &kinds(), problems).await;
+            refuses(&mesh, &planned.encode(), &kinds(), Error::Config(problems)).await;
         }
     });
 }
@@ -567,7 +576,13 @@ fn refuses_a_config_that_its_kind_refuses_at_the_apply() {
         let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let refusing = Table::new().with("influx", Reader).with("opcua", Refuser);
         let refused = problem("test.refused", "refused", "Fix it");
-        refuses(&mesh, &plant, &refusing, vec![refused]).await;
+        refuses(
+            &mesh,
+            &plant.encode(),
+            &refusing,
+            Error::Config(vec![refused]),
+        )
+        .await;
     });
 }
 
@@ -595,19 +610,21 @@ fn refuses_a_plan_with_only_a_home_on_a_node_that_is_not_a_member() {
             "no node of the mesh is named `other`",
             "Name a node of the mesh",
         );
-        refuses(&mesh, &site, &kinds(), vec![problem]).await;
+        refuses(
+            &mesh,
+            &site.encode(),
+            &kinds(),
+            Error::Config(vec![problem]),
+        )
+        .await;
     });
 }
 
 #[test]
 fn refuses_bytes_that_are_not_a_plan_and_proposes_nothing() {
     solo(|mesh| async move {
-        let base = mesh.pointer();
-        let error = apply(path(), b"plan", &mesh, &kinds(), keys(0))
-            .await
-            .expect_err("no plan");
         let version = config::plan::Error::Version { found: b'p' };
-        assert_eq!(error, Error::Plan(version));
+        let error = refuses(&mesh, b"plan", &kinds(), Error::Plan(version)).await;
         assert_eq!(error.status(), 2);
         assert_eq!(
             error.text(),
@@ -618,13 +635,9 @@ fn refuses_bytes_that_are_not_a_plan_and_proposes_nothing() {
         let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let mut bytes = planned.encode();
         bytes.truncate(2);
-        let error = apply(path(), &bytes, &mesh, &kinds(), keys(0))
-            .await
-            .expect_err("a cut plan");
         let malformed = config::plan::Error::Malformed { at: 1 };
-        assert_eq!(error, Error::Plan(malformed));
+        let error = refuses(&mesh, &bytes, &kinds(), Error::Plan(malformed)).await;
         assert_eq!(error.status(), 2);
-        assert_eq!(mesh.pointer(), base);
     });
 }
 
@@ -772,10 +785,13 @@ fn refuses_a_plan_on_a_node_that_uses_no_spec_as_behind() {
             &kinds(),
         )
         .expect("a plan");
-        let error = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
-            .await
-            .expect_err("a node behind");
-        assert_eq!(error, Error::Behind(Box::new(behind.clone())));
+        let error = refuses(
+            &mesh,
+            &planned.encode(),
+            &kinds(),
+            Error::Behind(Box::new(behind.clone())),
+        )
+        .await;
         assert_eq!(error.status(), 1);
         assert_eq!(
             error.text(),
@@ -786,11 +802,8 @@ fn refuses_a_plan_on_a_node_that_uses_no_spec_as_behind() {
                 behind.pointer.root
             )
         );
-        let error = apply(path(), b"plan", &mesh, &kinds(), keys(0))
-            .await
-            .expect_err("no plan");
         let version = config::plan::Error::Version { found: b'p' };
-        assert_eq!(error, Error::Plan(version));
+        refuses(&mesh, b"plan", &kinds(), Error::Plan(version)).await;
         assert_eq!(mesh.pointer(), behind.pointer);
     });
 }
@@ -895,11 +908,13 @@ fn refuses_a_plan_with_no_change_at_an_old_base_as_stale() {
             .await
             .expect("an apply");
         let pointer = mesh.pointer();
-        let error = apply(path(), &empty.encode(), &mesh, &kinds(), keys(10))
-            .await
-            .expect_err("a stale plan");
-        assert_eq!(error, Error::Stale { base, pointer });
-        assert_eq!(mesh.pointer(), pointer);
+        refuses(
+            &mesh,
+            &empty.encode(),
+            &kinds(),
+            Error::Stale { base, pointer },
+        )
+        .await;
     });
 }
 
@@ -956,10 +971,13 @@ fn refuses_a_plan_on_a_node_that_uses_an_old_spec_as_behind() {
         let spec = mesh.spec().await.expect("a spec");
         assert_eq!(spec.pointer, Some(first));
         let behind = spec.behind.expect("a node behind");
-        let error = apply(path(), &both.encode(), &mesh, &kinds(), keys(20))
-            .await
-            .expect_err("a node behind");
-        assert_eq!(error, Error::Behind(Box::new(behind)));
+        refuses(
+            &mesh,
+            &both.encode(),
+            &kinds(),
+            Error::Behind(Box::new(behind)),
+        )
+        .await;
     });
     assert_eq!(ran, Ok(()));
 }
