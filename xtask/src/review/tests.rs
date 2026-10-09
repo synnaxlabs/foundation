@@ -1488,6 +1488,10 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
         ("", "<search\n<?a?>\nReview round 3\n---", "<search"),
         ("", "<search\n<!----- x -->\nReview round 3\n---", "<search"),
         ("", "<!-- a -->\nReview round 3\n---", "<!-- a -->"),
+        ("", "- <source x\nReview round 3\n---", "- <source x"),
+        ("", "> <source x\nReview round 3\n---", "> <source x"),
+        ("", "- <source\nReview round 3\n---", "- <source"),
+        ("", "- </SOURCE>a\nReview round 3\n---", "- </SOURCE>a"),
         (notes, "a\n<search\n## Review round 3", "[^1]: <search"),
         (notes, "é\n<search\n## Review round 3", "[^1]: <search"),
     ] {

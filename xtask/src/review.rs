@@ -745,10 +745,23 @@ fn normalized(text: &str) -> String {
 }
 
 /// The round number of the first top-level heading that has one ([`number`]) in `body`
-/// read with each HTML block that GitHub does not start ([`unknown`]) read as lines of
-/// a paragraph, as GitHub reads them.
+/// read as GitHub reads its HTML blocks: with each `source` tag at the start of a line
+/// ([`bare`]) read as an `option` tag, and each HTML block that GitHub does not start
+/// ([`unknown`]) read as lines of a paragraph. GitHub reads HTML blocks by an older
+/// spec, in which a `source` tag starts one.
 fn unblocked(body: &str) -> Option<String> {
     let mut text = body.to_owned();
+    for start in std::iter::once(0).chain(body.match_indices('\n').map(|(i, _)| i + 1))
+    {
+        let line = &body[start..line_end(body, start)];
+        let rest = bare(line);
+        if opens(rest, "source") {
+            // Same length: the offsets stay.
+            let at = start + line.len() - rest.len();
+            let name = at + if rest.starts_with("</") { 2 } else { 1 };
+            text.replace_range(name..name + 6, "option");
+        }
+    }
     // A line of such a block can start another one once the block is gone.
     loop {
         let starts: Vec<usize> = std::iter::once(0)
@@ -786,18 +799,22 @@ fn unblocked(body: &str) -> Option<String> {
 /// reads HTML blocks by an older spec, with no `search` tag and only an uppercase
 /// letter after `<!`.
 fn unknown(line: &str) -> bool {
-    let tag = line.strip_prefix("</").or_else(|| line.strip_prefix('<'));
-    let search =
-        tag.and_then(|t| Some((t.get(..6)?, &t[6..])))
-            .is_some_and(|(name, rest)| {
-                let ends = [' ', '\t', '\n', '>'];
-                name.eq_ignore_ascii_case("search")
-                    && (rest.starts_with(ends) || rest.starts_with("/>"))
-            });
     let declaration = line
         .strip_prefix("<!")
         .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_lowercase()));
-    search || declaration
+    opens(line, "search") || declaration
+}
+
+/// Whether `line` starts with an open or a close tag named `name`, of 6 ASCII letters
+/// in any case, as the start of an HTML block of type 6.
+fn opens(line: &str, name: &str) -> bool {
+    let tag = line.strip_prefix("</").or_else(|| line.strip_prefix('<'));
+    tag.and_then(|t| Some((t.get(..6)?, &t[6..])))
+        .is_some_and(|(tag, rest)| {
+            let ends = [' ', '\t', '\n', '>'];
+            tag.eq_ignore_ascii_case(name)
+                && (rest.is_empty() || rest.starts_with(ends) || rest.starts_with("/>"))
+        })
 }
 
 /// The round number of `heading`: the text after `Review round` when it is a heading
