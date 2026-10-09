@@ -7360,6 +7360,37 @@ mod tests {
             });
         }
 
+        /// A peer that sends no hello goes silent, and the one wake after it comes past
+        /// both the idle timeout and the hello's bound: at the handshake, when the idle
+        /// timeout is due first, and 1.5 s after it, when the bound is.
+        #[test]
+        fn end_a_silent_session_at_a_late_wake_as_timed_out() {
+            for (quiet, wake) in [(0, 2_100), (1_500, 2_600)] {
+                testing::run(1, move |shard| {
+                    let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                    let mut foreign = Foreign::new(shard, |_| {});
+                    foreign.dial(pair.now(), pair::SERVER_KEY.public(), pair::SERVER);
+                    pair.foreign = Some(foreign);
+                    while pair.server.events.is_empty() {
+                        pair.run(Duration::from_millis(1));
+                    }
+                    pair.run(Duration::from_millis(quiet));
+                    pair.foreign = None;
+                    let (connected, _) = pair.server.events[0];
+                    let wake = pair::at(connected + Duration::from_millis(wake));
+                    pair.server.endpoint.timeout(wake);
+                    let mut events = Vec::new();
+                    while let Some(event) = pair.server.endpoint.poll() {
+                        events.push(event);
+                    }
+                    let [Event::Closed { error, .. }] = &events[..] else {
+                        panic!("{events:?}");
+                    };
+                    assert_eq!(error, &Error::TimedOut);
+                });
+            }
+        }
+
         /// Two nodes with an idle of 1 s, on links of 600 ms and 1.2 s RTT, which lose
         /// the server's first two datagrams. Each hello arrives late, after `idle`, and
         /// on the slower link after twice `idle`, but within the idle timeout of 3 PTO.

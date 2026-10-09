@@ -113,25 +113,27 @@ impl Connection {
         idle.expect("invariant: a `Setup` sets an idle timeout")
     }
 
-    /// Runs a timer due at `now`, and queues in `events` the [`Event::Closed`] of a
+    /// Runs the timers due at `now`, and queues in `events` the [`Event::Closed`] of a
     /// fault that it finds. Gives whether one ran, so that the caller drives the
-    /// connection.
+    /// connection. The idle timeout goes first: a wake past it and the hello's bound
+    /// ends a silent peer with [`Error::TimedOut`].
     pub(super) fn timeout(
         &mut self,
         now: Instant,
         events: &mut VecDeque<Event>,
     ) -> bool {
+        let ran = self.inner.poll_timeout().is_some_and(|due| due <= now);
+        if ran {
+            self.inner.handle_timeout(now);
+        }
         if self.connected()
+            && !self.inner.is_closed()
             && let Err(Fault(reason)) = self.streams.timeout(now, || self.idle())
         {
             events.extend(self.fault(now, reason));
             return true;
         }
-        if self.inner.poll_timeout().is_some_and(|due| due <= now) {
-            self.inner.handle_timeout(now);
-            return true;
-        }
-        false
+        ran
     }
 
     /// Moves the connection's events to `endpoint` and to `events` at `now`, and
