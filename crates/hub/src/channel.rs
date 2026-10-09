@@ -1,16 +1,31 @@
 //! The channels that sessions may name.
 
+use spec::channel::Kind;
 use types::channel;
-use types::sample::Type;
+use types::sample::{Scalar, Type};
 
-/// What sessions read of a defined channel.
+/// A defined channel, which sessions read at their open.
 #[derive(Clone, Debug)]
-pub(crate) struct Channel {
-    pub(crate) key: channel::Key,
-    /// The layout of its samples. Sessions read it only for a data channel.
-    pub(crate) data_type: Type,
+pub(crate) struct Channel(pub(crate) spec::channel::Channel);
+
+impl Channel {
+    pub(crate) fn key(&self) -> channel::Key {
+        self.0.key
+    }
+
     /// The index it is on. An index names itself.
-    pub(crate) index: channel::Key,
-    /// The definition it was made from, which a later set of definitions compares.
-    pub(crate) definition: spec::channel::Channel,
+    pub(crate) fn index(&self) -> channel::Key {
+        match &self.0.kind {
+            Kind::Index { .. } => self.0.key,
+            Kind::Data(data) => *data.index(),
+        }
+    }
+
+    /// The layout of its samples.
+    pub(crate) fn sample(&self) -> Type {
+        match &self.0.kind {
+            Kind::Index { .. } => Type::Scalar(Scalar::Stamp),
+            Kind::Data(data) => data.data_type().sample(),
+        }
+    }
 }

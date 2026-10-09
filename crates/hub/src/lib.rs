@@ -19,7 +19,6 @@ use types::channel::Key;
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
-use types::sample::{Scalar, Type};
 
 use channel::Channel;
 pub use link::{Link, Served};
@@ -305,8 +304,8 @@ impl State {
         let removed: hash::Set<Key> = self
             .channels
             .iter()
-            .filter(|&(name, known)| channels.get(name) != Some(&&known.definition))
-            .map(|(_, known)| known.key)
+            .filter(|&(name, known)| channels.get(name) != Some(&&known.0))
+            .map(|(_, known)| known.key())
             .collect();
         let index = |channel: &spec::channel::Channel| {
             matches!(channel.kind, Kind::Index { .. }).then_some(channel.key)
@@ -314,7 +313,7 @@ impl State {
         let before: hash::Set<Key> = self
             .channels
             .values()
-            .filter_map(|known| index(&known.definition))
+            .filter_map(|known| index(&known.0))
             .collect();
         let after: hash::Set<Key> = channels
             .values()
@@ -328,7 +327,7 @@ impl State {
             self.home.shed(slot);
         }
         self.channels
-            .retain(|_, known| !removed.contains(&known.key));
+            .retain(|_, known| !removed.contains(&known.key()));
         self.indexes.retain(|key, _| !removed.contains(key));
         let mut carried: Vec<Key> = after.difference(&before).copied().collect();
         carried.sort_unstable();
@@ -383,18 +382,8 @@ impl State {
 
     /// Makes `channel` known to sessions as `name`.
     fn define(&mut self, name: &Name, channel: &spec::channel::Channel) {
-        let key = channel.key;
-        let (data_type, index) = match &channel.kind {
-            Kind::Index { .. } => (Type::Scalar(Scalar::Stamp), key),
-            Kind::Data(data) => (data.data_type().sample(), *data.index()),
-        };
-        self.indexes.insert(key, index);
-        let channel = Channel {
-            key,
-            data_type,
-            index,
-            definition: channel.clone(),
-        };
+        let channel = Channel(channel.clone());
+        self.indexes.insert(channel.key(), channel.index());
         self.channels.insert(name.clone(), channel);
     }
 

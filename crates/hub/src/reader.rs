@@ -128,11 +128,11 @@ impl Reader {
                     .channels
                     .get(name)
                     .ok_or_else(|| Error::Unknown(name.clone()))?;
-                if *index.get_or_insert(channel.index) != channel.index {
+                if *index.get_or_insert(channel.index()) != channel.index() {
                     return Err(Error::ManyIndexes);
                 }
-                slots.push(borrowed.interner.slots().assign(channel.key));
-                keys.push(channel.key);
+                slots.push(borrowed.interner.slots().assign(channel.key()));
+                keys.push(channel.key());
             }
             let index = index.ok_or(Error::Empty)?;
             keys.push(index);

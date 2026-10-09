@@ -114,13 +114,14 @@ impl Writer {
                 .channels
                 .get(name)
                 .ok_or_else(|| Error::Unknown(name.clone()))?;
-            keys.push(channel.key);
-            let at = *positions.entry(channel.index).or_insert_with(|| {
-                groups.push((channel.index, Vec::new()));
+            let (key, index) = (channel.key(), channel.index());
+            keys.push(key);
+            let at = *positions.entry(index).or_insert_with(|| {
+                groups.push((index, Vec::new()));
                 groups.len() - 1
             });
-            if channel.key != channel.index && data.insert(channel.key) {
-                groups[at].1.push((channel.key, channel.data_type));
+            if key != index && data.insert(key) {
+                groups[at].1.push((key, channel.sample()));
             }
         }
         let groups: Vec<_> = groups
