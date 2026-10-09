@@ -125,9 +125,11 @@
   `Region` (2026-10-08T20:07:32Z:
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715), which
   supersedes `hub::Config::mesh` of
-  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067438821, and
-  `Refusal`, `Finished`, `end`, and the dial at each open, which supersedes the
-  session for each home of that plan (2026-10-08T21:19:24Z:
+  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067438821 and
+  `hub::Config::transport` of 6048960511, and `Refusal`, `Finished`, `end`, and the
+  dial at each open, which supersede `Refused(transport::Code)` of `reader::Error` and
+  `reader::Ended` in 6048960511 and the session for each home of that plan
+  (2026-10-08T21:19:24Z:
   https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6069259471). The
   removal of `reader::Error::Remote` supersedes it in
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273.
