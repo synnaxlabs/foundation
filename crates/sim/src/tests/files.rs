@@ -1731,6 +1731,31 @@ fn a_create_does_not_wait_for_a_live_rename_to_its_path() {
     assert!(found.contains(&None), "{found:?}");
 }
 
+/// Whether the block of a dropped write of a handle is still in use when a later
+/// write of the handle ends.
+fn block_held_after_write(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        pool.alloc(big).unwrap_err();
+        let small = [block(&pool, &[1; 512])];
+        file.write_at(0, &small).await.unwrap();
+        drop(small);
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_write_does_not_wait_for_a_dropped_write_on_its_path() {
+    assert!((0..32).any(block_held_after_write));
+}
+
 /// Whether the block of a dropped write of a handle, sent on `a`, is still in use when
 /// a rename of the handle from `a` to `b` ends.
 fn block_held_after_rename(value: u64) -> bool {
