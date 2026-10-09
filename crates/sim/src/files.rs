@@ -261,8 +261,8 @@ impl Files {
     /// than: the end of the last call on `path` that a dropped future or handle left
     /// to run, or of a remove through a handle, live or not, or zero. A call on `path`
     /// uses it, or the file that it names, or a file that a rename to it moves there,
-    /// or `file`, the file of a remove through a handle. A remove through a handle is on
-    /// the path that it was sent on and on its file.
+    /// or `file`, the file of a remove through a handle. A remove through a handle is
+    /// on the path that it was sent on and on its file.
     fn wait_end(&self, node: usize, path: &Path, file: Option<u64>) -> Monotonic {
         let path = disk::normal(path);
         let pending: Vec<_> = (self.queue.iter().rev())
