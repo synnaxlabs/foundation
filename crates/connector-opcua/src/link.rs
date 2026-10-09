@@ -488,7 +488,11 @@ fn the_c_and_cfg_asan_follow_the_address_sanitizer_of_the_rust() {
     let rust = names(&[exe], "--defined-only").contains("__asan_init");
     let undefined = symbols("--undefined-only");
     let c = undefined.iter().any(|name| name.starts_with("__asan_"));
-    assert_eq!((c, cfg!(asan)), (rust, rust));
+    assert_eq!(
+        (c, cfg!(asan)),
+        (rust, rust),
+        "(the C calls ASan, cfg(asan)) must equal whether the Rust links ASan"
+    );
 }
 
 /// GCC 10 and later default to `-moutline-atomics` on 64-bit Arm Linux, and so does
