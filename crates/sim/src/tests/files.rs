@@ -1737,16 +1737,16 @@ fn a_remove_through_the_handle_removes_the_file_and_closes_it() {
 }
 
 /// What a write open of `a` gives while a `File::remove` of it, whose future lives
-/// and which a fault fails, is in flight.
+/// and which a fault fails, is in flight. The open ends before the remove is polled
+/// again.
 fn open_beside_failed_handle_remove(value: u64) -> Option<Error> {
-    run(value, MIB, |node, tasks| async move {
-        let file = create(&node, "a", KIB).await;
+    run(value, MIB, |node, _| async move {
+        let (files, file) = (node.files(), create(&node, "a", KIB).await);
         node.fail_file(Path::new("a"), Operation::Remove);
-        tasks.spawn(async move {
-            assert_eq!(file.remove().await, Err(io("a", Operation::Remove, 5)));
-        });
-        node.clock().sleep(Span::from_nanos(1)).await;
-        let found = node.files().open(Path::new("a"), Mode::Write).await;
+        let mut remove = Box::pin(file.remove());
+        pend(remove.as_mut()).await;
+        let found = files.open(Path::new("a"), Mode::Write).await;
+        assert_eq!(remove.await, Err(io("a", Operation::Remove, 5)));
         found.map(drop).err()
     })
 }
