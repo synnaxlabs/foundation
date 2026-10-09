@@ -1,6 +1,6 @@
 //! Runs connectors and restarts them after errors.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::future::poll_fn;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -11,6 +11,7 @@ use env::clock::Clock;
 use env::entropy::Entropy;
 use env::net::Net;
 use env::tasks::{Driver, Task, Tasks};
+use types::hash::Map;
 use types::name::Name;
 use types::time::Span;
 
@@ -44,25 +45,32 @@ pub struct Config {
 /// Runs connectors of the kinds in a table, one `run` call at a time per connector.
 /// It is not `Send`: each shard makes its own.
 #[derive(Debug)]
-pub struct Supervisor(Rc<Config>);
+pub struct Supervisor {
+    config: Rc<Config>,
+    /// The tasks of each connector whose `run` future dropped before they ended.
+    left: RefCell<Map<Name, Rc<Live>>>,
+}
 
 impl Supervisor {
     /// Makes a supervisor for one shard.
     #[must_use]
     pub fn new(config: Config) -> Self {
-        Self(Rc::new(config))
+        Self {
+            config: Rc::new(config),
+            left: RefCell::default(),
+        }
     }
 
     /// Runs one connector: parses its config, starts `run`, and restarts it with
     /// backoff after any error but `Config`. The waits start again from the first
     /// after a run that lasted at least a minute. Never starts a run before the last
-    /// one returned and each task it spawned through [`Context::tasks`] ended, or
-    /// after `cancel` is cancelled.
+    /// one returned or dropped and each task it spawned through [`Context::tasks`]
+    /// ended, or after `cancel` is cancelled.
     ///
     /// Returns `Ok` when `run` returns `Ok`, or when `cancel` is cancelled and the
     /// run returned, in each case once the run's tasks ended. A drop of the future
-    /// cancels the run and does not wait for its tasks: to wait, cancel `cancel` and
-    /// await the future. The future is not `Send`: call it on a shard.
+    /// cancels the run, and the next `run` of `name` on this supervisor waits for its
+    /// tasks. The future is not `Send`: call it on a shard.
     ///
     /// # Errors
     ///
@@ -81,11 +89,19 @@ impl Supervisor {
             entropy,
             tasks,
             ..
-        } = &*self.0;
+        } = &*self.config;
+        let left = self.left.borrow_mut().remove(&name).unwrap_or_default();
+        let mut held = Left {
+            name: name.clone(),
+            live: left,
+            map: &self.left,
+        };
+        held.live.ended().await;
         let mut backoff = retry::Backoff::new(clock, entropy.rng(), RESTART);
         while !cancel.cancelled() {
             let token = Ended(cancel.child());
             let live = Rc::new(Live::default());
+            held.live = Rc::clone(&live);
             let count = Count {
                 tasks: tasks.clone(),
                 live: Rc::clone(&live),
@@ -95,7 +111,7 @@ impl Supervisor {
                 (),
                 token.0.clone(),
                 Tasks::new(count),
-                Rc::clone(&self.0),
+                Rc::clone(&self.config),
             );
             let start = clock.now();
             let end = kinds.run(kind, config, ctx).map_err(Error::Config)?.await;
@@ -127,6 +143,23 @@ impl Drop for Ended {
     }
 }
 
+/// Keeps the tasks of a connector's last run for its next `run` when the future of
+/// `run` drops before they ended.
+struct Left<'a> {
+    name: Name,
+    live: Rc<Live>,
+    map: &'a RefCell<Map<Name, Rc<Live>>>,
+}
+
+impl Drop for Left<'_> {
+    fn drop(&mut self) {
+        if self.live.n.get() > 0 {
+            let live = Rc::clone(&self.live);
+            self.map.borrow_mut().insert(self.name.clone(), live);
+        }
+    }
+}
+
 /// Spawns a run's tasks on the shard and counts those that have not ended.
 struct Count {
     tasks: Tasks,
@@ -145,10 +178,10 @@ impl Driver for Count {
 }
 
 /// How many tasks of one run have not ended, and who waits for none.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Live {
     n: Cell<usize>,
-    waiter: Cell<Option<Waker>>,
+    waiter: RefCell<Option<Waker>>,
 }
 
 impl Live {
@@ -158,7 +191,7 @@ impl Live {
             if self.n.get() == 0 {
                 return Poll::Ready(());
             }
-            self.waiter.set(Some(cx.waker().clone()));
+            self.waiter.replace(Some(cx.waker().clone()));
             Poll::Pending
         })
         .await;
@@ -784,5 +817,45 @@ mod tests {
             (before, *live.lock().expect("no panic"))
         });
         assert_eq!(live, (1, 0), "the second run's task outlives the drop");
+    }
+
+    #[test]
+    fn waits_for_the_tasks_of_a_dropped_run_before_a_new_run_of_its_connector() {
+        let (seen, kept) = run_on(|node, tasks| async move {
+            let kind = Spawner {
+                linger: ms(2_000),
+                ..Spawner::default()
+            };
+            let seen = Arc::clone(&kind.seen);
+            let kinds = Table::new().with("spawner", kind);
+            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let config = config();
+            let clock = node.clock();
+            let token = Token::new();
+            let name: Name = "plant.spawner".parse().expect("a valid name");
+            let mut run =
+                Box::pin(supervisor.run("spawner", name.clone(), &config, &token));
+            let mut later = pin!(clock.sleep(ms(5_000)));
+            poll_fn(|cx| {
+                assert!(run.as_mut().poll(cx).is_pending(), "it runs until dropped");
+                later.as_mut().poll(cx)
+            })
+            .await;
+            drop(run);
+            let again = Token::new();
+            let (canceller, sleeper) = (again.clone(), clock.clone());
+            tasks.spawn(async move {
+                sleeper.sleep(ms(5_000)).await;
+                canceller.cancel();
+            });
+            supervisor
+                .run("spawner", name, &config, &again)
+                .await
+                .expect("ok after the cancel");
+            let kept = supervisor.left.borrow().len();
+            (seen.lock().expect("no panic").clone(), kept)
+        });
+        assert_eq!(seen, [0, 0, 0], "the dropped run's task still runs");
+        assert_eq!(kept, 0, "a run whose tasks ended is kept");
     }
 }
