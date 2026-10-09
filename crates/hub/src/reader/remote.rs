@@ -2,9 +2,8 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::fmt;
 use std::future::poll_fn;
-use std::pin::{Pin, pin};
+use std::pin::pin;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker, ready};
@@ -21,18 +20,15 @@ use super::{Ended, Error, Mode, Streak, WINDOW};
 use crate::State;
 
 /// A reader session on one stream to the home. A task takes each frame off the stream
-/// as it arrives, so an idle caller never holds the window of the session. Each credit
-/// on its way lives in it, so a dropped [`Remote::take`] loses nothing.
+/// as it arrives and sends each credit, so an idle caller never holds the window or
+/// the send turn of the session.
 #[derive(Debug)]
 pub(super) struct Remote {
-    state: Rc<RefCell<State>>,
     queue: Rc<RefCell<Queue>>,
-    /// `None` once the session ended.
-    out: Option<Out>,
     /// The charge of each frame given back, for a complete reader.
     credit: Option<u64>,
-    /// The grant that the home has, which the task checks.
-    limit: Rc<Cell<u64>>,
+    /// The grant that the reader last asked the task to send.
+    asked: u64,
     /// The reader's key set. Place `n` of the open is entry `n`.
     set: Arc<KeySet>,
     /// The mask of every entry of `set`.
@@ -46,9 +42,11 @@ struct Queue {
     frames: VecDeque<Frame>,
     /// Why the session ended. The caller gets it after each frame in `frames`.
     ended: Option<Ended>,
+    /// The grant that the task sends next, for a complete reader.
+    due: Option<u64>,
     /// The waker of a [`Remote::take`] that waits for a frame.
     taker: Option<Waker>,
-    /// The waker of the task, which ends once the [`Remote`] drops.
+    /// The waker of the task of the session.
     task: Option<Waker>,
 }
 
@@ -125,15 +123,14 @@ impl Remote {
         let checked = credit.map(|_| Rc::clone(&limit));
         let inbound = Inbound::new(state, receiver, decoder, &set, checked);
         let latest = mode == Mode::Latest;
-        let task = run(Rc::downgrade(&queue), inbound, latest);
-        state.borrow().tasks.spawn(task);
+        let receiving = receive(Rc::downgrade(&queue), inbound, latest);
+        let granting = grant(Rc::downgrade(&queue), Rc::clone(state), sender, limit);
+        state.borrow().tasks.spawn(run(receiving, granting));
         let mask = Mask::new(&set, set.entries().iter().map(|entry| entry.slot));
         Ok(Self {
-            state: Rc::clone(state),
             queue,
-            out: Some(Out::Idle(sender)),
             credit,
-            limit,
+            asked: WINDOW,
             set,
             mask,
             streak: Streak::default(),
@@ -155,86 +152,34 @@ impl Remote {
     /// The [`Ended`] that ended the session, after each frame that arrived before it,
     /// on this and every later call.
     pub(super) async fn take(&mut self) -> Result<(Frame, &Arc<KeySet>, &Mask), Ended> {
-        if let Err(ended) = self.grant() {
-            self.queue.borrow_mut().end(ended);
-        }
-        let Self {
-            queue,
-            out,
-            credit,
-            limit,
-            streak,
-            ..
-        } = &mut *self;
+        self.ask();
+        let Self { queue, streak, .. } = &mut *self;
         let next = poll_fn(|cx| {
             ready!(streak.poll(cx));
-            if matches!(out, Some(Out::Sending(_))) && queue.borrow().ended.is_none() {
-                poll_credit(out, credit, limit, cx);
-            }
             let polled = queue.borrow_mut().poll_take(cx);
             streak.count(&polled);
             polled
         })
         .await;
-        match next {
-            Ok(frame) => Ok((frame, &self.set, &self.mask)),
-            Err(ended) => {
-                // A credit on its way drops with its sender, which resets with code
-                // 0. The home still sees the stop.
-                if let (Some(refusal), Some(Out::Idle(sender))) =
-                    (refusal(&ended), self.out.take())
-                {
-                    sender.reset(Code(refusal.code()));
-                }
-                Err(ended)
-            }
-        }
+        next.map(|frame| (frame, &self.set, &self.mask))
     }
 
-    /// Sends the credit once the home's grant is half a window short of the frames
-    /// given back plus a window, unless the session ended or a credit is on its
-    /// way. A credit that finds no room goes on its way, and [`poll_credit`] sends
-    /// it. A send that fails sends no more credits: the home stopped reading them,
-    /// and the frames that it sent still arrive.
-    fn grant(&mut self) -> Result<(), Ended> {
+    /// Asks the task to send a credit once the grant asked is half a window short of
+    /// the frames given back plus a window.
+    fn ask(&mut self) {
         let Some(taken) = self.credit else {
-            return Ok(());
+            return;
         };
         let limit_bytes = taken + WINDOW;
-        let Some(Out::Idle(sender)) = &mut self.out else {
-            return Ok(());
-        };
-        if limit_bytes - self.limit.get() < WINDOW / 2
-            || self.queue.borrow().ended.is_some()
-        {
-            return Ok(());
+        if limit_bytes - self.asked < WINDOW / 2 {
+            return;
         }
-        let mut block = self
-            .state
-            .borrow()
-            .alloc(Credit::LEN)
-            .map_err(Ended::Pool)?;
-        Credit { limit_bytes }.encode(&mut block);
-        let block = match sender.try_send(block.freeze()) {
-            Ok(None) => {
-                self.limit.set(limit_bytes);
-                return Ok(());
-            }
-            Ok(Some(block)) => block,
-            Err(_) => {
-                (self.out, self.credit) = (None, None);
-                return Ok(());
-            }
-        };
-        let Some(Out::Idle(mut sender)) = self.out.take() else {
-            unreachable!("invariant: no credit is on its way");
-        };
-        let sending = async move {
-            let sent = sender.send(block).await;
-            (sender, limit_bytes, sent)
-        };
-        self.out = Some(Out::Sending(Box::pin(sending)));
-        Ok(())
+        self.asked = limit_bytes;
+        let mut queue = self.queue.borrow_mut();
+        queue.due = Some(limit_bytes);
+        if let Some(task) = &queue.task {
+            task.wake_by_ref();
+        }
     }
 }
 
@@ -282,10 +227,27 @@ fn keep(slot: &mut Option<Waker>, cx: &Context<'_>) {
     }
 }
 
+/// Polls `receiving` and `granting`, the two halves of the task of a session, until
+/// both end.
+async fn run(receiving: impl Future<Output = ()>, granting: impl Future<Output = ()>) {
+    let (mut receiving, mut granting) = (pin!(receiving), pin!(granting));
+    let (mut received, mut granted) = (false, false);
+    poll_fn(|cx| {
+        received = received || receiving.as_mut().poll(cx).is_ready();
+        granted = granted || granting.as_mut().poll(cx).is_ready();
+        if received && granted {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+}
+
 /// Takes each frame off the stream of `inbound` as it arrives into `queue`, until the
 /// session ends or the [`Remote`] drops. A latest reader keeps only the newest frame.
 /// An end that the task finds stops the stream with its refusal, if it has one.
-async fn run(queue: Weak<RefCell<Queue>>, mut inbound: Inbound, latest: bool) {
+async fn receive(queue: Weak<RefCell<Queue>>, mut inbound: Inbound, latest: bool) {
     let mut streak = Streak::default();
     loop {
         let next = {
@@ -436,47 +398,76 @@ impl Inbound {
     }
 }
 
-/// The sending half of the stream to the home.
-enum Out {
-    /// No credit is on its way.
-    Idle(Sender),
-    /// A credit on its way, which owns the sender until the stream holds all of the
-    /// credit. A dropped [`Remote::take`] never cuts it: a cut send resets the stream.
-    /// Once the session ended, nothing polls it, so it never reaches the home.
-    Sending(Pin<Box<dyn Future<Output = Sent>>>),
-}
-
-/// The sender, the limit of the credit that it sent, and the result of the send.
-type Sent = (Sender, u64, Result<(), transport::Error>);
-
-impl fmt::Debug for Out {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Idle(sender) => f.debug_tuple("Idle").field(sender).finish(),
-            Self::Sending(_) => f.write_str("Sending"),
-        }
-    }
-}
-
-/// Polls the credit that `out` has on its way, and raises the grant in `limit` once
-/// the stream holds it. A send that fails clears both `out` and `credit`, as
-/// [`Remote::grant`] says.
-fn poll_credit(
-    out: &mut Option<Out>,
-    credit: &mut Option<u64>,
-    limit: &Cell<u64>,
-    cx: &mut Context<'_>,
+/// Sends each credit that `queue` asks for on `sender`, and raises the grant in `limit`
+/// once the stream holds it, until the session ends or the [`Remote`] drops. Then
+/// resets the stream with the refusal of the end, or with code 0 when it has none or
+/// a credit is still on its way. A send that fails sends no more credits: the home
+/// stopped reading them, and the frames that it sent still arrive. A pool with no
+/// block for a credit ends the session with [`Ended::Pool`].
+async fn grant(
+    queue: Weak<RefCell<Queue>>,
+    state: Rc<RefCell<State>>,
+    mut sender: Sender,
+    limit: Rc<Cell<u64>>,
 ) {
-    if let Some(Out::Sending(sending)) = out
-        && let Poll::Ready((sender, limit_bytes, sent)) = sending.as_mut().poll(cx)
-    {
-        if sent.is_err() {
-            (*out, *credit) = (None, None);
-            return;
+    let refusal = loop {
+        let limit_bytes = match poll_fn(|cx| poll_due(&queue, cx)).await {
+            Ok(limit_bytes) => limit_bytes,
+            Err(refusal) => break refusal,
+        };
+        let block = state.borrow().alloc(Credit::LEN);
+        let mut block = match block {
+            Ok(block) => block,
+            Err(error) => {
+                if let Some(queue) = queue.upgrade() {
+                    queue.borrow_mut().end(Ended::Pool(error));
+                }
+                continue;
+            }
+        };
+        Credit { limit_bytes }.encode(&mut block);
+        let mut sending = pin!(sender.send(block.freeze()));
+        let sent = poll_fn(|cx| match poll_end(&queue, cx) {
+            Poll::Ready(_) => Poll::Ready(None),
+            Poll::Pending => sending.as_mut().poll(cx).map(Some),
+        })
+        .await;
+        match sent {
+            Some(Ok(())) => limit.set(limit_bytes),
+            Some(Err(_)) | None => return,
         }
-        *out = Some(Out::Idle(sender));
-        limit.set(limit_bytes);
+    };
+    if let Some(refusal) = refusal {
+        sender.reset(Code(refusal.code()));
     }
+}
+
+/// The grant that `queue` asks the task to send, else the end as [`poll_end`] gives it.
+fn poll_due(
+    queue: &Weak<RefCell<Queue>>,
+    cx: &Context<'_>,
+) -> Poll<Result<u64, Option<Refusal>>> {
+    if let Poll::Ready(refusal) = poll_end(queue, cx) {
+        return Poll::Ready(Err(refusal));
+    }
+    let due = queue
+        .upgrade()
+        .and_then(|queue| queue.borrow_mut().due.take());
+    due.map_or(Poll::Pending, |limit_bytes| Poll::Ready(Ok(limit_bytes)))
+}
+
+/// The refusal of the end once the session ended, or `None` once the [`Remote`]
+/// dropped, else `Pending` with the waker kept in `queue`.
+fn poll_end(queue: &Weak<RefCell<Queue>>, cx: &Context<'_>) -> Poll<Option<Refusal>> {
+    let Some(queue) = queue.upgrade() else {
+        return Poll::Ready(None);
+    };
+    let mut queue = queue.borrow_mut();
+    if let Some(ended) = &queue.ended {
+        return Poll::Ready(refusal(ended));
+    }
+    keep(&mut queue.task, cx);
+    Poll::Pending
 }
 
 /// The session to `home`, another node, that the shard's transport holds or dials.
@@ -614,17 +605,4 @@ fn refusal(ended: &Ended) -> Option<Refusal> {
 
 fn to_usize(value: u32) -> usize {
     usize::try_from(value).expect("invariant: a usize holds a u32")
-}
-
-#[cfg(test)]
-mod tests {
-    use std::future;
-
-    use super::*;
-
-    #[test]
-    fn a_credit_on_its_way_shows_as_sending() {
-        let out = Out::Sending(Box::pin(future::pending()));
-        assert_eq!(format!("{out:?}"), "Sending");
-    }
 }
