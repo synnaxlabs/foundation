@@ -31,7 +31,7 @@
   #2106 did so for `arch/common/timer.c` of open62541: a hand mutant of each changed
   line fails a test or the build, except the release form of a `UA_assert` line,
   which builds to the same code with `UA_DEBUG` off (approved by
-  `laptop.architect-2`, 2026-10-09,
+  `laptop.architect-2`, 2026-10-09T04:52:13Z,
   https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074512538).
   A change of a file that the copy command of a C copy generates (the thread-local
   block of the open62541 `config.h`) is made again after each run of that command, as
