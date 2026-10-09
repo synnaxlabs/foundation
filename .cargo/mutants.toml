@@ -2,7 +2,8 @@
 # `sim` is mutated and tested.
 all_features = true
 
-# Mutants that no test can catch, each with the reason.
+# Mutants that no caller or peer can see, that only a job outside the mutants run
+# kills, or that no test kills yet (with its open issue). Each has its reason.
 exclude_re = [
   # A type name shows only in a panic of `connector_opcua::fuzz::decode`, which a
   # correct open62541 never gives. `fuzz::tests` checks the names.
@@ -34,6 +35,10 @@ exclude_re = [
   # Empty outside a build with the address sanitizer. Only the Rust ASan build of
   # #1912 reads the header in `block`, and its alloc tests fail without it.
   'crates/connector-opcua/src/alloc\.rs:.*replace unpoison with \(\)$',
+  # `moves` is a `sim` hook, so no caller or peer sees it. Only the private reads of
+  # `sends_from_one_run_on_one_connection_ask_for_one_move` and
+  # `a_send_from_a_run_with_no_value_moves_on_only_its_connection` kill the mutant.
+  'crates/connector-opcua/src/connection\.rs:.*replace \+ with \* in State::move_on$',
   # The fields of a UUIDv7 share no bit, so `^` gives the same bits as `|`.
   'crates/types/src/uuid\.rs:.*replace \| with \^ in v7$',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
@@ -76,6 +81,9 @@ exclude_re = [
   # Only Miri sees the stub task that a skipped clear leaks, and the miri job runs
   # those tests.
   'crates/connector-ni/src/daqmx\.rs:.*replace <impl Drop for Task>::drop with \(\)',
+  # Only a counting allocator sees the buffer that a skipped free leaks, and no public
+  # call reaches the manager until #435 PR 6c, whose memory test removes this entry.
+  'crates/connector-opcua/src/connection\.rs:.*replace <impl Drop for Buffer>::drop with \(\)',
   # A fence changes the order of memory operations around a counter read, and no
   # result a test can see. Loom does not model a counter read.
   'crates/os/src/clock\.rs:.*replace (settle|hold) with \(\)',
