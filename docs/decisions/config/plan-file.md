@@ -73,5 +73,5 @@
   connectors of an index in name order, so each gives the same problems. Name order, and
   an empty `allow` refused in `spec`: `laptop.architect-2`, 2026-10-09T00:48:39Z
   (https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
-  Supersedes the first-writer order of
+  This changes the first-writer order of
   https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143.
