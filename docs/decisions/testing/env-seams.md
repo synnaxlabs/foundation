@@ -415,7 +415,6 @@
   file call of its own and each failure of the data directory is `os::Error::Dir`
   (`laptop.architect-2`, 2026-10-09T18:30:45Z:
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545; the sync
-  at each call and the lost options: `laptop.architect-2`, 2026-10-09T18:40:55Z:
-  https://github.com/synnaxlabs/foundation/pull/2169#issuecomment-6087061440; the thread
-  with no handle: `laptop.architect-2`, 2026-10-09T19:05:37Z:
-  https://github.com/synnaxlabs/foundation/pull/2169#issuecomment-6087447005).
+  at each call, the thread with no handle, and the lost options: `laptop.architect-2`,
+  2026-10-09T18:40:55Z:
+  https://github.com/synnaxlabs/foundation/pull/2169#issuecomment-6087061440).
