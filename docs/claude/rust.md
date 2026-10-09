@@ -106,16 +106,18 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - Every error a user can see has a stable code and a fix-it hint.
 - Convert errors with `From` and `?`. Never drop the cause (r16 18).
 - Never ignore a `Result`: no `.ok();`, no `let _ = fallible();`, and no
-  `let _name = fallible();` (r16 19). Never `unwrap()` outside tests. Use
+  `let _name = fallible();` (r16 19). A `#[should_panic]` test may bind a call that
+  panics before it returns to `_name`. Never `unwrap()` outside tests. Use
   `expect("invariant: ...")` only for an internal invariant.
 - An internal invariant that breaks panics. Bad outside input never panics: it returns
   an error. Panic and assert messages state what broke and the values (r16 20).
 - `Drop` never panics on a failure from outside the code (an I/O error, a closed peer,
   bad outside input). It matches that failure by its name, and the arm states why the
   outcome is then correct. A broken internal invariant panics in `Drop` too. `Drop`
-  never blocks unless the type also gives a call that does not block (r16 23). Two
-  exceptions: `sim::Sim` (SIM DROP in `docs/decisions/testing/sim-drop.md`), and the
-  test types that TEST DROP names (`docs/decisions/testing/test-drop.md`).
+  never blocks unless the type also gives a call that does not block (r16 23).
+  `sim::Sim` panics in its `Drop` to report a panic of a future (SIM DROP in
+  `docs/decisions/testing/sim-drop.md`). The test types that TEST DROP names follow
+  it (`docs/decisions/testing/test-drop.md`), not this bullet.
 
 ## Unsafe
 
