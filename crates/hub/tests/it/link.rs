@@ -1,10 +1,13 @@
 //! The client sessions that `Link::serve` serves, over a real transport from a program
 //! to a simulated node: the hello stream, and the request streams.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
+use std::task::{Poll, Waker};
 
 use access::proof::{Error as Refusal, Field};
 use hub::{Served, serve};
@@ -143,15 +146,21 @@ where
     let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
         let (test, session, link) = accept(&node, &tasks, pool, synced, rules).await;
+        let live = Live::default();
         while let Ok(mut incoming) = session.accept().await {
             let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
+            let held = live.hold();
             tasks.spawn(async move {
                 header(&mut incoming).await;
                 let got = answer(link.serve(incoming), &clock).await;
                 kept.lock().expect("not poisoned").push(got);
+                drop(held);
             });
         }
         *ended.lock().expect("not poisoned") = Some(session.closed().await);
+        // The shard drops its tasks when this future ends, so a stream task that has
+        // not pushed its result yet would lose it.
+        live.ended().await;
         drop((link, test));
     };
     run_program_on(seed, wire, home, program);
@@ -160,6 +169,45 @@ where
     Home {
         served,
         closed: closed.expect("the session closed"),
+    }
+}
+
+/// The count of tasks that hold a [`Held`], with the waker of the one wait for zero.
+#[derive(Default)]
+struct Live(Rc<RefCell<(usize, Option<Waker>)>>);
+
+/// One task that [`Live::ended`] waits for, until it drops.
+struct Held(Rc<RefCell<(usize, Option<Waker>)>>);
+
+impl Live {
+    fn hold(&self) -> Held {
+        self.0.borrow_mut().0 += 1;
+        Held(Rc::clone(&self.0))
+    }
+
+    /// Ends when no [`Held`] is left.
+    async fn ended(&self) {
+        std::future::poll_fn(|cx| {
+            let mut live = self.0.borrow_mut();
+            if live.0 == 0 {
+                return Poll::Ready(());
+            }
+            live.1 = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let mut live = self.0.borrow_mut();
+        live.0 -= 1;
+        if live.0 == 0
+            && let Some(waker) = live.1.take()
+        {
+            waker.wake();
+        }
     }
 }
 
