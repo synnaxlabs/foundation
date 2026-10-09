@@ -11,10 +11,10 @@
   stops the stream with `Code(wire::header::REJECTED)` and resets the reply half with
   the same code, as for a header that does not decode, or for a first message with bytes
   after the header. The node reads no datagram until the first protocol that takes
-  datagrams has a server (#1661). The node admits every peer that
-  completes the handshake; the mesh checks each message of a mesh stream (NODE MESH).
-  With no mesh, at the stop, each session and stream future drops, then the transport.
-  The bound on the wait for a header is #1628.
+  datagrams has a server (#1661). The node admits each peer that completes the
+  handshake, within the bound on sessions of #1628 (below); the mesh checks each message
+  of a mesh stream (NODE MESH). With no mesh, at the stop, each session and stream
+  future drops, then the transport. A header has 10 s (#1628, below).
   Decided by `laptop.architect-2` (2026-10-07 21:09 UTC):
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046900669, on the
   plan https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6046861267;
@@ -23,7 +23,7 @@
   Amended (2026-10-07, #1649 round 1, a finding of `performance` that
   `laptop.integrator-1` deferred, 23:41 UTC): the window caps a session at the window
   over the round trip, about 21 MB/s at 50 ms, until #1662 sizes it from the
-  bandwidth-delay product. The number of sessions has no bound until #1628.
+  bandwidth-delay product. The number of sessions has no bound until #1628 (below).
   https://github.com/synnaxlabs/foundation/pull/1649#issuecomment-6049077609.
   Amended (2026-10-08, #1647, by `laptop.architect-2`, 00:05 UTC): a transport that
   stops with an error stops the node, and `Node::join` gives `Error::Transport`. The
@@ -130,3 +130,17 @@
   UTC): https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068130409, on
   the ruling of `laptop.architect` (20:08 UTC):
   https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791.
+  Amended (2026-10-09, #1628, by `laptop.architect-2`):
+  https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6082002858, on the
+  plan https://github.com/synnaxlabs/foundation/issues/1628#issuecomment-6081954276.
+  Two bounds, patches until #1662 as the limits above are. A stream whose header has not
+  arrived 10 s after the stream did is rejected as a header that does not decode is. A
+  test cannot open a stream with no bytes, because the transport queues a stream at its
+  first byte, so a first message that is still arriving at 10 s tests the wait. Shard 0
+  holds at most 256 sessions of peers outside the region (`Peer::Client`, and a
+  `Peer::Node` whose key no member holds in this node's view) and closes each next one
+  at once with `Code(wire::session::REFUSED)`. It never refuses a member, so a flood of
+  programs cannot lock the region out. Trigger: the change kind that removes a member
+  (MESH DRIVER) also closes each session of that node, with the code of a refused
+  session, and so ends its `Hub` and `Mesh` streams. The node then admits it again as
+  any other peer.
