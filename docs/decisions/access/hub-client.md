@@ -7,7 +7,7 @@
   `connect` for a challenge near the end of mesh time, a second guard of the node's own
   checks of the expiry (`EXPIRED`). A task renews the hello at half of `LIFE`
   after each admission, on the hello stream, until the session ends. A renewal waits for
-  a block as each message does, and the node closes the session if the hello expires
+  a block as each message does, and the node closes the session if the hello ends
   first. A challenge that `wire` refuses ends the renewal and closes the session with
   `MALFORMED`. Each later request gives the error that ended the renewal.
   `request(body)` signs the body, sends it on its own stream, and gives the body of the

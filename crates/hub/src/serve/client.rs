@@ -124,7 +124,7 @@ pub(crate) async fn hello(
 }
 
 /// Admits the first hello, then each renewal, until the program finishes the stream
-/// or the hello expires.
+/// or the hello ends.
 async fn renew(
     session: &Session,
     receiver: &mut Receiver,
