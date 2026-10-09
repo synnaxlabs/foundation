@@ -124,16 +124,7 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
         Line::new("complete wait", FRAMES - 1),
     ];
     for round in 0..WARMUP + ROUNDS {
-        let [
-            now,
-            first,
-            write,
-            wake,
-            latest_next,
-            complete_next,
-            grant,
-            wait,
-        ] = &mut lines;
+        let [now, first, write, wake, taken, complete_next, grant, wait] = &mut lines;
         for frame in 0..FRAMES {
             let draft = common::draft(&writer, stamp);
             stamp += 1;
@@ -149,7 +140,7 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
                 _ => &mut *write,
             };
             line.add(table::timed(&ALLOCATOR, || common::write(&mut writer, draft)).1);
-            latest_next.add(take(&mut latest));
+            taken.add(take(&mut latest));
         }
         let woken = count.wakes();
         assert_eq!(woken, round + 1, "each round's last write wakes the reader");
