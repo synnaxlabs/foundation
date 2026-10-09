@@ -187,9 +187,9 @@ fn a_batch_arrives_as_one_batch() {
     });
 }
 
-/// Receives one batch, and gives its length, stride, and ECN mark.
+/// Receives one batch, and gives its contents, stride, and ECN mark.
 #[cfg(target_os = "linux")]
-async fn receive_batch(receiver: &mut Receiver) -> (usize, usize, Option<Ecn>) {
+async fn receive_batch(receiver: &mut Receiver) -> (Vec<u8>, usize, Option<Ecn>) {
     let mut buffer = vec![0; receiver.batch_max().get() * DATAGRAM_BYTES_MAX];
     let mut meta = [Meta::default()];
     let mut buffers = [IoSliceMut::new(&mut buffer)];
@@ -200,7 +200,7 @@ async fn receive_batch(receiver: &mut Receiver) -> (usize, usize, Option<Ecn>) {
     .await;
     assert_eq!(batches.expect("the batch arrives"), Ok(1));
     let [meta] = meta;
-    (meta.len, meta.stride, meta.ecn)
+    (buffers[0][..meta.len].to_vec(), meta.stride, meta.ecn)
 }
 
 /// A transmit that the kernel refuses leaves GSO and the IPv4 ECN mark on.
@@ -242,7 +242,7 @@ fn a_refused_transmit_leaves_gso_and_ecn_on() {
                 assert_eq!(send(&mut sender, &batch).await, Ok(()));
                 assert_eq!(
                     receive_batch(&mut receiver).await,
-                    (300, 100, Some(Ecn::Ce)),
+                    (contents.to_vec(), 100, Some(Ecn::Ce)),
                     "after {case}"
                 );
             }
@@ -265,18 +265,15 @@ fn a_batch_arrives_when_the_kernel_refuses_gso() {
             segment: NonZeroUsize::new(100),
             ..transmit(receiver.local(), &contents)
         };
-        let expected: Vec<_> = contents
-            .chunks(100)
-            .map(|c| (c.to_vec(), Some(Ecn::Ce)))
-            .collect();
         for round in ["first", "second"] {
             assert_eq!(send(&mut sender, &batch).await, Ok(()), "{round} batch");
-            let datagrams: Vec<_> = receive(&mut receiver, 3)
-                .await
-                .into_iter()
-                .map(|d| (d.contents, d.ecn))
-                .collect();
-            assert_eq!(datagrams, expected, "{round} batch");
+            for datagram in contents.chunks(100) {
+                assert_eq!(
+                    receive_batch(&mut receiver).await,
+                    (datagram.to_vec(), 100, Some(Ecn::Ce)),
+                    "{round} batch"
+                );
+            }
         }
     });
 }
