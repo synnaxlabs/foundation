@@ -3,20 +3,17 @@
 //! at most 64 chunks, not one sized by the message.
 
 use std::cell::OnceCell;
-use std::future::poll_fn;
 use std::net::SocketAddr;
-use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
 
 use sim::Sim;
 use sim::node::Node;
 use transport::{Address, Class, Code, Error, Transport};
 use types::time::Span;
 
-use crate::ALLOCATOR;
 use crate::common::{CLIENT, PORT, SERVER, config, filled, part};
+use crate::{ALLOCATOR, next};
 
 /// The most heap that the drop of the receiver gives back: a list of 64 chunks, since
 /// each slot is 32 bytes.
@@ -112,20 +109,10 @@ fn serve(node: &Node, out: Arc<Mutex<Out>>) {
         let session = transport.accept().await.expect("a session");
         let mut receiver = session.accept().await.expect("a stream").receiver;
         let clock = own.clock();
-        let mut pending = 0;
-        let read = {
-            let mut recv = pin!(receiver.recv());
-            loop {
-                if let Poll::Ready(read) =
-                    poll_fn(|cx| Poll::Ready(recv.as_mut().poll(cx))).await
-                {
-                    break read;
-                }
-                pending += 1;
-                out.lock().expect("not poisoned").1 = pending;
-                clock.sleep(Span::MILLISECOND).await;
-            }
-        };
+        let (read, pending) = next(&mut receiver, &clock, |pending| {
+            out.lock().expect("not poisoned").1 = pending;
+        })
+        .await;
         let read = read.map(|block| block.map_or(0, |block| block.len()));
         clock.sleep(DROP).await;
         let before = ALLOCATOR.held();
