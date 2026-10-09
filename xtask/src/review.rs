@@ -464,7 +464,7 @@ fn entries(lines: &[String]) -> (Vec<(&'static str, String)>, usize) {
         match (name, values.last_mut()) {
             (Some(name), _) => values.push((*name, line[name.len() + 1..].to_string())),
             (None, Some((_, value))) => {
-                *value = format!("{value} {}", line.trim_start());
+                *value = format!("{value} {line}");
             }
             _ => return (values, i),
         }
