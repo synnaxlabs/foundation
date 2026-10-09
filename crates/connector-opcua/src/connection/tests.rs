@@ -5,6 +5,7 @@ use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::pin::{Pin, pin};
 use std::ptr;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
@@ -14,11 +15,22 @@ use env::rng::Rng;
 use sim::{Sim, node};
 use types::time::{Monotonic, Span};
 
-use super::{Manager, OPTIONS};
+use super::{LINGER, Manager, OPTIONS, READ_BYTES, SENDS};
+use crate::child;
 use crate::event::Loop;
 use crate::ffi::{self, Bytes, ConnectionState, KeyValueMap, Status};
 
 const PORT: u16 = 4840;
+
+/// The delay of a link of the sim.
+const DELAY: Span = Span::from_nanos(250_000);
+
+/// Gives `count` sends of `length` bytes, each of other bytes.
+fn sends(count: u8, length: usize) -> Vec<Vec<u8>> {
+    (0..count)
+        .map(|k| (0..=u8::MAX).cycle().take(length).map(|b| b ^ k).collect())
+        .collect()
+}
 
 /// `UA_NodeId` with a numeric identifier.
 #[repr(C)]
@@ -188,6 +200,15 @@ impl Side {
         Status(unsafe { (self.members().close)(self.cm(), id) })
     }
 
+    /// The count of connections in the table.
+    fn connections(&self) -> usize {
+        self.manager.state().table.borrow().len()
+    }
+
+    fn states(&self) -> Vec<ConnectionState> {
+        self.calls().iter().map(|(_, state, _)| *state).collect()
+    }
+
     fn run(&self) {
         let events = self.events();
         // SAFETY: the member takes its own loop.
@@ -258,16 +279,18 @@ unsafe extern "C" fn record(
     calls.borrow_mut().push((id, state, bytes));
 }
 
-/// What the peer read: each read with its time, and when the stream ended.
+/// What the peer read: each read with its time, and when and how the stream ended.
 #[derive(Default)]
 struct Reads {
-    reads: Vec<(Monotonic, Vec<u8>)>,
+    parts: Vec<(Monotonic, Vec<u8>)>,
     ended: Option<Monotonic>,
+    /// The error that ended the stream, if one did.
+    error: Option<String>,
 }
 
 impl Reads {
     fn bytes(&self) -> Vec<u8> {
-        self.reads
+        self.parts
             .iter()
             .flat_map(|(_, bytes)| bytes.clone())
             .collect()
@@ -293,9 +316,13 @@ impl Network {
         SocketAddr::new(self.peer.addresses()[0], PORT)
     }
 
-    /// Accepts one stream on the peer, writes `answer` and closes when it is given,
-    /// and records what it reads until the stream ends.
-    fn serve(&self, answer: Option<&'static [u8]>) -> Arc<Mutex<Reads>> {
+    /// Accepts one stream on the peer, and runs `peer` on it with the clock of the
+    /// peer.
+    fn accept<P, F>(&self, peer: P)
+    where
+        P: FnOnce(Tcp, Clock) -> F + Send + 'static,
+        F: Future<Output = ()> + 'static,
+    {
         let listen = tcp::Listen {
             local: self.remote(),
             backlog: 4,
@@ -303,37 +330,61 @@ impl Network {
         };
         let mut listener = self.peer.net().listen(&listen).expect("the port is free");
         let clock = self.peer.clock();
-        let reads = Arc::new(Mutex::new(Reads::default()));
-        let slot = Arc::clone(&reads);
         let config = env::shards::Config {
             name: "peer".into(),
             core: None,
         };
         let handle = self.peer.shards().start(config, move |_| async move {
-            let mut stream = poll_fn(|cx| listener.poll_accept(cx))
+            let stream = poll_fn(|cx| listener.poll_accept(cx))
                 .await
                 .expect("a stream comes");
+            peer(stream, clock).await;
+        });
+        drop(handle.expect("the shard starts"));
+    }
+
+    /// Accepts one stream on the peer, writes `answer` and closes when it is given,
+    /// and records what it reads until the stream ends.
+    fn serve(&self, answer: Option<&'static [u8]>) -> Arc<Mutex<Reads>> {
+        let reads = Arc::new(Mutex::new(Reads::default()));
+        let slot = Arc::clone(&reads);
+        self.accept(move |mut stream, clock| async move {
             if let Some(answer) = answer {
                 write(&mut stream, answer).await;
                 poll_fn(|cx| stream.poll_close(cx))
                     .await
                     .expect("the close works");
             }
-            loop {
-                let mut buffer = [0; 512];
-                let read = poll_fn(|cx| stream.poll_read(cx, &mut buffer)).await;
-                let mut reads = slot.lock().expect("no panic under the lock");
-                match read {
-                    Ok(0) | Err(_) => {
-                        reads.ended = Some(clock.now());
-                        break;
-                    }
-                    Ok(n) => reads.reads.push((clock.now(), buffer[..n].to_vec())),
-                }
-            }
+            read_all(&mut stream, &clock, &slot, Span::ZERO).await;
         });
-        drop(handle.expect("the shard starts"));
         reads
+    }
+}
+
+/// Records what `stream` reads in `reads` until it ends, and waits `pause` after
+/// each read.
+async fn read_all(stream: &mut Tcp, clock: &Clock, reads: &Mutex<Reads>, pause: Span) {
+    loop {
+        let mut buffer = vec![0; 1 << 15];
+        let read = poll_fn(|cx| stream.poll_read(cx, &mut buffer)).await;
+        {
+            let mut reads = reads.lock().expect("no panic under the lock");
+            match read {
+                Ok(0) => {
+                    reads.ended = Some(clock.now());
+                    return;
+                }
+                Err(e) => {
+                    reads.ended = Some(clock.now());
+                    reads.error = Some(e.to_string());
+                    return;
+                }
+                Ok(n) => reads.parts.push((clock.now(), buffer[..n].to_vec())),
+            }
+        }
+        if pause > Span::ZERO {
+            clock.sleep(pause).await;
+        }
     }
 }
 
@@ -365,6 +416,7 @@ fn a_connect_gives_opening_then_established_and_the_peer_reads_each_send() {
             assert_eq!(side.close(1), Status::GOOD);
             assert_eq!(side.send(1, b"three"), Status::BAD_CONNECTION_CLOSED);
             side.drive(Span::SECOND).await;
+            assert_eq!(side.connections(), 0);
             assert_eq!(side.close(1), Status::BAD_NOT_FOUND);
             assert_eq!(side.send(1, b"four"), Status::BAD_CONNECTION_CLOSED);
             side.calls()
@@ -390,9 +442,7 @@ fn the_peer_reads_each_byte_of_sends_that_the_stream_takes_in_parts() {
     let mut network = Network::new();
     let reads = network.serve(None);
     let remote = network.remote();
-    let sends: Vec<Vec<u8>> = (0..3u8)
-        .map(|k| (0..=u8::MAX).cycle().take(30_000).map(|b| b ^ k).collect())
-        .collect();
+    let sends = sends(3, 30_000);
     let written = sends.clone();
     network
         .sim
@@ -459,7 +509,7 @@ fn a_close_of_the_peer_gives_its_bytes_then_closing_once() {
         ]
     );
     let reads = reads.lock().expect("no panic under the lock");
-    assert!(reads.reads.is_empty());
+    assert!(reads.parts.is_empty());
     assert!(reads.ended.is_some());
 }
 
@@ -662,12 +712,6 @@ fn after_a_timer(action: Action) -> Outcome {
     Outcome { due, calls, reads }
 }
 
-/// The latest time that a step the timer starts may end, with no wait for the 1 s
-/// timer.
-fn soon(due: Monotonic) -> Monotonic {
-    due + Span::from_nanos(50_000_000)
-}
-
 #[test]
 fn a_connect_from_a_run_of_the_loop_is_established_with_no_other_event() {
     let outcome = after_a_timer(Action::Connect);
@@ -679,15 +723,11 @@ fn a_connect_from_a_run_of_the_loop_is_established_with_no_other_event() {
 fn a_send_from_a_run_of_the_loop_goes_out_with_no_other_event() {
     let outcome = after_a_timer(Action::Send);
     let reads = outcome.reads.lock().expect("no panic under the lock");
-    let [(at, bytes)] = &reads.reads[..] else {
-        panic!("one read: {:?}", reads.reads.len());
+    let [(at, bytes)] = &reads.parts[..] else {
+        panic!("one read: {:?}", reads.parts.len());
     };
     assert_eq!(bytes, b"late");
-    assert!(
-        *at <= soon(outcome.due),
-        "read at {at:?}, due at {:?}",
-        outcome.due
-    );
+    assert_eq!(*at, outcome.due + DELAY);
 }
 
 #[test]
@@ -696,12 +736,7 @@ fn a_close_from_a_run_of_the_loop_ends_the_stream_with_no_other_event() {
     let states: Vec<_> = outcome.calls.iter().map(|(_, state, _)| *state).collect();
     assert_eq!(states, [ffi::OPENING, ffi::ESTABLISHED, ffi::CLOSING]);
     let reads = outcome.reads.lock().expect("no panic under the lock");
-    let ended = reads.ended.expect("the stream ends");
-    assert!(
-        ended <= soon(outcome.due),
-        "ended at {ended:?}, due at {:?}",
-        outcome.due
-    );
+    assert_eq!(reads.ended, Some(outcome.due + DELAY));
 }
 
 #[test]
@@ -739,4 +774,322 @@ fn a_client_sends_hel_and_its_disconnect_ends_the_stream() {
     let length = u32::from_le_bytes(bytes[4..8].try_into().expect("4 bytes"));
     assert_eq!(usize::try_from(length).expect("u32 fits"), bytes.len());
     assert!(reads.ended.is_some());
+}
+
+#[test]
+fn a_drive_ends_with_the_first_value_of_run() {
+    let mut network = Network::new();
+    drop(network.serve(None));
+    let remote = network.remote();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            let start = side.clock.now();
+            assert_eq!(side.connect(remote), Status::GOOD);
+            let at = side
+                .manager
+                .drive(|| {
+                    side.run();
+                    (side.calls().len() == 2).then(|| side.clock.now())
+                })
+                .await;
+            assert_eq!(at, start + DELAY + DELAY);
+            assert_eq!(side.states(), [ffi::OPENING, ffi::ESTABLISHED]);
+        })
+        .expect("the run ends");
+}
+
+/// A close from a task that does not drive the manager wakes the task that does.
+#[test]
+fn a_close_from_another_task_ends_the_stream_with_no_other_event() {
+    let mut network = Network::new();
+    let reads = network.serve(None);
+    let remote = network.remote();
+    let at = network
+        .sim
+        .run_on(&network.local.clone(), move |node, tasks| async move {
+            let side = Rc::new(Side::new(&node));
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::from_nanos(100_000_000)).await;
+            let at = side.clock.now() + Span::from_nanos(10_000_000);
+            let other = Rc::clone(&side);
+            tasks.spawn(async move {
+                other.clock.sleep_until(at).await;
+                assert_eq!(other.close(1), Status::GOOD);
+            });
+            side.drive(Span::SECOND).await;
+            at
+        })
+        .expect("the run ends");
+    let reads = reads.lock().expect("no panic under the lock");
+    assert_eq!(reads.ended, Some(at + DELAY));
+}
+
+#[test]
+fn a_close_during_the_connect_gives_closing_and_no_stream() {
+    let mut network = Network::new();
+    drop(network.serve(None));
+    let remote = network.remote();
+    let error = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.connections(), 0);
+            assert_eq!(side.states(), [ffi::OPENING, ffi::CLOSING]);
+        })
+        .expect_err("the peer gets no stream");
+    let threads = vec!["peer".to_owned()];
+    assert_eq!(error, sim::Error::Stuck { threads, seed: 0 });
+}
+
+#[test]
+fn a_send_during_the_connect_is_refused() {
+    let mut network = Network::new();
+    let reads = network.serve(None);
+    let remote = network.remote();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            assert_eq!(side.send(1, b"early"), Status::BAD_CONNECTION_CLOSED);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+        })
+        .expect("the run ends");
+    let reads = reads.lock().expect("no panic under the lock");
+    assert_eq!(reads.bytes(), b"");
+    assert!(reads.ended.is_some());
+}
+
+/// The stream takes one send of 200,000 bytes in at least 4 writes, as its send
+/// buffer holds 64 KiB.
+#[test]
+fn the_peer_reads_each_byte_of_one_send_larger_than_the_send_buffer() {
+    let mut network = Network::new();
+    let reads = network.serve(None);
+    let remote = network.remote();
+    let send = sends(1, 200_000).remove(0);
+    let written = send.clone();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.send(1, &written), Status::GOOD);
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+        })
+        .expect("the run ends");
+    let reads = reads.lock().expect("no panic under the lock");
+    assert_eq!(reads.bytes(), send);
+    assert_eq!(reads.error, None);
+}
+
+/// The peer answers its first read with more bytes than one read takes, then waits
+/// 100 ms after each read. The close reads and drops the answer, so the stream ends
+/// with no reset after each send.
+#[test]
+fn a_close_writes_each_send_to_a_peer_that_wrote_bytes_it_did_not_read() {
+    let mut network = Network::new();
+    let reads = Arc::new(Mutex::new(Reads::default()));
+    let slot = Arc::clone(&reads);
+    network.accept(move |mut stream, clock| async move {
+        let mut buffer = [0; 512];
+        let n = poll_fn(|cx| stream.poll_read(cx, &mut buffer))
+            .await
+            .expect("the read works");
+        let first = (clock.now(), buffer[..n].to_vec());
+        slot.lock()
+            .expect("no panic under the lock")
+            .parts
+            .push(first);
+        write(&mut stream, &vec![7; 3 * READ_BYTES]).await;
+        read_all(&mut stream, &clock, &slot, Span::from_nanos(100_000_000)).await;
+    });
+    let remote = network.remote();
+    let sends = sends(5, 30_000);
+    let written = sends.clone();
+    let states = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            for send in &written {
+                assert_eq!(side.send(1, send), Status::GOOD);
+            }
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(LINGER).await;
+            assert_eq!(side.connections(), 0);
+            side.states()
+        })
+        .expect("the run ends");
+    assert_eq!(states, [ffi::OPENING, ffi::ESTABLISHED, ffi::CLOSING]);
+    let reads = reads.lock().expect("no panic under the lock");
+    assert_eq!(reads.error, None);
+    assert_eq!(reads.bytes(), sends.concat());
+}
+
+/// A close of a stream whose peer never reads drops it once it has waited
+/// [`LINGER`] from the first close, not from a later one.
+#[test]
+fn a_close_drops_a_stream_that_takes_no_bytes_after_it_lingers() {
+    let mut network = Network::new();
+    network.accept(|stream, clock| async move {
+        clock.sleep(Span::from_nanos(3_600_000_000_000)).await;
+        drop(stream);
+    });
+    let remote = network.remote();
+    let states = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            for send in sends(10, 30_000) {
+                assert_eq!(side.send(1, &send), Status::GOOD);
+            }
+            assert_eq!(side.close(1), Status::GOOD);
+            side.clock.sleep(Span::from_nanos(5_000_000_000)).await;
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::from_nanos(4_999_000_000)).await;
+            assert_eq!(side.connections(), 1);
+            side.drive(Span::from_nanos(1_000_000)).await;
+            assert_eq!(side.connections(), 0);
+            side.states()
+        })
+        .expect("the run ends");
+    assert_eq!(states, [ffi::OPENING, ffi::ESTABLISHED, ffi::CLOSING]);
+}
+
+/// Runs the test `name` of this module in a child process, asserts that it passes,
+/// and gives what it wrote to stderr.
+fn stderr(name: &str) -> String {
+    let output = child::output(&format!("connection::tests::{name}"));
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{stdout}"
+    );
+    String::from_utf8(output.stderr).unwrap()
+}
+
+/// The peer resets the stream as it accepts it, when `child::running()`.
+#[test]
+fn reset_as_open() {
+    if !child::running() {
+        return;
+    }
+    let mut network = Network::new();
+    network.accept(|stream, _| async move { drop(stream) });
+    let remote = network.remote();
+    let states = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.connections(), 0);
+            assert_eq!(side.close(1), Status::BAD_NOT_FOUND);
+            side.states()
+        })
+        .expect("the run ends");
+    assert_eq!(states, [ffi::OPENING, ffi::ESTABLISHED, ffi::CLOSING]);
+}
+
+#[test]
+fn a_reset_gives_closing_and_a_warning() {
+    assert_eq!(
+        stderr("reset_as_open"),
+        "connector-opcua: open62541 warning: connection 1: the read failed: \
+         10.0.0.2:4840 reset the stream\n"
+    );
+}
+
+/// The peer resets the stream 100 ms after it accepts it, and reads nothing, when
+/// `child::running()`.
+#[test]
+fn reset_as_closing() {
+    if !child::running() {
+        return;
+    }
+    let mut network = Network::new();
+    network.accept(|stream, clock| async move {
+        clock.sleep(Span::from_nanos(100_000_000)).await;
+        drop(stream);
+    });
+    let remote = network.remote();
+    let states = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::from_nanos(10_000_000)).await;
+            for send in sends(10, 30_000) {
+                assert_eq!(side.send(1, &send), Status::GOOD);
+            }
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.connections(), 0);
+            side.states()
+        })
+        .expect("the run ends");
+    assert_eq!(states, [ffi::OPENING, ffi::ESTABLISHED, ffi::CLOSING]);
+}
+
+#[test]
+fn a_reset_of_a_closed_connection_drops_it_before_it_lingers() {
+    assert_eq!(
+        stderr("reset_as_closing"),
+        "connector-opcua: open62541 warning: connection 1: the read failed: \
+         10.0.0.2:4840 reset the stream\n"
+    );
+}
+
+/// Sends one more than [`SENDS`] with no poll between, when `child::running()`.
+#[test]
+fn send_past_the_bound() {
+    if !child::running() {
+        return;
+    }
+    let mut network = Network::new();
+    let reads = network.serve(None);
+    let remote = network.remote();
+    let sends = sends(u8::try_from(SENDS).unwrap(), 100);
+    let written = sends.clone();
+    let states = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            for send in &written {
+                assert_eq!(side.send(1, send), Status::GOOD);
+            }
+            assert_eq!(side.send(1, b"past"), Status::BAD_CONNECTION_CLOSED);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.connections(), 0);
+            side.states()
+        })
+        .expect("the run ends");
+    assert_eq!(states, [ffi::OPENING, ffi::ESTABLISHED, ffi::CLOSING]);
+    let reads = reads.lock().expect("no panic under the lock");
+    assert_eq!(reads.bytes(), sends.concat());
+    assert_eq!(reads.error, None);
+}
+
+#[test]
+fn a_send_past_the_bound_closes_the_connection_with_a_warning() {
+    assert_eq!(
+        stderr("send_past_the_bound"),
+        "connector-opcua: open62541 warning: connection 1: 16 sends wait, so it \
+         closes\n"
+    );
 }

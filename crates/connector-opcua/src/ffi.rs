@@ -299,6 +299,11 @@ unsafe extern "C" {
 
     pub(crate) fn shim_loop_new(now: Now, clock: *mut c_void) -> *mut EventLoop;
     pub(crate) fn shim_loop_free(el: *mut EventLoop);
+    pub(crate) fn shim_log_warning(
+        el: *mut EventLoop,
+        message: *const u8,
+        length: usize,
+    );
 
     pub(crate) fn shim_client_new(el: *mut EventLoop) -> *mut Client;
     pub(crate) fn UA_Client_run_iterate(client: *mut Client, timeout_ms: u32) -> u32;

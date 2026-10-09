@@ -306,6 +306,13 @@ static void log_message(void *context, UA_LogLevel level, UA_LogCategory categor
     (void)written;
 }
 
+/* Logs the `length` bytes at `message` as a warning through the logger of `el`.
+ * `length` is above 0: mp_printf reads a precision of 0 as none, and reads to a NUL. */
+void shim_log_warning(UA_EventLoop *el, const char *message, size_t length) {
+    int bytes = length < LOG_BYTES ? (int)length : LOG_BYTES;
+    UA_LOG_WARNING(el->logger, UA_LOGCATEGORY_NETWORK, "%.*s", bytes, message);
+}
+
 /* Gives a fresh loop whose time is `now(clock)`, or NULL when out of memory. */
 UA_EventLoop *shim_loop_new(shim_now now, void *clock) {
     struct shim_loop *loop = (struct shim_loop *)UA_calloc(1, sizeof(*loop));
@@ -441,11 +448,20 @@ static UA_StatusCode cm_close(UA_ConnectionManager *cm, uintptr_t id) {
     return s->hooks->close(s->state, id);
 }
 
+/* Unlike `UA_ByteString_allocBuffer`, it does not zero the bytes: open62541 sends
+ * only the bytes it writes. */
 static UA_StatusCode cm_alloc(UA_ConnectionManager *cm, uintptr_t id,
                               UA_ByteString *buffer, size_t size) {
     (void)cm;
     (void)id;
-    return UA_ByteString_allocBuffer(buffer, size);
+    UA_ByteString_init(buffer);
+    if(size == 0)
+        return UA_STATUSCODE_GOOD;
+    buffer->data = (UA_Byte *)UA_malloc(size);
+    if(!buffer->data)
+        return UA_STATUSCODE_BADOUTOFMEMORY;
+    buffer->length = size;
+    return UA_STATUSCODE_GOOD;
 }
 
 /* Frees a buffer of `allocNetworkBuffer`. Rust frees each buffer that a send gives it

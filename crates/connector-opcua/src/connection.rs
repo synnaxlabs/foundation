@@ -1,12 +1,13 @@
 //! The TCP connection manager of a loop. open62541 opens, writes, and closes its
 //! connections through it, and each connection is an `env::net` stream that
-//! [`Manager::poll`] drives.
+//! [`Manager::drive`] drives.
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::{BTreeMap, VecDeque};
 use std::ffi::c_void;
+use std::fmt;
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::num::NonZeroUsize;
@@ -17,7 +18,7 @@ use std::task::{Context, Poll, Waker};
 use env::clock::{Clock, Sleep};
 use env::net::{self, Net, Tcp, tcp};
 use env::rng::Rng;
-use types::time::Monotonic;
+use types::time::{Monotonic, Span};
 
 use crate::event::Loop;
 use crate::ffi::{self, Bytes, Status};
@@ -32,8 +33,12 @@ const OPTIONS: tcp::Options = tcp::Options {
 /// The size of the read buffer of each connection.
 const READ_BYTES: usize = 1 << 16;
 
-/// The most buffers that one write takes.
-const WRITE_PARTS: usize = 16;
+/// The most sends that wait on one connection. One write takes them all. A send past
+/// it closes the connection.
+const SENDS: usize = 16;
+
+/// How long a closed connection may write what waits before it drops its stream.
+const LINGER: Span = Span::from_nanos(10_000_000_000);
 
 static HOOKS: ffi::Hooks = ffi::Hooks { open, send, close };
 
@@ -42,7 +47,6 @@ static HOOKS: ffi::Hooks = ffi::Hooks { open, send, close };
 pub(crate) struct Manager {
     state: NonNull<State>,
     events: Loop,
-    clock: Clock,
 }
 
 impl Manager {
@@ -57,12 +61,16 @@ impl Manager {
         let events = Loop::new(Clock::clone(&clock), rng);
         let state = NonNull::from(Box::leak(Box::new(State {
             net,
+            clock,
             raw: Cell::new(ptr::null_mut()),
             events: events.raw(),
             table: RefCell::new(BTreeMap::new()),
             next: Cell::new(1),
             waker: RefCell::new(None),
-            closing: RefCell::new(VecDeque::new()),
+            driving: Cell::new(false),
+            ahead: Cell::new(usize::MAX),
+            again: Cell::new(false),
+            ends: RefCell::new(VecDeque::new()),
             closed: UnsafeCell::new(ffi::DelayedCallback {
                 next: ptr::null_mut(),
                 callback: closed,
@@ -84,11 +92,7 @@ impl Manager {
             "open62541: out of memory for a connection manager"
         );
         this.raw.set(raw);
-        Self {
-            state,
-            events,
-            clock,
-        }
+        Self { state, events }
     }
 
     /// Gives the loop, for a client or server config with `externalEventLoop`.
@@ -101,48 +105,56 @@ impl Manager {
     /// server. Between calls, the drive sleeps until the next timer of the loop or a
     /// wake, also from a send or a close that `run` or another task asks for.
     pub(crate) async fn drive<T>(&self, mut run: impl FnMut() -> Option<T>) -> T {
+        let state = self.state();
         let mut sleep: Option<(Monotonic, Sleep)> = None;
         poll_fn(|cx| {
-            loop {
-                self.poll(cx);
+            state.driving.set(true);
+            let poll = loop {
+                state.again.set(false);
+                self.pass(cx);
                 if let Some(value) = run() {
-                    return Poll::Ready(value);
+                    break Poll::Ready(value);
+                }
+                if state.again.get() {
+                    continue;
                 }
                 let Some(next) = self.events.next() else {
-                    return Poll::Pending;
+                    break Poll::Pending;
                 };
                 if sleep.as_ref().is_none_or(|(at, _)| *at != next) {
-                    sleep = Some((next, self.clock.sleep_until(next)));
+                    sleep = Some((next, state.clock.sleep_until(next)));
                 }
                 let (_, timer) = sleep.as_mut().expect("invariant: set above");
                 match Pin::new(timer).poll(cx) {
                     Poll::Ready(()) => sleep = None,
-                    Poll::Pending => return Poll::Pending,
+                    Poll::Pending => break Poll::Pending,
                 }
-            }
+            };
+            state.driving.set(false);
+            poll
         })
         .await
     }
 
-    /// Connects, reads, and writes each connection until each waits, and wakes the
-    /// task of `cx` when one can go on. It calls the connection callbacks of
-    /// open62541, so a call that sends or closes from outside a poll also wakes that
-    /// task.
-    fn poll(&self, cx: &mut Context<'_>) {
+    /// Connects, reads, and writes each connection until each waits, and has the task
+    /// of `cx` woken when one can go on.
+    fn pass(&self, cx: &mut Context<'_>) {
         let state = self.state();
         state.park(cx.waker());
         let mut after = 0;
         loop {
+            state.ahead.set(after);
             let next = state
                 .table
                 .borrow()
                 .range(after..)
                 .next()
                 .map(|(id, _)| *id);
-            let Some(id) = next else { return };
+            let Some(id) = next else { break };
             after = id + 1;
             state.drive(id, cx);
         }
+        state.ahead.set(usize::MAX);
     }
 
     fn state(&self) -> &State {
@@ -174,15 +186,23 @@ impl Drop for Manager {
 /// since C may call a hook again.
 struct State {
     net: Net,
+    clock: Clock,
     raw: Cell<*mut ffi::ConnectionManager>,
     events: *mut ffi::EventLoop,
     table: RefCell<BTreeMap<usize, Connection>>,
     /// The key of the next connection. open62541 reads 0 as no connection.
     next: Cell<usize>,
-    /// The waker of the last poll.
+    /// The waker of the last pass.
     waker: RefCell<Option<Waker>>,
+    /// Whether a drive runs, so a wake needs no waker.
+    driving: Cell<bool>,
+    /// The first key that the running pass has not reached, or `usize::MAX` outside a
+    /// pass.
+    ahead: Cell<usize>,
+    /// Whether the drive passes again before it sleeps.
+    again: Cell<bool>,
     /// The connections whose `CLOSING` the next run of the loop gives.
-    closing: RefCell<VecDeque<usize>>,
+    ends: RefCell<VecDeque<usize>>,
     /// The delayed callback that gives each `CLOSING`. C writes its `next`.
     closed: UnsafeCell<ffi::DelayedCallback>,
     queued: Cell<bool>,
@@ -202,13 +222,27 @@ impl State {
         }
     }
 
-    fn wake(&self) {
-        if let Some(waker) = self.waker.borrow().as_ref() {
+    /// Has connection `id` move on: in the pass that runs, in another pass of the
+    /// drive, or in a drive that its waker starts.
+    fn wake(&self, id: usize) {
+        if self.driving.get() {
+            if id < self.ahead.get() {
+                self.again.set(true);
+            }
+        } else if let Some(waker) = self.waker.borrow().as_ref() {
             waker.wake_by_ref();
         }
     }
 
-    /// Queues the `CLOSING` of `id` for the next run of the loop, once.
+    /// Logs `what` of connection `id` as a warning through the logger of the loop.
+    fn warn(&self, id: usize, what: fmt::Arguments<'_>) {
+        let message = format!("connection {id}: {what}");
+        // SAFETY: the loop lives, and the call reads the bytes only during it.
+        unsafe { ffi::shim_log_warning(self.events, message.as_ptr(), message.len()) };
+    }
+
+    /// Queues the `CLOSING` of `id` for the next run of the loop, once, and starts
+    /// its linger.
     fn end(&self, id: usize) {
         {
             let mut table = self.table.borrow_mut();
@@ -219,24 +253,38 @@ impl State {
                 return;
             }
             connection.closing = true;
-            if let Stream::Connecting(_) = connection.stream {
-                connection.stream = Stream::Closed;
+            match connection.stream {
+                Stream::Connecting(_) => connection.stream = Stream::Closed,
+                Stream::Open(_) => {
+                    let until = self.clock.now() + LINGER;
+                    connection.linger = Some(self.clock.sleep_until(until));
+                }
+                Stream::Closed => {}
             }
         }
-        self.closing.borrow_mut().push_back(id);
+        self.ends.borrow_mut().push_back(id);
         if !self.queued.replace(true) {
             // SAFETY: the loop lives, and the callback is not in its queue.
             unsafe { (self.members().add_delayed)(self.events, self.closed.get()) };
         }
+        self.wake(id);
     }
 
     /// Moves connection `id` on until it waits, and calls C with no borrow held.
     fn drive(&self, id: usize, cx: &mut Context<'_>) {
         loop {
+            let mut failure = None;
             let step = match self.table.borrow_mut().get_mut(&id) {
-                Some(connection) => connection.step(cx),
+                Some(connection) => connection.step(cx).unwrap_or_else(|e| {
+                    failure = Some(e);
+                    connection.drop_stream();
+                    Step::Ended
+                }),
                 None => return,
             };
+            if let Some((during, e)) = failure {
+                self.warn(id, format_args!("the {during} failed: {e}"));
+            }
             match step {
                 Step::Waiting => return,
                 Step::Ended => self.end(id),
@@ -257,26 +305,26 @@ impl State {
 
     /// Calls the connection callback of `id` with `state` and `message`.
     fn call(&self, id: usize, state: ffi::ConnectionState, message: &mut [u8]) {
-        let peer = self.table.borrow().get(&id).and_then(|c| c.peer);
-        let Some(mut peer) = peer else { return };
-        peer.call(self.raw.get(), id, state, message);
+        let callback = self.table.borrow().get(&id).and_then(|c| c.callback);
+        let Some(mut callback) = callback else { return };
+        callback.call(self.raw.get(), id, state, message);
         if let Some(connection) = self.table.borrow_mut().get_mut(&id)
-            && let Some(slot) = connection.peer.as_mut()
+            && let Some(slot) = connection.callback.as_mut()
         {
-            slot.context = peer.context;
+            slot.context = callback.context;
         }
     }
 }
 
-/// The side of open62541 of one connection.
+/// The connection callback of open62541 for one connection, with its arguments.
 #[derive(Clone, Copy)]
-struct Peer {
+struct Callback {
     application: *mut c_void,
     context: *mut c_void,
-    callback: ffi::ConnectionCallback,
+    function: ffi::ConnectionCallback,
 }
 
-impl Peer {
+impl Callback {
     /// Calls the callback, which may write `context`.
     fn call(
         &mut self,
@@ -300,7 +348,7 @@ impl Peer {
         // SAFETY: open62541 gave the callback with its application, and reads the
         // message only during the call.
         unsafe {
-            (self.callback)(
+            (self.function)(
                 cm,
                 id,
                 self.application,
@@ -323,13 +371,15 @@ enum Stream {
 /// stream has closed.
 struct Connection {
     /// `None` once open62541 has the `CLOSING`.
-    peer: Option<Peer>,
+    callback: Option<Callback>,
     stream: Stream,
     sends: VecDeque<Buffer>,
     /// The bytes of the first send already written.
     sent: usize,
-    /// It reads no more, and closes once its sends are written.
+    /// It gives no more reads, and closes once its sends are written.
     closing: bool,
+    /// When a closing connection drops its stream with sends that wait.
+    linger: Option<Sleep>,
     /// Empty until the connect ends, and while a read callback holds it.
     buffer: Box<[u8]>,
 }
@@ -344,40 +394,57 @@ enum Step {
 }
 
 impl Connection {
-    fn step(&mut self, cx: &mut Context<'_>) -> Step {
+    /// Moves the connection on, or gives the step that failed and its error.
+    fn step(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Result<Step, (&'static str, net::Error)> {
         if let Stream::Connecting(connect) = &mut self.stream {
             return match connect.as_mut().poll(cx) {
-                Poll::Pending => Step::Waiting,
+                Poll::Pending => Ok(Step::Waiting),
                 Poll::Ready(Ok(tcp)) => {
                     self.stream = Stream::Open(tcp);
                     self.buffer = vec![0; READ_BYTES].into_boxed_slice();
-                    Step::Established
+                    Ok(Step::Established)
                 }
-                Poll::Ready(Err(_)) => {
-                    self.stream = Stream::Closed;
-                    Step::Ended
-                }
+                Poll::Ready(Err(e)) => Err(("connect", e)),
             };
         }
         let Stream::Open(tcp) = &mut self.stream else {
-            return if self.peer.is_none() {
+            return Ok(if self.callback.is_none() {
                 Step::Gone
             } else {
                 Step::Waiting
-            };
+            });
         };
-        if !self.closing && !self.buffer.is_empty() {
-            match tcp.poll_read(cx, &mut self.buffer) {
-                Poll::Ready(Ok(0)) => return Step::Ended,
-                Poll::Ready(Ok(n)) => {
-                    return Step::Read(std::mem::take(&mut self.buffer), n);
+        if self.closing {
+            if let Some(linger) = &mut self.linger
+                && Pin::new(linger).poll(cx).is_ready()
+            {
+                self.drop_stream();
+                return Ok(Step::Ended);
+            }
+            // A stream that drops with bytes it has not read resets, and the peer
+            // loses what it has not read yet.
+            loop {
+                match tcp.poll_read(cx, &mut self.buffer) {
+                    Poll::Ready(Ok(0)) | Poll::Pending => break,
+                    Poll::Ready(Ok(_)) => {}
+                    Poll::Ready(Err(e)) => return Err(("read", e)),
                 }
-                Poll::Ready(Err(_)) => return self.fail(),
+            }
+        } else if !self.buffer.is_empty() {
+            match tcp.poll_read(cx, &mut self.buffer) {
+                Poll::Ready(Ok(0)) => return Ok(Step::Ended),
+                Poll::Ready(Ok(n)) => {
+                    return Ok(Step::Read(std::mem::take(&mut self.buffer), n));
+                }
+                Poll::Ready(Err(e)) => return Err(("read", e)),
                 Poll::Pending => {}
             }
         }
         while !self.sends.is_empty() {
-            let mut parts = [IoSlice::new(&[]); WRITE_PARTS];
+            let mut parts = [IoSlice::new(&[]); SENDS];
             let mut count = 0;
             for (part, buffer) in parts.iter_mut().zip(&self.sends) {
                 *part = IoSlice::new(buffer.bytes());
@@ -386,28 +453,28 @@ impl Connection {
             parts[0] = IoSlice::new(&self.sends[0].bytes()[self.sent..]);
             match tcp.poll_write(cx, &parts[..count]) {
                 Poll::Ready(Ok(n)) => advance(&mut self.sends, &mut self.sent, n),
-                Poll::Ready(Err(_)) => return self.fail(),
-                Poll::Pending => return Step::Waiting,
+                Poll::Ready(Err(e)) => return Err(("write", e)),
+                Poll::Pending => return Ok(Step::Waiting),
             }
         }
         if self.closing {
             match tcp.poll_close(cx) {
-                Poll::Ready(_) => self.stream = Stream::Closed,
-                Poll::Pending => return Step::Waiting,
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(e)) => return Err(("close", e)),
+                Poll::Pending => return Ok(Step::Waiting),
             }
-            if self.peer.is_none() {
-                return Step::Gone;
-            }
+            self.drop_stream();
+            return Ok(Step::Ended);
         }
-        Step::Waiting
+        Ok(Step::Waiting)
     }
 
     /// Drops the stream and what waits to be written.
-    fn fail(&mut self) -> Step {
+    fn drop_stream(&mut self) {
         self.stream = Stream::Closed;
         self.sends.clear();
         self.sent = 0;
-        Step::Ended
+        self.linger = None;
     }
 }
 
@@ -487,29 +554,30 @@ unsafe extern "C" fn open(
     });
     let id = state.next.get();
     state.next.set(id + 1);
-    let peer = Peer {
+    let callback = Callback {
         application,
         context,
-        callback,
+        function: callback,
     };
     state.table.borrow_mut().insert(
         id,
         Connection {
-            peer: Some(peer),
+            callback: Some(callback),
             stream: Stream::Connecting(connect),
             sends: VecDeque::new(),
             sent: 0,
             closing: false,
+            linger: None,
             buffer: Box::default(),
         },
     );
     state.call(id, ffi::OPENING, &mut []);
-    state.wake();
+    state.wake(id);
     Status::GOOD.0
 }
 
 /// The hook of `sendWithConnection`: takes `buffer`, and queues it while the
-/// connection is open.
+/// connection is open. A send past [`SENDS`] closes the connection.
 unsafe extern "C" fn send(state: *mut c_void, id: usize, buffer: *mut Bytes) -> u32 {
     // SAFETY: C passes the state of `shim_cm_new`.
     let state = unsafe { self::state(state) };
@@ -526,9 +594,15 @@ unsafe extern "C" fn send(state: *mut c_void, id: usize, buffer: *mut Bytes) -> 
     if connection.closing || !matches!(connection.stream, Stream::Open(_)) {
         return Status::BAD_CONNECTION_CLOSED.0;
     }
+    if connection.sends.len() == SENDS {
+        drop(table);
+        state.warn(id, format_args!("{SENDS} sends wait, so it closes"));
+        state.end(id);
+        return Status::BAD_CONNECTION_CLOSED.0;
+    }
     connection.sends.push_back(buffer);
     drop(table);
-    state.wake();
+    state.wake(id);
     Status::GOOD.0
 }
 
@@ -541,7 +615,7 @@ unsafe extern "C" fn close(state: *mut c_void, id: usize) -> u32 {
         .table
         .borrow()
         .get(&id)
-        .is_some_and(|c| c.peer.is_some());
+        .is_some_and(|c| c.callback.is_some());
     if !open {
         return Status::BAD_NOT_FOUND.0;
     }
@@ -555,19 +629,19 @@ unsafe extern "C" fn closed(application: *mut c_void, _: *mut c_void) {
     let state = unsafe { self::state(application) };
     state.queued.set(false);
     loop {
-        let Some(id) = state.closing.borrow_mut().pop_front() else {
+        let Some(id) = state.ends.borrow_mut().pop_front() else {
             break;
         };
-        let peer = state
+        let callback = state
             .table
             .borrow_mut()
             .get_mut(&id)
-            .and_then(|c| c.peer.take());
-        if let Some(mut peer) = peer {
-            peer.call(state.raw.get(), id, ffi::CLOSING, &mut []);
+            .and_then(|c| c.callback.take());
+        if let Some(mut callback) = callback {
+            callback.call(state.raw.get(), id, ffi::CLOSING, &mut []);
         }
+        state.wake(id);
     }
-    state.wake();
 }
 
 #[cfg(test)]
