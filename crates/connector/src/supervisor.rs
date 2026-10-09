@@ -880,16 +880,7 @@ mod tests {
             let (hub, clock) = (inputs.hub.clone(), node.clock());
             tasks.spawn(async move {
                 clock.sleep(ms(100)).await;
-                let channels = ["state", "class", "restarts", "samples"]
-                    .map(|c| name(&format!("plant.tally.status.{c}")))
-                    .into();
-                let hog = hub::writer::Config {
-                    subject: name("plant.other"),
-                    authority: Authority(1),
-                    lease: None,
-                    channels,
-                };
-                let hog = hub.writer(hog).await.expect("opens");
+                let hog = rival(&hub, &["state", "class", "restarts", "samples"]).await;
                 clock.sleep(ms(400)).await;
                 let samples = name("plant.tally.status.samples");
                 let kept = status.iter().filter(|(name, _)| *name != samples);
@@ -930,19 +921,9 @@ mod tests {
             let (hub, clock, failer) = (inputs.hub.clone(), node.clock(), node.clone());
             tasks.spawn(async move {
                 clock.sleep(ms(100)).await;
-                let channels = ["state", "class", "restarts", "samples"]
-                    .map(|c| name(&format!("plant.tally.status.{c}")))
-                    .into();
-                let hog = hub::writer::Config {
-                    subject: name("plant.other"),
-                    authority: Authority(1),
-                    lease: None,
-                    channels,
-                };
-                let hog = hub.writer(hog).await.expect("opens");
+                let hog = rival(&hub, &["state", "class", "restarts", "samples"]).await;
                 clock.sleep(ms(400)).await;
-                let ring = std::path::Path::new("shard-0/ring");
-                failer.fail_file(ring, env::files::Operation::Sync);
+                failer.fail_file(RING.as_ref(), env::files::Operation::Sync);
                 clock.sleep(ms(1_700)).await;
                 let held = fill(&hog);
                 clock.sleep(ms(20_000)).await;
@@ -975,13 +956,7 @@ mod tests {
                 .set_definitions(status.iter().map(|(name, def)| (name, def)));
             let (hub, clock) = (inputs.hub.clone(), node.clock());
             tasks.spawn(async move {
-                let hog = hub::writer::Config {
-                    subject: name("plant.other"),
-                    authority: Authority(1),
-                    lease: None,
-                    channels: vec![name("plant.tally.status.state")],
-                };
-                let hog = hub.writer(hog).await.expect("opens");
+                let hog = rival(&hub, &["state"]).await;
                 clock.sleep(ms(500)).await;
                 let held = fill(&hog);
                 let samples = name("plant.tally.status.samples");
@@ -1690,6 +1665,24 @@ mod tests {
         held
     }
 
+    /// The ring file of the test shard, which `fail_file` fails.
+    const RING: &str = "shard-0/ring";
+
+    /// A writer of the subject `plant.other` with authority 1 on the status channels
+    /// of `plant.tally` that `suffixes` name.
+    async fn rival(hub: &hub::Hub, suffixes: &[&str]) -> hub::writer::Writer {
+        let channels = (suffixes.iter())
+            .map(|suffix| name(&format!("plant.tally.status.{suffix}")))
+            .collect();
+        let config = hub::writer::Config {
+            subject: name("plant.other"),
+            authority: Authority(1),
+            lease: None,
+            channels,
+        };
+        hub.writer(config).await.expect("opens")
+    }
+
     /// The time, `state`, and count of each status frame of `hog(full)`.
     fn hogged(full: bool) -> Vec<(Span, i64, i64)> {
         let statuses = tally(hog(full));
@@ -1971,8 +1964,7 @@ mod tests {
             let (failer, clock) = (node.clone(), node.clock());
             tasks.spawn(async move {
                 clock.sleep(ms(1_500)).await;
-                let ring = std::path::Path::new("shard-0/ring");
-                failer.fail_file(ring, env::files::Operation::Sync);
+                failer.fail_file(RING.as_ref(), env::files::Operation::Sync);
             });
             let (clock, start) = (node.clock(), node.clock().now());
             let result = Supervisor::new(inputs)
