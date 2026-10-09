@@ -30,14 +30,15 @@
   credit of a whole message is never lost. A class that does not wait keeps no credit
   past one peer window of its own bytes once the other class sent one peer window alone.
   So a class that starts again after the other sent alone goes ahead of it by its
-  credit, at most one window, and one message for each of its streams that holds QUIC
-  room. When the other class holds no message as its credit ends, as a `Latest` stream
-  on `try_send` between its calls, it also takes the rest of that step of credit, at
-  most one more window. After a pause in which neither class sends, each keeps the
-  credit of the time both waited, at most one peer window of `Latest` bytes, because no
-  byte moves in the pause and the share has no clock. When a simulation of a deployed
-  load shows `Latest` behind `Complete` by more than these bounds after such a pause,
-  the share gets a signal of the pause. A class that holds less than its share when QUIC
+  credit, at most one window, and the rest of each of its messages that holds room in
+  the send budget, at most one more window. When the other class holds no message as its
+  credit ends, as a `Latest` stream on `try_send` between its calls, it also takes the
+  rest of that step of credit, at most one more window. After a pause in which neither
+  class sends, each keeps the credit of the time both waited, at most one peer window of
+  `Latest` bytes, because no byte moves in the pause and the share has no clock. When a
+  simulation of a deployed load shows `Latest` behind `Complete` by more than these
+  bounds after such a pause, the share gets a signal of the pause. A class that holds
+  less than its share when QUIC
   gives room sends what it holds first, and the core holds no QUIC room for its later
   messages. So one `Latest` stream on `try_send` sends at most one message for each step
   of credit. So the share bounds a `Latest` stream on `try_send` only while its samples
@@ -77,7 +78,11 @@
   after the credit: architect-2 (#1998, 2026-10-09 01:34 UTC):
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6072445520, and
   architect-2 (#1998, 2026-10-09 03:15 UTC):
-  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073524571.
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073524571. The rests
+  in the lead: architect-2 (#1998, 2026-10-09 06:15 UTC):
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6075478571, which
+  supersedes the rest of one message for each stream of
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6074595514.
   Supersedes the sentence on the lead and the trigger bound of
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6070623279. Lost: a
   ration of the class with credit while the owed class competes only by its memory, and
