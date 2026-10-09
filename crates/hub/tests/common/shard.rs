@@ -11,8 +11,9 @@ use types::name::Name;
 use types::time::{Span, Stamp};
 
 const COMMIT: Span = Span::from_nanos(10_000_000);
-/// The area of a ring that holds the runs of the tests and of the `reader` and `woken`
-/// benches. A commit takes whole 4 KiB blocks (one for a frame, three for 64), and
+/// The area of the ring of the tests and of the `reader` and `woken` benches. The timed
+/// rounds of each bench fit in it, and the `lost write` line of the `reader` bench fills
+/// it. A commit takes whole 4 KiB blocks (one for a frame, three for 64), and
 /// nothing frees the ring until #160, so a run fills it at 1023 one-frame commits.
 pub(crate) const AREA: u64 = 1 << 22;
 
