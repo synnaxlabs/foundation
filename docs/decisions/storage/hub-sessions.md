@@ -263,9 +263,11 @@
   never sees `home::writer::Error::Unsynced`. The wait comes in the loop of the open,
   after it first resolves its channels and before it checks each home, so an unknown
   channel fails at once, the open sees a change of the definitions or of a home during
-  the wait, and the wait never comes between a home check and the carry (PR #2161, round
-  1, approved by `laptop.architect`:
-  https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6085364432). A task
+  the wait, and the wait never comes between a home check and the carry. A pass of the
+  open that waited for a home checks each home again, because a home can move while the
+  open waits for another (#2164) (PR #2161, rounds 1 and 2, approved by
+  `laptop.architect`:
+  https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6085920028). A task
   gets mesh time from `writer::Writer::now`, which gives `home::Shard::now` (HOME
   CLOCKS) and cannot fail, because mesh time stays once known. Lost: `Hub::now() ->
   Option<Stamp>`, because each caller holds a writer and would `expect` mesh time
