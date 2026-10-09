@@ -333,8 +333,8 @@ async fn session(
 }
 
 /// Polls `granting` and `receiving`, the two halves of the task of a session, until
-/// both end. Polls `granting` again in the poll in which `receiving` ends, which ends
-/// it too.
+/// both end. In the poll in which `receiving` ends, polls `granting` again if it has
+/// not ended, which ends it.
 async fn run(receiving: impl Future<Output = ()>, granting: impl Future<Output = ()>) {
     let (mut receiving, mut granting) = (pin!(receiving), pin!(granting));
     let mut granted = false;
