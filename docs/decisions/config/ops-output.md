@@ -64,10 +64,12 @@
   a change at a reserved label (FIRST ADMIN). `ops.behind` and the `ops.apply` fix
   decided by `laptop.architect-2` (2026-10-08T23:51:37Z, items 1 and 2 of
   https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071339913). The
-  order and the codes `ops.stale-plan` and `ops.apply` are steps 3 and 4 of
+  order and the codes `ops.stale-plan` and `ops.apply` are steps 3 and 4 of the plan
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063695586, approved
-  by `laptop.architect-2` (2026-10-08T16:00:18Z,
-  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745). The
+  by `laptop.architect-2` (2026-10-09T00:07:17Z,
+  https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071513636) and by
+  `laptop.architect` (2026-10-09T00:29:47Z,
+  https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071766367). The
   `ops.bad-plan` fix and the order of the base compare decided by `laptop.architect-2`
   (2026-10-08T22:57:59Z,
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6070706432).
