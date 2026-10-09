@@ -7574,6 +7574,47 @@ mod tests {
             });
         }
 
+        /// Sends at least `alone` bytes on `latest` in copies of `message`, one at a
+        /// time on `try_write`, until the server read them, then runs one [`RUN`].
+        fn send_alone(
+            pair: &mut Pair,
+            (receivers, read): (&mut Vec<(Class, Receiver)>, &mut [usize; 4]),
+            latest: &mut Sender,
+            message: &Block,
+            alone: usize,
+        ) {
+            let start = read[Class::Latest.rank()];
+            for _ in 0..alone.div_ceil(message.len()) {
+                let mut pending = Some(message.clone());
+                while pending.is_some() {
+                    send(pair, latest, &mut pending);
+                    pair.run(STEP);
+                    take(pair, receivers, read);
+                }
+            }
+            while read[Class::Latest.rank()] < start + alone {
+                pair.run(STEP);
+                take(pair, receivers, read);
+            }
+            pair.run(RUN);
+            take(pair, receivers, read);
+        }
+
+        /// Refills each of `senders` with copies of `message`. Gives the bytes that
+        /// noq-proto took of them since they were last refilled.
+        fn refill_each(
+            pair: &mut Pair,
+            senders: &mut [Sender],
+            message: &Block,
+        ) -> usize {
+            let mut taken = 0;
+            for sender in senders {
+                taken += held(pair, sender.key()) + refill(pair, sender, message);
+                taken -= held(pair, sender.key());
+            }
+            taken
+        }
+
         /// What [`lead`] measured after the pause.
         struct Lead {
             /// The bytes that `Complete` was owed as the pause ended. STREAM WIRE
@@ -7639,30 +7680,13 @@ mod tests {
                 flush(&mut pair, &mut receivers, &mut read, &senders);
             }
             let message = shard.block(&vec![1; size]);
-            let start = read[Class::Latest.rank()];
-            for _ in 0..alone.div_ceil(message.len()) {
-                let mut pending = Some(message.clone());
-                while pending.is_some() {
-                    send(&mut pair, &mut latest, &mut pending);
-                    pair.run(STEP);
-                    take(&mut pair, &mut receivers, &mut read);
-                }
-            }
-            while read[Class::Latest.rank()] < start + alone {
-                pair.run(STEP);
-                take(&mut pair, &mut receivers, &mut read);
-            }
-            pair.run(RUN);
-            take(&mut pair, &mut receivers, &mut read);
+            let reader = (&mut receivers, &mut read);
+            send_alone(&mut pair, reader, &mut latest, &message, alone);
             let credit = usize::try_from(owed(&mut pair)).expect("`Complete` is owed");
             let start = read[Class::Complete.rank()];
             let sample = shard.block(&[2; 1000]);
             let mut pending = Some(sample.clone());
-            let mut ahead = 0;
-            for complete in &mut completes {
-                ahead += refill(&mut pair, complete, &message);
-                ahead -= held(&mut pair, complete.key());
-            }
+            let mut ahead = refill_each(&mut pair, &mut completes, &message);
             let (mut took, mut step) = (0, 0);
             for steps in 1.. {
                 if blocking {
@@ -7686,12 +7710,7 @@ mod tests {
                 if pending.is_none() && held(&mut pair, latest.key()) < sample.len() {
                     break;
                 }
-                let mut stepped = 0;
-                for complete in &mut completes {
-                    let before = held(&mut pair, complete.key());
-                    let taken = refill(&mut pair, complete, &message);
-                    stepped += before + taken - held(&mut pair, complete.key());
-                }
+                let stepped = refill_each(&mut pair, &mut completes, &message);
                 took = took.max(stepped);
                 ahead += stepped;
             }
