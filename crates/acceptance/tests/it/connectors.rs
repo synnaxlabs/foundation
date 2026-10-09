@@ -52,7 +52,7 @@ fn ni_daqmx_reads_and_commands() {
 }
 
 #[test]
-#[ignore = "waits on #336, #341, #1957, #2145"]
+#[ignore = "waits on #336, #341, #1229, #1957, #2145"]
 fn influx_receives_every_sample_the_edge_writes() {
     let mut lab = Lab::new(1);
     let cloud = lab.start("cloud");
