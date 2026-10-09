@@ -1380,6 +1380,15 @@ fn reads_a_line_after_a_tab_that_a_list_item_takes_in_part() {
 }
 
 #[test]
+fn expands_each_tab_at_the_start_of_a_line_to_the_next_multiple_of_4() {
+    // The last line starts at an odd offset, and its tabs are at columns 2 and 4.
+    assert_eq!(
+        normalized("\ta\n \tb\n>\t c\r\n  \t\td\te \t"),
+        "    a\n    b\n>    c\n        d\te"
+    );
+}
+
+#[test]
 fn names_the_first_line_that_can_hide_text() {
     for (text, line) in [
         ("<b>\n\n<source x", "<b>"),
