@@ -1,9 +1,15 @@
 - **NODE NAME (2026-10-09)** A data directory holds one node, by name. `Config::name`
   gives it. Under `lock` (DATA DIRECTORY LOCK), after the claim of the shard count,
-  shard 0 opens the file `name` with `Mode::Create { len: 277 }`. A file of zeros gets
-  the name and syncs, and then the data directory syncs. A file with the same name
-  changes nothing. Another name stops the start with `Error::Renamed { stored, given }`
-  (the CLI code is `node.renamed`, #1732). The node never writes over a name.
+  shard 0 opens the file `name` with `Mode::Create { len: 277 }`. A file of zeros or
+  with the same name gets the name and syncs, and then the data directory syncs, as
+  `node.key` does: a failed sync of an earlier start can leave a name that a read sees
+  but a crash loses. Another name stops the start with
+  `Error::Renamed { stored, given }` (the CLI code is `node.renamed`, #1732). The node
+  never writes another name over a name.
+  The file is the only copy of the name on the node, and the source of the name that
+  the node puts in its card when it founds or joins a region (#1744). In the region,
+  `card.name` is the one copy (MEMBER RECORD). Trigger: the first operation that
+  renames a node in the region also writes this file, or refuses the rename.
   The file is one sector: the tag `foundation/name/1`, the length of the name in one
   byte, the name with zeros after it up to 255 bytes, and the CRC32C of those 273 bytes
   (little-endian). A crash keeps a sector whole or old, so a file with no bytes or with

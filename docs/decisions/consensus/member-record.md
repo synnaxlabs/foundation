@@ -4,7 +4,8 @@
   byte form), the join ticket's signature over the first card, `ephemeral` (for an
   ephemeral node, the time offline after which the region removes it), and the key of
   each status channel (X27) by its name relative to the node's name (`clock.offset`,
-  never the full name); `card.name` is the one copy of the node's name.
+  never the full name); `card.name` is the one copy of the node's name in region state
+  (NODE NAME keeps the node's own copy).
   The joining node gives its own release's names; the voters assign the keys at join
   (X27). A status name keeps its meaning and data type in every release, and a change
   takes a new name, so `hub` resolves a status channel from the record alone. The byte

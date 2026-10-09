@@ -51,7 +51,7 @@ pub(crate) async fn read(files: &Files) -> Result<Option<Name>, Error> {
 ///
 /// [`Error::Renamed`] when the file holds another name, [`Error::Name`] for a file
 /// that a node did not write, and [`Error::Directory`] for a file call that fails.
-/// Writes nothing over a name.
+/// Writes no other name over a name.
 pub(crate) async fn keep(files: &Files, name: &Name) -> Result<(), Error> {
     let opened = sector::open(files, Path::new(FILE)).await;
     let (file, bytes) = opened.map_err(|error| match error {
