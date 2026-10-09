@@ -49,10 +49,10 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 ///   [`spec::placement::place`] gives a `Tie` for, or a `Homeless` `home`.
 /// - `config.connector-home` at the `home` of a placement that wins for a connector and
 ///   names a node other than the connector's `node`.
-/// - `config.split-placement` at each index when the placement that wins for it is not
-///   the one that wins for a connector that writes it or a channel on it, and each such
-///   connector is on one node: at the label of the index's placement, or of the
-///   connector's when no placement selects the index.
+/// - `config.split-placement` at each index whose writers, the connectors that write
+///   it or a channel on it, are on one node: once for each writer whose winner is not
+///   the winner of the index, at the label of the index's placement, or of the
+///   writer's when no placement selects the index.
 /// - `config.writer-nodes` at the `node` of the first connector, in name order, on a
 ///   second node that writes an index or a channel on it.
 /// - `config.unknown-node` at each node that a connector or a placement names and that
