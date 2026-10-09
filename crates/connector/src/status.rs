@@ -308,7 +308,13 @@ impl Writer {
                 if values.staged.get() {
                     return Poll::Ready(());
                 }
-                values.waker.set(Some(cx.waker().clone()));
+                // The flush is polled at each wake of the run, so most polls keep the
+                // waker.
+                let waker = values.waker.take();
+                let waker = waker.filter(|waker| waker.will_wake(cx.waker()));
+                values
+                    .waker
+                    .set(Some(waker.unwrap_or_else(|| cx.waker().clone())));
                 Poll::Pending
             })
             .await;
