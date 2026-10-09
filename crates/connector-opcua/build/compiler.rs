@@ -55,11 +55,14 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
 }
 
 impl Builds {
-    /// Gives both builds the sanitizers of the Rust build. With `address`, the C runs
-    /// under the address and undefined behavior sanitizers, and stops at the first
-    /// error. With `fuzzing`, it gives libFuzzer its coverage. With either, a compiler
-    /// that is not clang gives way to `clang`, since rustc links the LLVM runtimes.
-    pub(crate) fn sanitize(&mut self, address: bool, fuzzing: bool) {
+    /// Gives both builds the sanitizers of the Rust build, and returns whether the C
+    /// builds with the address sanitizer. `sanitize` is the comma list of
+    /// `cfg(sanitize)`. When it holds `address`, the C runs under the address and
+    /// undefined behavior sanitizers, and stops at the first error. With `fuzzing`, it
+    /// gives libFuzzer its coverage. With either, a compiler that is not clang gives
+    /// way to `clang`, since rustc links the LLVM runtimes.
+    pub(crate) fn sanitize(&mut self, sanitize: &str, fuzzing: bool) -> bool {
+        let address = sanitize.split(',').any(|name| name == "address");
         let mut flags = Vec::new();
         if address {
             // `ZIP_FUNCTIONS` of the copy calls each comparator through a generic
@@ -74,7 +77,7 @@ impl Builds {
             flags.push("-fsanitize=fuzzer-no-link");
         }
         if flags.is_empty() {
-            return;
+            return false;
         }
         let clang = self.library.get_compiler().is_like_clang();
         for build in [&mut self.library, &mut self.shim] {
@@ -85,5 +88,6 @@ impl Builds {
                 build.flag(flag);
             }
         }
+        address
     }
 }

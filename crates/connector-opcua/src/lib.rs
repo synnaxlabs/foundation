@@ -105,27 +105,31 @@ mod tests {
         ];
         let fuzzer = "-fsanitize=fuzzer-no-link";
         let cases = [
-            (false, false, vec![]),
-            (true, false, address.to_vec()),
-            (false, true, vec![fuzzer]),
-            (true, true, [&address[..], &[fuzzer]].concat()),
+            ("", false, vec![]),
+            ("address", false, address.to_vec()),
+            ("leak,address", false, address.to_vec()),
+            ("memory", false, vec![]),
+            ("addressx", false, vec![]),
+            ("", true, vec![fuzzer]),
+            ("address", true, [&address[..], &[fuzzer]].concat()),
         ];
-        for (address, fuzzing, expected) in cases {
+        for (sanitize, fuzzing, expected) in cases {
             let mut builds = builds("/missing/clang");
-            builds.sanitize(address, fuzzing);
+            let asan = builds.sanitize(sanitize, fuzzing);
+            assert_eq!(asan, expected.contains(&address[0]), "{sanitize} {fuzzing}");
             for build in [&mut builds.library, &mut builds.shim] {
                 let tool = child::tool(build, TARGET);
                 assert_eq!(tool.path(), Path::new("/missing/clang"));
-                assert_eq!(sanitizers(&args(&tool)), expected, "{address} {fuzzing}");
+                assert_eq!(sanitizers(&args(&tool)), expected, "{sanitize} {fuzzing}");
             }
         }
     }
 
     #[test]
     fn sanitize_moves_gcc_to_clang() {
-        for (address, fuzzing) in [(true, false), (false, true)] {
+        for (sanitize, fuzzing) in [("address", false), ("", true)] {
             let mut builds = builds("/missing/gcc");
-            builds.sanitize(address, fuzzing);
+            builds.sanitize(sanitize, fuzzing);
             for build in [&mut builds.library, &mut builds.shim] {
                 assert_eq!(child::tool(build, TARGET).path(), Path::new("clang"));
             }
@@ -135,7 +139,7 @@ mod tests {
     #[test]
     fn sanitize_keeps_gcc_with_no_sanitizer() {
         let mut builds = builds("/missing/gcc");
-        builds.sanitize(false, false);
+        builds.sanitize("memory", false);
         for build in [&mut builds.library, &mut builds.shim] {
             assert_eq!(child::tool(build, TARGET).path(), Path::new("/missing/gcc"));
         }
