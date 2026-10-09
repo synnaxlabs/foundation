@@ -122,4 +122,6 @@
   time or before 1970: the time only orders keys, and the random bits make each key
   unique. `ops::Node::mesh` gives the mesh, so the lab reads the home of a channel.
   `node` also takes `document` and `connector`. The trigger above also makes
-  `ops::Node::plan`, `apply`, and `mesh` crate-private.
+  `ops::Node::plan`, `apply`, and `mesh` crate-private. Approved by `laptop.architect`
+  (2026-10-09T03:20:12Z,
+  https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6073579674).
