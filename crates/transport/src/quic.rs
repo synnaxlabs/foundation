@@ -268,7 +268,7 @@ impl Endpoint {
             let Some(connection) = entry.filter(|c| c.handshaking()) else {
                 continue;
             };
-            self.events.extend(connection.refuse(now));
+            self.events.extend(connection.abort(now));
             self.drive(handle, now);
         }
     }

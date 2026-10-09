@@ -253,13 +253,13 @@ impl Connection {
         matches!(self.state, State::Dialing { .. } | State::Accepting)
     }
 
-    /// Closes with code 0 a connection whose handshake is in flight, and gives the
-    /// [`Event::Closed`] of a dial.
+    /// Closes with code 0 a connection whose handshake is in flight, in either
+    /// direction, and gives the [`Event::Closed`] of a dial.
     ///
     /// # Panics
     ///
     /// When the handshake is not in flight.
-    pub(super) fn refuse(&mut self, now: Instant) -> Option<Event> {
+    pub(super) fn abort(&mut self, now: Instant) -> Option<Event> {
         match self.state {
             State::Dialing { .. } => self.close(now, Code(0)),
             State::Accepting => {
