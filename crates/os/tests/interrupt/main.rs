@@ -38,7 +38,12 @@ fn main() {
         #[cfg(target_os = "linux")]
         Some(arg) if arg == "early" => {
             mask::block(libc::SIG_SETMASK, &[]);
-            early();
+            early(false);
+        }
+        #[cfg(target_os = "linux")]
+        Some(arg) if arg == "early-waiting" => {
+            mask::block(libc::SIG_SETMASK, &[]);
+            early(true);
         }
         _ => {
             a_blocked_sigterm_stays_blocked_after_the_first_signal();
@@ -123,12 +128,23 @@ fn the_future_completes_at_the_first_signal() {
 }
 
 /// Holds the signals and signals itself, then, once the signal thread has taken the
-/// signal, polls the future once and writes whether it completed.
+/// signal, polls the future once and writes whether it completed. When `waiting`, the
+/// signal comes after the signal thread is in `sigwait`.
 #[cfg(target_os = "linux")]
-fn early() {
+fn early(waiting: bool) {
     use std::task::{Context, Waker};
 
     let interrupt = os::interrupt().expect("the signal thread starts");
+    if waiting {
+        let in_sigwait = async {
+            while signal_thread_blocks_sigint() != Some(false) {
+                sleep(Duration::from_millis(1)).await;
+            }
+        };
+        runtime()
+            .block_on(async { timeout(BOUND, in_sigwait).await })
+            .unwrap_or_else(|_| panic!("no sigwait in {BOUND:?}"));
+    }
     kill_process(getpid(), Signal::INT).expect("the process signals itself");
     // The signal thread takes SIGINT again only after it fires the future.
     let taken = async {
@@ -149,39 +165,48 @@ fn early() {
 /// pending set tells that it is not yet taken.
 #[cfg(target_os = "linux")]
 fn untaken() -> bool {
-    let has_sigint = |status: &str, field: &str| {
-        let mask = status
-            .lines()
-            .find_map(|line| line.strip_prefix(field))
-            .expect("a signal mask");
-        let mask = u64::from_str_radix(mask.trim(), 16).expect("a hex mask");
-        mask & (1 << (libc::SIGINT - 1)) != 0
-    };
     let process = std::fs::read_to_string("/proc/self/status").expect("a status");
-    if has_sigint(&process, "ShdPnd:") {
-        return true;
-    }
+    has_sigint(&process, "ShdPnd:") || signal_thread_blocks_sigint() != Some(false)
+}
+
+/// Whether the thread `signal` blocks SIGINT, or `None` when no thread has that name
+/// yet.
+#[cfg(target_os = "linux")]
+fn signal_thread_blocks_sigint() -> Option<bool> {
     for task in std::fs::read_dir("/proc/self/task").expect("the tasks list") {
         let task = task.expect("a task").path();
         let name = std::fs::read_to_string(task.join("comm")).expect("a name");
         if name.trim_end() == "signal" {
             let status =
                 std::fs::read_to_string(task.join("status")).expect("a status");
-            return has_sigint(&status, "SigBlk:");
+            return Some(has_sigint(&status, "SigBlk:"));
         }
     }
-    true
+    None
+}
+
+/// Whether the signal set of `field` in `status`, a status file of `/proc`, has SIGINT.
+#[cfg(target_os = "linux")]
+fn has_sigint(status: &str, field: &str) -> bool {
+    let mask = status
+        .lines()
+        .find_map(|line| line.strip_prefix(field))
+        .expect("a signal mask");
+    let mask = u64::from_str_radix(mask.trim(), 16).expect("a hex mask");
+    mask & (1 << (libc::SIGINT - 1)) != 0
 }
 
 #[cfg(target_os = "linux")]
 fn a_signal_before_the_first_poll_completes_the_future() {
-    let output = Command::new(std::env::current_exe().expect("the test binary"))
-        .arg("early")
-        .output()
-        .expect("the child runs");
-    assert!(output.status.success(), "{}", output.status);
-    let polled = String::from_utf8(output.stdout).expect("text");
-    assert_eq!(polled, "true\n", "the first poll completes");
+    for mode in ["early", "early-waiting"] {
+        let output = Command::new(std::env::current_exe().expect("the test binary"))
+            .arg(mode)
+            .output()
+            .expect("the child runs");
+        assert!(output.status.success(), "{mode}: {}", output.status);
+        let polled = String::from_utf8(output.stdout).expect("text");
+        assert_eq!(polled, "true\n", "{mode}: the first poll completes");
+    }
 }
 
 fn runtime() -> tokio::runtime::Runtime {
