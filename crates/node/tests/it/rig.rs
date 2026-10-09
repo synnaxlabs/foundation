@@ -111,7 +111,9 @@ impl Rig {
     }
 
     /// Starts `foundation` with `args` in [`Rig::dir`], with `stdout` as its standard
-    /// output, and with no standard input or error. Waits for nothing.
+    /// output, no standard input, and its standard error on a pipe that
+    /// [`Process::errors`] reads. Waits for nothing.
+    #[cfg(target_os = "linux")]
     pub(crate) fn spawn(&self, args: &[&str], stdout: Stdio) -> Process {
         let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
         command
@@ -119,7 +121,7 @@ impl Rig {
             .current_dir(&self.dir)
             .stdin(Stdio::null())
             .stdout(stdout)
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         Process(command.spawn().expect("start the command"))
     }
 
@@ -341,8 +343,18 @@ pub(crate) struct Process(Child);
 
 impl Process {
     /// The PID of the command.
+    #[cfg(target_os = "linux")]
     pub(crate) fn pid(&self) -> u32 {
         self.0.id()
+    }
+
+    /// The standard error of a command that [`Rig::spawn`] started and that exited.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn errors(&mut self) -> String {
+        let mut errors = String::new();
+        let mut pipe = self.0.stderr.take().expect("spawn pipes standard error");
+        std::io::Read::read_to_string(&mut pipe, &mut errors).expect("read the errors");
+        errors
     }
 
     /// Sends SIGTERM to the command. Panics when `kill` fails.

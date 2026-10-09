@@ -227,7 +227,7 @@ fn failed(error: impl std::fmt::Display) -> Failure {
 #[cfg(test)]
 mod tests {
     //! Through `failure`, as a process test cannot make a file system that refuses a
-    //! write with `EPERM` or `EROFS`, or a ring that fails with no refusal.
+    //! write with `EPERM` or `EROFS`.
 
     use std::path::PathBuf;
 

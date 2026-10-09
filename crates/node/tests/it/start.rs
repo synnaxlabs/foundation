@@ -259,6 +259,52 @@ fn a_key_file_that_is_a_directory_fails_as_node_failed() {
     );
 }
 
+#[test]
+fn a_ring_that_is_a_directory_fails_as_node_failed() {
+    let mut rig = Rig::new();
+    rig.start();
+    rig.stop();
+    let buffer = rig.dir.join("foundation-data/data/shard-0/ring");
+    std::fs::remove_file(&buffer).expect("remove the ring");
+    std::fs::create_dir(&buffer).expect("make a directory in its place");
+    assert_eq!(
+        ended(&rig.run(&["start"], b"")),
+        (
+            Some(1),
+            "",
+            "error[node.failed]: cannot open the buffer of shard-0: a file call failed: \
+             open of shard-0/ring failed with OS error 21\n\
+             fix: Fix the cause that the message states, then start the node again\n"
+        )
+    );
+}
+
+/// Linux only: the test reads the threads of the node from `/proc`.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_node_whose_standard_output_is_closed_runs_and_exits_0_at_sigterm() {
+    let rig = Rig::new();
+    let (reader, writer) = std::io::pipe().expect("make a pipe");
+    drop(reader);
+    let mut node = rig.spawn(&["start", "--name", "edge"], writer.into());
+    let pid = node.pid();
+    // `show` starts before `files-0`, and ends only after its write.
+    rig.wait("the thread `show` ends after its write of the line", || {
+        let tasks = std::fs::read_dir(format!("/proc/{pid}/task")).expect("list");
+        let names: Vec<String> = (tasks.map(|task| task.expect("read").path()))
+            .map(|task| std::fs::read_to_string(task.join("comm")).unwrap_or_default())
+            .collect();
+        let runs = |name: &str| names.iter().any(|n| n.trim_end() == name);
+        let ended = runs("files-0") && !runs("show");
+        ended.then_some(()).ok_or_else(|| names.concat())
+    });
+    node.term();
+    let status = rig.wait("the node exits at SIGTERM", || {
+        node.exited().ok_or_else(String::new)
+    });
+    assert_eq!((status.code(), node.errors().as_str()), (Some(0), ""));
+}
+
 /// Linux only: the test reads where each thread waits from `/proc`.
 #[cfg(target_os = "linux")]
 #[test]
