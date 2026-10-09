@@ -9,7 +9,8 @@ const RULE: &str = "A `sim` feature is test-only: only a dev-dependency, the fuz
                     docs/decisions/crate-map.md.";
 
 /// The problems where `package`, one package of `cargo metadata`, turns on a `sim`
-/// feature from a feature other than `sim` or from a normal dependency.
+/// feature from a feature other than `sim` or from a dependency that is not a
+/// dev-dependency.
 pub(crate) fn check(package: &Value) -> Vec<String> {
     let name = package["name"].as_str().unwrap_or_default();
     let mut problems = Vec::new();
@@ -24,7 +25,7 @@ pub(crate) fn check(package: &Value) -> Vec<String> {
         }
     }
     let deps = package["dependencies"].as_array().into_iter().flatten();
-    for dep in deps.filter(|dep| dep["kind"].is_null()) {
+    for dep in deps.filter(|dep| dep["kind"] != "dev") {
         let features = dep["features"].as_array().into_iter().flatten();
         if features.filter_map(Value::as_str).any(|f| f == "sim") {
             let dep = dep["name"].as_str().unwrap_or_default();
@@ -70,21 +71,24 @@ mod tests {
     }
 
     #[test]
-    fn rejects_a_normal_dependency_that_turns_on_sim() {
-        assert_eq!(
-            problems("normal"),
-            [
-                "`normal` turns on the `sim` feature of its dependency `own`. Move it \
-                 to the dev-dependencies. A `sim` feature is test-only: only a \
-                 dev-dependency, the fuzz crate, or another `sim` feature turns it \
-                 on. A product feature turns on `dep:sim` and `simulate` features. \
-                 See rule 9 in docs/decisions/crate-map.md."
-            ]
-        );
+    fn rejects_a_normal_or_build_dependency_that_turns_on_sim() {
+        for name in ["normal", "build"] {
+            assert_eq!(
+                problems(name),
+                [format!(
+                    "`{name}` turns on the `sim` feature of its dependency `own`. Move \
+                     it to the dev-dependencies. A `sim` feature is test-only: only a \
+                     dev-dependency, the fuzz crate, or another `sim` feature turns \
+                     it on. A product feature turns on `dep:sim` and `simulate` \
+                     features. See rule 9 in docs/decisions/crate-map.md."
+                )],
+                "`{name}`"
+            );
+        }
     }
 
     #[test]
-    fn accepts_sim_from_sim_and_from_dev_and_build_dependencies() {
+    fn accepts_sim_from_sim_and_from_dev_dependencies() {
         assert_eq!(problems("pass"), Vec::<String>::new());
     }
 }

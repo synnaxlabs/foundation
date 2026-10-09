@@ -4,7 +4,6 @@
 
 mod build;
 mod cfg;
-mod sim;
 mod field;
 mod files;
 mod fuzz;
@@ -15,6 +14,7 @@ mod open62541;
 mod oracles;
 mod review;
 mod select;
+mod sim;
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};

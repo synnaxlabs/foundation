@@ -14,7 +14,4 @@ weak = { path = "../weak", optional = true }
 
 [dev-dependencies]
 strong = { path = "../strong", features = ["simulate"] }
-normal = { path = "../normal" }
-
-[build-dependencies]
 own = { path = "../own", features = ["sim"] }
