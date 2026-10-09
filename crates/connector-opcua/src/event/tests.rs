@@ -360,13 +360,15 @@ fn a_timer_changes_its_interval_and_goes() {
 
 /// Intervals whose due time or ticks leave the range of `i64` ticks, or that are
 /// not a number. The ticks of the fourth are below `i64::MIN`, though its due time from
-/// a clock past 1 s is not.
-const OUT_OF_RANGE: [(f64, ffi::Policy); 5] = [
+/// a clock past 1 s is not. The last is due within 1 s of the last date only after a
+/// run at the last tick of the clock.
+const OUT_OF_RANGE: [(f64, ffi::Policy); 6] = [
     (922_337_203_685_477.0, ffi::CURRENT_TIME),
     (f64::INFINITY, ffi::BASE_TIME),
     (f64::NAN, ffi::ONCE),
     (-922_337_203_690_000.0, ffi::ONCE),
     (f64::NEG_INFINITY, ffi::ONCE),
+    (903_890_459_611_268.0, ffi::BASE_TIME),
 ];
 
 #[test]
@@ -398,19 +400,60 @@ fn due_before_the_last_date(f: &Fixture, before: f64) -> f64 {
 }
 
 #[test]
-fn a_timer_due_within_1_s_of_the_last_date_is_refused() {
+fn a_once_timer_due_within_1_s_of_the_last_date_is_refused() {
     let mut f = Fixture::new();
     f.advance(ms(1000));
     f.start();
     let within = due_before_the_last_date(&f, 5.0e6);
     assert_eq!(
-        f.try_timer(record, number(1), within, None, ffi::CURRENT_TIME),
+        f.try_timer(record, number(1), within, None, ffi::ONCE),
         Err(Status::BAD_OUT_OF_RANGE)
     );
     let outside = due_before_the_last_date(&f, 2.0e7);
-    f.try_timer(record, number(2), outside, None, ffi::CURRENT_TIME)
+    f.try_timer(record, number(2), outside, None, ffi::ONCE)
         .expect("a timer due 2 s before the last date is in range");
     assert_eq!(f.events.next(), None, "it is due after the clock ends");
+    f.run();
+    assert_eq!(f.ran(), []);
+}
+
+/// The interval, in ms, of a repeated timer that is due `before` ticks before the last
+/// date when it runs at the last tick of the clock.
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "the loss is under 2,048 ticks, far inside the margins of the tests"
+)]
+fn repeated_before_the_last_date(before: f64) -> f64 {
+    (i64::MAX as f64 - (u64::MAX / 100) as f64 - before) / 1.0e4
+}
+
+/// A repeated timer is next due one interval after its run, which may come at the last
+/// tick of the clock, and its first due time may come long before an interval from
+/// now.
+#[test]
+fn a_repeated_timer_due_within_1_s_of_the_last_date_after_a_run_is_refused() {
+    let mut f = Fixture::new();
+    f.start();
+    let (now, _) = earliest_base(&f);
+    let within = repeated_before_the_last_date(5.0e6);
+    for policy in [ffi::CURRENT_TIME, ffi::BASE_TIME] {
+        for base in [None, Some(now + 30_000_000), Some(now - 10_000_000)] {
+            assert_eq!(
+                f.try_timer(record, number(1), within, base, policy),
+                Err(Status::BAD_OUT_OF_RANGE),
+                "{base:?}"
+            );
+        }
+    }
+    let outside = repeated_before_the_last_date(2.0e7);
+    for (n, policy) in [(1, ffi::CURRENT_TIME), (2, ffi::BASE_TIME)] {
+        f.try_timer(record, number(n), outside, Some(now + 30_000_000), policy)
+            .expect("a repeated timer due 2 s before the last date is in range");
+    }
+    f.advance(ms(3000));
+    f.run();
+    assert_eq!(f.ran(), [1, 2]);
+    assert_eq!(f.events.next(), None, "each is due after the clock ends");
     f.run();
     assert_eq!(f.ran(), []);
 }
