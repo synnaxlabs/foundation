@@ -7302,6 +7302,8 @@ mod tests {
             });
         }
 
+        /// On `Endpoint` events, not through `Session`: no public peer can skip its
+        /// hello.
         #[test]
         fn end_a_session_whose_peer_sends_no_hello_for_idle() {
             testing::run(1, |shard| {
@@ -7322,6 +7324,38 @@ mod tests {
                     let reason = "a peer with no hello".to_owned();
                     assert_eq!(error, &Error::Broken { reason });
                 }
+                for pair in [&accepted, &dialed] {
+                    let reason =
+                        "closed by peer: a peer with no hello (code 4294967296)";
+                    assert_eq!(lost(pair), reason);
+                }
+            });
+        }
+
+        /// A peer that sends nothing after the handshake is past `idle` for both
+        /// bounds at once; the hello's wins.
+        #[test]
+        fn end_a_silent_session_whose_peer_sends_no_hello_as_broken() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let mut foreign = Foreign::new(shard, |_| {});
+                foreign.dial(pair.now(), pair::SERVER_KEY.public(), pair::SERVER);
+                pair.foreign = Some(foreign);
+                while pair.server.events.is_empty() {
+                    pair.run(Duration::from_millis(1));
+                }
+                pair.foreign = None;
+                pair.run(Duration::from_secs(3));
+                let [
+                    (connected, Event::Connected { .. }),
+                    (closed, Event::Closed { error, .. }),
+                ] = &pair.server.events[..]
+                else {
+                    panic!("{:?}", pair.server.events);
+                };
+                assert_eq!(*closed, *connected + Duration::from_secs(1));
+                let reason = "a peer with no hello".to_owned();
+                assert_eq!(error, &Error::Broken { reason });
             });
         }
 

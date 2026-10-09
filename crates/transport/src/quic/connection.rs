@@ -113,21 +113,18 @@ impl Connection {
         now: Instant,
         events: &mut VecDeque<Event>,
     ) -> bool {
-        // noq-proto's run first, so a peer that is silent ends with `TimedOut`.
+        // The hello's first: a silent peer's idle timer falls at the same instant.
+        if self.connected()
+            && let Err(Fault(reason)) = self.streams.timeout(now)
+        {
+            events.extend(self.fault(now, reason));
+            return true;
+        }
         if self.inner.poll_timeout().is_some_and(|due| due <= now) {
             self.inner.handle_timeout(now);
             return true;
         }
-        if !self.connected() {
-            return false;
-        }
-        match self.streams.timeout(now) {
-            Ok(()) => false,
-            Err(Fault(reason)) => {
-                events.extend(self.fault(now, reason));
-                true
-            }
-        }
+        false
     }
 
     /// Moves the connection's events to `endpoint` and to `events` at `now`, and
