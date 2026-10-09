@@ -71,11 +71,21 @@ fn refuses_an_empty_table_of_front_ends() {
 #[test]
 fn applies_with_each_connector_kind_of_the_node() {
     solo(|mesh| async move {
-        let node = create_node(mesh);
+        let node = create_node(mesh.clone());
         let files = vec![(PathBuf::from("plant.hcl"), PLANT.to_owned())];
         let (plan, _) = node.plan(files).await.expect("a plan");
         let applied = node.apply(Path::new("plant.plan"), &plan).await;
-        assert!(applied.is_ok(), "{applied:?}");
+        let expected = Applied {
+            file: "plant.plan".to_owned(),
+            pointer: plan::Pointer::from(mesh.pointer()),
+            counts: Counts {
+                added: 6,
+                changed: 0,
+                removed: 0,
+            },
+            homes: 1,
+        };
+        assert_eq!(applied, Ok(serde_json::to_value(expected).expect("JSON")));
     });
 }
 
