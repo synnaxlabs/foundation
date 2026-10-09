@@ -55,7 +55,11 @@
   readable at its first poll, in a field of its driver, so no lock is on the receive
   path. That driver is the receiver's alone, as a sender clone's is: it comes from
   the bind, beside the socket (`laptop.architect-2`, 2026-10-09 01:42 UTC,
-  https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6072529426). A
+  https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6072529426).
+  Supersedes the `OnceLock` of item 2 of
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541 and the
+  two `OnceLock`s of item 3 of
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6067014743. A
   sender registers for writable at its first poll and after `EAGAIN`, and drops the
   registration when the send ends: Linux wakes each `EPOLLOUT` registration of a socket
   for each datagram that the socket sends (1,000 wakes for 1,000 sends on box2), so a
