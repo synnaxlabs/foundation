@@ -386,6 +386,30 @@ fn leaves_out_each_count_of_zero() {
     assert_eq!(applied(0, 0, 0, 1), "Applied a\\n.plan: 1 home listed.\n");
 }
 
+/// `Applied::text` has no caller outside tests until the apply entry of #1744, so no
+/// caller sees a change from `error::escape` to `error::escape_controls`. This test is
+/// its only kill.
+#[test]
+fn escapes_the_file_as_an_error_does() {
+    let applied = Applied {
+        file: "it's \"b\\c\"\ne\u{301}.plan".to_owned(),
+        pointer: plan::Pointer::from(Pointer {
+            version: 1,
+            root: spec::tree::empty(),
+        }),
+        counts: Counts {
+            added: 0,
+            changed: 0,
+            removed: 0,
+        },
+        homes: 0,
+    };
+    assert_eq!(
+        applied.text(),
+        "Applied it's \"b\\\\c\"\\ne\\u{301}.plan: no change.\n"
+    );
+}
+
 #[test]
 fn gives_the_json_of_an_apply() {
     let pointer = plan::Pointer::from(Pointer {
