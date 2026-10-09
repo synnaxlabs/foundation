@@ -623,24 +623,6 @@ const fn gcd(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
-impl fmt::Display for Rate {
-    /// Writes the rate in hertz: `1kHz`, `100Hz`, `1/3Hz`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
-    }
-}
-
-impl FromStr for Rate {
-    type Err = Error;
-
-    /// Reads a rate in hertz, with an optional `k` or `M` prefix or a fraction.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let _ = s;
-        todo!()
-    }
-}
-
 /// A time value that could not be read or made. `Display` gives the message: a
 /// lower-case clause with no final period. [`Error::fix`] gives what to do instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
