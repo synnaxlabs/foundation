@@ -114,11 +114,13 @@
   `Credit` once its grant is half a window (512 KiB) short of the frames given back
   plus a window. A task on `hub::Config::tasks` takes each frame off the stream of a
   remote reader as it arrives, so the node takes each byte that it let the home send
-  (STREAM WIRE), and an idle caller never holds the window of its session. A complete
-  reader queues at most its grant, and a frame that starts once the charges that arrived
-  reach the grant ends the session with `Refusal::Malformed`. A latest reader keeps only
-  the newest frame. Lost: a bound on the sum of the credit at one home; a receive window
-  for each stream in `transport`; one task for each session. Trigger: a link that a
+  (STREAM WIRE), and an idle caller never holds the window of its session. The task
+  also sends each `Credit`, so a credit that waits for room in the session never waits
+  for the caller. A complete reader queues at most its grant plus one frame, and a
+  frame that starts once the charges that arrived reach the grant ends the session
+  with `Refusal::Malformed`. A latest reader keeps only the newest frame. Lost: a
+  bound on the sum of the credit at one home; a receive window for each stream in
+  `transport`; one task for each session. Trigger: a link that a
   remote latest reader with an idle caller fills, as measured, then a credit of one
   frame for a latest reader (HUB WIRE). Decided by `laptop.architect`
   (2026-10-09T03:24:37Z:
