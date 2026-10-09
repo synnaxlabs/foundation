@@ -13,11 +13,16 @@
   the copy, with no `[patch.crates-io]`. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572,
   2026-10-08 10:08 UTC). `fuzz/` is a workspace of its own, so `fuzz/Cargo.toml` holds
-  the `[patch.crates-io]` table of the root `Cargo.toml` (#1864). Lost: one
-  `[patch.crates-io]` table in `.cargo/config.toml` for both workspaces. Cargo reads
-  config from the working directory, so a run from outside the repository with
-  `--manifest-path` builds the registry release with no error (`laptop.architect-2`,
-  2026-10-08T14:16:19Z,
+  the `[patch.crates-io]` table of the root `Cargo.toml` (#1864). `cargo xtask fuzz`
+  fails when `fuzz/` builds a patched crate from another source than the copy that
+  the root builds. It checks the graphs of `cargo metadata --locked`, not the text of
+  the two tables: a patch that `fuzz/` does not use changes no code that it tests
+  (`laptop.architect-2`, 2026-10-09T04:27:21Z,
+  https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074258921).
+  Lost: one `[patch.crates-io]` table in `.cargo/config.toml` for both workspaces.
+  Cargo reads config from the working directory, so a run from outside the repository
+  with `--manifest-path` builds the registry release with no error
+  (`laptop.architect-2`, 2026-10-08T14:16:19Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6061840714). The PR
   that changes a copy of a Rust crate lists its mutants as `docs/dependencies.md`,
   "Local patches", states (`laptop.architect-2`, 2026-10-08T11:36:09Z,

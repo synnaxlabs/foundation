@@ -57,8 +57,10 @@ carry a local patch through `[patch.crates-io]` in the root `Cargo.toml` and in
 patched copy lives in `patches/<crate>/` (LOCAL PATCHES in
 `docs/decisions/releases/local-patches.md`). A C library that we patch (open62541) has
 no `[patch.crates-io]`: its `build.rs` reads `patches/open62541/`. Searches skip
-`patches/` (`.ignore`): to search a copy, give its path or use `rg --no-ignore`. No
-check yet keeps the two `[patch.crates-io]` tables equal (#1867).
+`patches/` (`.ignore`): to search a copy, give its path or use `rg --no-ignore`.
+`cargo xtask fuzz` fails when `fuzz/` builds a patched crate from another source than
+the copy that the root builds (LOCAL PATCHES;
+https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074258921).
 
 CI does not run the tests of a copy of a Rust crate and makes no mutants in it. So the
 PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff
