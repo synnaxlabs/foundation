@@ -126,8 +126,9 @@ mod tests {
     const SANITIZE: &str = "CARGO_CFG_SANITIZE";
     const FUZZING: (&str, &str) = ("CARGO_CFG_FUZZING", "");
 
-    /// Outside `cargo xtask sanitizers`, only this read of `address_sanitized` sees a
-    /// wrong value. There, the `link` test of the address sanitizer also fails.
+    /// No public call gives `address_sanitized`: `build.rs` turns it into `cfg(asan)`.
+    /// A wrong `true` fails the link of each test binary, but a wrong `false` fails the
+    /// `link` test only under `cargo xtask sanitizers`.
     #[test]
     fn sanitize_follows_the_rust_build() {
         let address = [
