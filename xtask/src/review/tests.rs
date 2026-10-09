@@ -1468,6 +1468,26 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
     let notes = "x[^1]\n\n[^1]: <search\n    <search\n    <search\n\n";
     for (front, heading, line) in [
         ("", "<search>Review round 3\n---", "<search>Review round 3"),
+        ("", "<search\n<!-- x -->\nReview round 3\n---", "<search"),
+        (
+            "",
+            "<SEARCH x\n<!-- x -->\nReview round 3\n---",
+            "<SEARCH x",
+        ),
+        (
+            "",
+            "</search>\n<!-- x -->\nReview round 3\n---",
+            "</search>",
+        ),
+        (
+            "",
+            "<search/>\n<!-- x -->\nReview round 3\n---",
+            "<search/>",
+        ),
+        ("", "<!doctype x>\n## Review round 3", "<!doctype x>"),
+        ("", "<search\n<?a?>\nReview round 3\n---", "<search"),
+        ("", "<search\n<!----- x -->\nReview round 3\n---", "<search"),
+        ("", "<!-- a -->\nReview round 3\n---", "<!-- a -->"),
         (notes, "a\n<search\n## Review round 3", "[^1]: <search"),
         (notes, "é\n<search\n## Review round 3", "[^1]: <search"),
     ] {

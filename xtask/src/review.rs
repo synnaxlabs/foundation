@@ -338,10 +338,9 @@ fn listed(reviewers: &str) -> BTreeSet<String> {
 }
 
 /// Parses `body` as a round comment. `None` when it has no round heading
-/// ([`Shown::number`]). The fields are
-/// the first block after the heading, so the findings text cannot set them. The last
-/// block is the end lines ([`END`]), unless the comment is `old`, posted before
-/// [`CUTOFF`].
+/// ([`Shown::number`]). The fields are the first block after the heading, so the
+/// findings text cannot set them. The last block is the end lines ([`END`]), unless the
+/// comment is `old`, posted before [`CUTOFF`].
 fn round(body: &str, old: bool) -> Option<Parsed> {
     let body = normalized(body);
     let shown = Shown::read(&body, old);
@@ -530,7 +529,6 @@ impl<'a> Shown<'a> {
         }
         footnotes(root);
         let mut hiding = Vec::new();
-        let mut blocks = Vec::new();
         for node in root.descendants() {
             let data = node.data.borrow();
             let start = line_start(data.sourcepos.start.line);
@@ -557,18 +555,14 @@ impl<'a> Shown<'a> {
                     );
                     shown.text.push(texts(node));
                 }
-                NodeValue::HtmlBlock(_) => {
-                    hiding.push((start, Cause::Raw));
-                    blocks.push(source(data.sourcepos));
-                }
-                NodeValue::HtmlInline(_) => {
+                NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) => {
                     hiding.push((start, Cause::Raw));
                 }
                 _ => {}
             }
         }
         if shown.number.is_none() && !old {
-            shown.number = unblocked(body, &blocks);
+            shown.number = unblocked(body);
         }
         hiding.extend(tagged(body, &starts, &codes).map(|at| (at, Cause::Raw)));
         hiding.sort_by_key(|(at, _)| *at);
@@ -751,30 +745,59 @@ fn normalized(text: &str) -> String {
 }
 
 /// The round number of the first top-level heading that has one ([`number`]) in `body`
-/// read with each line of the HTML `blocks` that starts with `<` after its indent read
-/// as a line of a paragraph, as GitHub reads `<search`.
-fn unblocked(body: &str, blocks: &[Range<usize>]) -> Option<String> {
+/// read with each HTML block that GitHub does not start ([`unknown`]) read as lines of
+/// a paragraph, as GitHub reads them.
+fn unblocked(body: &str) -> Option<String> {
     let mut text = body.to_owned();
-    let starts = blocks.iter().flat_map(|b| {
-        let rest = body[b.clone()]
-            .match_indices('\n')
-            .map(|(i, _)| b.start + i + 1);
-        std::iter::once(b.start).chain(rest)
-    });
-    // The tree order of `blocks` is not the source order: footnotes come last.
-    let mut starts: Vec<usize> = starts.collect();
-    starts.sort_unstable();
-    for line in starts.into_iter().rev() {
-        let at = body.len() - body[line..].trim_start_matches(' ').len();
-        if body[at..].starts_with('<') {
-            // Invisible ([`texts`]), and it keeps the tag that the line starts with.
+    // A line of such a block can start another one once the block is gone.
+    loop {
+        let starts: Vec<usize> = std::iter::once(0)
+            .chain(text.match_indices('\n').map(|(i, _)| i + 1))
+            .collect();
+        let arena = Arena::new();
+        let root = parse_document(&arena, &text, &options());
+        let mut unknowns: Vec<usize> = root
+            .descendants()
+            .filter_map(|node| {
+                let data = node.data.borrow();
+                let NodeValue::HtmlBlock(_) = data.value else {
+                    return None;
+                };
+                let LineColumn { line, column } = data.sourcepos.start;
+                let from = starts[line - 1] + column - 1;
+                let at = text.len() - text[from..].trim_start_matches(' ').len();
+                unknown(&text[at..]).then_some(at)
+            })
+            .collect();
+        if unknowns.is_empty() {
+            return root.children().find_map(number);
+        }
+        // Footnotes come last in the tree, so its order is not the source order.
+        unknowns.sort_unstable();
+        for at in unknowns.into_iter().rev() {
+            // Invisible ([`texts`]), and it keeps the tag as inline HTML.
             text.insert(at, '\u{200B}');
         }
     }
-    let arena = Arena::new();
-    parse_document(&arena, &text, &options())
-        .children()
-        .find_map(number)
+}
+
+/// Whether `line`, the first line of an HTML block as comrak reads it, starts a line
+/// of a paragraph on GitHub: a `search` tag, or `<!` and a lowercase letter. GitHub
+/// reads HTML blocks by an older spec, with no `search` tag and only an uppercase
+/// letter after `<!`.
+fn unknown(line: &str) -> bool {
+    let tag = line.strip_prefix("</").or_else(|| line.strip_prefix('<'));
+    let search =
+        tag.and_then(|t| Some((t.get(..6)?, &t[6..])))
+            .is_some_and(|(name, rest)| {
+                let ends = [' ', '\t', '\n', '>'];
+                name.eq_ignore_ascii_case("search")
+                    && (rest.starts_with(ends) || rest.starts_with("/>"))
+            });
+    let declaration = line
+        .strip_prefix("<!")
+        .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_lowercase()));
+    search || declaration
 }
 
 /// The round number of `heading`: the text after `Review round` when it is a heading
