@@ -224,6 +224,20 @@ jobs:
       - name: Miri
         run: cargo xtask miri
 
+  # Miri cannot run C, so ASan and UBSan check `connector-opcua` in its place.
+  sanitizers:
+    needs: changes
+    if: "!cancelled() && needs.changes.outputs.rust != 'false'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned nightly
+        run: |
+          rustup toolchain install "$(cat rust-toolchain-nightly)" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+      - name: Sanitizers
+        run: cargo xtask sanitizers
+
   fuzz:
     needs: changes
     if: "!cancelled() && needs.changes.outputs.rust != 'false'"

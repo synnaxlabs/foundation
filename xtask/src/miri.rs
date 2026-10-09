@@ -1,10 +1,11 @@
 //! Runs Miri on the pinned nightly.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use serde_json::Value;
 
+use crate::libtest::{self, Run};
 use crate::select;
 
 /// The `MIRIFLAGS` of each Miri pass.
@@ -14,9 +15,9 @@ const PASSES: [&str; 2] = [
 ];
 
 /// Crates whose `unsafe` code only calls the OS or C, which Miri cannot run. Tests on
-/// the real OS check `os` (BLOCK MEMORY). A sanitizer run will check
-/// `connector-opcua` (#1912).
-pub(crate) const SKIPPED: [&str; 2] = ["os", "connector-opcua"];
+/// the real OS check `os` (BLOCK MEMORY), and `cargo xtask sanitizers` checks
+/// `connector-opcua`.
+pub(crate) const SKIPPED: [&str; 2] = ["os", crate::sanitizers::CRATE];
 
 /// The workspace crates whose source names `unsafe_code`, the lint that each `unsafe`
 /// use must expect, except those in [`SKIPPED`].
@@ -25,6 +26,18 @@ pub(crate) fn packages(metadata: &Value) -> Result<Vec<select::Package>, String>
         select::packages(metadata, |s| select::has_word(s, "unsafe_code"))?;
     packages.retain(|package| !SKIPPED.contains(&package.name.as_str()));
     Ok(packages)
+}
+
+/// The problem of `run`, a Miri run with `flags` of the crate `name`, if any.
+fn problem(run: &Run, flags: &str, name: &str) -> Option<String> {
+    match run {
+        Run::Failed => Some(format!("Miri with `{flags}` failed in `{name}`")),
+        Run::Empty => Some(format!(
+            "`{name}` names `unsafe_code` but runs no tests under Miri. Add tests \
+             that reach its unsafe code."
+        )),
+        Run::Passed => None,
+    }
 }
 
 /// Runs `cargo miri test` once per pass in [`PASSES`] on each crate of [`packages`].
@@ -41,22 +54,9 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let mut problems = Vec::new();
     for flags in PASSES {
         for package in &packages {
-            let output = command(&nightly, package, flags)
-                .stderr(Stdio::inherit())
-                .output()
-                .map_err(|e| vec![format!("rustup: {e}")])?;
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            eprint!("{stdout}");
-            if !output.status.success() {
-                problems
-                    .push(format!("Miri with `{flags}` failed in `{}`", package.name));
-            } else if tests_ran(&stdout) == 0 {
-                problems.push(format!(
-                    "`{}` names `unsafe_code` but runs no tests under Miri. Add tests \
-                     that reach its unsafe code.",
-                    package.name
-                ));
-            }
+            let run = libtest::run(&mut command(&nightly, package, flags))
+                .map_err(|e| vec![e])?;
+            problems.extend(problem(&run, flags, &package.name));
         }
     }
     if problems.is_empty() {
@@ -79,25 +79,9 @@ fn command(
     command
 }
 
-/// The sum of N over the `running N tests` lines of libtest output.
-fn tests_ran(output: &str) -> usize {
-    output
-        .lines()
-        .filter_map(|line| line.strip_prefix("running ")?.split(' ').next())
-        .filter_map(|count| count.parse::<usize>().ok())
-        .sum()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn tests_ran_sums_each_test_binary() {
-        let output = "\nrunning 2 tests\ntest a ... ok\n\nrunning 0 tests\n\n\
-                      running 1 test\ntest b ... ok\n";
-        assert_eq!(tests_ran(output), 3);
-    }
 
     #[test]
     fn packages_are_the_crates_that_name_unsafe_code() {
@@ -131,7 +115,20 @@ mod tests {
     }
 
     #[test]
-    fn tests_ran_is_zero_with_no_tests() {
-        assert_eq!(tests_ran("\nrunning 0 tests\n\ntest result: ok.\n"), 0);
+    fn problem_names_each_run_that_does_not_pass() {
+        let problem = |run| problem(&run, "-Zmiri-x", "model");
+        assert_eq!(
+            problem(Run::Failed),
+            Some("Miri with `-Zmiri-x` failed in `model`".to_string())
+        );
+        assert_eq!(
+            problem(Run::Empty),
+            Some(
+                "`model` names `unsafe_code` but runs no tests under Miri. Add tests \
+                 that reach its unsafe code."
+                    .to_string()
+            )
+        );
+        assert_eq!(problem(Run::Passed), None);
     }
 }
