@@ -130,6 +130,23 @@ fn resolve(
     Ok((keys, groups))
 }
 
+/// The entry in `set` of each of `keys`, in their order.
+fn entries(set: &KeySet, keys: &[channel::Key]) -> Box<[usize]> {
+    let entry_of: hash::Map<channel::Key, usize> = set
+        .entries()
+        .iter()
+        .enumerate()
+        .map(|(at, entry)| (entry.key, at))
+        .collect();
+    keys.iter()
+        .map(|key| {
+            let entry = entry_of.get(key).copied();
+            entry
+                .unwrap_or_else(|| panic!("invariant: the key set holds channel {key}"))
+        })
+        .collect()
+}
+
 /// A writer session. Dropping it closes the session.
 #[derive(Debug)]
 pub struct Writer {
@@ -192,13 +209,7 @@ impl Writer {
             })
             .collect();
         let set = borrowed.interner.intern(&groups);
-        let entry_of: hash::Map<channel::Key, usize> = set
-            .entries()
-            .iter()
-            .enumerate()
-            .map(|(at, entry)| (entry.key, at))
-            .collect();
-        let entries = keys.iter().map(|key| entry_of[key]).collect();
+        let entries = entries(&set, &keys);
         let writer = ::home::writer::Writer {
             subject,
             authority,
