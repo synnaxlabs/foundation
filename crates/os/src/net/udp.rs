@@ -703,18 +703,66 @@ mod tests {
         }
     }
 
-    mod writer {
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
+    /// The epoll entries of any runtime in this process for the socket of `inode`.
+    fn registrations(inode: u64) -> usize {
+        let entry = format!("ino:{inode:x} ");
+        std::fs::read_dir("/proc/self/fdinfo")
+            .unwrap()
+            .filter_map(|fd| std::fs::read_to_string(fd.ok()?.path()).ok())
+            .map(|info| {
+                info.lines()
+                    .filter(|line| line.starts_with("tfd:") && line.contains(&entry))
+                    .count()
+            })
+            .sum()
+    }
+
+    mod receiver {
         use std::task::Waker;
 
         use super::*;
 
-        fn runtime() -> tokio::runtime::Runtime {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_io()
-                .enable_time()
-                .build()
-                .unwrap()
+        /// While the senders live, a dropped receiver drops its readable
+        /// registration.
+        #[test]
+        #[cfg_attr(not(target_os = "linux"), ignore = "needs /proc")]
+        fn a_dropped_receiver_drops_its_registration() {
+            use std::os::unix::fs::MetadataExt;
+
+            use env::net::udp::receiver::Driver as _;
+
+            runtime().block_on(async {
+                let (udp, mut receiver) =
+                    Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap();
+                let path = format!("/proc/self/fd/{}", udp.bound.socket.as_raw_fd());
+                let inode = std::fs::metadata(path).unwrap().ino();
+                let mut buffer = [0; 64];
+                let mut meta = [Meta::default()];
+                let poll = receiver.poll_recv(
+                    &mut Context::from_waker(Waker::noop()),
+                    &mut [IoSliceMut::new(&mut buffer)],
+                    &mut meta,
+                );
+                assert_eq!(poll, Poll::Pending);
+                assert_ne!(registrations(inode), 0);
+                drop(receiver);
+                assert_eq!(registrations(inode), 0);
+            });
         }
+    }
+
+    mod writer {
+        use std::task::Waker;
+
+        use super::*;
 
         #[test]
         fn waits_while_the_buffer_is_full_and_then_drops_the_registration() {
@@ -737,22 +785,6 @@ mod tests {
             });
         }
 
-        /// The epoll entries of any runtime in this process for the socket of `inode`.
-        fn registrations(inode: u64) -> usize {
-            let entry = format!("ino:{inode:x} ");
-            std::fs::read_dir("/proc/self/fdinfo")
-                .unwrap()
-                .filter_map(|fd| std::fs::read_to_string(fd.ok()?.path()).ok())
-                .map(|info| {
-                    info.lines()
-                        .filter(|line| {
-                            line.starts_with("tfd:") && line.contains(&entry)
-                        })
-                        .count()
-                })
-                .sum()
-        }
-
         /// While the socket stays open in `Bound`, epoll keeps a registration whose
         /// descriptor closed before it.
         #[test]
@@ -772,34 +804,6 @@ mod tests {
                 assert_eq!(full, Poll::Pending);
                 assert_ne!(registrations(inode), 0);
                 drop(writer);
-                assert_eq!(registrations(inode), 0);
-            });
-        }
-
-        /// While the senders live, a dropped receiver drops its readable
-        /// registration.
-        #[test]
-        #[cfg_attr(not(target_os = "linux"), ignore = "needs /proc")]
-        fn a_dropped_receiver_drops_its_registration() {
-            use std::os::unix::fs::MetadataExt;
-
-            use receiver::Driver as _;
-
-            runtime().block_on(async {
-                let (udp, mut receiver) =
-                    Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap();
-                let path = format!("/proc/self/fd/{}", udp.bound.socket.as_raw_fd());
-                let inode = std::fs::metadata(path).unwrap().ino();
-                let mut buffer = [0; 64];
-                let mut meta = [Meta::default()];
-                let poll = receiver.poll_recv(
-                    &mut Context::from_waker(Waker::noop()),
-                    &mut [IoSliceMut::new(&mut buffer)],
-                    &mut meta,
-                );
-                assert_eq!(poll, Poll::Pending);
-                assert_ne!(registrations(inode), 0);
-                drop(receiver);
                 assert_eq!(registrations(inode), 0);
             });
         }
