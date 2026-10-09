@@ -68,13 +68,8 @@
   behind one thread. Socket options come from `rustix`, and `TCP_NOTSENT_LOWAT`, which
   it lacks, from one `libc::setsockopt`. Decided by `laptop.architect-2` (2026-10-08
   02:32 UTC, #120,
-  https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). Amended
-  (2026-10-09, #2108): A drop of an `os` listener stops its listen at once on Linux,
-  also while a child holds a copy of the socket, from its fork to its exec. macOS has no
-  call that stops the listen of a copy, so there a connect in that window succeeds and
-  resets at the exec (`laptop.architect-2`, 2026-10-09T04:57:56Z:
-  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074581669). On `os`,
-  a UDP socket uses `noq-udp` for its socket calls: GSO, GRO, `recvmmsg`, ECN,
+  https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843). On
+  `os`, a UDP socket uses `noq-udp` for its socket calls: GSO, GRO, `recvmmsg`, ECN,
   the local address, and don't-fragment. `os` binds with `rustix`, with `IPV6_V6ONLY`
   off on an IPv6 socket, and routes as `sim` does: a socket on `::` sends IPv4 as
   `::ffff:a.b.c.d`, and any other socket that gets a destination of the other family
@@ -304,21 +299,26 @@
   (https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072622027).
   Amended (2026-10-08T21:01:28Z, #2000): each socket that `os` opens is closed on exec.
   On Linux, the call that opens the socket sets that and non-blocking, so a child that
-  another thread spawns never holds it. macOS has no such flag, and Tokio sets it in a
-  second call on an accepted stream too, so on macOS that child may hold the socket and
-  its port, as the doc of `os::net()` says. A Foundation node spawns no process, so only
-  tests see it, and CI runs on Linux. Lost: `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn
-  side, which std does not set, and which needs a spawn seam and `unsafe` for tests
-  only. Decided by `laptop.architect-2` (2026-10-08T21:01:28Z:
-  https://github.com/synnaxlabs/foundation/issues/2000). On macOS, a child that another
-  thread spawns during a lookup may also hold the sockets that the C library opens for
-  it, and a child spawned after a lookup may hold a socket that the C library keeps
-  open. `os` keeps this gap for the same reason. It cannot set the flags of the sockets
-  of a lookup, because the C library opens them, and it cannot open them another way
-  without its own resolver. Lost: a resolver in `os`, which changes what each lookup
-  gives on macOS. Trigger: the first change that makes a node spawn a process closes
-  each macOS gap of this amendment on the spawn side. Decided by `laptop.architect`
-  (2026-10-09T02:37:32Z:
+  another thread spawns holds it only from its fork to its exec. macOS has no such flag,
+  and Tokio sets it in a second call on an accepted stream too, so on macOS that child
+  may hold the socket and its port, as the doc of `os::net()` says. A Foundation node
+  spawns no process, so only tests see it, and CI runs on Linux. Lost:
+  `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn side, which std does not set, and which
+  needs a spawn seam and `unsafe` for tests only. Decided by `laptop.architect-2`
+  (2026-10-08T21:01:28Z: https://github.com/synnaxlabs/foundation/issues/2000). On
+  macOS, a child that another thread spawns during a lookup may also hold the sockets
+  that the C library opens for it, and a child spawned after a lookup may hold a socket
+  that the C library keeps open. `os` keeps this gap for the same reason. It cannot set
+  the flags of the sockets of a lookup, because the C library opens them, and it cannot
+  open them another way without its own resolver. Lost: a resolver in `os`, which
+  changes what each lookup gives on macOS. Trigger: the first change that makes a node
+  spawn a process closes each macOS gap of this amendment on the spawn side. Decided by
+  `laptop.architect` (2026-10-09T02:37:32Z:
   https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073119953; the socket
   that the C library keeps open, 2026-10-09T02:42:31Z:
-  https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073170413).
+  https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073170413). Amended
+  (2026-10-09, #2108): A drop of an `os` listener stops its listen at once on Linux,
+  also while a child holds a copy of the socket, from its fork to its exec. macOS has no
+  call that stops the listen of a copy, so there a connect in that window succeeds and
+  resets at the exec (`laptop.architect-2`, 2026-10-09T04:57:56Z:
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074581669).
