@@ -80,6 +80,18 @@ pub(super) fn socket(address: SocketAddr) -> Result<OwnedFd, Errno> {
     Ok(fd)
 }
 
+/// A child that another thread spawns holds a copy of the socket until its exec. On
+/// Linux a shutdown stops the listen of each copy, so a drop refuses at once.
+impl Drop for Listener {
+    fn drop(&mut self) {
+        #[cfg(target_os = "linux")]
+        if let Some(fd) = self.socket.fd() {
+            rustix::net::shutdown(fd, rustix::net::Shutdown::Read)
+                .expect("a listening socket shuts down");
+        }
+    }
+}
+
 impl listener::Driver for Listener {
     fn local(&self) -> SocketAddr {
         self.local
@@ -194,6 +206,24 @@ mod tests {
         );
         assert_eq!(sockopt::tcp_nodelay(&accepted), Ok(false));
         assert_eq!(super::super::lowat::get(accepted.as_fd()), Ok(1 << 14));
+    }
+
+    /// A child that another thread spawns holds a copy of each socket until its exec.
+    #[test]
+    #[cfg(target_os = "linux")]
+    #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
+    fn a_dropped_listener_refuses_while_a_copy_of_it_is_open() {
+        let config = tcp::Listen {
+            local: loopback(),
+            backlog: 1,
+            options: options(),
+        };
+        let listener = Listener::listen(&config).unwrap();
+        let local = listener::Driver::local(&listener);
+        let _copy = rustix::io::dup(listener.socket.fd().unwrap()).unwrap();
+        drop(listener);
+        let error = std::net::TcpStream::connect(local).unwrap_err();
+        assert_eq!(error.raw_os_error(), Some(Errno::CONNREFUSED.raw_os_error()));
     }
 
     mod socket {
