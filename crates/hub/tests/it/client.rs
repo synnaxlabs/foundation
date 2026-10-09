@@ -24,8 +24,8 @@ use super::link::{
     AGENT, Got, OTHER, QUIET, SUBJECT, accept, header, name, rules, run_program,
     serve_session, serve_session_on,
 };
-use super::serve::{HOME, own_pool, public_key, transport};
 use super::{NODE, POOL};
+use crate::net::{HOME, own_pool, public_key, transport};
 
 /// Connects to the home at `at` from `node` as [`SUBJECT`], signing with `key`, with a
 /// client pool that holds a body at the cap while the transport sends it.
