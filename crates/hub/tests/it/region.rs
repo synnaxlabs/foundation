@@ -103,6 +103,17 @@ fn run<F>(seed: u64, main: impl FnOnce(Test) -> F + Send + 'static)
 where
     F: Future<Output = ()> + 'static,
 {
+    unsynced(seed, |mut test| async move {
+        test.sync().await;
+        main(test).await;
+    });
+}
+
+/// As [`run`], with no mesh time until `main` calls [`Test::sync`].
+fn unsynced<F>(seed: u64, main: impl FnOnce(Test) -> F + Send + 'static)
+where
+    F: Future<Output = ()> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
@@ -113,11 +124,46 @@ where
             crate::net::transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let region = open(&node, &tasks, Rc::new(transport), Vec::new()).await;
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test = Test::new(node, tasks, layout, POOL, Some(region)).await;
-        test.sync().await;
-        main(test).await;
+        main(Test::new(node, tasks, layout, POOL, Some(region)).await).await;
     })
     .expect("the run ends");
+}
+
+#[test]
+fn a_writer_does_not_open_at_a_home_that_moved_while_it_waits_for_mesh_time() {
+    unsynced(11, |mut test| async move {
+        let hub = test.hub.clone();
+        let mut opening = std::pin::pin!(hub.writer(config("a", &["value"])));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        test.set_home(TIME, NODE).await;
+        test.clock.sleep(Span::SECOND).await;
+        assert!(poll_once(opening.as_mut()).is_pending());
+        test.set_home(TIME, OTHER).await;
+        let region = test.region.as_ref().expect("a region");
+        let named = region.mesh.watch(TIME).next().await;
+        assert_eq!(named, Ok(Some(OTHER)));
+        test.sync().await;
+        let opened = opening.await;
+        let error = opened.expect_err("the mesh names OTHER as the home of time");
+        assert_eq!(error, writer::Error::Remote { home: OTHER });
+    });
+}
+
+#[test]
+fn a_writer_does_not_open_on_a_mesh_that_stopped_while_it_waits_for_mesh_time() {
+    unsynced(12, |mut test| async move {
+        let hub = test.hub.clone();
+        let mut opening = std::pin::pin!(hub.writer(config("a", &["value"])));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        test.set_home(TIME, NODE).await;
+        test.clock.sleep(Span::SECOND).await;
+        assert!(poll_once(opening.as_mut()).is_pending());
+        let stopped = test.stop_mesh().await;
+        test.sync().await;
+        let opened = opening.await;
+        let error = opened.expect_err("the mesh stopped");
+        assert_eq!(error, writer::Error::Mesh(stopped));
+    });
 }
 
 impl Test {

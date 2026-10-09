@@ -157,14 +157,15 @@ impl Writer {
         if channels.is_empty() {
             return Err(Error::Empty);
         }
+        // Each mesh time reaches the first stamp. No `await` comes between the last
+        // home check and the carry.
+        let time = state.borrow().time.reach(Stamp::from_nanos(i64::MIN));
+        time.await;
         let (mut keys, groups) = loop {
             let (_, groups) = resolve(&state.borrow(), &channels)?;
             for (index, _) in &groups {
                 crate::home(state, *index).await?;
             }
-            // Each mesh time reaches the first stamp.
-            let time = state.borrow().time.reach(Stamp::from_nanos(i64::MIN));
-            time.await;
             // A call of `set_definitions` while the open waits can change a channel.
             let (keys, again) = resolve(&state.borrow(), &channels)?;
             let indexes = |groups: &[Indexed]| -> Vec<channel::Key> {
