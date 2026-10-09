@@ -26,8 +26,8 @@ impl Client {
     ///
     /// # Panics
     ///
-    /// If open62541 refuses the client, or gives a status other than `Good` for the
-    /// first run or a timer. Only the second panic gives the name of the status.
+    /// Panics if open62541 refuses the client, or gives a status other than `Good` for
+    /// the first run or a timer. Only the second panic gives the name of the status.
     #[must_use]
     pub fn new(clock: Clock, timers: usize) -> Self {
         let events = Loop::new(clock, &mut Rng::from_seed(0));
