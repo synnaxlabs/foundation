@@ -11,6 +11,9 @@ exclude_re = [
   # Miri needs the pinned nightly, which only the miri CI job installs. A deliberate
   # break in that job shows that it fails.
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
+  # cargo-fuzz needs the pinned nightly, which only the fuzz CI job installs (#252). A
+  # crash planted in a target shows that the job fails.
+  'xtask/src/fuzz\.rs:.*(replace run_one ->| in run$)',
   # Calls the GitHub API. The review workflow runs it on each PR: a round with findings
   # shows that it fails.
   'xtask/src/review\.rs:.*(replace run ->| in run$)',

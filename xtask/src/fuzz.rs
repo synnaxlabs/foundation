@@ -278,6 +278,11 @@ mod tests {
                     "path+file:///w/crates/types#0.0.0",
                     "/w/crates/types/Cargo.toml",
                 ),
+                package(
+                    "crc32c",
+                    "registry+x#crc32c@0.6.7",
+                    "/r/crc32c-0.6.7/Cargo.toml",
+                ),
             ],
         })
     }
@@ -289,6 +294,18 @@ mod tests {
     #[test]
     fn fuzz_builds_each_patched_crate_of_this_repository_from_its_copy() {
         assert_eq!(patched(&crate::fixture().join("../..")), Ok(()));
+    }
+
+    #[test]
+    fn checks_the_lock_before_it_builds() {
+        let root = crate::fixture().join("stale");
+        let problems = run(&root, SECONDS).unwrap_err();
+        assert_eq!(problems.len(), 1);
+        assert!(
+            problems[0].contains("--locked was passed"),
+            "{}",
+            problems[0]
+        );
     }
 
     #[test]
