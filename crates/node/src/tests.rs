@@ -4120,6 +4120,7 @@ mod port {
                     files: own.files(),
                     dir: crate::directory::blob(),
                     pool,
+                    floor_bytes: 0,
                 })
                 .await
                 .expect("the store opens");
