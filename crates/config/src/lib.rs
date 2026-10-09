@@ -203,7 +203,7 @@ struct Found<'a> {
 }
 
 /// A connector, as the kind of its block checks it.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Writer {
     /// The node that runs it.
     node: Name,

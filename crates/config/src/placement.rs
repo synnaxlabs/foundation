@@ -50,6 +50,17 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     }
 }
 
+/// Each node that `policy` names: its home, its standby, then its copies, the order in
+/// which `check` gives them with their spans.
+pub(crate) fn nodes(policy: &Policy) -> impl Iterator<Item = &Name> {
+    let copies = policy.copies();
+    policy
+        .home()
+        .into_iter()
+        .chain(policy.standby())
+        .chain(copies)
+}
+
 /// Reports a policy that `Policy::new` refuses for `nodes`.
 fn refuse(found: &mut Found<'_>, block: &Block, nodes: &Nodes, error: &Error) {
     let diagnostic = match error {

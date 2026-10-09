@@ -14,7 +14,9 @@ use types::channel::Key;
 use types::digest::Digest;
 use types::name::Name;
 
-use crate::{Definition, Entry, Found, KINDS, Writer, channel, checked, sort, span};
+use crate::{
+    Definition, Entry, Found, KINDS, Writer, channel, checked, placement, sort, span,
+};
 
 pub use codec::Error;
 
@@ -82,56 +84,23 @@ pub fn plan(
     })
 }
 
-/// Checks `definitions`, the definitions of a spec by tree key, against each rule of
-/// [`plan`] that [`spec::region::check`] does not hold, with `members` and `kinds` as
-/// `plan` takes them. An apply runs it on [`Plan::definitions`], so that a plan file
-/// that `plan` did not make cannot apply what `plan` refuses.
+/// Checks `definitions`, the definitions of a spec by tree key, with `members` and
+/// `kinds` as [`plan`] takes them: `kinds` accepts the kind and the config of each
+/// connector, then each rule of `plan` from `config.unplaced` to
+/// `config.unknown-node`. An apply runs it on [`Plan::definitions`], so that a plan
+/// file that `plan` did not make cannot apply what `plan` refuses.
 ///
 /// # Errors
 ///
 /// The diagnostics of `kinds` for each connector whose kind or config it refuses.
-/// Else each problem of [`plan`] after `config.wrong-channel`, with no span.
+/// Else each problem of those rules of [`plan`], with no span.
 pub fn check(
     definitions: &BTreeMap<Name, definition::Definition>,
     members: &BTreeSet<Name>,
     kinds: &Table,
 ) -> Result<(), Vec<Diagnostic>> {
+    let model = Model::definitions(definitions, kinds)?;
     let mut diagnostics = Vec::new();
-    let mut writers = Vec::new();
-    for definition in definitions.values() {
-        let definition::Definition::Connector(connector) = definition else {
-            continue;
-        };
-        let config = connector.config().document();
-        match kinds.check(connector.kind().as_str(), None, config) {
-            Ok(channels) => writers.push(Writer {
-                node: connector.node().clone(),
-                at: None,
-                writes: channels.writes,
-            }),
-            Err(found) => diagnostics.extend(found),
-        }
-    }
-    if !diagnostics.is_empty() {
-        return Err(diagnostics);
-    }
-    let nodes: Vec<_> = definitions
-        .values()
-        .filter_map(|definition| match definition {
-            definition::Definition::Placement(policy) => Some(policy),
-            _ => None,
-        })
-        .flat_map(|policy| {
-            let copies = policy.copies();
-            policy
-                .home()
-                .into_iter()
-                .chain(policy.standby())
-                .chain(copies)
-        })
-        .map(|node| (node.clone(), None))
-        .collect();
-    let model = Model::definitions(definitions, &writers, &nodes);
     rules(&model, members, &mut diagnostics);
     if diagnostics.is_empty() {
         Ok(())
@@ -306,13 +275,13 @@ struct Model<'a> {
     /// Each index, in name order.
     indexes: Vec<&'a Name>,
     /// The index of each data channel whose index is a channel, by name.
-    on: BTreeMap<&'a Name, &'a Name>,
+    index_of: BTreeMap<&'a Name, &'a Name>,
     /// Each connector and its node, in name order.
     connectors: Vec<(&'a Name, &'a Name)>,
     /// Each connector that a kind checked, in name order.
-    writers: Vec<&'a Writer>,
+    writers: Vec<Writer>,
     /// Each node that a placement names.
-    nodes: &'a [(Name, Option<Span>)],
+    nodes: Vec<(Name, Option<Span>)>,
     /// The span of the label of each definition.
     labels: BTreeMap<&'a Name, Option<Span>>,
     /// The span of the `home` of each placement.
@@ -320,16 +289,13 @@ struct Model<'a> {
 }
 
 impl<'a> Model<'a> {
-    fn new(
-        writers: impl IntoIterator<Item = &'a Writer>,
-        nodes: &'a [(Name, Option<Span>)],
-    ) -> Self {
+    fn new(writers: Vec<Writer>, nodes: Vec<(Name, Option<Span>)>) -> Self {
         Self {
             placements: Vec::new(),
             indexes: Vec::new(),
-            on: BTreeMap::new(),
+            index_of: BTreeMap::new(),
             connectors: Vec::new(),
-            writers: writers.into_iter().collect(),
+            writers,
             nodes,
             labels: BTreeMap::new(),
             homes: BTreeMap::new(),
@@ -338,7 +304,8 @@ impl<'a> Model<'a> {
 
     /// The model of the files, with their spans.
     fn found(found: &'a Found<'_>) -> Self {
-        let mut model = Self::new(found.writers.values(), &found.nodes);
+        let writers = found.writers.values().cloned().collect();
+        let mut model = Self::new(writers, found.nodes.clone());
         for (name, entry) in &found.entries {
             model.labels.insert(name, entry.label_span);
             match &entry.definition {
@@ -346,7 +313,7 @@ impl<'a> Model<'a> {
                     if let definition::Definition::Placement(_) = definition {
                         model.homes.insert(name, span(found.blocks[name], "home"));
                     }
-                    model.spec(name, definition);
+                    model.add(name, definition);
                 }
                 Definition::Channel(kind) => model.channel(name, kind, Some),
             }
@@ -356,11 +323,40 @@ impl<'a> Model<'a> {
 
     /// The model of `definitions`, with no span. A data channel whose index is no
     /// channel has no index.
+    ///
+    /// # Errors
+    ///
+    /// The diagnostics of `kinds` for each connector whose kind or config it refuses.
     fn definitions(
         definitions: &'a BTreeMap<Name, definition::Definition>,
-        writers: &'a [Writer],
-        nodes: &'a [(Name, Option<Span>)],
-    ) -> Self {
+        kinds: &Table,
+    ) -> Result<Self, Vec<Diagnostic>> {
+        let mut diagnostics = Vec::new();
+        let mut writers = Vec::new();
+        let mut nodes = Vec::new();
+        for definition in definitions.values() {
+            match definition {
+                definition::Definition::Connector(connector) => {
+                    let config = connector.config().document();
+                    match kinds.check(connector.kind().as_str(), None, config) {
+                        Ok(channels) => writers.push(Writer {
+                            node: connector.node().clone(),
+                            at: None,
+                            writes: channels.writes,
+                        }),
+                        Err(found) => diagnostics.extend(found),
+                    }
+                }
+                definition::Definition::Placement(policy) => {
+                    let named = placement::nodes(policy);
+                    nodes.extend(named.map(|node| (node.clone(), None)));
+                }
+                _ => {}
+            }
+        }
+        if !diagnostics.is_empty() {
+            return Err(diagnostics);
+        }
         let keys: BTreeMap<Key, &Name> = definitions
             .iter()
             .filter_map(|(name, definition)| match definition {
@@ -374,14 +370,15 @@ impl<'a> Model<'a> {
                 definition::Definition::Channel(channel) => {
                     model.channel(name, &channel.kind, |key| keys.get(key).copied());
                 }
-                definition => model.spec(name, definition),
+                definition => model.add(name, definition),
             }
         }
-        model
+        Ok(model)
     }
 
-    /// Adds a definition that is no channel.
-    fn spec(&mut self, name: &'a Name, definition: &'a definition::Definition) {
+    /// Adds a placement or a connector, and skips each other definition that is no
+    /// channel.
+    fn add(&mut self, name: &'a Name, definition: &'a definition::Definition) {
         match definition {
             definition::Definition::Placement(policy) => {
                 self.placements.push((name, policy));
@@ -404,7 +401,7 @@ impl<'a> Model<'a> {
             spec::channel::Kind::Index { .. } => self.indexes.push(name),
             spec::channel::Kind::Data(data) => {
                 if let Some(index) = index(Data::index(data)) {
-                    self.on.insert(name, index);
+                    self.index_of.insert(name, index);
                 }
             }
         }
@@ -792,10 +789,9 @@ fn writer<'f>(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<&'f Name> {
     let mut writers = model.writers.iter().filter(|writer| {
-        writer
-            .writes
-            .iter()
-            .any(|name| name == index || model.on.get(name).copied() == Some(index))
+        writer.writes.iter().any(|name| {
+            name == index || model.index_of.get(name).copied() == Some(index)
+        })
     });
     let first = writers.next()?;
     if let Some(second) = writers.find(|writer| writer.node != first.node) {
