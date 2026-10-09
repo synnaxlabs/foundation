@@ -1139,11 +1139,12 @@ impl Streams {
     }
 
     /// When the peer's hello is due on a connection whose idle timeout `idle` gives:
-    /// twice it after the handshake, while the hello has not arrived. A cut that the
-    /// connection lives through ends within the idle timeout. Calls `idle` only while
-    /// it waits.
+    /// twice it after the handshake, while the hello has not arrived and the
+    /// connection has not ended. A cut that the connection lives through ends within
+    /// the idle timeout. Calls `idle` only while it waits.
     pub(super) fn deadline(&self, idle: impl FnOnce() -> Duration) -> Option<Instant> {
-        self.peer.since().map(|since| since + 2 * idle())
+        let since = self.peer.since()?;
+        self.closed.get().is_none().then(|| since + 2 * idle())
     }
 
     /// Checks the wait for the peer's hello at `now`, on a connection whose idle

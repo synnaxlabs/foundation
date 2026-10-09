@@ -100,10 +100,7 @@ impl Connection {
 
     /// When [`Connection::timeout`] must next run, if ever.
     pub(super) fn deadline(&self) -> Option<Instant> {
-        // An ended connection keeps the wait for a hello that never came.
-        let streams = (self.connected())
-            .then(|| self.streams.deadline(|| self.idle()))
-            .flatten();
+        let streams = self.streams.deadline(|| self.idle());
         self.inner.poll_timeout().into_iter().chain(streams).min()
     }
 
@@ -127,7 +124,6 @@ impl Connection {
             self.inner.handle_timeout(now);
         }
         if let Err(Fault(reason)) = self.streams.timeout(now, || self.idle())
-            && self.connected()
             && !self.inner.is_closed()
         {
             events.extend(self.fault(now, reason));
