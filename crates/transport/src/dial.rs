@@ -2,7 +2,7 @@
 //! address, staggered, until one gives a session.
 
 use std::future::poll_fn;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV6};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -132,7 +132,7 @@ impl Dial<'_> {
     /// [`Error::Network`] when the socket broke.
     fn start(&mut self, index: usize) -> Result<(), Error> {
         match self.addresses[index] {
-            Address::Udp(remote) if routable(remote) => {
+            Address::Udp(remote) if let Some(remote) = route(remote) => {
                 let session = self.dialer.dial(self.peer, remote)?;
                 self.flying.push((index, session));
                 self.causes.push(None);
@@ -158,16 +158,35 @@ impl Dial<'_> {
     }
 }
 
-/// Whether a datagram can go to `remote`: its port is not 0 and its IP is specified.
-fn routable(remote: SocketAddr) -> bool {
-    remote.port() != 0 && !remote.ip().is_unspecified()
+/// Where a datagram to `remote` goes, or `None` when its port is 0 or its IP is
+/// unspecified. It is `remote` in the form in which a socket at `[::]` gives the
+/// source of each reply, as a remote in another form would make each reply come from
+/// an unknown peer: an IPv4-mapped IP becomes IPv4, and an IPv6 address has no flow
+/// label, and a scope only when its IP is link-local.
+fn route(remote: SocketAddr) -> Option<SocketAddr> {
+    let remote = match remote {
+        SocketAddr::V6(v6) if let Some(v4) = v6.ip().to_ipv4_mapped() => {
+            SocketAddr::new(v4.into(), v6.port())
+        }
+        SocketAddr::V6(v6) => {
+            let ip = *v6.ip();
+            let scope = if ip.is_unicast_link_local() {
+                v6.scope_id()
+            } else {
+                0
+            };
+            SocketAddrV6::new(ip, v6.port(), 0, scope).into()
+        }
+        SocketAddr::V4(_) => remote,
+    };
+    (remote.port() != 0 && !remote.ip().is_unspecified()).then_some(remote)
 }
 
 #[cfg(test)]
 mod tests {
     use std::future::poll_fn;
     use std::io::IoSliceMut;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
     use std::pin::pin;
     use std::sync::{Arc, Mutex};
     use std::task::Poll;
@@ -277,6 +296,19 @@ mod tests {
             accepted,
             dialed.lock().expect("a lock").take().expect("a dial"),
         )
+    }
+
+    /// A private call, as `sim` has no link-local address (#2075).
+    #[test]
+    fn a_route_keeps_the_scope_of_a_link_local_address_and_no_flow_label() {
+        let ip = "fe80::1".parse().expect("an IPv6 address");
+        let remote = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 7, 2));
+        let route = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 2));
+        assert_eq!(super::route(remote), Some(route));
+        let ip = "fd00::1".parse().expect("an IPv6 address");
+        let remote = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 7, 2));
+        let route = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 0));
+        assert_eq!(super::route(remote), Some(route));
     }
 
     #[test]
@@ -641,16 +673,20 @@ mod tests {
             at: a,
         };
         let unspecified = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4433);
+        let mapped = Ipv4Addr::UNSPECIFIED.to_ipv6_mapped();
+        let mapped = SocketAddr::new(IpAddr::V6(mapped), 4433);
         let addresses = vec![
             relay,
             Address::Tcp(b),
             Address::Udp(PORT_ZERO),
             Address::Tcp(a),
             Address::Udp(unspecified),
+            Address::Udp(mapped),
         ];
         let attempts = vec![
             (Address::Udp(PORT_ZERO), Error::Unroutable),
             (Address::Udp(unspecified), Error::Unroutable),
+            (Address::Udp(mapped), Error::Unroutable),
             (Address::Tcp(b), Error::Unroutable),
             (Address::Tcp(a), Error::Unroutable),
             (relay, Error::Unroutable),

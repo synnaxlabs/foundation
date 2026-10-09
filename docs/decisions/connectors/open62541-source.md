@@ -139,7 +139,7 @@
   copy and of `shim.c` call no libc function that gives or takes a heap pointer. A
   crypto library that a later PR links keeps its own allocator. So the counting
   allocator of a test or benchmark binary counts C too. The copy check compiles
-  without `alloc.h`. A test reads the archives that `build.rs` makes with it, and
+  without `alloc.h`. A test reads the archive that `build.rs` makes with it, and
   fails on each symbol outside the copy and `shim.c` that its closed list does not
   hold. The list holds no clock function and no libc function that gives or takes a
   heap pointer. Lost: `UA_ENABLE_MALLOC_SINGLETON` (a global), `--wrap=malloc`
@@ -149,7 +149,7 @@
   2026-10-08 19:13 UTC; the header:
   https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6067771921,
   2026-10-08 19:46 UTC). The exception for `UA_ARCH_HEADER` in the flags passage
-  above, the copy check without `alloc.h`, and the test of the archives: approved by
+  above, the copy check without `alloc.h`, and the test of the archive: approved by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6068060133,
   2026-10-08 20:04 UTC, and at 1a593331:
@@ -163,7 +163,7 @@
   `static UA_THREAD_LOCAL` buffers of `src/client/ua_client.c` and the server files.
   So our change of `src_generated/open62541/config.h` moves its thread-local block out
   of `#if UA_MULTITHREADING >= 100`. The driver test of `UA_rng` is its positive
-  control, and the test of the archives fails on each `pthread_mutex_*` symbol: the
+  control, and the test of the archive fails on each `pthread_mutex_*` symbol: the
   closed list holds none. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912,
   2026-10-08 20:03 UTC). Supersedes the note "a copy config with `UA_MULTITHREADING`
@@ -185,3 +185,32 @@
   `config.h` for each target is its check. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6071050895,
   2026-10-08 23:26 UTC).
+  The event loop of `connector-opcua` is a `UA_EventLoop` that `shim.c` fills and
+  `event::Loop` owns, on one thread. Its monotonic time is the clock of `env`.
+  `dateTime_now` gives that time counted from the Unix epoch, and the UTC offset is 0,
+  until #1992 gives it the wall time of the node through `hub`, in the PR of the first
+  connection with a security policy other than `None`. No connection that checks a
+  certificate runs before. Its drop runs the queued delayed callbacks in at most 64
+  passes, then aborts: a callback that queues itself at each pass is a defect. The
+  hidden module `bench`, behind the feature `sim`, gives the benchmark and the
+  allocation test a client on the loop. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211,
+  2026-10-08 19:05 UTC); the abort supersedes "panics" in that comment
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
+  2026-10-08 20:22 UTC).
+  The logger of the loop writes each message of level warning and up to fd 2, and
+  drops the lower levels: it formats the line into a stack buffer of 512 bytes with
+  `mp_vsnprintf` and sends it in one `write`, so a line allocates nothing, takes no
+  `stdio` lock, and does not mix with a line of another thread. A longer line is cut,
+  not dropped. Trigger: when `node` has a log, the loop takes its sink from its
+  caller. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068103327,
+  2026-10-08 20:07 UTC;
+  https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
+  2026-10-08 20:22 UTC).
+  Two timers due at one time run in an order that no code may depend on. Until PR 6 of
+  #435 orders the timer tree of the copy by due time, then by `id`, that order comes
+  from heap addresses, so a simulation with such timers does not replay. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6073878926,
+  2026-10-09 03:49 UTC).

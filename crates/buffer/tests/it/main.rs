@@ -191,7 +191,7 @@ impl Shard {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         for (first, stamp) in [(0, 30), (3, 60)] {
             let parts = Parts::default();
             buffer
@@ -207,7 +207,7 @@ impl Shard {
         let ring = layout(AREA, 3 * to_usize(BLOCK) - 9);
         let mut slots = Slots::new();
         let buffer = self.open(ring, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let long = Parts::from(self.block(4244));
         for (first, stamp, parts) in [(0, 30, long), (3, 60, Parts::default())] {
             buffer
@@ -575,8 +575,8 @@ fn entries_are_durable_at_committed_and_recovered_at_open() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
-        let b = slots.assign(key(2));
+        let a = slots.index(key(1));
+        let b = slots.index(key(2));
         let parts = Parts::from(shard.block(100));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), parts.clone())])
@@ -603,8 +603,8 @@ fn entries_are_durable_at_committed_and_recovered_at_open() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("reopens");
-        let b = slots.assign(key(2));
-        let a = slots.assign(key(1));
+        let b = slots.index(key(2));
+        let a = slots.index(key(1));
         assert_eq!(buffer.tail(a, Path::Live), live);
         assert_eq!(buffer.durable(a, Path::Live), live);
         assert_eq!(buffer.tail(b, Path::Backfill), backfill);
@@ -622,7 +622,7 @@ fn a_read_gives_each_entry_its_own_stored_at() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let stamped = |first, stored_at| Entry {
             stored_at: Stamp::from_nanos(stored_at),
             ..entry(1, a, Path::Live, first, 1, None, shard.block(8).into())
@@ -653,7 +653,7 @@ fn an_open_takes_a_ring_with_a_caller_record() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 0, None, shard.block(8).into())])
             .expect("queues");
@@ -672,7 +672,7 @@ fn durable_moves_only_at_a_commit() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -764,7 +764,7 @@ fn the_first_append_after_an_idle_span_commits_after_one_commit() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.clock.sleep(commits(21)).await;
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
@@ -785,7 +785,7 @@ fn a_busy_buffer_keeps_one_deadline_per_commit() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.memory.slow_syncs(shard.clock.clone(), tenths(2));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
@@ -810,7 +810,7 @@ fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.clock.sleep(COMMIT).await;
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
@@ -840,7 +840,7 @@ fn a_deadline_that_passes_during_a_sync_fires_when_the_sync_ends() {
                 .open(layout(AREA, BODY_MAX), &mut slots)
                 .await
                 .expect("opens");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             let tenth = COMMIT.nanos() / 10;
             let sync = Span::from_nanos(tenth * tenths);
             shard.memory.slow_syncs(shard.clock.clone(), sync);
@@ -893,7 +893,7 @@ fn a_batch_past_the_open_group_starts_the_next_record() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let first = Parts::from(shard.block(2000));
         let rest = Parts::from(shard.block(1500));
         buffer
@@ -916,7 +916,7 @@ fn a_batch_past_the_open_group_starts_the_next_record() {
             .await
             .expect("reopens");
         assert_eq!(
-            buffer.tail(slots.assign(key(1)), Path::Live),
+            buffer.tail(slots.index(key(1)), Path::Live),
             tail(3, Some(3))
         );
     });
@@ -930,7 +930,7 @@ fn a_full_ring_queues_nothing() {
             .open(layout(4 * BLOCK, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let parts = Parts::from(shard.block(3900));
         for seq in 0..3 {
             buffer
@@ -959,7 +959,7 @@ fn a_batch_is_queued_whole_or_not_at_all() {
             .open(layout(8 * BLOCK, 8183), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let long = Parts::from(shard.block(5000));
         let parts = Parts::from(shard.block(3900));
         for seq in 0..3 {
@@ -987,7 +987,7 @@ fn a_batch_is_queued_whole_or_not_at_all() {
             .open(layout(8 * BLOCK, 8183), &mut slots)
             .await
             .expect("reopens");
-        assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(3, None));
+        assert_eq!(buffer.tail(slots.index(key(1)), Path::Live), tail(3, None));
     });
 }
 
@@ -1001,7 +1001,7 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let small = Parts::from(shard.block(10));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, None, small.clone())])
@@ -1052,7 +1052,7 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("reopens");
-        assert_eq!(buffer.tail(slots.assign(key(1)), Path::Live), tail(2, None));
+        assert_eq!(buffer.tail(slots.index(key(1)), Path::Live), tail(2, None));
     });
 }
 
@@ -1067,7 +1067,7 @@ fn an_append_is_large_exactly_when_the_layout_check_fails() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let max = buffer.layout().entry_max();
         let cases = [
             (1, 1, 0),
@@ -1121,7 +1121,7 @@ fn a_failed_append_holds_no_part() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.pool.purge();
         shard.pool.purge();
         let before = shard.pool.committed();
@@ -1151,7 +1151,7 @@ fn a_reopen_syncs_the_ring_once() {
         let ring = layout(AREA, BODY_MAX);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         for (first, last) in [(0, 30), (3, 60)] {
             buffer
                 .append([entry(
@@ -1192,7 +1192,7 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.memory.fail_syncs();
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
@@ -1230,7 +1230,7 @@ fn commits_counts_the_commits_that_ended() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         assert_eq!(buffer.commits(), 0);
         for (count, first, last) in [(1, 0, 30), (2, 3, 60)] {
             buffer
@@ -1275,7 +1275,7 @@ fn commits_moves_before_an_entry_appended_during_the_commit_is_durable() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
@@ -1306,8 +1306,8 @@ fn durable_changes_only_at_a_commit_that_moves_commits() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
-        let b = slots.assign(key(2));
+        let a = slots.index(key(1));
+        let b = slots.index(key(2));
         let read = |buffer: &Buffer| {
             (
                 buffer.commits(),
@@ -1356,7 +1356,7 @@ fn a_drop_ends_the_commit_task() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -1375,7 +1375,7 @@ fn a_drop_ends_the_commit_task() {
             .await
             .expect("reopens");
         assert_eq!(
-            buffer.tail(slots.assign(key(1)), Path::Live),
+            buffer.tail(slots.index(key(1)), Path::Live),
             tail(4, Some(31)),
             "the entry queued at the drop was written"
         );
@@ -1392,7 +1392,7 @@ fn a_commit_on_an_entry_queued_at_the_drop_resolves_at_the_next_deadline() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -1412,7 +1412,7 @@ fn a_commit_on_an_entry_queued_at_the_drop_resolves_at_the_next_deadline() {
             .await
             .expect("reopens");
         assert_eq!(
-            buffer.tail(slots.assign(key(1)), Path::Live),
+            buffer.tail(slots.index(key(1)), Path::Live),
             tail(1, Some(1))
         );
     });
@@ -1426,7 +1426,7 @@ fn committed_waits_for_an_entry_appended_during_a_commit() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let sync = Span::from_nanos(4_000_000);
         shard.memory.slow_syncs(shard.clock.clone(), sync);
         buffer
@@ -1457,7 +1457,7 @@ fn an_entry_below_the_tail_is_a_broken_invariant() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, None, Parts::default())])
             .expect("queues");
@@ -1484,7 +1484,7 @@ fn an_entry_past_the_last_seq_is_a_broken_invariant() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         drop(buffer.append([entry(
             1,
             a,
@@ -1578,7 +1578,7 @@ fn a_ring_with_one_zero_header_block_opens_from_the_other() {
             let ring = layout(AREA, BODY_MAX);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             buffer
                 .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
                 .expect("queues");
@@ -1588,7 +1588,7 @@ fn a_ring_with_one_zero_header_block_opens_from_the_other() {
             let before = shard.memory.bytes(RING);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens again");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)), "{lost}");
             let after = shard.memory.bytes(RING);
             assert_eq!(after[kept..kept + block], before[kept..kept + block]);
@@ -1717,7 +1717,7 @@ fn commit_cut_and_recover(
         let mut slots = Slots::new();
         let config = node_config(&node, tasks, dir);
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -1730,7 +1730,7 @@ fn commit_cut_and_recover(
         let mut slots = Slots::new();
         let config = node_config(&node, tasks, dir);
         let buffer = Buffer::open(config, &mut slots).await.expect("opens again");
-        buffer.tail(slots.assign(key(1)), Path::Live)
+        buffer.tail(slots.index(key(1)), Path::Live)
     });
     recovered.expect("the last open ends")
 }
@@ -1997,7 +1997,7 @@ fn of_two_opens_at_once_of_a_ring_with_no_checkpoint_one_gets_busy() {
                     Ok(buffer) => buffer,
                     Err(error) => return give(Err(error)),
                 };
-                let slot = slots.assign(key(index));
+                let slot = slots.index(key(index));
                 let parts = Parts::default();
                 buffer
                     .append([entry(index, slot, Path::Live, 0, 3, Some(30), parts)])
@@ -2019,7 +2019,7 @@ fn of_two_opens_at_once_of_a_ring_with_no_checkpoint_one_gets_busy() {
                 .await
                 .expect("opens again");
             [1, 2].map(|index| {
-                buffer.tail(slots.assign(key(index)), Path::Live) == tail(3, Some(30))
+                buffer.tail(slots.index(key(index)), Path::Live) == tail(3, Some(30))
             })
         });
         let committed = gave.map(|ended| ended == Some(Ok(())));
@@ -2053,7 +2053,7 @@ fn drop_an_open_then_commit(seed: u64, after: i64) -> Option<bool> {
         let mut slots = Slots::new();
         let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots).await;
         let buffer = buffer.ok()?;
-        let slot = slots.assign(key(1));
+        let slot = slots.index(key(1));
         buffer
             .append([entry(1, slot, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -2066,7 +2066,7 @@ fn drop_an_open_then_commit(seed: u64, after: i64) -> Option<bool> {
         let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
             .await
             .expect("opens again");
-        buffer.tail(slots.assign(key(1)), Path::Live)
+        buffer.tail(slots.index(key(1)), Path::Live)
     });
     Some(recovered.expect("the last open ends") == tail(3, Some(30)))
 }
@@ -2115,7 +2115,7 @@ fn commit_and_close_during_another_open(
         };
         let gave = async {
             let buffer = Buffer::open(config, &mut slots).await?;
-            let slot = slots.assign(key(1));
+            let slot = slots.index(key(1));
             buffer
                 .append([entry(1, slot, Path::Live, 0, 3, Some(30), Parts::default())])
                 .expect("queues");
@@ -2134,7 +2134,7 @@ fn commit_and_close_during_another_open(
             ..node_config(&own, tasks, DIR)
         };
         let buffer = Buffer::open(config, &mut slots).await;
-        let slot = slots.assign(key(1));
+        let slot = slots.index(key(1));
         let gave = match &buffer {
             Ok(buffer) => Ok(buffer.tail(slot, Path::Live)),
             Err(error) => Err(error.clone()),
@@ -2154,7 +2154,7 @@ fn commit_and_close_during_another_open(
         let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
             .await
             .expect("opens again");
-        buffer.tail(slots.assign(key(1)), Path::Live)
+        buffer.tail(slots.index(key(1)), Path::Live)
     });
     (committed, opened, recovered.expect("the last open ends"))
 }
@@ -2230,7 +2230,7 @@ fn three_opens_and_a_failed_sync(
                 let gave = async {
                     let config = node_config(&own, tasks, DIR);
                     let buffer = Buffer::open(config, &mut slots).await?;
-                    let slot = slots.assign(key(1));
+                    let slot = slots.index(key(1));
                     let parts = Parts::default();
                     buffer
                         .append([entry(1, slot, Path::Live, 0, 3, Some(30), parts)])
@@ -2251,7 +2251,7 @@ fn three_opens_and_a_failed_sync(
         let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
             .await
             .expect("opens again");
-        buffer.tail(slots.assign(key(1)), Path::Live)
+        buffer.tail(slots.index(key(1)), Path::Live)
     });
     (
         results.map(|result| result.expect("each open ends")),
@@ -2304,7 +2304,7 @@ fn a_failed_read_of_the_header_blocks_fails_the_open_and_keeps_the_ring() {
                 let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
                     .await
                     .expect("opens");
-                let slot = slots.assign(key(1));
+                let slot = slots.index(key(1));
                 let parts = Parts::default();
                 buffer
                     .append([entry(1, slot, Path::Live, 0, 3, Some(30), parts)])
@@ -2325,7 +2325,7 @@ fn a_failed_read_of_the_header_blocks_fails_the_open_and_keeps_the_ring() {
             let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
                 .await
                 .expect("opens again");
-            buffer.tail(slots.assign(key(1)), Path::Live)
+            buffer.tail(slots.index(key(1)), Path::Live)
         });
         let kept = if committed {
             tail(3, Some(30))
@@ -2352,7 +2352,7 @@ fn kill_the_first_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, boo
             .await
             .expect("the first open ends well");
         open.store(true, Ordering::Relaxed);
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -2386,7 +2386,7 @@ fn a_tail_reported_durable_after_a_kill_survives_a_power_cut() {
             let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
                 .await
                 .expect("opens after the kill");
-            buffer.durable(slots.assign(key(1)), Path::Live)
+            buffer.durable(slots.index(key(1)), Path::Live)
         });
         let reported = reported.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
         sim.crash(&node, sim::Crash::Power);
@@ -2395,7 +2395,7 @@ fn a_tail_reported_durable_after_a_kill_survives_a_power_cut() {
             let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
                 .await
                 .expect("opens after the power cut");
-            buffer.tail(slots.assign(key(1)), Path::Live)
+            buffer.tail(slots.index(key(1)), Path::Live)
         });
         let recovered = recovered.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
         assert_eq!(recovered, reported, "seed {seed}, cut at {cut} ns");
@@ -2420,7 +2420,7 @@ fn an_open_right_after_a_drop_fails_with_busy_until_the_task_ended() {
         let config = || node_config(&node, tasks.clone(), DIR);
         let mut slots = Slots::new();
         let first = Buffer::open(config(), &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         first
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -2443,7 +2443,7 @@ fn an_open_while_a_commit_of_a_dropped_buffer_is_held_fails_with_busy() {
         let config = || node_config(&node, tasks.clone(), DIR);
         let mut slots = Slots::new();
         let first = Buffer::open(config(), &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         first
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -2473,7 +2473,7 @@ fn a_reopen_after_a_failed_sync_keeps_what_it_reports_across_a_power_cut() {
             let config = || node_config(&node, tasks.clone(), DIR);
             let mut slots = Slots::new();
             let first = Buffer::open(config(), &mut slots).await.expect("opens");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             first
                 .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
                 .expect("queues");
@@ -2503,7 +2503,7 @@ fn a_reopen_after_a_failed_sync_keeps_what_it_reports_across_a_power_cut() {
             let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
                 .await
                 .expect("opens after the power cut");
-            buffer.tail(slots.assign(key(1)), Path::Live)
+            buffer.tail(slots.index(key(1)), Path::Live)
         });
         assert_eq!(recovered, Ok(tail(3, Some(3))), "seed {seed}");
     }
@@ -2528,7 +2528,7 @@ fn fail_a_sync_and_cut(seed: u64, len: usize, marked: Range<usize>) -> (Tail, Ta
         let pool = Rc::clone(&config.pool);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         node.fail_file(FilePath::new(RING), Operation::Sync);
         let mut bytes = pool.alloc(len).expect("a block");
         bytes[marked].fill(0xab);
@@ -2550,7 +2550,7 @@ fn fail_a_sync_and_cut(seed: u64, len: usize, marked: Range<usize>) -> (Tail, Ta
         let buffer = Buffer::open(long_config(&node, tasks), &mut slots)
             .await
             .expect("opens after the failed sync");
-        buffer.durable(slots.assign(key(1)), Path::Live)
+        buffer.durable(slots.index(key(1)), Path::Live)
     });
     let reported = reported.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
     sim.crash(&node, sim::Crash::Power);
@@ -2559,7 +2559,7 @@ fn fail_a_sync_and_cut(seed: u64, len: usize, marked: Range<usize>) -> (Tail, Ta
         let buffer = Buffer::open(long_config(&node, tasks), &mut slots)
             .await
             .expect("opens after the power cut");
-        buffer.tail(slots.assign(key(1)), Path::Live)
+        buffer.tail(slots.index(key(1)), Path::Live)
     });
     let recovered = recovered.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
     (reported, recovered)
@@ -2597,7 +2597,7 @@ fn a_failed_write_of_the_read_bytes_fails_the_open() {
         let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -2642,7 +2642,7 @@ fn an_open_after_a_failed_sync_of_the_first_header_reports_only_disk_records_dur
             let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
                 .await
                 .expect("opens after the failed sync");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             buffer
                 .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
                 .expect("queues");
@@ -2656,7 +2656,7 @@ fn an_open_after_a_failed_sync_of_the_first_header_reports_only_disk_records_dur
             let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
                 .await
                 .expect("opens after the power cut");
-            buffer.tail(slots.assign(key(1)), Path::Live)
+            buffer.tail(slots.index(key(1)), Path::Live)
         });
         let recovered = recovered.unwrap_or_else(|e| panic!("seed {seed}: {e}"));
         assert_eq!(recovered, reported, "seed {seed}");
@@ -2674,7 +2674,7 @@ fn a_power_cut_during_a_restart_over_an_old_one_keeps_the_entries() {
             let mut slots = Slots::new();
             let config = node_config(&node, tasks.clone(), DIR);
             let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             buffer
                 .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
                 .expect("queues");
@@ -2693,7 +2693,7 @@ fn a_power_cut_during_a_restart_over_an_old_one_keeps_the_entries() {
             let mut slots = Slots::new();
             let config = node_config(&node, tasks, DIR);
             let buffer = Buffer::open(config, &mut slots).await?;
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             let recovered = buffer.tail(a, Path::Live);
             buffer
                 .append([entry(1, a, Path::Live, 3, 2, Some(50), Parts::default())])
@@ -2712,7 +2712,7 @@ fn a_power_cut_during_a_restart_over_an_old_one_keeps_the_entries() {
             let mut slots = Slots::new();
             let config = node_config(&node, tasks, DIR);
             let buffer = Buffer::open(config, &mut slots).await;
-            buffer.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live))
+            buffer.map(|buffer| buffer.tail(slots.index(key(1)), Path::Live))
         });
         let last = last.unwrap_or_else(|e| panic!("cut at {cut} ns: {e}"));
         assert_eq!(last, Ok(tail(5, Some(50))), "seed {seed}, cut at {cut} ns");
@@ -2867,7 +2867,7 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -2886,7 +2886,7 @@ fn a_record_over_the_most_entries_is_invalid() {
             let ring = least(100_000);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             let len = 4 + 51 * to_usize(count.into());
             let parts = Parts::from(shard.block(len - 55));
             buffer
@@ -2914,7 +2914,7 @@ fn a_record_over_the_most_entries_is_invalid() {
             }
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
-            let tails = buffer.tail(slots.assign(key(1)), Path::Live);
+            let tails = buffer.tail(slots.index(key(1)), Path::Live);
             assert_eq!(
                 tails,
                 tail(count.into(), Some(count.into())),
@@ -2932,7 +2932,7 @@ fn a_record_with_an_entry_past_the_last_seq_is_invalid() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -2952,7 +2952,7 @@ fn a_record_with_an_entry_below_the_tail_is_invalid() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([
                 entry(1, a, Path::Live, 0, 3, Some(30), Parts::default()),
@@ -3250,7 +3250,7 @@ fn opens_with_no_data_leave_room_for_the_largest_record() {
             }
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens again");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             let largest = Parts::from(shard.block(BODY_MAX - 55));
             let batch = [entry(1, a, Path::Live, 0, 1, None, largest)];
             assert_eq!(buffer.append(batch), Ok(()), "an area of {area}");
@@ -3268,7 +3268,7 @@ fn opens_with_no_data_after_an_entry_leave_room_for_the_next() {
             let ring = layout(6 * BLOCK, BODY_MAX);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             buffer
                 .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
                 .expect("queues");
@@ -3283,7 +3283,7 @@ fn opens_with_no_data_after_an_entry_leave_room_for_the_next() {
             }
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens again");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             assert_eq!(
                 buffer.tail(a, Path::Live),
                 tail(3, Some(30)),
@@ -3295,7 +3295,7 @@ fn opens_with_no_data_after_an_entry_leave_room_for_the_next() {
             drop(buffer);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("reopens");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             assert_eq!(
                 buffer.tail(a, Path::Live),
                 tail(5, Some(50)),
@@ -3313,7 +3313,7 @@ fn a_full_ring_does_not_reopen_before_its_tail_moves() {
             .open(layout(4 * BLOCK, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let parts = Parts::from(shard.block(3900));
         for seq in 0..3 {
             buffer
@@ -3342,7 +3342,7 @@ fn a_failed_record_write_ends_the_buffer_with_its_error() {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         node.fail_file(FilePath::new(RING), Operation::WriteAt);
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
@@ -3371,7 +3371,7 @@ fn a_commit_held_past_the_drop_gives_ok_when_a_later_write_fails() {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -3403,7 +3403,7 @@ fn an_end_gives_the_error_of_a_write_after_the_drop() {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let end = buffer.ended();
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
@@ -3435,7 +3435,7 @@ fn an_end_gives_ok_once_the_entries_queued_at_the_drop_are_durable() {
         let config = || node_config(&node, tasks.clone(), DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config(), &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -3460,7 +3460,7 @@ fn an_end_gives_the_error_of_a_write_before_the_drop() {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let end = buffer.ended();
         node.fail_file(FilePath::new(RING), Operation::WriteAt);
         buffer
@@ -3498,7 +3498,7 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let mut end = pin!(buffer.ended());
         let flag = Arc::new(Flag(AtomicBool::new(false)));
         let waker = Waker::from(Arc::clone(&flag));
@@ -3526,7 +3526,7 @@ fn a_dropped_end_keeps_no_waker_while_the_buffer_is_held() {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let flags: Vec<Arc<Flag>> = (0..64)
             .map(|_| Arc::new(Flag(AtomicBool::new(false))))
             .collect();
@@ -3593,7 +3593,7 @@ fn an_end_taken_at_a_drop_during_a_failing_sync_gives_its_error() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
         shard.memory.fail_syncs();
         buffer
@@ -3620,7 +3620,7 @@ fn an_end_taken_after_a_failed_commit_gives_its_error_at_once() {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         node.fail_file(FilePath::new(RING), Operation::WriteAt);
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
@@ -3647,7 +3647,7 @@ fn an_open_while_an_end_of_a_dropped_buffer_is_held_fails_with_busy() {
         let config = || node_config(&node, tasks.clone(), DIR);
         let mut slots = Slots::new();
         let first = Buffer::open(config(), &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         first
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -3671,7 +3671,7 @@ fn an_append_with_no_block_for_its_record_header_is_refused() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let mut held = Vec::new();
         let mut len = shard.pool.largest();
         while len > 0 {
@@ -3840,7 +3840,7 @@ async fn follow(shard: Shard, steps: Vec<Step>) {
                 bytes,
                 last,
             } => {
-                let slot = slots.assign(key(index));
+                let slot = slots.index(key(index));
                 let at = tails.entry((index, path)).or_default();
                 let first = at.seq + skip;
                 let parts = Parts::from(shard.block(bytes));
@@ -3869,7 +3869,7 @@ async fn follow(shard: Shard, steps: Vec<Step>) {
         }
         for index in 0..3 {
             for path in [Path::Live, Path::Backfill] {
-                let slot = slots.assign(key(index));
+                let slot = slots.index(key(index));
                 let expected = tails.get(&(index, path)).copied().unwrap_or_default();
                 assert_eq!(
                     buffer.tail(slot, path),
@@ -3907,7 +3907,7 @@ fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_its_dead
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.clock.sleep(commits(21)).await;
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
@@ -3927,7 +3927,7 @@ fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_its_dead
             .await
             .expect("reopens");
         assert_eq!(
-            buffer.tail(slots.assign(key(1)), Path::Live),
+            buffer.tail(slots.index(key(1)), Path::Live),
             tail(3, Some(30)),
             "the entry queued at the drop was written"
         );
@@ -3942,7 +3942,7 @@ fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let sync = Span::from_nanos(4_000_000);
         shard.memory.slow_syncs(shard.clock.clone(), sync);
         buffer
@@ -3973,7 +3973,7 @@ fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
             .await
             .expect("reopens");
         assert_eq!(
-            buffer.tail(slots.assign(key(1)), Path::Live),
+            buffer.tail(slots.index(key(1)), Path::Live),
             tail(2, Some(2)),
             "the entry queued at the drop was written"
         );
@@ -3994,7 +3994,7 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         let ring = least(150_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let mut part = parts_pool.alloc(48_000).expect("the pool has a block");
         part.fill(7);
         let parts = Parts::from(part.freeze());
@@ -4010,7 +4010,7 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
         drop(buffer);
         let mut slots = Slots::new();
         let opened = shard.open(ring, &mut slots).await;
-        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        let tails = opened.map(|buffer| buffer.tail(slots.index(key(1)), Path::Live));
         assert_eq!(tails, Ok(tail(3, Some(3))));
     });
 }
@@ -4028,7 +4028,7 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
         let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let first = Parts::from(shard.block(512 << 10));
         let second = Parts::from(shard.block(60_000));
         buffer
@@ -4050,7 +4050,7 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
         drop(held);
         let mut slots = Slots::new();
         let opened = shard.open(ring, &mut slots).await;
-        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        let tails = opened.map(|buffer| buffer.tail(slots.index(key(1)), Path::Live));
         assert_eq!(tails, Ok(tail(2, Some(2))));
     });
 }
@@ -4075,7 +4075,7 @@ fn an_entry_over_the_largest_pool_block_is_large() {
         let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let large = buffer.append([
             entry(1, a, Path::Live, 0, 1, Some(1), over),
             entry(1, a, Path::Live, 1, 1, Some(2), more),
@@ -4103,7 +4103,7 @@ fn an_entry_over_the_largest_pool_block_is_large() {
         drop(buffer);
         let mut slots = Slots::new();
         let opened = shard.open(ring, &mut slots).await;
-        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        let tails = opened.map(|buffer| buffer.tail(slots.index(key(1)), Path::Live));
         assert_eq!(tails, Ok(tail(1, Some(1))), "an open recovers it");
     });
 }
@@ -4117,7 +4117,7 @@ fn an_open_with_an_entry_over_the_largest_pool_block_fails() {
         let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let bytes = Parts::from(shard.block(200_000));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), bytes)])
@@ -4142,7 +4142,7 @@ fn an_open_with_an_entry_over_the_largest_pool_block_fails() {
         shard.pool = larger;
         let mut slots = Slots::new();
         let opened = shard.open(ring, &mut slots).await;
-        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        let tails = opened.map(|buffer| buffer.tail(slots.index(key(1)), Path::Live));
         assert_eq!(tails, Ok(tail(1, Some(1))));
     });
 }
@@ -4155,7 +4155,7 @@ fn one_entry_of_the_entry_max_commits_and_is_recovered() {
         let ring = layout(AREA, BODY_MAX);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let small = Parts::from(shard.block(10));
         let max = Parts::from(shard.block(buffer.layout().entry_max()));
         assert_eq!(buffer.layout().entry_max(), 4032);
@@ -4167,7 +4167,7 @@ fn one_entry_of_the_entry_max_commits_and_is_recovered() {
         drop(buffer);
         let mut slots = Slots::new();
         let opened = shard.open(ring, &mut slots).await;
-        let tails = opened.map(|buffer| buffer.tail(slots.assign(key(1)), Path::Live));
+        let tails = opened.map(|buffer| buffer.tail(slots.index(key(1)), Path::Live));
         assert_eq!(tails, Ok(tail(2, Some(1))));
     });
 }
@@ -4183,7 +4183,7 @@ fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -4247,7 +4247,7 @@ fn a_commit_made_after_its_entries_synced_resolves_well_after_a_later_failure() 
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -4277,7 +4277,7 @@ fn a_commit_awaited_during_a_slow_sync_resolves_when_the_sync_ends() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let tenth = COMMIT.nanos() / 10;
         shard
             .memory
@@ -4303,7 +4303,7 @@ fn a_commit_made_during_a_sync_resolves_with_that_sync() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let sync = Span::from_nanos(COMMIT.nanos() * 4 / 10);
         shard.memory.slow_syncs(shard.clock.clone(), sync);
         buffer
@@ -4334,7 +4334,7 @@ fn a_commit_held_across_two_later_commits_resolves_well() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -4361,7 +4361,7 @@ fn a_commit_outlives_the_borrow_of_its_buffer() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -4385,7 +4385,7 @@ fn a_commit_held_past_the_drop_during_a_sync_resolves_with_the_sync() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
@@ -4418,7 +4418,7 @@ fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
         shard.memory.fail_syncs();
         buffer
@@ -4451,7 +4451,7 @@ fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
@@ -4477,7 +4477,7 @@ fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
             .await
             .expect("reopens");
         assert_eq!(
-            buffer.tail(slots.assign(key(1)), Path::Live),
+            buffer.tail(slots.index(key(1)), Path::Live),
             tail(2, Some(2))
         );
     });
@@ -4493,7 +4493,7 @@ fn a_drop_with_nothing_queued_ends_the_task_at_the_commit_in_flight() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
@@ -4517,7 +4517,7 @@ fn a_drop_ends_the_task_at_a_failed_commit_in_flight() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let opened = shard.memory.syncs();
         shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
         shard.memory.fail_syncs();
@@ -4553,7 +4553,7 @@ fn a_commit_on_an_entry_queued_at_the_drop_resolves_with_a_failed_write() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         shard.memory.fail_syncs();
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
@@ -4580,7 +4580,7 @@ fn a_synced_commit_held_past_the_drop_resolves_well_after_a_failed_write() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -4611,8 +4611,8 @@ fn a_read_gives_the_entries_of_one_path_in_order() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
-        let b = slots.assign(key(2));
+        let a = slots.index(key(1));
+        let b = slots.index(key(2));
         let live = |first, len, last, bytes| {
             entry(
                 1,
@@ -4686,7 +4686,7 @@ fn a_budget_splits_the_log_over_reads_that_follow_next() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let live = |first, len, last, bytes| {
             entry(
                 1,
@@ -4750,7 +4750,7 @@ fn a_handoff_at_the_tail_is_given_once() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let frame = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
         buffer.append([frame]).expect("queues");
         buffer.committed().await.expect("commits");
@@ -4809,7 +4809,7 @@ fn a_read_stops_before_a_skip_and_the_next_reports_the_gap() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let live = |first, len, last, bytes| {
             entry(
                 1,
@@ -4869,7 +4869,7 @@ fn a_read_gives_only_durable_entries() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let frame = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
         buffer.append([frame]).expect("queues");
         let read = buffer
@@ -4906,7 +4906,7 @@ fn a_mark_inside_an_entry_gives_it_whole_and_one_past_the_tail_gives_nothing() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let live = |first, len, last, bytes| {
             entry(
                 1,
@@ -4956,7 +4956,7 @@ fn a_failed_ring_read_gives_its_error_and_a_later_read_passes() {
         let config = node_config(&node, tasks, DIR);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -4993,7 +4993,7 @@ fn a_read_with_no_block_for_the_table_gives_the_pool_error() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let frame = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
         buffer.append([frame]).expect("queues");
         buffer.committed().await.expect("commits");
@@ -5033,7 +5033,7 @@ fn a_read_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let frame = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
         buffer.append([frame]).expect("queues");
         buffer.committed().await.expect("commits");
@@ -5063,7 +5063,7 @@ fn a_read_across_a_failed_sync_gives_the_error_that_ended_the_buffer() {
         let pool = Rc::clone(&config.pool);
         let mut slots = Slots::new();
         let buffer = Buffer::open(config, &mut slots).await.expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let batch: Vec<Entry> = (0..20)
             .map(|first| {
                 let bytes = pool.alloc(8).expect("a block").freeze();
@@ -5103,7 +5103,7 @@ fn a_read_ends_at_a_pool_shortage_and_keeps_what_it_holds() {
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let first = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
         buffer.append([first]).expect("queues");
         buffer.committed().await.expect("commits");
@@ -5148,7 +5148,7 @@ fn a_record_with_a_table_over_one_block_is_read() {
             .open(layout(AREA, BODY_MAX * 4), &mut slots)
             .await
             .expect("opens");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         let batch: Vec<_> = (0..100)
             .map(|first| entry(1, a, Path::Live, first, 1, None, shard.block(3).into()))
             .collect();
@@ -5178,7 +5178,7 @@ fn cut_the_second_commit(seed: u64, cut: i64) -> (sim::Sim, sim::node::Node, boo
         let buffer = Buffer::open(config, &mut slots)
             .await
             .expect("the first open ends well");
-        let a = slots.assign(key(1));
+        let a = slots.index(key(1));
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -5214,7 +5214,7 @@ fn a_read_after_a_power_cut_gives_the_entries_the_tail_reports() {
             let buffer = Buffer::open(node_config(&node, tasks, DIR), &mut slots)
                 .await
                 .expect("opens after the power cut");
-            let a = slots.assign(key(1));
+            let a = slots.index(key(1));
             let tail = buffer.tail(a, Path::Live);
             let reads = read_all(&buffer, a, Path::Live, Mark::at(0), 1).await;
             (tail, reads)

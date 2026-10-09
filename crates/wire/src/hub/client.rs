@@ -36,7 +36,7 @@ use types::node;
 use types::time::{Interval, Stamp};
 
 use super::{BUSY, Error};
-use crate::common::{Fields, Writer};
+use crate::common::{Fields, Writer, body};
 use crate::header::MALFORMED;
 
 const HELLO: u8 = 4;
@@ -72,7 +72,7 @@ pub enum Refusal {
     /// [`MALFORMED`]: a message of the program does not decode, or breaks a rule of
     /// the client wire.
     Malformed,
-    /// [`BUSY`]: the node had no memory for a response.
+    /// [`BUSY`]: the node had no memory for a response or a request body.
     Busy,
     /// [`REFUSED`].
     Refused,
@@ -130,7 +130,7 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Malformed => "a message of the program broke the client wire",
-            Self::Busy => "the node had no memory for a response",
+            Self::Busy => "the node had no memory for a response or a request body",
             Self::Refused => {
                 "the spec has no such subject, does not list the key for it, or the \
                  signature is not valid"
@@ -375,16 +375,14 @@ impl Response {
 
 /// The rest of the body of one request or response.
 #[derive(Debug)]
-pub struct Body {
-    remain: usize,
-}
+pub struct Body(body::Count);
 
 impl Body {
     fn new(length: u64) -> Self {
         assert_body(length);
         let remain = usize::try_from(length)
             .expect("invariant: a usize holds a body of at most 16 MiB");
-        Self { remain }
+        Self(body::Count::new(remain))
     }
 
     /// Takes the next message of the body and gives its bytes.
@@ -394,21 +392,17 @@ impl Body {
     /// [`Error::Empty`] for an empty message, [`Error::Body`] for more bytes than
     /// remain, and [`Error::Trailing`] once the body ended.
     pub fn take<'m>(&mut self, message: &'m [u8]) -> Result<&'m [u8], Error> {
-        let (len, remain) = (message.len(), self.remain);
-        if remain == 0 {
+        if self.0.remain() == 0 {
             return Err(Error::Trailing);
         }
-        if len == 0 {
-            return Err(Error::Empty);
-        }
-        self.remain = remain.checked_sub(len).ok_or(Error::Body { len, remain })?;
+        self.0.take(message)?;
         Ok(message)
     }
 
     /// The bytes that remain. The body ended at 0.
     #[must_use]
     pub fn remain(&self) -> usize {
-        self.remain
+        self.0.remain()
     }
 
     /// Checks that the body ended, when its stream ends.
@@ -417,10 +411,7 @@ impl Body {
     ///
     /// [`Error::Unfinished`] when bytes of the body remain.
     pub fn end(&self) -> Result<(), Error> {
-        match self.remain {
-            0 => Ok(()),
-            remain => Err(Error::Unfinished { remain }),
-        }
+        Ok(self.0.end()?)
     }
 }
 

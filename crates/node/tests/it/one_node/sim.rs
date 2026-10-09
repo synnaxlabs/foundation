@@ -33,8 +33,7 @@ pub(super) struct Opcua {}
 #[derive(Debug, Default)]
 pub(super) struct Influx {
     /// The tests read it while [`Influx::stored`] waits on #1734. The test
-    /// `a_dropped_influx_ends_its_shard` counts its owners while a refused connect
-    /// waits on #2000.
+    /// `a_dropped_influx_ends_its_shard` counts its owners.
     store: Arc<Mutex<Store>>,
     /// The address of the first [`Influx::serve`].
     address: Option<SocketAddr>,
@@ -178,6 +177,12 @@ fn write(address: SocketAddr, lines: &'static str) -> String {
     answer.try_recv().expect("the shard sent the answer")
 }
 
+/// What [`write`] gives when no server listens at `address`. On macOS, a child that a
+/// rig test spawns may hold the port (`os::net`), so only Linux checks a refusal.
+fn refused(address: SocketAddr) -> String {
+    format!("the connect failed: {address} refused the connection")
+}
+
 #[test]
 fn influx_stores_each_line_written_to_plant_and_keeps_it_after_a_stop() {
     let mut influx = Influx::default();
@@ -190,6 +195,21 @@ fn influx_stores_each_line_written_to_plant_and_keeps_it_after_a_stop() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs SOCK_CLOEXEC")]
+fn a_stopped_influx_refuses_and_serves_again_on_its_port_with_what_it_stored() {
+    let mut influx = Influx::default();
+    let address = influx.serve();
+    assert_eq!(write(address, "m f=1 1"), "204 No Content");
+    influx.stop();
+    assert_eq!(write(address, "m f=2 2"), refused(address));
+    assert_eq!(influx.serve(), address);
+    assert_eq!(write(address, "m f=3 3"), "204 No Content");
+    let store = influx.store.lock().expect("no panic");
+    let times: Vec<_> = store.points("m", &[]).map(|point| point.time).collect();
+    assert_eq!(times, [Stamp::from_nanos(1), Stamp::from_nanos(3)]);
+}
+
+#[test]
 fn a_dropped_influx_ends_its_shard() {
     let mut influx = Influx::default();
     let address = influx.serve();
@@ -197,6 +217,9 @@ fn a_dropped_influx_ends_its_shard() {
     let store = Arc::clone(&influx.store);
     drop(influx);
     assert_eq!(Arc::strong_count(&store), 1, "the shard holds no store");
+    if cfg!(target_os = "linux") {
+        assert_eq!(write(address, "m f=2 2"), refused(address));
+    }
 }
 
 #[test]

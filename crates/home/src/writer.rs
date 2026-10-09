@@ -26,7 +26,7 @@ pub struct Writer {
 }
 
 /// An open writer on its shard.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key {
     /// The number of the shard that opened the writer.
     pub(crate) shard: u32,

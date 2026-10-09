@@ -9,9 +9,14 @@ dependencies = [
  "block",
  "connector-influx",
  "env",
+ "mesh",
  "node",
+ "ops",
  "proptest",
+ "serde_json",
  "sim",
+ "spec",
+ "transport",
  "types",
 ]
 
@@ -421,8 +426,12 @@ name = "connector-opcua"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "connector-opcua",
  "counting",
  "divan",
+ "env",
+ "sim",
+ "types",
 ]
 
 [[package]]
@@ -1062,11 +1071,13 @@ dependencies = [
  "bytes",
  "clock",
  "codec",
+ "config-hcl",
  "connector",
  "connector-influx",
  "counting",
  "crc32c",
  "divan",
+ "document",
  "env",
  "estimate",
  "home",
@@ -1197,15 +1208,21 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 name = "ops"
 version = "0.0.0"
 dependencies = [
+ "blob",
+ "block",
  "clap",
  "config",
  "config-hcl",
  "connector",
  "document",
+ "env",
+ "mesh",
  "schemars",
  "serde",
  "serde_json",
+ "sim",
  "spec",
+ "transport",
  "types",
 ]
 
