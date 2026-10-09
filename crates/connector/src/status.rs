@@ -387,6 +387,15 @@ mod tests {
     }
 
     #[test]
+    fn debugs_each_value_but_the_waker() {
+        let status = Status::new(vec![name("samples")]);
+        status.count("samples").set(3);
+        let want = "Status(Values { state: Running, class: None, restarts: 0, counts: \
+                    [(Name(\"samples\"), Cell { value: 3 })], staged: true, .. })";
+        assert_eq!(format!("{status:?}"), want);
+    }
+
+    #[test]
     fn panics_on_a_status_channel_longer_than_a_name() {
         let connector = "c".repeat(245);
         let connector = name(&connector);
