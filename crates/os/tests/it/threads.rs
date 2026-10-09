@@ -323,3 +323,16 @@ fn a_panic_in_the_drop_of_an_aborted_tokio_task_gives_ok() {
     let handle = threads().start("thread-17", body).unwrap();
     assert_joins(handle, Ok(()));
 }
+
+#[test]
+fn a_tokio_task_that_panics_in_its_drop_after_a_panic_escapes_tokio_gives_panicked() {
+    let body = || async {
+        // A panic escapes Tokio from each task: the first ends `block_on`, and the second
+        // the drop of the runtime.
+        drop(tokio::spawn(Stuck(2)));
+        drop(tokio::spawn(async { panic_any(Relay(2)) }));
+        pending::<()>().await;
+    };
+    let handle = threads().start("thread-18", body).unwrap();
+    assert_joins(handle, panicked("thread-18"));
+}

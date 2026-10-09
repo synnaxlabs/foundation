@@ -448,3 +448,16 @@ fn a_panic_in_the_drop_of_an_aborted_tokio_task_does_not_end_the_shard() {
     let handle = shards().start(config("shard-19"), main).unwrap();
     assert_joins(handle, Ok(()));
 }
+
+#[test]
+fn a_tokio_task_that_panics_in_its_drop_after_a_panic_escapes_tokio_ends_the_shard() {
+    let main = |_: Tasks| async {
+        // A panic escapes Tokio from each task: the first ends `block_on`, and the second
+        // the drop of the runtime.
+        drop(tokio::task::spawn_local(Stuck(2)));
+        drop(tokio::task::spawn_local(async { panic_any(Relay(2)) }));
+        pending::<()>().await;
+    };
+    let handle = shards().start(config("shard-20"), main).unwrap();
+    assert_joins(handle, panicked("shard-20"));
+}
