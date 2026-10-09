@@ -599,9 +599,10 @@ fn opens_a_writer_once_the_node_has_mesh_time_and_a_reader_before() {
         test.sync().await;
         let synced = test.clock.now();
         let mut writer = opening.await.expect("opens");
+        let waited = test.clock.now() - synced;
         assert!(
-            test.clock.now() - synced <= Span::SECOND,
-            "opens at the next read"
+            waited <= Span::SECOND,
+            "opened {waited} after sync, more than 1 s"
         );
         let now = writer.now();
         assert_eq!(now.nanos(), test.now());
