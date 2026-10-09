@@ -56,9 +56,10 @@ pub(crate) struct Disk {
     /// The changes of entries that no `sync_dir` covered, in the order that their calls
     /// ended.
     log: Vec<Change>,
-    /// The path of each open descriptor, by the key of its handle.
+    /// The path of each open descriptor as its open or rename gave it, by the key of
+    /// its handle.
     descriptors: BTreeMap<u64, PathBuf>,
-    /// The path of each descriptor closed, in order.
+    /// The normal path of each descriptor closed, in order.
     closes: Vec<PathBuf>,
 }
 
@@ -301,8 +302,8 @@ impl Disk {
     }
 
     /// Moves the entry of the file of `handle` from `from` to `to`, both in one
-    /// directory, and gives descriptor `handle` the path `to`. `NotFound` when `from`
-    /// no longer names the file; `Exists` when `to` is taken.
+    /// directory, and gives descriptor `handle`, when it is still open, the path `to`.
+    /// `NotFound` when `from` no longer names the file; `Exists` when `to` is taken.
     pub(crate) fn rename(
         &mut self,
         handle: Handle,
@@ -319,7 +320,7 @@ impl Disk {
         }
         self.edit(dir, vec![(old.into(), None), (new.to_owned(), Some(inode))]);
         if let Some(path) = self.descriptors.get_mut(&handle.key) {
-            *path = normal(to);
+            *path = to.to_path_buf();
         }
         Ok(())
     }
@@ -342,10 +343,10 @@ impl Disk {
 
     /// Makes `handle`, which an open of `path` gave, a descriptor.
     pub(crate) fn opened(&mut self, handle: Handle, path: &Path) {
-        self.descriptors.insert(handle.key, normal(path));
+        self.descriptors.insert(handle.key, path.to_path_buf());
     }
 
-    /// The path of descriptor `handle` now.
+    /// The path of descriptor `handle` now, as its open or rename gave it.
     pub(crate) fn path(&self, handle: Handle) -> &Path {
         let Some(path) = self.descriptors.get(&handle.key) else {
             unreachable!(
@@ -359,7 +360,7 @@ impl Disk {
     /// Closes descriptor `handle`: drops its hold and logs its path.
     pub(crate) fn close(&mut self, handle: Handle) {
         self.release(handle);
-        let path = self.path(handle).to_path_buf();
+        let path = normal(self.path(handle));
         self.descriptors.remove(&handle.key);
         self.closes.push(path);
     }
@@ -393,8 +394,11 @@ impl Disk {
     /// empty. Returns the number of changes that a `Power` crash kept, or 0 after a
     /// `Process` crash.
     pub(crate) fn crash(&mut self, crash: Crash, rng: &mut Rng) -> u64 {
-        self.closes
-            .extend(mem::take(&mut self.descriptors).into_values());
+        self.closes.extend(
+            mem::take(&mut self.descriptors)
+                .values()
+                .map(|path| normal(path)),
+        );
         let inodes: Vec<u64> = self.inodes.keys().copied().collect();
         for inode in inodes {
             if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {

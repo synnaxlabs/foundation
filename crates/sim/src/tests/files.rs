@@ -1776,3 +1776,30 @@ fn a_fault_on_the_new_path_misses_a_reader_after_another_descriptor_renames() {
         assert_eq!(found.map(|_| ()), Ok(()));
     });
 }
+
+#[test]
+fn an_error_of_a_descriptor_names_the_path_of_its_open_as_given() {
+    run(0, MIB, |node, _| async move {
+        let pool = pool();
+        let file = create(&node, "./a", KIB).await;
+        node.fail_file(Path::new("a"), Operation::ReadAt);
+        let found = file.read_at(0, pool.alloc(512).unwrap()).await;
+        assert_eq!(found.map(|_| ()), Err(io("./a", Operation::ReadAt, 5)));
+    });
+}
+
+#[test]
+fn an_error_of_a_descriptor_names_the_path_of_its_rename_as_given() {
+    run(0, MIB, |node, _| async move {
+        let pool = pool();
+        let mut file = create(&node, "./a", KIB).await;
+        file.rename(Path::new("./c")).await.unwrap();
+        node.fail_file(Path::new("c"), Operation::WriteAt);
+        let found = file.write_at(0, &[block(&pool, &[1; 512])]).await;
+        assert_eq!(found, Err(io("./c", Operation::WriteAt, 5)));
+        node.fail_file(Path::new("c"), Operation::Sync);
+        assert_eq!(file.sync().await, Err(io("./c", Operation::Sync, 5)));
+        let found = file.sync().await;
+        assert_eq!(found, Err(Error::Poisoned { path: "./c".into() }));
+    });
+}
