@@ -73,7 +73,13 @@
   https://github.com/synnaxlabs/foundation/issues/1456#issuecomment-6043389350). So
   bytes that wait for a block never use up the credit that a started message needs,
   and a peer that breaks the send rule holds at most the receive budget and stops only
-  its own connection. Each node's first one-way stream is its hello, with no class byte:
+  its own connection. After an error, a read holds no bytes of the message. The read
+  of the endpoint clears the message reader, and no other part does, because only it
+  sees each error, also that of a connection that closed before the reader ran.
+  Decided by `laptop.architect-2` (#1672:
+  https://github.com/synnaxlabs/foundation/issues/1672#issuecomment-6049625317 and
+  https://github.com/synnaxlabs/foundation/issues/1672#issuecomment-6054670282).
+  Each node's first one-way stream is its hello, with no class byte:
   (id, value) pairs, both QUIC varints, ids strictly increasing, then the stream end. Id
   0 is `window_bytes` and id 1 is `message_bytes_max`; both are required. A node ignores
   an id it does not know, so an advisory field needs no new ALPN; a field that the peer
