@@ -13,12 +13,12 @@ use std::task::{self, Poll, Wake, Waker};
 
 use env::clock::Clock;
 use types::authority::Authority;
-use types::frame::{Form, Label, Path};
+use types::frame::{Draft, Form, Label, Path};
 use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Monotonic, Span, Stamp};
 
-use hub::home::{self, Outcome, Refusal};
+use hub::home::{self, Outcome, Refusal, order};
 use hub::writer::Failure;
 
 use crate::kind;
@@ -374,8 +374,10 @@ struct Session {
 }
 
 impl Session {
-    /// Writes the last value of each status channel. A frame that the home does not
-    /// apply leaves the status staged, so the flush writes it again.
+    /// Writes the last value of each status channel. A frame that the home refuses
+    /// as `Backwards` is stamped after the stamp the refusal gives and written again,
+    /// one time. A frame that the home does not apply leaves the status staged, so
+    /// the flush writes it again.
     ///
     /// # Panics
     ///
@@ -386,37 +388,37 @@ impl Session {
         if self.closed {
             return;
         }
-        let mut stamp = self.hub.now();
-        if let Some(last) = self.last {
-            stamp = stamp.max(Stamp::from_nanos(last.nanos().strict_add(1)));
+        let now = self.hub.now();
+        let stamp = self.last.map_or(now, |last| now.max(after(last)));
+        if let Err(before) = self.send(values, stamp)
+            && let Err(_) = self.send(values, after(before))
+        {
+            values.stage();
         }
+    }
+
+    /// Writes one frame of the last value of each status channel at `stamp`.
+    ///
+    /// # Errors
+    ///
+    /// The stamp that the home gives when it refuses the frame as `Backwards`.
+    ///
+    /// # Panics
+    ///
+    /// As [`Session::write`].
+    fn send(&mut self, values: &Values, stamp: Stamp) -> Result<(), Stamp> {
         self.last = Some(stamp);
-        let mut draft = self
-            .hub
-            .draft(Form::Raw, &self.series)
-            .expect("invariant: the series follow the key set");
-        let supervisor = [
-            u64::from(self.state as u8),
-            u64::from(self.class as u8),
-            self.restarts,
-        ];
-        let counts = values.counts.iter().map(|(_, count)| count.get());
-        let mut samples = supervisor.into_iter().chain(counts);
-        for (i, &entry) in self.entries.iter().enumerate() {
-            let bytes = draft
-                .series_mut(entry)
-                .expect("invariant: each entry has a series");
-            if i == 0 {
-                bytes.copy_from_slice(&stamp.nanos().to_le_bytes());
-                continue;
-            }
-            let sample = samples.next().expect("invariant: a sample per channel");
-            let len = bytes.len();
-            bytes.copy_from_slice(&sample.to_le_bytes()[..len]);
-        }
-        draft.set_count(self.group, 1);
+        let draft = self.frame(values, stamp);
         match self.hub.write(Label::Path(Path::Live), draft) {
             Ok([Outcome::Applied { .. }]) => {}
+            Ok(
+                [
+                    Outcome::Refused {
+                        refusal: Refusal::Order(order::Error::Backwards { before, .. }),
+                        ..
+                    },
+                ],
+            ) => return Err(*before),
             Ok(
                 [
                     Outcome::Lost { .. }
@@ -445,7 +447,42 @@ impl Session {
                 error @ (home::Error::Resend | home::Error::Full | home::Error::Large),
             )) => panic!("the home refuses a status frame: {error}"),
         }
+        Ok(())
     }
+
+    /// A frame of the last value of each status channel at `stamp`.
+    fn frame(&self, values: &Values, stamp: Stamp) -> Draft {
+        let mut draft = self
+            .hub
+            .draft(Form::Raw, &self.series)
+            .expect("invariant: the series follow the key set");
+        let supervisor = [
+            u64::from(self.state as u8),
+            u64::from(self.class as u8),
+            self.restarts,
+        ];
+        let counts = values.counts.iter().map(|(_, count)| count.get());
+        let mut samples = supervisor.into_iter().chain(counts);
+        for (i, &entry) in self.entries.iter().enumerate() {
+            let bytes = draft
+                .series_mut(entry)
+                .expect("invariant: each entry has a series");
+            if i == 0 {
+                bytes.copy_from_slice(&stamp.nanos().to_le_bytes());
+                continue;
+            }
+            let sample = samples.next().expect("invariant: a sample per channel");
+            let len = bytes.len();
+            bytes.copy_from_slice(&sample.to_le_bytes()[..len]);
+        }
+        draft.set_count(self.group, 1);
+        draft
+    }
+}
+
+/// The stamp 1 ns after `stamp`.
+fn after(stamp: Stamp) -> Stamp {
+    Stamp::from_nanos(stamp.nanos().strict_add(1))
 }
 
 /// Polls `run` to its end, and `side` after it while `run` is pending, so `side` sees

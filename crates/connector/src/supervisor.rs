@@ -1355,6 +1355,41 @@ mod tests {
     }
 
     #[test]
+    fn writes_the_start_of_a_call_at_the_instant_of_the_end_before_it_at_once() {
+        let statuses = run_on(|node, tasks| async move {
+            let script = Script {
+                steps: Mutex::new([Step::Done, Step::Linger(Span::ZERO)].into()),
+                ..Script::default()
+            };
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            let supervisor = Supervisor::new(inputs);
+            let (name, clock) = (name("plant.script"), node.clock());
+            let token = Token::new();
+            let first = supervisor
+                .run("script", name.clone(), &config(), &token)
+                .await;
+            first.expect("the first call returns ok");
+            let (canceller, sleeper) = (token.clone(), clock.clone());
+            tasks.spawn(async move {
+                sleeper.sleep(ms(5_000)).await;
+                canceller.cancel();
+            });
+            let second = supervisor.run("script", name, &config(), &token).await;
+            second.expect("the second call returns ok");
+            clock.sleep(Span::SECOND).await;
+            statuses.borrow().clone()
+        });
+        let got: Vec<_> = statuses.iter().map(|(at, s)| (*at, s[0])).collect();
+        let ns = Span::from_nanos;
+        let first = [(ns(0), 0), (ns(1), 3), (ns(2), 2)];
+        let second = [(ns(3), 0), (ms(5_000), 3), (ns(5_000_000_001), 2)];
+        assert_eq!(got, [first, second].concat());
+    }
+
+    #[test]
     fn writes_the_count_of_a_set_at_the_time_of_a_flush() {
         let statuses = tally(Tally {
             count: "samples",

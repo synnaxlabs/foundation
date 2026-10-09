@@ -76,7 +76,12 @@
   `Failure::Removed` or `home::Error::Disk` the call writes no more status. Each other
   refusal is a defect of `connector`, and panics (`laptop.architect-2`,
   2026-10-09T19:41:05Z:
-  https://github.com/synnaxlabs/foundation/pull/2173#issuecomment-6087998186). The
+  https://github.com/synnaxlabs/foundation/pull/2173#issuecomment-6087998186). A frame
+  that the home refuses as `Backwards` is stamped again after the stamp that the
+  refusal gives, and written again at once, one time. A writer starts with no last
+  stamp, so its first frame can be at or before the last frame of the writer before it
+  on the same index (`laptop.architect-2`, 2026-10-09T20:20:46Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6088599351). The
   status channels open once the node has mesh time, and no run starts before. A cancel
   while they wait to open gives `Ok` at once (`laptop.architect-2`,
   2026-10-09T19:43:41Z:
