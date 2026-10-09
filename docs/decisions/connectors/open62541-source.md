@@ -308,9 +308,9 @@
   the port before it builds the URL of its server. Also lost: one constructor with an
   `Option<Listener>`, which a client gives as a literal `None` (`docs/claude/rust.md`;
   `laptop.director`,
-  https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089322178), and one
-  with an enum argument, a new type that holds one value. Decided by
-  `laptop.architect-2`
+  https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089322178,
+  2026-10-09 21:10 UTC), and one with an enum argument, a new type that holds one
+  value. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286,
   2026-10-09 20:26 UTC). The two constructors: decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089351505,
@@ -321,7 +321,10 @@
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089521550,
   2026-10-09 21:25 UTC).
   A server on the loop of a manager is `STOPPED` when its last connection closes after
-  `UA_Server_run_shutdown`, so its owner drives until then. `UA_Server_delete` then
-  frees the server and each session at once. Between that drive and the delete, the
-  owner calls nothing that queues a delayed callback on the server, such as
-  `UA_Server_addCertificates`: the next run of the loop would read the freed server.
+  `UA_Server_run_shutdown`. That close can queue a delayed callback on the server, such
+  as the removal of a session that is not activated, so its owner drives until the
+  server is `STOPPED` and no delayed callback waits (`event::Loop::next` is not now).
+  `UA_Server_delete` then frees the server and each session at once. Between that drive
+  and the delete, the owner calls nothing that queues a delayed callback on the server,
+  such as `UA_Server_addCertificates`: the next run of the loop would read the freed
+  server.

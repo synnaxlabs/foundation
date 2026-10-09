@@ -493,6 +493,10 @@ pub(crate) mod test {
             client: *mut super::Client,
             url: *const std::ffi::c_char,
         ) -> u32;
+        pub(crate) fn UA_Client_connectSecureChannelAsync(
+            client: *mut super::Client,
+            url: *const std::ffi::c_char,
+        ) -> u32;
         pub(crate) fn __UA_Client_AsyncService(
             client: *mut super::Client,
             request: *const c_void,
@@ -503,6 +507,8 @@ pub(crate) mod test {
             key: *mut u32,
         ) -> u32;
 
+        pub(crate) fn UA_new(kind: *const c_void) -> *mut c_void;
+        pub(crate) fn UA_delete(value: *mut c_void, kind: *const c_void);
         pub(crate) fn UA_findDataType(id: *const NodeId) -> *const c_void;
         pub(crate) fn UA_KeyValueMap_setScalar(
             map: *mut KeyValueMap,
@@ -523,6 +529,7 @@ pub(crate) mod test {
             kind: *const c_void,
         ) -> *const c_void;
         pub(crate) fn UA_Client_disconnect(client: *mut super::Client) -> u32;
+        pub(crate) fn UA_Client_disconnectAsync(client: *mut super::Client) -> u32;
 
         pub(crate) fn shim_server_new(
             el: *mut EventLoop,

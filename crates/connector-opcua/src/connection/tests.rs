@@ -1982,6 +1982,8 @@ fn notes(
         .collect()
 }
 
+/// A read buffer for each listen and connecting connection costs 64 KiB each, which no
+/// call of open62541 shows, so the test reads the table.
 #[test]
 fn only_a_stream_that_reads_holds_a_read_buffer() {
     let mut network = Network::new();
@@ -2497,6 +2499,155 @@ fn a_stopped_server_with_a_session_is_deleted_with_its_session() {
             // SAFETY: the server lives.
             let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
             assert_eq!(state, ffi::test::Lifecycle::STOPPED);
+            // SAFETY: the server is stopped.
+            let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
+            assert_eq!(status, Status::GOOD);
+            // SAFETY: nothing uses the client after it.
+            unsafe { ffi::UA_Client_delete(client) };
+            side.drive(Span::SECOND).await;
+        })
+        .expect("the run ends");
+}
+
+/// The `CloseSession` service of a running server removes the session after the
+/// service ends, which still writes to it.
+#[test]
+fn a_session_that_its_client_closes_is_removed_after_the_service() {
+    let mut network = Network::new();
+    network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            // SAFETY: the loop outlives the server, which the test deletes.
+            let server = unsafe {
+                ffi::test::shim_server_new(
+                    side.events().raw(),
+                    PORT,
+                    c"opc.tcp://:4840".as_ptr(),
+                )
+            };
+            assert!(!server.is_null());
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+            assert_eq!(status, Status::GOOD);
+            // SAFETY: the loop outlives the client, which the test deletes.
+            let client = unsafe { ffi::shim_client_new(side.events().raw()) };
+            assert!(!client.is_null());
+            let url = c"opc.tcp://10.0.0.1:4840";
+            // SAFETY: the client lives, and copies the URL.
+            let status = Status(unsafe {
+                ffi::test::UA_Client_connectAsync(client, url.as_ptr())
+            });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            // SAFETY: the client lives.
+            let status =
+                Status(unsafe { ffi::test::UA_Client_disconnectAsync(client) });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            // SAFETY: the server lives.
+            let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
+            assert_eq!(state, ffi::test::Lifecycle::STOPPED);
+            // SAFETY: the server is stopped.
+            let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
+            assert_eq!(status, Status::GOOD);
+            // SAFETY: nothing uses the client after it.
+            unsafe { ffi::UA_Client_delete(client) };
+            side.drive(Span::SECOND).await;
+        })
+        .expect("the run ends");
+}
+
+/// Records the service result of the response at `response` in the `Cell<u32>` at
+/// `data`.
+unsafe extern "C" fn created(
+    _: *mut ffi::Client,
+    data: *mut c_void,
+    _: u32,
+    response: *mut c_void,
+) {
+    // SAFETY: the response header starts the response; its result is at 12.
+    let at = unsafe { response.cast::<u8>().add(12) };
+    // SAFETY: as above.
+    let result = unsafe { at.cast::<u32>().read_unaligned() };
+    // SAFETY: the test gives a live cell.
+    unsafe { (*data.cast::<Cell<u32>>()).set(result) };
+}
+
+/// The close of a channel purges its session that is not activated, and the removal
+/// waits in the loop when the server becomes `STOPPED`.
+#[test]
+fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
+    let mut network = Network::new();
+    network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            // SAFETY: the loop outlives the server, which the test deletes.
+            let server = unsafe {
+                ffi::test::shim_server_new(
+                    side.events().raw(),
+                    PORT,
+                    c"opc.tcp://:4840".as_ptr(),
+                )
+            };
+            assert!(!server.is_null());
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+            assert_eq!(status, Status::GOOD);
+            // SAFETY: the loop outlives the client, which the test deletes.
+            let client = unsafe { ffi::shim_client_new(side.events().raw()) };
+            assert!(!client.is_null());
+            let url = c"opc.tcp://10.0.0.1:4840";
+            // SAFETY: the client lives, and copies the URL.
+            let status = Status(unsafe {
+                ffi::test::UA_Client_connectSecureChannelAsync(client, url.as_ptr())
+            });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            let request_type = builtin(459); // CreateSessionRequest
+            let response_type = builtin(462); // CreateSessionResponse
+            // SAFETY: a valid type.
+            let request = unsafe { ffi::test::UA_new(request_type) };
+            let result = Box::new(Cell::new(u32::MAX));
+            // SAFETY: the client lives; the request is encoded at once.
+            let status = Status(unsafe {
+                ffi::test::__UA_Client_AsyncService(
+                    client,
+                    request,
+                    request_type,
+                    created as *const c_void,
+                    response_type,
+                    ptr::from_ref(&*result).cast_mut().cast(),
+                    ptr::null_mut(),
+                )
+            });
+            // SAFETY: made by `UA_new`.
+            unsafe { ffi::test::UA_delete(request, request_type) };
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            assert_eq!(Status(result.get()), Status::GOOD, "the session is made");
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+            assert_eq!(status, Status::GOOD);
+            side.manager
+                .drive(|_| {
+                    side.run();
+                    // SAFETY: the server lives.
+                    let state =
+                        unsafe { ffi::test::UA_Server_getLifecycleState(server) };
+                    let due = side.events().next() == Some(side.clock.now());
+                    if state == ffi::test::Lifecycle::STOPPED && !due {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                })
+                .await;
             // SAFETY: the server is stopped.
             let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
             assert_eq!(status, Status::GOOD);
