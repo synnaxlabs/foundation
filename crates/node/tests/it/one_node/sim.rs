@@ -155,13 +155,18 @@ where
 /// Writes `lines` to the database `plant` at `address` from a shard of its own, and
 /// gives the status of the answer or the error of the client.
 fn write(address: SocketAddr, lines: &'static str) -> String {
+    write_within(address, lines, Span::MINUTE)
+}
+
+/// [`write`], with a client timeout of `timeout`.
+fn write_within(address: SocketAddr, lines: &'static str, timeout: Span) -> String {
     let (send, answer) = mpsc::channel();
     let shard = start("write", move |tasks| async move {
         let client = Client::new(connector::http::Config {
             net: os::net(),
             clock: os::clock(),
             tasks,
-            timeout: Span::MINUTE,
+            timeout,
             body_max: 1 << 10,
         });
         let request = Request::post(format!("http://{address}/write?db=plant"))
@@ -266,7 +271,7 @@ fn a_dropped_influx_stops_its_server_when_the_test_panics() {
         Span::from_nanos(5_000_000_000),
         "the server stops",
         || {
-            let written = write(address, "m f=1 1");
+            let written = write_within(address, "m f=1 1", Span::SECOND);
             if written == refused(address) {
                 Ok(())
             } else {
