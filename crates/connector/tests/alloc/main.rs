@@ -117,9 +117,11 @@ fn check<F: Future>(mut f: Pin<&mut F>, token: &Token, wakers: &[Waker], name: &
 #[cfg(feature = "sim")]
 mod status {
     use std::cell::Cell;
+    use std::future;
+    use std::pin::pin;
     use std::sync::Arc;
-    use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
 
     use connector::cancel::Token;
     use connector::kind::{Channels, Context, Error, Kind, Table};
@@ -133,9 +135,15 @@ mod status {
 
     use super::ALLOCATOR;
 
-    /// A kind that sets its count `samples` 64 times in each second, and counts the
-    /// allocations of the sets from the third second on.
-    struct Sets(Arc<AtomicU64>);
+    /// A kind that sets its count `samples` 64 times each 2.1 s, so each first set
+    /// finds the status write due, and counts the allocations of the sets from the
+    /// third time on. It holds `steady` from the third time on until it ends its last
+    /// sleep, and counts in `slept` what its sleeps allocate meanwhile.
+    struct Sets {
+        allocations: Arc<AtomicU64>,
+        steady: Arc<AtomicBool>,
+        slept: Arc<AtomicU64>,
+    }
 
     impl Kind for Sets {
         type Config = ();
@@ -163,18 +171,35 @@ mod status {
             let count = ctx.count("samples");
             let allocations = Cell::new(0);
             // The first wakes of the flush grow the simulator's lists.
-            for second in 0..6_u64 {
+            for round in 0..6_u64 {
                 let ((), n) = ALLOCATOR.count(|| {
                     for i in 0..64 {
-                        count.set(second * 64 + i);
+                        count.set(round * 64 + i);
                     }
                 });
-                if second >= 2 {
+                if round >= 2 {
                     allocations.set(allocations.get() + n);
+                    self.steady.store(true, Relaxed);
                 }
-                ctx.clock().sleep(Span::from_nanos(1_100_000_000)).await;
+                let (sleep, n) = ALLOCATOR
+                    .count(|| ctx.clock().sleep(Span::from_nanos(2_100_000_000)));
+                if self.steady.load(Relaxed) {
+                    self.slept.fetch_add(n, Relaxed);
+                }
+                let mut sleep = pin!(sleep);
+                future::poll_fn(|cx| {
+                    let (poll, n) = ALLOCATOR.count(|| sleep.as_mut().poll(cx));
+                    if self.steady.load(Relaxed) {
+                        self.slept.fetch_add(n, Relaxed);
+                    }
+                    poll
+                })
+                .await;
             }
-            self.0.store(allocations.get(), Relaxed);
+            self.steady.store(false, Relaxed);
+            self.allocations.store(allocations.get(), Relaxed);
+            // The end of the run writes the status, after the polls that count.
+            ctx.clock().sleep(Span::from_nanos(1)).await;
             Ok(())
         }
     }
@@ -184,10 +209,19 @@ mod status {
     }
 
     /// Checks that a set of a status count allocates nothing, also the set that wakes
-    /// the status writer.
+    /// the status writer, and that so does each poll of the supervisor while the kind
+    /// sets its count, with the write of the status, but for the kind's sleeps.
     pub(super) fn check() {
         let allocations = Arc::new(AtomicU64::new(1));
-        let kind = Sets(Arc::clone(&allocations));
+        let steady = Arc::new(AtomicBool::new(false));
+        let slept = Arc::new(AtomicU64::new(0));
+        let kind = Sets {
+            allocations: Arc::clone(&allocations),
+            steady: Arc::clone(&steady),
+            slept: Arc::clone(&slept),
+        };
+        let polled = Arc::new(AtomicU64::new(0));
+        let (counted, into) = (Arc::clone(&steady), Arc::clone(&polled));
         let mut sim = sim::Sim::new(sim::Config::default());
         let node = sim.node(sim::node::Config::default());
         let result = sim.run_on(&node, |node, tasks| async move {
@@ -207,9 +241,18 @@ mod status {
             config
                 .hub
                 .set_definitions(status.iter().map(|(name, def)| (name, def)));
-            Supervisor::new(config)
-                .run("sets", connector, &Document::default(), &Token::new())
-                .await
+            let supervisor = Supervisor::new(config);
+            let (token, config) = (Token::new(), Document::default());
+            let mut run = pin!(supervisor.run("sets", connector, &config, &token));
+            future::poll_fn(|cx| {
+                if !counted.load(Relaxed) {
+                    return run.as_mut().poll(cx);
+                }
+                let (poll, n) = ALLOCATOR.count(|| run.as_mut().poll(cx));
+                into.fetch_add(n, Relaxed);
+                poll
+            })
+            .await
         });
         result
             .expect("the run ends")
@@ -218,6 +261,12 @@ mod status {
             allocations.load(Relaxed),
             0,
             "a set of a status count allocates nothing"
+        );
+        assert!(slept.load(Relaxed) > 0, "the sleeps of the kind count");
+        assert_eq!(
+            polled.load(Relaxed),
+            slept.load(Relaxed),
+            "a poll of the supervisor allocates only in the kind's sleeps"
         );
     }
 }
