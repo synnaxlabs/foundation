@@ -1,8 +1,9 @@
 //! Keeps the spec that this node uses: reads the spec of each new committed pointer,
 //! and names the pointer in use in a file.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::future::poll_fn;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -434,8 +435,12 @@ pub(super) async fn keep(
         };
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
+        let before = group.used.spec.pointer;
         group.used.settle(pointer, done);
         group.wake_calls();
+        if group.used.spec.pointer != before {
+            group.wake_watches();
+        }
     }
 }
 
@@ -542,6 +547,76 @@ impl Mesh {
             Poll::Pending
         })
         .await
+    }
+
+    /// A watch of the spec that this node uses.
+    #[must_use]
+    pub fn watch_spec(&self) -> Watch {
+        let mut group = self.group.borrow_mut();
+        let slot = group.slot();
+        Watch {
+            group: Rc::downgrade(&self.group),
+            stopped: Rc::clone(&group.stopped),
+            slot,
+            given: None,
+        }
+    }
+}
+
+/// A watch of the spec that a node uses.
+pub struct Watch {
+    group: Weak<RefCell<Group>>,
+    // The cause of the group's stop, which this watch gives after the group drops.
+    stopped: Rc<OnceCell<Stopped>>,
+    // The key of this watch's waker in the group.
+    slot: u64,
+    // The pointer in use that the last call of `next` gave, or `None` before the
+    // first call.
+    given: Option<Option<Pointer>>,
+}
+
+impl fmt::Debug for Watch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Watch").finish_non_exhaustive()
+    }
+}
+
+impl Watch {
+    /// The first call returns the spec in use at once. Each later call waits until
+    /// the pointer in use differs from the one it last returned, and returns the
+    /// newest spec: two changes between calls give one result. A change of only
+    /// `behind` does not wake it.
+    ///
+    /// # Errors
+    ///
+    /// [`Stopped`], the cause, at once, on each call after the group stops or each
+    /// [`Mesh`] of it drops, as [`crate::Watch::next`] does.
+    pub async fn next(&mut self) -> Result<Spec, Stopped> {
+        poll_fn(|cx| {
+            if let Some(stopped) = self.stopped.get() {
+                return Poll::Ready(Err(stopped.clone()));
+            }
+            let Some(group) = self.group.upgrade() else {
+                return Poll::Ready(Err(Stopped::Dropped));
+            };
+            let mut group = group.borrow_mut();
+            let spec = &group.used.spec;
+            if self.given == Some(spec.pointer) {
+                group.watches.insert(self.slot, cx.waker().clone());
+                return Poll::Pending;
+            }
+            self.given = Some(spec.pointer);
+            Poll::Ready(Ok(spec.clone()))
+        })
+        .await
+    }
+}
+
+impl Drop for Watch {
+    fn drop(&mut self) {
+        if let Some(group) = self.group.upgrade() {
+            group.borrow_mut().watches.remove(&self.slot);
+        }
     }
 }
 

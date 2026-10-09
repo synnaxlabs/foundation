@@ -53,3 +53,8 @@
   https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178, the wait
   of `Mesh::spec` in item 4 of the same comment, and the text of `Behind::pointer` in
   https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6061345871.
+  Amended (#1957 PR 2, #2179): `Mesh::watch_spec` gives a `used::Watch`. Its first
+  `next` gives the spec in use at once. Each later `next` waits until the pointer in
+  use differs from the one it last gave, and gives the newest spec, so two changes
+  between calls give one result. A change of only `behind` wakes no watch. After a stop,
+  `next` gives `Stopped` as the home watch does. By `laptop.architect` (PENDING #2179).

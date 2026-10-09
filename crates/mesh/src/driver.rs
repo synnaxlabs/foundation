@@ -48,7 +48,7 @@ mod home;
 mod propose;
 mod send;
 mod stream;
-mod used;
+pub(crate) mod used;
 
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
