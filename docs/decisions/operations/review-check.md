@@ -14,12 +14,14 @@
   period, or semicolon removed, is the word that is checked. Decided by the director at
   2026-10-08T02:57:36Z
   (https://github.com/synnaxlabs/foundation/issues/1467#issuecomment-6051244793). The
-  check reads the comment as GitHub does, by `pulldown-cmark`, with the spaces and
-  tabs at the end of each line removed: as CommonMark with the GitHub extensions that
-  `pulldown-cmark` has (tables, footnotes, strikethrough, task lists, and quote kinds).
-  The others change no line of text: an extended autolink keeps its text, and the tag
-  filter acts only on raw HTML, which fails (corrected by the director at
-  2026-10-08T21:55:15Z,
+  check reads the comment as GitHub does, by `comrak` (chosen by the person at
+  2026-10-09T01:15:32Z,
+  https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6072253988), with the
+  spaces and tabs at the end of each line removed, and each tab in the spaces, tabs, and
+  `>` at the start of a line replaced by spaces to the next multiple of 4 columns: as
+  CommonMark with the GitHub extensions tables, footnotes, strikethrough, task lists,
+  extended autolinks, and quote kinds. The tag filter acts only on raw HTML, which fails
+  (corrected by the director at 2026-10-08T21:55:15Z,
   https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069788449). A
   line ends at `\n`, `\r\n`, or a lone `\r` (decided by the director at
   2026-10-08T04:42:33Z,
@@ -30,25 +32,22 @@
   reads some of these blocks as text and shows the line as a heading. The fields are
   the first top-level block after it, and the end lines are the last one, each when it
   is a paragraph. A code block, an HTML block, a list, a quote, or a table is not a
-  paragraph, so a list after the `Hot path:` line fails. A round comment posted after
-  the cutoff fails when it holds raw HTML outside a code span or a code block: an HTML
-  block or inline HTML as `pulldown-cmark` reads it, or a line of text whose source,
-  after the indent and the marks of quotes, list items, and footnote labels, starts with
-  `<` and a letter, `!`, `/`, or `?` and that is not an autolink, also when the line
-  starts inside a code span, a link, or a link definition. GitHub reads some of these
-  lines in a different way, and an open `<!--` or `<details>` hides the text after it.
-  It also fails when the source of a line of text, after the indent and those marks,
-  starts with a footnote label that `pulldown-cmark` does not read as a footnote
-  definition, also when the line starts inside a code span, a link, or a link
-  definition. GitHub reads the blocks of a comment before its spans, can read that label
-  as a footnote, and does not show a footnote with no reference. A footnote label here
-  is as GitHub reads it: `[^`, one or more characters other than `]`, space, or tab,
-  then `]:`, with no backslash escapes. The message names the line. A round comment that
-  fails by these rules gets an edit that puts the line in a code span, and the cutoff
-  stays. In an old round, a `Hot path:` line, or a `Reviewers:` line of a round that
-  does not parse, counts where GitHub shows it as a line of text of a paragraph, at any
-  depth and any indent. A line of a code block or an HTML block does not count. Changed
-  by https://github.com/synnaxlabs/foundation/issues/1783,
+  paragraph, so a list after the `Hot path:` line fails. A footnote with no reference
+  is not shown, so its lines do not count. The footnotes are the last blocks, as
+  GitHub shows them. A round comment posted after the cutoff fails when it holds raw
+  HTML outside a code span or a code block: an HTML block or inline HTML as `comrak`
+  reads it, or a line of text whose source, after the indent and the marks of quotes,
+  list items, and footnote labels, starts with `<` and a letter, `!`, `/`, or `?` and
+  that is not an autolink, also when the line starts inside a code span, a link, or a
+  link definition. GitHub reads some of these lines in a different way, and an open
+  `<!--` or `<details>` hides the text after it. A footnote label here is `[^`, one or
+  more characters other than `]`, space, or tab, then `]:`. The message names the
+  line. A round comment that fails by these rules gets an edit that puts the line in a
+  code span, and the cutoff stays. In an old round, a `Hot path:` line, or a
+  `Reviewers:` line of a round that does not parse, counts where GitHub shows it as a
+  line of text of a paragraph, at any depth and any indent. A line of a code block or an
+  HTML block does not count. Changed by
+  https://github.com/synnaxlabs/foundation/issues/1783,
   https://github.com/synnaxlabs/foundation/issues/2037, and
   https://github.com/synnaxlabs/foundation/issues/2050, with the rulings of the director
   at 2026-10-08T21:47:24Z
