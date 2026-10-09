@@ -75,7 +75,9 @@ pub(crate) fn main() {
 
 /// The pattern of run `n`. A later run can get the address of a block that an
 /// earlier run freed, and the bytes it does not write keep that run's pattern, so
-/// each run has its own.
+/// each run has its own. No block of an earlier run holds the pattern of a later one
+/// while the runs are fewer than 12: the pattern of run 10, then the filler, holds
+/// that of run 11.
 fn pattern(n: usize) -> Vec<u8> {
     (0..=250).cycle().skip(n).take(PATTERN).collect()
 }
