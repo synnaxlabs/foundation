@@ -112,14 +112,17 @@
   stream on the session that `transport::Transport::dial` gives at that open, the one
   session of the shard to the home (ONE SESSION PER PEER). When that session closes with
   `Code(0)` before the home's `Opened`, as a session that loses the tie-break of ONE
-  SESSION PER PEER does, the task dials again and opens on the session that this dial
-  gives, at most twice. The home's node dials only when it has no open session, and runs
-  one dial at a time, so its session beats at most the session that was open and one
-  that this node dialed before that session arrived. A third loss needs a session of the
-  home's node to end first, and fails the open with `Error::Transport`. The home never
-  served an open on a losing session: the lower node holds its streams until it closes
-  it. Amended by `laptop.architect` (2026-10-09T09:12:45Z,
-  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077974207). A
+  SESSION PER PEER does, the task of the remote reader dials again and opens on the
+  session that this dial gives, at most twice. The home's node dials only when it has no
+  open session, and runs one dial at a time, so its session beats at most the session
+  that was open and one that this node dialed before that session arrived. A third loss
+  needs a session of the home's node to end first, and fails the open with
+  `Error::Transport`. The home never served an open on a losing session: the lower node
+  holds its streams until it closes it. Amended by `laptop.architect`
+  (2026-10-09T09:12:45Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077974207; "the task
+  of the remote reader", 2026-10-09T09:25:27Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6078169582). A
   complete reader sends `Credit` once its grant is half a window (512 KiB) short of the
   frames given back plus a window. A task on `hub::Config::tasks` takes each frame off
   the stream of a remote reader as it arrives, so the node takes each byte that it let
