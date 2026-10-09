@@ -384,6 +384,10 @@ fn symbols(flag: &str) -> std::collections::BTreeSet<String> {
 )]
 fn the_c_names_only_the_listed_symbols_outside_it() {
     let defined = symbols("--defined-only");
+    assert!(
+        defined.contains("shim_client_new"),
+        "the archive holds no shim"
+    );
     let undefined = symbols("--undefined-only");
     let outside: Vec<&str> =
         undefined.difference(&defined).map(String::as_str).collect();
