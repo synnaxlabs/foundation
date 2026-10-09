@@ -124,4 +124,6 @@
   takes `document` and `connector`. The trigger above also makes `ops::Node::plan`,
   `apply`, and `mesh` crate-private. Approved by `laptop.architect` for the key time
   rule and `ops::Node::mesh` (2026-10-09T03:33:40Z,
-  https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6073726053).
+  https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6073726053). Approved
+  by `laptop.architect-2` for the `node` and `ops` parts (2026-10-09T03:40:04Z,
+  https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6073787912).
