@@ -7412,6 +7412,28 @@ mod tests {
             });
         }
 
+        /// The carrier sets its sleep only when the deadline changes, so one timeout
+        /// at a late wake must leave no deadline at or before it.
+        #[test]
+        fn leave_no_past_deadline_after_a_late_wake() {
+            for late in [100, 300, 600, 900].map(Duration::from_millis) {
+                testing::run(1, move |shard| {
+                    let mut pair = dial_foreign(shard, Foreign::new(shard, |_| {}));
+                    let (connected, _) = pair.client.events[0];
+                    let due = connected + Duration::from_secs(2);
+                    let now = Duration::from_nanos(pair.now().0);
+                    pair.run(due - Duration::from_millis(50) - now);
+                    let wake = pair::at(due + late);
+                    pair.client.endpoint.timeout(wake);
+                    let deadline = pair.client.endpoint.deadline();
+                    assert!(
+                        deadline.is_none_or(|due| due > wake),
+                        "{late:?}: {deadline:?}"
+                    );
+                });
+            }
+        }
+
         #[test]
         fn leave_ahead_of_every_stream() {
             testing::run(1, |shard| {
