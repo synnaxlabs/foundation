@@ -1380,11 +1380,13 @@ fn holds_the_transport_until_the_reply_of_a_request_drops() {
             panic!("a request: {served:?}");
         };
         let held = Rc::strong_count(&transport);
-        let super::Test { clock, hub, .. } = test;
+        let super::Test {
+            clock, hub, region, ..
+        } = test;
         drop((hub, link, hello));
         clock.sleep(Span::SECOND).await;
         let with_reply = Rc::strong_count(&transport);
-        drop(request);
+        drop((request, region, session));
         clock.sleep(Span::SECOND).await;
         let without_reply = Rc::strong_count(&transport);
         *kept.lock().expect("not poisoned") = Some((held, with_reply, without_reply));
@@ -1408,5 +1410,5 @@ fn holds_the_transport_until_the_reply_of_a_request_drops() {
         .take()
         .expect("the home ran");
     assert_eq!(with_reply, held, "the reply holds the hub");
-    assert_eq!(without_reply, held - 1, "the hub let go of the transport");
+    assert_eq!(without_reply, 1, "no task holds the transport");
 }
