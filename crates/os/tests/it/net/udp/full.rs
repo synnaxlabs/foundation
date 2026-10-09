@@ -159,7 +159,7 @@ fn a_retry_of_a_batch_over_the_path_mtu_sends_its_last_datagram_once() {
         let (mut sender, _) = os::net().udp(&config()).unwrap();
         let (_, mut receiver) = os::net().udp(&config()).unwrap();
         answer_calls(|nr, k| match (nr, k) {
-            (libc::SYS_sendmsg, 0 | 2) => Some(libc::EMSGSIZE),
+            (libc::SYS_sendmsg, 0) => Some(libc::EMSGSIZE),
             (libc::SYS_sendmsg, 1) => Some(libc::EAGAIN),
             _ => None,
         });
