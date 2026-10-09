@@ -102,6 +102,9 @@ pub(crate) async fn dial(
                 let mut dial = pin!(dial::dial(&carrier, node, &addresses));
                 // A session from the peer that ends the attempt drops the dial.
                 let dialed = poll_fn(|cx| {
+                    if let Some(table) = this.upgrade() {
+                        table.borrow_mut().poll_take(cx);
+                    }
                     if started.poll(cx).is_ready() {
                         return Poll::Ready(None);
                     }
@@ -179,20 +182,15 @@ impl Table {
         Found::Start(attempt)
     }
 
-    /// Ends `attempt` to `node` with what its dial gave, after the table takes the
-    /// sessions that wait in the carrier. A session waits for `accept`, and closes
-    /// the held one. After an error, the attempt gives the held session. When a
-    /// session from the peer ended the attempt first, the dial's session drops.
+    /// Ends `attempt` to `node` with what its dial gave. A session waits for
+    /// `accept`, and closes the held one. After an error, the attempt gives the held
+    /// session.
     fn dialed(
         &mut self,
         node: PublicKey,
         attempt: &Rc<Attempt>,
         dialed: Result<Session, Error>,
     ) {
-        self.take();
-        if attempt.ended() {
-            return;
-        }
         let entry = self.nodes.get_mut(&node);
         let entry = entry.expect("invariant: a dial keeps its entry");
         let dial = entry.dial.take().expect("invariant: one dial ends it");
@@ -216,6 +214,15 @@ impl Table {
     /// carrier.
     fn take(&mut self) {
         while let Some(session) = self.carrier.accepted() {
+            if let Some(session) = self.arrive(Session::new(session)) {
+                self.push(session);
+            }
+        }
+    }
+
+    /// As [`Table::take`], and wakes `cx` when the next session waits in the carrier.
+    fn poll_take(&mut self, cx: &Context<'_>) {
+        while let Poll::Ready(Ok(session)) = self.carrier.poll_accept(cx) {
             if let Some(session) = self.arrive(Session::new(session)) {
                 self.push(session);
             }
@@ -363,11 +370,6 @@ impl Attempt {
         }
         wake::register(&mut state.waiting, cx.waker());
         Poll::Pending
-    }
-
-    /// Whether the attempt has its result.
-    fn ended(&self) -> bool {
-        self.0.borrow().result.is_some()
     }
 
     fn end(&self, result: Result<Session, Error>) {
@@ -1366,6 +1368,35 @@ mod tests {
             let dialed = transport.dial(SERVER.public(), &slow).await;
             let dialed = dialed.expect("the server's session");
             assert_eq!(dialed.closed().await, Error::PeerClosed { code: Code(1) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // The client has the higher key, runs no accept, and dials a dead address. The
+    // server's session reaches the client's carrier 1 ms later. Rule 4: the higher
+    // node takes it at once and stops its own dial.
+    #[test]
+    fn a_session_from_the_peer_stops_a_dial_with_no_accept() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let back = [Address::Udp(testing::address(&client))];
+        let dead = dead(&server);
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            node.clock().sleep(Span::MILLISECOND).await;
+            let dialed = transport.dial(CLIENT.public(), &back).await;
+            let dialed = dialed.expect("a session");
+            assert_eq!(dialed.closed().await, Error::PeerClosed { code: Code(4) });
+        });
+        testing::transport(&client, CLIENT, move |transport, node| async move {
+            let start = node.clock().now();
+            let dialed = transport.dial(SERVER.public(), &dead).await;
+            let waited = node.clock().now() - start;
+            let dialed = dialed.expect("the server's session");
+            assert!(
+                waited < testing::spans(Span::MILLISECOND, 100),
+                "waited {waited:?}"
+            );
+            dialed.close(Code(4));
+            linger(&node).await;
         });
         assert_eq!(sim.run(), Ok(()));
     }
