@@ -289,7 +289,11 @@
   reads each channel whose name `select` matches at the open, which share one index, or
   the open gives `ManyIndexes` with the least matched name and the least name on another
   index (`laptop.architect`, 2026-10-08T06:18:32Z:
-  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6053699496). A named
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6053699496). A
+  selector that matches no channel gives `Empty` until #1819 (`laptop.architect`,
+  2026-10-08T06:18:32Z and 06:37:34Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6053699496 and
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6054016051). A named
   reader has one session for each subject and name at the home of its index
   (`laptop.architect`, 2026-10-08T10:15:04Z:
   https://github.com/synnaxlabs/foundation/issues/1851#issuecomment-6057659053): a later
