@@ -35,7 +35,7 @@ where
 
 /// The inputs of a supervisor of `kinds` on a shard of `node`, with a hub on a new
 /// shard, and the mesh time once the clock has one.
-pub(crate) async fn create_inputs(
+pub(crate) async fn create_config(
     node: &sim::node::Node,
     tasks: Tasks,
     kinds: Table,

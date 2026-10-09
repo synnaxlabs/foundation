@@ -198,7 +198,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::{create_inputs, run_on};
+    use crate::common::{create_config, run_on};
     use crate::kind::{Channels, Kind, Table};
     use hub::reader::{Mode, Received};
     use spec::channel::{Channel, Data};
@@ -362,7 +362,7 @@ mod tests {
             let runs = Arc::clone(&script.runs);
             let kinds = Table::new().with("script", script);
             let supervisor =
-                Supervisor::new(create_inputs(&node, tasks.clone(), kinds).await.0);
+                Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
             let clock = node.clock();
             let token = Token::new();
             if cancel == Some(Span::ZERO) {
@@ -654,7 +654,7 @@ mod tests {
             .run_on(&client, move |node, tasks| async move {
                 let kinds = Table::new().with("dial", dial);
                 let supervisor =
-                    Supervisor::new(create_inputs(&node, tasks.clone(), kinds).await.0);
+                    Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
                 let token = Token::new();
                 let canceller = token.clone();
                 let clock = node.clock();
@@ -741,7 +741,7 @@ mod tests {
             let (seen, live) = (Arc::clone(&kind.seen), Arc::clone(&kind.live));
             let kinds = Table::new().with("spawner", kind);
             let supervisor =
-                Supervisor::new(create_inputs(&node, tasks.clone(), kinds).await.0);
+                Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
             let token = Token::new();
             let canceller = token.clone();
             let clock = node.clock();
@@ -815,7 +815,7 @@ mod tests {
             let live = Arc::clone(&kind.live);
             let kinds = Table::new().with("spawner", kind);
             let supervisor =
-                Supervisor::new(create_inputs(&node, tasks, kinds).await.0);
+                Supervisor::new(create_config(&node, tasks, kinds).await.0);
             let token = Token::new();
             let name = "plant.spawner".parse().expect("a valid name");
             let config = config();
@@ -839,7 +839,7 @@ mod tests {
             let seen = Arc::clone(&kind.seen);
             let kinds = Table::new().with("spawner", kind);
             let supervisor =
-                Supervisor::new(create_inputs(&node, tasks.clone(), kinds).await.0);
+                Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
             let (token, config) = (Token::new(), config());
             let name: Name = "plant.spawner".parse().expect("a valid name");
             let clock = node.clock();
@@ -976,7 +976,7 @@ mod tests {
     #[test]
     fn gives_a_kind_a_writer_whose_samples_a_hub_reader_gets_in_order() {
         let got = run_on(|node, tasks| async move {
-            let (mut inputs, now) = create_inputs(&node, tasks, Table::new()).await;
+            let (mut inputs, now) = create_config(&node, tasks, Table::new()).await;
             define(&inputs.hub);
             let write = Write {
                 start: now.nanos(),

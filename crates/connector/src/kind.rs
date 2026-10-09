@@ -383,7 +383,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::{create_inputs, run, run_on};
+    use crate::common::{create_config, run, run_on};
 
     const MISSING: Code = Code::new("test.missing");
     const RANGE: Code = Code::new("test.range");
@@ -667,7 +667,7 @@ mod tests {
         let (early, late, out, ctx_name, n) = run_on(|node, tasks| async move {
             let token = Token::new();
             let inputs =
-                Rc::new(create_inputs(&node, tasks.clone(), Table::new()).await.0);
+                Rc::new(create_config(&node, tasks.clone(), Table::new()).await.0);
             let ctx = Context::new(
                 name("plant.counter"),
                 3,
@@ -699,7 +699,7 @@ mod tests {
     fn gives_a_new_random_source_on_each_call() {
         let (a, b) = run_on(|node, tasks| async move {
             let inputs =
-                Rc::new(create_inputs(&node, tasks.clone(), Table::new()).await.0);
+                Rc::new(create_config(&node, tasks.clone(), Table::new()).await.0);
             let ctx = Context::new(name("a"), (), Token::new(), tasks, inputs);
             (ctx.rng().next_u64(), ctx.rng().next_u64())
         });
