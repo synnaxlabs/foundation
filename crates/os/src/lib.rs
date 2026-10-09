@@ -262,6 +262,17 @@ mod tests {
     }
 
     #[test]
+    fn a_memory_error_names_the_os_error_as_its_source() {
+        let e = Error::Memory(std::io::Error::other("no meminfo"));
+        assert_eq!(
+            e.to_string(),
+            "cannot read the available memory: no meminfo"
+        );
+        let source = std::error::Error::source(&e).map(ToString::to_string);
+        assert_eq!(source.as_deref(), Some("no meminfo"));
+    }
+
+    #[test]
     fn a_wall_error_names_the_os_error_as_its_source() {
         let e = Error::Wall(std::io::Error::other("no clock"));
         assert_eq!(e.to_string(), "cannot read the wall clock: no clock");
