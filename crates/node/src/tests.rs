@@ -2824,7 +2824,7 @@ mod port {
 
     /// The node rejects a stream whose header has not arrived 10 s after the stream
     /// did. On a link of 4 KB/s, a first message of 60 KiB takes about 16 s, so the
-    /// reply half resets before the message arrives.
+    /// stream stops, and its reply half resets, before the message arrives.
     #[test]
     fn a_header_late_by_10_s_is_rejected() {
         let mut sim = sim::Sim::new(sim::Config::default());
@@ -2859,15 +2859,25 @@ mod port {
             let start = own.clock().now();
             sender.send(block.freeze()).await.expect("it sends");
             let read = reply.recv().await.map(|m| m.map(|b| b.to_vec()));
-            *seen.lock().unwrap() = Some((own.clock().now() - start, read));
+            let waited = own.clock().now() - start;
+            let sent = loop {
+                let mut block = pool.alloc(1).unwrap();
+                block.copy_from_slice(b"a");
+                if let Err(error) = sender.send(block.freeze()).await {
+                    break error;
+                }
+                own.clock().sleep(Span::MILLISECOND).await;
+            };
+            *seen.lock().unwrap() = Some((waited, read, sent));
             session.closed().await;
             drop((sender, transport));
         });
         drop(started.expect("the peer starts"));
         assert_eq!(sim.run_for(Span::MINUTE), Ok(()));
-        let (waited, read) = out.lock().unwrap().take().expect("the peer reads");
+        let (waited, read, sent) = out.lock().unwrap().take().expect("the peer reads");
         let code = Code(wire::header::REJECTED);
         assert_eq!(read, Err(transport::Error::Reset { code }));
+        assert_eq!(sent, transport::Error::Stopped { code });
         let (header, bound) = (10 * Span::SECOND.nanos(), 11 * Span::SECOND.nanos());
         assert!(
             (header..bound).contains(&waited.nanos()),
