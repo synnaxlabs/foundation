@@ -161,13 +161,15 @@ where
     }
 }
 
-/// Runs `count` client sessions of one synced hub, each served as [`session`] serves
-/// its one, from its own port of the program's node. Gives what `serve` gave for each
-/// stream, in the order they ended.
+/// The count of client sessions that [`sessions`] runs.
+const SESSIONS: usize = 3;
+
+/// Runs [`SESSIONS`] client sessions of one synced hub, each served as [`session`]
+/// serves its one, from its own port of the program's node. Gives what `serve` gave for
+/// each stream, in the order they ended.
 fn sessions<P>(
     seed: u64,
-    count: u16,
-    program: impl FnOnce(Vec<Agent>) -> P + Send + 'static,
+    program: impl FnOnce([Agent; SESSIONS]) -> P + Send + 'static,
 ) -> Vec<Result<Got, serve::Error>>
 where
     P: Future<Output = ()> + 'static,
@@ -180,7 +182,7 @@ where
         let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
         let accepted = Rc::new(Cell::new(0));
         let mut ends = Vec::new();
-        for _ in 0..count {
+        for _ in 0..SESSIONS {
             let session = transport.accept().await.expect("a session");
             let link = test.hub.link(session.clone());
             tasks.spawn(serve_each(
@@ -201,11 +203,12 @@ where
     };
     run_program(seed, home, move |node, tasks, at| async move {
         let mut agents = Vec::new();
-        for port in 0..count {
-            agents.push(Agent::dial_from(&node, tasks.clone(), at, PORT + port).await);
+        for port in 0..SESSIONS {
+            let port = PORT + u16::try_from(port).expect("fits");
+            agents.push(Agent::dial_from(&node, tasks.clone(), at, port).await);
         }
         let ends: Vec<_> = agents.iter().map(|agent| agent.session.clone()).collect();
-        program(agents).await;
+        program(agents.try_into().ok().expect("an agent for each session")).await;
         for session in ends {
             session.close(Code(0));
         }
@@ -215,13 +218,12 @@ where
 }
 
 /// `asserted`, then the close of each stream still open when [`sessions`] closed its
-/// `count` sessions: `stalled` requests and the hello stream of each session.
+/// sessions: `stalled` requests and the hello stream of each session.
 fn closed_after(
     mut asserted: Vec<Result<Got, serve::Error>>,
-    count: u16,
     stalled: usize,
 ) -> Vec<Result<Got, serve::Error>> {
-    let open = usize::from(count) + stalled;
+    let open = SESSIONS + stalled;
     asserted.extend((0..open).map(|_| Err(serve::Error::Stream(closed_with(0)))));
     asserted
 }
@@ -1036,9 +1038,7 @@ fn refuses_a_request_whose_signature_does_not_verify() {
 /// declared lengths count, so the large bodies are never sent.
 #[test]
 fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
-    let served = sessions(107, 3, |agents| async move {
-        let [mut stalled, mut held, mut refused] =
-            <[Agent; 3]>::try_from(agents).ok().expect("three agents");
+    let served = sessions(107, |[mut stalled, mut held, mut refused]| async move {
         for agent in [&mut stalled, &mut held, &mut refused] {
             agent.admit().await;
         }
@@ -1061,7 +1061,6 @@ fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
             Err(over.clone()),
             Ok(Got::Request(name(SUBJECT), b"y".to_vec())),
         ],
-        3,
         2,
     );
     assert_eq!(
@@ -1079,9 +1078,7 @@ fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
 /// the cap then fit exactly.
 #[test]
 fn reserves_no_body_for_a_second_request_of_a_link() {
-    let served = sessions(109, 3, |agents| async move {
-        let [mut first, mut second, mut third] =
-            <[Agent; 3]>::try_from(agents).ok().expect("three agents");
+    let served = sessions(109, |[mut first, mut second, mut third]| async move {
         for agent in [&mut first, &mut second, &mut third] {
             agent.admit().await;
         }
@@ -1100,7 +1097,6 @@ fn reserves_no_body_for_a_second_request_of_a_link() {
             Err(serve::Error::Pending),
             Ok(Got::Request(name(SUBJECT), b"a".to_vec())),
         ],
-        3,
         2,
     );
     assert_eq!(served, each);
@@ -1110,9 +1106,7 @@ fn reserves_no_body_for_a_second_request_of_a_link() {
 /// back.
 #[test]
 fn frees_the_room_of_a_request_whose_stream_reset() {
-    let served = sessions(108, 3, |agents| async move {
-        let [mut first, mut second, mut third] =
-            <[Agent; 3]>::try_from(agents).ok().expect("three agents");
+    let served = sessions(108, |[mut first, mut second, mut third]| async move {
         for agent in [&mut first, &mut second, &mut third] {
             agent.admit().await;
         }
