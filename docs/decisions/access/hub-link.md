@@ -101,7 +101,10 @@
   honest link pays the rate too; a stop of stalled bodies when a request does not fit,
   which needs a rate and one task that stops the stream of another link. Decided by
   `laptop.architect` (2026-10-09T12:49:35Z,
-  https://github.com/synnaxlabs/foundation/issues/2121#issuecomment-6081223893).
+  https://github.com/synnaxlabs/foundation/issues/2121#issuecomment-6081223893); the
+  name `Share`, and `Share` before `Bodies`, by `laptop.architect`
+  (2026-10-09T13:06:31Z,
+  https://github.com/synnaxlabs/foundation/issues/2121#issuecomment-6081487506).
   Supersedes "A stalled request holds its reservation until its stream or session
   ends; only an admitted subject can do this"
   (https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483).
