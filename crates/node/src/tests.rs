@@ -2797,28 +2797,48 @@ mod port {
         assert_eq!(node.join(), Ok(()));
     }
 
-    /// A peer holds a session over a slow link when the node stops. The node drains
-    /// the session before it frees the lock: the peer sees its close before a probe
-    /// can take the lock, and the probe then binds the node's port at once.
+    /// What the peer and the probe of [`stop_with_a_peer`] see.
+    #[derive(Clone, Debug, PartialEq)]
+    enum Event {
+        /// The peer's session closed with this error.
+        Closed(transport::Error),
+        /// The probe took the lock, then bound the node's port with this result.
+        Locked(Result<(), env::net::Error>),
+    }
+
+    /// The node drains a peer's session before it frees the lock: the peer sees its
+    /// close before a probe can take the lock, and the probe then binds the node's
+    /// port at once.
     #[test]
     fn a_peer_sees_its_close_before_the_lock_is_free() {
-        #[derive(Clone, Debug, PartialEq)]
-        enum Event {
-            /// The peer's session closed with this error.
-            Closed(transport::Error),
-            /// The probe took the lock, then bound the node's port with this result.
-            Locked(Result<(), env::net::Error>),
-        }
+        let closed = transport::Error::PeerClosed { code: Code(0) };
+        let seen = stop_with_a_peer(Span::from_nanos(10 * Span::MILLISECOND.nanos()));
+        assert_eq!(seen, [Event::Closed(closed), Event::Locked(Ok(()))]);
+    }
+
+    /// The node waits at most 3 s for the drain, so a probe takes the lock before a
+    /// peer 4 s away sees its close. The close left before, so it still arrives.
+    #[test]
+    fn a_peer_over_3_s_away_sees_its_close_after_the_lock_is_free() {
+        let closed = transport::Error::PeerClosed { code: Code(0) };
+        let seen = stop_with_a_peer(Span::from_nanos(4 * Span::SECOND.nanos()));
+        assert_eq!(seen, [Event::Locked(Ok(())), Event::Closed(closed)]);
+    }
+
+    /// Stops a node while a peer holds a session over links with a one-way `delay`,
+    /// and gives, in order, what the peer and a probe that takes the lock as soon as it
+    /// is free see.
+    fn stop_with_a_peer(delay: Span) -> Vec<Event> {
         let mut sim = sim::Sim::new(sim::Config::default());
         let host = keyed(&mut sim, 2);
         let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
         let peer = sim.node(sim::node::Config::default());
-        let slow = sim::link::Config {
-            delay: Span::from_nanos(10 * Span::MILLISECOND.nanos()),
+        let link = sim::link::Config {
+            delay,
             ..sim::link::Config::default()
         };
-        sim.link(&peer, &host, slow);
-        sim.link(&host, &peer, slow);
+        sim.link(&peer, &host, link);
+        sim.link(&host, &peer, link);
         let listen = listen(&host);
         let events = Arc::new(Mutex::new(Vec::new()));
         let seen = Arc::clone(&events);
@@ -2838,7 +2858,10 @@ mod port {
             drop(transport);
         });
         drop(started.expect("the peer starts"));
-        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        assert_eq!(
+            sim.run_for(Span::from_nanos(30 * Span::SECOND.nanos())),
+            Ok(())
+        );
         node.stop();
         let seen = Arc::clone(&events);
         sim.run_on(&host, move |host, _| async move {
@@ -2848,11 +2871,9 @@ mod port {
             drop(lock);
         })
         .expect("the probe ends");
-        let closed = transport::Error::PeerClosed { code: Code(0) };
-        let events = events.lock().unwrap().clone();
-        assert_eq!(events, [Event::Closed(closed), Event::Locked(Ok(()))]);
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(node.join(), Ok(()));
+        events.lock().unwrap().clone()
     }
 
     /// A program with no key starts a handshake that gets no answer, and sends its
