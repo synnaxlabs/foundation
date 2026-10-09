@@ -128,15 +128,21 @@ pub(crate) fn key(slot: Slot) -> channel::Key {
 }
 
 /// An interner where `key(slot)` has `slot`, for each slot below 64: as an index for
-/// each slot in `indexes`, else as a data channel.
-pub(crate) fn create_interner(indexes: &[u32]) -> Interner {
+/// each slot in `indexes`, else as a data channel of the type that `groups` gives its
+/// key, or `I64`.
+pub(crate) fn create_interner(indexes: &[u32], groups: &[Group<'_>]) -> Interner {
     let mut interner = Interner::new();
     for n in 0..64 {
         let key = key(Slot::new(n));
         if indexes.contains(&n) {
             interner.slots().index(key);
         } else {
-            interner.slots().data(key);
+            let data_type = groups
+                .iter()
+                .flat_map(|group| group.data)
+                .find_map(|&(at, data_type)| (at == key).then_some(data_type));
+            let data_type = data_type.unwrap_or(Type::Scalar(Scalar::I64));
+            interner.slots().data(key, data_type);
         }
     }
     interner
@@ -148,5 +154,5 @@ pub(crate) fn intern(groups: &[Group<'_>]) -> Arc<KeySet> {
     let indexes: Vec<u32> = (0..64)
         .filter(|&n| groups.iter().any(|group| group.index == key(Slot::new(n))))
         .collect();
-    create_interner(&indexes).intern(groups)
+    create_interner(&indexes, groups).intern(groups)
 }

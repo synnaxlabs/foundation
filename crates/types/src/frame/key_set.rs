@@ -142,7 +142,7 @@ impl Interner {
             indexes.push(index);
             channels.push((index, group.index, stamp, index));
             for &(key, data_type) in group.data {
-                channels.push((self.slots.data(key), key, data_type, index));
+                channels.push((self.slots.data(key, data_type), key, data_type, index));
             }
         }
         let mut keys: Vec<_> = channels.iter().map(|&(_, key, ..)| key).collect();
@@ -233,14 +233,18 @@ mod tests {
     }
 
     /// An interner where key `n` has slot `n`, for each `n` below 10: as an index for
-    /// each `n` in `indexes`, else as a data channel.
-    fn interner(indexes: &[u32]) -> Interner {
+    /// each `n` in `indexes`, else as a data channel of the type that `types` gives
+    /// it, or `F64`.
+    fn interner(indexes: &[u32], types: &[(u32, Type)]) -> Interner {
         let mut interner = Interner::new();
         for n in 0..10 {
             if indexes.contains(&n) {
                 interner.slots().index(key(n));
             } else {
-                interner.slots().data(key(n));
+                let data_type = types
+                    .iter()
+                    .find_map(|&(at, data_type)| (at == n).then_some(data_type));
+                interner.slots().data(key(n), data_type.unwrap_or(F64));
             }
         }
         interner
@@ -257,7 +261,7 @@ mod tests {
 
     #[test]
     fn sorts_entries_and_numbers_groups_by_index_slot() {
-        let mut interner = interner(&[4, 9]);
+        let mut interner = interner(&[4, 9], &[(7, U8)]);
         let set = interner.intern(&[
             Group {
                 index: key(9),
@@ -288,7 +292,7 @@ mod tests {
 
     #[test]
     fn finds_the_entry_of_each_slot() {
-        let mut interner = interner(&[5]);
+        let mut interner = interner(&[5], &[]);
         let set = interner.intern(&[Group {
             index: key(5),
             data: &[(key(8), F64), (key(2), F64)],
@@ -301,7 +305,7 @@ mod tests {
 
     #[test]
     fn gives_equal_groups_the_same_key_set() {
-        let mut interner = interner(&[1, 4]);
+        let mut interner = interner(&[1, 4], &[(3, U8)]);
         let first = interner.intern(&[
             Group {
                 index: key(1),
@@ -333,7 +337,7 @@ mod tests {
 
     #[test]
     fn tells_an_index_from_a_stamp_channel_on_it() {
-        let mut interner = interner(&[1]);
+        let mut interner = interner(&[1], &[(2, STAMP)]);
         let first = interner.intern(&[Group {
             index: key(1),
             data: &[(key(2), STAMP)],
@@ -356,7 +360,7 @@ mod tests {
 
     #[test]
     fn tells_an_index_from_a_stamp_channel_beside_another_group() {
-        let mut interner = interner(&[1, 5]);
+        let mut interner = interner(&[1, 5], &[(2, STAMP)]);
         let first = interner.intern(&[
             Group {
                 index: key(1),
@@ -383,7 +387,7 @@ mod tests {
 
     #[test]
     fn snapshots_hold_the_key_sets_interned_before_them() {
-        let mut interner = interner(&[0, 1]);
+        let mut interner = interner(&[0, 1], &[]);
         let empty = interner.snapshot();
         let first = interner.intern(&[Group {
             index: key(0),
@@ -444,7 +448,7 @@ mod tests {
     #[test]
     fn keeps_a_slot_assigned_before_the_key_set() {
         let mut interner = Interner::new();
-        let early = interner.slots().data(key(7));
+        let early = interner.slots().data(key(7), F64);
         let set = interner.intern(&[Group {
             index: key(3),
             data: &[(key(7), F64)],
@@ -465,7 +469,7 @@ mod tests {
         expected = "channel 00000000-0000-0000-0000-000000000002 appears twice in a key set"
     )]
     fn refuses_a_data_channel_twice() {
-        interner(&[1]).intern(&[Group {
+        interner(&[1], &[]).intern(&[Group {
             index: key(1),
             data: &[(key(2), F64), (key(2), U8)],
         }]);
@@ -476,7 +480,7 @@ mod tests {
         expected = "channel 00000000-0000-0000-0000-000000000001 appears twice in a key set"
     )]
     fn refuses_an_index_that_is_also_data() {
-        interner(&[1, 3]).intern(&[
+        interner(&[1, 3], &[]).intern(&[
             Group {
                 index: key(1),
                 data: &[],
@@ -497,7 +501,7 @@ mod tests {
             index: key(6),
             data: &[],
         };
-        interner(&[6]).intern(&[group, group]);
+        interner(&[6], &[]).intern(&[group, group]);
     }
 
     #[test]
@@ -571,7 +575,7 @@ mod tests {
             let slot = if set.index(at) == at {
                 slots.index(entry.key)
             } else {
-                slots.data(entry.key)
+                slots.data(entry.key, entry.data_type)
             };
             prop_assert_eq!(slot, entry.slot);
         }
@@ -586,7 +590,7 @@ mod tests {
             prop_assert_eq!(set.index(at), at);
             prop_assert_eq!(numbered.and_then(|g| u32::try_from(g).ok()), Some(group));
             for (key, kind) in data {
-                let at_data = set.find(slots.data(*key)).unwrap();
+                let at_data = set.find(slots.data(*key, *kind)).unwrap();
                 prop_assert_eq!(entries[at_data].data_type, *kind);
                 prop_assert_eq!(entries[at_data].group, group);
                 prop_assert_eq!(set.index(at_data), at);

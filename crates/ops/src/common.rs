@@ -100,33 +100,47 @@ pub(crate) fn placed_site() -> String {
     format!("{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n")
 }
 
-pub(crate) const NODE: node::Key = node::Key::from_u128(1);
-pub(crate) const PRIVATE_KEY: PrivateKey = PrivateKey([1; 32]);
+/// The member number of this node.
+const OWN: u8 = 1;
+pub(crate) const NODE: node::Key = key(OWN);
+pub(crate) const PRIVATE_KEY: PrivateKey = private_key(OWN);
 pub(crate) const ADMIN: PrivateKey = PrivateKey([7; 32]);
 pub(crate) const PORT: u16 = 7000;
 
-/// The record of the one node, `edge`, which the plans name.
-pub(crate) fn create_member() -> Member {
+/// The key of the member `n`.
+const fn key(n: u8) -> node::Key {
+    node::Key::from_u128(n as u128)
+}
+
+/// The private key of the member `n`.
+const fn private_key(n: u8) -> PrivateKey {
+    PrivateKey([n; 32])
+}
+
+/// The record of the member `n`, named `name`.
+pub(crate) fn create_member(n: u8, name: &str) -> Member {
+    let private_key = private_key(n);
     let card = Card {
-        name: name("edge"),
-        public_key: PRIVATE_KEY.public(),
+        name: self::name(name),
+        public_key: private_key.public(),
         seal_key: SealKey::new([9; 32]).expect("a seal key"),
         addresses: Addresses::new(Vec::new()).expect("no addresses"),
         version: 1,
     };
     Member {
-        card: card::Signed::sign(NODE, card, &PRIVATE_KEY),
+        card: card::Signed::sign(key(n), card, &private_key),
         admission: [0; 64],
         ephemeral: None,
         status: Status::new([].into()).expect("a status"),
     }
 }
 
-/// The mesh of a root region whose one member and voter is `edge`, with the founding
-/// `definitions`.
+/// The mesh of a root region with the founding `definitions`, whose members are
+/// `names` at the keys from `NODE` up. The first is this node and the one voter.
 pub(crate) async fn open(
     node: &sim::node::Node,
     tasks: &Tasks,
+    names: &[&str],
     definitions: BTreeMap<Name, Definition>,
 ) -> Mesh {
     let budget = block::Config { budget: 1 << 20 };
@@ -156,14 +170,16 @@ pub(crate) async fn open(
     })
     .await
     .expect("a store");
-    let member = create_member();
     let config = mesh::Config {
         key: NODE,
         private_key: PRIVATE_KEY,
         founding: Founding {
             prefix: Prefix::ROOT,
             voters: [NODE].into(),
-            members: vec![member],
+            members: (OWN..)
+                .zip(names)
+                .map(|(n, name)| create_member(n, name))
+                .collect(),
             definitions,
             homes: BTreeMap::new(),
         },
@@ -179,24 +195,25 @@ pub(crate) async fn open(
     Mesh::open(config).await.expect("a mesh")
 }
 
-/// Runs `body` with the mesh of [`open`] on the one node of a run, with the
-/// definitions of a first start.
+/// Runs `body` with the mesh of [`open`] on the one node of a run, whose one member is
+/// `edge`, with the definitions of a first start.
 pub(crate) fn solo<F: Future<Output = ()> + 'static>(
     body: impl FnOnce(Mesh) -> F + Send + 'static,
 ) {
-    founded(spec::founding::create(ADMIN.public()), body);
+    founded(&["edge"], spec::founding::create(ADMIN.public()), body);
 }
 
-/// Runs `body` with the mesh of [`open`] on the one node of a run, with the founding
-/// `definitions`.
+/// Runs `body` with the mesh of [`open`] on the one node of a run, with the members
+/// `names` and the founding `definitions`.
 pub(crate) fn founded<F: Future<Output = ()> + 'static>(
+    names: &'static [&'static str],
     definitions: BTreeMap<Name, Definition>,
     body: impl FnOnce(Mesh) -> F + Send + 'static,
 ) {
     let mut sim = Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
-    let ran = sim.run_on(&node, |node, tasks| async move {
-        body(open(&node, &tasks, definitions).await).await;
+    let ran = sim.run_on(&node, move |node, tasks| async move {
+        body(open(&node, &tasks, names, definitions).await).await;
     });
     assert_eq!(ran, Ok(()));
 }
