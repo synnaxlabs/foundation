@@ -92,15 +92,15 @@
   #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415).
   Supersedes the removal of the feature in
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066303437, approved
-  in https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066705829.
-  Trigger: #2038 gives the loom models a cfg name of their own, and then removes the
-  feature.
-  On `os`, a peer that resets after the handshake gives `Ok` from `Net::connect`, and
-  the stream
-  reads `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of the
-  connect, an IPv4-mapped address as plain IPv4, and any other address as given, with
-  its scope and flow label. A caller that needs the kernel's peer there makes an
-  interface change to `env::net`. Decided by `laptop.architect-2` (2026-10-08 15:42 UTC,
+  in https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066705829, and
+  item 2 of https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843,
+  which removed it when the last of #119 and #1095 merged. Trigger: #2038 gives the
+  loom models a cfg name of their own, and then removes the feature. On `os`, a peer
+  that resets after the handshake gives `Ok` from `Net::connect`, and the stream reads
+  `Reset`. The kernel then holds no peer, so `Tcp::peer` is the remote of the connect,
+  an IPv4-mapped address as plain IPv4, and any other address as given, with its scope
+  and flow label. A caller that needs the kernel's peer there makes an interface
+  change to `env::net`. Decided by `laptop.architect-2` (2026-10-08 15:42 UTC,
   #1789, https://github.com/synnaxlabs/foundation/pull/1789#issuecomment-6063559667).
   Amended (2026-10-07, #995): `env::net` also gives name lookups.
   `Net::resolve` gives an IP literal, also an IPv6 address in brackets, with no
