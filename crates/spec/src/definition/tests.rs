@@ -298,6 +298,16 @@ fn refuses_actions_that_allow_nothing_before_their_authority() {
 }
 
 #[test]
+fn refuses_actions_that_allow_nothing_before_a_missing_authority() {
+    let bytes = access(&[b"a"], &[b"b"], 0, 0);
+    let error = Error::Access {
+        at: 38,
+        error: access::Error::Empty,
+    };
+    assert_eq!(Definition::decode(&bytes[..bytes.len() - 1]), Err(error));
+}
+
+#[test]
 fn refuses_an_authority_without_write() {
     let bytes = access(&[b"a"], &[b"b"], 0b1, 3);
     let error = Error::Authority {

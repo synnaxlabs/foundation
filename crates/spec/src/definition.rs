@@ -762,9 +762,13 @@ impl<'a> Reader<'a> {
         let allow =
             Actions::from_bits(bits).ok_or(Error::Actions { at: actions, bits })?;
         let at = self.at();
-        let authority = Authority(self.byte()?);
+        // `Policy::new` runs before a missing authority fails, so a refused `allow`
+        // comes first, at the earlier byte.
+        let byte = self.byte();
+        let authority = Authority(*byte.as_ref().unwrap_or(&0));
         let policy = Policy::new(subjects, select, allow, authority)
             .map_err(|error| Error::Access { at: actions, error })?;
+        byte?;
         if authority.0 != 0 && !allow.contains(Action::Write) {
             return Err(Error::Authority {
                 at,
