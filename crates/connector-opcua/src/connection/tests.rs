@@ -2123,6 +2123,20 @@ fn a_pass_accepts_each_stream_that_waits() {
     assert_eq!(calls.len(), 9);
 }
 
+#[test]
+fn a_send_on_the_listen_connection_is_refused() {
+    let mut network = Network::new();
+    let status = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::with(&node, Some(listener(&node)));
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.send(1, b"no")
+        })
+        .expect("the run ends");
+    assert_eq!(status, Status::BAD_CONNECTION_CLOSED);
+}
+
 /// Fails the listener once it accepted one stream, when `child::running()`.
 #[test]
 fn failed_listener() {
