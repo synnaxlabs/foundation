@@ -923,7 +923,7 @@ fn a_create_after_a_dropped_remove_keeps_its_file() {
 }
 
 #[test]
-fn a_write_open_waits_for_a_dropped_remove_through_the_handle() {
+fn a_write_open_waits_for_a_dropped_remove_and_then_a_create_stays() {
     run(|files, data| async move {
         let file = create(&files, "a", KIB).await;
         let mut open = stalled(&files, &data, |context| {
@@ -937,6 +937,9 @@ fn a_write_open_waits_for_a_dropped_remove_through_the_handle() {
         .await;
         let found = open.as_mut().await.map(drop);
         assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        create(&files, "a", KIB).await.close().await;
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("a")]);
     });
 }
 
