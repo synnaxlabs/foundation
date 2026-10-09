@@ -39,6 +39,6 @@
   attribute of the block reads, as `Policy::new` needs each of them. The rule is in
   `spec` once, and `config::plan::check` holds no copy. Supersedes the
   `config.empty-allow` of an empty list whatever the other attributes give, of
-  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121. Decided by `laptop.architect-2`,
-  2026-10-09T00:48:39Z
+  https://github.com/synnaxlabs/foundation/issues/1017#issuecomment-6051076121.
+  Decided by `laptop.architect-2`, 2026-10-09T00:48:39Z
   (https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
