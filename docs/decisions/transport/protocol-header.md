@@ -22,7 +22,7 @@
   comment to link. A client session (`Peer::Client`) opens only hub streams, its hello
   stream is the first hub stream, and the node's `Challenge` is the first message on it
   (CLIENT HELLO); `node` refuses the other four protocols from a client. The stream and
-  client rules are approved by the coordinator on #90. The hello stream was changed by
+  client rules have no approval comment on #90. The hello stream was changed by
   `laptop.architect` at 2026-10-08T09:53:58Z
   (https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526).
   Rejected: a version agreed once per session (the format flag's flip reaches nodes at
