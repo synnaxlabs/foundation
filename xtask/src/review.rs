@@ -25,11 +25,50 @@ const BOT: &str = "synnax-foundation-factory[bot]";
 const FORMAT: &str =
     "in the format of .claude/skills/review/SKILL.md, \"Round comment\".";
 
-/// The causes of [`Shown::hiding`].
-const RAW: &str = "raw HTML, which can hide text on GitHub";
-const MARKED: &str = "`[^` outside a footnote reference, which can hide text on GitHub";
-const SHORT: &str = "a link or an image with a line break after its text, or a link \
-                     reference definition, in a paragraph, which the check cannot read";
+/// What in a line of a comment can hide text on GitHub, or keeps the check from
+/// reading it.
+#[derive(Clone, Copy, Debug)]
+enum Cause {
+    /// Raw HTML.
+    Raw,
+    /// `[^` in a span of text before the last line of its paragraph: GitHub reads a `]`
+    /// on a later line as the end of a footnote reference.
+    Bracket,
+    /// The first line of a paragraph that comrak places in the wrong lines
+    /// ([`misplaced`]).
+    Misplaced,
+}
+
+impl Cause {
+    /// The problem of round `number` with this cause in `line`.
+    fn problem(self, number: u32, line: &str) -> String {
+        let (cause, remedy) = match self {
+            Cause::Raw => (
+                format!(
+                    "raw HTML, which can hide text on GitHub, in the line `{line}`"
+                ),
+                "Put the line in a code span",
+            ),
+            Cause::Bracket => (
+                format!(
+                    "`[^` before the last line of a paragraph, which can hide text on \
+                     GitHub, in the line `{line}`"
+                ),
+                "Put the line in a code span",
+            ),
+            Cause::Misplaced => (
+                format!(
+                    "a link or an image with a line break after its text, or a link \
+                     reference definition, in the paragraph that starts with the line \
+                     `{line}`, which the check cannot read"
+                ),
+                "Write each link and image on one line, and put a blank line after each \
+                 link reference definition",
+            ),
+        };
+        format!("review round {number} has {cause}. {remedy}, {FORMAT}")
+    }
+}
 
 /// The names of the lines that end each round comment, in order.
 const END: [&str; 3] = ["Deferred", "Public surface", "Hot path"];
@@ -331,10 +370,7 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
     };
     let fields = || {
         if let Some((line, cause)) = shown.hiding.filter(|_| !old) {
-            return Err(format!(
-                "review round {number} has {cause}, in the line `{line}`. Put the line \
-                 in a code span, {FORMAT}"
-            ));
+            return Err(cause.problem(number, line));
         }
         let range = range.ok_or_else(|| missing("Range"))?.trim_matches('`');
         let (from, end) = range.split_once("..").ok_or_else(|| {
@@ -439,7 +475,7 @@ fn options() -> Options<'static> {
 }
 
 /// A comment read as GitHub reads Markdown: its text from its round heading on, and the
-/// first line with raw HTML.
+/// first line that can hide text or that the check cannot read.
 #[derive(Debug, Default)]
 struct Shown<'a> {
     /// The text after `## Review round ` in the heading, or `None` when the comment
@@ -450,13 +486,13 @@ struct Shown<'a> {
     blocks: Vec<Option<usize>>,
     /// The lines of text of each paragraph after the heading, at any depth, as GitHub
     /// shows them: without the indent or the marks of a list item or a quote. A
-    /// footnote with no reference is not shown.
+    /// footnote with no reference is not shown. A paragraph that comrak places in the
+    /// wrong lines ([`misplaced`]) gives each of its source lines after its marks
+    /// ([`bare`]).
     text: Vec<Vec<&'a str>>,
     /// The first line of the comment that can hide text on GitHub or that the check
-    /// cannot read, and what in it does: raw HTML, `[^` in its text outside a
-    /// footnote reference ([`marked`]), or the start of a paragraph that comrak
-    /// places in the wrong lines ([`short`]).
-    hiding: Option<(&'a str, &'static str)>,
+    /// cannot read, and its cause.
+    hiding: Option<(&'a str, Cause)>,
     /// The text after `## Review round ` in the first line in a top-level HTML block
     /// that starts with it. GitHub reads some HTML blocks as text, and then shows the
     /// line as a heading.
@@ -508,15 +544,20 @@ impl<'a> Shown<'a> {
                     shown.number = heading(&body[source(data.sourcepos)]);
                     shown.text.clear();
                 }
+                NodeValue::Paragraph if misplaced(node, data.sourcepos.end.line) => {
+                    hiding.push((start, Cause::Misplaced));
+                    let lines = body[source(data.sourcepos)].split('\n');
+                    shown.text.push(lines.map(bare).collect());
+                }
                 NodeValue::Paragraph => {
-                    if short(node, data.sourcepos.end.line) {
-                        hiding.push((start, SHORT));
-                    }
+                    let last = data.sourcepos.end.line;
+                    let bracket = bracket(node, last)
+                        .map(|line| (line_start(line), Cause::Bracket));
+                    hiding.extend(bracket);
                     shown.text.push(texts(body, node, at));
                 }
-                NodeValue::Text(text) if marked(text) => hiding.push((start, MARKED)),
                 NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) => {
-                    hiding.push((start, RAW));
+                    hiding.push((start, Cause::Raw));
                     let block = top.then(|| &body[source(data.sourcepos)]);
                     let number = || block?.split('\n').find_map(heading);
                     shown.html_number = shown.html_number.or_else(number);
@@ -524,7 +565,7 @@ impl<'a> Shown<'a> {
                 _ => {}
             }
         }
-        hiding.extend(tagged(body, &starts, &codes).map(|at| (at, RAW)));
+        hiding.extend(tagged(body, &starts, &codes).map(|at| (at, Cause::Raw)));
         let first = hiding.into_iter().min_by_key(|(at, _)| *at);
         shown.hiding =
             first.map(|(at, cause)| (body[at..line_end(body, at)].trim(), cause));
@@ -553,17 +594,22 @@ impl<'a> Shown<'a> {
     }
 }
 
-/// Whether `text`, a span of text on one line, holds a `[^` with no `]` after it.
-/// GitHub then reads a `]` on a later line as the end of a footnote reference.
-fn marked(text: &str) -> bool {
-    text.match_indices("[^")
-        .any(|(i, _)| !text[i + 2..].contains(']'))
+/// The first line of `paragraph` before its last line `last` with a span of text that
+/// holds `[^`. GitHub can read a `]` on a later line as the end of a footnote
+/// reference, and then hides the text between them.
+fn bracket<'n>(paragraph: &'n AstNode<'n>, last: usize) -> Option<usize> {
+    paragraph.descendants().find_map(|span| {
+        let data = span.data.borrow();
+        let line = data.sourcepos.start.line;
+        let text = matches!(&data.value, NodeValue::Text(t) if t.contains("[^"));
+        (text && line < last).then_some(line)
+    })
 }
 
 /// Whether comrak places each span of `paragraph` before its last line `last`. It
 /// does after a link or an image with a line break after its text, and after a link
 /// reference definition, and then each line it gives after them is wrong.
-fn short<'n>(paragraph: &'n AstNode<'n>, last: usize) -> bool {
+fn misplaced<'n>(paragraph: &'n AstNode<'n>, last: usize) -> bool {
     let mut spans = paragraph.descendants().skip(1);
     spans.all(|span| span.data.borrow().sourcepos.end.line < last)
 }
@@ -597,10 +643,7 @@ fn texts<'a, 'n>(
 /// after a tab that a quote or a list item takes in part.
 fn normalized(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
-    for (i, line) in lines(text).enumerate() {
-        if i > 0 {
-            normalized.push('\n');
-        }
+    for line in lines(text) {
         let line = line.trim_end_matches([' ', '\t']);
         let content = line.trim_start_matches([' ', '\t', '>']);
         let start = normalized.len();
@@ -614,6 +657,7 @@ fn normalized(text: &str) -> String {
             }
         }
         normalized.push_str(content);
+        normalized.push('\n');
     }
     normalized
 }
@@ -638,11 +682,8 @@ fn heading(line: &str) -> Option<&str> {
 fn tagged(body: &str, starts: &[usize], codes: &[Range<usize>]) -> Option<usize> {
     starts.iter().copied().find(|&start| {
         let line = &body[start..line_end(body, start)];
-        let mut rest = unmarked(line);
+        let rest = bare(line);
         let at = |rest: &str| start + line.len() - rest.len();
-        while let Some(after) = note(rest) {
-            rest = unmarked(after);
-        }
         !codes.iter().any(|code| code.contains(&at(rest))) && tag(rest)
     })
 }
@@ -660,6 +701,16 @@ fn tag(text: &str) -> bool {
         })
     };
     text.strip_prefix('<').is_some_and(|l| l.starts_with(opens)) && !autolink()
+}
+
+/// `line` after the indent and the marks of quotes, list items, and footnote labels
+/// ([`note`]) at its start.
+fn bare(line: &str) -> &str {
+    let mut rest = unmarked(line);
+    while let Some(after) = note(rest) {
+        rest = unmarked(after);
+    }
+    rest
 }
 
 /// `line` after the indent and the marks of quotes and list items at its start.

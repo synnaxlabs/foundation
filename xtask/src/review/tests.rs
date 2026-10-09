@@ -148,22 +148,23 @@ fn raw(line: &str) -> String {
     )
 }
 
-/// The problem of a round 3 with `[^` outside a footnote reference in `line`.
+/// The problem of a round 3 with `[^` before the last line of a paragraph in `line`.
 fn bracket(line: &str) -> String {
     format!(
-        "review round 3 has `[^` outside a footnote reference, which can hide text on \
-         GitHub, in the line `{line}`. Put the line in a code span, in the format of \
-         .claude/skills/review/SKILL.md, \"Round comment\"."
+        "review round 3 has `[^` before the last line of a paragraph, which can hide \
+         text on GitHub, in the line `{line}`. Put the line in a code span, in the \
+         format of .claude/skills/review/SKILL.md, \"Round comment\"."
     )
 }
 
 /// The problem of a round 3 with a paragraph that comrak places in the wrong lines,
-/// from `line`.
-fn short(line: &str) -> String {
+/// which starts with `line`.
+fn misplaced(line: &str) -> String {
     format!(
         "review round 3 has a link or an image with a line break after its text, or a \
-         link reference definition, in a paragraph, which the check cannot read, in \
-         the line `{line}`. Put the line in a code span, in the format of \
+         link reference definition, in the paragraph that starts with the line \
+         `{line}`, which the check cannot read. Write each link and image on one line, \
+         and put a blank line after each link reference definition, in the format of \
          .claude/skills/review/SKILL.md, \"Round comment\"."
     )
 }
@@ -1401,12 +1402,20 @@ fn reads_a_line_after_a_tab_that_a_list_item_takes_in_part() {
 #[test]
 fn fails_a_round_with_a_footnote_reference_over_a_line_break() {
     // GitHub shows each `[^` up to a `]` on a later line as `[^]`.
-    let end = ROUND.replace("Public surface: none\n", "Public surface: none [^x\n");
-    let end = end.replace("Hot path: none", "Hot path: none ]");
-    assert_eq!(
-        check(&record(vec![bot(&end)])),
-        vec![bracket("Public surface: none [^x")]
-    );
+    // A `]` that a `[` before it takes, an escape, or an entity does not end it.
+    for mark in ["[^x", "[^x [y]", "[^x \\]", "[^x\\]", "[^x &#93;"] {
+        let end = ROUND.replace(
+            "Public surface: none\n",
+            &format!("Public surface: none {mark}\n"),
+        );
+        let end = end.replace("Hot path: none", "Hot path: none ]");
+        let line = format!("Public surface: none {mark}");
+        assert_eq!(
+            check(&record(vec![bot(&end)])),
+            vec![bracket(&line)],
+            "{mark}"
+        );
+    }
     for (text, line) in [
         ("a [^*f*\ng]", "a [^*f*"),
         ("a [^x `]`\nb ]", "a [^x `]`"),
@@ -1432,6 +1441,7 @@ fn passes_a_footnote_mark_in_a_link_or_a_code_span() {
         "```\n[^x\n```",
         "a [^] [^x]",
         "a [^x *y* z]",
+        "a\nb [^x",
     ] {
         let shown =
             ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
@@ -1491,7 +1501,7 @@ fn names_the_first_line_that_can_hide_text() {
         ("a[^1]\n\n[^1]: a <b>\n\nc <i>", raw("[^1]: a <b>")),
         (
             "[x](https://x.y \"t\n<source y\")",
-            short("[x](https://x.y \"t"),
+            misplaced("[x](https://x.y \"t"),
         ),
     ] {
         let hidden =
@@ -1527,12 +1537,35 @@ fn fails_a_paragraph_that_comrak_places_in_the_wrong_lines() {
         assert_ne!(comment, ROUND);
         assert_eq!(
             check(&record(vec![bot(&comment)])),
-            vec![short(line)],
+            vec![misplaced(line)],
             "{comment}"
         );
     }
     let text = ROUND.replace("Deferred: none", "Deferred: none [x\ny](https://x.y)");
     assert_eq!(check(&record(vec![bot(&text)])), Vec::<String>::new());
+    // comrak places the `\\x` span inside the `é` of the line before.
+    let wide =
+        ROUND.replace("weakening.\n\n", "weakening.\n\n[r]: u\n\u{e9}\n\\\\x\n\n");
+    assert_eq!(check(&record(vec![bot(&wide)])), vec![misplaced("[r]: u")]);
+}
+
+#[test]
+fn an_old_round_reads_each_line_of_a_paragraph_that_comrak_places_in_the_wrong_lines() {
+    // GitHub shows `Hot path: send` as a line of text in each case.
+    for text in [
+        "[r]: https://x.y\nHot path: `send`",
+        "See [x](https://x.y \"a\nb\")\nHot path: `send`",
+        "> - See [x](\n>   https://x.y)\n>   Hot path: `send`",
+    ] {
+        let round = old(&format!(
+            "## Review round 1\n\nConfirmed a finding.\n\n{text}"
+        ));
+        assert_eq!(
+            check(&record(vec![round, bot(ROUND)])),
+            vec!["review round 1 names no performance, which this round requires."],
+            "{text}"
+        );
+    }
 }
 
 #[test]
