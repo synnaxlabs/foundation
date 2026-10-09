@@ -306,13 +306,21 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
         removal
     }
 
-    /// Adds `keys` to the channels of the open session `key`.
-    fn extend(&mut self, key: K, keys: &[Key]) {
-        let open = self
+    /// The channels of the open session `key`, to add to.
+    fn keys_mut(&mut self, key: K) -> &mut Vec<Key> {
+        &mut self
             .0
             .get_mut(&key)
-            .expect("invariant: the session is open");
-        open.keys.extend_from_slice(keys);
+            .expect("invariant: the session is open")
+            .keys
+    }
+
+    /// Makes the open session `key` not open, and gives its channels.
+    fn take(&mut self, key: K) -> Vec<Key> {
+        self.0
+            .remove(&key)
+            .expect("invariant: the session is open")
+            .keys
     }
 
     /// Returns whether the session `key` was open, and makes it not open.

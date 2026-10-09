@@ -18,7 +18,9 @@ use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use wire::header::MALFORMED;
 use wire::hub::client::Refusal;
-use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
+use wire::hub::{
+    BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends, keys,
+};
 
 use crate::reader::{Credit, Ended, Session};
 use crate::{Away, Removal, State};
@@ -311,25 +313,23 @@ async fn open(
         return Err(Error::Class(class));
     }
     let mut opening = Opening::new(state);
-    let mut keys = Vec::new();
     loop {
         let Some(message) = opening.recv(receiver).await? else {
             return Ok(None);
         };
-        let FromReader::Keys { keys: run, last } = home.decode(&message)? else {
+        let FromReader::Keys { keys, last } = home.decode(&message)? else {
             unreachable!("invariant: Home gives the keys run after the open");
         };
-        let start = keys.len();
-        keys.extend(run);
-        opening.check(&keys[start..])?;
+        opening.check(keys)?;
         if last {
             break;
         }
     }
-    let at = opening.position(&keys)?;
+    let at = opening.at.ok_or(Error::NoIndex)?;
     let Some(granted) = wait_for(&opening, home, receiver).await? else {
         return Ok(None);
     };
+    let keys = opening.into_keys();
     let slots = state.borrow_mut().slots(keys[at], &keys);
     let index = slots[at];
     let keys: Box<[channel::Key]> = keys.into();
@@ -366,6 +366,8 @@ struct Opening<'s> {
     removal: Removal,
     /// The index of the keys checked, which the first key sets.
     index: Option<channel::Key>,
+    /// The position of the index in the keys checked.
+    at: Option<usize>,
 }
 
 impl<'s> Opening<'s> {
@@ -380,6 +382,7 @@ impl<'s> Opening<'s> {
             key,
             removal,
             index: None,
+            at: None,
         }
     }
 
@@ -405,25 +408,27 @@ impl<'s> Opening<'s> {
         .await
     }
 
-    /// Checks that each of `keys` is known and on the index of the open, and adds them
-    /// to the channels of the open.
-    fn check(&mut self, keys: &[channel::Key]) -> Result<(), Error> {
-        let mut state = self.state.borrow_mut();
-        for &key in keys {
+    /// Checks that each of `keys` is known and on the index of the open, and adds it to
+    /// the channels of the open.
+    fn check(&mut self, keys: keys::Iter<'_>) -> Result<(), Error> {
+        let state = &mut *self.state.borrow_mut();
+        let checked = state.opens.keys_mut(self.key);
+        for key in keys {
             let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
             if *self.index.get_or_insert(of) != of {
                 return Err(Error::ManyIndexes);
             }
+            if key == of && self.at.is_none() {
+                self.at = Some(checked.len());
+            }
+            checked.push(key);
         }
-        state.opens.extend(self.key, keys);
         Ok(())
     }
 
-    /// The position of the index of the open in `keys`, the keys it checked.
-    fn position(&self, keys: &[channel::Key]) -> Result<usize, Error> {
-        self.index
-            .and_then(|index| keys.iter().position(|&key| key == index))
-            .ok_or(Error::NoIndex)
+    /// Ends the open, and gives the keys it checked, in order.
+    fn into_keys(self) -> Vec<channel::Key> {
+        self.state.borrow_mut().opens.take(self.key)
     }
 
     /// Waits until the mesh names this node the home of the index. Fails at once when
