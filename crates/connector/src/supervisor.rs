@@ -1385,6 +1385,69 @@ mod tests {
         assert_eq!(got, want);
     }
 
+    /// A kind with the count `samples`. Its run spawns a task that sets the count to
+    /// each of 1 to `n`, `gap` apart, and returns `Ok` once that task ended.
+    struct Relay {
+        n: u64,
+        gap: Span,
+    }
+
+    impl Kind for Relay {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Tally::check(&Tally::new("samples"), &())
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+            let (count, clock) = (ctx.count("samples"), ctx.clock().clone());
+            let (n, gap) = (self.n, self.gap);
+            let done = Rc::new((Cell::new(false), Cell::new(None::<Waker>)));
+            let signal = Rc::clone(&done);
+            ctx.tasks().spawn(async move {
+                for i in 1..=n {
+                    clock.sleep(gap).await;
+                    count.set(i);
+                }
+                signal.0.set(true);
+                if let Some(waker) = signal.1.take() {
+                    waker.wake();
+                }
+            });
+            poll_fn(|cx| {
+                if done.0.get() {
+                    return Poll::Ready(());
+                }
+                done.1.set(Some(cx.waker().clone()));
+                Poll::Pending
+            })
+            .await;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn gives_13_frames_for_10_000_samples_over_10_s_set_from_a_task() {
+        let statuses = tally(Relay {
+            n: 10_000,
+            gap: ms(1),
+        });
+        assert_eq!(statuses.len(), 13, "{statuses:?}");
+        assert_eq!(statuses.last().map(|(_, samples)| samples[3]), Some(10_000));
+        assert_eq!(states(&statuses)[11..], [(3, 0, 0), (2, 0, 0)]);
+    }
+
     /// The status frames of one connector of `kind`, `plant.tally`, with the count
     /// `samples`.
     fn tally(kind: impl Kind + 'static) -> Vec<Written> {
