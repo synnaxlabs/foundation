@@ -791,7 +791,7 @@ mod tests {
             let mut source = Source::new(part, 64);
             source.open = true;
             assert_eq!(read(&mut reader, &pool, &mut source), Ok(Poll::Pending));
-            // Private: no heap count is exact in a binary with a test harness.
+            // Private: no public call shows a part of a message.
             assert_eq!(*reader.buffer(), vec![9; 8]);
             let read = drive(
                 &mut reader,
@@ -962,7 +962,8 @@ mod tests {
             let read = read_views(&mut reader, &pool, &batch, &mut at, 2 + 10);
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
-            // Private: no heap count is exact in a binary with a test harness.
+            // Private: no public call shows a part of a message. tests/alloc/polls.rs
+            // counts the allocations of one that comes over many polls.
             assert_eq!(*reader.buffer(), message[..10]);
             assert_eq!(reader.buffer().capacity(), 1_024);
             let buffer = reader.buffer().as_ptr();
@@ -987,7 +988,8 @@ mod tests {
             let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
             assert_eq!(read, Ok(Poll::Pending));
             assert!(batch.is_unique());
-            // Private: no heap count is exact in a binary with a test harness.
+            // Private: no public call shows a part of a message. tests/alloc/polls.rs
+            // counts the allocations of one that waits for a block.
             assert_eq!(*reader.buffer(), message);
             drop(held);
             let read = read_views(&mut reader, &pool, &batch, &mut at, batch.len());
@@ -1005,7 +1007,8 @@ mod tests {
             reader.admit();
             let read = reader.read(|max| Ok(source.take(max)));
             assert_eq!(read, Ok(Step::Block(100)));
-            // Private: no heap count is exact in a binary with a test harness.
+            // Private: no public call shows a part of a message. tests/alloc/polls.rs
+            // counts the allocations of one that waits for a block.
             assert_eq!(reader.held(), (None, 10));
             assert!(reader.fill(None).is_pending());
             assert_eq!(reader.held(), (Some((100, 100)), 0));
