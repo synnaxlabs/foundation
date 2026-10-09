@@ -67,7 +67,8 @@ pub struct Config {
     pub tasks: env::tasks::Tasks,
     /// This node's key. A client's hello must name it as `via`.
     pub node: types::node::Key,
-    /// Mesh time, which the hub checks each hello and request against.
+    /// Mesh time, which the hub checks each hello and request against, and which
+    /// [`Hub::writer`] waits for: the reader that `home` was made with.
     pub time: clock::Reader,
     /// The source of each challenge's nonce.
     pub entropy: env::entropy::Entropy,
