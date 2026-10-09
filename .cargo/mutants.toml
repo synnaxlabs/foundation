@@ -2,7 +2,8 @@
 # `sim` is mutated and tested.
 all_features = true
 
-# Mutants that no test can catch, each with the reason.
+# Mutants that no caller or peer can see, or that only a job outside the mutants run
+# kills, each with the reason.
 exclude_re = [
   # A type name shows only in a panic of `connector_opcua::fuzz::decode`, which a
   # correct open62541 never gives. `fuzz::tests` checks the names.
@@ -34,8 +35,9 @@ exclude_re = [
   # Empty outside a build with the address sanitizer. Only the Rust ASan build of
   # #1912 reads the header in `block`, and its alloc tests fail without it.
   'crates/connector-opcua/src/alloc\.rs:.*replace unpoison with \(\)$',
-  # `moves` is a `sim` hook that no public call shows. The two move tests read it, and
-  # kill each.
+  # `moves` is a `sim` hook, so no caller or peer sees it. Only the private reads of
+  # `sends_from_one_run_on_one_connection_ask_for_one_move` and
+  # `a_send_from_a_run_with_no_value_moves_on_only_its_connection` kill the mutant.
   'crates/connector-opcua/src/connection\.rs:.*replace \+ with \* in State::move_on$',
   # The fields of a UUIDv7 share no bit, so `^` gives the same bits as `|`.
   'crates/types/src/uuid\.rs:.*replace \| with \^ in v7$',
