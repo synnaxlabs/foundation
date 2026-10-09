@@ -96,6 +96,7 @@
   ruling on where the lab calls `create_key`. Trigger: when #1744 lands, the lab founds
   its region through the node, and `create_key` stays only if a tool still needs it.
   Until a tool calls it, `create_key` is behind the `sim` feature (`laptop.architect-2`,
+  2026-10-09T03:42:57Z,
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6073816041).
   Trigger: a tool that needs a node's key before its first start takes it out of
   `sim`, with a new ruling.

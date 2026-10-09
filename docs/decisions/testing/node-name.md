@@ -18,9 +18,13 @@
   `node::name(files, given)` gives the name before the start: the stored name, else
   the given one, else `Error::Unnamed`. It opens the file to read only, so it makes
   nothing and waits for no lock. So the first start needs a name, and a later one does
-  not.
-  Lost: the name in the shard record, because a record is a file name and its count
-  changes. Also lost: a text file, because a torn write of text can read as another
-  valid name.
+  not (`laptop.architect-2`, 2026-10-08T05:00:46Z,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6052649826).
+  Lost: `main` owns the name, and reads and writes the file before `Node::start`. The
+  write is outside the lock, so two first starts with two names can leave the name of
+  the node that lost, and #1744 founds the region with the name, which `node` must
+  then have. Also lost: `Config::name: Option<Name>`, which shard 0 alone resolves.
+  The line that `main` prints needs the name, and a task of `Node::spawn` gets only
+  the hub, so the node needs a new way to give the name back.
   Decided by `laptop.architect-2`, #1732, 2026-10-09T18:30:45Z:
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545.
