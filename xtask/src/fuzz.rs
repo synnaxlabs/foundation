@@ -234,7 +234,8 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
 /// resolves a requirement on crates.io, which a copy that the `root` graph builds
 /// meets, to another package. Cargo applies a patch to each such requirement. It fails
 /// on an edge to a package with the name of a copy that no requirement resolves, when
-/// the package is not a copy or the edge is of a package with an edge to itself.
+/// the package is not a copy, or has the name of the dependent and the dependent has an
+/// edge to itself.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
     let root = Package::all(root, &copies)?;
@@ -344,7 +345,7 @@ impl<'a> Package<'a> {
     /// `packages` the packages of the graph. Cargo names an edge from a package to
     /// itself by the lib target, whatever the rename, so such an edge resolves each
     /// such requirement that no other edge resolves. It fails when none is, or on a
-    /// version requirement that does not parse.
+    /// version of `dependency` or a requirement that does not parse.
     fn requirements(
         &self,
         dependency: &Package<'_>,
@@ -935,11 +936,11 @@ mod tests {
         assert_eq!(unpatched(&root(), &fuzz), Err(unresolved(&id("1.3.0"))));
     }
 
-    /// `noq-proto` `version` of the `fuzz` workspace, with a requirement on itself
-    /// with a path and no version.
-    fn own(version: &str) -> Value {
-        let id = format!("path+file:///w/fuzz#noq-proto@{version}");
-        let mut own = package("noq-proto", &id, "/w/fuzz/Cargo.toml");
+    /// `noq-proto` 9.0.0 of the `fuzz` workspace, with a requirement on itself with a
+    /// path and no version.
+    fn own() -> Value {
+        let id = "path+file:///w/fuzz#noq-proto@9.0.0";
+        let mut own = package("noq-proto", id, "/w/fuzz/Cargo.toml");
         own = needs(own, "noq-proto", "*");
         own["dependencies"][0]["source"] = Value::Null;
         own
@@ -962,31 +963,50 @@ mod tests {
     #[test]
     fn passes_an_edge_to_another_name_beside_a_self_edge() {
         let me = "path+file:///w/fuzz#noq-proto@9.0.0";
-        let fuzz = fuzz(&[own("9.0.0"), crc()], &[(me, me), (me, CRC)]);
+        let fuzz = fuzz(&[own(), crc()], &[(me, me), (me, CRC)]);
         assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
+    }
+
+    /// `noq-proto` `version` of the `fuzz` workspace, and `types` with a requirement
+    /// `req` on it from `source`.
+    fn local(version: &str, req: &str, source: Value) -> (String, [Value; 2]) {
+        let id = format!("path+file:///w/fuzz/noq#noq-proto@{version}");
+        let noq = package("noq-proto", &id, "/w/fuzz/noq/Cargo.toml");
+        let mut types = needs(types(), "noq-proto", req);
+        types["dependencies"][0]["source"] = source;
+        (id, [types, noq])
     }
 
     #[test]
     fn pairs_a_requirement_with_no_version_with_a_pre_release() {
-        let me = "path+file:///w/fuzz#noq-proto@9.0.0-dev";
-        let fuzz = fuzz(&[own("9.0.0-dev")], &[(me, me)]);
+        let (noq, packages) = local("9.0.0-dev", "*", Value::Null);
+        let fuzz = fuzz(&packages, &[(TYPES, &noq)]);
         assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
-        let mut git = own("9.0.0-dev");
-        git["dependencies"][0]["source"] = json!("git+https://github.com/synnaxlabs/p");
-        let fuzz = self::fuzz(&[git], &[(me, me)]);
+        let git = json!("git+https://github.com/synnaxlabs/p");
+        let (noq, packages) = local("9.0.0-dev", "*", git);
+        let fuzz = self::fuzz(&packages, &[(TYPES, &noq)]);
         assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
     }
 
     #[test]
     fn pairs_no_requirement_with_a_path_and_a_version_that_the_package_does_not_meet() {
-        let me = "path+file:///w/fuzz#noq-proto@9.0.0";
-        let mut own = own("9.0.0");
-        own["dependencies"][0]["req"] = json!("^1");
-        let fuzz = fuzz(&[own], &[(me, me)]);
+        let (noq, packages) = local("9.0.0", "^1", Value::Null);
+        let fuzz = fuzz(&packages, &[(TYPES, &noq)]);
+        assert_eq!(unpatched(&root(), &fuzz), Err(unresolved(&noq)));
+    }
+
+    #[test]
+    fn names_the_version_of_a_dependency_that_does_not_parse() {
+        let fuzz = fuzz(
+            &[needs(types(), "noq-proto", "^1.3"), release("one")],
+            &[(TYPES, &id("one"))],
+        );
         assert_eq!(
             unpatched(&root(), &fuzz),
             Err(format!(
-                "`{me}` has no requirement that its edge `noq_proto` to `{me}` resolves"
+                "`{}` has the version `one`: unexpected character 'o' while parsing \
+                 major version number",
+                id("one")
             ))
         );
     }
