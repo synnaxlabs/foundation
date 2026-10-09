@@ -480,12 +480,18 @@ async fn take_lock(host: &sim::node::Node) -> (env::files::File, bool) {
 /// and the private key [`KEY`].
 fn keyed(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
     let host = host(sim, cores);
+    write_own_key(sim, &host);
+    host
+}
+
+/// Writes the key [`OWN`] and the private key [`KEY`] to the data directory of
+/// `host`.
+fn write_own_key(sim: &mut sim::Sim, host: &sim::node::Node) {
     let identity = Identity {
         key: OWN,
         private_key: KEY,
     };
-    write_key(sim, &host, identity::encode(&identity).to_vec());
-    host
+    write_key(sim, host, identity::encode(&identity).to_vec());
 }
 
 /// Writes `bytes` to a new file `node.key` on `host`.
@@ -4505,11 +4511,17 @@ mod port {
         }
 
         /// A task that panics after the group stops, before the node sees the stop:
-        /// `join` gives the panic. At [`WRITE`], the sim runs the group's stop first.
+        /// `join` gives the panic. At [`WRITE`], the sim runs the group's stop first,
+        /// in a run whose timers wake only when due.
         #[test]
         fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
-            let host = keyed(&mut sim, 2);
+            let host = sim.node(sim::node::Config {
+                cores: NonZeroUsize::new(2).unwrap(),
+                arm_max: None,
+                ..sim::node::Config::default()
+            });
+            write_own_key(&mut sim, &host);
             let node = start_alone(&host);
             let at =
                 sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);

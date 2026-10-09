@@ -448,12 +448,22 @@ where
     F: Future<Output = ()> + 'static,
 {
     let (sim, node) = create_node(seed);
+    (sim, start_on(node, main))
+}
+
+/// Starts one shard of `node` to run `main`, as [`start`] does.
+fn start_on<F>(
+    node: sim::node::Node,
+    main: impl FnOnce(Shard) -> F + Send + 'static,
+) -> env::thread::Handle
+where
+    F: Future<Output = ()> + 'static,
+{
     let config = env::shards::Config {
         name: DIR.into(),
         core: None,
     };
-    let handle = node
-        .shards()
+    node.shards()
         .start(config, move |tasks| {
             main(Shard {
                 files: node.files(),
@@ -464,8 +474,7 @@ where
                 disk: Disk::Sim(node),
             })
         })
-        .expect("the shard starts");
-    (sim, handle)
+        .expect("the shard starts")
 }
 
 /// Runs `main` as [`start`] does, until it returns.
@@ -781,9 +790,18 @@ fn durable_moves_only_at_a_commit() {
     });
 }
 
+/// The node's timers wake only when due, so the sleep of the test wakes no task.
 #[test]
 fn an_idle_buffer_wakes_no_task() {
-    let (mut sim, handle) = start(20, |shard| async move {
+    let mut sim = sim::Sim::new(sim::Config {
+        seed: 20,
+        ..sim::Config::default()
+    });
+    let node = sim.node(sim::node::Config {
+        arm_max: None,
+        ..sim::node::Config::default()
+    });
+    let handle = start_on(node, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)

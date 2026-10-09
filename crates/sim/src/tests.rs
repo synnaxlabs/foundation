@@ -1428,7 +1428,10 @@ impl<F: Future> Future for Counted<F> {
 #[test]
 fn a_timer_wakes_its_task_only_when_due() {
     let mut sim = sim(0);
-    let node = sim.node(node::Config::default());
+    let node = sim.node(node::Config {
+        arm_max: None,
+        ..node::Config::default()
+    });
     let (early, late) = (node.clock(), node.clock());
     let polls = Arc::new(AtomicUsize::new(0));
     let count = Arc::clone(&polls);
@@ -1773,7 +1776,10 @@ fn a_wall_step_back_lets_a_waiting_timer_fire() {
 #[test]
 fn a_node_added_later_holds_back_a_timer_past_its_end() {
     let mut sim = sim(0);
-    let node = sim.node(node::Config::default());
+    let node = sim.node(node::Config {
+        arm_max: None,
+        ..node::Config::default()
+    });
     let log = Arc::new(Mutex::new(Vec::new()));
     let _handle =
         log_after(&node, "a", Span::from_nanos(2 * Span::SECOND.nanos()), &log);

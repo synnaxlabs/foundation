@@ -2011,6 +2011,7 @@ fn a_write_open_waits_for_a_dropped_remove_at_the_end_of_true_time() {
         monotonic: Monotonic(0),
         wall: types::time::Stamp::from_nanos(i64::MIN),
         disk_bytes: MIB,
+        arm_max: None,
         ..node::Config::default()
     });
     let found = sim
