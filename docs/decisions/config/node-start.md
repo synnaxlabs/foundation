@@ -56,6 +56,8 @@
   https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090863425;
   2026-10-09T23:23:21Z, why the escape stays: `Start::fail` and `Applied` give a path in
   that form,
-  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090952680).
+  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090952680, whose
+  reason is narrowed to those two in
+  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6091313576).
   `--listen`, and the files `address` and `admin.key`, come with #1744
   (https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6053227526).
