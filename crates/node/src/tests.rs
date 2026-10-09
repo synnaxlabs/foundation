@@ -4217,6 +4217,43 @@ mod port {
             }
         }
 
+        /// A channel that an apply makes has a UUIDv7 key at mesh time.
+        #[test]
+        fn an_applied_channel_has_a_key_at_mesh_time() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let node = start(&host, region(&[member(OWN, &KEY, &host)]));
+            let made = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&made);
+            let text = format!(
+                "channel \"plant.time\" {{ kind = \"index\" }}\n\
+                 placement \"plant\" {{\n  select = \"plant.*\"\n  home = \"plant.node{OWN}\"\n}}\n"
+            );
+            node.operate(move |ops| async move {
+                let files = vec![(std::path::PathBuf::from("plant.hcl"), text)];
+                let (plan, _) = ops.plan(files).await.expect("a plan");
+                let path = std::path::Path::new("plant.plan");
+                ops.apply(path, &plan).await.expect("an apply");
+                let spec = ops.mesh().spec().await.expect("a spec");
+                let label = Kind::Channel.key("plant.time").unwrap();
+                let Some(Definition::Channel(channel)) = spec.definitions.get(&label) else {
+                    panic!("a channel at plant.time");
+                };
+                *out.lock().unwrap() = Some(channel.key);
+            });
+            assert_eq!(sim.run_for(Span::from_nanos(30 * Span::SECOND.nanos())), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let key = made.lock().unwrap().take().expect("a channel");
+            let millis = i64::try_from(key.as_u128() >> 80).unwrap();
+            let start = sim::node::Config::default().wall.nanos() / 1_000_000;
+            assert!(
+                (start..start + 1_000).contains(&millis),
+                "{millis} ms is not in the first second of {start} ms"
+            );
+        }
+
         /// A node with a region whose port does not bind drops a task of `operate`
         /// uncalled, as `spawn` does, and `join` gives the port error.
         #[test]
