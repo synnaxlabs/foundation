@@ -16,7 +16,7 @@ const PASSES: [&str; 2] = [
 /// Crates whose `unsafe` code only calls the OS or C, which Miri cannot run. Tests on
 /// the real OS check `os` (BLOCK MEMORY), and `cargo xtask sanitizers` checks
 /// `connector-opcua`.
-pub(crate) const SKIPPED: [&str; 2] = ["os", "connector-opcua"];
+pub(crate) const SKIPPED: [&str; 2] = ["os", crate::sanitizers::CRATE];
 
 /// The workspace crates whose source names `unsafe_code`, the lint that each `unsafe`
 /// use must expect, except those in [`SKIPPED`].
@@ -80,7 +80,7 @@ fn command(
 }
 
 /// The sum of N over the `running N tests` lines of libtest output.
-fn tests_ran(output: &str) -> usize {
+pub(crate) fn tests_ran(output: &str) -> usize {
     output
         .lines()
         .filter_map(|line| line.strip_prefix("running ")?.split(' ').next())

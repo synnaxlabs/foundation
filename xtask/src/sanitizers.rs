@@ -2,24 +2,33 @@
 //! check it in place of Miri.
 
 use std::path::Path;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use crate::nightly::Toolchain;
 
-/// Runs `cargo test` of `connector-opcua` with the feature `sim` and the address
-/// sanitizer, on the nightly in `rust-toolchain-nightly`, for its host triple.
-/// `build.rs` of the crate then builds its C with the address and undefined behavior
-/// sanitizers. It fails when the nightly gives no host triple or a test fails.
+/// The crate that this task checks, which `cargo xtask miri` skips.
+pub(crate) const CRATE: &str = "connector-opcua";
+
+/// Runs `cargo test` of [`CRATE`] with the feature `sim` and the address sanitizer, on
+/// the nightly in `rust-toolchain-nightly`, for its host triple. `build.rs` of the
+/// crate then builds its C with the address and undefined behavior sanitizers. It
+/// fails when the nightly gives no host triple, a test fails, or no test runs.
 pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
     let nightly = Toolchain::read(root).map_err(|e| vec![e])?;
     let host = nightly.host().map_err(|e| vec![e])?;
-    let status = command(&nightly, &host)
-        .status()
+    let output = command(&nightly, &host)
+        .stderr(Stdio::inherit())
+        .output()
         .map_err(|e| vec![format!("rustup: {e}")])?;
-    if !status.success() {
-        return Err(vec![
-            "the sanitizer tests of `connector-opcua` failed".into(),
-        ]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    eprint!("{stdout}");
+    if !output.status.success() {
+        return Err(vec![format!("the sanitizer tests of `{CRATE}` failed")]);
+    }
+    if crate::miri::tests_ran(&stdout) == 0 {
+        return Err(vec![format!(
+            "`{CRATE}` runs no tests under the sanitizers"
+        )]);
     }
     Ok(())
 }
@@ -31,7 +40,7 @@ fn command(nightly: &Toolchain, host: &str) -> Command {
     // flags go in `target.<host>`, which joins the `target-cpu` of
     // `.cargo/config.toml`, where `RUSTFLAGS` would drop it.
     command
-        .args(["test", "-p", "connector-opcua", "--features", "sim"])
+        .args(["test", "-p", CRATE, "--features", "sim"])
         .args(["--target", host, "--target-dir", "target/sanitizers"])
         .arg("--config")
         .arg(format!("target.{host}.rustflags=[\"-Zsanitizer=address\"]"))
