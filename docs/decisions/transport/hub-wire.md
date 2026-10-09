@@ -80,26 +80,26 @@
   the home's `hub` checks it at the `Open` and stops the session with `MALFORMED`.
   Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node
   is not the home of the index), 18 `FAILED` (the home's buffer failed), 19 `BUSY` (the
-  home's pool had no block for a reply, or the node had no room for a request body
-  under its cap; a later open or request can succeed), and 2
-  `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
-  or breaks a rule above), which every protocol may use. A reset drops the frames in
-  flight, which is correct for `FAILED`, since the session cannot go on (lost: a
-  `Reply::Failed` that keeps them, a second end message to fuzz). Each reply block holds
-  one message. An ends message holds at most the frame's series, at 8 bytes each, the
-  size of their descriptors in the frame's block, so the pool can always hold it (the
-  architect, 2026-10-07T22:17:44Z,
+  home's pool had no block for a reply, or the node had no room for a request body under
+  its cap; a later open or request can succeed), and 2 `wire::header::MALFORMED` (a
+  message that does not decode, comes from the wrong side, or breaks a rule above),
+  which every protocol may use. A reset drops the frames in flight, which is correct for
+  `FAILED`, since the session cannot go on (lost: a `Reply::Failed` that keeps them, a
+  second end message to fuzz). Each reply block holds one message. An ends message holds
+  at most the frame's series, at 8 bytes each, the size of their descriptors in the
+  frame's block, so the pool can always hold it (the architect, 2026-10-07T22:17:44Z,
   https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6047985988).
   Supersedes "A reply block holds at most `min(bytes_max, Pool::largest)` bytes"
-  (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084). The
-  home ends the session on `BUSY` and does not wait: the pool gives no wake, so a wait
-  needs a clock in `hub` and a wait queue for each session, and the end frees the
-  frames the session pins (`mesh` ends its stream in the same case). The class rule and
-  code 18 were decided by the architect (2026-10-07T21:34:19Z,
+  (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084). When
+  its pool has no block for a reply, the home ends the session on `BUSY` and does not
+  wait: the pool gives no wake, so a wait needs a clock in `hub` and a wait queue for
+  each session, and the end frees the frames the session pins (`mesh` ends its stream in
+  the same case). The class rule and code 18 were decided by the architect
+  (2026-10-07T21:34:19Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641), code 19
   `BUSY` and the end of a session on it by the architect (2026-10-07T21:47:56Z,
-  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084). The
-  text of code 19 was decided by `laptop.architect` (2026-10-09T04:00:55Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084). The text
+  of code 19 was decided by `laptop.architect` (2026-10-09T04:00:55Z,
   https://github.com/synnaxlabs/foundation/pull/2093#issuecomment-6073992277).
   Supersedes the code 19 text of
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084, the
@@ -109,16 +109,16 @@
   https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074 that
   gives its text to the PR of #2012. Trigger: the block refusal of a reader (#2003)
   widens the text of code 19 to the text of
-  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074.
-  Lost: a `message_bytes_max` of at least the largest pool block (a client or a
-  foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels
-  a session, the most that fit in 1472 bytes; the index in its own field of `Open`,
-  because the home knows its index and a second copy needs a check; the whole
-  `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
-  open needs no mesh time (READER RULES), and a later named open can add one; grants for
-  many sessions in one message, which wait until a link carries a second session; a
-  public series count on `View`, for a home that writes the ends from `View::iter`,
-  which gives the home's entry order and not place order (the architect,
+  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074. Lost: a
+  `message_bytes_max` of at least the largest pool block (a client or a foreign peer can
+  set 1472, and it ties `transport` to the pool); a cap of 91 channels a session, the
+  most that fit in 1472 bytes; the index in its own field of `Open`, because the home
+  knows its index and a second copy needs a check; the whole `Frame::body` (a reader
+  gets only its view); an `UNSYNCED` code, because an unnamed open needs no mesh time
+  (READER RULES), and a later named open can add one; grants for many sessions in one
+  message, which wait until a link carries a second session; a public series count on
+  `View`, for a home that writes the ends from `View::iter`, which gives the home's
+  entry order and not place order (the architect,
   https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). The
   coordinator approved the messages (2026-10-05); the architect decided the rest (#561,
   2026-10-06) and the run, the index place, and `MALFORMED` on #1064
