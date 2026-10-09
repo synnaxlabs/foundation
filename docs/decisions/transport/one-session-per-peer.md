@@ -5,8 +5,8 @@
   1. The table. Each `Transport` maps a node key to its open session and to the dial
      that runs for it. A session that is closing or closed is not open, so the next
      `dial` dials again. A refusal is a close. The table holds no handle to an open
-     session, only to a session that waits for `accept`, so a session still closes
-     when its last handle drops.
+     session, only to a session that waits for `accept` or that it holds (rule 4), so
+     a session still closes when its last handle drops.
   2. One attempt. The dial runs as a task on `tasks`, not in the caller's future, so the
      first caller can drop and the others still get the result. Its session goes to the
      table and to `accept` even when no caller waits. A dial that fails gives the
