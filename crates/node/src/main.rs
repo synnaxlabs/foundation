@@ -382,6 +382,12 @@ fn failed(error: impl std::fmt::Display) -> Failure {
     }
 }
 
+/// These tests call the functions of `main`, since a process test cannot set what
+/// they need: a host with a known free memory and free disk (`quarter`, and the texts
+/// of a default budget), or a buffer error that only a failing host makes (`Refused`,
+/// `Exhausted`, another buffer error). So they are the only kill of the mutants of
+/// `quarter` and of the arms of `stopped` and `source` for a default budget. The
+/// process tests in `tests/it/start.rs` cover each kept budget.
 #[cfg(test)]
 mod tests {
     use super::*;
