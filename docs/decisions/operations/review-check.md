@@ -57,8 +57,8 @@
   (https://github.com/synnaxlabs/foundation/issues/2037#issuecomment-6071274522), and
   2026-10-09T00:29:41Z
   (https://github.com/synnaxlabs/foundation/issues/2050#issuecomment-6071765169),
-  approved by the director at 2026-10-09T00:29:08Z
-  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6071759217).
+  approved by the director at 2026-10-09T00:50:43Z
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6071991379).
   Supersedes the code block and indent rules of
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6051923239,
   https://github.com/synnaxlabs/foundation/pull/1752#issuecomment-6052414062,
