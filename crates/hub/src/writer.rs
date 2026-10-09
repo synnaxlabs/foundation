@@ -99,6 +99,37 @@ impl fmt::Display for Failure {
 
 impl std::error::Error for Failure {}
 
+/// An index, and the key and sample type of each data channel of a writer on it.
+type Indexed = (channel::Key, Vec<(channel::Key, Type)>);
+
+/// The key of each of `channels`, and their data channels by index, in the order of
+/// `channels`.
+fn resolve(
+    state: &State,
+    channels: &[Name],
+) -> Result<(Vec<channel::Key>, Vec<Indexed>), Error> {
+    let mut groups: Vec<Indexed> = Vec::new();
+    let mut keys = Vec::with_capacity(channels.len());
+    let mut positions = hash::Map::default();
+    let mut data = hash::Set::default();
+    for name in channels {
+        let channel = state
+            .channels
+            .get(name)
+            .ok_or_else(|| Error::Unknown(name.clone()))?;
+        let (key, index) = (channel.key(), channel.index());
+        keys.push(key);
+        let at = *positions.entry(index).or_insert_with(|| {
+            groups.push((index, Vec::new()));
+            groups.len() - 1
+        });
+        if key != index && data.insert(key) {
+            groups[at].1.push((key, channel.sample()));
+        }
+    }
+    Ok((keys, groups))
+}
+
 /// A writer session. Dropping it closes the session.
 #[derive(Debug)]
 pub struct Writer {
@@ -126,31 +157,20 @@ impl Writer {
         if channels.is_empty() {
             return Err(Error::Empty);
         }
-        let mut groups: Vec<(channel::Key, Vec<(channel::Key, Type)>)> = Vec::new();
-        let mut keys = Vec::with_capacity(channels.len());
-        {
-            let borrowed = state.borrow();
-            let mut positions = hash::Map::default();
-            let mut data = hash::Set::default();
-            for name in &channels {
-                let channel = borrowed
-                    .channels
-                    .get(name)
-                    .ok_or_else(|| Error::Unknown(name.clone()))?;
-                let (key, index) = (channel.key(), channel.index());
-                keys.push(key);
-                let at = *positions.entry(index).or_insert_with(|| {
-                    groups.push((index, Vec::new()));
-                    groups.len() - 1
-                });
-                if key != index && data.insert(key) {
-                    groups[at].1.push((key, channel.sample()));
-                }
+        let (mut keys, groups) = loop {
+            let (_, groups) = resolve(&state.borrow(), &channels)?;
+            for (index, _) in &groups {
+                crate::carry(state, *index).await?;
             }
-        }
-        for (index, _) in &groups {
-            crate::carry(state, *index).await?;
-        }
+            // A call of `set_definitions` while the open waits can change a channel.
+            let (keys, again) = resolve(&state.borrow(), &channels)?;
+            let indexes = |groups: &[Indexed]| -> Vec<channel::Key> {
+                groups.iter().map(|&(index, _)| index).collect()
+            };
+            if indexes(&again) == indexes(&groups) {
+                break (keys, again);
+            }
+        };
         let mut borrowed = state.borrow_mut();
         let borrowed = &mut *borrowed;
         let groups: Vec<_> = groups

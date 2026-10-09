@@ -140,23 +140,15 @@ impl Reader {
         channels: &[Name],
         mode: Mode,
     ) -> Result<Self, Error> {
-        let mut keys = Vec::with_capacity(channels.len() + 1);
-        let index = {
-            let borrowed = state.borrow();
-            let mut index = None;
-            for name in channels {
-                let channel = borrowed
-                    .channels
-                    .get(name)
-                    .ok_or_else(|| Error::Unknown(name.clone()))?;
-                if *index.get_or_insert(channel.index()) != channel.index() {
-                    return Err(Error::ManyIndexes);
-                }
-                keys.push(channel.key());
+        let (mut keys, index) = loop {
+            let (_, index) = resolve(&state.borrow(), channels)?;
+            crate::carry(state, index).await?;
+            // A call of `set_definitions` while the open waits can change a channel.
+            let (keys, again) = resolve(&state.borrow(), channels)?;
+            if again == index {
+                break (keys, index);
             }
-            index.ok_or(Error::Empty)?
         };
-        crate::carry(state, index).await?;
         let (mut slots, slot) = {
             let mut borrowed = state.borrow_mut();
             let assigned = borrowed.interner.slots();
@@ -219,6 +211,26 @@ impl Reader {
             })
         }
     }
+}
+
+/// The key of each of `channels`, and their one index.
+fn resolve(
+    state: &State,
+    channels: &[Name],
+) -> Result<(Vec<channel::Key>, channel::Key), Error> {
+    let mut keys = Vec::with_capacity(channels.len() + 1);
+    let mut index = None;
+    for name in channels {
+        let channel = state
+            .channels
+            .get(name)
+            .ok_or_else(|| Error::Unknown(name.clone()))?;
+        if *index.get_or_insert(channel.index()) != channel.index() {
+            return Err(Error::ManyIndexes);
+        }
+        keys.push(channel.key());
+    }
+    Ok((keys, index.ok_or(Error::Empty)?))
 }
 
 /// A session at the shard's home, through a mask of the reader's channels: the frames
