@@ -27,25 +27,25 @@ fn check(protocol: Protocol, hcl: &str) {
 }
 
 #[test]
-#[ignore = "waits on #435"]
+#[ignore = "waits on #274, #435"]
 fn opc_ua_reads_and_commands() {
     check(Protocol::OpcUa, include_str!("fixtures/opcua.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #432"]
+#[ignore = "waits on #274, #432"]
 fn modbus_tcp_reads_and_commands() {
     check(Protocol::ModbusTcp, include_str!("fixtures/modbus_tcp.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #434"]
+#[ignore = "waits on #274, #434"]
 fn modbus_rtu_reads_and_commands() {
     check(Protocol::ModbusRtu, include_str!("fixtures/modbus_rtu.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #436"]
+#[ignore = "waits on #274, #436"]
 fn ni_daqmx_reads_and_commands() {
     check(Protocol::Ni, include_str!("fixtures/ni.hcl"));
 }
