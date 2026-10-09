@@ -223,8 +223,8 @@
   until `run` gives a value. A send or a close from `run` or from another task on that
   thread wakes the drive. At most 16 sends wait on one connection: a send past them
   closes the connection. A close writes what waits, reads and drops what the peer
-  sends, so that the drop sends no reset, and drops the stream 10 s after the first
-  close if the peer takes no bytes. Each connect, read, write, or close error gives a
+  sends, so that the drop sends no reset, and drops the stream with a warning 10 s
+  after the first close, so a peer that reads slowly cannot hold it. Each connect, read, write, or close error gives a
   warning through the logger of the loop, then `CLOSING`. The wake: decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6074418284,

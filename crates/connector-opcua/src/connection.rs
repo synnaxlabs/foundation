@@ -68,6 +68,7 @@ impl Manager {
             next: Cell::new(1),
             waker: RefCell::new(None),
             driving: Cell::new(false),
+            held: Cell::new(false),
             ahead: Cell::new(usize::MAX),
             again: Cell::new(false),
             ends: RefCell::new(VecDeque::new()),
@@ -104,8 +105,18 @@ impl Manager {
     /// it. `run` runs the loop with a timeout of 0, alone or through its client or
     /// server. Between calls, the drive sleeps until the next timer of the loop or a
     /// wake, also from a send or a close that `run` or another task asks for.
+    ///
+    /// # Panics
+    ///
+    /// When another drive of the manager runs, since one would take the wakes of the
+    /// other.
     pub(crate) async fn drive<T>(&self, mut run: impl FnMut() -> Option<T>) -> T {
         let state = self.state();
+        assert!(
+            !state.held.replace(true),
+            "one drive of a manager at a time"
+        );
+        let _held = Held(&state.held);
         let mut sleep: Option<(Monotonic, Sleep)> = None;
         poll_fn(|cx| {
             state.driving.set(true);
@@ -152,7 +163,7 @@ impl Manager {
                 .map(|(id, _)| *id);
             let Some(id) = next else { break };
             after = id + 1;
-            state.drive(id, cx);
+            state.move_on(id, cx);
         }
         state.ahead.set(usize::MAX);
     }
@@ -196,6 +207,8 @@ struct State {
     waker: RefCell<Option<Waker>>,
     /// Whether a drive runs, so a wake needs no waker.
     driving: Cell<bool>,
+    /// Whether a drive exists, from its first poll until its drop.
+    held: Cell<bool>,
     /// The first key that the running pass has not reached, or `usize::MAX` outside a
     /// pass.
     ahead: Cell<usize>,
@@ -271,7 +284,7 @@ impl State {
     }
 
     /// Moves connection `id` on until it waits, and calls C with no borrow held.
-    fn drive(&self, id: usize, cx: &mut Context<'_>) {
+    fn move_on(&self, id: usize, cx: &mut Context<'_>) {
         loop {
             let mut failure = None;
             let step = match self.table.borrow_mut().get_mut(&id) {
@@ -295,9 +308,11 @@ impl State {
                 Step::Established => self.call(id, ffi::ESTABLISHED, &mut []),
                 Step::Read(mut buffer, n) => {
                     self.call(id, ffi::ESTABLISHED, &mut buffer[..n]);
-                    if let Some(connection) = self.table.borrow_mut().get_mut(&id) {
-                        connection.buffer = buffer;
-                    }
+                    self.table
+                        .borrow_mut()
+                        .get_mut(&id)
+                        .expect("invariant: only a pass removes a connection")
+                        .buffer = buffer;
                 }
             }
         }
@@ -305,14 +320,27 @@ impl State {
 
     /// Calls the connection callback of `id` with `state` and `message`.
     fn call(&self, id: usize, state: ffi::ConnectionState, message: &mut [u8]) {
-        let callback = self.table.borrow().get(&id).and_then(|c| c.callback);
-        let Some(mut callback) = callback else { return };
+        let mut callback = self
+            .table
+            .borrow()
+            .get(&id)
+            .and_then(|c| c.callback)
+            .expect("invariant: a connection that is not closing has its callback");
         callback.call(self.raw.get(), id, state, message);
         if let Some(connection) = self.table.borrow_mut().get_mut(&id)
             && let Some(slot) = connection.callback.as_mut()
         {
             slot.context = callback.context;
         }
+    }
+}
+
+/// Clears the flag of a drive when the drive drops.
+struct Held<'a>(&'a Cell<bool>);
+
+impl Drop for Held<'_> {
+    fn drop(&mut self) {
+        self.0.set(false);
     }
 }
 
@@ -378,7 +406,7 @@ struct Connection {
     sent: usize,
     /// It gives no more reads, and closes once its sends are written.
     closing: bool,
-    /// When a closing connection drops its stream with sends that wait.
+    /// When a closing connection drops its stream, sends or not.
     linger: Option<Sleep>,
     /// Empty until the connect ends, and while a read callback holds it.
     buffer: Box<[u8]>,
@@ -421,8 +449,8 @@ impl Connection {
             if let Some(linger) = &mut self.linger
                 && Pin::new(linger).poll(cx).is_ready()
             {
-                self.drop_stream();
-                return Ok(Step::Ended);
+                let remote = tcp.peer();
+                return Err(("close", net::Error::TimedOut { remote }));
             }
             // A stream that drops with bytes it has not read resets, and the peer
             // loses what it has not read yet.
@@ -632,14 +660,13 @@ unsafe extern "C" fn closed(application: *mut c_void, _: *mut c_void) {
         let Some(id) = state.ends.borrow_mut().pop_front() else {
             break;
         };
-        let callback = state
+        let mut callback = state
             .table
             .borrow_mut()
             .get_mut(&id)
-            .and_then(|c| c.callback.take());
-        if let Some(mut callback) = callback {
-            callback.call(state.raw.get(), id, ffi::CLOSING, &mut []);
-        }
+            .and_then(|c| c.callback.take())
+            .expect("invariant: a connection keeps its callback until its `CLOSING`");
+        callback.call(state.raw.get(), id, ffi::CLOSING, &mut []);
         state.wake(id);
     }
 }

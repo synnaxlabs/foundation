@@ -1019,10 +1019,13 @@ fn a_close_writes_each_send_to_a_peer_that_wrote_bytes_it_did_not_read() {
     assert_eq!(reads.bytes(), sends.concat());
 }
 
-/// A close of a stream whose peer never reads drops it once it has waited
-/// [`LINGER`] from the first close, not from a later one.
+/// The peer reads nothing, and the stream closes twice 5 s apart, when
+/// `child::running()`.
 #[test]
-fn a_close_drops_a_stream_that_takes_no_bytes_after_it_lingers() {
+fn lingers() {
+    if !child::running() {
+        return;
+    }
     let mut network = Network::new();
     network.accept(|stream, clock| async move {
         clock.sleep(Span::from_nanos(3_600_000_000_000)).await;
@@ -1049,6 +1052,37 @@ fn a_close_drops_a_stream_that_takes_no_bytes_after_it_lingers() {
         })
         .expect("the run ends");
     assert_eq!(states, [ffi::OPENING, ffi::ESTABLISHED, ffi::CLOSING]);
+}
+
+/// A close drops a stream whose peer reads nothing [`LINGER`] after the first close,
+/// not a later one, with a warning.
+#[test]
+fn a_close_drops_a_stream_that_takes_no_bytes_after_it_lingers() {
+    assert_eq!(
+        stderr("lingers"),
+        "connector-opcua: open62541 warning: connection 1: the close failed: \
+         10.0.0.2:4840 did not answer in time\n"
+    );
+}
+
+#[test]
+#[should_panic(expected = "one drive of a manager at a time")]
+fn a_second_drive_of_a_manager_panics() {
+    let mut network = Network::new();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            let mut first = pin!(side.manager.drive(|| None::<Infallible>));
+            let mut second = pin!(side.manager.drive(|| None::<Infallible>));
+            poll_fn(|cx| {
+                assert!(first.as_mut().poll(cx).is_pending());
+                assert!(second.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+        })
+        .expect("the run ends");
 }
 
 /// Runs the test `name` of this module in a child process, asserts that it passes,
