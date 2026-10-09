@@ -1391,10 +1391,11 @@ mod tests {
     fn dials_with_no_session_from_a_peer_keep_no_wakers_in_the_carrier() {
         let (mut sim, client, server) = testing::nodes(0);
         let dead = dead(&server);
+        let failed = unreachable(SERVER.public(), &server);
         testing::transport(&client, CLIENT, move |transport, _| async move {
             for _ in 0..50 {
                 let dialed = transport.dial(SERVER.public(), &dead).await;
-                assert!(dialed.is_err());
+                assert_eq!(dialed.err(), Some(failed.clone()));
             }
             let wakers = transport.table.borrow().carrier.accept_wakers();
             assert_eq!(wakers, 1, "only the task that takes sessions waits");
