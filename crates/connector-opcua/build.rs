@@ -24,6 +24,7 @@ fn build() {
     let copy = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../patches/open62541");
     println!("cargo::rerun-if-changed={}", copy.display());
     println!("cargo::rerun-if-changed=src/shim.c");
+    println!("cargo::rerun-if-changed=src/alloc.h");
     let read = |name| {
         let path = copy.join(name);
         std::fs::read_to_string(&path)

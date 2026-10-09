@@ -16,7 +16,7 @@ use crate::status::Connector;
 
 /// How long [`Rig::wait`] and [`Rig::run`] wait: longer than the 60 s cap of a restart
 /// backoff.
-pub(crate) const PATIENCE: Span = Span::from_nanos(90_000_000_000);
+const PATIENCE: Span = Span::from_nanos(90_000_000_000);
 
 /// The time between two checks of a wait.
 const POLL: Duration = Duration::from_millis(100);
@@ -65,13 +65,13 @@ impl Rig {
         todo!("waits on #1732")
     }
 
-    /// Runs `foundation` with `args` in [`Rig::dir`], with no input, and gives its
-    /// output when it exits and closes its pipes. When 90 s pass first, kills it and
-    /// panics with the output so far.
-    pub(crate) fn run(&self, args: &[&str]) -> Output {
+    /// Runs `foundation` with `args` in [`Rig::dir`], with `input` on its standard
+    /// input, and gives its output when it exits and closes its pipes. When 90 s pass
+    /// first, kills it and panics with the output so far.
+    pub(crate) fn run(&self, args: &[&str], input: &[u8]) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
         command.args(args).current_dir(&self.dir);
-        run(&self.clock, PATIENCE, command, &[])
+        run(&self.clock, PATIENCE, command, input)
     }
 
     /// Calls `check` until it gives `Ok`, and gives that value. When 90 s pass first,
@@ -124,12 +124,7 @@ fn wait<T>(
 /// Runs `command` with `input` on its standard input, and gives its output when it
 /// exits and closes its pipes. When `limit` passes first, kills it and panics with the
 /// output so far.
-pub(crate) fn run(
-    clock: &Clock,
-    limit: Span,
-    command: Command,
-    input: &[u8],
-) -> Output {
+fn run(clock: &Clock, limit: Span, command: Command, input: &[u8]) -> Output {
     let mut running = Running::new(command, input);
     let status = wait(
         clock,

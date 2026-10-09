@@ -187,6 +187,38 @@ impl Readers {
         }
     }
 
+    /// No readers, as [`Readers::new`] gives, whose first key of each mode has number
+    /// `first`. A key below `first` counts as given and closed.
+    #[must_use]
+    pub fn after(live: u64, first: u64) -> Self {
+        Self {
+            next_complete: first,
+            next_latest: first,
+            ..Self::new(live)
+        }
+    }
+
+    /// Ends the readers of an index that its home stops carrying: each named reader
+    /// stops holding its position. Returns the number after each key they gave, in
+    /// either mode, for [`Readers::after`].
+    ///
+    /// # Panics
+    ///
+    /// If a session is open, in either mode, or a record waits for
+    /// [`Readers::records`].
+    #[must_use]
+    pub fn end(self) -> u64 {
+        assert!(
+            self.complete.is_empty() && self.latest.is_empty(),
+            "a reader of the index is open"
+        );
+        assert!(
+            self.records.is_empty(),
+            "a record waits: take the records first"
+        );
+        self.next_complete.max(self.next_latest)
+    }
+
     /// The readers that `records` describe, in log order, on an index whose next live
     /// sample takes seq `live`. A session that was open at the crash counts as closed
     /// at `now`.
@@ -562,21 +594,21 @@ impl Readers {
                     return;
                 };
                 match now {
-                    Some(now) => self.end_at(i, now),
+                    Some(now) => self.finish_at(i, now),
                     None if self.complete[i].named.is_some() => {
                         panic!("named complete session {key} closed with no mesh time")
                     }
-                    None => drop(self.end(i)),
+                    None => drop(self.finish(i)),
                 }
             }
             Key::Latest(key) => self.close_latest(key),
         }
     }
 
-    /// Removes the complete session at `i` at `now`, as [`Readers::end`] does. A named
-    /// one holds its position from `now`.
-    fn end_at(&mut self, i: usize, now: Stamp) {
-        let session = self.end(i);
+    /// Removes the complete session at `i` at `now`, as [`Readers::finish`] does. A
+    /// named one holds its position from `now`.
+    fn finish_at(&mut self, i: usize, now: Stamp) {
+        let session = self.finish(i);
         let Some(reader) = session.named else {
             return;
         };
@@ -593,7 +625,7 @@ impl Readers {
     }
 
     /// Removes the complete session at `i`. The last one drops the queued frames.
-    fn end(&mut self, i: usize) -> Session {
+    fn finish(&mut self, i: usize) -> Session {
         let session = self.remove(i);
         if self.complete.is_empty() {
             if let Some((_, seq)) = self.queue.back() {
@@ -664,7 +696,7 @@ impl Readers {
             return self.remove_latest(reader).map(Key::from);
         };
         let key = self.complete[i].key;
-        self.end_at(i, now);
+        self.finish_at(i, now);
         Some(key.into())
     }
 
@@ -1520,6 +1552,94 @@ pub(super) mod tests {
             ];
             assert_eq!(drained(&mut readers), records);
             assert_eq!(readers.deadline(), Some(at(15)));
+        }
+    }
+
+    mod end {
+        use super::*;
+
+        #[test]
+        fn gives_the_number_after_each_key_of_either_mode() {
+            let mut readers = Readers::new(0);
+            let key = readers
+                .open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole)
+                .key;
+            readers.close(key.into(), None);
+            for _ in 0..3 {
+                let key = readers.open_latest().key;
+                readers.close(key.into(), None);
+            }
+            assert_eq!(readers.end(), 3);
+        }
+
+        #[test]
+        fn gives_readers_after_whose_first_key_of_each_mode_has_that_number() {
+            let mut readers = Readers::after(0, 3);
+            let unnamed = Reader::Unnamed;
+            let complete = readers.open(unnamed, Start::At(live(0)), 0, Charge::Whole);
+            assert_eq!(complete.key, complete::Key(3));
+            assert_eq!(readers.open_latest().key, latest::Key(3));
+        }
+
+        #[test]
+        fn gives_readers_after_on_which_a_key_below_first_changes_nothing() {
+            let frames = Frames::new(1);
+            let mut readers = Readers::after(0, 5);
+            let key = readers
+                .open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole)
+                .key;
+            readers.queue(&frames.frame(1), &frames.set, 0..1);
+            readers.grant(complete::Key(3), u64::MAX);
+            assert_eq!(readers.release(1), []);
+            assert!(matches!(readers.take(key.into()), Next::Empty));
+            assert_eq!(readers.ack(complete::Key(3), live(1)), Ok(()));
+            assert!(matches!(readers.take(complete::Key(3).into()), Next::Empty));
+            assert!(matches!(readers.take(latest::Key(3).into()), Next::Empty));
+            readers.close(complete::Key(3).into(), None);
+            readers.close(latest::Key(3).into(), None);
+            readers.grant(key, CHARGE);
+            assert_eq!(taken(&mut readers, key), [1]);
+        }
+
+        #[test]
+        #[should_panic(expected = "complete session 6 was never open")]
+        fn panics_on_a_complete_key_after_first_that_it_never_gave() {
+            let mut readers = Readers::after(0, 5);
+            let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
+            readers.grant(complete::Key(6), 1);
+        }
+
+        #[test]
+        #[should_panic(expected = "latest session 5 was never open")]
+        fn panics_on_a_latest_key_after_first_that_it_never_gave() {
+            let mut readers = Readers::after(0, 5);
+            readers.close(latest::Key(5).into(), None);
+        }
+
+        #[test]
+        #[should_panic(expected = "a reader of the index is open")]
+        fn panics_with_a_complete_session_open() {
+            let mut readers = Readers::new(0);
+            readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
+            let _first = readers.end();
+        }
+
+        #[test]
+        #[should_panic(expected = "a reader of the index is open")]
+        fn panics_with_a_latest_session_open() {
+            let mut readers = Readers::new(0);
+            let _session = readers.open_latest();
+            let _first = readers.end();
+        }
+
+        #[test]
+        #[should_panic(expected = "a record waits: take the records first")]
+        fn panics_with_a_record_that_waits() {
+            let mut readers = Readers::new(0);
+            let opened =
+                readers.open(named("a", 10), Start::At(live(0)), 0, Charge::Whole);
+            readers.close(opened.key.into(), Some(at(1)));
+            let _first = readers.end();
         }
     }
 

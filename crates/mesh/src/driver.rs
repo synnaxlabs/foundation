@@ -153,8 +153,8 @@ impl Mesh {
     ///
     /// - [`Error::Member`] when the region cannot hold one of
     ///   `config.founding.members`, or two name one node.
-    /// - [`Error::NotMember`] when `config.founding.members` lacks this node or a
-    ///   voter.
+    /// - [`Error::NotMember`] when `config.founding.members` lacks this node, a voter,
+    ///   or the node of a home.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.founding.members`.
     /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
@@ -279,6 +279,14 @@ impl Mesh {
     #[must_use]
     pub fn member(&self, key: node::Key) -> Option<Member> {
         self.group.borrow().state.member(key).cloned()
+    }
+
+    /// The key of the member whose card holds `public_key` in this node's view of the
+    /// region, or `None` when no member holds it. At most one member holds a key. It
+    /// answers also after the group stops, from the view at the stop.
+    #[must_use]
+    pub fn holder(&self, public_key: PublicKey) -> Option<node::Key> {
+        self.group.borrow().state.holder(public_key)
     }
 
     /// The spec pointer in this node's applied state. It answers also after the group
@@ -1026,8 +1034,8 @@ fn request(body: &Body) -> bool {
     }
 }
 
-// Checks that `own` and each of `voters` are members of `state`, and that
-// `private_key` is the key of `own`.
+// Checks that `own`, each of `voters`, and the node of each home are members of
+// `state`, and that `private_key` is the key of `own`.
 fn check_members(
     state: &region::State,
     own: node::Key,
@@ -1041,8 +1049,8 @@ fn check_members(
         }
         Some(_) => {}
     }
-    let mut voters = voters.iter();
-    if let Some(&key) = voters.find(|&&key| state.member(key).is_none()) {
+    let mut others = voters.iter().copied().chain(state.homes());
+    if let Some(key) = others.find(|&key| state.member(key).is_none()) {
         return Err(Error::NotMember(key));
     }
     Ok(())
@@ -2076,8 +2084,9 @@ mod tests {
         assert_eq!(cluster.take(), (Vec::new(), homes));
     }
 
+    // The others reach node 3 on the sessions that it dialed.
     #[test]
-    fn the_other_voters_agree_when_the_card_of_a_voter_has_no_address() {
+    fn each_voter_agrees_when_the_card_of_a_voter_has_no_address() {
         let mut cluster = Cluster::new(5);
         cluster.board.lock().unwrap().hidden = Some(3);
         cluster.script(home);
@@ -2087,11 +2096,8 @@ mod tests {
         let &[leader] = led.as_slice() else {
             panic!("the group took a proposal from each of {led:?}");
         };
-        let home = |id| match id {
-            3 => (id, vec![None]),
-            _ => (id, vec![None, Some(key(leader))]),
-        };
-        assert_eq!(homes, IDS.map(home).into());
+        let homes_of = |id| (id, vec![None, Some(key(leader))]);
+        assert_eq!(homes, IDS.map(homes_of).into());
     }
 
     #[test]
@@ -2412,6 +2418,7 @@ mod tests {
             let cause = Unknown::Kind { kind: 9 };
             let stopped = Stopped::Change { at: bad, cause };
             assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+            assert_eq!(mesh.holder(public(1)), Some(key(1)));
         });
     }
 
@@ -3037,10 +3044,10 @@ mod tests {
             });
         }
 
-        // Members 2 and 4 share one public key. Node 2 is a voter, and node 4 is
-        // not.
+        // Members 2 and 4 would share one public key, so that a message of node 4
+        // could pass the sender check under the key of voter 2.
         #[test]
-        fn not_voter_names_no_key_that_a_voter_holds() {
+        fn a_member_with_the_public_key_of_a_voter_does_not_start() {
             solo(|node, tasks| async move {
                 let mut config = config(&node, &tasks, 1, &IDS, &IDS).await;
                 let mut card = common::member(2).card.card().clone();
@@ -3050,12 +3057,8 @@ mod tests {
                     card,
                     ..common::member(4)
                 });
-                let mesh = Mesh::start(config).await.unwrap();
-                let heartbeat = message(4, 1, Body::Heartbeat { commit: 0 });
-                let refused = mesh.receive(public(2), heartbeat);
-                assert_eq!(refused, Err(Error::NotVoter { from: key(4) }));
-                let answer = mesh.answer(public(2), home(2)).await;
-                assert_eq!(answer, Ok(Message::NotLeader { leader: None }));
+                let held = Unfit::Held { key: key(2) };
+                assert_eq!(Mesh::start(config).await.err(), Some(Error::Member(held)));
             });
         }
 
@@ -3357,6 +3360,35 @@ mod tests {
                 entries: ready.entries,
                 commit: 0,
             }
+        }
+
+        /// Until the apply refuses a join of node 4 whose card holds the public key
+        /// of voter 2, a request of node 4 under that key passes the sender check and
+        /// names node 4. After it, node 4 has no key, and the message is spoofed.
+        #[test]
+        fn a_join_with_the_public_key_of_a_voter_names_its_node_until_it_applies() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &[2, 3]).await.unwrap();
+                let card = card::Card {
+                    public_key: public(2),
+                    ..common::member(4).card.card().clone()
+                };
+                let twin = card::Signed::sign(key(4), card, &common::private(2));
+                let joins = [ticket(), join_with(&twin, 7, Stamp::EPOCH), join(5)];
+                write(&mesh, changes(&joins)).await;
+                let request = message(4, 1, Body::Heartbeat { commit: 0 });
+                let refused = Err(Error::NotVoter { from: key(4) });
+                assert_eq!(mesh.receive(public(2), request), refused);
+                let commit = proven(2, 1, Body::Heartbeat { commit: 3 });
+                assert_eq!(mesh.receive(public(2), commit), Ok(()));
+                node.clock().sleep(Span::MILLISECOND).await;
+                assert_eq!(mesh.member(key(4)), None);
+                assert_eq!(mesh.holder(public(2)), Some(key(2)));
+                assert_eq!(mesh.holder(public(5)), Some(key(5)));
+                let reply = message(4, 1, Body::HeartbeatReply);
+                let spoofed = Err(Error::Spoofed { from: key(4) });
+                assert_eq!(mesh.receive(public(2), reply), spoofed);
+            });
         }
 
         pub(super) fn changes(changes: &[Change]) -> Vec<Data> {
@@ -5350,6 +5382,55 @@ mod tests {
     }
 
     #[test]
+    fn open_refuses_the_first_founding_home_at_a_node_that_is_not_a_member() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &IDS, &IDS).await;
+            config.founding.homes = BTreeMap::from([
+                (channel::Key::from_u128(4), key(2)),
+                (channel::Key::from_u128(5), key(9)),
+                (channel::Key::from_u128(6), key(8)),
+            ]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(9))));
+        });
+    }
+
+    #[test]
+    fn open_refuses_a_voter_that_is_not_a_member_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &[1, 2], &IDS).await;
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(3))));
+        });
+    }
+
+    #[test]
+    fn open_refuses_this_node_that_is_not_a_member_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = config(&node, &tasks, 1, &[2, 3], &[2, 3]).await;
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            let refused = Mesh::open(config).await.err();
+            assert_eq!(refused, Some(Error::NotMember(key(1))));
+        });
+    }
+
+    #[test]
+    fn open_refuses_a_wrong_private_key_before_a_founding_home() {
+        solo(|node, tasks| async move {
+            let mut config = Config {
+                key: key(1),
+                ..config(&node, &tasks, 2, &IDS, &[]).await
+            };
+            config.founding.homes =
+                BTreeMap::from([(channel::Key::from_u128(4), key(9))]);
+            assert_eq!(Mesh::open(config).await.err(), Some(Error::WrongKey));
+        });
+    }
+
+    #[test]
     fn member_gives_the_record_of_a_member_and_none_for_another_node() {
         solo(|node, tasks| async move {
             let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
@@ -5692,7 +5773,8 @@ mod tests {
         });
     }
 
-    /// The drop of the last mesh stops each dial, and `ended` does not wait for it.
+    /// The drop of the last mesh stops each wait for a dial, and `ended` does not wait
+    /// for the dial.
     #[test]
     fn ended_waits_for_each_task_that_sends_but_not_for_its_dial() {
         for seed in 0..32 {

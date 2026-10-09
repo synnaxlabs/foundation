@@ -421,6 +421,8 @@ name = "connector-opcua"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "counting",
+ "divan",
 ]
 
 [[package]]
@@ -855,6 +857,7 @@ version = "0.0.0"
 dependencies = [
  "access",
  "aws-lc-rs",
+ "blob",
  "block",
  "buffer",
  "clock",
@@ -862,6 +865,7 @@ dependencies = [
  "counting",
  "env",
  "home",
+ "mesh",
  "sim",
  "spec",
  "transport",
@@ -1055,13 +1059,18 @@ dependencies = [
  "blob",
  "block",
  "buffer",
+ "bytes",
  "clock",
  "codec",
+ "connector",
+ "connector-influx",
  "counting",
+ "crc32c",
  "divan",
  "env",
  "estimate",
  "home",
+ "http",
  "hub",
  "loom",
  "mesh",

@@ -33,6 +33,7 @@ use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
 mod client;
+mod region;
 mod serve;
 
 /// The node key of the hub under test.
@@ -89,17 +90,20 @@ struct Test {
     unsynced: Option<clock::Clock>,
     /// A commit of the home, taken before the hub had it. It holds the ring open.
     commit: home::Commit,
+    /// The mesh of the node's region, which the hub holds too.
+    region: Option<mesh::Mesh>,
     hub: Hub,
 }
 
 impl Test {
-    /// A hub on a new ring of `node` with `layout` and a pool of `pool` bytes, whose
-    /// mesh clock does not run yet.
+    /// A hub on a new ring of `node` with `layout`, a pool of `pool` bytes, and
+    /// `region`, whose mesh clock does not run yet.
     async fn new(
         node: sim::node::Node,
         tasks: Tasks,
         layout: buffer::Layout,
         pool: usize,
+        region: Option<mesh::Mesh>,
     ) -> Self {
         let config = block::Config { budget: pool };
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
@@ -139,6 +143,7 @@ impl Test {
             node: NODE,
             time: mesh.clone(),
             entropy: node.entropy(),
+            mesh: region.clone(),
         });
         let channels: BTreeMap<_, _> = CHANNELS
             .into_iter()
@@ -159,6 +164,7 @@ impl Test {
             paused,
             unsynced: Some(unsynced),
             commit,
+            region,
             hub,
         }
     }
@@ -312,7 +318,7 @@ fn unsynced_on<F>(
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, move |node, tasks| async move {
         let layout = buffer::Layout::new(area, body_max).expect("a ring");
-        main(Test::new(node, tasks, layout, POOL).await).await;
+        main(Test::new(node, tasks, layout, POOL, None).await).await;
     })
     .expect("the run ends");
 }

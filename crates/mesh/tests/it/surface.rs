@@ -236,6 +236,8 @@ fn a_node_opens_its_region_and_reads_its_member_a_home_the_pointer_and_the_spec(
         assert_eq!(mesh.spec().await, Ok(spec));
         assert_eq!(mesh.member(KEY), Some(create_member(1, Vec::new())));
         assert_eq!(mesh.member(OTHER), None);
+        assert_eq!(mesh.holder(public_key(1)), Some(KEY));
+        assert_eq!(mesh.holder(public_key(2)), None);
         let mut watch = mesh.watch(INDEX);
         assert_eq!(watch.next().await, Ok(None));
         drop(mesh);
@@ -361,6 +363,19 @@ fn a_region_with_two_records_of_one_node_does_not_open() {
         let mut config = create_config(&node, &tasks).await;
         config.founding.members.push(create_member(1, Vec::new()));
         let unfit = region::Unfit::Duplicate { key: KEY };
+        assert_eq!(Mesh::open(config).await.err(), Some(Error::Member(unfit)));
+    });
+}
+
+#[test]
+fn a_region_with_two_members_of_one_public_key_does_not_open() {
+    solo(|node, tasks| async move {
+        let mut config = create_config(&node, &tasks).await;
+        let mut twin = create_member(1, Vec::new());
+        let card = twin.card.card().clone();
+        twin.card = card::Signed::sign(OTHER, card, &private_key(1));
+        config.founding.members.push(twin);
+        let unfit = region::Unfit::Held { key: KEY };
         assert_eq!(Mesh::open(config).await.err(), Some(Error::Member(unfit)));
     });
 }
