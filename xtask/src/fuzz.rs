@@ -30,8 +30,8 @@ const MAX_LEN: u64 = 16 * 1024;
 /// cores. Each run reads `fuzz/corpus/<target>`, which libFuzzer writes to, and
 /// `oracles/fuzz/<target>`. It fails before the build on each problem that [`check`]
 /// finds and when the pinned nightly gives no host triple, and then when the build
-/// fails or a target fails. cargo-fuzz keeps the input
-/// of a crash in `fuzz/artifacts/<target>/`.
+/// fails or a target fails. cargo-fuzz keeps the input of a crash in
+/// `fuzz/artifacts/<target>/`.
 pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
     let targets = check(root)?;
     let fuzz = Fuzz::new(root).map_err(|e| vec![e])?;
@@ -1372,7 +1372,12 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
         let host = fuzz.unwrap().host;
         assert!(host.starts_with(std::env::consts::ARCH), "{host}");
-        assert!(host.contains(std::env::consts::OS), "{host}");
+        let os = if cfg!(target_os = "macos") {
+            "darwin"
+        } else {
+            std::env::consts::OS
+        };
+        assert!(host.contains(os), "{host}");
     }
 
     #[test]
