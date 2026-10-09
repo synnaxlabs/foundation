@@ -1,17 +1,19 @@
 //! Dedicated threads on real threads: their body, their blocking, and their panics.
 
-use std::future::{Ready, poll_fn, ready};
+use std::future::{Ready, pending, poll_fn, ready};
 use std::panic::panic_any;
-use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::task::{Context, Poll, Waker};
+use std::task::{Poll, Waker};
 use std::time::Duration;
 
 use env::threads::Threads;
+use tokio::sync::oneshot;
 use tokio::task::yield_now;
 
-use crate::common::{Bomb, Relay, Relayed, Stuck, assert_joins, panicked};
+use crate::common::{
+    Armed, Bomb, Relay, Relayed, Stuck, assert_aborts, assert_joins, panicked,
+};
 
 fn threads() -> Threads {
     os::threads().expect("the OS gives the cores of this process")
@@ -68,21 +70,6 @@ fn a_panic_in_the_call_of_the_body_gives_panicked() {
     let body = || -> Ready<()> { panic!("body") };
     let handle = threads().start("thread-1", body).unwrap();
     assert_joins(handle, panicked("thread-1"));
-}
-
-/// A future that panics when it drops, and in its poll when `faulty`.
-struct Armed {
-    faulty: bool,
-    _bomb: Bomb,
-}
-
-impl Future for Armed {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
-        assert!(!self.faulty, "body");
-        Poll::Ready(())
-    }
 }
 
 #[test]
@@ -259,4 +246,93 @@ fn a_panic_whose_payload_panics_in_its_drop_as_a_tokio_task_drops_gives_panicked
     };
     let handle = threads().start("thread-11", body).unwrap();
     assert_joins(handle, panicked("thread-11"));
+}
+
+#[test]
+fn a_panic_in_the_poll_of_a_tokio_task_gives_ok() {
+    let body = || async {
+        let (sender, dropped) = oneshot::channel::<()>();
+        drop(tokio::spawn(async move {
+            let _sender = sender;
+            panic!("tokio task");
+        }));
+        dropped.await.expect_err("the panic drops the sender");
+    };
+    let handle = threads().start("thread-12", body).unwrap();
+    assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_panic_in_the_drop_of_a_tokio_task_gives_ok() {
+    let body = || {
+        // The payload of the panic, `Relay(0)`, does not panic in its drop.
+        drop(tokio::spawn(Stuck(0)));
+        ready(())
+    };
+    let handle = threads().start("thread-13", body).unwrap();
+    assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_in_a_tokio_task_gives_panicked() {
+    let body = || async {
+        // Tokio catches the panic of the poll and the first panic in the drop of its
+        // payload.
+        drop(tokio::spawn(async { panic_any(Relay(2)) }));
+        pending::<()>().await;
+    };
+    let handle = threads().start("thread-14", body).unwrap();
+    assert_joins(handle, panicked("thread-14"));
+}
+
+#[test]
+fn a_panic_in_the_poll_and_then_the_drop_of_a_tokio_task_aborts_the_process() {
+    assert_aborts(|| {
+        let body = || async {
+            drop(tokio::spawn(Armed {
+                faulty: true,
+                _bomb: Bomb,
+            }));
+            pending::<()>().await;
+        };
+        let handle = threads().start("thread-15", body).unwrap();
+        assert_joins(handle, Ok(()));
+    });
+}
+
+#[test]
+fn a_panic_over_a_local_that_panics_in_its_drop_in_the_body_aborts_the_process() {
+    assert_aborts(|| {
+        let body = || async {
+            let _bomb = Bomb;
+            panic!("body");
+        };
+        let handle = threads().start("thread-16", body).unwrap();
+        assert_joins(handle, panicked("thread-16"));
+    });
+}
+
+#[test]
+fn a_panic_in_the_drop_of_an_aborted_tokio_task_gives_ok() {
+    let body = || async {
+        let task = tokio::spawn(Stuck(0));
+        task.abort();
+        let error = task.await.expect_err("the abort drops the task");
+        assert!(error.is_panic(), "{error}");
+    };
+    let handle = threads().start("thread-17", body).unwrap();
+    assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_tokio_task_that_panics_in_its_drop_after_a_panic_escapes_tokio_gives_panicked() {
+    let body = || async {
+        // A panic escapes Tokio from each task: the first ends `block_on`, and the second
+        // the drop of the runtime.
+        drop(tokio::spawn(Stuck(2)));
+        drop(tokio::spawn(async { panic_any(Relay(2)) }));
+        pending::<()>().await;
+    };
+    let handle = threads().start("thread-18", body).unwrap();
+    assert_joins(handle, panicked("thread-18"));
 }

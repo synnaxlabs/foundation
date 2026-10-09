@@ -912,6 +912,7 @@ dependencies = [
  "config",
  "connector",
  "document",
+ "mesh",
  "schemars",
  "serde",
  "serde_json",
