@@ -77,7 +77,7 @@ impl Places {
     /// when the bound is full.
     fn take(&mut self, peer: Peer) -> Option<Rc<()>> {
         self.nodes.retain(|_, place| place.strong_count() > 0);
-        // `Places` holds one clone of `programs`.
+        // `Places` itself holds one count of `programs`.
         let taken = Rc::strong_count(&self.programs) - 1 + self.nodes.len();
         let full = taken >= PLACES;
         match peer {
