@@ -47,12 +47,16 @@ impl Drop for Small {
         // While the thread panics, a command can block and a second panic aborts the
         // test binary.
         if !std::thread::panicking() {
-            // Lazy: a command that a parallel test starts can inherit a file on the
-            // mount.
-            check(sudo("umount").arg("-l").arg(self.mount()));
-            std::fs::remove_dir_all(&self.0).unwrap();
+            remove(&self.mount());
         }
     }
+}
+
+/// Unmounts the `mount` of a [`Small`] and removes its directory.
+fn remove(mount: &Path) {
+    // Lazy: a command that a parallel test starts can inherit a file on the mount.
+    check(sudo("umount").arg("-l").arg(mount));
+    std::fs::remove_dir_all(mount.parent().unwrap()).unwrap();
 }
 
 fn sudo(program: &str) -> Command {
@@ -92,10 +96,16 @@ fn a_disk_that_drops_while_the_test_panics_stays_mounted() {
     }));
     unwound.expect_err("the test panics");
     let mount = data.parent().expect("the data directory is on the mount");
-    let mounts = std::fs::read_to_string("/proc/self/mounts").unwrap();
-    assert!(mounts.contains(mount.to_str().unwrap()), "{mounts}");
-    check(sudo("umount").arg("-l").arg(mount));
-    std::fs::remove_dir_all(mount.parent().unwrap()).unwrap();
+    let mounted = Command::new("mountpoint")
+        .arg("-q")
+        .arg(mount)
+        .status()
+        .unwrap()
+        .success();
+    if mounted {
+        remove(mount);
+    }
+    assert!(mounted, "{} is not mounted", mount.display());
 }
 
 #[test]
