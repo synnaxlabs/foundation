@@ -70,7 +70,24 @@
   `sendmmsg`. After `EIO` or `EINVAL` on a GSO send, `noq-udp` stores 1 as its
   `max_gso_segments`, and from then on each datagram goes out alone; that is the only
   GSO flag. Each half has its own `dup` of the socket. The receiver registers for
-  readable at its first poll, in a `OnceLock`, so no lock is on the receive path. A
+  readable at its first poll, in a field of its driver (`laptop.architect-2`,
+  2026-10-08 19:12 UTC,
+  https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
+  `os` receiver's driver has no `Mutex` of its own (item 2 of `laptop.architect-2`,
+  2026-10-08 18:27 UTC,
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). Its
+  poll and its drop lock only Tokio's `Mutex`es, in Tokio's `AsyncFd` and I/O driver.
+  `laptop.architect-2` reads item 2 as no `Mutex` of our own, with Tokio's own locks
+  allowed (2026-10-09 03:18 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6073564290). The
+  receiver's `receiver::Driver` is its alone, as a sender clone's is:
+  `net::Driver::udp` gives it at the bind, beside the socket (`laptop.architect-2`,
+  2026-10-09 01:42 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6072529426).
+  Supersedes the `OnceLock` of item 2 of
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541 and the
+  two `OnceLock`s of item 3 of
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6067014743. A
   sender registers for writable at its first poll and after `EAGAIN`, and drops the
   registration when the send ends: Linux wakes each `EPOLLOUT` registration of a socket
   for each datagram that the socket sends (1,000 wakes for 1,000 sends on box2), so a
