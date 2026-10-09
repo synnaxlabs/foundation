@@ -340,13 +340,16 @@ impl State {
             let slot = self.interner.slots().assign(key);
             self.home.shed(slot);
         }
-        let dropped: Vec<Key> = self
+        let mut dropped: Vec<Key> = self
             .channels
             .values()
             .filter(|known| removed.contains(&known.key()))
             .map(Channel::index)
             .filter(|index| after.contains(index))
             .collect();
+        // Each drop walks the latest sessions of its index, so once per index.
+        dropped.sort_unstable();
+        dropped.dedup();
         for key in dropped {
             let slot = self.interner.slots().assign(key);
             self.home.drop_newest(slot);
