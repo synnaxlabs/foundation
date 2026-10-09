@@ -387,6 +387,27 @@ mod linux {
             assert_eq!(root.available().unwrap(), 8192 * MIB);
         }
 
+        /// A hybrid host: the v2 mount takes the line of the unified hierarchy, not
+        /// the v1 line of `memory`, whose files stand in for a cgroup that it must not
+        /// read.
+        #[test]
+        fn a_v2_mount_takes_the_cgroup_of_the_unified_hierarchy() {
+            let root = Root::new("hybrid");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "4:memory:/x\n0::/y\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "37 31 0:31 / /cg rw - cgroup2 cgroup2 rw\n",
+                )
+                .write("cg/x/memory.max", &format!("{}\n", MIB / 2))
+                .write("cg/x/memory.current", "0\n")
+                .write("cg/x/memory.stat", "inactive_file 0\n")
+                .write("cg/y/memory.max", &format!("{MIB}\n"))
+                .write("cg/y/memory.current", "0\n")
+                .write("cg/y/memory.stat", "inactive_file 0\n");
+            assert_eq!(root.available().unwrap(), MIB);
+        }
+
         /// The process is in `/ab/c`, outside the mount whose root is `/a`. The
         /// cgroup `/a/b/c` of that mount is not above the process.
         #[test]
