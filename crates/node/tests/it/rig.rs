@@ -235,18 +235,23 @@ impl Drop for Process {
     fn drop(&mut self) {
         // `kill` gives `Ok` for a command that exited. No wait: while the thread
         // panics, a wait can block, and `run` waits for its command itself.
-        match self.0.kill() {
-            Err(error) if std::thread::panicking() => {
-                #[expect(
-                    clippy::print_stderr,
-                    reason = "a second panic aborts the test binary"
-                )]
-                {
-                    eprintln!("kill the command: {error}");
-                }
+        killed(self.0.kill(), std::thread::panicking());
+    }
+}
+
+/// Panics when `kill` failed, or prints its error while the thread is `panicking`.
+fn killed(kill: std::io::Result<()>, panicking: bool) {
+    match kill {
+        Err(error) if panicking => {
+            #[expect(
+                clippy::print_stderr,
+                reason = "a second panic aborts the test binary"
+            )]
+            {
+                eprintln!("kill the command: {error}");
             }
-            killed => killed.expect("kill the command"),
         }
+        kill => kill.expect("kill the command"),
     }
 }
 
@@ -334,7 +339,7 @@ fn a_rig_removes_its_directory_with_its_files() {
 }
 
 #[test]
-#[cfg(target_os = "linux")]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs /proc")]
 fn a_test_that_panics_kills_its_command() {
     let mut command = Command::new("sh");
     command.args(["-c", "exec sleep 60"]);
@@ -362,6 +367,21 @@ fn a_test_that_panics_kills_its_command() {
             }
         },
     );
+}
+
+#[test]
+fn a_failed_kill_panics() {
+    let failed = || killed(Err(ErrorKind::PermissionDenied.into()), false);
+    let panic = std::panic::catch_unwind(failed).expect_err("the kill panics");
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some("kill the command: Kind(PermissionDenied)")
+    );
+}
+
+#[test]
+fn a_failed_kill_while_the_test_panics_does_not_panic() {
+    killed(Err(ErrorKind::PermissionDenied.into()), true);
 }
 
 #[test]
