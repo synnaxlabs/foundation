@@ -58,8 +58,7 @@
   https://github.com/synnaxlabs/foundation/issues/1479#issuecomment-6042237695). A named
   complete session has a `complete::Key` (#1024). One close replaces
   `Readers::close_named`, so the caller never picks a close by the mode of the session
-  (`laptop.architect`,
-  2026-10-08T11:12:45Z:
+  (`laptop.architect`, 2026-10-08T11:12:45Z:
   https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367). One
   `delivery::named::Key { subject, name }` keys a named reader in `Reader::Named`,
   `Record`, and `Readers::open_named_latest`, in place of two `Name` values (the
