@@ -540,6 +540,22 @@ fn without(names: &[&str]) -> BTreeMap<Name, Definition> {
 }
 
 #[test]
+fn gives_the_entry_of_each_channel_of_the_config_in_its_order() {
+    run(4, |test| async move {
+        let names = ["value-c", "value-b", "time", "value-b", "value"];
+        let writer = test.writer("a", &names).await;
+        let keys: Vec<_> = writer
+            .entries()
+            .iter()
+            .map(|&entry| writer.set().entries()[entry].key.as_u128())
+            .collect();
+        assert_eq!(keys, [5, 4, 1, 4, 2]);
+        let time = writer.set().groups()[0];
+        assert_eq!(writer.entries()[2], time, "the entry of the index");
+    });
+}
+
+#[test]
 fn opens_no_session_on_an_unknown_name() {
     run(2, |test| async move {
         let writer = test.hub.writer(config("a", &["value", "nope"])).await;

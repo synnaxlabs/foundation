@@ -130,6 +130,23 @@ fn resolve(
     Ok((keys, groups))
 }
 
+/// The entry in `set` of each of `keys`, in their order.
+fn entries(set: &KeySet, keys: &[channel::Key]) -> Box<[usize]> {
+    let entry_of: hash::Map<channel::Key, usize> = set
+        .entries()
+        .iter()
+        .enumerate()
+        .map(|(at, entry)| (entry.key, at))
+        .collect();
+    keys.iter()
+        .map(|key| {
+            let entry = entry_of.get(key).copied();
+            entry
+                .unwrap_or_else(|| panic!("invariant: the key set holds channel {key}"))
+        })
+        .collect()
+}
+
 /// A writer session. Dropping it closes the session.
 #[derive(Debug)]
 pub struct Writer {
@@ -138,6 +155,8 @@ pub struct Writer {
     /// Why the hub ended the writer.
     ending: Ending,
     set: Arc<KeySet>,
+    /// The entry in `set` of each channel of the config, in its order.
+    entries: Box<[usize]>,
     /// The outcomes of the last write.
     outcomes: Vec<::home::Outcome>,
 }
@@ -190,6 +209,7 @@ impl Writer {
             })
             .collect();
         let set = borrowed.interner.intern(&groups);
+        let entries = entries(&set, &keys);
         let writer = ::home::writer::Writer {
             subject,
             authority,
@@ -205,6 +225,7 @@ impl Writer {
             key,
             ending,
             set,
+            entries,
             outcomes: Vec::new(),
         })
     }
@@ -213,6 +234,14 @@ impl Writer {
     #[must_use]
     pub fn set(&self) -> &Arc<KeySet> {
         &self.set
+    }
+
+    /// The entry of each channel of [`Config::channels`], in that order: its
+    /// position in the entries of [`Self::set`], as [`Self::draft`] and
+    /// [`Draft::series_mut`] take it. A channel named twice has the same entry twice.
+    #[must_use]
+    pub fn entries(&self) -> &[usize] {
+        &self.entries
     }
 
     /// Mesh time now, as the home stamps each entry and checks each stamp: it never
