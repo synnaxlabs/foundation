@@ -1435,6 +1435,8 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
         "<search\n## Review round 3\n## Review round 4",
         "<search\r## Review round 3",
         "<search\r## Review round 3\r## Review round 4",
+        "<search\n## Review *round* 3",
+        "<search\n## Review&#32;round 3",
     ] {
         let headless = ROUND.replace("## Review round 3", heading);
         assert_eq!(

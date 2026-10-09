@@ -350,7 +350,8 @@ fn round(body: &str, old: bool) -> Option<Parsed> {
         .hiding
         .iter()
         .find(|(_, cause)| !old || matches!(cause, Cause::Misplaced));
-    let number = (shown.number.as_deref()).or(shown.html_number.filter(|_| !old))?;
+    let html = shown.html_number.as_deref().filter(|_| !old);
+    let number = shown.number.as_deref().or(html)?;
     let text = &shown.text;
     let lines = shown.fields().iter().map(String::as_str);
     let field = |name| lines.clone().find_map(|l: &str| l.strip_prefix(name));
@@ -490,9 +491,8 @@ fn options() -> Options<'static> {
 /// lines that can hide text or that the check cannot read.
 #[derive(Debug, Default)]
 struct Shown<'a> {
-    /// The text after `Review round` in the first top-level level 2 heading whose text
-    /// as GitHub shows it ([`texts`]) is `Review round` or starts with `Review round `,
-    /// or `None` when the comment has no such heading.
+    /// The round number of the first top-level heading that has one ([`number`]), or
+    /// `None` when the comment has no such heading.
     number: Option<String>,
     /// Each top-level block after the heading: the index in `text` of a paragraph, or
     /// `None` for any other block. The footnotes come last, as GitHub shows them.
@@ -504,15 +504,14 @@ struct Shown<'a> {
     /// Each line of the comment that can hide text on GitHub or that the check cannot
     /// read, with its cause, in order.
     hiding: Vec<(&'a str, Cause)>,
-    /// The text after `## Review round ` in the first line in a top-level HTML block
-    /// that starts with it. GitHub reads some HTML blocks as text, and then shows the
-    /// line as a heading.
-    html_number: Option<&'a str>,
+    /// The round number of the first line in a top-level HTML block that, read alone,
+    /// is a heading with one ([`number`]). GitHub reads some HTML blocks as text, and
+    /// then shows the line as a heading.
+    html_number: Option<String>,
 }
 
 impl<'a> Shown<'a> {
-    /// Reads `body` ([`normalized`]). Its round heading is the first top-level
-    /// `## Review round ` heading.
+    /// Reads `body` ([`normalized`]) from its round heading ([`Shown::number`]).
     fn read(body: &'a str) -> Self {
         let mut shown = Self::default();
         let starts: Vec<usize> = std::iter::once(0)
@@ -545,15 +544,8 @@ impl<'a> Shown<'a> {
                 shown.blocks.push(index);
             }
             match &data.value {
-                NodeValue::Heading(NodeHeading { level: 2, .. })
-                    if top && shown.number.is_none() =>
-                {
-                    let text = texts(node).into_iter().next();
-                    shown.number = text.and_then(|t| {
-                        let rest = t.strip_prefix("Review round")?;
-                        let word = rest.is_empty() || rest.starts_with(' ');
-                        word.then(|| rest.trim_start().to_owned())
-                    });
+                NodeValue::Heading(_) if top && shown.number.is_none() => {
+                    shown.number = number(node);
                     shown.text.clear();
                 }
                 NodeValue::Paragraph if misplaced(node, data.sourcepos.end.line) => {
@@ -571,8 +563,14 @@ impl<'a> Shown<'a> {
                 NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) => {
                     hiding.push((start, Cause::Raw));
                     let block = top.then(|| &body[source(data.sourcepos)]);
-                    let number = || block?.split('\n').find_map(heading);
-                    shown.html_number = shown.html_number.or_else(number);
+                    let alone = |line: &str| {
+                        let arena = Arena::new();
+                        parse_document(&arena, line, &options())
+                            .first_child()
+                            .and_then(number)
+                    };
+                    let number = || block?.split('\n').find_map(alone);
+                    shown.html_number = shown.html_number.take().or_else(number);
                 }
                 _ => {}
             }
@@ -757,14 +755,16 @@ fn normalized(text: &str) -> String {
     normalized
 }
 
-/// The text after `## Review round ` in `line` when it starts with it after at most
-/// three spaces.
-fn heading(line: &str) -> Option<&str> {
-    let heading = line.trim_start_matches(' ');
-    let indent = line.len() - heading.len();
-    (indent < 4)
-        .then_some(heading)?
-        .strip_prefix("## Review round ")
+/// The round number of `heading`: the text after `Review round` when it is a heading
+/// of level 2 whose first line of text as GitHub shows it ([`texts`]) is `Review
+/// round` or starts with `Review round `.
+fn number<'n>(heading: &'n AstNode<'n>) -> Option<String> {
+    let value = &heading.data.borrow().value;
+    let level = matches!(value, NodeValue::Heading(NodeHeading { level: 2, .. }));
+    let text = level.then(|| texts(heading))?.into_iter().next()?;
+    let rest = text.strip_prefix("Review round")?;
+    let word = rest.is_empty() || rest.starts_with(' ');
+    word.then(|| rest.trim_start().to_owned())
 }
 
 /// The first of the line starts `starts` of `body` whose line, after the indent and
