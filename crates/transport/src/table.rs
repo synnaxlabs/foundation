@@ -931,8 +931,8 @@ mod tests {
 
     type Sessions = Rc<RefCell<Vec<Session>>>;
 
-    /// Whether `transport` dialed `session`, its open session to the peer. No public
-    /// call shows it until a later session from the peer arrives.
+    /// Whether `transport` dialed `session`, its open session to the peer. Public
+    /// calls show it only once a later session from the peer arrives.
     fn own(transport: &Transport, session: &Session) -> bool {
         let Peer::Node(node) = session.peer() else {
             panic!("a session to a node");
@@ -1202,6 +1202,53 @@ mod tests {
             let held = second.dial(SERVER.public(), &at).await.expect("a session");
             assert_eq!(accepted.closed().await, Error::PeerClosed { code: Code(0) });
             assert_eq!(held.closed().await, Error::PeerClosed { code: Code(7) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    // As the test before, then a third session from the client 20 ms after the held
+    // session won. The won session is not one that the server dialed, so the third
+    // replaces it.
+    #[test]
+    fn a_third_session_replaces_the_held_session_that_won() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let back = [Address::Udp(testing::address(&client))];
+        let at = [Address::Udp(testing::address(&server))];
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let (transport, sessions) = accepting(config, &node);
+            let open = transport.dial(CLIENT.public(), &back).await;
+            let open = open.expect("a session");
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 15))
+                .await;
+            sessions.borrow_mut().clear();
+            drop(open);
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 5))
+                .await;
+            let won = sessions.borrow_mut().pop().expect("the held session");
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 40))
+                .await;
+            assert!(!won.live());
+            let third = sessions.borrow_mut().pop().expect("the third session");
+            third.close(Code(8));
+            linger(&node).await;
+        });
+        testing::start(&client, move |shard, node| async move {
+            let [first, second, third] = copies(&shard, &node);
+            let accepted = first.accept().await.expect("the server's session");
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 10))
+                .await;
+            let held = second.dial(SERVER.public(), &at).await.expect("a session");
+            assert_eq!(accepted.closed().await, Error::PeerClosed { code: Code(0) });
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 20))
+                .await;
+            let newer = third.dial(SERVER.public(), &at).await.expect("a session");
+            assert_eq!(held.closed().await, Error::PeerClosed { code: Code(0) });
+            assert_eq!(newer.closed().await, Error::PeerClosed { code: Code(8) });
         });
         assert_eq!(sim.run(), Ok(()));
     }
