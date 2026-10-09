@@ -357,7 +357,8 @@ impl<'a> Model<'a> {
                 self.placements.push((name, policy));
                 self.homes
                     .insert(name, block.and_then(|block| span(block, "home")));
-                let at = |node| block.and_then(|block| placement::at(block, node));
+                let spans = block.map(placement::spans).unwrap_or_default();
+                let at = |node| spans.get(node).copied().flatten();
                 let nodes = placement::nodes(policy).map(|node| (node, at(node)));
                 self.nodes.extend(nodes);
             }

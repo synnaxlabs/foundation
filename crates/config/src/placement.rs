@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use document::diagnostic::{Code, Diagnostic};
 use document::{Block, Span, read};
 use spec::definition;
@@ -58,14 +60,19 @@ pub(crate) fn nodes(policy: &Policy) -> impl Iterator<Item = &Name> {
 }
 
 /// The span of the first `home`, `standby`, or copy of `block`, a checked `placement`
-/// block, that names `node`.
-pub(crate) fn at(block: &Block, node: &Name) -> Option<Span> {
+/// block, that names each node.
+pub(crate) fn spans(block: &Block) -> BTreeMap<Name, Option<Span>> {
     let attributes = KEYS[1..]
         .iter()
         .filter_map(|key| block.body.attributes.get(key));
-    let mut values = attributes.flat_map(|attribute| read::items(&attribute.value));
-    let named = values.find(|value| read::name(value).is_ok_and(|name| name == *node));
-    named?.span
+    let values = attributes.flat_map(|attribute| read::items(&attribute.value));
+    let mut spans = BTreeMap::new();
+    for value in values {
+        if let Ok(node) = read::name(value) {
+            spans.entry(node).or_insert(value.span);
+        }
+    }
+    spans
 }
 
 /// Reports a policy that `Policy::new` refuses for `nodes`.
