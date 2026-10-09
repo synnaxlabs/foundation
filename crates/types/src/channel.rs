@@ -4,6 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::hash;
+use crate::sample::Type;
 
 /// A channel's identity: a UUIDv7 made with the channel. It never changes and is never
 /// reused. Files never hold it; the stored spec maps each name to its key.
@@ -76,17 +77,15 @@ impl Slot {
     }
 }
 
-/// The node's table of channel slots. A key holds at most two slots: its slot as an
-/// index, which never changes, and its slot as a data channel, which each
-/// [`retire`](Self::retire) replaces. Slots count from 0, and no slot goes to a second
-/// key or role. Give it only keys from the spec or the node's disk, which limit the
-/// keys that it holds: it hashes with no key. The node's
+/// The node's table of channel slots. A key holds one slot as an index, and one slot
+/// as a data channel for each sample type. No slot changes or goes to a second key,
+/// role, or type. Slots count from 0. Give it only keys and types from the spec or the
+/// node's disk, which limit what it holds: it hashes with no key. The node's
 /// [`Interner`](crate::frame::key_set::Interner) owns it.
 #[derive(Debug, Default)]
 pub struct Slots {
     indexes: hash::Map<Key, Slot>,
-    data: hash::Map<Key, Slot>,
-    /// The slots given, which a retire does not lower.
+    data: hash::Map<(Key, Type), Slot>,
     given: u64,
 }
 
@@ -111,24 +110,19 @@ impl Slots {
             .or_insert_with(|| next(&mut self.given))
     }
 
-    /// The slot of `key` as a data channel. The first call for `key`, and the first
-    /// call after each [`retire`](Self::retire) of it, assigns the next slot. It is
-    /// never the slot of `key` as an index.
+    /// The slot of `key` as a data channel of `data_type`. The first call for the pair
+    /// assigns the next slot, and each later call gives the same slot. So a reader that
+    /// wants this slot takes no series of `key` of another type. It is never the slot
+    /// of `key` as an index.
     ///
     /// # Panics
     ///
     /// If the table already assigned 2^32 slots.
-    pub fn data(&mut self, key: Key) -> Slot {
+    pub fn data(&mut self, key: Key, data_type: Type) -> Slot {
         *self
             .data
-            .entry(key)
+            .entry((key, data_type))
             .or_insert_with(|| next(&mut self.given))
-    }
-
-    /// Retires the slot of `key` as a data channel: the next [`data`](Self::data) of
-    /// `key` gives a slot that no key had. The slot of `key` as an index stays.
-    pub fn retire(&mut self, key: Key) {
-        self.data.remove(&key);
     }
 }
 
@@ -142,6 +136,7 @@ fn next(given: &mut u64) -> Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sample::Scalar;
     use crate::time::{Span, Stamp};
     use proptest::prelude::*;
 
@@ -263,57 +258,45 @@ mod tests {
         }
     }
 
+    const I64: Type = Type::Scalar(Scalar::I64);
+    const I32: Type = Type::Scalar(Scalar::I32);
+
     #[test]
     fn assigns_dense_slots_once_per_key_and_role() {
         let mut slots = Slots::new();
         let (a, b) = (Key::from_u128(7), Key::from_u128(3));
         assert_eq!(slots.index(a), Slot::new(0));
-        assert_eq!(slots.data(b), Slot::new(1));
+        assert_eq!(slots.data(b, I64), Slot::new(1));
         assert_eq!(slots.index(a), Slot::new(0));
-        assert_eq!(slots.data(b), Slot::new(1));
-        assert_eq!(slots.data(a), Slot::new(2));
+        assert_eq!(slots.data(b, I64), Slot::new(1));
+        assert_eq!(slots.data(a, I64), Slot::new(2));
         assert_eq!(slots.index(b), Slot::new(3));
         assert_eq!(slots.index(Key::from_u128(9)), Slot::new(4));
     }
 
     #[test]
-    fn keeps_the_index_slot_after_data_and_retire_of_its_key() {
+    fn assigns_one_data_slot_per_key_and_sample_type() {
         let mut slots = Slots::new();
         let a = Key::from_u128(7);
-        assert_eq!(slots.index(a), Slot::new(0));
-        assert_eq!(slots.data(a), Slot::new(1));
-        slots.retire(a);
-        assert_eq!(slots.index(a), Slot::new(0));
+        assert_eq!(slots.data(a, I64), Slot::new(0));
+        assert_eq!(slots.data(a, I64), Slot::new(0));
+        assert_eq!(slots.data(a, I32), Slot::new(1));
+        assert_eq!(slots.data(a, I64), Slot::new(0));
+        assert_eq!(slots.index(a), Slot::new(2));
+        assert_eq!(slots.data(a, I32), Slot::new(1));
     }
 
     #[test]
-    fn gives_a_new_data_slot_after_each_retire() {
+    fn assigns_a_data_slot_per_type_with_each_parameter() {
         let mut slots = Slots::new();
-        let (a, b) = (Key::from_u128(7), Key::from_u128(3));
-        assert_eq!(slots.data(a), Slot::new(0));
-        assert_eq!(slots.data(b), Slot::new(1));
-        slots.retire(a);
-        assert_eq!(slots.data(a), Slot::new(2));
-        assert_eq!(slots.index(a), Slot::new(3));
-        slots.retire(a);
-        assert_eq!(slots.data(a), Slot::new(4));
-        assert_eq!(slots.index(a), Slot::new(3));
-        assert_eq!(slots.data(b), Slot::new(1));
-        let unassigned = Key::from_u128(5);
-        slots.retire(unassigned);
-        assert_eq!(slots.data(unassigned), Slot::new(5));
-    }
-
-    /// A restart makes a new table, so an index that was a data channel before it
-    /// gets its slot back in this order.
-    #[test]
-    fn gives_the_first_slot_to_an_index_after_its_data_slot_retires() {
-        let mut slots = Slots::new();
-        let a = Key::from_u128(3);
-        assert_eq!(slots.index(a), Slot::new(0));
-        slots.data(a);
-        slots.retire(a);
-        assert_eq!(slots.index(a), Slot::new(0));
+        let a = Key::from_u128(7);
+        let array = |len| Type::Array {
+            element: Scalar::F32,
+            len,
+        };
+        assert_eq!(slots.data(a, array(8)), Slot::new(0));
+        assert_eq!(slots.data(a, array(16)), Slot::new(1));
+        assert_eq!(slots.data(a, array(8)), Slot::new(0));
     }
 
     /// It sets the private count, as no test can make 2^32 calls.
@@ -331,6 +314,6 @@ mod tests {
     fn panics_at_the_data_slot_after_2_32_slots() {
         let mut slots = Slots::new();
         slots.given = 1 << 32;
-        slots.data(Key::from_u128(7));
+        slots.data(Key::from_u128(7), I64);
     }
 }

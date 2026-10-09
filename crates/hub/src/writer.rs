@@ -115,7 +115,7 @@ fn resolve(
     for name in channels {
         let channel = state
             .channels
-            .get(name)
+            .named(name)
             .ok_or_else(|| Error::Unknown(name.clone()))?;
         let (key, index) = (channel.key(), channel.index());
         keys.push(key);
