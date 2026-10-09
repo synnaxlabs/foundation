@@ -8,7 +8,8 @@ use crate::Error;
 /// is the usage less the inactive file pages. On cgroup v2 these are `memory.max`,
 /// `memory.current`, and `inactive_file` in `memory.stat`; on cgroup v1,
 /// `memory.limit_in_bytes`, `memory.usage_in_bytes`, and `total_inactive_file` in
-/// `memory.stat`. On macOS, the free, inactive, and purgeable pages.
+/// `memory.stat`. A cgroup with no `memory.stat`, as under gVisor, counts no inactive
+/// file pages. On macOS, the free, inactive, and purgeable pages.
 ///
 /// # Errors
 ///
@@ -151,7 +152,10 @@ mod linux {
         let usage = dir.join(files.usage);
         let usage = number(&usage, read(&usage)?.trim())?;
         let stat = dir.join("memory.stat");
-        let text = read(&stat)?;
+        let Some(text) = optional(&stat)? else {
+            // gVisor writes no `memory.stat`, so the working set is the usage.
+            return Ok(Some(limit.saturating_sub(usage)));
+        };
         let inactive = text
             .lines()
             .find_map(|line| line.strip_prefix(files.inactive)?.strip_prefix(' '))
@@ -574,6 +578,22 @@ mod linux {
             let root = Root::new("gvisor");
             root.write("proc/meminfo", "MemAvailable:    1048576 kB\nShmem: 0 kB\n");
             assert_eq!(root.available().unwrap(), 1024 * MIB);
+        }
+
+        /// gVisor's memory cgroup has `memory.limit_in_bytes` and
+        /// `memory.usage_in_bytes`, and no `memory.stat`.
+        #[test]
+        fn a_v1_cgroup_with_no_stat_takes_the_usage_as_the_working_set() {
+            let root = Root::new("gvisor-cgroup");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "2:memory:/\n1:cpu:/\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "6 1 0:6 / /sys/fs/cgroup/memory rw,nosuid - cgroup none rw,memory\n",
+                )
+                .write("sys/fs/cgroup/memory/memory.limit_in_bytes", "1073741824\n")
+                .write("sys/fs/cgroup/memory/memory.usage_in_bytes", "104857600\n");
+            assert_eq!(root.available().unwrap(), 924 * MIB);
         }
 
         #[test]
