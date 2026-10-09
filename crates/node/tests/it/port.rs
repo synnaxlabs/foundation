@@ -124,6 +124,7 @@ async fn lock(files: &env::files::Files) -> env::files::File {
 /// # Panics
 ///
 /// When it sends nothing within 60 s.
+#[track_caller]
 fn wait<T>(receiver: &mpsc::Receiver<T>) -> T {
     #[expect(
         clippy::disallowed_methods,
