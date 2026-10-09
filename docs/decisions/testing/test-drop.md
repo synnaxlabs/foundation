@@ -7,14 +7,14 @@
   23:21 UTC, as `laptop.monitor` relayed it, recorded at
   https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6071002339; the
   question: https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6070953004),
-  and approved this text: "Yes approve" (2026-10-09, about 01:10 UTC, as
+  and approved #2036 with this rule: "Yes approve" (2026-10-09 01:07 UTC, as
   `laptop.monitor` relayed it:
-  https://github.com/synnaxlabs/foundation/pull/2036#issuecomment-6072166747).
-  A type in test code (under `tests/` or in a `#[cfg(test)]` module) whose `Drop`
-  panics or blocks as the input of its test, such as `Bomb` in
-  `crates/os/tests/it/common.rs`, is not a helper, and the `Drop` rule of rust.md does
-  not hold for it. Decided by `laptop.director`
+  https://github.com/synnaxlabs/foundation/pull/2036#issuecomment-6072166747). A type in
+  test code (under `tests/` or in a `#[cfg(test)]` module) whose `Drop` panics or blocks
+  as the input of its test, such as `Bomb` in `crates/os/tests/it/common.rs`, is not a
+  helper, and the `Drop` rule of rust.md does not hold for it. Decided by
+  `laptop.director`
   (https://github.com/synnaxlabs/foundation/pull/2036#issuecomment-6071198900,
   2026-10-08 23:39 UTC, widened at
-  https://github.com/synnaxlabs/foundation/pull/2036#issuecomment-6071294220,
-  2026-10-08 23:47 UTC).
+  https://github.com/synnaxlabs/foundation/pull/2036#issuecomment-6071294220, 2026-10-08
+  23:47 UTC).
