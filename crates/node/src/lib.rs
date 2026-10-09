@@ -789,7 +789,7 @@ impl Serve {
             entropy,
             mesh: mesh.clone(),
         });
-        hub.define(definitions.iter().flatten());
+        hub.set_definitions(definitions.iter().flatten());
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         let group = stopped(mesh.as_ref());
         // The port's future holds the mesh, so it drops before the wait.

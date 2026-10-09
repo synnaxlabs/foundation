@@ -572,7 +572,7 @@ mod buffer {
             let index = Key::from_u128(key);
             let entry = Entry {
                 index,
-                slot: slots.assign(index),
+                slot: slots.index(index),
                 path: Stream::Live,
                 first: 0,
                 len: 1,
@@ -1559,8 +1559,8 @@ mod home {
             let mut home = opened.expect("the buffer opens");
             let mut interner = next.await.expect("the open gives the interner");
             let (index, values) = (Key::from_u128(1), Key::from_u128(2));
-            let slot = interner.slots().assign(index);
-            interner.slots().assign(values);
+            let slot = interner.slots().index(index);
+            interner.slots().data(values);
             let set = interner.intern(&[Group {
                 index,
                 data: &[(values, Type::Scalar(Scalar::I64))],
@@ -1874,7 +1874,7 @@ mod hub {
             .iter()
             .map(|(n, c)| (name(n), Definition::Channel(c.clone())))
             .collect();
-        hub.define(
+        hub.set_definitions(
             definitions
                 .iter()
                 .map(|(name, definition)| (name, definition)),
@@ -3433,7 +3433,8 @@ mod port {
                 Err(sim::Error::Panicked {
                     thread: "shard-0".into(),
                     message: format!(
-                        "the index {index} of channel plant.value is not a known index"
+                        "the index {index} of channel plant.value is not an index of the \
+                         definitions"
                     ),
                     seed: 0,
                 })
@@ -3545,7 +3546,7 @@ mod port {
                     entropy,
                     mesh: Some(mesh.clone()),
                 });
-                hub.define(&region(&members).definitions);
+                hub.set_definitions(&region(&members).definitions);
                 let port = route::accept(transport, Some(mesh.clone()), hub, tasks);
                 let (mut port, mut act) = (pin!(port), pin!(act(mesh, own)));
                 poll_fn(|cx| {
