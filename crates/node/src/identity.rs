@@ -107,12 +107,19 @@ pub(crate) fn encode(identity: &Identity) -> [u8; LEN] {
 fn decode(bytes: &[u8; LEN]) -> Option<Identity> {
     let (body, crc) = bytes.split_at(BODY);
     let valid = body[..16] == *TAG && crc32c::crc32c(body).to_le_bytes() == *crc;
-    valid.then(|| Identity {
+    valid.then(|| fields(bytes))
+}
+
+/// The key and the private key in `bytes`, whatever its tag and checksum.
+fn fields(bytes: &[u8; LEN]) -> Identity {
+    Identity {
         key: types::node::Key::from_u128(u128::from_be_bytes(
-            body[16..32].try_into().expect("invariant: 16 bytes"),
+            bytes[16..32].try_into().expect("invariant: 16 bytes"),
         )),
-        private_key: PrivateKey(body[32..].try_into().expect("invariant: 32 bytes")),
-    })
+        private_key: PrivateKey(
+            bytes[32..BODY].try_into().expect("invariant: 32 bytes"),
+        ),
+    }
 }
 
 /// `body` with its CRC32C after it.
@@ -131,13 +138,7 @@ pub(crate) fn with_checksum(body: &[u8; BODY]) -> [u8; LEN] {
 /// When a check fails.
 #[cfg(any(test, feature = "sim"))]
 pub(crate) fn check(bytes: &[u8; LEN]) {
-    let fields = Identity {
-        key: types::node::Key::from_u128(u128::from_be_bytes(
-            bytes[16..32].try_into().expect("16 bytes"),
-        )),
-        private_key: PrivateKey(bytes[32..BODY].try_into().expect("32 bytes")),
-    };
-    let valid = encode(&fields) == *bytes;
+    let valid = encode(&fields(bytes)) == *bytes;
     match decode(bytes) {
         Some(identity) => {
             assert!(valid, "decodes {bytes:02x?}");
