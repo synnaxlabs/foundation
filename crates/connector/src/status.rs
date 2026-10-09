@@ -768,7 +768,9 @@ mod tests {
     }
 
     /// The sizes of the frame and of the block come from `types` and `home`, so the
-    /// test above checks the exact message.
+    /// test above checks the exact message. It calls `Writer` and not
+    /// `Supervisor::run`: there `check` is quadratic in the counts, about 35 min for
+    /// these.
     #[test]
     #[should_panic(expected = "invariant: a status frame fits the largest block")]
     fn panics_at_the_start_of_a_status_larger_than_the_largest_block() {
