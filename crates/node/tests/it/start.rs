@@ -119,9 +119,10 @@ fn a_data_directory_that_is_a_file_fails() {
         (
             Some(1),
             "",
-            "error[node.data]: cannot open or make the data directory plain: \
-             Not a directory (os error 20)\n\
-             fix: Give with `--data` a directory that this user can make and write\n"
+            "error[node.data]: cannot write the data directory plain: Not a directory \
+             (os error 20)\n\
+             fix: Let this user make and write plain and each file in it, or give \
+             another directory with `--data`\n"
         )
     );
 }
@@ -142,9 +143,10 @@ fn a_data_directory_that_the_user_cannot_write_fails() {
         (
             Some(1),
             "",
-            "error[node.data]: cannot use the data directory foundation-data: open of \
-             lock failed with OS error 13\n\
-             fix: Give with `--data` a directory that this user can make and write\n"
+            "error[node.data]: cannot write the data directory foundation-data: open \
+             of lock failed with OS error 13\n\
+             fix: Let this user make and write foundation-data and each file in it, or \
+             give another directory with `--data`\n"
         )
     );
 }
@@ -165,9 +167,10 @@ fn a_new_data_directory_in_a_directory_that_the_user_cannot_write_fails() {
         (
             Some(1),
             "",
-            "error[node.data]: cannot open or make the data directory read: \
-             Permission denied (os error 13)\n\
-             fix: Give with `--data` a directory that this user can make and write\n"
+            "error[node.data]: cannot write the data directory read: Permission \
+             denied (os error 13)\n\
+             fix: Let this user make and write read and each file in it, or give \
+             another directory with `--data`\n"
         )
     );
 }
@@ -189,6 +192,37 @@ fn a_key_file_that_holds_no_key_fails() {
              fix: Fix the cause that the message states, then start the node again\n"
         )
     );
+}
+
+#[test]
+fn a_file_of_the_data_directory_that_the_user_cannot_write_fails() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut rig = Rig::new();
+    rig.start();
+    rig.stop();
+    let mode = |mode| std::fs::Permissions::from_mode(mode);
+    for (file, call) in [("node.key", "open"), ("shard-0/ring", "open")] {
+        let path = rig.dir.join("foundation-data/data").join(file);
+        std::fs::set_permissions(&path, mode(0o400)).expect("make it read-only");
+        let output = rig.run(&["start"], b"");
+        std::fs::set_permissions(&path, mode(0o600)).expect("make it writable");
+        assert_eq!(
+            ended(&output),
+            (
+                Some(1),
+                "",
+                format!(
+                    "error[node.data]: cannot write the data directory foundation-data: \
+                     {call} of {file} failed with OS error 13\n\
+                     fix: Let this user make and write foundation-data and each file in \
+                     it, or give another directory with `--data`\n"
+                )
+                .as_str()
+            ),
+            "{file}"
+        );
+    }
 }
 
 /// Linux only: the test reads where each thread waits from `/proc`.
