@@ -19,11 +19,16 @@ const QUIET: Duration = Duration::from_millis(200);
 const BOUND: Duration = Duration::from_secs(10);
 
 fn main() {
-    if std::env::args_os().nth(1).is_some_and(|arg| arg == "child") {
-        child();
-    } else {
-        a_second_signal_ends_the_process();
-        the_future_completes_at_the_first_signal();
+    match std::env::args_os().nth(1) {
+        Some(arg) if arg == "child" => child(),
+        #[cfg(target_os = "linux")]
+        Some(arg) if arg == "early" => early(),
+        _ => {
+            a_second_signal_ends_the_process();
+            the_future_completes_at_the_first_signal();
+            #[cfg(target_os = "linux")]
+            a_signal_before_the_first_poll_completes_the_future();
+        }
     }
 }
 
@@ -71,6 +76,59 @@ fn the_future_completes_at_the_first_signal() {
             .await
             .unwrap_or_else(|_| panic!("no signal came in {BOUND:?}"));
     });
+}
+
+/// Holds the signals and signals itself, then, once the signal thread has taken the
+/// signal, polls the future once and writes whether it completed.
+#[cfg(target_os = "linux")]
+fn early() {
+    use std::task::{Context, Waker};
+
+    let interrupt = os::interrupt().expect("the signal thread starts");
+    kill_process(getpid(), Signal::INT).expect("the process signals itself");
+    // The signal thread takes SIGINT again only after it fires the future.
+    let taken = async {
+        while serving_blocks_sigint() {
+            sleep(Duration::from_millis(1)).await;
+        }
+    };
+    runtime()
+        .block_on(async { timeout(BOUND, taken).await })
+        .unwrap_or_else(|_| panic!("no signal came in {BOUND:?}"));
+    let polled = pin!(interrupt).poll(&mut Context::from_waker(Waker::noop()));
+    let mut output = std::io::stdout();
+    writeln!(output, "{}", polled.is_ready()).expect("a write to the test");
+}
+
+/// Whether the thread `signal` of this process blocks SIGINT.
+#[cfg(target_os = "linux")]
+fn serving_blocks_sigint() -> bool {
+    for task in std::fs::read_dir("/proc/self/task").expect("the tasks list") {
+        let task = task.expect("a task").path();
+        let name = std::fs::read_to_string(task.join("comm")).expect("a name");
+        if name.trim_end() != "signal" {
+            continue;
+        }
+        let status = std::fs::read_to_string(task.join("status")).expect("a status");
+        let mask = status
+            .lines()
+            .find_map(|line| line.strip_prefix("SigBlk:"))
+            .expect("a signal mask");
+        let mask = u64::from_str_radix(mask.trim(), 16).expect("a hex mask");
+        return mask & (1 << (libc::SIGINT - 1)) != 0;
+    }
+    panic!("no thread signal")
+}
+
+#[cfg(target_os = "linux")]
+fn a_signal_before_the_first_poll_completes_the_future() {
+    let output = Command::new(std::env::current_exe().expect("the test binary"))
+        .arg("early")
+        .output()
+        .expect("the child runs");
+    assert!(output.status.success(), "{}", output.status);
+    let polled = String::from_utf8(output.stdout).expect("text");
+    assert_eq!(polled, "true\n", "the first poll completes");
 }
 
 fn runtime() -> tokio::runtime::Runtime {

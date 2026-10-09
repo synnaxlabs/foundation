@@ -1,6 +1,6 @@
 //! Implements the `env` seams on the real operating system: monotonic and wall clocks,
 //! files, randomness, and threads, and the memory of block pools. The only crate
-//! allowed to call them.
+//! allowed to call them. It also holds the signals that ask the process to stop.
 //!
 //! # Panics in shards and threads
 //!
@@ -158,9 +158,10 @@ pub fn net() -> env::net::Net {
 /// and `dir/data` when they are not there, but not the parents of `dir`. `os` keeps
 /// its own entries in `dir`, so give it a directory that nothing else uses. `threads`
 /// starts I/O thread `name`, which runs each call of the disk and of its files in the
-/// order they reach it, and ends after the disk and its files drop. Give each shard a disk of its own. The mode of each
-/// file and directory that it makes gives the group and other users no access. It does
-/// not change the mode of a file or directory that is there.
+/// order they reach it, and ends after the disk and its files drop. Give each shard
+/// a disk of its own. The mode of each file and directory that it makes gives the
+/// group and other users no access. It does not change the mode of a file or
+/// directory that is there.
 ///
 /// # Errors
 ///
@@ -180,24 +181,51 @@ pub fn files(
 /// ends the process as it does with no hold, so a stop that hangs can still be
 /// ended. Call it once, on the main thread, before the process starts any other
 /// thread: a thread that was there before still takes them, and ends the process
-/// on one.
+/// on one. It takes a signal sent to the process, as Ctrl-C and `kill` send it, not
+/// one sent to a single thread.
 ///
 /// # Errors
 ///
 /// [`Error::Thread`] when the thread that waits for them cannot start.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn interrupt() -> Result<impl Future<Output = ()> + Send + 'static, Error> {
-    signal::hold()
+    let set = signal::set();
+    signal::block(&set);
+    let (fire, fired) = tokio::sync::oneshot::channel();
+    let handle = thread::start(
+        "signal".to_owned(),
+        |_| Ok(()),
+        move |()| {
+            // The future may be gone, as when the process stops on its own.
+            signal::serve(&set, || fire.send(()).unwrap_or(()))
+        },
+    )
+    .map_err(|e| {
+        signal::unblock(&set);
+        Error::Thread(e)
+    })?;
+    // The thread ends with the process.
+    drop(handle);
+    Ok(wait(fired))
 }
 
-/// Why `os` could not build a seam.
+/// Completes when the signal thread fires `fired`.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn wait(fired: tokio::sync::oneshot::Receiver<()>) {
+    fired
+        .await
+        .expect("invariant: the signal thread fires before it ends");
+}
+
+/// Why `os` could not build a seam or hold the signals.
 #[derive(Debug)]
 pub enum Error {
     /// The OS could not give the cores of the calling thread.
     Cores(std::io::Error),
     /// The OS could not open or make the data directory.
     Dir(std::io::Error),
-    /// The I/O thread could not start.
+    /// A thread of `os` could not start: the I/O thread of [`files`] or the thread
+    /// of [`interrupt`].
     Thread(env::thread::Error),
     /// The OS refused a read of its wall clock.
     Wall(std::io::Error),
@@ -207,7 +235,7 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Cores(e) => write!(f, "cannot read the cores of this thread: {e}"),
-            Self::Dir(e) => write!(f, "cannot open the data directory: {e}"),
+            Self::Dir(e) => write!(f, "cannot open or make the data directory: {e}"),
             Self::Thread(e) => write!(f, "{e}"),
             Self::Wall(e) => write!(f, "cannot read the wall clock: {e}"),
         }
