@@ -36,7 +36,7 @@ impl Kind {
         }
     }
 
-    /// The pathspecs of `path`.
+    /// The pathspecs of the paths that `path` takes.
     fn globs(self) -> &'static [&'static str] {
         match self {
             Kind::Code => &[
