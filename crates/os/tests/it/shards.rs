@@ -10,9 +10,12 @@ use std::time::Duration;
 
 use env::shards::{Config, Shards};
 use env::tasks::Tasks;
+use tokio::sync::oneshot;
 use tokio::task::yield_now;
 
-use crate::common::{Bomb, Relay, Relayed, Stuck, assert_joins, panicked};
+use crate::common::{
+    Armed, Bomb, Relay, Relayed, Stuck, assert_aborts, assert_joins, panicked,
+};
 
 fn shards() -> Shards {
     os::shards().expect("the OS gives the cores of this process")
@@ -355,4 +358,140 @@ fn a_panic_whose_payload_panics_in_its_drop_as_a_tokio_task_drops_ends_the_shard
     };
     let handle = shards().start(config("shard-12"), main).unwrap();
     assert_joins(handle, panicked("shard-12"));
+}
+
+#[test]
+fn a_panic_in_the_poll_of_a_tokio_task_does_not_end_the_shard() {
+    let main = |_: Tasks| async {
+        let (sender, dropped) = oneshot::channel::<()>();
+        drop(tokio::task::spawn_local(async move {
+            let _sender = sender;
+            panic!("tokio task");
+        }));
+        dropped.await.expect_err("the panic drops the sender");
+    };
+    let handle = shards().start(config("shard-13"), main).unwrap();
+    assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_panic_in_the_drop_of_a_tokio_task_does_not_end_the_shard() {
+    // The payload of the panic, `Relay(0)`, does not panic in its drop.
+    let main = |_: Tasks| async { drop(tokio::task::spawn_local(Stuck(0))) };
+    let handle = shards().start(config("shard-14"), main).unwrap();
+    assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_panic_whose_payload_panics_in_its_drop_in_a_tokio_task_ends_the_shard() {
+    let main = |_: Tasks| async {
+        // Tokio catches the panic of the poll and the first panic in the drop of its
+        // payload.
+        drop(tokio::task::spawn_local(async { panic_any(Relay(2)) }));
+        pending::<()>().await;
+    };
+    let handle = shards().start(config("shard-15"), main).unwrap();
+    assert_joins(handle, panicked("shard-15"));
+}
+
+#[test]
+fn a_panic_in_the_poll_and_then_the_drop_of_a_tokio_task_aborts_the_process() {
+    assert_aborts(|| {
+        let main = |_: Tasks| async {
+            drop(tokio::task::spawn_local(Armed {
+                faulty: true,
+                _bomb: Bomb,
+            }));
+            pending::<()>().await;
+        };
+        let handle = shards().start(config("shard-16"), main).unwrap();
+        assert_joins(handle, Ok(()));
+    });
+}
+
+#[test]
+fn a_panic_over_a_local_that_panics_in_its_drop_in_a_task_aborts_the_process() {
+    assert_aborts(|| {
+        let main = |tasks: Tasks| async move {
+            tasks.spawn(async {
+                let _bomb = Bomb;
+                panic!("task");
+            });
+            pending::<()>().await;
+        };
+        let handle = shards().start(config("shard-17"), main).unwrap();
+        assert_joins(handle, panicked("shard-17"));
+    });
+}
+
+#[test]
+fn a_panic_over_a_local_that_panics_in_its_drop_in_main_aborts_the_process() {
+    assert_aborts(|| {
+        let main = |_: Tasks| async {
+            let _bomb = Bomb;
+            panic!("main");
+        };
+        let handle = shards().start(config("shard-18"), main).unwrap();
+        assert_joins(handle, panicked("shard-18"));
+    });
+}
+
+#[test]
+fn a_panic_in_the_drop_of_an_aborted_tokio_task_does_not_end_the_shard() {
+    let main = |_: Tasks| async {
+        let task = tokio::task::spawn_local(Stuck(0));
+        task.abort();
+        let error = task.await.expect_err("the abort drops the task");
+        assert!(error.is_panic(), "{error}");
+        yield_now().await;
+    };
+    let handle = shards().start(config("shard-19"), main).unwrap();
+    assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_tokio_task_that_panics_in_its_drop_after_a_panic_escapes_tokio_ends_the_shard() {
+    let main = |_: Tasks| async {
+        // A panic escapes Tokio from each task: the first ends `block_on`, and the
+        // second the drop of the runtime.
+        drop(tokio::task::spawn_local(Stuck(2)));
+        drop(tokio::task::spawn_local(async { panic_any(Relay(2)) }));
+        pending::<()>().await;
+    };
+    let handle = shards().start(config("shard-20"), main).unwrap();
+    assert_joins(handle, panicked("shard-20"));
+}
+
+#[test]
+fn a_panic_in_the_poll_of_a_task_from_tokio_spawn_does_not_end_the_shard() {
+    let main = |_: Tasks| async {
+        let (sender, dropped) = oneshot::channel::<()>();
+        drop(tokio::spawn(async move {
+            let _sender = sender;
+            panic!("tokio task");
+        }));
+        dropped.await.expect_err("the panic drops the sender");
+    };
+    let handle = shards().start(config("shard-21"), main).unwrap();
+    assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_panic_in_the_drop_of_a_task_from_tokio_spawn_does_not_end_the_shard() {
+    // The payload of the panic, `Relay(0)`, does not panic in its drop.
+    let main = |_: Tasks| async { drop(tokio::spawn(Stuck(0))) };
+    let handle = shards().start(config("shard-22"), main).unwrap();
+    assert_joins(handle, Ok(()));
+}
+
+#[test]
+fn a_panic_in_the_drop_of_main_during_the_unwind_of_block_on_ends_the_shard() {
+    let main = |_: Tasks| async {
+        let _bomb = Bomb;
+        // A panic escapes Tokio and ends `block_on`, whose unwind drops `main`.
+        drop(tokio::task::spawn_local(async { panic_any(Relay(2)) }));
+        pending::<()>().await;
+    };
+    let handle = shards().start(config("shard-23"), main).unwrap();
+    assert_joins(handle, panicked("shard-23"));
 }
