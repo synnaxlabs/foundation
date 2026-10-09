@@ -1,5 +1,6 @@
 //! A TCP listener: the kernel's socket, polled through Tokio.
 
+use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::task::{Context, Poll, ready};
@@ -7,7 +8,8 @@ use std::task::{Context, Poll, ready};
 use env::net::{Error, listener, tcp};
 use rustix::io::Errno;
 use rustix::net::{SocketType, ipproto, sockopt};
-use tokio::net::TcpListener;
+use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 
 use super::socket::Socket;
 use super::stream::Stream;
@@ -15,7 +17,7 @@ use super::{apply, bind, canonical, from_io, in_use, io_error};
 
 /// A listening socket.
 pub(super) struct Listener {
-    socket: Socket<std::net::TcpListener, TcpListener>,
+    socket: Socket<std::net::TcpListener, AsyncFd<std::net::TcpListener>>,
     local: SocketAddr,
     /// Set again on each accepted stream.
     options: tcp::Options,
@@ -102,17 +104,31 @@ fn stop(fd: BorrowedFd<'_>) {
 }
 
 /// Registers `listener` with the I/O driver of this thread. A failed registration
-/// closes the socket, so on Linux it stops the listen first, through a copy. With no
-/// free descriptor for the copy, the registration still runs.
-fn register(listener: std::net::TcpListener) -> std::io::Result<TcpListener> {
-    #[cfg(target_os = "linux")]
-    let copy = listener.try_clone().ok();
-    TcpListener::from_std(listener).inspect_err(|_| {
-        #[cfg(target_os = "linux")]
-        if let Some(copy) = &copy {
-            stop(copy.as_fd());
-        }
+/// stops the listen before the socket closes.
+fn register(
+    listener: std::net::TcpListener,
+) -> io::Result<AsyncFd<std::net::TcpListener>> {
+    AsyncFd::try_with_interest(listener, Interest::READABLE).map_err(|failed| {
+        let (listener, error) = failed.into_parts();
+        stop(listener.as_fd());
+        error
     })
+}
+
+/// Accepts one stream, non-blocking and closed on exec, or registers `cx` for the next.
+fn accept(
+    listener: &AsyncFd<std::net::TcpListener>,
+    cx: &mut Context<'_>,
+) -> Poll<io::Result<(std::net::TcpStream, SocketAddr)>> {
+    loop {
+        let mut ready = ready!(listener.poll_read_ready(cx))?;
+        if let Ok(accepted) = ready.try_io(|listener| listener.get_ref().accept()) {
+            return Poll::Ready(accepted.and_then(|(stream, peer)| {
+                stream.set_nonblocking(true)?;
+                Ok((stream, peer))
+            }));
+        }
+    }
 }
 
 impl listener::Driver for Listener {
@@ -128,9 +144,7 @@ impl listener::Driver for Listener {
             .socket
             .live("TCP listener", register)
             .map_err(io_error)?;
-        let (stream, peer) =
-            ready!(listener.poll_accept(cx)).map_err(|e| from_io(&e))?;
-        let stream = stream.into_std().map_err(|e| from_io(&e))?;
+        let (stream, peer) = ready!(accept(listener, cx)).map_err(|e| from_io(&e))?;
         let stream = self.accepted(stream, peer)?;
         Poll::Ready(Ok(Box::new(stream)))
     }
@@ -292,6 +306,28 @@ mod tests {
             error.raw_os_error(),
             Some(Errno::CONNREFUSED.raw_os_error())
         );
+    }
+
+    #[test]
+    #[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
+    fn an_accepted_stream_is_non_blocking_and_closed_on_exec() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .build()
+            .unwrap();
+        let listener = std::net::TcpListener::bind(loopback()).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let _client =
+            std::net::TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let _entered = runtime.enter();
+        let listener = register(listener).unwrap();
+        let (stream, _) = runtime
+            .block_on(std::future::poll_fn(|cx| accept(&listener, cx)))
+            .unwrap();
+        let flags = rustix::fs::fcntl_getfl(&stream).unwrap();
+        assert!(flags.contains(OFlags::NONBLOCK));
+        let flags = rustix::io::fcntl_getfd(&stream).unwrap();
+        assert!(flags.contains(FdFlags::CLOEXEC));
     }
 
     mod socket {
