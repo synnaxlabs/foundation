@@ -1,0 +1,16 @@
+[package]
+name = "p"
+version = "1.4.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[target.'cfg(unix)'.dev-dependencies]
+up = { package = "p", version = "1" }
+
+[target.'cfg( unix )'.dev-dependencies]
+up = { package = "p", version = "0.9" }
+
+[patch.crates-io]
+p = { path = "." }

@@ -57,8 +57,9 @@ carry a local patch through `[patch.crates-io]` in the root `Cargo.toml` and in
 patched copy lives in `patches/<crate>/` (LOCAL PATCHES in
 `docs/decisions/releases/local-patches.md`). A C library that we patch (open62541) has
 no `[patch.crates-io]`: its `build.rs` reads `patches/open62541/`. Searches skip
-`patches/` (`.ignore`): to search a copy, give its path or use `rg --no-ignore`. No
-check yet keeps the two `[patch.crates-io]` tables equal (#1867).
+`patches/` (`.ignore`): to search a copy, give its path or use `rg --no-ignore`.
+`cargo xtask fuzz` checks that `fuzz/` uses each copy as the root does, by the rule of
+LOCAL PATCHES.
 
 CI does not run the tests of a copy of a Rust crate and makes no mutants in it. So the
 PR that changes such a copy lists each mutant that `cargo mutants --list --in-diff
@@ -104,6 +105,7 @@ These never ship in the binary.
 | Crate | Used by | Why | License | Version | Approved |
 | --- | --- | --- | --- | --- | --- |
 | `serde_json` | `xtask` | Read `cargo metadata` output for the layer check | MIT or Apache-2.0 | | Bootstrap |
+| `semver` | `xtask` | Whether a version meets a Cargo requirement, for the patch check of `cargo xtask fuzz` (LOCAL PATCHES). It was in `Cargo.lock` already, through `rustc_version`. The person, 2026-10-09T04:53:43Z, through laptop.monitor: "approved" (https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074530288) | MIT or Apache-2.0 | 1.0.28 | 2026-10-09 |
 | `comrak` | `xtask` | Read a review round comment as GitHub shows it (GitHub's own parser, cmark-gfm, ported to Rust) for the review check. `default-features = false`; its tree: `caseless`, `entities`, `finl_unicode` (Unicode-DFS-2016), `memchr-n`, `phf`, `typed-arena`, `unicode-normalization`, and their own. It reads footnote labels and closing fences as GitHub does, where `pulldown-cmark` did not. Known differences from GitHub, each handled in `xtask/src/review.rs`: the HTML block names of CommonMark 0.31, such as `source` (`tagged`), a wrong column after a tab that a container takes in part (`normalized`), wrong lines after a link or an image with a line break after its text and after a link reference definition (`misplaced`), a `[^` that GitHub ends at a `]` on a later line (`bracket`), and the references of the last definition of a footnote label, where GitHub shows the first (`footnotes`) | BSD-2-Clause | 0.56.0 | 2026-10-09: the person said "b is fine" (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6072253988), and "Yes add it" for Unicode-DFS-2016 (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6072539632) |
 | `proptest` | All crates (dev) | Property tests (testing layer 1) | MIT or Apache-2.0 | 1.11.0 | 2026-10-04 |
 | `loom` | `ring`, `block` (`cfg(loom)`) | Exhaustive checks of wake protocols and atomics | MIT | 0.7.2 | 2026-10-04 |
