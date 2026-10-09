@@ -349,8 +349,8 @@ state on `main`.
   manifest. aws-lc-rs is the only crypto provider, with one recorded exception.
 - `unsafe` is denied in the workspace. The crates that allow it (`block`, `ring`,
   `counting`) run under Miri in CI.
-- The `fuzz/` crate has its own lock file. The `fuzz` job of `ci.yaml` checks it with
-  `cargo deny` on each change to Rust.
+- The `fuzz/` crate has its own lock file. The `deny` job of `ci.yaml` checks it with
+  `cargo deny` on each change to it.
 - A local patch of a Rust crate (`patches/`) is a path package, which `cargo deny`
   does not check against advisories. The `Advisories of each patched release` step of
   the `deny` job checks its release (#1867). The open62541 copy in `patches/open62541/`

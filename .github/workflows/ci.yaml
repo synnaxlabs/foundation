@@ -76,6 +76,7 @@ jobs:
               - 'Cargo.toml'
               - '**/Cargo.toml'
               - 'Cargo.lock'
+              - 'fuzz/Cargo.lock'
               - 'deny.toml'
               - '.github/workflows/**'
             models:
@@ -103,7 +104,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Format
-        run: cargo fmt --check
+        run: |
+          cargo fmt --check
+          cargo fmt --check --manifest-path fuzz/Cargo.toml
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Layers
@@ -143,8 +146,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2
+      # `fuzz/` is a workspace of its own, with its own lock file.
       - name: Dependencies
-        run: cargo deny check advisories bans licenses sources
+        run: |
+          cargo deny check advisories bans licenses sources
+          cargo deny --manifest-path fuzz/Cargo.toml \
+            check advisories bans licenses sources
       # A patched crate is a path package, which no advisory reaches. A package that
       # depends on the exact release of each path package outside the workspace
       # checks those releases.
@@ -232,17 +239,14 @@ jobs:
             fuzz -> target
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-fuzz@0.13.2,cargo-deny@0.20.2
-      # `fuzz/` is a workspace of its own, which the workspace gates do not see.
-      - name: Format
-        run: cargo fmt --check --manifest-path fuzz/Cargo.toml
+          # The same pin as in `fuzz.yaml`.
+          tool: cargo-fuzz@0.13.2
+      # `fuzz/` is a workspace of its own, which the Clippy step of `check` does not
+      # see.
       - name: Clippy
         run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
-      - name: Dependencies
-        run: |
-          cargo deny --manifest-path fuzz/Cargo.toml \
-            check advisories bans licenses sources
       - name: Fuzz
+        if: ${{ !cancelled() }}
         run: cargo xtask fuzz 60
       - name: Clean tree
         run: test -z "$(git status --porcelain)" || { git status; exit 1; }

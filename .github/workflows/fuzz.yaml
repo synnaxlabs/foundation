@@ -20,6 +20,7 @@ jobs:
           rustup toolchain install "$(cat rust-toolchain-nightly)" --profile minimal
       - uses: taiki-e/install-action@v2
         with:
+          # The same pin as in `ci.yaml`.
           tool: cargo-fuzz@0.13.2
       - name: Fuzz
         run: cargo xtask fuzz 600
