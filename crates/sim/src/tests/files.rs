@@ -1731,8 +1731,8 @@ fn a_create_does_not_wait_for_a_live_rename_to_its_path() {
     assert!(found.contains(&None), "{found:?}");
 }
 
-/// Whether the block of a dropped write of a handle is still in use when a rename of
-/// the handle from `a` to `b` ends.
+/// Whether the block of a dropped write of a handle, sent on `a`, is still in use when
+/// a rename of the handle from `a` to `b` ends.
 fn block_held_after_rename(value: u64) -> bool {
     run(value, MIB, move |node, _| async move {
         let pool = pool();
@@ -1750,7 +1750,7 @@ fn block_held_after_rename(value: u64) -> bool {
 }
 
 #[test]
-fn a_rename_does_not_wait_for_the_dropped_write_of_its_handle() {
+fn a_rename_does_not_wait_for_the_dropped_write_of_its_handle_on_another_path() {
     assert!((0..32).any(block_held_after_rename));
 }
 
