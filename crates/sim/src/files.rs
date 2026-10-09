@@ -143,9 +143,9 @@ struct Flight {
     node: usize,
     /// The path of the call, or of the file for a call on an open file.
     path: PathBuf,
-    /// The path that the call is on: `path`, moved by each rename through its handle
-    /// that ends while it is in flight.
-    on: PathBuf,
+    /// The paths that the call is on: `path`, and each path that a rename of its file
+    /// gives the file while the call is in flight.
+    on: Vec<PathBuf>,
     call: Call,
     held: Option<Held>,
     /// A fault fails the call when it ends.
@@ -244,7 +244,7 @@ impl Files {
         self.queue.insert((at, key));
         let flight = Flight {
             node,
-            on: path.clone(),
+            on: vec![path.clone()],
             path,
             call,
             held,
@@ -261,9 +261,8 @@ impl Files {
     /// than: the end of the last call on `path` that a dropped future or handle left
     /// to run, or of a remove through a handle, live or not, or zero. A call on `path`
     /// uses it, or the file that it names, or a file that a rename to it moves there.
-    /// A call through a handle is also on the path that it was sent on, which each
-    /// rename through the handle moves, so it stays on the path after a remove of the
-    /// path unlinks the file.
+    /// A call through a handle is also on each path that its file had while it was in
+    /// flight, so it stays on them after a remove unlinks the file.
     fn wait_end(&self, node: usize, path: &Path) -> Monotonic {
         let path = disk::normal(path);
         let pending: Vec<_> = (self.queue.iter().rev())
@@ -286,7 +285,7 @@ impl Files {
             .collect();
         (pending.iter())
             .find(|(_, flight)| {
-                disk::normal(&flight.on) == path
+                flight.on.iter().any(|on| disk::normal(on) == path)
                     || (flight.call.handle())
                         .is_some_and(|handle| inodes.contains(&handle.inode))
             })
@@ -387,10 +386,10 @@ impl Files {
                 let renamed = disk.rename(*handle, &path, to);
                 if renamed.is_ok() {
                     let moved = (self.flights.values_mut()).filter(|flight| {
-                        let key = flight.call.handle().map(|handle| handle.key);
-                        key == Some(handle.key)
+                        let file = flight.call.handle().map(|handle| handle.inode);
+                        file == Some(handle.inode)
                     });
-                    moved.for_each(|flight| flight.on.clone_from(to));
+                    moved.for_each(|flight| flight.on.push(to.clone()));
                 }
                 renamed.map(|()| Done::Unit)
             }

@@ -2488,11 +2488,14 @@ fn a_remove_through_a_renamed_handle_ends_after_the_dropped_write_of_its_handle(
     assert_eq!(held, Vec::<usize>::new());
 }
 
-/// What a create of `b` gives after the drop of a handle of `a` with a dropped write
-/// in flight. A remove of `b` starts, a rename of the handle to `b` ends before it, and
-/// the remove can unlink the file, which holds 600 KiB of the 1 MiB disk until the
-/// write ends.
-fn create_after_handle_of_renamed_removed(value: u64) -> Result<(), Error> {
+/// What a create of `path` gives after the drop of a handle of `a` with a dropped write
+/// in flight, and whether `b` is gone after it. A remove of `b` starts, a rename of
+/// the handle to `b` ends before it, and the remove can unlink the file, which holds
+/// 600 KiB of the 1 MiB disk until the write ends.
+fn create_after_handle_of_renamed_removed(
+    value: u64,
+    path: &'static str,
+) -> (bool, Result<(), Error>) {
     run(value, MIB, move |node, _| async move {
         let (pool, files) = (pool(), node.files());
         let mut file = create(&node, "a", 600 * KIB).await;
@@ -2506,9 +2509,10 @@ fn create_after_handle_of_renamed_removed(value: u64) -> Result<(), Error> {
         remove.await.unwrap();
         files.sync_dir(Path::new("")).await.unwrap();
         drop(file);
-        (files.open(Path::new("b"), Mode::Create { len: 600 * KIB }))
-            .await
-            .map(drop)
+        let made = files.open(Path::new(path), Mode::Create { len: 600 * KIB });
+        let made = made.await.map(drop);
+        let names = files.list(Path::new("")).await.unwrap();
+        (!names.contains(&PathBuf::from("b")), made)
     })
 }
 
@@ -2516,11 +2520,50 @@ fn create_after_handle_of_renamed_removed(value: u64) -> Result<(), Error> {
 fn a_write_open_waits_for_the_write_of_a_dropped_handle_of_a_renamed_removed_file() {
     let failed: Vec<_> = (0..2048)
         .filter_map(|value| {
-            let made = create_after_handle_of_renamed_removed(value);
+            let (_, made) = create_after_handle_of_renamed_removed(value, "b");
             made.err().map(|error| (value, error))
         })
         .collect();
     assert_eq!(failed, Vec::new());
+}
+
+#[test]
+fn a_write_open_of_the_sent_path_waits_for_the_write_of_a_dropped_renamed_handle() {
+    let runs: Vec<_> = (0..2048)
+        .map(|value| (value, create_after_handle_of_renamed_removed(value, "a")))
+        .filter_map(|(value, (gone, made))| gone.then_some((value, made)))
+        .collect();
+    assert!(runs.len() > 32, "{}", runs.len());
+    let failed: Vec<_> = (runs.into_iter())
+        .filter_map(|(value, made)| made.err().map(|error| (value, error)))
+        .collect();
+    assert_eq!(failed, Vec::new());
+}
+
+/// Whether the block of a dropped write of a handle of `a` is still in use when a
+/// write open of `b` ends, after a rename of the handle to `b` fails.
+fn block_held_after_open_of_failed_rename_target(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let big = pool.largest();
+        drop(create(&node, "b", KIB).await);
+        let mut file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        pool.alloc(big).unwrap_err();
+        let renamed = file.rename(Path::new("b")).await;
+        assert_eq!(renamed, Err(Error::Exists { path: "b".into() }));
+        drop(files.open(Path::new("b"), Mode::Write).await.unwrap());
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_failed_rename_moves_no_call() {
+    assert!((0..32).any(block_held_after_open_of_failed_rename_target));
 }
 
 /// Whether the block of a dropped read of a read handle of `a` is still in use when a
@@ -2550,4 +2593,40 @@ fn a_create_waits_for_a_dropped_read_of_a_reader_on_its_path_after_a_rename() {
         .filter(|&value| block_held_after_create_of_reader_path(value))
         .collect();
     assert_eq!(held, Vec::<u64>::new());
+}
+
+/// What a create of `b` gives after a dropped read of a dropped read handle of `a`. A
+/// remove of `b` starts, a rename of the write handle to `b` ends before it, and the
+/// remove can unlink the file, which holds 600 KiB of the 1 MiB disk until the read
+/// ends.
+fn create_after_reader_of_renamed_removed(value: u64) -> Result<(), Error> {
+    run(value, MIB, move |node, _| async move {
+        let (pool, files) = (pool(), node.files());
+        let mut writer = create(&node, "a", 600 * KIB).await;
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        let mut read = Box::pin(reader.read_at(0, pool.alloc(512).unwrap()));
+        pend(read.as_mut()).await;
+        drop(read);
+        drop(reader);
+        let mut remove = Box::pin(files.remove(Path::new("b")));
+        pend(remove.as_mut()).await;
+        writer.rename(Path::new("b")).await.unwrap();
+        remove.await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        drop(writer);
+        (files.open(Path::new("b"), Mode::Create { len: 600 * KIB }))
+            .await
+            .map(drop)
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_read_of_a_dropped_reader_of_a_renamed_removed_file() {
+    let failed: Vec<_> = (0..2048)
+        .filter_map(|value| {
+            let made = create_after_reader_of_renamed_removed(value);
+            made.err().map(|error| (value, error))
+        })
+        .collect();
+    assert_eq!(failed, Vec::new());
 }
