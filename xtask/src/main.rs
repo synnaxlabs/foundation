@@ -172,6 +172,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nightly_is_the_pin_with_no_line_end() {
+        assert_eq!(nightly(&fixture()), Ok("nightly-2000-01-01".to_string()));
+    }
+
+    #[test]
     fn layers_reports_crates_missing_from_the_map() {
         let missing = |name| {
             format!(

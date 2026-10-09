@@ -20,14 +20,7 @@ const MAX_LEN: u64 = 16 * 1024;
 /// build fails, or when a target fails. cargo-fuzz keeps the input of a crash in
 /// `fuzz/artifacts/<target>/`.
 pub(crate) fn run(root: &Path, seconds: NonZeroU64) -> Result<(), Vec<String>> {
-    let graph = |manifest: &Path| graph(&root.join(manifest)).map_err(|e| vec![e]);
-    let problems = unpatched(
-        &graph(Path::new("Cargo.toml"))?,
-        &graph(Path::new("fuzz/Cargo.toml"))?,
-    );
-    if !problems.is_empty() {
-        return Err(problems);
-    }
+    patched(root)?;
     let nightly = crate::nightly(root).map_err(|e| vec![e])?;
     let fuzz = |args: &[&str]| {
         let mut command = Command::new("rustup");
@@ -162,6 +155,18 @@ fn report(target: &str, output: &Output) -> String {
     }
 }
 
+/// Checks that `fuzz/Cargo.lock` at `root` is current, and that `fuzz/` builds each
+/// crate that the root `Cargo.toml` patches from its copy in `patches/`.
+fn patched(root: &Path) -> Result<(), Vec<String>> {
+    let graph = |manifest: &str| graph(&root.join(manifest)).map_err(|e| vec![e]);
+    let problems = unpatched(&graph("Cargo.toml")?, &graph("fuzz/Cargo.toml")?);
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems)
+    }
+}
+
 /// Runs `cargo metadata --locked` on the package or workspace of `manifest`.
 fn graph(manifest: &Path) -> Result<Value, String> {
     let output = crate::cargo()
@@ -240,6 +245,24 @@ mod tests {
 
     fn fuzz(packages: &[Value]) -> Value {
         json!({ "workspace_root": "/w/fuzz", "packages": packages })
+    }
+
+    #[test]
+    fn fuzz_builds_each_patched_crate_of_this_repository_from_its_copy() {
+        assert_eq!(patched(&crate::fixture().join("../..")), Ok(()));
+    }
+
+    #[test]
+    fn graph_holds_each_package_of_the_lock() {
+        let graph = graph(&crate::fixture().join("Cargo.toml")).unwrap();
+        let mut names: Vec<_> = graph["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|package| package["name"].as_str().unwrap())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["a", "a", "b", "globals", "model"]);
     }
 
     #[test]
