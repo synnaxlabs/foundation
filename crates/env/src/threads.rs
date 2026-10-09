@@ -43,7 +43,7 @@ impl Threads {
     /// runs the future it returns to completion, then ends. A panic in `body` or its
     /// future ends the thread, and [`Handle::join`] returns
     /// [`Panicked`](crate::thread::Panicked). As anywhere in Rust, a panic that unwinds
-    /// out of a drop during the unwind of a panic aborts the process.
+    /// into the unwind of another panic aborts the process.
     ///
     /// The future may block the thread, for example in a vendor call. To wait for an
     /// event, such as a value from a shard or a deadline, it awaits a future and never
