@@ -7428,7 +7428,8 @@ mod tests {
                 };
                 assert_eq!(*closed, *connected + 2 * idle);
                 // The peer's last datagram arrives by `cut + DELAY`.
-                assert!(*closed - (cut + DELAY) > idle, "{closed:?} {cut:?}");
+                let silent = closed.checked_sub(cut + DELAY).expect("a close after");
+                assert!(silent > idle, "{silent:?}");
                 let reason = "a peer with no hello".to_owned();
                 assert_eq!(error, &Error::Broken { reason });
             });
