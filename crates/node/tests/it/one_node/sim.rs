@@ -248,7 +248,10 @@ fn a_dropped_influx_does_not_join_its_server_when_the_test_panics() {
 }
 
 #[test]
-#[cfg_attr(not(target_os = "linux"), ignore = "needs the shutdown of a listener")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs SOCK_CLOEXEC and the shutdown of a listener"
+)]
 fn a_dropped_influx_stops_its_server_when_the_test_panics() {
     let mut influx = Influx::default();
     let address = influx.serve();
