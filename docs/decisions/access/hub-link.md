@@ -97,9 +97,9 @@
   count when it comes to 0. A stalled request still holds its reservation until its
   stream or session ends, but only inside its subject's share. Two subjects together
   can still hold the whole room. Lost: a deadline or a minimum rate for each body,
-  since the subject opens its next request at once when the hub stops one, and a slow
-  honest link pays the rate too; a stop of stalled bodies when a request does not fit,
-  which needs a rate and one task that stops the stream of another link. Decided by
+  because the subject opens its next request at once when the hub stops one, and a
+  slow honest link pays the rate too; a stop of stalled bodies when a request does not
+  fit, which needs a rate and one task that stops the stream of another link. Decided by
   `laptop.architect` (2026-10-09T12:49:35Z,
   https://github.com/synnaxlabs/foundation/issues/2121#issuecomment-6081223893); the
   name `Share`, and `Share` before `Bodies`, by `laptop.architect`
