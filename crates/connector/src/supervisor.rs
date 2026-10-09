@@ -200,6 +200,7 @@ mod tests {
     use crate::cancel::Token;
     use crate::common::{create_config, run_on};
     use crate::kind::{Channels, Kind, Table};
+    use hub::home::Refusal;
     use hub::reader::{Mode, Received};
     use spec::channel::{Channel, Data};
     use spec::data_type::DataType;
@@ -864,11 +865,32 @@ mod tests {
         );
     }
 
-    /// A kind that writes one sample of `plant.value` for each of `values`, through
-    /// a writer of its context, stamped from `start`, then returns.
+    /// A kind that writes one sample of `plant.value` for each of `values`, `gap`
+    /// apart, through a writer of its context at `authority` with `lease`, stamped
+    /// from `start` on. It keeps the refusal of each write in `refusals`, or `None`
+    /// when the home applied it.
     struct Write {
         start: i64,
         values: Vec<i64>,
+        authority: Authority,
+        lease: Option<Span>,
+        gap: Span,
+        refusals: Arc<Mutex<Vec<Option<Refusal>>>>,
+    }
+
+    impl Write {
+        /// One write of each of `values` at `start`, with no gap, at authority 1 and no
+        /// lease.
+        fn new(start: i64, values: Vec<i64>) -> Self {
+            Self {
+                start,
+                values,
+                authority: Authority(1),
+                lease: None,
+                gap: Span::ZERO,
+                refusals: Arc::default(),
+            }
+        }
     }
 
     impl Kind for Write {
@@ -892,7 +914,7 @@ mod tests {
         async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
             let channels = vec![name("plant.value")];
             let mut writer = ctx
-                .writer(channels, Authority(1), None)
+                .writer(channels, self.authority, self.lease)
                 .await
                 .expect("the writer opens");
             let entries = writer.set().entries();
@@ -902,7 +924,13 @@ mod tests {
             };
             let (time, value) = (entry(1).expect("time"), entry(2).expect("value"));
             let group = entries[time].group;
-            for (stamp, sample) in (self.start..).zip(&self.values) {
+            let clock = ctx.clock();
+            let began = clock.now();
+            for (i, sample) in (0..).zip(&self.values) {
+                if i > 0 {
+                    clock.sleep(self.gap).await;
+                }
+                let stamp = self.start + (clock.now() - began).nanos() + i;
                 let mut series = [(time, 8), (value, 8)];
                 series.sort_unstable();
                 let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
@@ -914,10 +942,14 @@ mod tests {
                 let outcomes = writer
                     .write(Label::Path(Path::Live), draft)
                     .expect("the home takes it");
-                assert!(
-                    matches!(outcomes, [hub::home::Outcome::Applied { .. }]),
-                    "{outcomes:?}"
-                );
+                let refusal = match outcomes {
+                    [hub::home::Outcome::Applied { .. }] => None,
+                    [hub::home::Outcome::Refused { refusal, .. }] => {
+                        Some(refusal.clone())
+                    }
+                    _ => panic!("one group applied or refused: {outcomes:?}"),
+                };
+                self.refusals.lock().expect("no panic").push(refusal);
             }
             Ok(())
         }
@@ -978,10 +1010,7 @@ mod tests {
         let got = run_on(|node, tasks| async move {
             let (mut inputs, now) = create_config(&node, tasks, Table::new()).await;
             define(&inputs.hub);
-            let write = Write {
-                start: now.nanos(),
-                values: vec![30, 10, 20],
-            };
+            let write = Write::new(now.nanos(), vec![30, 10, 20]);
             inputs.kinds = Arc::new(Table::new().with("write", write));
             let mut reader = inputs
                 .hub
@@ -1000,5 +1029,57 @@ mod tests {
             got
         });
         assert_eq!(got, [30, 10, 20]);
+    }
+
+    /// Runs `write(now)` as `plant.write` on a new shard, while a writer as
+    /// `plant.other` at `holder` holds `plant.value` when it is some. Gives the
+    /// refusal of each write, or `None` for one the home applied.
+    fn refusals(
+        holder: Option<Authority>,
+        write: impl FnOnce(i64) -> Write + Send + 'static,
+    ) -> Vec<Option<Refusal>> {
+        run_on(move |node, tasks| async move {
+            let (mut inputs, now) = create_config(&node, tasks, Table::new()).await;
+            define(&inputs.hub);
+            let write = write(now.nanos());
+            let refusals = Arc::clone(&write.refusals);
+            inputs.kinds = Arc::new(Table::new().with("write", write));
+            let mut other = None;
+            if let Some(authority) = holder {
+                let config = hub::writer::Config {
+                    subject: name("plant.other"),
+                    authority,
+                    lease: None,
+                    channels: vec![name("plant.value")],
+                };
+                other = Some(inputs.hub.writer(config).await.expect("opens"));
+            }
+            let supervisor = Supervisor::new(inputs);
+            let result = supervisor
+                .run("write", name("plant.write"), &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            drop(other);
+            refusals.lock().expect("no panic").clone()
+        })
+    }
+
+    #[test]
+    fn applies_the_writes_of_a_kind_at_its_authority_over_a_lower_holder() {
+        let refusals = refusals(Some(Authority(1)), |start| Write {
+            authority: Authority(2),
+            ..Write::new(start, vec![7])
+        });
+        assert_eq!(refusals, [None]);
+    }
+
+    #[test]
+    fn refuses_the_write_of_a_kind_after_its_lease_runs_out() {
+        let refusals = refusals(None, |start| Write {
+            lease: Some(Span::SECOND),
+            gap: Span::from_nanos(3 * Span::SECOND.nanos()),
+            ..Write::new(start, vec![7, 8])
+        });
+        assert_eq!(refusals, [None, Some(Refusal::Expired)]);
     }
 }
