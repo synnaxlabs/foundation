@@ -25,5 +25,12 @@
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545;
   2026-10-09T19:31:23Z, `start` as a `Command` variant, which amends the first, and the
   line, https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6087849613).
+  `main` writes the line on a thread of its own, so a standard output that nobody
+  reads blocks neither shard 0 nor the stop. `main` drops the handles of that thread
+  and of the thread that waits for the signal, since each waits only on the process
+  (`env::thread::Handle`). Decided by `laptop.architect-2` (2026-10-09T22:02:37Z,
+  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6089996352;
+  2026-10-09T22:10:27Z, the stop handle also after a clean end,
+  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090093334).
   `--listen`, and the files `address` and `admin.key`, come with #1744
   (https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6053227526).
