@@ -370,10 +370,11 @@ fn names(
         .collect()
 }
 
-/// The symbols that `nm` with `flag` gives for the archives of this build.
+/// The symbols that `nm` with `flag` gives for the archive of this build, which holds
+/// the copy and the shim.
 fn symbols(flag: &str) -> std::collections::BTreeSet<String> {
     let out = std::path::Path::new(env!("OUT_DIR"));
-    names(&[out.join("libopen62541.a"), out.join("libshim.a")], flag)
+    names(&[out.join("libopen62541.a")], flag)
 }
 
 #[test]
