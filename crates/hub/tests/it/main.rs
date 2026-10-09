@@ -32,6 +32,9 @@ use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
+#[path = "../common/net.rs"]
+mod net;
+
 mod client;
 mod definitions;
 mod link;
