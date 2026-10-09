@@ -662,6 +662,16 @@ mod tests {
     }
 
     #[test]
+    fn passes_a_renamed_release_beside_an_unrenamed_requirement_on_the_copy() {
+        assert_eq!(patched("mixed"), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn passes_a_requirement_from_git_that_the_copy_meets() {
+        assert_eq!(patched("git"), Ok(Vec::new()));
+    }
+
+    #[test]
     fn passes_a_dependency_whose_lib_name_is_not_its_package_name() {
         assert_eq!(patched("libname"), Ok(Vec::new()));
     }
@@ -843,14 +853,6 @@ mod tests {
         assert_eq!(unpatched(&root(), &copied), Err(unresolved(PATCHED)));
     }
 
-    #[test]
-    fn passes_a_requirement_from_git_that_the_copy_meets() {
-        let git = |requirement: &mut Value| {
-            requirement["source"] = json!("git+https://github.com/x/noq");
-        };
-        assert_eq!(paired("noq_proto", git), Ok(Vec::new()));
-    }
-
     /// The error for an edge `noq_proto` of `types` to `to` that nothing resolves.
     fn unresolved(to: &str) -> String {
         format!(
@@ -910,7 +912,7 @@ mod tests {
 
     #[test]
     fn reads_the_lib_target_of_each_kind() {
-        for kind in LIBS {
+        for kind in ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"] {
             let mut lib = release("1.3.0");
             lib["targets"] = json!([
                 { "name": "noq_proto", "kind": ["bin"] },
