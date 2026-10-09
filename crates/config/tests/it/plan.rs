@@ -2548,9 +2548,9 @@ fn lists_each_writer_of_an_index_that_no_placement_selects() {
     let refused =
         text(&(placement("p", "\"c1\"", "n") + &placement("q", "\"c2\"", "n")));
     let found = problems(Spec::create_empty().plan(&[&refused], &["n"]));
-    let found: Vec<_> = found.into_iter().map(|p| (p.0, p.2, p.3)).collect();
     let expected = [(
         "config.split-placement",
+        Some((Source(0), label(&refused, "p"))),
         "no placement selects the index `x.time`, but the placement `p` wins for the \
          connector `c1`, and the placement `q` wins for the connector `c2`"
             .to_owned(),
@@ -2690,4 +2690,29 @@ fn plans_after_the_one_fix_of_a_unit_whose_second_winner_names_another_home() {
         ];
         plans_after(&refused, &expected, &fixed);
     }
+}
+
+#[test]
+fn excludes_each_winner_of_a_unit_whose_target_is_elsewhere_and_spread() {
+    let z =
+        "connector \"z\" {\n  kind = \"writer\"\n  node = \"m\"\n  writes = []\n}\n";
+    let text =
+        |more: &str| writers(&["a", "b"], &["\"i.time\""; 2], &(z.to_owned() + more));
+    let refused = text(
+        &(placement("p", "\"a\", \"i.time\", \"z\"", "m")
+            + &placement("q", "\"b\"", "n")),
+    );
+    let fix = "Exclude the connectors `a` and `b` and their indexes from the `select` \
+               of `p` and `q`, and select them with another placement whose `home` is \
+               `n`";
+    let expected = [
+        ("config.split-placement", fix.to_owned()),
+        ("config.connector-home", fix.to_owned()),
+    ];
+    let fixed = text(
+        &(placement("p", "\"a\", \"i.time\", \"z\", \"!a\", \"!i.time\"", "m")
+            + &placement("q", "\"b\", \"!b\"", "n")
+            + &placement("ab", "\"a\", \"b\", \"i.time\"", "n")),
+    );
+    plans_after(&refused, &expected, &fixed);
 }
