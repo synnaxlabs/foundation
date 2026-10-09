@@ -112,7 +112,6 @@ fn checked<'a>(
         connectors: BTreeMap::new(),
         kinds,
         blocks: BTreeMap::new(),
-        writers: BTreeMap::new(),
         nodes: Vec::new(),
     };
     let mut connectors: Vec<_> = names(documents, Kind::Connector).collect();
@@ -196,21 +195,8 @@ struct Found<'a> {
     kinds: &'a Table,
     /// The block of each entry, by tree key.
     blocks: BTreeMap<Name, &'a Block>,
-    /// Each connector whose kind accepts its config, by its name.
-    writers: BTreeMap<Name, Writer>,
     /// Each node that a checked `placement` block names, with its span.
     nodes: Vec<(Name, Option<Span>)>,
-}
-
-/// A connector, as the kind of its block checks it.
-#[derive(Clone, Debug)]
-struct Writer {
-    /// The node that runs it.
-    node: Name,
-    /// Where the block names the node.
-    at: Option<Span>,
-    /// The channels that it writes to the mesh.
-    writes: Vec<Name>,
 }
 
 /// A problem that is already in the diagnostics.
