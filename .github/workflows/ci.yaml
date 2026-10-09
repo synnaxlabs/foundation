@@ -226,14 +226,6 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64]
     timeout-minutes: 90
     steps:
-      # A cancelled or killed run of cargo mutants leaves its copies in /tmp, on a disk
-      # that the runners of a host share. The mutants job times out after 90 minutes,
-      # so no job still uses a copy older than 120.
-      - name: Remove old copies of cargo mutants
-        run: |
-          df -h /
-          du -sh /tmp/cargo-mutants-* "$HOME"/target/* 2>/dev/null || true
-          find /tmp -maxdepth 1 -name 'cargo-mutants-*' -mmin +120 -exec rm -rf {} +
       # A mutant can allocate in a loop until the host runs out of memory. Each runner
       # unit on the host has a cap, the caps leave 2 GiB of the host free, and the
       # unit's OOMPolicy=continue keeps the runner up, so only a test process dies
