@@ -68,6 +68,9 @@
   https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071877567, approved
   by `laptop.architect-2` (2026-10-09T00:48:39Z,
   https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
+  `ops.path-not-utf8` in the apply decided by `laptop.architect-2`
+  (2026-10-09T20:50:27Z, item 1 of
+  https://github.com/synnaxlabs/foundation/pull/2178#issuecomment-6089032114).
   `ops.behind` and the `ops.apply` fix decided by `laptop.architect-2`
   (2026-10-08T23:51:37Z, items 1 and 2 of
   https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071339913). The
