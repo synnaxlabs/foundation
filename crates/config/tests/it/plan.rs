@@ -8,6 +8,7 @@ use config::{Definition, Entry};
 use connector::cancel;
 use connector::kind::{self, Channels, Context, Kind, Table};
 use document::diagnostic::Diagnostic;
+use document::encoding::Checked;
 use document::{Document, Source, read as reader};
 use spec::Pointer;
 use spec::channel::Channel;
@@ -96,16 +97,15 @@ impl Spec {
         }
     }
 
+    /// Plans `texts` on the nodes `members`, and asserts that `check` agrees.
     fn plan(&self, texts: &[&str], members: &[&str]) -> Result<Plan, Vec<Diagnostic>> {
         let members = members.iter().map(|member| name(member)).collect();
         let applied = self.definitions();
-        config::plan::plan(
-            &documents(texts),
-            self.pointer,
-            &applied,
-            &members,
-            &kinds(),
-        )
+        let documents = documents(texts);
+        let planned =
+            config::plan::plan(&documents, self.pointer, &applied, &members, &kinds());
+        agrees(&documents, &applied, &planned, &members);
+        planned
     }
 
     /// Each stored definition, by tree key.
@@ -167,6 +167,76 @@ impl Spec {
             .collect();
         self.set(changes);
     }
+}
+
+/// Asserts that `config::plan::check` gives each problem of `planned` but
+/// `config.wrong-channel`, with no span, when `config::check` finds none in
+/// `documents`. It checks the definitions of the plan, or, when `plan` refuses, the
+/// definitions that the files make. The message of `config.writer-nodes` is left out,
+/// since the order of its nodes is the order of the files only in `plan`.
+fn agrees(
+    documents: &[Document],
+    applied: &BTreeMap<Name, Stored>,
+    planned: &Result<Plan, Vec<Diagnostic>>,
+    members: &BTreeSet<Name>,
+) {
+    let Ok(entries) = config::check(documents, &kinds()) else {
+        return;
+    };
+    let (definitions, mut expected) = match planned {
+        Ok(plan) => {
+            let mut made = 0;
+            let key = || {
+                made += 1;
+                Key::from_u128((1 << 100) | made)
+            };
+            (
+                plan.definitions(applied, key).expect("definitions"),
+                Vec::new(),
+            )
+        }
+        Err(diagnostics) => {
+            let rules = diagnostics.iter().cloned();
+            let rules =
+                rules.filter(|found| found.code.as_str() != "config.wrong-channel");
+            (made(&entries), problems(Err(rules.collect())))
+        }
+    };
+    let checked = config::plan::check(&definitions, members, &kinds());
+    let mut found = match checked {
+        Ok(()) => Vec::new(),
+        Err(diagnostics) => problems(Err(diagnostics)),
+    };
+    for problem in &mut expected {
+        problem.1 = None;
+    }
+    for problem in expected.iter_mut().chain(&mut found) {
+        if problem.0 == "config.writer-nodes" {
+            problem.2.clear();
+        }
+    }
+    expected.sort();
+    found.sort();
+    assert_eq!(found, expected);
+}
+
+/// The definitions of `entries`. Each channel has the key of its place in name order,
+/// and an edge to a name that no entry holds has the key 0.
+fn made(entries: &BTreeMap<Name, Entry>) -> BTreeMap<Name, Stored> {
+    let keys: BTreeMap<_, _> = entries.keys().zip(1..).collect();
+    let key = |name: &Name| Key::from_u128(keys.get(name).copied().unwrap_or(0));
+    let made = entries.iter().map(|(name, entry)| {
+        let definition = match &entry.definition {
+            Definition::Spec(definition) => definition.clone(),
+            Definition::Channel(kind) => Stored::Channel(Channel {
+                key: key(name),
+                kind: kind.clone().map(|to| key(&to)),
+            }),
+            definition => panic!("a new kind of definition: {definition:?}"),
+        };
+        (name.clone(), definition)
+    });
+    made.collect()
 }
 
 fn encode(name: &Name, entry: &Entry, keys: &BTreeMap<Name, Key>) -> Vec<u8> {
@@ -701,6 +771,92 @@ connector \"a\" {
         "Name `n` as the `home`, and keep `n` out of `standby` and `copies`",
     );
     assert_eq!(found, [expected]);
+}
+
+/// The definitions of one connector, `rogue`, of `kind` on the node `nowhere`, with
+/// `config`.
+fn rogue(kind: &str, config: &str) -> BTreeMap<Name, Stored> {
+    let config = Checked::new(read(0, config)).expect("a shallow config");
+    let connector =
+        spec::connector::Connector::new(name(kind), name("nowhere"), config);
+    BTreeMap::from([(name("rogue"), Stored::Connector(connector))])
+}
+
+#[test]
+fn check_refuses_only_a_connector_of_a_kind_that_the_build_lacks() {
+    let members = BTreeSet::from([name("n")]);
+    let found = config::plan::check(&rogue("nothing", ""), &members, &kinds());
+    let expected = (
+        "connector.unknown-kind",
+        None,
+        "this build has no connector kind \"nothing\"".into(),
+        "Use one of [\"commander\", \"influx\", \"writer\"]".into(),
+    );
+    assert_eq!(problems(found.map(|()| unreachable())), [expected]);
+}
+
+#[test]
+fn check_refuses_only_a_config_that_its_kind_refuses_as_plan_does() {
+    let text = "\
+connector \"rogue\" {
+  kind = \"writer\"
+  node = \"nowhere\"
+  writes = 1
+}
+";
+    let planned = problems(Spec::create_empty().plan(&[text], &["n"]));
+    let members = BTreeSet::from([name("n")]);
+    let found = config::plan::check(&rogue("writer", "writes = 1"), &members, &kinds());
+    let found = problems(found.map(|()| unreachable()));
+    let text = |problems: Vec<Problem>| {
+        let problems = problems.into_iter();
+        problems
+            .map(|(code, _, message, fix)| (code, message, fix))
+            .collect::<Vec<_>>()
+    };
+    let codes: Vec<_> = planned.iter().map(|problem| problem.0).collect();
+    assert_eq!(codes, ["document.bad-name"]);
+    assert_eq!(text(found), text(planned));
+}
+
+/// A plan for `problems` to refuse, which a `check` that refuses never gives.
+fn unreachable() -> Plan {
+    unreachable!("check refuses")
+}
+
+#[test]
+fn check_names_the_nodes_of_writer_nodes_in_the_order_of_the_connector_names() {
+    let text = format!(
+        "{PLANT}\
+connector \"w2\" {{
+  kind = \"writer\"
+  node = \"n2\"
+  writes = [\"a.time\"]
+}}
+connector \"w1\" {{
+  kind = \"writer\"
+  node = \"n1\"
+  writes = [\"a.value\"]
+}}
+"
+    );
+    let members = ["n", "n1", "n2"];
+    let planned = problems(Spec::create_empty().plan(&[&text], &members));
+    let entries = config::check(&documents(&[&text]), &kinds()).expect("entries");
+    let members = members.iter().map(|member| name(member)).collect();
+    let found = config::plan::check(&made(&entries), &members, &kinds());
+    let message = |first, second| {
+        format!(
+            "connectors on the nodes `{first}` and `{second}` write the index \
+             `a.time`, so it has no one home"
+        )
+    };
+    let fix = "Run each connector that writes `a.time` on one node";
+    let at = (0, value(&text, "node", "\"n1\""));
+    let expected = problem("config.writer-nodes", at, &message("n2", "n1"), fix);
+    assert_eq!(planned, [expected]);
+    let expected = ("config.writer-nodes", None, message("n1", "n2"), fix.into());
+    assert_eq!(problems(found.map(|()| unreachable())), [expected]);
 }
 
 /// Asserts that `refused` gives each code and fix of `expected`, and that `fixed`, the

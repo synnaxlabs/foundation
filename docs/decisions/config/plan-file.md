@@ -59,3 +59,13 @@
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067332179. Supersedes
   the `changes: Vec<Change>` field and `Change::name` of
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6040866688.
+  `config::plan::check(definitions, members, kinds)` checks the definitions after the
+  plan against each rule of `plan` that `spec::region::check` does not hold, with no
+  span: the kind table accepts the kind and the config of each connector, then
+  `config.unplaced`, `config.connector-home`, `config.split-placement`,
+  `config.writer-nodes`, and `config.unknown-node`. The rules are in `config` once, on
+  one model of the definitions that `plan` builds with spans. Apply calls it after
+  `definitions` and before `Mesh::apply`, with the members and the kind table of the
+  node that applies, since both can change after `plan`. Decided by
+  `laptop.architect-2`, 2026-10-08T21:36:36Z
+  (https://github.com/synnaxlabs/foundation/issues/2013).
