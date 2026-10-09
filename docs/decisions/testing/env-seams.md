@@ -66,12 +66,13 @@
   the local address, and don't-fragment. `os` binds with `rustix`, with `IPV6_V6ONLY`
   off on an IPv6 socket, and routes as `sim` does: a socket on `::` sends IPv4 as
   `::ffff:a.b.c.d`, and any other socket that gets a destination of the other family
-  gives `Unreachable`. A `Transmit` goes out in one `sendmsg`, with GSO; there is no
-  `sendmmsg`. After `EIO` or `EINVAL` on a GSO send, `noq-udp` stores 1 as its
-  `max_gso_segments`, and from then on each datagram goes out alone; that is the only
-  GSO flag. Each half has its own `dup` of the socket. The receiver registers for
-  readable at its first poll, in a field of its driver (`laptop.architect-2`,
-  2026-10-08 19:12 UTC,
+  gives `Unreachable`. A `Transmit` goes out in one `sendmsg`, with GSO, or one per
+  datagram after the kernel refuses GSO; there is no `sendmmsg`. After `EIO` or
+  `EINVAL` on a GSO send, `noq-udp` sends the first datagram alone. Only when it goes
+  out does `noq-udp` store 1 as its `max_gso_segments`, and from then on each datagram
+  goes out alone; that is the only GSO flag. Each half has its own `dup` of the
+  socket. The receiver registers for readable at its first poll, in a field of its
+  driver (`laptop.architect-2`, 2026-10-08 19:12 UTC,
   https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
   `os` receiver's driver has no `Mutex` of its own (item 2 of `laptop.architect-2`,
   2026-10-08 18:27 UTC,
@@ -123,7 +124,10 @@
   which refused only `0.0.0.0`. On macOS, `os` has no GSO, so `batch_max` is 1, and the
   loopback, with an MTU of 16,384 bytes, loses a larger datagram. Decided by
   `laptop.architect-2` (2026-10-08 22:35 UTC, #1965,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767).
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767). On
+  Apple, the `noq-udp` patch sends an IPv4 source as `IP_PKTINFO`, and `os` has no
+  check of its own. Decided by `laptop.architect-2` (2026-10-08 22:51 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958).
   `os::net()` is behind the `os` cargo feature `net`, off by default, because Tokio has
   no `net` under `--cfg loom`. Decided by `laptop.architect-2` (2026-10-08 23:42 UTC,
   #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415).
