@@ -272,8 +272,8 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
             let (message, fix) = match pool {
                 block::Error::Refused { .. } => (
                     format!(
-                        "the system refused memory that the pool budget {budget} of \
-                         shard-{core} has room for: {error}"
+                        "the system refused memory for shard-{core} that its part of the \
+                         pool budget {budget} has room for: {error}"
                     ),
                     "Free memory on this host".to_owned(),
                 ),
@@ -621,9 +621,9 @@ mod tests {
     fn memory_that_the_system_refused_tells_the_user_to_free_memory() {
         let refused_memory = Failure {
             code: MEMORY,
-            message: "the system refused memory that the pool budget 1GiB of shard-3 \
-                      has room for: the pool has no block: the system refused memory \
-                      for a block of 64 bytes"
+            message: "the system refused memory for shard-3 that its part of the pool \
+                      budget 1GiB has room for: the pool has no block: the system \
+                      refused memory for a block of 64 bytes"
                 .to_owned(),
             fix: "Free memory on this host".to_owned(),
         };

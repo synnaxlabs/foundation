@@ -967,7 +967,8 @@ fn end(
     group.map(|stopped| Some(Error::Group(stopped)))
 }
 
-/// Why a node failed, or why [`name`] gave no name or [`budget`] no budgets.
+/// Why a node failed, or why [`name`] gave no name or [`budget`] could not read the
+/// budgets.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A shard could not start or pin.
