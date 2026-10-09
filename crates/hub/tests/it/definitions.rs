@@ -220,22 +220,47 @@ fn ends_the_sessions_of_a_data_channel_whose_unit_changes() {
 }
 
 #[test]
-fn ends_the_sessions_of_an_index_whose_control_edge_changes() {
-    run(48, |test| async move {
-        let mut reader = test.reader(&["time"], Mode::Latest).await;
-        let time = Channel {
-            key: Key::from_u128(1),
-            kind: Kind::Index {
-                error: None,
-                control: Some(Key::from_u128(5)),
-            },
+fn ends_the_sessions_of_a_data_channel_whose_quality_channel_changes() {
+    run(49, |test| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let quality = Some(Key::from_u128(5));
+        let data = Data::new(Key::from_u128(1), quality, DataType::Sample(I64), None);
+        let value = Channel {
+            key: Key::from_u128(2),
+            kind: Kind::Data(data.expect("no unit")),
         };
         let mut changed = channels();
-        changed.insert(name("time"), Definition::Channel(time));
+        changed.insert(name("value"), Definition::Channel(value));
         test.hub.set_definitions(&changed);
-        let ended = reader.next().await.expect_err("the reader ended");
-        assert_eq!(ended, Ended::Removed(Key::from_u128(1)));
+        let now = test.now();
+        let failure = written(&mut writer, &[(1, &[now]), (2, &[20])]);
+        let failure = failure.expect_err("the writer ended");
+        assert_eq!(failure, Failure::Removed(Key::from_u128(2)));
     });
+}
+
+/// An index whose `error` or `control` edge is `to`, and whose other edge is none.
+fn index_with(error: bool, to: u128) -> Definition {
+    let to = Some(Key::from_u128(to));
+    let (error, control) = if error { (to, None) } else { (None, to) };
+    Definition::Channel(Channel {
+        key: Key::from_u128(1),
+        kind: Kind::Index { error, control },
+    })
+}
+
+#[test]
+fn ends_the_sessions_of_an_index_whose_error_or_control_edge_changes() {
+    for (seed, error) in [(48, false), (50, true)] {
+        run(seed, move |test| async move {
+            let mut reader = test.reader(&["time"], Mode::Latest).await;
+            let mut changed = channels();
+            changed.insert(name("time"), index_with(error, 5));
+            test.hub.set_definitions(&changed);
+            let ended = reader.next().await.expect_err("the reader ended");
+            assert_eq!(ended, Ended::Removed(Key::from_u128(1)));
+        });
+    }
 }
 
 /// A data channel whose index is renamed at the same key keeps its definition, but
