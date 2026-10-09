@@ -34,16 +34,16 @@
   the cutoff fails when it holds raw HTML outside a code span or a code block: an HTML
   block or inline HTML as `pulldown-cmark` reads it, or a line of text whose source,
   after the indent and the marks of quotes, list items, and footnote labels, starts
-  with `<` and a letter, `!`, `/`, or `?` and that is not an autolink. It also fails
-  when the source of a line of text, after the indent and those marks, starts with a
-  footnote label that `pulldown-cmark` does not read as a footnote definition, also when
-  the line starts inside a code span or a link. GitHub reads the blocks of a comment
-  before its spans, can read that label as a footnote, and does not show a footnote with
-  no reference. A footnote label here is as GitHub reads it: `[^`, one or more
-  characters other than `]`, space, or tab, then `]:`, with no backslash escapes. The
-  message names the line. GitHub reads some of these lines in a different way, and an
-  open `<!--` or `<details>` hides the text after it. A round comment that fails by this
-  rule gets an edit that puts the line in a code span, and the cutoff
+  with `<` and a letter, `!`, `/`, or `?` and that is not an autolink. GitHub reads some
+  of these lines in a different way, and an open `<!--` or `<details>` hides the text
+  after it. It also fails when the source of a line of text, after the indent and those
+  marks, starts with a footnote label that `pulldown-cmark` does not read as a footnote
+  definition, also when the line starts inside a code span or a link. GitHub reads the
+  blocks of a comment before its spans, can read that label as a footnote, and does not
+  show a footnote with no reference. A footnote label here is as GitHub reads it: `[^`,
+  one or more characters other than `]`, space, or tab, then `]:`, with no backslash
+  escapes. The message names the line. A round comment that fails by these rules gets
+  an edit that puts the line in a code span, and the cutoff
   stays. In an old round, a `Hot path:` line, or a `Reviewers:` line of a round that
   does not parse, counts where GitHub shows it as a line of text of a paragraph, at any
   depth and any indent. A line of a code block or an HTML block does not count. Changed
