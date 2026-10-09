@@ -1,7 +1,8 @@
 //! Shard 0's sessions: each stream goes to the server of the protocol its header
 //! names.
 
-use std::cell::Cell;
+use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::pin::pin;
 use std::rc::Rc;
@@ -11,6 +12,7 @@ use hub::{Hub, Link};
 use mesh::Mesh;
 use transport::stream::Incoming;
 use transport::{Code, Error, Peer, Session, Transport};
+use types::ed25519::PublicKey;
 use types::time::Span;
 use wire::Protocol;
 
@@ -19,14 +21,14 @@ use crate::scope::Scope;
 /// How long a stream may take to give its header, a patch as [`crate::WINDOW`] is.
 const HEADER: Span = Span::from_nanos(10_000_000_000);
 
-/// How many sessions of peers outside the region the node holds at once, a patch as
-/// [`HEADER`] is.
+/// How many places the peers outside the region hold at once, a patch as [`HEADER`]
+/// is. A program holds one per session, and a node one for its key.
 const SESSIONS: usize = 256;
 
 /// Serves each session of `transport` in its own future on `tasks`, until the
 /// transport stops, and gives the error that stopped it. Admits each session of a
-/// member of `mesh`'s region, and of another peer while fewer than [`SESSIONS`] of
-/// them are open; closes each other session with `wire::session::REFUSED`. `route`
+/// member of `mesh`'s region, and of another peer while it gets a place of
+/// [`SESSIONS`]; closes each other session with `wire::session::REFUSED`. `route`
 /// decides each stream.
 pub(crate) async fn accept(
     transport: Rc<Transport>,
@@ -36,16 +38,17 @@ pub(crate) async fn accept(
     tasks: env::tasks::Tasks,
 ) -> Error {
     let mut sessions = Scope::new(tasks.clone());
-    let outside = Rc::new(Cell::new(0));
+    let places = Rc::new(RefCell::new(Places::default()));
     loop {
         let session = match transport.accept().await {
             Ok(session) => session,
             Err(error) => return error,
         };
-        let held = if member(session.peer(), mesh.as_ref()) {
+        let peer = session.peer();
+        let held = if member(peer, mesh.as_ref()) {
             None
-        } else if outside.get() < SESSIONS {
-            Some(Outside::new(Rc::clone(&outside)))
+        } else if let Some(place) = Place::take(&places, peer) {
+            Some(place)
         } else {
             session.close(Code(wire::session::REFUSED));
             continue;
@@ -59,20 +62,55 @@ pub(crate) async fn accept(
     }
 }
 
-/// One open session of a peer outside the region, in the count it holds until it
-/// drops.
-struct Outside(Rc<Cell<usize>>);
+/// The places that the peers outside the region hold.
+#[derive(Default)]
+struct Places {
+    /// The open sessions of programs.
+    programs: usize,
+    /// The open sessions of each node. The transport holds one per node and closes
+    /// the old one as a new one arrives, before the old one's future ends.
+    nodes: BTreeMap<PublicKey, usize>,
+}
 
-impl Outside {
-    fn new(count: Rc<Cell<usize>>) -> Self {
-        count.set(count.get() + 1);
-        Self(count)
+/// One open session of a peer outside the region, in [`Places`] until it drops.
+struct Place {
+    places: Rc<RefCell<Places>>,
+    peer: Peer,
+}
+
+impl Place {
+    /// The place of a new session of `peer`: a new place while fewer than
+    /// [`SESSIONS`] are held, and the place of a node's old session. `None` when
+    /// the bound is full.
+    fn take(places: &Rc<RefCell<Places>>, peer: Peer) -> Option<Self> {
+        let mut held = places.borrow_mut();
+        let full = held.programs + held.nodes.len() >= SESSIONS;
+        match peer {
+            Peer::Client if full => return None,
+            Peer::Client => held.programs += 1,
+            Peer::Node(key) if full && !held.nodes.contains_key(&key) => return None,
+            Peer::Node(key) => *held.nodes.entry(key).or_default() += 1,
+        }
+        Some(Self {
+            places: Rc::clone(places),
+            peer,
+        })
     }
 }
 
-impl Drop for Outside {
+impl Drop for Place {
     fn drop(&mut self) {
-        self.0.set(self.0.get() - 1);
+        let mut held = self.places.borrow_mut();
+        match self.peer {
+            Peer::Client => held.programs -= 1,
+            Peer::Node(key) => {
+                let sessions = held.nodes.get_mut(&key).expect("a held place");
+                *sessions -= 1;
+                if *sessions == 0 {
+                    held.nodes.remove(&key);
+                }
+            }
+        }
     }
 }
 

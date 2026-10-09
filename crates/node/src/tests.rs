@@ -3839,6 +3839,118 @@ mod port {
             assert_eq!(of_program, transport::Error::Stopped { code });
         }
 
+        /// 255 programs and one node outside the region fill the bound, and the next
+        /// program is refused. Once the peer's links drop every packet, its sessions
+        /// time out and free their places, and a later program is admitted.
+        #[test]
+        fn places_free_when_the_peers_outside_the_region_vanish() {
+            const LATE: Span = Span::from_nanos(150_000_000_000);
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let node = start(&hosts[0], region(&pair(&hosts)));
+            let listen = listen(&hosts[0]);
+            let attacker = sim.node(sim::node::Config::default());
+            let late = sim.node(sim::node::Config::default());
+            let (refused, admitted) =
+                (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+            let shard = || env::shards::Config {
+                name: "peer".into(),
+                core: None,
+            };
+            let (own, seen) = (attacker.clone(), Arc::clone(&refused));
+            let started = attacker.shards().start(shard(), move |tasks| async move {
+                let at = [Address::Udp(listen)];
+                let (program, pool) = program(&own, tasks.clone());
+                let (outsider, _) = transport(&own, tasks, CLIENT);
+                let mut held = Vec::new();
+                for _ in 0..255 {
+                    held.push(
+                        program.dial(KEY.public(), &at).await.expect("a session"),
+                    );
+                }
+                held.push(outsider.dial(KEY.public(), &at).await.expect("a session"));
+                let over = program.dial(KEY.public(), &at).await;
+                *seen.lock().unwrap() = Some(over.expect("a handshake").closed().await);
+                drop(pool);
+                std::future::pending::<()>().await;
+                drop((held, program, outsider));
+            });
+            drop(started.expect("the peer starts"));
+            let (own, seen) = (late.clone(), Arc::clone(&admitted));
+            let started = late.shards().start(shard(), move |tasks| async move {
+                own.clock().sleep(LATE).await;
+                let at = [Address::Udp(listen)];
+                let (program, pool) = program(&own, tasks);
+                let again = program.dial(KEY.public(), &at).await.expect("a session");
+                *seen.lock().unwrap() = Some(sent_clock(&again, &pool, &own).await);
+                drop((again, program));
+            });
+            drop(started.expect("the late peer starts"));
+            assert_eq!(sim.run_for(Span::MINUTE), Ok(()));
+            let cut = sim::link::Config {
+                loss: 1.0,
+                ..sim::link::Config::default()
+            };
+            sim.link(&attacker, &hosts[0], cut);
+            sim.link(&hosts[0], &attacker, cut);
+            assert_eq!(sim.run_for(LATE), Ok(()));
+            let code = Code(wire::session::REFUSED);
+            let refused = refused.lock().unwrap().take();
+            assert_eq!(refused, Some(transport::Error::PeerClosed { code }));
+            let code = Code(wire::header::REJECTED);
+            let admitted = admitted.lock().unwrap().take();
+            assert_eq!(admitted, Some(transport::Error::Stopped { code }));
+            drop(node);
+        }
+
+        /// A node outside the region holds the 256th place, then dials again from a
+        /// new transport. The node's transport closes the old session, as the newer
+        /// one wins, so the new one takes the old one's place.
+        #[test]
+        fn a_node_outside_the_region_that_dials_again_at_the_bound_keeps_its_place() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let node = start(&hosts[0], region(&pair(&hosts)));
+            let listen = listen(&hosts[0]);
+            let attacker = sim.node(sim::node::Config::default());
+            let out = Arc::new(Mutex::new(None));
+            let seen = Arc::clone(&out);
+            let shard = env::shards::Config {
+                name: "peer".into(),
+                core: None,
+            };
+            let own = attacker.clone();
+            let started = attacker.shards().start(shard, move |tasks| async move {
+                let at = [Address::Udp(listen)];
+                let (program, _) = program(&own, tasks.clone());
+                let mut held = Vec::new();
+                for _ in 0..255 {
+                    held.push(
+                        program.dial(KEY.public(), &at).await.expect("a session"),
+                    );
+                }
+                let (first, _) = transport(&own, tasks.clone(), CLIENT);
+                let old = first.dial(KEY.public(), &at).await.expect("a session");
+                own.clock().sleep(Span::SECOND).await;
+                let (second, pool) = transport(&own, tasks, CLIENT);
+                let new = second.dial(KEY.public(), &at).await.expect("a session");
+                let of_new = sent_clock(&new, &pool, &own).await;
+                let old_closed = old.closed().await;
+                *seen.lock().unwrap() = Some((old_closed, of_new));
+                drop((held, program, first, second, new));
+            });
+            drop(started.expect("the peer starts"));
+            assert_eq!(sim.run_for(Span::MINUTE), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let (old_closed, of_new) =
+                out.lock().unwrap().take().expect("the peer ran");
+            assert_eq!(old_closed, transport::Error::PeerClosed { code: Code(0) });
+            let code = Code(wire::header::REJECTED);
+            assert_eq!(of_new, transport::Error::Stopped { code });
+        }
+
         /// The error of the first send that fails on a one-way stream of `session`
         /// whose header names the clock protocol, which the node rejects.
         async fn sent_clock(
