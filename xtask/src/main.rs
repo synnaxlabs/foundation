@@ -4,7 +4,7 @@
 
 mod build;
 mod cfg;
-mod feature;
+mod sim;
 mod field;
 mod files;
 mod fuzz;
@@ -85,7 +85,7 @@ fn layers(root: &Path) -> Result<(), Vec<String>> {
         if name == "xtask" || bench {
             continue;
         }
-        problems.extend(feature::check(package));
+        problems.extend(sim::check(package));
         let Some(entry) = map::find(name) else {
             problems.push(format!(
                 "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs \
