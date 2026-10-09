@@ -132,7 +132,7 @@ pub(super) fn session_in<H, P>(
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
         let transport = Rc::new(transport(&node, &tasks, &own_pool(), HOME, 1 << 16));
         let region = if regional {
-            Some(region::open(&node, &tasks, Rc::clone(&transport)).await)
+            Some(region::open(&node, &tasks, Rc::clone(&transport), Vec::new()).await)
         } else {
             None
         };
@@ -582,7 +582,7 @@ fn keeps_the_highest_credit_sent_while_the_open_waits_for_a_home() {
         let writing = Rc::clone(&test);
         test.tasks.spawn(async move {
             writing.clock.sleep(SETTLE).await;
-            writing.set_home(region::TIME, super::NODE).await;
+            writing.set_home(super::TIME, super::NODE).await;
             let mut writer = writing.writer("a", &["value"]).await;
             writing.clock.sleep(SETTLE).await;
             write(&mut writer, &[writing.now()], &[10]);
@@ -625,7 +625,7 @@ fn serves_the_new_type_of_a_channel_changed_while_the_open_waits_for_a_home() {
             let mut changed = channels();
             changed.insert(name("value"), definition(2, DataType::Sample(I32), 1));
             writing.hub.set_definitions(&changed);
-            writing.set_home(region::TIME, super::NODE).await;
+            writing.set_home(super::TIME, super::NODE).await;
             let mut writer = writing.writer("a", &["value"]).await;
             writing.clock.sleep(SETTLE).await;
             write_i32(&mut writer, writing.now(), 20);
@@ -677,7 +677,7 @@ fn serves_the_new_index_of_keys_changed_while_the_open_waits_for_a_home() {
             swapped.insert(name("time"), definition(1, sample.clone(), 2));
             swapped.insert(name("value-c"), definition(5, sample, 2));
             writing.hub.set_definitions(&swapped);
-            writing.set_home(region::TIME, super::NODE).await;
+            writing.set_home(super::TIME, super::NODE).await;
             writing.clock.sleep(SETTLE).await;
             setting.store(true, Ordering::Relaxed);
             writing

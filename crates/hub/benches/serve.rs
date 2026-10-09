@@ -482,7 +482,7 @@ async fn create_hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
         node: types::node::Key::from_u128(1),
         time,
         entropy: node.entropy(),
-        mesh: None,
+        region: None,
     });
     let i64 = DataType::Sample(Type::Scalar(Scalar::I64));
     let mut definitions = Vec::new();

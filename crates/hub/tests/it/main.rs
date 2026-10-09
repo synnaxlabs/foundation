@@ -41,6 +41,7 @@ mod link;
 #[path = "../common/node.rs"]
 mod node;
 mod region;
+mod remote;
 mod serve;
 
 /// The node key of the hub under test.
@@ -79,6 +80,12 @@ const CHANNELS: [(u128, &str, Type, u128); 5] = [
     (4, "value-b", I64, 3),
     (5, "value-c", I64, 1),
 ];
+/// The key of `time` in [`CHANNELS`].
+const TIME: channel::Key = channel::Key::from_u128(CHANNELS[0].0);
+/// The key of `value` in [`CHANNELS`].
+const VALUE: channel::Key = channel::Key::from_u128(CHANNELS[1].0);
+/// The key of `time-b` in [`CHANNELS`].
+const TIME_B: channel::Key = channel::Key::from_u128(CHANNELS[2].0);
 
 /// What one test gets: a hub on one shard, with [`CHANNELS`] defined.
 struct Test {
@@ -97,8 +104,8 @@ struct Test {
     unsynced: Option<clock::Clock>,
     /// A commit of the home, taken before the hub had it. It holds the ring open.
     commit: home::Commit,
-    /// The mesh of the node's region, which the hub holds too.
-    region: Option<mesh::Mesh>,
+    /// The node's region, which the hub holds too.
+    region: Option<hub::Region>,
     hub: Hub,
 }
 
@@ -110,7 +117,7 @@ impl Test {
         tasks: Tasks,
         layout: buffer::Layout,
         pool: usize,
-        region: Option<mesh::Mesh>,
+        region: Option<hub::Region>,
     ) -> Self {
         let config = block::Config { budget: pool };
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
@@ -150,7 +157,10 @@ impl Test {
             node: NODE,
             time: mesh.clone(),
             entropy: node.entropy(),
-            mesh: region.clone(),
+            region: region.as_ref().map(|region| hub::Region {
+                mesh: region.mesh.clone(),
+                transport: Rc::clone(&region.transport),
+            }),
         });
         hub.set_definitions(&channels());
         Self {

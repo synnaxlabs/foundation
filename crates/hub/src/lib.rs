@@ -63,7 +63,7 @@ pub struct Config {
     /// The node's key set interner, which owns the slot table that the home's buffer
     /// opened with.
     pub interner: Interner,
-    /// Where the hub spawns its commit task.
+    /// Where the hub spawns its commit task and the task of each remote reader.
     pub tasks: env::tasks::Tasks,
     /// This node's key. A client's hello must name it as `via`.
     pub node: types::node::Key,
@@ -71,10 +71,19 @@ pub struct Config {
     pub time: clock::Reader,
     /// The source of each challenge's nonce.
     pub entropy: env::entropy::Entropy,
-    /// The region's mesh, or `None` for a node with no region. The mesh names the home
-    /// of each index and the address of each member. With `None`, this node is the
-    /// home of each index.
-    pub mesh: Option<::mesh::Mesh>,
+    /// The node's region, or `None` for a node with no region. With `None`, this node
+    /// is the home of each index.
+    pub region: Option<Region>,
+}
+
+/// What the hub of a node in a region reads homes from, and reaches them on.
+#[derive(Debug)]
+pub struct Region {
+    /// The region's mesh. It names the home of each index and the addresses of each
+    /// member.
+    pub mesh: ::mesh::Mesh,
+    /// The transport of this shard. The hub dials the home of each remote reader on it.
+    pub transport: Rc<transport::Transport>,
 }
 
 /// The state of one shard's hub, which each session shares. No borrow of it lasts
@@ -89,6 +98,7 @@ struct State {
     /// Each open writer, by its home key.
     writers: Sessions<::home::writer::Key>,
     readers: Sessions<::home::reader::Key>,
+    remotes: reader::remote::Sessions,
     /// The waker of each reader that waits for a frame.
     wakers: hash::Map<::home::reader::Key, Waker>,
     /// The readers that [`::home::Shard::woken`] gave last.
@@ -101,7 +111,9 @@ struct State {
     entropy: env::entropy::Entropy,
     /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
     rules: access::Rules,
-    mesh: Option<::mesh::Mesh>,
+    region: Option<Region>,
+    /// Where the hub spawns the task of each remote reader.
+    tasks: env::tasks::Tasks,
     /// The bytes of request bodies that open requests reserved, at most
     /// [`serve::BODIES_BYTES_MAX`]. A `Cell`, so the drop of a reply needs only a shared
     /// borrow.
@@ -124,7 +136,7 @@ impl Hub {
             node,
             time,
             entropy,
-            mesh,
+            region,
         } = config;
         let state = Rc::new(RefCell::new(State {
             home,
@@ -133,6 +145,7 @@ impl Hub {
             indexes: hash::Map::default(),
             writers: Sessions::default(),
             readers: Sessions::default(),
+            remotes: reader::remote::Sessions::default(),
             wakers: hash::Map::default(),
             woken: Vec::new(),
             commit: commit::Signal::default(),
@@ -141,7 +154,8 @@ impl Hub {
             time,
             entropy,
             rules: access::Rules::default(),
-            mesh,
+            region,
+            tasks: tasks.clone(),
             bodies: Cell::new(0),
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
@@ -192,19 +206,24 @@ impl Hub {
         Writer::open(&self.0, config).await
     }
 
-    /// Opens a reader session on `channels`, which share one index, as
-    /// [`writer`](Self::writer) opens a writer. It gets each frame of the index, as a
-    /// view of only `channels` and their index. A complete reader gets each live frame
-    /// written after the returned future resolves, until it misses one
-    /// ([`reader::Mode::Complete`]).
+    /// Opens a reader session on `channels`, which share one index. While the mesh
+    /// names no home for the index, it waits for one. At the home of another node,
+    /// each open reader holds one stream of the one session to it, so it also waits
+    /// while that home allows this node no more streams, until another reader there
+    /// drops. It gets each frame of the index, as a view of only `channels` and their
+    /// index. A complete reader gets each live frame written after the returned future
+    /// resolves, until it misses one ([`reader::Mode::Complete`]).
     ///
     /// # Errors
     ///
     /// For the first name that breaks a rule: [`reader::Error::Unknown`] for a name
     /// that no channel has, and [`reader::Error::ManyIndexes`] for a channel on
     /// another index than the first. [`reader::Error::Empty`] for no name. Then
-    /// [`reader::Error::Remote`] when the home of the index is not this node, and
-    /// [`reader::Error::Mesh`] when the mesh stopped.
+    /// [`reader::Error::Mesh`] when the mesh stopped. At the home of another node:
+    /// [`reader::Error::Transport`] when the dial or the stream fails,
+    /// [`reader::Error::Refused`] when the home refuses the session,
+    /// [`reader::Error::Message`] for a reply that breaks the hub protocol, and
+    /// [`reader::Error::Pool`] when the shard's pool has no block for the open.
     pub async fn reader(
         &self,
         channels: &[Name],
@@ -373,7 +392,8 @@ impl State {
         }
     }
 
-    /// Ends each session on a channel of `removed`, and closes it at the home.
+    /// Ends each session on a channel of `removed`, and closes each local one at the
+    /// home.
     fn end(&mut self, removed: &hash::Set<Key>) {
         for key in self.writers.end(removed) {
             self.close_writer(key);
@@ -383,6 +403,7 @@ impl State {
                 waker.wake();
             }
         }
+        self.remotes.end(removed);
     }
 
     /// Closes the writer `key` at the home, unless a removal closed it.
@@ -408,6 +429,27 @@ impl State {
         let channel = Channel(channel.clone());
         self.indexes.insert(channel.key(), channel.index());
         self.channels.insert(name.clone(), channel);
+    }
+
+    /// A block of `len` bytes from the home's pool.
+    ///
+    /// # Errors
+    ///
+    /// [`block::Error::Exhausted`] or [`block::Error::Refused`] when the pool has no
+    /// block for it now.
+    ///
+    /// # Panics
+    ///
+    /// When `len` is over the pool's largest block: each caller asks for at most that.
+    fn alloc(&self, len: usize) -> Result<block::Unique, block::Error> {
+        self.home.pool().alloc(len).map_err(|error| match error {
+            block::Error::TooLarge { .. } => {
+                unreachable!(
+                    "invariant: no caller asks for more than the largest block"
+                )
+            }
+            block::Error::Exhausted { .. } | block::Error::Refused { .. } => error,
+        })
     }
 
     /// Carries `index` at the home. A later carry does nothing.
@@ -474,7 +516,7 @@ async fn home(
     let (watch, node) = {
         let state = state.borrow();
         (
-            state.mesh.as_ref().map(|mesh| mesh.watch(index)),
+            state.region.as_ref().map(|region| region.mesh.watch(index)),
             state.node,
         )
     };
