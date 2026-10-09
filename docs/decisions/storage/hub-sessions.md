@@ -260,10 +260,11 @@
   https://github.com/synnaxlabs/foundation/issues/2143#issuecomment-6082087720):
   `Hub::writer` waits for the node's first mesh time (`clock::Reader::reach` on
   `hub::Config::time`, the reader of the home), as it waits for a home, so a hub caller
-  never sees `home::writer::Error::Unsynced`. The wait comes before the open resolves
-  its channels and checks each home, so it sees a change of the definitions or of a home
-  during the wait, and no wait comes between the last home check and the carry (PR
-  #2161, round 1, approved by `laptop.architect`:
+  never sees `home::writer::Error::Unsynced`. The wait comes in the loop of the open,
+  after it first resolves its channels and before it checks each home, so an unknown
+  channel fails at once, the open sees a change of the definitions or of a home during
+  the wait, and the wait never comes between a home check and the carry (PR #2161, round
+  1, approved by `laptop.architect`:
   https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6085364432). A task
   gets mesh time from `writer::Writer::now`, which gives `home::Shard::now` (HOME
   CLOCKS) and cannot fail, because mesh time stays once known. Lost: `Hub::now() ->
