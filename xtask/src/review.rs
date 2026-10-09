@@ -516,19 +516,20 @@ impl<'a> Shown<'a> {
         let root = parse_document(&arena, body, &options());
         // The code blocks of a footnote that GitHub does not show still hold its lines.
         let mut codes = Vec::new();
-        for node in root.descendants().collect::<Vec<_>>() {
+        let mut notes = Vec::new();
+        for node in root.descendants() {
             let data = node.data.borrow();
             match &data.value {
                 NodeValue::CodeBlock(_) => {
                     codes.push(at(data.sourcepos.start)..source(data.sourcepos).end);
                 }
-                NodeValue::FootnoteDefinition(note) if note.total_references == 0 => {
-                    node.detach();
+                NodeValue::FootnoteDefinition(note) => {
+                    notes.push((node, note.name.clone(), note.total_references));
                 }
-                NodeValue::FootnoteDefinition(_) => root.append(node),
                 _ => {}
             }
         }
+        footnotes(root, &notes);
         let mut hiding = Vec::new();
         for node in root.descendants() {
             let data = node.data.borrow();
@@ -612,6 +613,33 @@ fn bracket<'n>(paragraph: &'n AstNode<'n>, last: usize) -> Option<usize> {
 fn misplaced<'n>(paragraph: &'n AstNode<'n>, last: usize) -> bool {
     let mut spans = paragraph.descendants().skip(1);
     spans.all(|span| span.data.borrow().sourcepos.end.line < last)
+}
+
+/// Moves to the end of `root` the first definition of each footnote label with a
+/// reference, as GitHub shows it, and detaches each other one. `notes` holds each
+/// definition in order, with its label and the references that comrak counts.
+fn footnotes<'n>(root: &'n AstNode<'n>, notes: &[(&'n AstNode<'n>, String, u32)]) {
+    // comrak counts the references of the last definition of a label, and GitHub
+    // shows the first.
+    for (i, (node, name, _)) in notes.iter().enumerate() {
+        let label = |(_, other, _): &(_, String, _)| same(name, other);
+        let first = !notes[..i].iter().any(label);
+        let referenced = notes[i..].iter().any(|n| n.2 > 0 && label(n));
+        if first && referenced {
+            root.append(node);
+        } else {
+            node.detach();
+        }
+    }
+}
+
+/// Whether comrak reads the footnote labels `a` and `b` as one label.
+fn same(a: &str, b: &str) -> bool {
+    let arena = Arena::new();
+    let text = format!("[^{a}]\n\n[^{b}]: x");
+    let root = parse_document(&arena, &text, &options());
+    root.descendants()
+        .any(|n| matches!(n.data.borrow().value, NodeValue::FootnoteReference(_)))
 }
 
 /// The lines of text of `paragraph` in `body`, each from the start of its first span

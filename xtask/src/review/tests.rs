@@ -1356,6 +1356,7 @@ fn fails_raw_html_on_a_line_inside_a_span() {
             "a `x\n<source [y](https://x.y)`",
             "<source [y](https://x.y)`",
         ),
+        ("[a\n<source y](https://x.y)", "<source y](https://x.y)"),
     ];
     for (text, line) in cases {
         let hidden = ROUND.replace("but comments", &format!("but {text}"));
@@ -1458,6 +1459,30 @@ fn passes_a_footnote_mark_in_a_link_or_a_code_span() {
 fn hides_both_footnotes_with_no_reference_of_one_label() {
     let notes = format!("{ROUND}\n\n[^a]: x\n\n[^a]: y");
     assert_eq!(check(&record(vec![bot(&notes)])), Vec::<String>::new());
+}
+
+#[test]
+fn an_old_round_reads_the_first_footnote_of_a_label_with_a_reference() {
+    // GitHub shows the first definition of a label, also in another case.
+    for second in ["[^a]: y", "[^A]: y"] {
+        let round = old(&format!(
+            "## Review round 1\n\nConfirmed a finding [^a].\n\n\
+             [^a]: Hot path: `send`\n\n{second}"
+        ));
+        assert_eq!(
+            check(&record(vec![round, bot(ROUND)])),
+            vec!["review round 1 names no performance, which this round requires."],
+            "{second}"
+        );
+    }
+    let round = old(
+        "## Review round 1\n\nConfirmed a finding [^a].\n\n[^a]: x\n\n\
+         [^a]: Hot path: `send`",
+    );
+    assert_eq!(
+        check(&record(vec![round, bot(ROUND)])),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
