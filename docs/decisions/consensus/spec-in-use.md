@@ -4,7 +4,7 @@
   wait for its read, and a retry keeps the cause of the read before it. A call waits for
   the first read of the pointer committed at the call, or of a later pointer that
   replaced it before its read began, and never for a retry. It gives `Stopped` when the
-  group stopped, before or during the call (`laptop.architect`,
+  group stopped, before or during the call (`laptop.architect`, 2026-10-09T22:22:43Z,
   https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090235986). One task
   in `mesh` reads the spec of each committed pointer with `spec::region::definitions`
   over the chunks of the spec in use and the chunks that the change lists, and gets each

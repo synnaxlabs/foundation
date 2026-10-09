@@ -699,7 +699,8 @@ fn gives_a_stop_of_the_group_as_stopped() {
         let expected = Error::Stopped(stopped.clone());
         let error = refuses(&mesh, &site.encode(), &kinds(), expected).await;
         let text = format!(
-            "error[ops.stopped]: {stopped}\nfix: Fix the cause in the message, then start the node and plan again\n"
+            "error[ops.stopped]: {stopped}\nfix: Fix the cause in the message, then \
+             start the node and plan again\n"
         );
         assert_eq!(error.text(), text);
         assert_eq!(error.status(), 1);

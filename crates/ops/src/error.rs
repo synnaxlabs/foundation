@@ -46,8 +46,7 @@ pub(crate) enum Error {
     },
     /// The region did not apply the plan.
     Apply(mesh::Error),
-    /// The group of the mesh stopped, so the node can neither plan nor apply until it
-    /// starts again.
+    /// The group of the mesh stopped, so the node can neither plan nor apply.
     Stopped(mesh::Stopped),
 }
 
