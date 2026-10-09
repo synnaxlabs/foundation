@@ -3999,5 +3999,276 @@ mod port {
                 assert_eq!(node.join(), Ok(()), "cut {cut}");
             }
         }
+
+        /// The founding of [`pair`] with `plant.time` (key 1), homed at `home`, and
+        /// `plant.value` (key 2).
+        fn paired(hosts: &[sim::node::Node; 2], home: types::node::Key) -> Founding {
+            use super::super::hub::{I64, data, index};
+            let mut founding = region(&pair(hosts));
+            let channels = [("plant.time", index(1)), ("plant.value", data(2, I64, 1))];
+            for (name, channel) in channels {
+                let name = name.parse().unwrap();
+                founding
+                    .definitions
+                    .insert(name, Definition::Channel(channel));
+            }
+            founding
+                .homes
+                .insert(types::channel::Key::from_u128(1), home);
+            founding
+        }
+
+        /// As [`peer`], with `founding`, and `act` gets the peer's hub and mesh.
+        fn peer_hub<F: Future<Output = ()> + 'static>(
+            host: &sim::node::Node,
+            founding: Founding,
+            act: impl FnOnce(::hub::Hub, ::mesh::Mesh, sim::node::Node) -> F
+            + Send
+            + 'static,
+        ) {
+            let shard = env::shards::Config {
+                name: "peer".into(),
+                core: None,
+            };
+            let own = host.clone();
+            let started = host.shards().start(shard, move |tasks| async move {
+                let bound =
+                    transport::Port::bind(&own.net(), listen(&own)).expect("a port");
+                let identity = Identity {
+                    key: OTHER.0,
+                    private_key: OTHER.1,
+                };
+                let definitions = founding.definitions.clone();
+                let endpoint = Endpoint {
+                    part: bound.split(NonZeroUsize::MIN).pop().expect("one part"),
+                    region: Some(founding),
+                    clock: own.clock(),
+                    entropy: own.entropy(),
+                };
+                let pool = super::pool();
+                let stop = crate::stop::Stop::default();
+                let (open, buffer, next, time) =
+                    super::super::home::create_open(&own, &tasks, 0, stop);
+                let opened =
+                    open.run(own.files(), Rc::new(buffer), tasks.clone()).await;
+                let home = opened.expect("the buffer opens");
+                let interner = next.await.expect("the open gives the interner");
+                let (key, entropy) = (identity.key, endpoint.entropy.clone());
+                let (transport, mesh) = endpoint
+                    .open(identity, own.files(), pool, tasks.clone())
+                    .await
+                    .expect("the mesh opens");
+                let mesh = mesh.expect("the peer has a region");
+                let hub = ::hub::Hub::new(::hub::Config {
+                    home,
+                    interner,
+                    tasks: tasks.clone(),
+                    node: key,
+                    time,
+                    entropy,
+                    region: Some(::hub::Region {
+                        mesh: mesh.clone(),
+                        transport: Rc::clone(&transport),
+                    }),
+                });
+                hub.define(&definitions);
+                let port =
+                    route::accept(transport, Some(mesh.clone()), hub.clone(), tasks);
+                let (mut port, mut act) =
+                    (pin!(port), pin!(act(hub, mesh.clone(), own)));
+                poll_fn(|cx| {
+                    let stopped = port.as_mut().poll(cx);
+                    assert!(stopped.is_pending(), "the peer's transport stopped");
+                    act.as_mut().poll(cx)
+                })
+                .await;
+                drop(mesh);
+            });
+            drop(started.expect("the peer starts"));
+        }
+
+        /// A task of the node reads the frames that the peer, the home, writes.
+        #[test]
+        fn a_node_reads_from_the_home_of_a_peer() {
+            use super::super::hub::{samples, write, writer};
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let founding = paired(&hosts, OTHER.0);
+            let node = start(&hosts[0], founding.clone());
+            let read = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&read);
+            node.spawn(move |hub| async move {
+                let value = "plant.value".parse().unwrap();
+                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let mut reader = match reader {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        *out.lock().unwrap() = Some(Err(error.to_string()));
+                        return;
+                    }
+                };
+                let received = reader.next().await;
+                *out.lock().unwrap() = Some(match received {
+                    Ok(received) => Ok(samples(&received, 2)),
+                    Err(ended) => Err(ended.to_string()),
+                });
+            });
+            peer_hub(&hosts[1], founding, move |hub, _, host| async move {
+                let clock = host.clock();
+                let mut writer = writer(&hub, &clock, &["plant.value"]).await;
+                for at in 0..1000 {
+                    write(&mut writer, super::super::hub::WALL + at, 7);
+                    clock.sleep(Span::from_nanos(10_000_000)).await;
+                }
+                std::future::pending::<()>().await;
+            });
+            assert_eq!(sim.run_for(TWENTY), Ok(()));
+            node.stop();
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            assert_eq!(read.lock().unwrap().take(), Some(Ok(vec![7])));
+        }
+
+        /// A node stops while a task holds a reader at the peer's home, or waits in
+        /// its open.
+        #[test]
+        fn a_node_stops_while_a_reader_at_a_peer_is_open() {
+            for opened in [true, false] {
+                let mut sim = sim::Sim::new(sim::Config::default());
+                let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+                let founding = paired(&hosts, OTHER.0);
+                let mut theirs = founding.clone();
+                if !opened {
+                    theirs.homes.clear();
+                }
+                let node = start(&hosts[0], founding);
+                let read = Arc::new(Mutex::new(Vec::new()));
+                let out = Arc::clone(&read);
+                node.spawn(move |hub| async move {
+                    let value = "plant.value".parse().unwrap();
+                    let reader =
+                        hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                    out.lock().unwrap().push(reader.is_ok());
+                    let mut reader = reader.expect("the reader opens");
+                    let next = reader.next().await.is_ok();
+                    out.lock().unwrap().push(next);
+                });
+                peer_hub(&hosts[1], theirs, move |_hub, _, _host| async move {
+                    std::future::pending::<()>().await;
+                });
+                assert_eq!(sim.run_for(TEN), Ok(()), "opened {opened}");
+                assert_eq!(
+                    *read.lock().unwrap(),
+                    if opened { vec![true] } else { vec![] },
+                    "opened {opened}"
+                );
+                node.stop();
+                assert_eq!(sim.run_for(TEN), Ok(()), "opened {opened}");
+                assert_eq!(node.join(), Ok(()), "opened {opened}");
+                let node = start(&hosts[0], paired(&hosts, OTHER.0));
+                assert_eq!(sim.run_for(TEN), Ok(()), "opened {opened}");
+                node.stop();
+                assert_eq!(sim.run_for(TEN), Ok(()), "opened {opened}");
+                assert_eq!(node.join(), Ok(()), "opened {opened}");
+            }
+        }
+
+        /// The readers that the peer holds at the node's home leave the mesh of the
+        /// peer a stream to the node, so a home that the peer sets still commits.
+        #[test]
+        #[ignore = "waits on #2019"]
+        fn readers_at_a_home_leave_the_mesh_a_stream() {
+            // In seed 2 the peer is not the leader, so it sends the change on a new
+            // stream to the node.
+            assert!(set_with_readers(2, 63), "63 readers");
+            assert!(set_with_readers(2, 64), "64 readers");
+        }
+
+        /// Whether a home that the peer sets, while it holds `count` readers at the
+        /// node's home, commits in a run of `seed`.
+        fn set_with_readers(seed: u64, count: usize) -> bool {
+            let case = (seed, count);
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let founding = paired(&hosts, OWN);
+            let node = start(&hosts[0], founding.clone());
+            assert_eq!(sim.run_for(TEN), Ok(()), "case {case:?}");
+            let results = Arc::new(Mutex::new((0, Vec::new())));
+            let out = Arc::clone(&results);
+            peer_hub(&hosts[1], founding, move |hub, mesh, host| async move {
+                host.clock().sleep(Span::SECOND).await;
+                let mut readers = Vec::new();
+                for _ in 0..count {
+                    let value = "plant.value".parse().unwrap();
+                    let mode = ::hub::reader::Mode::Latest;
+                    let reader = hub.reader(&[value], mode).await;
+                    readers.push(reader.expect("the reader opens"));
+                    out.lock().unwrap().0 += 1;
+                }
+                let set = mesh.set_home(INDEX, OTHER.0).await;
+                out.lock().unwrap().1.push(set);
+                std::future::pending::<()>().await;
+            });
+            assert_eq!(sim.run_for(Span::MINUTE), Ok(()), "case {case:?}");
+            let committed = {
+                let (opened, set) = &*results.lock().unwrap();
+                assert_eq!(*opened, count, "case {case:?}");
+                match set.as_slice() {
+                    [] => false,
+                    [Ok(())] => true,
+                    other => panic!("{case:?}: {other:?}"),
+                }
+            };
+            node.stop();
+            assert_eq!(sim.run_for(TEN), Ok(()), "case {case:?}");
+            assert_eq!(node.join(), Ok(()), "case {case:?}");
+            committed
+        }
+
+        /// The peer reads the frames that a task of the node, the home, writes.
+        #[test]
+        fn a_peer_reads_from_the_home_of_the_node() {
+            use super::super::hub::{samples, write, writer};
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let founding = paired(&hosts, OWN);
+            let node = start(&hosts[0], founding.clone());
+            let clock = hosts[0].clock();
+            node.spawn(move |hub| async move {
+                let mut writer = writer(&hub, &clock, &["plant.value"]).await;
+                for at in 0..1000 {
+                    write(&mut writer, super::super::hub::WALL + at, 7);
+                    clock.sleep(Span::from_nanos(10_000_000)).await;
+                }
+                std::future::pending::<()>().await;
+            });
+            let read = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&read);
+            peer_hub(&hosts[1], founding, move |hub, _, _| async move {
+                let value = "plant.value".parse().unwrap();
+                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let mut reader = match reader {
+                    Ok(reader) => reader,
+                    Err(error) => {
+                        *out.lock().unwrap() = Some(Err(error.to_string()));
+                        return;
+                    }
+                };
+                let received = reader.next().await;
+                *out.lock().unwrap() = Some(match received {
+                    Ok(received) => Ok(samples(&received, 2)),
+                    Err(ended) => Err(ended.to_string()),
+                });
+                std::future::pending::<()>().await;
+            });
+            assert_eq!(sim.run_for(TWENTY), Ok(()));
+            assert_eq!(read.lock().unwrap().take(), Some(Ok(vec![7])));
+            node.stop();
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+        }
     }
 }
