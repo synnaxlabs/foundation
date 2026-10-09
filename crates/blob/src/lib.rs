@@ -619,9 +619,8 @@ mod tests {
         bytes: &[u8],
     ) {
         let file = node.files().open(&path(digest), Mode::Write).await.unwrap();
-        let mut block = create_pool(BUDGET).alloc(bytes.len()).unwrap();
-        block.copy_from_slice(bytes);
-        file.write_at(offset, &[block.freeze()]).await.unwrap();
+        let block = create_pool(BUDGET).copy(bytes).unwrap();
+        file.write_at(offset, &[block]).await.unwrap();
         file.sync().await.unwrap();
         file.close().await;
     }
