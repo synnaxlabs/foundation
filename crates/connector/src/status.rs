@@ -7,8 +7,11 @@ use std::fmt;
 use std::future::poll_fn;
 use std::pin::pin;
 use std::rc::Rc;
+use std::sync::Arc;
+#[cfg(not(loom))]
+use std::sync::Mutex;
+#[cfg(not(loom))]
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
 use std::task::{self, Poll, Wake, Waker};
 
 use env::clock::Clock;
@@ -20,6 +23,10 @@ use types::time::{Monotonic, Span, Stamp};
 
 use hub::home::{self, Outcome, Refusal, order};
 use hub::writer::Failure;
+#[cfg(loom)]
+use loom::sync::Mutex;
+#[cfg(loom)]
+use loom::sync::atomic::{AtomicBool, Ordering};
 
 use crate::kind;
 
@@ -656,5 +663,71 @@ mod tests {
             error.to_string(),
             "a name or pattern is 256 bytes long, more than the limit of 255 bytes"
         );
+    }
+}
+
+#[cfg(test)]
+#[cfg(loom)]
+mod model {
+    use std::future::{pending, poll_fn};
+    use std::pin::pin;
+    use std::sync::Arc;
+    use std::task::{self, Poll, Wake, Waker};
+
+    use loom::sync::Mutex;
+    use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use loom::thread;
+
+    use super::beside;
+
+    /// A task waker that records its wake.
+    #[derive(Default)]
+    struct Task(AtomicBool);
+
+    impl Wake for Task {
+        fn wake(self: Arc<Self>) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+
+    /// A wake of the side from another thread, while a poll with a new task waker
+    /// runs, reaches that poll or wakes the new task.
+    #[test]
+    fn a_wake_of_the_side_from_another_thread_is_not_lost() {
+        loom::model(|| {
+            let (slot, polls) =
+                (Arc::new(Mutex::new(None)), Arc::new(AtomicUsize::new(0)));
+            let (stored, counted) = (Arc::clone(&slot), Arc::clone(&polls));
+            let side = poll_fn(move |cx| {
+                counted.fetch_add(1, Ordering::Relaxed);
+                *stored.lock().expect("no panic under the lock") =
+                    Some(cx.waker().clone());
+                Poll::Pending
+            });
+            let mut both = pin!(beside(pending::<()>(), side));
+            let (first, second) =
+                (Arc::new(Task::default()), Arc::new(Task::default()));
+            let first_waker = Waker::from(Arc::clone(&first));
+            let pending = both
+                .as_mut()
+                .poll(&mut task::Context::from_waker(&first_waker));
+            assert!(pending.is_pending());
+            let side_waker: Waker = slot
+                .lock()
+                .expect("no panic under the lock")
+                .take()
+                .expect("the side keeps a waker");
+            let waking = thread::spawn(move || side_waker.wake());
+            let second_waker = Waker::from(Arc::clone(&second));
+            let pending = both
+                .as_mut()
+                .poll(&mut task::Context::from_waker(&second_waker));
+            assert!(pending.is_pending());
+            waking.join().expect("no panic in the wake");
+            assert!(
+                polls.load(Ordering::Relaxed) == 2 || second.0.load(Ordering::Acquire),
+                "the second poll sees the wake, or the wake wakes the second task"
+            );
+        });
     }
 }

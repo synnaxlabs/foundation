@@ -19,6 +19,9 @@ document = { path = "../document" }
 spec = { path = "../spec", optional = true }
 types = { path = "../types" }
 
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
+
 [dev-dependencies]
 # Turns on `sim`, because the bench host runs no features.
 codec = { path = "../codec" }

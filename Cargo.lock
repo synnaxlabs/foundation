@@ -410,6 +410,7 @@ dependencies = [
  "http-body",
  "hub",
  "hyper",
+ "loom",
  "proptest",
  "sim",
  "spec",
