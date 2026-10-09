@@ -55,11 +55,12 @@
 
   Each write is one frame with the last value of every status channel. Each start of a
   run writes the whole status. A change of `state`, `class`, or `restarts` is written at
-  once. A change of counts alone is written at most once each second after the last
+  once, after the home applied the state before it (below). A change of counts alone is written at most once each second after the last
   write, timed with the clock of `supervisor::Config` (`laptop.architect-2`,
   2026-10-08T06:38:42Z:
   https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6054035730, rules 1
-  to 3). When a run returns, `state` 3 with the class of that end is written at once.
+  to 3). When a run returns, `state` 3 with the class of that end is written at once, after
+  the home applied the state before it.
   When each task of the run ended, `state` 1, or 2 when the call returns
   (`laptop.architect-2`, 2026-10-08T19:07:43Z:
   https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6067099903). A run
