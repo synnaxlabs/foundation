@@ -29,6 +29,10 @@ use types::time::Span;
 /// The port each node binds, on its host's first address.
 const PORT: u16 = 7000;
 
+/// The stamp of the first sample of [`Lab::send`], 2026-01-01 in nanoseconds. Each
+/// later sample is a millisecond later.
+const START: i64 = 1_767_225_600_000_000_000;
+
 /// The private key of the subject `admin`, the first admin of each mesh.
 const ADMIN: PrivateKey = PrivateKey([0; 32]);
 
@@ -49,16 +53,20 @@ pub(crate) struct Lab {
     /// The samples written, by channel.
     written: BTreeMap<String, Written>,
     /// What each reader got, by [`Reader`].
-    readers: Vec<Got>,
-    /// What a local reader at the home got, by channel. A stand-in for a read of
-    /// the home (#340), for the preview only.
-    homes: BTreeMap<String, Got>,
+    readers: Vec<Arc<Mutex<Got>>>,
+    /// What a reader at the node of [`Lab::send`] got, by channel.
+    sent: BTreeMap<String, Arc<Mutex<Got>>>,
     /// The key of the next channel.
     next: u128,
 }
 
-/// The samples a reader got, and why it ended, and whether it opened.
-type Got = Arc<Mutex<(Vec<Sample>, Option<String>, bool)>>;
+/// What one reader task got.
+#[derive(Debug, Default)]
+struct Got {
+    opened: bool,
+    samples: Vec<Sample>,
+    ended: Option<hub::reader::Ended>,
+}
 
 /// A simulated InfluxDB store and the names of the connector that writes to it.
 #[derive(Debug, Default)]
@@ -164,14 +172,23 @@ impl Lab {
             stores: BTreeMap::new(),
             written: BTreeMap::new(),
             readers: Vec::new(),
-            homes: BTreeMap::new(),
+            sent: BTreeMap::new(),
             next: 1,
         }
     }
 
     /// Adds a node named `name` on a new simulated host, and writes its key there. It
     /// starts at the next [`Lab::run`].
+    ///
+    /// # Panics
+    ///
+    /// After the first [`Lab::run`], as the write of the key runs the simulation to
+    /// its end, and a node that runs never ends.
     pub(crate) fn start(&mut self, name: &str) -> Node {
+        assert!(
+            self.members.iter().all(|member| member.node.is_none()),
+            "lab failure: `start` after the first run"
+        );
         let byte = u8::try_from(self.members.len() + 1)
             .expect("lab failure: at most 255 nodes");
         let host = self.sim.node(sim::node::Config::default());
@@ -354,29 +371,25 @@ impl Lab {
         }
     }
 
-    /// Opens a live reader on `channel` at `node`. It gets the samples written from
-    /// now on.
+    /// Opens a live reader on `channel` at `node`, and runs the simulation until it
+    /// opens. It gets the samples written from now on.
     pub(crate) fn reader(&mut self, node: Node, channel: &str) -> Reader {
-        self.boot();
-        let got = collect(&self.members[node.0], channel);
-        self.until_open(&got);
+        let got = self.open(node, channel);
         self.readers.push(got);
         Reader(self.readers.len() - 1)
     }
 
     /// Writes `values` to `channel` on `node`, one each millisecond, as the
-    /// simulation runs.
+    /// simulation runs, stamped from [`START`]. First it opens a reader at `node` for
+    /// [`Lab::samples`].
     pub(crate) fn send(&mut self, node: Node, channel: &str, values: &[f64]) {
         use hub::writer;
         use types::authority::Authority;
         use types::frame::{Form, Label, Path as Stream};
-        self.boot();
+        let got = self.open(node, channel);
+        self.sent.insert(channel.to_string(), got);
         let member = &self.members[node.0];
-        let home = collect(member, channel);
-        self.until_open(&home);
-        self.homes.insert(channel.to_string(), home);
-        let member = &self.members[node.0];
-        let (clock, wall) = (member.host.clock(), member.host.wall());
+        let clock = member.host.clock();
         let values = values.to_vec();
         let name: types::name::Name =
             channel.parse().expect("lab failure: a channel name");
@@ -395,29 +408,21 @@ impl Lab {
                     opened => break opened.expect("lab failure: the writer opens"),
                 }
             };
-            for value in values {
+            let stamps = (START..).step_by(1_000_000);
+            for (stamp, value) in stamps.zip(values) {
                 clock.sleep(Span::MILLISECOND).await;
-                let set = writer.set();
-                let entries = set.entries();
-                let time = entries
-                    .iter()
-                    .position(|e| {
-                        e.data_type
-                            == types::sample::Type::Scalar(types::sample::Scalar::Stamp)
-                    })
-                    .expect("an index");
-                let data = 1 - time;
-                let group = entries[time].group;
+                let entries = writer.set().entries();
+                let time = index(entries);
+                let (data, group) = (1 - time, entries[time].group);
                 let mut draft = writer
                     .draft(Form::Raw, &[(0, 8), (1, 8)])
                     .expect("lab failure: a frame");
-                let stamp = wall.now().time.nanos();
                 for (entry, bytes) in
                     [(time, stamp.to_le_bytes()), (data, value.to_le_bytes())]
                 {
                     draft
                         .series_mut(entry)
-                        .expect("a series")
+                        .expect("lab failure: the series is present")
                         .copy_from_slice(&bytes);
                 }
                 draft.set_count(group, 1);
@@ -427,31 +432,30 @@ impl Lab {
         });
     }
 
-    /// Runs the simulation a millisecond at a time until `got` opens, at most 10 s.
-    fn until_open(&mut self, got: &Got) {
-        let wait: u32 =
-            std::env::var("PREVIEW_WAIT").map_or(10_000, |w| w.parse().unwrap());
-        for at in 0..wait {
-            if got.lock().unwrap().2 {
-                if at > 100 {
-                    eprintln!("a reader opened after {at} ms");
-                }
-                return;
+    /// Starts a complete reader on `channel` at `node`, and runs the simulation a
+    /// millisecond at a time until it opens: the hub gives only the frames written
+    /// after the open.
+    fn open(&mut self, node: Node, channel: &str) -> Arc<Mutex<Got>> {
+        self.boot();
+        let got = collect(&self.members[node.0], channel);
+        for _ in 0..10_000 {
+            if got.lock().unwrap().opened {
+                return got;
             }
             if let Err(e) = self.sim.run_for(Span::MILLISECOND) {
                 panic!("{e}");
             }
         }
-        panic!("lab failure: the reader did not open in 10 s");
+        panic!("the reader on {channel} did not open in 10 s");
     }
 
     /// Every sample that `reader` got, in the order it got them.
+    ///
+    /// # Panics
+    ///
+    /// When the reader ended.
     pub(crate) fn received(&self, reader: Reader) -> Vec<Sample> {
-        let got = self.readers[reader.0].lock().unwrap();
-        if let Some(ended) = &got.1 {
-            eprintln!("the reader ended: {ended}");
-        }
-        got.0.clone()
+        took(&self.readers[reader.0])
     }
 
     /// Creates a single-use join ticket on `admin`.
@@ -564,18 +568,23 @@ impl Lab {
     }
 
     /// Reads every sample of `channel` on `node`, as `subject`. For short runs only.
-    /// For the preview, what a local reader at the home got from [`Lab::send`] on.
+    /// Until a read of the home exists (#340), it gives what a reader at the node of
+    /// [`Lab::send`] got from the send on.
+    ///
+    /// # Panics
+    ///
+    /// When no [`Lab::send`] wrote to `channel`, or its reader ended.
     pub(crate) fn samples(
         &mut self,
         _node: Node,
         _subject: &str,
         channel: &str,
     ) -> Vec<Sample> {
-        let got = self.homes[channel].lock().unwrap();
-        if let Some(ended) = &got.1 {
-            eprintln!("the home reader ended: {ended}");
-        }
-        got.0.clone()
+        let got = self
+            .sent
+            .get(channel)
+            .unwrap_or_else(|| panic!("lab failure: no send wrote to {channel}"));
+        took(got)
     }
 
     /// The commands recorded on `channel`, with their acknowledgments.
@@ -669,24 +678,22 @@ impl Lab {
     }
 }
 
-/// A complete reader on `channel` at `member`, which puts each sample it gets in
+/// Spawns a complete reader on `channel` at `member`, which puts what it gets in
 /// the returned value.
-fn collect(member: &Member, channel: &str) -> Got {
-    let got: Got = Arc::default();
+fn collect(member: &Member, channel: &str) -> Arc<Mutex<Got>> {
+    let got = Arc::<Mutex<Got>>::default();
     let out = Arc::clone(&got);
     let name: types::name::Name = channel.parse().expect("lab failure: a channel name");
-    member.node.as_ref().unwrap().spawn(move |hub| async move {
+    let node = member.node.as_ref().expect("lab failure: the node runs");
+    node.spawn(move |hub| async move {
         let opened = hub.reader(&[name], hub::reader::Mode::Complete).await;
-        let mut reader = opened.expect("lab failure: the reader opens");
-        out.lock().unwrap().2 = true;
+        let mut reader = opened.expect("the reader opens");
+        out.lock().unwrap().opened = true;
         loop {
             match reader.next().await {
-                Ok(received) => {
-                    let samples = decode(&received);
-                    out.lock().unwrap().0.extend(samples);
-                }
+                Ok(received) => out.lock().unwrap().samples.extend(decode(&received)),
                 Err(ended) => {
-                    out.lock().unwrap().1 = Some(format!("{ended:?}"));
+                    out.lock().unwrap().ended = Some(ended);
                     return;
                 }
             }
@@ -695,25 +702,46 @@ fn collect(member: &Member, channel: &str) -> Got {
     got
 }
 
-/// The samples of `received`: its index and its one data channel.
+/// The samples of `got`.
+///
+/// # Panics
+///
+/// When its reader ended.
+fn took(got: &Mutex<Got>) -> Vec<Sample> {
+    let got = got.lock().unwrap();
+    if let Some(ended) = &got.ended {
+        panic!("the reader ended: {ended}");
+    }
+    got.samples.clone()
+}
+
+/// The position of the index in `entries`.
+fn index(entries: &[types::frame::key_set::Entry]) -> usize {
+    let stamp = types::sample::Type::Scalar(types::sample::Scalar::Stamp);
+    entries
+        .iter()
+        .position(|entry| entry.data_type == stamp)
+        .expect("lab failure: the set holds an index")
+}
+
+/// The samples of `received`, a frame of one data channel and its index.
 fn decode(received: &hub::reader::Received<'_>) -> Vec<Sample> {
     let entries = received.set.entries();
-    let mut series: Vec<(usize, Vec<u8>)> = Vec::new();
+    let time = index(entries);
+    let mut series = [Vec::new(), Vec::new()];
     for (entry, bytes) in received.view.iter() {
-        let e = &entries[entry];
-        let range = received.view.range(e.group).expect("a range");
+        let at = &entries[entry];
+        let range = received
+            .view
+            .range(at.group)
+            .expect("the group has a range");
         let count = usize::try_from(range.count).unwrap();
-        let mut out = vec![0; count * 8];
-        codec::decode(e.data_type, count, bytes, &mut out).expect("decodes");
-        series.push((entry, out));
+        let out = &mut series[usize::from(entry != time)];
+        out.resize(count * 8, 0);
+        codec::decode(at.data_type, count, bytes, out).expect("the series decodes");
     }
-    let stamp = types::sample::Type::Scalar(types::sample::Scalar::Stamp);
-    let (time, data): (Vec<_>, Vec<_>) = series
-        .into_iter()
-        .partition(|(entry, _)| entries[*entry].data_type == stamp);
-    let (time, data) = (&time[0].1, &data[0].1);
-    let (time, _) = time.as_chunks::<8>();
-    let (data, _) = data.as_chunks::<8>();
+    let [time, data] = series;
+    let (time, data) = (time.as_chunks::<8>().0, data.as_chunks::<8>().0);
     time.iter()
         .zip(data)
         .map(|(t, d)| Sample {
@@ -724,7 +752,7 @@ fn decode(received: &hub::reader::Received<'_>) -> Vec<Sample> {
 }
 
 /// The names that `dir` of `node`'s data directory holds at 1 s, or the error of the
-/// list. Call it before the first [`Lab::run`].
+/// list. Call it after each [`Lab::start`] and before the first [`Lab::run`].
 fn listed(lab: &Lab, node: Node, dir: &'static str) -> Arc<Mutex<Option<Listed>>> {
     let host = lab.members[node.0].host.clone();
     let out = Arc::new(Mutex::new(None));
@@ -796,6 +824,15 @@ fn a_mesh_after_the_first_run_panics() {
     let (a, b) = (lab.start("a"), lab.start("b"));
     lab.run(Duration::from_millis(1));
     lab.mesh(&[a, b]);
+}
+
+#[test]
+#[should_panic(expected = "lab failure: `start` after the first run")]
+fn a_start_after_the_first_run_panics() {
+    let mut lab = Lab::new(1);
+    lab.start("a");
+    lab.run(Duration::from_millis(1));
+    lab.start("b");
 }
 
 #[test]

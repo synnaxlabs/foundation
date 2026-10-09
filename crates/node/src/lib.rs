@@ -700,6 +700,7 @@ impl Serve {
     /// port's future and the tasks of the mesh. Runs no task and takes no session when
     /// a shard did not open, or when the identity did not load or the mesh did not
     /// open, which goes into `failed`.
+    #[expect(clippy::too_many_lines, reason = "preview merge only")]
     async fn run(
         self,
         home: home::Shard,
