@@ -131,16 +131,19 @@
   loopback, with an MTU of 16,384 bytes, loses a larger datagram. Decided by
   `laptop.architect-2` (2026-10-08 22:35 UTC, #1965,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767). On Apple,
-  unless a caller turns on the fast path with `UdpSocketState::set_apple_fast_path`,
-  which no crate here calls, the `noq-udp` patch sends an IPv4 source as `IP_PKTINFO`,
-  and `os` has no check of its own for an IPv4 source that is not local. Decided by
-  `laptop.architect-2` (2026-10-08 22:51 UTC, #1965,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958). Trigger:
-  a PR that calls `set_apple_fast_path` first patches `prepare_msg_x` as `prepare_msg`
-  is, and links a macOS run of the source tests with the fast path on
-  (`laptop.architect-2`, 2026-10-09 04:55 and 05:03 UTC, #2097,
-  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074544404,
+  the `noq-udp` patch sends an IPv4 source as `IP_PKTINFO`, and `os` refuses no IPv4
+  source beyond the exception above. Decided by `laptop.architect-2` (2026-10-08
+  22:51 UTC, #1965,
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958). This
+  holds unless a caller turns on the fast path with
+  `UdpSocketState::set_apple_fast_path`, which no crate here calls. Trigger: a PR that
+  calls `set_apple_fast_path` first patches `prepare_msg_x` as `prepare_msg` is, and
+  links a macOS run of the source tests with the fast path on. The limit and its
+  trigger: `laptop.architect-2` (2026-10-09 05:03 UTC, #2097,
   https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074645099).
+  Supersedes the `fast-apple-datapath` condition of
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074544404
+  (04:55 UTC).
   `os::net()` is behind the `os` cargo feature `net`, off by default, because Tokio has
   no `net` under `--cfg loom`. Decided by `laptop.architect-2` (2026-10-08 23:42 UTC,
   #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415).
