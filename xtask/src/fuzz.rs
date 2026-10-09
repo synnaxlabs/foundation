@@ -26,6 +26,12 @@ const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 /// The least `-max_len` of a run: libFuzzer makes no input longer.
 const MAX_LEN: u64 = 16 * 1024;
 
+/// Each target, and the count of features that it must give at `INITED` to pass.
+const FLOORS: [(&str, u64); 1] = [
+    // With fewer, the build gave its C no coverage.
+    ("connector_opcua_decode", 1000),
+];
+
 /// Runs each target of `fuzz/` at `root` for `seconds`, as many at once as the host has
 /// cores. Each run reads `fuzz/corpus/<target>`, which libFuzzer writes to, and
 /// `oracles/fuzz/<target>`. It fails before the build on each problem that [`check`]
@@ -191,20 +197,31 @@ fn max_len(sizes: impl IntoIterator<Item = u64>) -> u64 {
 
 /// What the run of `target` that gave `output` prints, and its problem. A run that
 /// passed prints libFuzzer's last `Done` line, and any other run its whole output. A
-/// run that passed with no `Done` line ran no input, which is a problem.
+/// run that passed with no `Done` line ran no input, which is a problem. So is a run
+/// with fewer features at `INITED` than the floor of its target in [`FLOORS`].
 fn report(target: &str, output: &Output) -> (String, Result<(), String>) {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let done = stderr.lines().rfind(|line| line.starts_with("Done "));
-    match (output.status.success(), done) {
-        (true, Some(done)) => {
+    let floor = FLOORS.iter().find(|(name, _)| *name == target);
+    let features = inited(&stderr);
+    match (output.status.success(), done, floor) {
+        (true, Some(_), Some((_, floor))) if features.is_none_or(|n| n < *floor) => {
+            let problem = format!(
+                "fuzz target `{target}` gave {} features at `INITED`, fewer than \
+                 its floor of {floor} in `FLOORS`",
+                features.map_or_else(|| "no".to_string(), |n| n.to_string())
+            );
+            (format!("{problem}:\n{stdout}{stderr}\n"), Err(problem))
+        }
+        (true, Some(done), _) => {
             (format!("fuzz target `{target}` passed: {done}\n"), Ok(()))
         }
-        (true, None) => (
+        (true, None, _) => (
             format!("fuzz target `{target}` gave no `Done` line:\n{stdout}{stderr}\n"),
             Err(format!("fuzz target `{target}` gave no `Done` line")),
         ),
-        (false, _) => (
+        (false, _, _) => (
             format!("fuzz target `{target}` failed:\n{stdout}{stderr}\n"),
             Err(format!(
                 "fuzz target `{target}` failed. cargo-fuzz keeps the input of a crash \
@@ -212,6 +229,13 @@ fn report(target: &str, output: &Output) -> (String, Result<(), String>) {
             )),
         ),
     }
+}
+
+/// The count of features on the `INITED` line of libFuzzer in `stderr`.
+fn inited(stderr: &str) -> Option<u64> {
+    let line = stderr.lines().find(|line| line.contains("\tINITED "))?;
+    let mut words = line.split_whitespace().skip_while(|word| *word != "ft:");
+    words.nth(1)?.parse().ok()
 }
 
 /// Checks `fuzz/` at `root` before the build and returns its targets, read from its
@@ -1416,6 +1440,38 @@ mod tests {
                 Err("fuzz target `spec_tree` gave no `Done` line".to_string())
             )
         );
+    }
+
+    #[test]
+    fn refuses_a_run_below_the_feature_floor_of_its_target() {
+        let target = "connector_opcua_decode";
+        let floor = |features: &str| {
+            let stderr = format!("#488\tINITED{features} corp: 1\nDone 9 runs\n");
+            report(target, &output(0, "", &stderr)).1
+        };
+        assert_eq!(floor(" cov: 530 ft: 1000"), Ok(()));
+        let refused = |n: &str| {
+            Err(format!(
+                "fuzz target `{target}` gave {n} features at `INITED`, fewer than \
+                 its floor of 1000 in `FLOORS`"
+            ))
+        };
+        assert_eq!(floor(" cov: 75 ft: 999"), refused("999"));
+        assert_eq!(floor(""), refused("no"));
+        let stderr = "#2\tINITED cov: 1 ft: 1 corp: 1\nDone 9 runs\n";
+        assert_eq!(report("spec_tree", &output(0, "", stderr)).1, Ok(()));
+    }
+
+    #[test]
+    fn each_floor_names_a_target_of_fuzz() {
+        let fuzz = crate::fixture().join("../../fuzz");
+        let targets = bins(&crate::graph(&fuzz).unwrap()).unwrap();
+        for (target, _) in FLOORS {
+            assert!(
+                targets.iter().any(|t| t == target),
+                "{target} in {targets:?}"
+            );
+        }
     }
 
     #[test]

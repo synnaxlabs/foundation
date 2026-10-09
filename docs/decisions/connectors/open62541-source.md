@@ -50,8 +50,9 @@
   flag. `build.rs` and the check both read `flags.txt`, so the check reads objects
   compiled with the flags of the connector. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849,
-  2026-10-08 13:31 UTC). The `UA_ARCH_HEADER` of the allocator below is the one flag
-  of `build.rs` outside `flags.txt`, so the objects of the check do not have it. A
+  2026-10-08 13:31 UTC). The `UA_ARCH_HEADER` of the allocator below and the
+  sanitizer flags below are the only flags of `build.rs` outside `flags.txt`, so the
+  objects of the check do not have them. A
   `-W` flag with no `,` is a warning, which changes no code, so `collect` leaves it
   out by that pattern, not by name. Decided by
   `laptop.architect-2`
@@ -166,6 +167,28 @@
   2026-10-08 21:46 UTC, and the list for 64-bit Arm at 586e8089:
   https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6069858320,
   2026-10-08 22:00 UTC).
+  `build.rs` gives both builds the sanitizers of the Rust build. With
+  `sanitize="address"`, it adds `-fsanitize=address,undefined -fno-sanitize=function
+  -fno-sanitize-recover=all` and sets `cfg(asan)`. With `cfg(fuzzing)`, it adds
+  `-fsanitize=fuzzer-no-link`. With either, a compiler that is not clang gives way to
+  `clang`, since rustc links the LLVM runtimes. The `function` check is off because the
+  copy calls functions through a generic type by design (`ZIP_FUNCTIONS`, the
+  `UA_Callback` casts). With a sanitizer other than `address` and `leak`, `build.rs`
+  fails: the C has no MSan or TSan instrumentation, so MSan reports false errors and
+  TSan misses the C. Lost: a Rust MSan or TSan run of this crate (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/2165#issuecomment-6088153688, 2026-10-09
+  19:51 UTC). Under `cfg(asan)`, the test of the archive also accepts the names of the
+  sanitizer runtimes (`__asan_`, `__ubsan_`, `__start_asan_globals`,
+  `__stop_asan_globals`). Lost: `CC` and `CFLAGS` set by each job, which gives two
+  places that pick the flags, and C with no coverage under a plain `cargo fuzz`; and an
+  ignore list for the copy in place of `-fno-sanitize=function`, because the one
+  indirect call of `shim.c` that the check reads runs the cast callbacks of the copy.
+  The flags follow `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018,
+  2026-10-08 02:24 UTC, and the `function` check, 2026-10-09 17:35 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2165#issuecomment-6086019787).
+  Supersedes, for the `function` check, the C flags of rule 1 of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018.
   The copy builds with `UA_MULTITHREADING` 0, so it takes no `UA_LOCK` and links no
   `pthread_mutex_*` symbol: each server and each client runs on one thread. Level 0
   alone makes `UA_THREAD_LOCAL` empty, so two threads would share `UA_rng` and the

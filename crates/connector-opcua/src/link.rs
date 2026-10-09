@@ -345,6 +345,32 @@ fn the_list_holds_no_lock_and_no_atomic() {
     assert!(held.is_empty(), "{held:?}");
 }
 
+/// Whether `name` is in the runtime of the address or the undefined behavior
+/// sanitizer, which `build.rs` adds together.
+fn sanitizer(name: &str) -> bool {
+    name.starts_with("__asan_")
+        || name.starts_with("__ubsan_")
+        || ["__start_asan_globals", "__stop_asan_globals"].contains(&name)
+}
+
+#[test]
+fn sanitizer_names_only_the_runtimes() {
+    for name in ["__asan_init", "__ubsan_handle_add_overflow_abort"] {
+        assert!(sanitizer(name), "{name}");
+    }
+    assert!(sanitizer("__start_asan_globals"));
+    assert!(sanitizer("__stop_asan_globals"));
+    for name in [
+        "memcpy",
+        "__start_other",
+        "asan_init",
+        "__msan_init",
+        "_asan_x",
+    ] {
+        assert!(!sanitizer(name), "{name}");
+    }
+}
+
 /// The symbols that `nm` with `flag` gives for `files`.
 fn names(
     files: &[std::path::PathBuf],
@@ -391,7 +417,7 @@ fn the_c_names_only_the_listed_symbols_outside_it() {
     assert!(outside.contains(&"connector_opcua_malloc"), "{outside:?}");
     let unlisted: Vec<&str> = outside
         .into_iter()
-        .filter(|name| !OUTSIDE.contains(name))
+        .filter(|name| !(OUTSIDE.contains(name) || (cfg!(asan) && sanitizer(name))))
         .collect();
     assert!(unlisted.is_empty(), "the C names {unlisted:?}");
 }
@@ -452,14 +478,21 @@ fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the Rust names {drawn:?}");
 }
 
-/// `build.rs` sets `cfg(asan)` exactly when the address sanitizer instruments the C, so
-/// the tests of the poisoning in `alloc` cannot turn off unseen.
+/// When this test binary links the address sanitizer, the sanitizer instruments the C
+/// and `build.rs` sets `cfg(asan)`, so neither the C checks nor the tests of the
+/// poisoning in `alloc` can turn off unseen.
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "needs GNU nm")]
-fn asan_is_set_when_the_c_calls_the_address_sanitizer() {
+fn the_c_and_cfg_asan_follow_the_address_sanitizer_of_the_rust() {
+    let exe = std::env::current_exe().unwrap();
+    let rust = names(&[exe], "--defined-only").contains("__asan_init");
     let undefined = symbols("--undefined-only");
-    let instrumented = undefined.iter().any(|name| name.starts_with("__asan_"));
-    assert_eq!(cfg!(asan), instrumented, "{undefined:?}");
+    let c = undefined.iter().any(|name| name.starts_with("__asan_"));
+    assert_eq!(
+        (c, cfg!(asan)),
+        (rust, rust),
+        "(the C calls ASan, cfg(asan)) must equal whether the Rust links ASan"
+    );
 }
 
 /// GCC 10 and later default to `-moutline-atomics` on 64-bit Arm Linux, and so does
