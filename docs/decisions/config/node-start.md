@@ -30,9 +30,9 @@
   `node.failed`. Lost: `node.data` for the claim of `lock` alone, which leaves a ring
   that the user cannot write on `node.failed`. `Node::stopper` gives a `Stopper` that
   stops the node from another thread. A stop after the node ended does nothing. Lost: a
-  line that `node` writes
-  itself, a second owner of the output form; an entry of the table with a flag that each
-  of its four users skips. Decided by `laptop.architect-2` (2026-10-08T02:21:16Z,
+  line that `node` writes itself, a second owner of the output form; an entry of the
+  table with a flag that each of its four users skips. Decided by `laptop.architect-2`
+  (2026-10-08T02:21:16Z,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6050855867;
   2026-10-08T05:00:46Z, `--name` and the line,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6052649826;
@@ -53,6 +53,8 @@
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545,
   https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090417728;
   2026-10-09T23:14:43Z, the escape of `data` in the text form,
-  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090863425).
+  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090863425;
+  2026-10-09T23:23:21Z, why the escape stays, as the one form of each text line of
+  `ops`, https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090952680).
   `--listen`, and the files `address` and `admin.key`, come with #1744
   (https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6053227526).

@@ -34,9 +34,8 @@ pub struct Failure {
 impl Start {
     /// The line that tells that the node `name` runs in [`Start::data`], as text or
     /// JSON, with its newline. Each gives the data directory lossily, as
-    /// `Path::to_string_lossy` does.
-    /// Text also escapes it as [`Start::fail`] does: the line stays one line, and a
-    /// literal `\n` in the path reads apart from a newline.
+    /// `Path::to_string_lossy` does. Text also escapes it as [`Start::fail`] does: the
+    /// line stays one line, and a literal `\n` in the path reads apart from a newline.
     #[must_use]
     pub fn line(&self, name: &Name) -> String {
         if self.json {
