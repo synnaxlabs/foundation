@@ -34,7 +34,12 @@ fn site() -> Vec<(PathBuf, String)> {
 #[should_panic(expected = "`ops::Node` needs a front end")]
 fn refuses_an_empty_table_of_front_ends() {
     solo(|mesh| async move {
-        drop(Node::new(mesh, || Key::from_u128(1), BTreeMap::new(), Table::new()));
+        drop(Node::new(
+            mesh,
+            || Key::from_u128(1),
+            BTreeMap::new(),
+            Table::new(),
+        ));
     });
 }
 

@@ -7,8 +7,8 @@ use std::pin::pin;
 use std::task::Poll;
 
 use connector::kind::Table;
-use mesh::used::{Behind, Cause};
 use mesh::Mesh;
+use mesh::used::{Behind, Cause};
 use sim::Sim;
 use spec::Pointer;
 use spec::channel::{Edge, Problem};
@@ -20,8 +20,8 @@ use types::name::Prefix;
 
 use super::{Applied, apply};
 use crate::common::{
-    ADMIN, NODE, PLANT, Reader, files, founded, front_ends, keys, name, open, placed_site,
-    solo,
+    ADMIN, NODE, PLANT, Reader, files, founded, front_ends, keys, name, open,
+    placed_site, solo,
 };
 use crate::error::Error;
 use crate::plan::{self, Counts, Output, plan};

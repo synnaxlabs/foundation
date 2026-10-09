@@ -46,13 +46,22 @@ impl Node {
         }
     }
 
+    /// The mesh that the operations read and change.
+    #[must_use]
+    pub fn mesh(&self) -> &mesh::Mesh {
+        &self.mesh
+    }
+
     /// Plans the change from `files`, each a path and its text, to the spec in use.
     /// Gives the plan file and the JSON output that `plan --json` writes.
     ///
     /// # Errors
     ///
     /// The JSON error that `plan --json` writes, with its code, message, and fix.
-    pub async fn plan(&self, files: Vec<(PathBuf, String)>) -> Result<(Vec<u8>, Value), Value> {
+    pub async fn plan(
+        &self,
+        files: Vec<(PathBuf, String)>,
+    ) -> Result<(Vec<u8>, Value), Value> {
         let files: Vec<File> = files
             .into_iter()
             .map(|(path, text)| File { path, text })
@@ -67,7 +76,8 @@ impl Node {
             &self.kinds,
         )
         .map_err(|e| e.json())?;
-        let output = serde_json::to_value(output).expect("invariant: an output is JSON");
+        let output =
+            serde_json::to_value(output).expect("invariant: an output is JSON");
         Ok((plan.encode(), output))
     }
 
