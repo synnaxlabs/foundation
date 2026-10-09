@@ -11,12 +11,11 @@
 use std::path::Path;
 
 use block::Pool;
-use env::files::{self, Files, Mode};
+use env::files::{Files, Mode};
 use types::digest::Digest;
 
 use crate::bytes::block;
 use crate::error::Error;
-use crate::log;
 use crate::region::Founding;
 
 const FILE: &str = "founding";
@@ -35,7 +34,7 @@ const CHECK: usize = 8;
 /// - [`Error::Unfounded`] when the log holds a record and `dir` holds no founding, or
 ///   a founding that does not read back whole.
 /// - [`Error::Pool`] when the pool has no block.
-/// - [`Error::Log`] with [`log::Error::Files`] when a file call fails.
+/// - [`Error::Files`] when a file call fails.
 pub(super) async fn keep(
     files: &Files,
     dir: &Path,
@@ -43,7 +42,7 @@ pub(super) async fn keep(
     given: &Founding,
     logged: bool,
 ) -> Result<(), Error> {
-    let names = files.list(dir).await.map_err(failed)?;
+    let names = files.list(dir).await.map_err(Error::Files)?;
     let path = dir.join(FILE);
     if names.iter().any(|name| name == Path::new(FILE)) {
         let stored = read(files, &path, pool).await?;
@@ -72,7 +71,7 @@ pub(super) async fn keep(
 }
 
 async fn read(files: &Files, path: &Path, pool: &Pool) -> Result<Vec<u8>, Error> {
-    let file = files.open(path, Mode::Read).await.map_err(failed)?;
+    let file = files.open(path, Mode::Read).await.map_err(Error::Files)?;
     let len =
         usize::try_from(file.len()).expect("invariant: a founding fits in memory");
     let mut bytes = Vec::with_capacity(len);
@@ -83,7 +82,7 @@ async fn read(files: &Files, path: &Path, pool: &Pool) -> Result<Vec<u8>, Error>
         let part = file
             .read_at(offset(bytes.len()), part)
             .await
-            .map_err(failed)?;
+            .map_err(Error::Files)?;
         bytes.extend_from_slice(&part);
     }
     file.close().await;
@@ -101,21 +100,21 @@ async fn write(
     let mut bytes = digest(&rest).to_vec();
     bytes.extend(rest);
     let new = dir.join(NEW);
-    files.remove(&new).await.map_err(failed)?;
+    files.remove(&new).await.map_err(Error::Files)?;
     let len = offset(bytes.len());
     let mut file = files
         .open(&new, Mode::Create { len })
         .await
-        .map_err(failed)?;
+        .map_err(Error::Files)?;
     let mut at = 0;
     for part in bytes.chunks(pool.largest()) {
         let block = block(pool, part).map_err(Error::Pool)?;
-        file.write_at(at, &[block]).await.map_err(failed)?;
+        file.write_at(at, &[block]).await.map_err(Error::Files)?;
         at = at.saturating_add(offset(part.len()));
     }
-    file.rename(&dir.join(FILE)).await.map_err(failed)?;
+    file.rename(&dir.join(FILE)).await.map_err(Error::Files)?;
     file.close().await;
-    files.sync_dir(dir).await.map_err(failed)
+    files.sync_dir(dir).await.map_err(Error::Files)
 }
 
 // The check of some bytes: the first bytes of their digest.
@@ -128,8 +127,4 @@ fn digest(bytes: &[u8]) -> [u8; CHECK] {
 
 fn offset(at: usize) -> u64 {
     u64::try_from(at).expect("invariant: an offset fits in 64 bits")
-}
-
-fn failed(error: files::Error) -> Error {
-    Error::Log(log::Error::Files(error))
 }

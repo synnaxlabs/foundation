@@ -1,7 +1,7 @@
 //! Tests of the founding that the first open of a mesh directory keeps, and that each
 //! later open checks `Config::founding` against.
 
-use env::files::Mode;
+use env::files::{self, Mode};
 
 use super::*;
 
@@ -43,6 +43,14 @@ fn write_record(sim: &mut Sim, node: &sim::node::Node) {
 
 /// A first open with the founding of [`create_region`], and a record in the log.
 fn founded(seed: u64) -> (Sim, sim::node::Node, region::Founding) {
+    founded_with(seed, BTreeMap::new())
+}
+
+/// [`founded`], with the founding homes `homes`.
+fn founded_with(
+    seed: u64,
+    homes: BTreeMap<channel::Key, node::Key>,
+) -> (Sim, sim::node::Node, region::Founding) {
     let mut sim = Sim::new(sim::Config {
         seed,
         ..sim::Config::default()
@@ -50,7 +58,10 @@ fn founded(seed: u64) -> (Sim, sim::node::Node, region::Founding) {
     let node = sim.node(sim::node::Config::default());
     let region = sim
         .run_on(&node, |node, tasks| async move {
-            create_region(&node, &tasks).await
+            region::Founding {
+                homes,
+                ..create_region(&node, &tasks).await
+            }
         })
         .unwrap();
     run_with(&mut sim, &node, region.clone());
@@ -179,6 +190,91 @@ fn a_reopen_with_other_definitions_is_refused() {
 
     let error = refused(&mut sim, &node, more.clone());
     assert_eq!(error, mismatch(&region, &more), "a second refused open");
+}
+
+#[test]
+fn a_reopen_with_other_homes_is_refused() {
+    let homes = |home: Option<u8>| {
+        let homes = home.map(|id| (common::index(1), key(id)));
+        homes.into_iter().collect::<BTreeMap<_, _>>()
+    };
+    let (mut sim, node, region) = founded_with(0, homes(Some(2)));
+    let index = common::index(1);
+    let cases = [
+        (
+            Some(3),
+            format!("the mesh was founded with another home of index {index}"),
+        ),
+        (
+            None,
+            format!(
+                "the mesh was founded with a home of index {index}, which the config lacks"
+            ),
+        ),
+    ];
+    for (home, text) in cases {
+        let given = region::Founding {
+            homes: homes(home),
+            ..region.clone()
+        };
+        let error = refused(&mut sim, &node, given.clone());
+        assert_eq!(error, mismatch(&region, &given), "{home:?}");
+        assert_eq!(error.to_string(), text);
+    }
+    let (mut sim, node, region) = founded(0);
+    let given = region::Founding {
+        homes: homes(Some(2)),
+        ..region.clone()
+    };
+    let error = refused(&mut sim, &node, given.clone());
+    assert_eq!(error, mismatch(&region, &given));
+    let text = format!("the mesh was founded with no home of index {index}");
+    assert_eq!(error.to_string(), text);
+    run_with(&mut sim, &node, region);
+}
+
+/// A failed file call on the founding file, at the first open and at a later one.
+#[test]
+fn a_failed_call_on_the_founding_file_gives_the_files_error() {
+    let failed = |sim: &mut Sim, node: &sim::node::Node, region| {
+        let error = refused(sim, node, region);
+        let Error::Files(error) = error else {
+            panic!("{error:?}");
+        };
+        error
+    };
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let region = sim
+        .run_on(&node, |node, tasks| async move {
+            create_region(&node, &tasks).await
+        })
+        .unwrap();
+    node.fail_file(Path::new("founding.new"), Operation::WriteAt);
+    let error = failed(&mut sim, &node, region);
+    let path = PathBuf::from("founding.new");
+    let operation = Operation::WriteAt;
+    assert_eq!(
+        error,
+        files::Error::Io {
+            path,
+            operation,
+            code: 5
+        }
+    );
+    let (mut sim, node, region) = founded(0);
+    node.fail_file(Path::new(FILE), Operation::ReadAt);
+    let error = failed(&mut sim, &node, region);
+    let path = PathBuf::from(FILE);
+    let operation = Operation::ReadAt;
+    assert_eq!(
+        error,
+        files::Error::Io {
+            path,
+            operation,
+            code: 5
+        }
+    );
 }
 
 #[test]

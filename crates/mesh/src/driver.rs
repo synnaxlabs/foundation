@@ -167,10 +167,10 @@ impl Mesh {
     ///   founding, with the members of each in key order.
     /// - [`Error::Unfounded`] when the log holds a record, and `config.dir` holds no
     ///   founding that reads back whole.
-    /// - [`Error::Log`] when the log does not open, or a call of the founding file
-    ///   fails.
+    /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
-    /// - [`Error::Files`] when a call on `<config.dir>/spec` or its files fails, and
+    /// - [`Error::Files`] when a call on the founding file, on `<config.dir>/spec`, or
+    ///   on its files fails, and
     ///   [`Error::Stray`] when that directory holds a file that does not name a
     ///   pointer.
     ///
