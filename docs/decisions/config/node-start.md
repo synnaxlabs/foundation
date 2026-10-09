@@ -28,8 +28,9 @@
   `node::Error::Buffer`. Its message is "cannot write the data directory {data}:
   {error}", and its fix "Let this user make and write {data} and each file in it, or
   give another directory with `--data`". Each other `Directory` error but `Busy`, and
-  each other buffer error, is `node.failed`. Lost: `node.data` for the claim of `lock`
-  alone, which leaves a ring that the user cannot write on `node.failed`.
+  each buffer error that neither `node.data` nor NODE SETTINGS (`Pool`) names, is
+  `node.failed`. Lost: `node.data` for the claim of `lock` alone, which leaves a ring
+  that the user cannot write on `node.failed`.
   `Node::stopper` gives a `Stopper` that stops the node from another thread. A stop
   after the node ended does nothing. Lost: a line that `node` writes itself, a second
   owner of the output form; an entry of the table with a flag that each of its four
