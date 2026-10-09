@@ -63,6 +63,16 @@ UA_InterruptManager *UA_InterruptManager_new_POSIX(const UA_String name) {
     return NULL;
 }
 
+/* `src/ffi.rs` mirrors these and asserts the same sizes. */
+_Static_assert(sizeof(UA_NodeId) == 24, "UA_NodeId changed");
+_Static_assert(sizeof(UA_DataType) == 96, "UA_DataType changed");
+_Static_assert(sizeof(UA_DecodeBinaryOptions) == 40, "UA_DecodeBinaryOptions changed");
+_Static_assert(offsetof(UA_DecodeBinaryOptions, decodedLength) == 32,
+               "decodedLength moved");
+_Static_assert(UA_TYPES_COUNT == 388, "UA_TYPES changed");
+_Static_assert(UA_TYPES_BYTESTRING == 14, "UA_TYPES_BYTESTRING moved");
+_Static_assert(UA_TYPES_VARIANT == 23, "UA_TYPES_VARIANT moved");
+
 /* `src/ffi.rs` mirrors the struct, in words of the size of a pointer, and asserts the
  * same offsets. */
 _Static_assert(sizeof(UA_EventLoop) == 23 * sizeof(void *), "UA_EventLoop changed");

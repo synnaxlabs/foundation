@@ -373,8 +373,118 @@ fn stops_an_open_of_a_channel_removed_while_it_waits_for_a_home_with_unknown() {
             changing.set_home(TIME, NODE).await;
         });
     });
-    let unknown = channel::Key::from_u128(2);
-    assert_eq!(served, Some(Err(serve::Error::Unknown(unknown))));
+    let removed = serve::Error::Removed(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(removed)));
+    assert_eq!(code, Some(Code(wire::hub::UNKNOWN)));
+}
+
+/// An open of `[time, value]` that waits for the home of `time`, while a call moves
+/// `value` to `time-b`, stops with `UNKNOWN`, as for a removal.
+#[test]
+fn stops_an_open_of_a_channel_moved_while_it_waits_with_unknown() {
+    let (served, code) = served(7, |test| async move {
+        let changing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            changing.clock.sleep(Span::SECOND).await;
+            let mut moved = channels();
+            moved.insert(name("value"), definition(2, DataType::Sample(I64), 3));
+            changing.hub.set_definitions(&moved);
+            changing.set_home(TIME, NODE).await;
+        });
+    });
+    let removed = serve::Error::Removed(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(removed)));
+    assert_eq!(code, Some(Code(wire::hub::UNKNOWN)));
+}
+
+/// As above, while a call changes the data type of `value`.
+#[test]
+fn stops_an_open_of_a_channel_retyped_while_it_waits_with_unknown() {
+    let (served, code) = served(7, |test| async move {
+        let changing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            changing.clock.sleep(Span::SECOND).await;
+            let mut retyped = channels();
+            let f64 = types::sample::Type::Scalar(types::sample::Scalar::F64);
+            retyped.insert(name("value"), definition(2, DataType::Sample(f64), 1));
+            changing.hub.set_definitions(&retyped);
+            changing.set_home(TIME, NODE).await;
+        });
+    });
+    let removed = serve::Error::Removed(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(removed)));
+    assert_eq!(code, Some(Code(wire::hub::UNKNOWN)));
+}
+
+/// As above, while a call changes the data type of `value` after the home is named
+/// and before the open runs again: the open reads its removal after the wait.
+#[test]
+fn stops_an_open_of_a_channel_retyped_after_its_home_is_named_with_unknown() {
+    let (served, code) = served(7, |test| async move {
+        let changing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            changing.clock.sleep(Span::SECOND).await;
+            changing.set_home(TIME, NODE).await;
+            let mut retyped = channels();
+            let f64 = types::sample::Type::Scalar(types::sample::Scalar::F64);
+            retyped.insert(name("value"), definition(2, DataType::Sample(f64), 1));
+            changing.hub.set_definitions(&retyped);
+        });
+    });
+    let removed = serve::Error::Removed(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(removed)));
+    assert_eq!(code, Some(Code(wire::hub::UNKNOWN)));
+}
+
+/// An open that waits for the home of `time` stops when a call removes `time`, with
+/// no home named after the call.
+#[test]
+fn stops_an_open_whose_index_is_removed_while_it_waits_with_unknown() {
+    let (served, code) = served(7, |test| async move {
+        let changing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            changing.clock.sleep(Span::SECOND).await;
+            let removed = without(&["time", "value", "value-c"]);
+            changing.hub.set_definitions(&removed);
+        });
+    });
+    assert_eq!(served, Some(Err(serve::Error::Removed(TIME))));
+    assert_eq!(code, Some(Code(wire::hub::UNKNOWN)));
+}
+
+/// An open that waits stops with the channel of the first call that removed one of
+/// its channels.
+#[test]
+fn stops_an_open_that_waits_with_its_first_removed_channel() {
+    let (served, code) = served(7, |test| async move {
+        let changing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            changing.clock.sleep(Span::SECOND).await;
+            changing.hub.set_definitions(&without(&["value"]));
+            let removed = without(&["time", "value", "value-c"]);
+            changing.hub.set_definitions(&removed);
+        });
+    });
+    let removed = serve::Error::Removed(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(removed)));
+    assert_eq!(code, Some(Code(wire::hub::UNKNOWN)));
+}
+
+/// A call that defines `value` again as it was does not undo its removal by the call
+/// before it.
+#[test]
+fn stops_an_open_of_a_channel_removed_and_defined_again_while_it_waits_with_unknown() {
+    let (served, code) = served(7, |test| async move {
+        let changing = Rc::clone(&test);
+        test.tasks.spawn(async move {
+            changing.clock.sleep(Span::SECOND).await;
+            changing.hub.set_definitions(&without(&["value"]));
+            changing.hub.set_definitions(&channels());
+            changing.set_home(TIME, NODE).await;
+        });
+    });
+    let removed = serve::Error::Removed(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(removed)));
     assert_eq!(code, Some(Code(wire::hub::UNKNOWN)));
 }
 

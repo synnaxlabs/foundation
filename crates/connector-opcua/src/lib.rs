@@ -18,9 +18,15 @@ mod event;
 #[cfg(feature = "open62541")]
 #[cfg_attr(
     not(feature = "sim"),
-    expect(dead_code, reason = "only `bench` uses it until the session of #435")
+    expect(
+        dead_code,
+        reason = "only `bench` and `fuzz` use it until the session of #435"
+    )
 )]
 mod ffi;
+#[cfg(feature = "sim")]
+#[doc(hidden)]
+pub mod fuzz;
 #[cfg(test)]
 #[cfg(feature = "open62541")]
 mod link;
@@ -37,22 +43,16 @@ mod compiler;
 mod tests {
     use std::path::Path;
 
-    use super::{child, compiler};
+    use super::child;
+    use super::compiler;
 
     /// The target of each build that these tests make.
     const TARGET: &str = "x86_64-unknown-linux-gnu";
 
-    /// Gives the tool that `build` picks for `path`. No such file exists, so `cc`
-    /// takes the family from the name, as it does for a compiler it cannot run.
+    /// Gives the tool that `build` picks for `path`. When `cc` cannot run `path` to
+    /// find its family, it takes the family from the name.
     fn tool(mut build: cc::Build, path: &str) -> cc::Tool {
-        build
-            .compiler(path)
-            .target(TARGET)
-            .host(TARGET)
-            .opt_level(0)
-            .cargo_metadata(false)
-            .cargo_warnings(false)
-            .get_compiler()
+        child::tool(build.compiler(path), TARGET)
     }
 
     fn args(tool: &cc::Tool) -> Vec<String> {
@@ -141,10 +141,124 @@ mod tests {
         }
     }
 
+    /// The tool of this process for its own target, with the compiler and the `CFLAGS`
+    /// of its environment.
+    fn probe() -> cc::Tool {
+        child::tool(&mut cc::Build::new(), env!("CONNECTOR_OPCUA_TARGET"))
+    }
+
+    #[test]
+    fn asan_is_true_in_a_child_process() {
+        if child::running() {
+            assert_eq!(compiler::asan(&probe()), Ok(true));
+        }
+    }
+
+    #[test]
+    fn asan_is_false_in_a_child_process() {
+        if child::running() {
+            assert_eq!(compiler::asan(&probe()), Ok(false));
+        }
+    }
+
+    /// Gives the error of `asan` when `program` fails with `reason`.
+    fn cannot_preprocess(program: &Path, reason: &str) -> String {
+        let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join(compiler::PROBE);
+        format!(
+            "connector-opcua: {} cannot preprocess {}: {reason}",
+            program.display(),
+            probe.display()
+        )
+    }
+
+    #[test]
+    fn asan_fails_when_the_tool_cannot_run() {
+        let tool = tool(cc::Build::new(), "/missing/cc");
+        // ENOENT on Linux and macOS.
+        let reason = std::io::Error::from_raw_os_error(2);
+        assert_eq!(
+            compiler::asan(&tool),
+            Err(cannot_preprocess(tool.path(), &reason.to_string()))
+        );
+    }
+
+    #[test]
+    fn asan_fails_when_the_tool_cannot_preprocess() {
+        let tool = tool(cc::Build::new(), "false");
+        assert_eq!(
+            compiler::asan(&tool),
+            Err(cannot_preprocess(tool.path(), ""))
+        );
+    }
+
+    #[test]
+    fn asan_names_the_missing_wrapper_in_a_child_process() {
+        if child::running() {
+            let reason = std::io::Error::from_raw_os_error(2);
+            assert_eq!(
+                compiler::asan(&probe()),
+                Err(cannot_preprocess(
+                    Path::new("/missing/ccache"),
+                    &reason.to_string()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn asan_names_the_missing_wrapper() {
+        child::run(
+            "tests::asan_names_the_missing_wrapper_in_a_child_process",
+            &[("CC", "/missing/ccache clang")],
+        );
+    }
+
+    #[test]
+    fn asan_fails_with_the_stderr_of_the_tool() {
+        let mut build = cc::Build::new();
+        build.flag("--connector-opcua-no-such-flag");
+        let tool = child::tool(&mut build, env!("CONNECTOR_OPCUA_TARGET"));
+        let message = compiler::asan(&tool).unwrap_err();
+        // A wrapper in the `CC` variables or `RUSTC_WRAPPER` of this process runs in
+        // place of the compiler.
+        let program = Path::new(tool.to_command().get_program()).to_owned();
+        let stderr = message
+            .strip_prefix(&cannot_preprocess(&program, ""))
+            .unwrap_or_else(|| panic!("{message}"));
+        assert!(
+            stderr.contains("--connector-opcua-no-such-flag"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn asan_is_true_only_with_address_sanitizer_in_cflags() {
+        let (asan, other) = (
+            "tests::asan_is_true_in_a_child_process",
+            "tests::asan_is_false_in_a_child_process",
+        );
+        let cases = [
+            (asan, Some("-fsanitize=address")),
+            (asan, Some("-O1 -fsanitize=undefined,address")),
+            (other, None),
+            (other, Some("-fsanitize=undefined")),
+            (other, Some("-fsanitize=address -fno-sanitize=address")),
+        ];
+        // Clang 18 defines no `__SANITIZE_ADDRESS__`; only `__has_feature` finds it.
+        for compiler in [None, Some("clang")] {
+            for (name, cflags) in cases {
+                let compiler = compiler.map(|compiler| ("CC", compiler));
+                let cflags = cflags.map(|cflags| ("CFLAGS", cflags));
+                let envs: Vec<_> = compiler.into_iter().chain(cflags).collect();
+                child::run(name, &envs);
+            }
+        }
+    }
+
     #[test]
     fn the_shim_fails_on_a_warning_with_or_without_cflags() {
-        for cflags in [None, Some("-O1")] {
-            child::run("tests::builds_in_this_environment", cflags);
+        for envs in [&[][..], &[("CFLAGS", "-O1")]] {
+            child::run("tests::builds_in_this_environment", envs);
         }
     }
 }

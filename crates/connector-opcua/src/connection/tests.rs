@@ -1290,7 +1290,7 @@ fn a_second_drive_of_a_manager_panics() {
 /// Runs the test `name` of this module in a child process, asserts that it passes,
 /// and gives what it wrote to stderr.
 fn stderr(name: &str) -> String {
-    let output = child::output(&format!("connection::tests::{name}"));
+    let output = child::output(&format!("connection::tests::{name}"), &[]);
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
         output.status.success() && stdout.contains("test result: ok. 1 passed"),

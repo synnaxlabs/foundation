@@ -10,6 +10,10 @@ use super::Loop;
 use crate::child;
 use crate::ffi::{self, DelayedCallback, EventLoop, Status};
 
+unsafe extern "C" {
+    fn UA_UInt32_random() -> u32;
+}
+
 /// Ticks of 100 ns from 1601 to 1970, the epoch of `dateTime_now`.
 const UNIX_EPOCH_TICKS: i64 = 116_444_736_000_000_000;
 
@@ -274,7 +278,7 @@ fn draws(seed: u64) -> [u32; 4] {
     let clock = sim.node(sim::node::Config::default()).clock();
     let _events = Loop::new(clock, &mut Rng::from_seed(seed));
     // SAFETY: it draws from the generator of this thread.
-    std::array::from_fn(|_| unsafe { ffi::test::UA_UInt32_random() })
+    std::array::from_fn(|_| unsafe { UA_UInt32_random() })
 }
 
 #[test]
@@ -786,7 +790,7 @@ fn drop_65_passes() {
 fn the_drop_aborts_after_64_passes() {
     use std::os::unix::process::ExitStatusExt;
     const SIGABRT: i32 = 6;
-    let output = child::output("event::tests::drop_65_passes");
+    let output = child::output("event::tests::drop_65_passes", &[]);
     assert_eq!(output.status.signal(), Some(SIGABRT));
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
@@ -940,7 +944,7 @@ fn send_with_no_channel() {
 
 #[test]
 fn an_error_goes_to_stderr() {
-    let output = child::output("event::tests::send_with_no_channel");
+    let output = child::output("event::tests::send_with_no_channel", &[]);
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
@@ -951,7 +955,7 @@ fn an_error_goes_to_stderr() {
 
 #[test]
 fn a_warning_goes_to_stderr_and_an_info_message_does_not() {
-    let output = child::output("event::tests::connect_to_a_bad_url");
+    let output = child::output("event::tests::connect_to_a_bad_url", &[]);
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stderr).unwrap(),
@@ -961,7 +965,7 @@ fn a_warning_goes_to_stderr_and_an_info_message_does_not() {
 
 #[test]
 fn a_long_line_is_cut_to_512_bytes_with_its_newline() {
-    let output = child::output("event::tests::connect_to_a_long_url");
+    let output = child::output("event::tests::connect_to_a_long_url", &[]);
     assert!(output.status.success());
     let line = format!(
         "connector-opcua: open62541 warning: Endpoint URL is invalid: {}",
