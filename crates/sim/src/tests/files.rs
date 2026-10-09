@@ -2522,3 +2522,32 @@ fn a_write_open_waits_for_the_write_of_a_dropped_handle_of_a_renamed_removed_fil
         .collect();
     assert_eq!(failed, Vec::new());
 }
+
+/// Whether the block of a dropped read of a read handle of `a` is still in use when a
+/// create of `a` ends, after the write handle of the file renames it to `b`. The read
+/// is on `a`: the rename gives `b` only to the write handle.
+fn block_held_after_create_of_reader_path(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let big = pool.largest();
+        let mut writer = create(&node, "a", big as u64).await;
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        let mut read = Box::pin(reader.read_at(0, pool.alloc(big).unwrap()));
+        pend(read.as_mut()).await;
+        drop(read);
+        drop(reader);
+        pool.alloc(big).unwrap_err();
+        writer.rename(Path::new("b")).await.unwrap();
+        drop(writer);
+        drop(create(&node, "a", KIB).await);
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_create_waits_for_a_dropped_read_of_a_reader_on_its_path_after_a_rename() {
+    let held: Vec<_> = (0..256)
+        .filter(|&value| block_held_after_create_of_reader_path(value))
+        .collect();
+    assert_eq!(held, Vec::<u64>::new());
+}

@@ -143,8 +143,8 @@ struct Flight {
     node: usize,
     /// The path of the call, or of the file for a call on an open file.
     path: PathBuf,
-    /// The path that the call is on: `path`, moved by each rename of the file of its
-    /// handle that ends while it is in flight.
+    /// The path that the call is on: `path`, moved by each rename through its handle
+    /// that ends while it is in flight.
     on: PathBuf,
     call: Call,
     held: Option<Held>,
@@ -262,8 +262,8 @@ impl Files {
     /// to run, or of a remove through a handle, live or not, or zero. A call on `path`
     /// uses it, or the file that it names, or a file that a rename to it moves there.
     /// A call through a handle is also on the path that it was sent on, which each
-    /// rename of its file moves, so it stays on the path after a remove of the path
-    /// unlinks the file.
+    /// rename through the handle moves, so it stays on the path after a remove of the
+    /// path unlinks the file.
     fn wait_end(&self, node: usize, path: &Path) -> Monotonic {
         let path = disk::normal(path);
         let pending: Vec<_> = (self.queue.iter().rev())
@@ -387,8 +387,8 @@ impl Files {
                 let renamed = disk.rename(*handle, &path, to);
                 if renamed.is_ok() {
                     let moved = (self.flights.values_mut()).filter(|flight| {
-                        let file = flight.call.handle().map(|handle| handle.inode);
-                        flight.node == node && file == Some(handle.inode)
+                        let key = flight.call.handle().map(|handle| handle.key);
+                        key == Some(handle.key)
                     });
                     moved.for_each(|flight| flight.on.clone_from(to));
                 }
