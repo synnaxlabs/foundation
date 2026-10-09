@@ -1,11 +1,10 @@
 //! Shard 0's sessions: each stream goes to the server of the protocol its header
 //! names.
 
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::future::poll_fn;
 use std::pin::pin;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::task::Poll;
 
 use hub::{Hub, Link};
@@ -38,7 +37,7 @@ pub(crate) async fn accept(
     tasks: env::tasks::Tasks,
 ) -> Error {
     let mut sessions = Scope::new(tasks.clone());
-    let places = Rc::new(RefCell::new(Places::default()));
+    let mut places = Places::default();
     loop {
         let session = match transport.accept().await {
             Ok(session) => session,
@@ -47,7 +46,7 @@ pub(crate) async fn accept(
         let peer = session.peer();
         let held = if member(peer, mesh.as_ref()) {
             None
-        } else if let Some(place) = Place::take(&places, peer) {
+        } else if let Some(place) = places.take(peer) {
             Some(place)
         } else {
             session.close(Code(wire::session::REFUSED));
@@ -62,53 +61,36 @@ pub(crate) async fn accept(
     }
 }
 
-/// The places that the peers outside the region hold.
+/// The places that the peers outside the region hold. A place is a token: it is
+/// held while a session's future holds it, and free once the last holder drops it.
 #[derive(Default)]
 struct Places {
-    /// The open sessions of programs.
-    programs: usize,
-    /// The open sessions of each node. The transport holds one per node and closes
-    /// the old one as a new one arrives, before the old one's future ends.
-    nodes: BTreeMap<PublicKey, usize>,
+    /// One token for all programs, one clone for each open session.
+    programs: Rc<()>,
+    /// The token of each node's key, shared by that key's open sessions.
+    nodes: BTreeMap<PublicKey, Weak<()>>,
 }
 
-/// One open session of a peer outside the region, in [`Places`] until it drops.
-struct Place {
-    places: Rc<RefCell<Places>>,
-    peer: Peer,
-}
-
-impl Place {
-    /// The place of a new session of `peer`: a new place while fewer than
-    /// [`SESSIONS`] are held, and the place of a node's old session. `None` when
-    /// the bound is full.
-    fn take(places: &Rc<RefCell<Places>>, peer: Peer) -> Option<Self> {
-        let mut held = places.borrow_mut();
-        let full = held.programs + held.nodes.len() >= SESSIONS;
+impl Places {
+    /// The place of a new session of `peer`: the place that the key of a node
+    /// still holds, else a new place while fewer than [`SESSIONS`] are held. `None`
+    /// when the bound is full.
+    fn take(&mut self, peer: Peer) -> Option<Rc<()>> {
+        self.nodes.retain(|_, place| place.strong_count() > 0);
+        let full = Rc::strong_count(&self.programs) - 1 + self.nodes.len() >= SESSIONS;
         match peer {
-            Peer::Client if full => return None,
-            Peer::Client => held.programs += 1,
-            Peer::Node(key) if full && !held.nodes.contains_key(&key) => return None,
-            Peer::Node(key) => *held.nodes.entry(key).or_default() += 1,
-        }
-        Some(Self {
-            places: Rc::clone(places),
-            peer,
-        })
-    }
-}
-
-impl Drop for Place {
-    fn drop(&mut self) {
-        let mut held = self.places.borrow_mut();
-        match self.peer {
-            Peer::Client => held.programs -= 1,
+            Peer::Client if full => None,
+            Peer::Client => Some(Rc::clone(&self.programs)),
             Peer::Node(key) => {
-                let sessions = held.nodes.get_mut(&key).expect("a held place");
-                *sessions -= 1;
-                if *sessions == 0 {
-                    held.nodes.remove(&key);
+                if let Some(place) = self.nodes.get(&key).and_then(Weak::upgrade) {
+                    return Some(place);
                 }
+                if full {
+                    return None;
+                }
+                let place = Rc::new(());
+                self.nodes.insert(key, Rc::downgrade(&place));
+                Some(place)
             }
         }
     }
