@@ -11,6 +11,9 @@ exclude_re = [
   # Miri needs the pinned nightly, which only the miri CI job installs. A deliberate
   # break in that job shows that it fails.
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
+  # The build and the runs need the pinned nightly and cargo-fuzz, which no test has. A
+  # crash planted in a target must fail the `fuzz` job of `ci.yaml` (#2105).
+  'xtask/src/fuzz\.rs:.*(replace run_one ->| in run$)',
   # Calls the GitHub API. The review workflow runs it on each PR: a round with findings
   # shows that it fails.
   'xtask/src/review\.rs:.*(replace run ->| in run$)',
@@ -97,4 +100,10 @@ exclude_re = [
   # Only a pool whose largest block is 1472 bytes tells `<` from `<=`. Block sizes are
   # 64 times 2^k times 5 to 8, so none is 1472: 1280, then 1536.
   'crates/transport/src/client\.rs:.*replace < with <= in Config::setup',
+  # A kept `Weak` of a reader that went changes only the memory of the hub, and no
+  # counting-allocator test opens remote readers yet (#2015). The unit test of
+  # `Sessions::add` kills it through the length of the list.
+  'crates/hub/src/reader/remote\.rs:.*replace > with >= in Sessions::add',
+  # Equal keys get no rule (ONE SESSION PER PEER, rule 4), so no test can pin `<`.
+  'crates/transport/src/table\.rs:.*replace < with <= in Table::arrive',
 ]

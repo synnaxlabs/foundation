@@ -777,6 +777,10 @@ impl Serve {
             Ok(opened) => opened,
             Err(error) => return fail(error),
         };
+        let region = mesh.clone().map(|mesh| hub::Region {
+            mesh,
+            transport: Rc::clone(&transport),
+        });
         let ops = mesh.as_ref().map(|mesh| {
             Rc::new(operations(mesh.clone(), self.time.clone(), entropy.clone()))
         });
@@ -787,7 +791,7 @@ impl Serve {
             node: key,
             time: self.time,
             entropy,
-            mesh: mesh.clone(),
+            region,
         });
         hub.set_definitions(definitions.iter().flatten());
         let ended = mesh.as_ref().map(mesh::Mesh::ended);

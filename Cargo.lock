@@ -7,8 +7,10 @@ name = "acceptance"
 version = "0.0.0"
 dependencies = [
  "block",
+ "codec",
  "connector-influx",
  "env",
+ "hub",
  "mesh",
  "node",
  "ops",
@@ -935,6 +937,7 @@ dependencies = [
  "counting",
  "env",
  "home",
+ "hub",
  "mesh",
  "sim",
  "spec",
@@ -2441,6 +2444,7 @@ name = "xtask"
 version = "0.0.0"
 dependencies = [
  "comrak",
+ "semver",
  "serde_json",
 ]
 

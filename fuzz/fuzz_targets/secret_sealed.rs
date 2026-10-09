@@ -6,6 +6,7 @@
 //! Input: an 8-byte big-endian version, a name, a NUL, then the sealed bytes.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};

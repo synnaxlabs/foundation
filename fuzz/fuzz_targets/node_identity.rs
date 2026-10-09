@@ -5,6 +5,7 @@
 //! their CRC32C.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use libfuzzer_sys::fuzz_target;
 

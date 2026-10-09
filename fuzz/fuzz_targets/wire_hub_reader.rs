@@ -1,12 +1,14 @@
 //! `wire::hub::Reader` never panics, each event encodes to its message and comes in the
 //! order of a session, each refusal is one that the order or the mode gives, the body
-//! starts after the ends run and ends at its last end, and each valid message that the
-//! home writes reads back. A latest and a complete session each read the input.
+//! starts after the ends run and ends at its last end, the stream may end only after
+//! `Behind`, and each valid message that the home writes reads back. A latest and a
+//! complete session each read the input.
 //!
 //! Input: one byte, the places of the session less 1, then the messages from the home
 //! (`fuzz::messages`).
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use fuzz::hub::Run;
 use libfuzzer_sys::{
@@ -113,7 +115,8 @@ fn refused(next: Next, places: u32, mode: Mode, message: &[u8], error: Error) ->
 
 /// Each event of the session in `bytes` must encode to its message and come in the
 /// order of a session, each refusal must be the one that the order or the mode gives,
-/// and the body must be where [`Reader::body`] says.
+/// the body must be where [`Reader::body`] says, and [`Reader::end`] must refuse each
+/// point before `Behind`.
 fn read(bytes: &[u8]) {
     let [places, rest @ ..] = bytes else {
         return;
@@ -189,6 +192,12 @@ fn read_session(places: u32, mode: Mode, rest: &[u8]) {
             _ => None,
         };
         assert_eq!(reader.body(), body, "the body is not where it should be");
+        let end = match next {
+            Next::Ended => Ok(()),
+            Next::Body { remain, .. } => Err(Error::Unfinished { remain }),
+            Next::Opened | Next::Head | Next::Ends(_) => Err(Error::Finished),
+        };
+        assert_eq!(reader.end(), end, "the stream may not end here");
     }
 }
 

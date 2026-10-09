@@ -30,6 +30,10 @@ use types::time::Span;
 /// The port each node binds, on its host's first address.
 const PORT: u16 = 7000;
 
+/// The stamp of the first sample of [`Lab::send`], 2026-01-01 in nanoseconds. Each
+/// later sample is a millisecond later.
+const START: i64 = 1_767_225_600_000_000_000;
+
 /// The private key of the subject `admin`, the first admin of each mesh.
 const ADMIN: PrivateKey = PrivateKey([0; 32]);
 
@@ -52,6 +56,35 @@ pub(crate) struct Lab {
     /// The simulation ran, or holds a task of a test, so a [`Lab::start`] would run
     /// it.
     ran: bool,
+    /// What each reader got, by [`Reader`].
+    readers: Vec<Arc<Mutex<Got>>>,
+    /// The node of [`Lab::send`], and what a reader there got, by channel.
+    sent: BTreeMap<String, (Node, Arc<Mutex<Got>>)>,
+    /// The channels of [`Lab::channel`], by name.
+    channels: BTreeMap<String, Made>,
+}
+
+/// A channel of [`Lab::channel`].
+#[derive(Debug, Clone, Copy)]
+struct Made {
+    keys: Keys,
+    /// The samples that each [`Lab::send`] on it wrote.
+    sent: i64,
+}
+
+/// The keys of a channel of [`Lab::channel`] and of its index.
+#[derive(Debug, Clone, Copy)]
+struct Keys {
+    index: types::channel::Key,
+    data: types::channel::Key,
+}
+
+/// What one reader task got.
+#[derive(Debug, Default)]
+struct Got {
+    opened: bool,
+    samples: Vec<Sample>,
+    ended: Option<hub::reader::Ended>,
 }
 
 /// A simulated InfluxDB store and the names of the connector that writes to it.
@@ -92,7 +125,7 @@ pub(crate) struct Node(usize);
 
 /// A live reader on one channel, opened with [`Lab::reader`].
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Reader;
+pub(crate) struct Reader(usize);
 
 /// A join ticket. It is a secret, never written to a file.
 #[derive(Debug)]
@@ -158,6 +191,9 @@ impl Lab {
             stores: BTreeMap::new(),
             written: BTreeMap::new(),
             ran: false,
+            readers: Vec::new(),
+            sent: BTreeMap::new(),
+            channels: BTreeMap::new(),
         }
     }
 
@@ -304,26 +340,203 @@ impl Lab {
         }
     }
 
-    /// Creates the `f64` channel `channel`, whose home is `home`.
-    pub(crate) fn channel(&mut self, _home: Node, _channel: &str) {
-        todo!("waits on #462, #585")
+    /// Creates the `f64` channel `channel`, whose home is `home`, on the index
+    /// `{channel}_time`, in the founding of the region of `home`.
+    ///
+    /// # Panics
+    ///
+    /// After a node runs, when `home` is in no mesh, or when a mesh of the lab defines
+    /// `channel` or `{channel}_time`.
+    pub(crate) fn channel(&mut self, home: Node, channel: &str) {
+        use spec::channel::{Channel, Data, Kind};
+        use spec::data_type::DataType;
+        use spec::definition::Definition;
+        use types::sample::{Scalar, Type};
+        assert!(
+            self.members.iter().all(|member| member.node.is_none()),
+            "lab failure: `channel` {channel} after a node runs"
+        );
+        let founding = self.members[home.0].region.clone().unwrap_or_else(|| {
+            panic!("lab failure: the home of {channel} is in no mesh")
+        });
+        for name in [channel.to_string(), format!("{channel}_time")] {
+            let key = name.parse().expect("lab failure: a channel name");
+            let mut regions = self.members.iter().filter_map(|m| m.region.as_ref());
+            assert!(
+                !regions.any(|r| r.definitions.contains_key(&key)),
+                "lab failure: {name} exists"
+            );
+        }
+        let next = u128::try_from(2 * self.channels.len() + 1).unwrap();
+        let (index, data) = (
+            types::channel::Key::from_u128(next),
+            types::channel::Key::from_u128(next + 1),
+        );
+        let made = Made {
+            keys: Keys { index, data },
+            sent: 0,
+        };
+        self.channels.insert(channel.to_string(), made);
+        let kind = Data::new(
+            index,
+            None,
+            DataType::Sample(Type::Scalar(Scalar::F64)),
+            None,
+        );
+        let definitions = [
+            (
+                format!("{channel}_time"),
+                Channel {
+                    key: index,
+                    kind: Kind::Index {
+                        error: None,
+                        control: None,
+                    },
+                },
+            ),
+            (
+                channel.to_string(),
+                Channel {
+                    key: data,
+                    kind: Kind::Data(kind.expect("lab failure: a data channel")),
+                },
+            ),
+        ];
+        let home = self.members[home.0].key;
+        for member in &mut self.members {
+            let Some(region) = member.region.as_mut().filter(|r| **r == founding)
+            else {
+                continue;
+            };
+            for (name, channel) in &definitions {
+                let name = name.parse().expect("lab failure: a channel name");
+                region
+                    .definitions
+                    .insert(name, Definition::Channel(channel.clone()));
+            }
+            region.homes.insert(index, home);
+        }
     }
 
-    /// Opens a live reader on `channel` at `node`. It gets the samples written from
-    /// now on.
-    pub(crate) fn reader(&mut self, _node: Node, _channel: &str) -> Reader {
-        todo!("waits on #340, #462, #585, #2018, #2023")
+    /// Opens a live reader on `channel` at `node`, and runs the simulation until it
+    /// opens. It gets the samples written from now on.
+    pub(crate) fn reader(&mut self, node: Node, channel: &str) -> Reader {
+        let got = self.open(node, channel);
+        self.readers.push(got);
+        Reader(self.readers.len() - 1)
     }
 
     /// Writes `values` to `channel` on `node`, one each millisecond, as the
-    /// simulation runs.
-    pub(crate) fn send(&mut self, _node: Node, _channel: &str, _values: &[f64]) {
-        todo!("waits on #462, #585")
+    /// simulation runs. The samples of each send on `channel` are stamped a
+    /// millisecond apart from [`START`], after those of the send before it. The first
+    /// send on `channel` opens a reader at `node` for [`Lab::samples`].
+    ///
+    /// # Panics
+    ///
+    /// As the simulation runs, when the home does not apply a sample, as when a send
+    /// starts before the one before it on `channel` ends.
+    pub(crate) fn send(&mut self, node: Node, channel: &str, values: &[f64]) {
+        use hub::writer;
+        use types::authority::Authority;
+        use types::frame::{Form, Label, Path as Stream};
+        if !self.sent.contains_key(channel) {
+            let got = self.open(node, channel);
+            self.sent.insert(channel.to_string(), (node, got));
+        }
+        let made = self.made(channel);
+        let start = START + made.sent * 1_000_000;
+        let keys = made.keys;
+        made.sent += i64::try_from(values.len()).unwrap();
+        let member = &self.members[node.0];
+        let clock = member.host.clock();
+        let values = values.to_vec();
+        let name: types::name::Name =
+            channel.parse().expect("lab failure: a channel name");
+        member.node.as_ref().unwrap().spawn(move |hub| async move {
+            let config = writer::Config {
+                subject: "admin".parse().unwrap(),
+                authority: Authority(1),
+                lease: None,
+                channels: vec![name],
+            };
+            let mut writer = loop {
+                match hub.writer(config.clone()).await {
+                    Err(writer::Error::Home(hub::home::writer::Error::Unsynced)) => {
+                        clock.sleep(Span::MILLISECOND).await;
+                    }
+                    opened => break opened.expect("lab failure: the writer opens"),
+                }
+            };
+            let stamps = (start..).step_by(1_000_000);
+            for (stamp, value) in stamps.zip(values) {
+                clock.sleep(Span::MILLISECOND).await;
+                let entries = writer.set().entries();
+                let (time, data) = (at(entries, keys.index), at(entries, keys.data));
+                let group = entries[time].group;
+                let mut draft = writer
+                    .draft(Form::Raw, &[(0, 8), (1, 8)])
+                    .expect("lab failure: a frame");
+                for (entry, bytes) in
+                    [(time, stamp.to_le_bytes()), (data, value.to_le_bytes())]
+                {
+                    draft
+                        .series_mut(entry)
+                        .expect("lab failure: the series is present")
+                        .copy_from_slice(&bytes);
+                }
+                draft.set_count(group, 1);
+                let outcomes = writer.write(Label::Path(Stream::Live), draft);
+                assert!(
+                    matches!(outcomes, Ok([hub::home::Outcome::Applied { .. }])),
+                    "the write of {value}: {outcomes:?}"
+                );
+            }
+        });
+    }
+
+    /// Starts a complete reader on `channel` at `node`, and runs the simulation a
+    /// millisecond at a time until it opens: the hub gives only the frames written
+    /// after the open.
+    fn open(&mut self, node: Node, channel: &str) -> Arc<Mutex<Got>> {
+        let keys = self.made(channel).keys;
+        self.boot();
+        let got = collect(&self.members[node.0], channel, keys);
+        let step = Duration::from_millis(1);
+        let opened = self.until(step, 10_000, || got.lock().unwrap().opened);
+        assert!(opened, "the reader on {channel} did not open in 10 s");
+        got
+    }
+
+    /// The channel `channel` of [`Lab::channel`].
+    fn made(&mut self, channel: &str) -> &mut Made {
+        let made = self.channels.get_mut(channel);
+        made.unwrap_or_else(|| panic!("lab failure: no `channel` made {channel}"))
+    }
+
+    /// Runs the simulation `step` at a time until `done` holds, at most `steps`
+    /// times. Gives whether `done` held.
+    fn until(
+        &mut self,
+        step: Duration,
+        steps: u32,
+        mut done: impl FnMut() -> bool,
+    ) -> bool {
+        for _ in 0..steps {
+            if done() {
+                return true;
+            }
+            self.run(step);
+        }
+        done()
     }
 
     /// Every sample that `reader` got, in the order it got them.
-    pub(crate) fn received(&self, _reader: Reader) -> Vec<Sample> {
-        todo!("waits on #340, #462, #585, #2018, #2023")
+    ///
+    /// # Panics
+    ///
+    /// When the reader ended.
+    pub(crate) fn received(&self, reader: Reader) -> Vec<Sample> {
+        took(&self.readers[reader.0])
     }
 
     /// Creates a single-use join ticket on `admin`.
@@ -429,16 +642,18 @@ impl Lab {
         running.operate(move |ops| async move {
             *slot.lock().unwrap() = Some(task(ops).await);
         });
-        for _ in 0..600 {
-            if let Some(out) = out.lock().unwrap().take() {
-                return out;
-            }
-            self.run(Duration::from_millis(100));
-        }
-        panic!(
-            "lab failure: an operation on {} took 60 s",
-            self.members[node.0].name
-        );
+        let mut done = None;
+        let step = Duration::from_millis(100);
+        self.until(step, 600, || {
+            done = out.lock().unwrap().take();
+            done.is_some()
+        });
+        done.unwrap_or_else(|| {
+            panic!(
+                "lab failure: an operation on {} took 60 s",
+                self.members[node.0].name
+            )
+        })
     }
 
     /// Runs the MCP `plan` tool on `node` and returns the plan and the names of the
@@ -485,17 +700,17 @@ impl Lab {
         _rate: u64,
         _count: u64,
     ) {
-        todo!("waits on #340")
+        todo!("waits on #2145")
     }
 
     /// The seqs that the home gave the samples written to `channel`.
     pub(crate) fn written(&self, _channel: &str) -> Range<u64> {
-        todo!("waits on #340")
+        todo!("waits on #2145")
     }
 
     /// The true simulated time of each sample written to `channel`, in order.
     pub(crate) fn truth(&self, _channel: &str) -> Vec<i64> {
-        todo!("waits on #340")
+        todo!("waits on #2145")
     }
 
     /// Sends `value` to the command channel `channel` as `subject`.
@@ -506,7 +721,7 @@ impl Lab {
         _channel: &str,
         _value: f64,
     ) -> Result<(), String> {
-        todo!("waits on #340")
+        todo!("waits on #2145")
     }
 
     /// Reads `channel` on `node` from the oldest sample, as `subject`.
@@ -516,22 +731,39 @@ impl Lab {
         _subject: &str,
         _channel: &str,
     ) -> Received {
-        todo!("waits on #340")
+        todo!("waits on #274")
     }
 
     /// Reads every sample of `channel` on `node`, as `subject`. For short runs only.
+    /// Until a read of the home from its oldest sample exists (#274), it gives what a
+    /// reader at the node of the first [`Lab::send`] on `channel` got from that send
+    /// on.
+    ///
+    /// # Panics
+    ///
+    /// When no [`Lab::send`] wrote to `channel`, its reader ended, or `node` and
+    /// `subject` are not the node of the first send and `admin`.
     pub(crate) fn samples(
         &mut self,
-        _node: Node,
-        _subject: &str,
-        _channel: &str,
+        node: Node,
+        subject: &str,
+        channel: &str,
     ) -> Vec<Sample> {
-        todo!("waits on #462, #585")
+        let (sender, got) = self
+            .sent
+            .get(channel)
+            .unwrap_or_else(|| panic!("lab failure: no send wrote to {channel}"));
+        assert!(
+            node == *sender && subject == "admin",
+            "lab failure: until #274, `samples` reads only at the node of the first \
+             send, as admin"
+        );
+        took(got)
     }
 
     /// The commands recorded on `channel`, with their acknowledgments.
     pub(crate) fn audit(&mut self, _node: Node, _channel: &str) -> Vec<Command> {
-        todo!("waits on #340")
+        todo!("waits on #2145")
     }
 
     /// What the Influx store at `address` holds for `channel`, folded by
@@ -619,6 +851,88 @@ impl Lab {
             }
         }
     }
+}
+
+/// Spawns a complete reader on `channel` at `member`, which puts what it gets in
+/// the returned value.
+fn collect(member: &Member, channel: &str, keys: Keys) -> Arc<Mutex<Got>> {
+    let got = Arc::<Mutex<Got>>::default();
+    let out = Arc::clone(&got);
+    let name: types::name::Name = channel.parse().expect("lab failure: a channel name");
+    let node = member.node.as_ref().expect("lab failure: the node runs");
+    node.spawn(move |hub| async move {
+        let opened = hub.reader(&[name], hub::reader::Mode::Complete).await;
+        let mut reader = opened.expect("the reader opens");
+        out.lock().unwrap().opened = true;
+        loop {
+            match reader.next().await {
+                Ok(received) => {
+                    let samples = decode(&received, keys);
+                    out.lock().unwrap().samples.extend(samples);
+                }
+                Err(ended) => {
+                    out.lock().unwrap().ended = Some(ended);
+                    return;
+                }
+            }
+        }
+    });
+    got
+}
+
+/// The samples of `got`.
+///
+/// # Panics
+///
+/// When its reader ended.
+fn took(got: &Mutex<Got>) -> Vec<Sample> {
+    let got = got.lock().unwrap();
+    if let Some(ended) = &got.ended {
+        panic!("the reader ended: {ended}");
+    }
+    got.samples.clone()
+}
+
+/// The position of the channel `key` in `entries`.
+fn at(entries: &[types::frame::key_set::Entry], key: types::channel::Key) -> usize {
+    entries
+        .iter()
+        .position(|entry| entry.key == key)
+        .unwrap_or_else(|| panic!("lab failure: the set holds no {key:?}"))
+}
+
+/// The samples of `received`, a frame of the channel of `keys` and its index.
+///
+/// # Panics
+///
+/// When the frame holds another channel.
+fn decode(received: &hub::reader::Received<'_>, keys: Keys) -> Vec<Sample> {
+    let entries = received.set.entries();
+    let mut series = [Vec::new(), Vec::new()];
+    for (entry, bytes) in received.view.iter() {
+        let at = &entries[entry];
+        let range = received
+            .view
+            .range(at.group)
+            .expect("the group has a range");
+        let count = usize::try_from(range.count).unwrap();
+        let out = match at.key {
+            key if key == keys.index => &mut series[0],
+            key if key == keys.data => &mut series[1],
+            key => panic!("the frame holds {key:?}"),
+        };
+        out.resize(count * 8, 0);
+        codec::decode(at.data_type, count, bytes, out).expect("the series decodes");
+    }
+    let [time, data] = series;
+    let (time, data) = (time.as_chunks::<8>().0, data.as_chunks::<8>().0);
+    time.iter()
+        .zip(data)
+        .map(|(t, d)| Sample {
+            ns: i64::from_le_bytes(*t),
+            value: f64::from_le_bytes(*d),
+        })
+        .collect()
 }
 
 /// The names that `dir` of `node`'s data directory holds at 1 s, or the error of the
@@ -914,4 +1228,207 @@ mod stored {
     fn panics_when_the_connector_writes_no_measurement_for_the_channel() {
         lab().stored("influx", "edge.other");
     }
+}
+
+/// A lab of the nodes `a` and `b` in one mesh, with the channel `a.value` at `a`.
+fn pair() -> (Lab, Node, Node) {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a, b]);
+    lab.channel(a, "a.value");
+    (lab, a, b)
+}
+
+fn values(samples: &[Sample]) -> Vec<f64> {
+    samples.iter().map(|sample| sample.value).collect()
+}
+
+#[test]
+fn a_second_send_stamps_after_the_first() {
+    let (mut lab, a, b) = pair();
+    let reader = lab.reader(b, "a.value");
+    lab.send(a, "a.value", &[1.0, 2.0]);
+    lab.run(Duration::from_secs(1));
+    lab.send(a, "a.value", &[3.0]);
+    lab.run(Duration::from_secs(1));
+    let stored = lab.samples(a, "admin", "a.value");
+    assert_eq!(values(&stored), [1.0, 2.0, 3.0]);
+    assert_eq!(stored[2].ns, START + 2_000_000);
+    assert_eq!(lab.received(reader), stored);
+    lab.stop();
+}
+
+#[test]
+#[should_panic(expected = "lab failure: no `channel` made a.value_time")]
+fn a_reader_on_an_index_panics() {
+    let (mut lab, _, b) = pair();
+    lab.reader(b, "a.value_time");
+}
+
+#[test]
+#[should_panic(
+    expected = "lab failure: until #274, `samples` reads only at the node \
+                           of the first send, as admin"
+)]
+fn samples_at_another_node_panic() {
+    let (mut lab, a, b) = pair();
+    lab.send(a, "a.value", &[1.0]);
+    lab.samples(b, "admin", "a.value");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: `channel` b.value after a node runs")]
+fn a_channel_after_a_node_runs_panics() {
+    let (mut lab, _, b) = pair();
+    lab.run(Duration::from_millis(1));
+    lab.channel(b, "b.value");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: the home of c.value is in no mesh")]
+fn a_channel_at_a_node_in_no_mesh_panics() {
+    let (mut lab, ..) = pair();
+    let c = lab.start("c");
+    lab.channel(c, "c.value");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: a.value exists")]
+fn a_channel_made_twice_panics() {
+    let (mut lab, a, _) = pair();
+    lab.channel(a, "a.value");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: `start` after the first run or a task")]
+fn a_start_after_a_reader_panics() {
+    let (mut lab, _, b) = pair();
+    lab.reader(b, "a.value");
+    lab.start("c");
+}
+
+#[test]
+#[should_panic(expected = "the reader ended")]
+fn received_after_the_reader_ended_panics() {
+    let (mut lab, a, b) = pair();
+    let reader = lab.reader(b, "a.value");
+    lab.cut(a, b);
+    lab.run(Duration::from_secs(120));
+    lab.received(reader);
+}
+
+#[test]
+#[should_panic(expected = "lab failure: the writer opens")]
+fn a_send_at_a_node_that_is_not_the_home_panics() {
+    let (mut lab, _, b) = pair();
+    lab.send(b, "a.value", &[1.0]);
+    lab.run(Duration::from_secs(1));
+}
+
+#[test]
+#[should_panic(expected = "lab failure: no send wrote to a.value")]
+fn samples_with_no_send_panic() {
+    let (mut lab, a, _) = pair();
+    lab.samples(a, "admin", "a.value");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: a.value_time exists")]
+fn a_channel_named_as_an_index_panics() {
+    let (mut lab, a, _) = pair();
+    lab.channel(a, "a.value_time");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: b_time exists")]
+fn an_index_named_as_a_channel_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a, b]);
+    lab.channel(a, "b_time");
+    lab.channel(a, "b");
+}
+
+#[test]
+#[should_panic(expected = "the write of")]
+fn an_overlapping_send_panics() {
+    let (mut lab, a, _) = pair();
+    lab.send(a, "a.value", &[1.0, 2.0, 3.0]);
+    lab.send(a, "a.value", &[4.0]);
+    lab.run(Duration::from_secs(1));
+}
+
+#[test]
+fn two_channels_keep_their_samples() {
+    let (mut lab, a, b) = pair();
+    lab.channel(b, "b.value");
+    lab.send(a, "a.value", &[1.0]);
+    lab.send(b, "b.value", &[2.0]);
+    lab.run(Duration::from_secs(1));
+    assert_eq!(values(&lab.samples(a, "admin", "a.value")), [1.0]);
+    assert_eq!(values(&lab.samples(b, "admin", "b.value")), [2.0]);
+    lab.stop();
+}
+
+#[test]
+#[should_panic(expected = "lab failure: no channel a.value_time")]
+fn a_channel_stays_in_the_mesh_of_its_home() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a]);
+    lab.mesh(&[b]);
+    lab.channel(a, "a.value");
+    lab.home(b, "a.value_time");
+}
+
+#[test]
+#[should_panic(expected = "until #274")]
+fn samples_as_another_subject_panic() {
+    let (mut lab, a, _) = pair();
+    lab.send(a, "a.value", &[1.0]);
+    lab.samples(a, "operator", "a.value");
+}
+
+#[test]
+#[should_panic(expected = "the reader on a.value did not open in 10 s")]
+fn a_reader_cut_from_the_home_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a, b]);
+    lab.channel(a, "a.value");
+    lab.cut(a, b);
+    lab.reader(b, "a.value");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: x exists")]
+fn one_name_in_two_meshes_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a]);
+    lab.mesh(&[b]);
+    lab.channel(a, "x");
+    lab.channel(b, "x");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: x_time exists")]
+fn an_index_name_in_another_mesh_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a]);
+    lab.mesh(&[b]);
+    lab.channel(a, "x");
+    lab.channel(b, "x_time");
+}
+
+#[test]
+#[should_panic(expected = "lab failure: x_time exists")]
+fn a_channel_on_an_index_name_in_another_mesh_panics() {
+    let mut lab = Lab::new(1);
+    let (a, b) = (lab.start("a"), lab.start("b"));
+    lab.mesh(&[a]);
+    lab.mesh(&[b]);
+    lab.channel(b, "x_time");
+    lab.channel(a, "x");
 }

@@ -6,6 +6,7 @@
 //! Input: one frame, then the PDU of a reply to the request in it.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use connector_modbus::device::Device;
 use connector_modbus::pdu::{Exception, Reply, Request};

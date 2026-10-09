@@ -8,6 +8,7 @@
 //! both.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use document::Source;
 use document::encoding::Checked;

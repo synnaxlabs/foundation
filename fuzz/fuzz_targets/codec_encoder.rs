@@ -4,6 +4,7 @@
 //! Input: one byte picks the scalar. The rest, cut to whole samples, is the samples.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use codec::Encoder;
 use libfuzzer_sys::fuzz_target;

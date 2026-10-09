@@ -35,10 +35,16 @@ Rules:
    https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6067290747). A crate
    may also take itself, so its tests and benches build with its own `sim` feature
    (STORED BENCH; `laptop.architect`, 2026-10-08T01:01:28Z:
-   https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). The
-   `hub` edge was decided by the architect (#340). Lost: `buffer` in the `hub` row (hub
-   code could call the ring), the hub tests in `node`, and a second way to build a shard
-   in `home`.
+   https://github.com/synnaxlabs/foundation/pull/1568#issuecomment-6049989224). A
+   layer 3 crate may take `hub` with `sim`, so its tests build a hub through
+   `hub::testing::open`, on the shard of `home::testing::shard` (`laptop.architect`,
+   2026-10-08T17:50:53Z:
+   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). It
+   supersedes the Lost item "a second way to build a shard in `home`" of the `hub` edge,
+   which the architect decided (#340:
+   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6030590185). Lost:
+   `buffer` in the `hub` row (hub code could call the ring), the hub tests in `node`,
+   and a builder that takes a `sim::node::Node`, which adds an edge on `sim`.
 
 Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
 `estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
@@ -81,6 +87,11 @@ Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `
 | 4 | `ops` | Holds the operation table and handlers, generates the CLI, MCP tools, and docs, and runs each operation on the node that must run it. | `config`, `connector`, `hub`, `mesh`, `blob`, `sim`, layer 1 |
 | 4 | `acceptance` | Runs the MVP acceptance scenarios against whole meshes built from `node`. Test-only. | all crates |
 | 4 | `node` | Is the composition root: real seams, pools and shards, all tables (kinds, front ends, time sources, secret stores), the status collector, process lifecycle, and upgrades. | all crates |
+
+`fuzz` holds the fuzz targets, outside the workspace. It is test-only, builds on the
+pinned nightly, may depend on any crate, and no crate depends on it (#252;
+`laptop.architect`, 2026-10-09T04:18Z,
+https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074164278).
 
 Outside the binary: the Rust SDK reuses `block`, `types`, `codec`, and `wire`; other
 SDKs hand-write their data path against golden vectors (D12).
