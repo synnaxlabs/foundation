@@ -14,7 +14,7 @@ use types::name::Name;
 use types::sample::Type;
 use types::time::{Span, Stamp};
 
-use crate::{Away, Removal, State};
+use crate::{Away, Ending, State};
 
 /// What a writer session opens with.
 #[derive(Clone, Debug)]
@@ -135,8 +135,8 @@ fn resolve(
 pub struct Writer {
     state: Rc<RefCell<State>>,
     key: ::home::writer::Key,
-    /// The channel whose removal ended the writer.
-    removed: Removal,
+    /// Why the hub ended the writer.
+    ending: Ending,
     set: Arc<KeySet>,
     /// The outcomes of the last write.
     outcomes: Vec<::home::Outcome>,
@@ -199,11 +199,11 @@ impl Writer {
         let key = borrowed.home.open_writer(writer).map_err(Error::Home)?;
         borrowed.commit.appended();
         keys.extend(groups.iter().map(|group| group.index));
-        let removed = borrowed.writers.add(key, keys.into());
+        let ending = borrowed.writers.add(key, keys.into());
         Ok(Self {
             state: Rc::clone(state),
             key,
-            removed,
+            ending,
             set,
             outcomes: Vec::new(),
         })
@@ -269,7 +269,7 @@ impl Writer {
         label: Label,
         frame: Draft,
     ) -> Result<&[::home::Outcome], Failure> {
-        if let Some(key) = self.removed.get() {
+        if let Some(key) = self.ending.removed() {
             return Err(Failure::Removed(key));
         }
         let mut state = self.state.borrow_mut();

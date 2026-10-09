@@ -4,10 +4,11 @@ use std::pin::pin;
 use std::sync::atomic::Ordering;
 
 use hub::reader::{self, Ended, Mode};
+use types::channel::Key;
 use types::name::Selector;
 use types::time::Span;
 
-use super::{name, poll_flagged, run, samples, unnamed, unsynced, write};
+use super::{name, poll_flagged, run, samples, unnamed, unsynced, without, write};
 
 /// A reader of `subject` named `reader` on `value`, with a hold of `hold`.
 fn named(subject: &str, reader: &str, mode: Mode, hold: Span) -> reader::Config {
@@ -62,6 +63,21 @@ fn wakes_a_named_reader_that_waits_when_a_later_open_takes_it_over() {
         let _reader = test.hub.reader(open).await.expect("opens");
         assert!(woken.0.load(Ordering::Relaxed), "the open wakes the reader");
         assert_eq!(next.await.expect_err("replaced"), Ended::Replaced);
+    });
+}
+
+#[test]
+fn ends_a_replaced_reader_with_replaced_after_a_removal_of_its_channel() {
+    run(10, |test| async move {
+        let open = named("a", "r", Mode::Complete, Span::ZERO);
+        let mut replaced = test.hub.reader(open).await.expect("opens");
+        let open = named("a", "r", Mode::Latest, Span::ZERO);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        test.hub.set_definitions(&without(&["value"]));
+        let ended = replaced.next().await.expect_err("replaced");
+        assert_eq!(ended, Ended::Replaced);
+        let ended = reader.next().await.expect_err("removed");
+        assert_eq!(ended, Ended::Removed(Key::from_u128(2)));
     });
 }
 

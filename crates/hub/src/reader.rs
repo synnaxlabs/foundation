@@ -18,7 +18,7 @@ use types::sample::Type;
 use types::time::Span;
 
 use crate::channel::Channel;
-use crate::{Away, Removal, State};
+use crate::{Away, End, Ending, State};
 use remote::Remote;
 
 /// The credit a complete reader has past the frames it gave back: a fixed window until
@@ -252,26 +252,50 @@ impl Local {
         named: Option<::home::reader::named::Key>,
         hold: Span,
     ) -> Result<Self, Error> {
+        let charge = ::home::reader::complete::Charge::Whole;
         let (session, credit) = match (mode, named) {
-            (Mode::Complete, named) => {
-                let charge = ::home::reader::complete::Charge::Whole;
-                let (session, credit) = match named {
-                    None => Session::complete(state, channels, WINDOW, charge),
-                    Some(named) => Session::named_complete(
-                        state, channels, named, hold, WINDOW, charge,
-                    )
-                    .map_err(|::home::reader::Unsynced| Error::Unsynced)?,
+            (Mode::Complete, None) => {
+                let (session, credit) =
+                    Session::complete(state, channels, WINDOW, charge);
+                (session, Some(credit))
+            }
+            (Mode::Complete, Some(named)) => {
+                let key = {
+                    let mut state = state.borrow_mut();
+                    let opened = state
+                        .home
+                        .open_named_complete(
+                            channels.index,
+                            named,
+                            hold,
+                            WINDOW,
+                            charge,
+                        )
+                        .map_err(|::home::reader::Unsynced| Error::Unsynced)?;
+                    state.replace(opened.replaced);
+                    opened.key
                 };
-                (session, Some((credit, 0)))
+                let (session, credit) = Session::with_credit(state, key, channels);
+                (session, Some(credit))
             }
             (Mode::Latest, None) => (Session::latest(state, channels), None),
             (Mode::Latest, Some(named)) => {
-                let session = Session::named_latest(state, channels, named)
-                    .map_err(|::home::reader::Unsynced| Error::Unsynced)?;
-                (session, None)
+                let key = {
+                    let mut state = state.borrow_mut();
+                    let opened = state
+                        .home
+                        .open_named_latest(channels.index, named)
+                        .map_err(|::home::reader::Unsynced| Error::Unsynced)?;
+                    state.replace(opened.replaced);
+                    opened.key
+                };
+                (Session::new(state, key, channels), None)
             }
         };
-        Ok(Self { session, credit })
+        Ok(Self {
+            session,
+            credit: credit.map(|credit| (credit, 0)),
+        })
     }
 
     /// Raises the grant by the charge of `frame`, which the reader gave back.
@@ -399,6 +423,15 @@ pub(crate) enum Stop {
     Replaced,
 }
 
+impl From<End> for Stop {
+    fn from(end: End) -> Self {
+        match end {
+            End::Removed(key) => Self::Removed(key),
+            End::Replaced => Self::Replaced,
+        }
+    }
+}
+
 impl From<Stop> for Ended {
     fn from(stop: Stop) -> Self {
         match stop {
@@ -445,8 +478,8 @@ fn resolve(
 pub(crate) struct Session {
     state: Rc<RefCell<State>>,
     key: ::home::reader::Key,
-    /// The channel whose removal ended the session.
-    removed: Removal,
+    /// Why the hub ended the session.
+    ending: Ending,
     /// The slots of the reader's channels.
     slots: Box<[channel::Slot]>,
     /// The key set of the last frame, and the mask of the reader's channels in it.
@@ -481,59 +514,10 @@ impl Session {
         Self::with_credit(state, key, channels)
     }
 
-    /// Opens a complete session of the named reader `reader` on `channels`, as
-    /// [`complete`](Self::complete) does, which takes over the reader's open session.
-    ///
-    /// # Errors
-    ///
-    /// [`::home::reader::Unsynced`] before the node first has mesh time.
-    pub(crate) fn named_complete(
-        state: &Rc<RefCell<State>>,
-        channels: Channels,
-        reader: ::home::reader::named::Key,
-        hold: Span,
-        limit_bytes: u64,
-        charge: ::home::reader::complete::Charge,
-    ) -> Result<(Self, Credit), ::home::reader::Unsynced> {
-        let opened = {
-            let mut state = state.borrow_mut();
-            let opened = state.home.open_named_complete(
-                channels.index,
-                reader,
-                hold,
-                limit_bytes,
-                charge,
-            )?;
-            state.replace(opened.replaced);
-            opened
-        };
-        Ok(Self::with_credit(state, opened.key, channels))
-    }
-
     /// Opens a latest session on `channels`.
     pub(crate) fn latest(state: &Rc<RefCell<State>>, channels: Channels) -> Self {
         let key = state.borrow_mut().home.open_latest(channels.index);
         Self::new(state, key, channels)
-    }
-
-    /// Opens a latest session of the named reader `reader` on `channels`, which takes
-    /// over the reader's open session.
-    ///
-    /// # Errors
-    ///
-    /// [`::home::reader::Unsynced`] before the node first has mesh time.
-    pub(crate) fn named_latest(
-        state: &Rc<RefCell<State>>,
-        channels: Channels,
-        reader: ::home::reader::named::Key,
-    ) -> Result<Self, ::home::reader::Unsynced> {
-        let opened = {
-            let mut state = state.borrow_mut();
-            let opened = state.home.open_named_latest(channels.index, reader)?;
-            state.replace(opened.replaced);
-            opened
-        };
-        Ok(Self::new(state, opened.key, channels))
     }
 
     fn with_credit(
@@ -545,7 +529,7 @@ impl Session {
         let credit = Credit {
             state: Rc::clone(state),
             key,
-            removed: session.removed.clone(),
+            ending: session.ending.clone(),
         };
         (session, credit)
     }
@@ -555,11 +539,11 @@ impl Session {
         key: ::home::reader::Key,
         channels: Channels,
     ) -> Self {
-        let removed = state.borrow_mut().readers.add(key, channels.keys);
+        let ending = state.borrow_mut().readers.add(key, channels.keys);
         Self {
             state: Rc::clone(state),
             key,
-            removed,
+            ending,
             slots: channels.slots,
             mask: None,
             streak: Streak::default(),
@@ -571,9 +555,10 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// [`Stop::Removed`] once a channel of the session is removed, before any frame
-    /// that waits. Else [`Stop`] once no frame waits and the session can give no more.
-    /// Either on this and every later call: [`Stop::Behind`] before [`Stop::Buffer`].
+    /// [`Stop::Removed`] once a channel of the session is removed, or
+    /// [`Stop::Replaced`] once a takeover ends it, before any frame that waits. Else
+    /// [`Stop`] once no frame waits and the session can give no more. Either on this
+    /// and every later call: [`Stop::Behind`] before [`Stop::Buffer`].
     ///
     /// # Panics
     ///
@@ -581,8 +566,8 @@ impl Session {
     /// this hub made.
     pub(crate) async fn take(&mut self) -> Result<(Frame, &Arc<KeySet>, &Mask), Stop> {
         let frame = poll_fn(|cx| {
-            if let Some(key) = self.removed.get() {
-                return Poll::Ready(Err(Stop::Removed(key)));
+            if let Some(end) = self.ending.get() {
+                return Poll::Ready(Err(end.into()));
             }
             ready!(self.streak.poll(cx));
             let polled = poll_take(&mut self.state.borrow_mut(), self.key, cx);
@@ -618,9 +603,6 @@ fn poll_take(
         Next::Behind => return Poll::Ready(Err(Stop::Behind)),
         Next::Empty => {}
     }
-    if state.replaced.contains(&key) {
-        return Poll::Ready(Err(Stop::Replaced));
-    }
     if let Some(error) = &state.failed {
         return Poll::Ready(Err(Stop::Buffer(error.clone())));
     }
@@ -655,14 +637,14 @@ impl Streak {
 pub(crate) struct Credit {
     state: Rc<RefCell<State>>,
     key: ::home::reader::complete::Key,
-    removed: Removal,
+    ending: Ending,
 }
 
 impl Credit {
     /// Raises the grant of the session to `limit_bytes` since the open. Changes
-    /// nothing once the session ended on a removed channel.
+    /// nothing once the hub ended the session.
     pub(crate) fn grant(&self, limit_bytes: u64) {
-        if self.removed.get().is_none() {
+        if self.ending.get().is_none() {
             self.state.borrow_mut().home.grant(self.key, limit_bytes);
         }
     }

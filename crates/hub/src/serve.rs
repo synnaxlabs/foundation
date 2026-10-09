@@ -25,7 +25,7 @@ use wire::hub::{
 };
 
 use crate::reader::{Channels, Credit, Session, Stop};
-use crate::{Away, Removal, State};
+use crate::{Away, Ending, State};
 
 pub use client::{Reply, Request};
 
@@ -412,7 +412,7 @@ async fn open(
 struct Opening<'s> {
     state: &'s Rc<RefCell<State>>,
     key: u64,
-    removal: Removal,
+    ending: Ending,
     /// The index of the keys checked, which the first key sets.
     index: Option<channel::Key>,
     /// The position of the index in the keys checked.
@@ -424,12 +424,12 @@ impl<'s> Opening<'s> {
         let mut borrowed = state.borrow_mut();
         let key = borrowed.opened;
         borrowed.opened += 1;
-        let removal = borrowed.opens.add(key, Box::default());
+        let ending = borrowed.opens.add(key, Box::default());
         drop(borrowed);
         Self {
             state,
             key,
-            removal,
+            ending,
             index: None,
             at: None,
         }
@@ -438,7 +438,7 @@ impl<'s> Opening<'s> {
     /// Fails with the first channel of the open that a call removed. Else sets the
     /// waker that such a call wakes.
     fn watch(&self, cx: &Context<'_>) -> Result<(), Error> {
-        if let Some(key) = self.removal.get() {
+        if let Some(key) = self.ending.removed() {
             return Err(Error::Removed(key));
         }
         let mut state = self.state.borrow_mut();

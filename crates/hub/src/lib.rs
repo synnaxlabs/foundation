@@ -99,8 +99,6 @@ struct State {
     remotes: reader::remote::Sessions,
     /// The waker of each reader that waits for a frame.
     wakers: hash::Map<::home::reader::Key, Waker>,
-    /// Each open reader session that a later open of its name took over.
-    replaced: hash::Set<::home::reader::Key>,
     /// Each served open from its first key to its session, by a key from `opened`.
     opens: Sessions<u64>,
     /// The waker of each open in `opens`.
@@ -149,7 +147,6 @@ impl Hub {
             readers: Sessions::default(),
             remotes: reader::remote::Sessions::default(),
             wakers: hash::Map::default(),
-            replaced: hash::Set::default(),
             opens: Sessions::default(),
             waiting: hash::Map::default(),
             opened: 0,
@@ -301,22 +298,43 @@ fn checked<'d>(
 #[derive(Debug)]
 struct Sessions<K>(hash::Map<K, Open>);
 
-/// The channels of an open session, and its removal.
+/// The channels of an open session, and its ending.
 #[derive(Debug)]
 struct Open {
     keys: Vec<Key>,
-    removal: Removal,
+    ending: Ending,
 }
 
-/// The first channel of a session that the hub removed, which the session reads at
-/// each call. It reads no map, so its check costs the same while other sessions end.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct Removal(Rc<Cell<Option<Key>>>);
+/// Why the hub ended a session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum End {
+    /// The hub removed this channel of the session, its first one removed.
+    Removed(Key),
+    /// A later open of the same named reader took over the session.
+    Replaced,
+}
 
-impl Removal {
-    /// The key of the removed channel, or `None` while each channel stays.
-    pub(crate) fn get(&self) -> Option<Key> {
+/// Why the hub ended a session, which the session reads at each call. It reads no map,
+/// so its check costs the same while other sessions end.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Ending(Rc<Cell<Option<End>>>);
+
+impl Ending {
+    /// Why the hub ended the session, or `None` while it is open.
+    pub(crate) fn get(&self) -> Option<End> {
         self.0.get()
+    }
+
+    /// The channel whose removal ended the session, or `None` while it is open.
+    ///
+    /// # Panics
+    ///
+    /// When a takeover ended it: only the session of a named reader has one.
+    pub(crate) fn removed(&self) -> Option<Key> {
+        self.get().map(|end| match end {
+            End::Removed(key) => key,
+            End::Replaced => panic!("invariant: only a named reader is taken over"),
+        })
     }
 }
 
@@ -328,15 +346,15 @@ impl<K> Default for Sessions<K> {
 
 impl<K: Copy + Ord + Hash> Sessions<K> {
     /// Opens the session `key` on `keys`, so that a removal of one of them ends it.
-    fn add(&mut self, key: K, keys: Box<[Key]>) -> Removal {
-        let removal = Removal::default();
+    fn add(&mut self, key: K, keys: Box<[Key]>) -> Ending {
+        let ending = Ending::default();
         let open = Open {
             keys: keys.into_vec(),
-            removal: removal.clone(),
+            ending: ending.clone(),
         };
         let added = self.0.insert(key, open);
         assert!(added.is_none(), "invariant: each key is added once");
-        removal
+        ending
     }
 
     /// The channels of the open session `key`, to add to.
@@ -361,15 +379,21 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
         self.0.remove(&key).is_some()
     }
 
-    /// Puts the first channel of `removed` in the removal of each session on one of
-    /// them. Returns their keys in order, to close.
+    /// Makes the open session `key` not open, and ends it with [`End::Replaced`].
+    fn replace(&mut self, key: K) {
+        let open = self.0.remove(&key).expect("invariant: the session is open");
+        open.ending.0.set(Some(End::Replaced));
+    }
+
+    /// Ends each session on a channel of `removed` with the first such channel.
+    /// Returns their keys in order, to close.
     fn end(&self, removed: &hash::Set<Key>) -> Vec<K> {
         let mut ended: Vec<K> = self
             .0
             .iter()
             .filter_map(|(&key, open)| {
                 let first = open.keys.iter().find(|key| removed.contains(key))?;
-                open.removal.0.set(Some(*first));
+                open.ending.0.set(Some(End::Removed(*first)));
                 Some(key)
             })
             .collect();
@@ -417,11 +441,10 @@ impl State {
         }
     }
 
-    /// Closes the reader session `key` at the home, unless a removal closed it.
-    /// Returns its waker, when it waits for a frame.
+    /// Closes the reader session `key` at the home, unless a removal or a takeover
+    /// closed it. Returns its waker, when it waits for a frame.
     fn close_reader(&mut self, key: ::home::reader::Key) -> Option<Waker> {
         let waker = self.wakers.remove(&key);
-        self.replaced.remove(&key);
         if self.readers.remove(key) {
             self.home.close_reader(key);
         }
@@ -434,7 +457,7 @@ impl State {
         let Some(key) = replaced else {
             return;
         };
-        self.replaced.insert(key);
+        self.readers.replace(key);
         if let Some(waker) = self.wakers.remove(&key) {
             waker.wake();
         }
