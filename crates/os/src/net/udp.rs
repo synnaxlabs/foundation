@@ -555,6 +555,7 @@ mod tests {
 
         /// Sends a batch of more than 64 or 128 segments, which Linux refuses with
         /// `EINVAL`. Its first datagram goes out alone, so `noq-udp` turns GSO off.
+        #[cfg(target_os = "linux")]
         fn turn_gso_off(bound: &Bound) {
             let refused = noq_udp::Transmit {
                 destination: bound.local,
