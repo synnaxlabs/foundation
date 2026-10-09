@@ -758,12 +758,9 @@ mod tests {
             };
             let mut other = inputs.hub.writer(other).await.expect("opens");
             let entries = other.set().entries();
-            let mut series: Vec<_> = (0..entries.len()).map(|i| (i, 8)).collect();
-            for (i, entry) in entries.iter().enumerate() {
-                if entry.key.as_u128() <= STATUS.as_u128() + 2 && entry.key != STATUS {
-                    series[i].1 = 1;
-                }
-            }
+            let series: Vec<_> = (entries.iter().enumerate())
+                .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
+                .collect();
             let mut draft = other.draft(Form::Raw, &series).expect("a frame");
             let stamp = other.now().nanos() + Span::SECOND.nanos();
             for (i, entry) in entries.iter().enumerate() {

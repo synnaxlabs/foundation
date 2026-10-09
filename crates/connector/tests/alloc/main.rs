@@ -49,7 +49,6 @@ fn main() {
         "race",
     );
     check_ticks();
-    #[cfg(feature = "sim")]
     status::check();
 }
 
@@ -114,7 +113,6 @@ fn check<F: Future>(mut f: Pin<&mut F>, token: &Token, wakers: &[Waker], name: &
     );
 }
 
-#[cfg(feature = "sim")]
 mod status {
     use std::cell::Cell;
     use std::future;
