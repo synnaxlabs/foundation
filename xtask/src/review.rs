@@ -750,6 +750,8 @@ fn normalized(text: &str) -> String {
 /// ([`RENAMED`]), and an invisible character ([`texts`]) is put before `<!` and a
 /// lowercase letter, which starts no HTML block on GitHub.
 fn unblocked(body: &str) -> Option<String> {
+    // Both parsers drop it, so the first line starts after it.
+    let body = body.strip_prefix('\u{feff}').unwrap_or(body);
     let mut text = String::with_capacity(body.len());
     for line in body.split_inclusive('\n') {
         let rest = bare(line);

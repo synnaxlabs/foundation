@@ -1515,6 +1515,20 @@ fn fails_raw_html_before_a_heading_that_github_shows_and_comrak_does_not() {
 }
 
 #[test]
+fn fails_raw_html_after_a_byte_order_mark_before_a_heading_that_github_shows() {
+    let found = ROUND.replace("Findings: none", "Findings: 2");
+    let at = found.find("## Review round 3").unwrap();
+    for line in ["\u{feff}<search", "\u{feff}<!x", "\u{feff}<SEARCH x"] {
+        let last = format!("{line}\n{}", &found[at..]);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&last)])),
+            vec![raw(line)],
+            "{line}"
+        );
+    }
+}
+
+#[test]
 fn passes_a_round_whose_heading_github_hides_in_an_html_block() {
     let found = ROUND.replace("Findings: none", "Findings: 2");
     // GitHub starts a block of type 7 at a complete tag alone on its line.
