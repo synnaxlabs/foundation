@@ -448,8 +448,9 @@ impl Session {
     }
 }
 
-/// Polls `run` to its end, and `side` with it. `side` has a waker of its own, and is
-/// polled only after a wake of it, so a poll of `run` alone costs one atomic swap.
+/// Polls `run` to its end, and `side` after it while `run` is pending, so `side` sees
+/// what `run` did at the same instant. `side` has a waker of its own, and is polled
+/// only after a wake of it, so a poll of `run` alone costs one atomic swap.
 async fn beside<T>(
     run: impl Future<Output = T>,
     side: impl Future<Output = Infallible>,
@@ -467,13 +468,16 @@ async fn beside<T>(
             let mut stored = woke.task.lock().expect("no panic under the lock");
             stored.clone_from(&task);
         }
+        if let Poll::Ready(out) = run.as_mut().poll(cx) {
+            return Poll::Ready(out);
+        }
         if woke.woken.swap(false, Ordering::AcqRel) {
             let side = side.as_mut().poll(&mut task::Context::from_waker(&waker));
             if let Poll::Ready(never) = side {
                 match never {}
             }
         }
-        run.as_mut().poll(cx)
+        Poll::Pending
     })
     .await
 }

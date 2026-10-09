@@ -1355,6 +1355,24 @@ mod tests {
     }
 
     #[test]
+    fn writes_the_count_of_a_set_at_the_time_of_a_flush() {
+        let statuses = tally(Tally {
+            count: "samples",
+            n: 10_000,
+            gap: ms(1),
+        });
+        let mut want = vec![(Span::ZERO, 0)];
+        want.extend((1..=9).map(|s| (ms(s * 1_000), s * 1_000)));
+        want.extend([
+            (ms(10_000), 10_000),
+            (Span::from_nanos(10_000_000_001), 10_000),
+        ]);
+        let got = statuses.iter().map(|(at, samples)| (*at, samples[3]));
+        assert_eq!(got.collect::<Vec<_>>(), want);
+        assert_eq!(states(&statuses)[10..], [(3, 0, 0), (2, 0, 0)]);
+    }
+
+    #[test]
     fn writes_no_status_once_a_status_channel_is_removed() {
         let statuses = run_on(|node, tasks| async move {
             let gap = ms(300);
