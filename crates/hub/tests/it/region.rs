@@ -149,6 +149,25 @@ fn a_writer_does_not_open_at_a_home_that_moved_while_it_waits_for_mesh_time() {
     });
 }
 
+/// A writer on two indexes checks the home of the first again once the second has one.
+#[test]
+fn a_writer_does_not_open_at_a_home_that_moved_while_it_waits_for_another_home() {
+    run(13, |test| async move {
+        test.set_home(TIME, NODE).await;
+        let config = config("a", &["value", "value-b"]);
+        let mut opening = std::pin::pin!(test.hub.writer(config));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        test.set_home(TIME, OTHER).await;
+        let region = test.region.as_ref().expect("a region");
+        let named = region.mesh.watch(TIME).next().await;
+        assert_eq!(named, Ok(Some(OTHER)));
+        test.set_home(TIME_B, NODE).await;
+        let opened = opening.await;
+        let error = opened.expect_err("the mesh names OTHER as the home of time");
+        assert_eq!(error, writer::Error::Remote { home: OTHER });
+    });
+}
+
 #[test]
 fn a_writer_does_not_open_on_a_mesh_that_stopped_while_it_waits_for_mesh_time() {
     unsynced(12, |mut test| async move {

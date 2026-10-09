@@ -540,11 +540,12 @@ enum Away {
 
 /// Waits until the mesh names this node the home of `index`. With no mesh, this node
 /// is the home. It changes no state, so the caller checks its channels again, or reads
-/// its removal, after it, then carries `index` with no `await` between.
+/// its removal, after it, then carries `index` with no `await` between. Gives whether
+/// it waited: the mesh named no home at the call.
 async fn home(
     state: &Rc<RefCell<State>>,
     index: types::channel::Key,
-) -> Result<(), Away> {
+) -> Result<bool, Away> {
     let (watch, node) = {
         let state = state.borrow();
         (
@@ -552,14 +553,15 @@ async fn home(
             state.node,
         )
     };
+    let mut waited = false;
     if let Some(mut watch) = watch {
         loop {
             match watch.next().await.map_err(Away::Mesh)? {
                 Some(home) if home == node => break,
                 Some(home) => return Err(Away::Remote(home)),
-                None => {}
+                None => waited = true,
             }
         }
     }
-    Ok(())
+    Ok(waited)
 }

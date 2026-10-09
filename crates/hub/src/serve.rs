@@ -489,7 +489,8 @@ impl<'s> Opening<'s> {
         let mut homed = pin!(crate::home(self.state, index));
         poll_fn(|cx| {
             self.watch(cx)?;
-            homed.as_mut().poll(cx).map_err(Error::from)
+            let homed = homed.as_mut().poll(cx).map_ok(|_| ());
+            homed.map_err(Error::from)
         })
         .await
     }
