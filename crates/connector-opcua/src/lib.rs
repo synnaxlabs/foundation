@@ -81,24 +81,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn sanitizers_follow_the_rust_build() {
-        let address = [
-            "-fsanitize=address,undefined",
-            "-fno-sanitize=function",
-            "-fno-sanitize-recover=all",
-        ];
-        let fuzzer = "-fsanitize=fuzzer-no-link";
-        assert!(compiler::sanitizers("", false).is_empty());
-        assert!(compiler::sanitizers("memory", false).is_empty());
-        assert_eq!(compiler::sanitizers("address", false), address);
-        assert_eq!(compiler::sanitizers("leak,address", false), address);
-        assert_eq!(compiler::sanitizers("", true), [fuzzer]);
-        let mut both = address.to_vec();
-        both.push(fuzzer);
-        assert_eq!(compiler::sanitizers("address", true), both);
-    }
-
     /// The builds of `compiler::builds`, for `TARGET` and with the compiler `path`.
     fn builds(path: &str) -> compiler::Builds {
         let mut builds = compiler::builds(Path::new("/copy"), "-std=c99", "a.c");
@@ -108,30 +90,52 @@ mod tests {
         builds
     }
 
+    /// The flags of `args` that start with `-fsanitize` or `-fno-sanitize`.
+    fn sanitizers(args: &[String]) -> Vec<&str> {
+        let flags = args.iter().map(String::as_str);
+        flags.filter(|arg| arg.contains("sanitize")).collect()
+    }
+
     #[test]
-    fn sanitize_adds_the_flags_to_both_builds() {
-        let mut builds = builds("/missing/clang");
-        builds.sanitize(&["-fsanitize=address"]);
-        for build in [&mut builds.library, &mut builds.shim] {
-            let tool = child::tool(build, TARGET);
-            assert_eq!(tool.path(), Path::new("/missing/clang"));
-            assert!(args(&tool).contains(&"-fsanitize=address".into()));
+    fn sanitize_follows_the_rust_build() {
+        let address = [
+            "-fsanitize=address,undefined",
+            "-fno-sanitize=function",
+            "-fno-sanitize-recover=all",
+        ];
+        let fuzzer = "-fsanitize=fuzzer-no-link";
+        let cases = [
+            (false, false, vec![]),
+            (true, false, address.to_vec()),
+            (false, true, vec![fuzzer]),
+            (true, true, [&address[..], &[fuzzer]].concat()),
+        ];
+        for (address, fuzzing, expected) in cases {
+            let mut builds = builds("/missing/clang");
+            builds.sanitize(address, fuzzing);
+            for build in [&mut builds.library, &mut builds.shim] {
+                let tool = child::tool(build, TARGET);
+                assert_eq!(tool.path(), Path::new("/missing/clang"));
+                assert_eq!(sanitizers(&args(&tool)), expected, "{address} {fuzzing}");
+            }
         }
     }
 
     #[test]
     fn sanitize_moves_gcc_to_clang() {
-        let mut builds = builds("/missing/gcc");
-        builds.sanitize(&["-fsanitize=address"]);
-        for build in [&mut builds.library, &mut builds.shim] {
-            assert_eq!(child::tool(build, TARGET).path(), Path::new("clang"));
+        for (address, fuzzing) in [(true, false), (false, true)] {
+            let mut builds = builds("/missing/gcc");
+            builds.sanitize(address, fuzzing);
+            for build in [&mut builds.library, &mut builds.shim] {
+                assert_eq!(child::tool(build, TARGET).path(), Path::new("clang"));
+            }
         }
     }
 
     #[test]
-    fn sanitize_keeps_gcc_with_no_flags() {
+    fn sanitize_keeps_gcc_with_no_sanitizer() {
         let mut builds = builds("/missing/gcc");
-        builds.sanitize(&[]);
+        builds.sanitize(false, false);
         for build in [&mut builds.library, &mut builds.shim] {
             assert_eq!(child::tool(build, TARGET).path(), Path::new("/missing/gcc"));
         }
@@ -190,120 +194,6 @@ mod tests {
                     !library.contains(&arg.into()),
                     "{path}: {arg} in {library:?}"
                 );
-            }
-        }
-    }
-
-    /// The tool of this process for its own target, with the compiler and the `CFLAGS`
-    /// of its environment.
-    fn probe() -> cc::Tool {
-        child::tool(&mut cc::Build::new(), env!("CONNECTOR_OPCUA_TARGET"))
-    }
-
-    #[test]
-    fn asan_is_true_in_a_child_process() {
-        if child::running() {
-            assert_eq!(compiler::asan(&probe()), Ok(true));
-        }
-    }
-
-    #[test]
-    fn asan_is_false_in_a_child_process() {
-        if child::running() {
-            assert_eq!(compiler::asan(&probe()), Ok(false));
-        }
-    }
-
-    /// Gives the error of `asan` when `program` fails with `reason`.
-    fn cannot_preprocess(program: &Path, reason: &str) -> String {
-        let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join(compiler::PROBE);
-        format!(
-            "connector-opcua: {} cannot preprocess {}: {reason}",
-            program.display(),
-            probe.display()
-        )
-    }
-
-    #[test]
-    fn asan_fails_when_the_tool_cannot_run() {
-        let tool = tool(cc::Build::new(), "/missing/cc");
-        // ENOENT on Linux and macOS.
-        let reason = std::io::Error::from_raw_os_error(2);
-        assert_eq!(
-            compiler::asan(&tool),
-            Err(cannot_preprocess(tool.path(), &reason.to_string()))
-        );
-    }
-
-    #[test]
-    fn asan_fails_when_the_tool_cannot_preprocess() {
-        let tool = tool(cc::Build::new(), "false");
-        assert_eq!(
-            compiler::asan(&tool),
-            Err(cannot_preprocess(tool.path(), ""))
-        );
-    }
-
-    #[test]
-    fn asan_names_the_missing_wrapper_in_a_child_process() {
-        if child::running() {
-            let reason = std::io::Error::from_raw_os_error(2);
-            assert_eq!(
-                compiler::asan(&probe()),
-                Err(cannot_preprocess(
-                    Path::new("/missing/ccache"),
-                    &reason.to_string()
-                ))
-            );
-        }
-    }
-
-    #[test]
-    fn asan_names_the_missing_wrapper() {
-        child::run(
-            "tests::asan_names_the_missing_wrapper_in_a_child_process",
-            &[("CC", "/missing/ccache clang")],
-        );
-    }
-
-    #[test]
-    fn asan_fails_with_the_stderr_of_the_tool() {
-        let mut build = cc::Build::new();
-        build.flag("--connector-opcua-no-such-flag");
-        let tool = child::tool(&mut build, env!("CONNECTOR_OPCUA_TARGET"));
-        let message = compiler::asan(&tool).unwrap_err();
-        // A wrapper in the `CC` variables or `RUSTC_WRAPPER` of this process runs in
-        // place of the compiler.
-        let program = Path::new(tool.to_command().get_program()).to_owned();
-        let stderr = message
-            .strip_prefix(&cannot_preprocess(&program, ""))
-            .unwrap_or_else(|| panic!("{message}"));
-        assert!(
-            stderr.contains("--connector-opcua-no-such-flag"),
-            "{message}"
-        );
-    }
-
-    #[test]
-    fn asan_is_true_only_with_address_sanitizer_in_cflags() {
-        let (asan, other) = (
-            "tests::asan_is_true_in_a_child_process",
-            "tests::asan_is_false_in_a_child_process",
-        );
-        let cases = [
-            (asan, Some("-fsanitize=address")),
-            (asan, Some("-O1 -fsanitize=undefined,address")),
-            (other, None),
-            (other, Some("-fsanitize=undefined")),
-            (other, Some("-fsanitize=address -fno-sanitize=address")),
-        ];
-        // Clang 18 defines no `__SANITIZE_ADDRESS__`; only `__has_feature` finds it.
-        for compiler in [None, Some("clang")] {
-            for (name, cflags) in cases {
-                let compiler = compiler.map(|compiler| ("CC", compiler));
-                let cflags = cflags.map(|cflags| ("CFLAGS", cflags));
-                let envs: Vec<_> = compiler.into_iter().chain(cflags).collect();
-                child::run(name, &envs);
             }
         }
     }

@@ -54,30 +54,25 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
     Builds { library, shim }
 }
 
-/// The C flags that give the copy and the shim the sanitizers of the Rust build.
-/// `sanitize` is `CARGO_CFG_SANITIZE`, empty when it is not set, and `fuzzing` is
-/// whether `cfg(fuzzing)` is set.
-pub(crate) fn sanitizers(sanitize: &str, fuzzing: bool) -> Vec<&'static str> {
-    let mut flags = Vec::new();
-    if sanitize.split(',').any(|name| name == "address") {
-        // `ZIP_FUNCTIONS` of the copy calls each comparator through a generic
-        // function type, which `-fsanitize=function` stops on.
-        flags.extend([
-            "-fsanitize=address,undefined",
-            "-fno-sanitize=function",
-            "-fno-sanitize-recover=all",
-        ]);
-    }
-    if fuzzing {
-        flags.push("-fsanitize=fuzzer-no-link");
-    }
-    flags
-}
-
 impl Builds {
-    /// Adds `flags`, from [`sanitizers`], to both builds. With any flag, a compiler
+    /// Gives both builds the sanitizers of the Rust build. With `address`, the C runs
+    /// under the address and undefined behavior sanitizers, and stops at the first
+    /// error. With `fuzzing`, it gives libFuzzer its coverage. With either, a compiler
     /// that is not clang gives way to `clang`, since rustc links the LLVM runtimes.
-    pub(crate) fn sanitize(&mut self, flags: &[&str]) {
+    pub(crate) fn sanitize(&mut self, address: bool, fuzzing: bool) {
+        let mut flags = Vec::new();
+        if address {
+            // `ZIP_FUNCTIONS` of the copy calls each comparator through a generic
+            // function type, which `-fsanitize=function` stops on.
+            flags.extend([
+                "-fsanitize=address,undefined",
+                "-fno-sanitize=function",
+                "-fno-sanitize-recover=all",
+            ]);
+        }
+        if fuzzing {
+            flags.push("-fsanitize=fuzzer-no-link");
+        }
         if flags.is_empty() {
             return;
         }
@@ -86,39 +81,9 @@ impl Builds {
             if !clang {
                 build.compiler("clang");
             }
-            for flag in flags {
+            for flag in &flags {
                 build.flag(flag);
             }
         }
     }
-}
-
-/// The file that `asan` preprocesses, relative to the crate.
-pub(crate) const PROBE: &str = "build/asan.c";
-
-/// Whether `tool` compiles C with `-fsanitize=address`, by its compiler and its flags,
-/// `CFLAGS` included.
-///
-/// # Errors
-///
-/// When `tool` cannot preprocess `PROBE`: the message names the program that ran,
-/// which is the C compiler wrapper (from the `CC` variables or `RUSTC_WRAPPER`) when
-/// `cc` uses one, and gives the reason or the standard error of `tool`.
-pub(crate) fn asan(tool: &Tool) -> Result<bool, String> {
-    let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join(PROBE);
-    let mut command = tool.to_command();
-    let output = command.arg("-E").arg(&probe).output();
-    let reason = match output {
-        Ok(output) if output.status.success() => {
-            let mut lines = output.stdout.split(|&byte| byte == b'\n');
-            return Ok(lines.any(|line| line.trim_ascii() == b"connector_opcua_asan"));
-        }
-        Ok(output) => String::from_utf8_lossy(&output.stderr).into_owned(),
-        Err(e) => e.to_string(),
-    };
-    Err(format!(
-        "connector-opcua: {} cannot preprocess {}: {reason}",
-        Path::new(command.get_program()).display(),
-        probe.display()
-    ))
 }
