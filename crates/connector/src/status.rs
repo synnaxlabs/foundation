@@ -380,12 +380,13 @@ impl Session {
     /// Writes the last value of each status channel. A frame that the home refuses
     /// as `Backwards` is stamped after the stamp the refusal gives and written again,
     /// one time. A frame that the home does not apply, or for which the shard's pool
-    /// gives no frame, leaves the status staged, so the flush writes it again.
+    /// has no block now, leaves the status staged, so the flush writes it again.
     ///
     /// # Panics
     ///
-    /// When the home refuses the frame for a cause that only a defect gives, which
-    /// includes `Backwards` on the frame written again.
+    /// When the draft or the home refuses the frame for a cause that only a defect
+    /// gives, which includes `Backwards` on the frame written again and a frame larger
+    /// than the largest block of the pool.
     fn write(&mut self, values: &Values, now: Monotonic) {
         values.staged.set(false);
         self.wrote = now;
@@ -409,11 +410,13 @@ impl Session {
     ///
     /// # Panics
     ///
-    /// When the home refuses the frame for a cause that only a defect gives.
+    /// When the draft or the home refuses the frame for a cause that only a defect
+    /// gives, which includes a frame larger than the largest block of the pool.
     fn send(&mut self, values: &Values, stamp: Stamp) -> Result<(), Stamp> {
         let mut draft = match self.hub.draft(Form::Raw, &self.series) {
             Ok(draft) => draft,
-            Err(frame::Error::Pool(_)) => {
+            Err(frame::Error::Pool(error)) => {
+                check_pool(&error);
                 values.stage();
                 return Ok(());
             }
@@ -548,6 +551,22 @@ impl Wake for Woke {
     }
 }
 
+/// Checks that the pool can give a status frame later.
+///
+/// # Panics
+///
+/// When no block of the pool holds a status frame.
+fn check_pool(error: &block::Error) {
+    match error {
+        block::Error::Exhausted { .. } | block::Error::Refused { .. } => {}
+        block::Error::TooLarge { .. } => {
+            panic!(
+                "invariant: a status frame fits the largest block of the pool: {error}"
+            )
+        }
+    }
+}
+
 #[cfg(test)]
 #[cfg(not(loom))]
 mod tests {
@@ -669,6 +688,27 @@ mod tests {
             error.to_string(),
             "a name or pattern is 256 bytes long, more than the limit of 255 bytes"
         );
+    }
+
+    #[test]
+    fn keeps_a_status_staged_when_the_pool_has_no_block_now() {
+        check_pool(&block::Error::Exhausted {
+            requested: 128,
+            available: 64,
+        });
+        check_pool(&block::Error::Refused { requested: 128 });
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a status frame fits the largest block of the pool: block \
+                    of 128 bytes is above the largest block of 64 bytes"
+    )]
+    fn panics_when_no_block_of_the_pool_holds_a_status_frame() {
+        check_pool(&block::Error::TooLarge {
+            requested: 128,
+            largest: 64,
+        });
     }
 }
 

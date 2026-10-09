@@ -13,6 +13,7 @@ bytes.workspace = true
 http.workspace = true
 http-body.workspace = true
 hyper.workspace = true
+block = { path = "../block" }
 env = { path = "../env" }
 hub = { path = "../hub" }
 document = { path = "../document" }
