@@ -2380,3 +2380,25 @@ connector \"w1\" {
     let codes: Vec<_> = planned.iter().map(|problem| problem.0).collect();
     assert_eq!(codes, ["config.writer-nodes"]);
 }
+
+#[test]
+fn gives_one_unknown_node_for_a_copy_that_a_placement_repeats() {
+    let text = "\
+channel \"a.time\" {
+  kind = \"index\"
+}
+placement \"a\" {
+  select = \"a.*\"
+  home = \"n\"
+  copies = [\"ghost\", \"ghost\"]
+}
+";
+    let planned = problems(Spec::create_empty().plan(&[text], &["n"]));
+    let expected = problem(
+        "config.unknown-node",
+        (0, offset(text, "\"ghost\"")),
+        "no node of the mesh is named `ghost`",
+        "Name a node of the mesh",
+    );
+    assert_eq!(planned, [expected]);
+}

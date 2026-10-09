@@ -38,9 +38,14 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     };
     match Policy::new(select, nodes.clone()) {
         Ok(policy) => {
-            found
-                .nodes
-                .extend(home.into_iter().chain(standby).chain(copies));
+            let spanned: Vec<_> =
+                home.into_iter().chain(standby).chain(copies).collect();
+            let at = |node: &Name| {
+                let first = spanned.iter().find(|(name, _)| name == node);
+                first.and_then(|(_, at)| *at)
+            };
+            let named = self::nodes(&policy).map(|node| (node.clone(), at(node)));
+            found.nodes.extend(named);
             Some(Definition::Spec(definition::Definition::Placement(policy)))
         }
         Err(error) => {
@@ -50,8 +55,8 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     }
 }
 
-/// Each node that `policy` names: its home, its standby, then its copies, the order in
-/// which `check` gives them with their spans.
+/// Each node that `policy` names, once: its home, its standby, then its copies in name
+/// order.
 pub(crate) fn nodes(policy: &Policy) -> impl Iterator<Item = &Name> {
     let copies = policy.copies();
     policy
