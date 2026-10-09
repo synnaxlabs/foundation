@@ -134,7 +134,7 @@ async fn renew(
         return Ok(Served::Ended);
     }
     loop {
-        // A fresh wait for each renewal, since a renewal can move the expiry earlier.
+        // A fresh wait for each renewal, since a renewal can move the end earlier.
         let mut renewal = pin!(take(session, receiver, sender));
         let mut expiry = pin!(expiry(session));
         let renewed = poll_fn(|cx| match renewal.as_mut().poll(cx) {
