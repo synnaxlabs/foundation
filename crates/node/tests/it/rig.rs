@@ -97,9 +97,7 @@ impl Rig {
     #[cfg(unix)]
     pub(crate) fn stop(&mut self) -> Output {
         let mut node = self.node.take().expect("a node runs");
-        let pid = node.process.0.id().to_string();
-        let sent = Command::new("kill").arg(&pid).status().expect("run kill");
-        assert!(sent.success(), "send SIGTERM to {pid}");
+        node.process.term();
         let ended = poll(&self.clock, PATIENCE, || {
             node.ended().ok_or_else(|| node.seen())
         });
@@ -110,6 +108,19 @@ impl Rig {
                 late("the node exits at SIGTERM", PATIENCE, &seen)
             }
         }
+    }
+
+    /// Starts `foundation` with `args` in [`Rig::dir`], with `stdout` as its standard
+    /// output, and with no standard input or error. Waits for nothing.
+    pub(crate) fn spawn(&self, args: &[&str], stdout: Stdio) -> Process {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
+        command
+            .args(args)
+            .current_dir(&self.dir)
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(Stdio::null());
+        Process(command.spawn().expect("start the command"))
     }
 
     /// Runs `foundation` with `args` in [`Rig::dir`], with `input` on its standard
@@ -295,7 +306,7 @@ impl Running {
 
     /// The exit status, once the command has exited and each of its pipes has closed.
     fn ended(&mut self) -> Option<ExitStatus> {
-        let status = self.process.0.try_wait().expect("check the command")?;
+        let status = self.process.exited()?;
         let written = self.input.as_ref().is_none_or(JoinHandle::is_finished);
         let closed = written && self.stdout.ended() && self.stderr.ended();
         closed.then_some(status)
@@ -326,9 +337,27 @@ impl Running {
 /// The process of a command. Drop kills it, so a test that panics leaves no
 /// `foundation` process. A process that it starts lives on: `foundation` starts none.
 #[derive(Debug)]
-pub(crate) struct Process(pub(crate) Child);
+pub(crate) struct Process(Child);
 
 impl Process {
+    /// The PID of the command.
+    pub(crate) fn pid(&self) -> u32 {
+        self.0.id()
+    }
+
+    /// Sends SIGTERM to the command. Panics when `kill` fails.
+    #[cfg(unix)]
+    pub(crate) fn term(&self) {
+        let pid = self.0.id().to_string();
+        let sent = Command::new("kill").arg(&pid).status().expect("run kill");
+        assert!(sent.success(), "send SIGTERM to {pid}");
+    }
+
+    /// The exit status of the command, or `None` while it runs.
+    pub(crate) fn exited(&mut self) -> Option<ExitStatus> {
+        self.0.try_wait().expect("check the command")
+    }
+
     /// Kills the command and waits for it to exit.
     fn end(&mut self) {
         // `kill` gives `Ok` for a command that exited.

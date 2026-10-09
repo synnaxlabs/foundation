@@ -1,6 +1,6 @@
 //! `foundation start`: a node on a data directory until SIGTERM.
 
-use crate::rig::{Process, Rig};
+use crate::rig::Rig;
 use crate::text;
 
 /// The exit status, the standard output, and the standard error of `output`.
@@ -196,7 +196,6 @@ fn a_key_file_that_holds_no_key_fails() {
 #[test]
 fn a_node_whose_standard_output_nobody_reads_exits_0_at_sigterm() {
     use std::io::Write;
-    use std::process::{Command, Stdio};
 
     let rig = Rig::new();
     let (reader, mut writer) = std::io::pipe().expect("make a pipe");
@@ -208,16 +207,8 @@ fn a_node_whose_standard_output_nobody_reads_exits_0_at_sigterm() {
         reason = "a process test fills a pipe of another process"
     )]
     std::thread::spawn(move || while writer.write_all(&[0; 4096]).is_ok() {});
-    let node = Command::new(env!("CARGO_BIN_EXE_foundation"))
-        .args(["start", "--name", "edge"])
-        .current_dir(&rig.dir)
-        .stdin(Stdio::null())
-        .stdout(stdout)
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("start the node");
-    let mut node = Process(node);
-    let pid = node.0.id().to_string();
+    let mut node = rig.spawn(&["start", "--name", "edge"], stdout.into());
+    let pid = node.pid();
     rig.wait(
         "a thread of the node waits in its write of the line",
         || {
@@ -229,13 +220,9 @@ fn a_node_whose_standard_output_nobody_reads_exits_0_at_sigterm() {
             blocked.then_some(()).ok_or_else(|| waits.join("\n"))
         },
     );
-    let sent = Command::new("kill").arg(&pid).status().expect("run kill");
-    assert!(sent.success(), "send SIGTERM to {pid}");
+    node.term();
     let status = rig.wait("the node exits at SIGTERM", || {
-        node.0
-            .try_wait()
-            .expect("check the node")
-            .ok_or_else(String::new)
+        node.exited().ok_or_else(String::new)
     });
     drop(reader);
     assert_eq!(status.code(), Some(0));
