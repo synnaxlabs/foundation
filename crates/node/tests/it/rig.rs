@@ -470,6 +470,19 @@ fn a_failed_kill_while_the_test_panics_reports_its_error() {
     );
 }
 
+/// A developer can set `RUST_TEST_NOCAPTURE` for the whole run.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs perl and /proc")]
+fn a_failed_kill_panics_in_a_run_that_does_not_capture() {
+    let output = Command::new(std::env::current_exe().expect("the test binary"))
+        .args(["--exact", "rig::a_failed_kill_panics"])
+        .env("RUST_TEST_NOCAPTURE", "1")
+        .output()
+        .expect("run the test binary");
+    let report = String::from_utf8(output.stdout).expect("UTF-8");
+    assert!(report.contains("test result: ok. 1 passed"), "{report}");
+}
+
 #[test]
 fn a_rig_keeps_its_directory_when_the_test_fails() {
     let mut dir = PathBuf::new();
