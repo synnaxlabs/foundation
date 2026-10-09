@@ -1462,6 +1462,26 @@ fn hides_both_footnotes_with_no_reference_of_one_label() {
 }
 
 #[test]
+fn an_old_round_reads_no_hot_path_after_other_text_on_its_line() {
+    // A `2.` item cannot interrupt a paragraph, so GitHub shows the line
+    // `2. Hot path: send`.
+    for text in [
+        "See\n2. Hot path: `send`",
+        "[r]: https://x.y\nSee\n2. Hot path: `send`",
+        "> - [r]: https://x.y\n>   See\n>   2. Hot path: `send`",
+    ] {
+        let round = old(&format!(
+            "## Review round 1\n\nConfirmed a finding.\n\n{text}"
+        ));
+        assert_eq!(
+            check(&record(vec![round, bot(ROUND)])),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn an_old_round_reads_the_first_footnote_of_a_label_with_a_reference() {
     // GitHub shows the first definition of a label, also in another case.
     for second in ["[^a]: y", "[^A]: y"] {

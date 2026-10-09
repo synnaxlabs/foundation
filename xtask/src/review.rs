@@ -488,8 +488,8 @@ struct Shown<'a> {
     /// The lines of text of each paragraph after the heading, at any depth, as GitHub
     /// shows them: without the indent or the marks of a list item or a quote. A
     /// footnote with no reference is not shown. A paragraph that comrak places in the
-    /// wrong lines ([`misplaced`]) gives each of its source lines after its marks
-    /// ([`bare`]).
+    /// wrong lines ([`misplaced`]) gives each of its source lines from its start, and
+    /// after the indent and the marks of quotes.
     text: Vec<Vec<&'a str>>,
     /// The first line of the comment that can hide text on GitHub or that the check
     /// cannot read, and its cause.
@@ -541,8 +541,13 @@ impl<'a> Shown<'a> {
                 }
                 NodeValue::Paragraph if misplaced(node, data.sourcepos.end.line) => {
                     hiding.push((start, Cause::Misplaced));
-                    let lines = body[source(data.sourcepos)].split('\n');
-                    shown.text.push(lines.map(bare).collect());
+                    // A later line holds no mark of a list item or a footnote label.
+                    let text =
+                        &body[at(data.sourcepos.start)..source(data.sourcepos).end];
+                    let lines = text.split('\n');
+                    shown.text.push(
+                        lines.map(|l| l.trim_start_matches([' ', '>'])).collect(),
+                    );
                 }
                 NodeValue::Paragraph => {
                     let last = data.sourcepos.end.line;
