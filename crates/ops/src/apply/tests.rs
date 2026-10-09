@@ -309,35 +309,27 @@ fn rogue(planned: &config::plan::Plan, kind: &str, node: &str) -> config::plan::
 #[test]
 fn refuses_a_plan_that_plan_refuses_and_proposes_nothing() {
     solo(|mesh| async move {
-        let base = mesh.pointer();
         let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let cases = [
             (
                 rogue(&planned, "nothing", "edge"),
-                "connector.unknown-kind",
-                "this build has no connector kind \"nothing\"",
-                "Use one of [\"influx\", \"opcua\"]",
+                problem(
+                    "connector.unknown-kind",
+                    "this build has no connector kind \"nothing\"",
+                    "Use one of [\"influx\", \"opcua\"]",
+                ),
             ),
             (
                 rogue(&planned, "opcua", "nowhere"),
-                "config.unknown-node",
-                "no node of the mesh is named `nowhere`",
-                "Name a node of the mesh",
+                problem(
+                    "config.unknown-node",
+                    "no node of the mesh is named `nowhere`",
+                    "Name a node of the mesh",
+                ),
             ),
         ];
-        for (planned, code, message, fix) in cases {
-            let error = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
-                .await
-                .expect_err("a plan that plan refuses");
-            let problem = crate::error::Problem {
-                code: code.into(),
-                message: message.into(),
-                fix: fix.into(),
-                place: None,
-                notes: Vec::new(),
-            };
-            assert_eq!(error, Error::Config(vec![problem]));
-            assert_eq!(mesh.pointer(), base);
+        for (planned, problem) in cases {
+            refuses(&mesh, &planned, &kinds(), vec![problem]).await;
         }
     });
 }
@@ -359,7 +351,6 @@ fn added(
 #[test]
 fn refuses_a_plan_that_breaks_a_rule_on_names_or_private_keys() {
     solo(|mesh| async move {
-        let base = mesh.pointer();
         let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let entry = planned.changes[&name("plc")].new.as_ref().expect("an add");
         let config::Definition::Spec(plc) = entry.definition.clone() else {
@@ -396,11 +387,7 @@ fn refuses_a_plan_that_breaks_a_rule_on_names_or_private_keys() {
             ),
         ];
         for (planned, problem) in cases {
-            let error = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
-                .await
-                .expect_err("a plan that check refuses");
-            assert_eq!(error, Error::Config(vec![problem]));
-            assert_eq!(mesh.pointer(), base);
+            refuses(&mesh, &planned, &kinds(), vec![problem]).await;
         }
     });
 }
@@ -477,6 +464,22 @@ fn problem(code: &str, message: &str, fix: &str) -> crate::error::Problem {
     }
 }
 
+/// Applies `planned` with `kinds`, and asserts that the apply gives the `Config`
+/// `problems` and proposes nothing.
+async fn refuses(
+    mesh: &Mesh,
+    planned: &config::plan::Plan,
+    kinds: &Table,
+    problems: Vec<crate::error::Problem>,
+) {
+    let base = mesh.pointer();
+    let error = apply(path(), &planned.encode(), mesh, kinds, keys(0))
+        .await
+        .expect_err("a plan that check refuses");
+    assert_eq!(error, Error::Config(problems));
+    assert_eq!(mesh.pointer(), base);
+}
+
 const A_TIME: &str = "channel \"a.time\" { kind = \"index\" }\n";
 
 /// The plan of the placement `t`, which wins for the connector `a`, and the placement
@@ -497,7 +500,6 @@ async fn split(mesh: &Mesh) -> config::plan::Plan {
 fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
     let definitions = spec::founding::create(ADMIN.public());
     founded(&["edge", "other"], definitions, |mesh| async move {
-        let base = mesh.pointer();
         let (_, placed) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         let mut unplaced = placed.clone();
         unplaced.changes.remove(&name("p.@placement"));
@@ -554,11 +556,7 @@ fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
             ),
         ];
         for (planned, problems) in cases {
-            let error = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
-                .await
-                .expect_err("a plan that check refuses");
-            assert_eq!(error, Error::Config(problems));
-            assert_eq!(mesh.pointer(), base);
+            refuses(&mesh, &planned, &kinds(), problems).await;
         }
     });
 }
@@ -566,15 +564,10 @@ fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
 #[test]
 fn refuses_a_config_that_its_kind_refuses_at_the_apply() {
     solo(|mesh| async move {
-        let base = mesh.pointer();
         let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let refusing = Table::new().with("influx", Reader).with("opcua", Refuser);
-        let error = apply(path(), &plant.encode(), &mesh, &refusing, keys(0))
-            .await
-            .expect_err("a config that its kind refuses");
         let refused = problem("test.refused", "refused", "Fix it");
-        assert_eq!(error, Error::Config(vec![refused]));
-        assert_eq!(mesh.pointer(), base);
+        refuses(&mesh, &plant, &refusing, vec![refused]).await;
     });
 }
 
@@ -597,17 +590,12 @@ fn refuses_a_plan_with_only_a_home_on_a_node_that_is_not_a_member() {
         let (_, site) = plan_among(&mesh, &[("site.hcl", &site)], &members).await;
         assert!(site.changes.is_empty());
         assert_eq!(site.homes.len(), 1);
-        let pointer = mesh.pointer();
-        let error = apply(path(), &site.encode(), &mesh, &kinds(), keys(10))
-            .await
-            .expect_err("a home on a node that is not a member");
         let problem = problem(
             "config.unknown-node",
             "no node of the mesh is named `other`",
             "Name a node of the mesh",
         );
-        assert_eq!(error, Error::Config(vec![problem]));
-        assert_eq!(mesh.pointer(), pointer);
+        refuses(&mesh, &site, &kinds(), vec![problem]).await;
     });
 }
 
