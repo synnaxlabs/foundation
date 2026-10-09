@@ -2736,3 +2736,58 @@ fn a_second_removal_keeps_the_end_of_a_remote_reader() {
         },
     );
 }
+
+#[test]
+fn a_session_that_ends_with_a_refusal_while_a_credit_is_due_sends_no_credit() {
+    let body = |n: usize| if n == 31 { 14_272 } else { 16_320 };
+    remote(
+        52,
+        sim::link::Config::default(),
+        move |node, _, transport, steps| async move {
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
+            for n in 0..32 {
+                send_frame(&mut sender, body(n)).await.expect("sends");
+            }
+            until(&node.clock(), &steps.again).await;
+            // A body one byte longer than its ends.
+            send_head(&mut sender, 1, &[(0, 8), (1, 16)])
+                .await
+                .expect("sends");
+            send(&mut sender, 17, |out| out.fill(1)).await;
+            let reset = loop {
+                match receiver.recv().await {
+                    Ok(Some(message)) => assert_ne!(message.len(), Credit::LEN),
+                    Ok(None) => panic!("the stream finished"),
+                    Err(error) => break error,
+                }
+            };
+            assert_eq!(
+                reset,
+                transport::Error::Reset {
+                    code: Code(MALFORMED)
+                }
+            );
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            for _ in 0..32 {
+                reader.next().await.expect("a frame");
+            }
+            test.paused.pause();
+            let wait = test.clock.sleep(Span::from_nanos(100_000_000));
+            assert!(race(reader.next(), wait).await.is_err(), "a credit is due");
+            steps.again.store(true, Ordering::Relaxed);
+            test.clock.sleep(Span::from_nanos(500_000_000)).await;
+            test.paused.resume();
+            let ended = reader.next().await.map(|_| ());
+            let body = wire::hub::Error::Body {
+                len: 17,
+                remain: 16,
+            };
+            assert_eq!(ended, Err(Ended::Message(body)));
+            until(&test.clock, &steps.stopped).await;
+        },
+    );
+}
