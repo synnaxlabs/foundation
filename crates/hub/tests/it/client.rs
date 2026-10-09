@@ -3,8 +3,6 @@
 
 use std::cell::Cell;
 use std::future::poll_fn;
-use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -13,7 +11,7 @@ use std::task::Poll;
 use hub::client::{Client, Config, Error, LIFE};
 use hub::serve;
 use transport::stream::Incoming;
-use transport::{Address, Code, Port};
+use transport::{Address, Code};
 use types::ed25519::PrivateKey;
 use types::time::{Interval, Span, Stamp};
 use wire::header::MALFORMED;
@@ -26,8 +24,8 @@ use super::link::{
     AGENT, Got, OTHER, QUIET, SUBJECT, accept, header, name, rules, run_program,
     serve_session, serve_session_on,
 };
-use super::serve::{HOME, PORT, own_pool, public_key, transport};
 use super::{NODE, POOL};
+use crate::net::{HOME, own_pool, public_key, transport};
 
 /// Connects to the home at `at` from `node` as [`SUBJECT`], signing with `key`, with a
 /// client pool that holds a body at the cap while the transport sends it.
@@ -51,18 +49,14 @@ async fn connect_with(
     key: PrivateKey,
     pool: Rc<block::Pool>,
 ) -> Result<Client, Error> {
-    let own = SocketAddr::new(node.addresses()[0], PORT);
-    let mut parts = Port::bind(&node.net(), own)
-        .expect("binds")
-        .split(NonZeroUsize::MIN);
     let config = transport::client::Config {
+        net: node.net(),
         clock: node.clock(),
         entropy: node.entropy(),
         tasks: tasks.clone(),
         pool: own_pool(),
     };
-    let transport = transport::Client::new(config, parts.pop().expect("one part"))
-        .expect("a client");
+    let transport = transport::Client::new(config).expect("a client");
     let config = Config {
         via: NODE,
         node: public_key(&HOME),
@@ -140,6 +134,19 @@ fn closes_the_session_when_the_last_clone_drops() {
         Ok(Got::Request(name(SUBJECT), b"ab".to_vec()))
     );
     assert_eq!(home.closed, transport::Error::PeerClosed { code: Code(0) });
+}
+
+/// The home keeps the end of each stream, whichever task the sim picks first.
+#[test]
+fn keeps_the_end_of_each_stream_at_each_seed() {
+    for seed in 0..16 {
+        let home = with_client(seed, |client, node| async move {
+            assert_eq!(client.request(b"ab").await, Ok(b"ba".to_vec()));
+            drop(client);
+            node.clock().sleep(QUIET).await;
+        });
+        assert_eq!(home.served.len(), 2, "seed {seed}: {:?}", home.served);
+    }
 }
 
 #[test]
@@ -648,6 +655,74 @@ fn closes_the_session_on_a_challenge_that_is_not_valid() {
     );
 }
 
+/// A request in flight when a challenge that `wire` refuses ends the renewal gives
+/// that error, not the error of the close.
+#[test]
+fn gives_the_error_of_the_renewal_to_a_request_in_flight() {
+    raw(
+        135,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let _request = read_request(&session).await;
+            let sender = hello.sender.as_mut().expect("two-way");
+            let refused = own_pool().copy(&[0xff]).expect("room");
+            sender.send(refused).await.expect("sends");
+            drop(session.closed().await);
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            assert_eq!(
+                client.request(b"ab").await,
+                Err(Error::Message(wire::hub::Error::Kind { kind: 0xff }))
+            );
+        },
+    );
+}
+
+/// A request in flight when the node finishes the hello stream gives
+/// [`Error::Unanswered`], the error that ended the renewal.
+#[test]
+fn gives_an_unanswered_renewal_to_a_request_in_flight() {
+    raw(
+        136,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let _request = read_request(&session).await;
+            let sender = hello.sender.as_mut().expect("two-way");
+            sender.finish().expect("finishes");
+            drop(session.closed().await);
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            assert_eq!(client.request(b"ab").await, Err(Error::Unanswered));
+        },
+    );
+}
+
+/// A body over the cap gives [`Error::Body`] also once the renewal ended.
+#[test]
+fn gives_the_body_error_first_after_the_renewal_ended() {
+    raw(
+        152,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let sender = hello.sender.as_mut().expect("two-way");
+            let refused = own_pool().copy(&[0xff]).expect("room");
+            sender.send(refused).await.expect("sends");
+            drop(session.closed().await);
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            node.clock().sleep(LIFE).await;
+            let length = usize::try_from(BODY_BYTES_MAX).expect("fits") + 1;
+            assert_eq!(
+                client.request(&vec![0; length]).await,
+                Err(Error::Body { length })
+            );
+        },
+    );
+}
+
 /// The retry of a message that finds the pool full, as the record states it.
 const RETRY: Span = Span::from_nanos(10_000_000);
 
@@ -1093,7 +1168,7 @@ fn gives_the_turn_in_the_order_requests_began() {
 #[test]
 fn names_each_error() {
     let cases = [
-        (Error::Refused(Refusal::Expired), "the hello expired"),
+        (Error::Refused(Refusal::Expired), "the hello ended"),
         (
             Error::Transport(transport::Error::TimedOut),
             "the session failed: the peer stopped answering",
@@ -1182,4 +1257,80 @@ fn sends_a_body_at_the_cap_from_a_pool_of_one_chunk_on_each_link() {
             },
         );
     }
+}
+
+/// Asserts that a program connects to a home whose node has mesh time with
+/// `wall_error`.
+fn connects_at_wall_error(seed: u64, wall_error: Option<Span>) {
+    let (connected, served) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+    let (client_end, home_end) = (Arc::clone(&connected), Arc::clone(&served));
+    run_program(
+        seed,
+        move |node, tasks| async move {
+            node.set_wall_error(wall_error);
+            let (test, session, link) =
+                accept(&node, &tasks, POOL, true, Some(rules())).await;
+            let mut hello = session.accept().await.expect("a hello stream");
+            header(&mut hello).await;
+            let result = link.serve(hello).await.map(drop);
+            *home_end.lock().expect("not poisoned") = Some(result);
+            drop((link, test));
+        },
+        move |node, tasks, at| async move {
+            let result = connect(&node, tasks, at, AGENT).await.map(drop);
+            *client_end.lock().expect("not poisoned") = Some(result);
+        },
+    );
+    let served = served.lock().expect("not poisoned").take();
+    let connected = connected.lock().expect("not poisoned").take();
+    assert_eq!(connected, Some(Ok(())), "the home gave {served:?}");
+}
+
+#[test]
+fn connects_to_a_node_whose_mesh_time_has_an_error_of_minutes() {
+    connects_at_wall_error(170, Some(Span::from_nanos(3 * Span::MINUTE.nanos())));
+}
+
+#[test]
+fn connects_to_a_node_whose_mesh_time_has_an_unknown_error() {
+    connects_at_wall_error(171, None);
+}
+
+/// A node with no time source admits a program, then gets one, so its error
+/// shrinks from unknown to 10 ms. The program's session lives on: its renewals pass.
+#[test]
+fn keeps_a_session_when_the_error_of_mesh_time_shrinks() {
+    let (got, served) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(Vec::new())));
+    let (kept, seen) = (Arc::clone(&got), Arc::clone(&served));
+    run_program(
+        172,
+        move |node, tasks| async move {
+            super::link::shrink_wall_error(&node, &tasks);
+            let (test, session, link) =
+                accept(&node, &tasks, POOL, true, Some(rules())).await;
+            super::link::serve_each(
+                &session,
+                &link,
+                &tasks,
+                &node.clock(),
+                &seen,
+                &Rc::default(),
+            )
+            .await;
+            drop((link, test));
+        },
+        move |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            node.clock()
+                .sleep(Span::from_nanos(2 * LIFE.nanos() + Span::SECOND.nanos()))
+                .await;
+            let late = client.request(b"late").await;
+            *kept.lock().expect("not poisoned") = Some(late);
+            drop(client);
+            node.clock().sleep(QUIET).await;
+        },
+    );
+    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
+    let got = got.lock().expect("not poisoned").take();
+    assert_eq!(got, Some(Ok(b"etal".to_vec())), "the home gave {served:?}");
 }

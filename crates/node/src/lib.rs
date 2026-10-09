@@ -6,6 +6,9 @@
 #[doc(hidden)]
 pub mod bench;
 mod directory;
+#[cfg(feature = "sim")]
+#[doc(hidden)]
+pub mod fuzz;
 mod handoff;
 mod identity;
 mod route;
@@ -21,6 +24,7 @@ mod task;
 #[cfg(not(loom))]
 mod tests;
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::iter;
@@ -31,6 +35,8 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
+use document::diagnostic::Diagnostic;
+use document::{Document, Source};
 use env::thread::Handle;
 use types::ed25519::PrivateKey;
 use types::frame::key_set::Interner;
@@ -115,6 +121,8 @@ pub struct Node {
     failed: Option<Error>,
     /// The tasks for shard 0's hub.
     queue: task::Queue<task::Task>,
+    /// The node has a region, so shard 0 has an `ops::Node`.
+    regional: bool,
 }
 
 /// A started shard, with its error once it fails.
@@ -159,14 +167,15 @@ impl Node {
     /// Once each buffer has opened, shard 0 reads the node's key and private key from
     /// the file `node.key` in the data directory, and makes the file at the first start
     /// once it has mesh time, unless [`create_key`] made it, then opens the mesh of
-    /// [`Config::region`] when it has one, then serves the port and admits every peer
-    /// that proves its key, until its transport or the mesh's group stops, which stops
-    /// the node. Returns once each shard runs or one has failed to start. When the disk
-    /// budget holds no ring on each shard, no shard starts, and [`Node::join`] gives
-    /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
-    /// start, a shard with no memory, a data directory that another node holds or that
-    /// was made for another shard count, a key file that is not valid, or a buffer or a
-    /// mesh that does not open stops the node, and [`Node::join`] returns its error.
+    /// [`Config::region`] when it has one, then serves the port, admits each member of
+    /// the region and at most 256 sessions of other peers at once, until its transport
+    /// or the mesh's group stops, which stops the node. Returns once each shard runs or
+    /// one has failed to start. When the disk budget holds no ring on each shard, no
+    /// shard starts, and [`Node::join`] gives [`Error::Disk`] with the budget, the
+    /// shard count, and the least budget. A failed start, a shard with no memory, a
+    /// data directory that another node holds or that was made for another shard count,
+    /// a key file that is not valid, or a buffer or a mesh that does not open stops the
+    /// node, and [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -175,16 +184,20 @@ impl Node {
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let cores = config.shards.cores().get();
+        let regional = config.region.is_some();
         let parts = match parts(config.budget, config.disk, cores) {
             Ok(parts) => parts,
             Err(small) => {
                 let count =
                     u64::try_from(cores).expect("invariant: a core count fits a u64");
-                return Self::failed(Error::Disk {
+                let min =
+                    types::byte::Size::from_bytes(small.min.saturating_mul(count));
+                let error = Error::Disk {
                     disk: config.disk,
                     cores,
-                    min: types::byte::Size::from_bytes(small.min.saturating_mul(count)),
-                });
+                    min,
+                };
+                return Self::failed(error, regional);
             }
         };
         let Ok(count) = u32::try_from(cores) else {
@@ -194,7 +207,7 @@ impl Node {
             Ok(bound) => bound.split(NonZeroUsize::MIN).pop(),
             Err(error) => {
                 let listen = config.listen;
-                return Self::failed(Error::Port { listen, error });
+                return Self::failed(Error::Port { listen, error }, regional);
             }
         };
         let endpoint = Endpoint {
@@ -206,13 +219,15 @@ impl Node {
         Self::launch(config, endpoint, parts.into_iter().zip(0..count))
     }
 
-    /// A node that failed with `error` before any shard started.
-    fn failed(error: Error) -> Self {
+    /// A node that failed with `error` before any shard started. `regional` is whether
+    /// its config has a region.
+    fn failed(error: Error, regional: bool) -> Self {
         Self {
             stop: Stop::default(),
             shards: Vec::new(),
             failed: Some(error),
             queue: task::pair().0,
+            regional,
         }
     }
 
@@ -236,6 +251,7 @@ impl Node {
         let cores = shards.cores().get();
         let handoff::Chain { first, last, links } = handoff::chain(cores);
         let (queue, inbox) = task::pair();
+        let regional = endpoint.region.is_some();
         let (mesh, clock) = clock::Clock::new(monotonic.clone());
         let serve = Serve {
             interner: last,
@@ -291,6 +307,7 @@ impl Node {
             shards: started,
             failed: error,
             queue,
+            regional,
         }
     }
 
@@ -309,7 +326,29 @@ impl Node {
     where
         F: Future<Output = ()> + 'static,
     {
-        self.queue.push(Box::new(move |hub| Box::pin(task(hub))));
+        self.queue
+            .push(Box::new(move |handles| Box::pin(task(handles.hub.clone()))));
+    }
+
+    /// Calls `task` with the operations on the node's mesh on shard 0, in the order
+    /// and with the guarantees of [`Node::spawn`]. Each new channel that an apply
+    /// makes gets a UUIDv7 key at mesh time.
+    ///
+    /// # Panics
+    ///
+    /// When [`Config::region`] is `None`: the node has no mesh.
+    pub fn operate<F>(&self, task: impl FnOnce(Rc<ops::Node>) -> F + Send + 'static)
+    where
+        F: Future<Output = ()> + 'static,
+    {
+        assert!(self.regional, "`operate` on a node with no region");
+        self.queue.push(Box::new(move |handles| {
+            let ops = handles
+                .ops
+                .as_ref()
+                .expect("invariant: a node with a region opens its mesh");
+            Box::pin(task(Rc::clone(ops)))
+        }));
     }
 
     /// Asks every shard to end. A shard then starts no claim of the data directory
@@ -725,6 +764,7 @@ impl Serve {
                 Err(error) => return fail(error),
             };
         let (key, entropy) = (identity.key, self.endpoint.entropy.clone());
+        let clock = self.endpoint.clock.clone();
         // The endpoint's open takes the founding, so the definitions go first.
         let definitions = self
             .endpoint
@@ -739,6 +779,13 @@ impl Serve {
             Ok(opened) => opened,
             Err(error) => return fail(error),
         };
+        let region = mesh.clone().map(|mesh| hub::Region {
+            mesh,
+            transport: Rc::clone(&transport),
+        });
+        let ops = mesh.as_ref().map(|mesh| {
+            Rc::new(operations(mesh.clone(), self.time.clone(), entropy.clone()))
+        });
         let hub = hub::Hub::new(hub::Config {
             home,
             interner,
@@ -746,14 +793,15 @@ impl Serve {
             node: key,
             time: self.time,
             entropy,
-            mesh: mesh.clone(),
+            region,
         });
-        hub.define(definitions.iter().flatten());
+        hub.set_definitions(definitions.iter().flatten());
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         let group = stopped(mesh.as_ref());
         // The port's future holds the mesh, so it drops before the wait.
         {
-            let port = route::accept(transport, mesh, hub.clone(), tasks.clone());
+            let port =
+                route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
             let mut port = pin!(port);
             let mut group = pin!(group);
             let mut guard = pin!(guard);
@@ -767,12 +815,51 @@ impl Serve {
                 // a task's drop.
                 ended.map(|error| error.map_or((), fail))
             });
-            self.inbox.serve(hub, tasks, stop).await;
+            self.inbox
+                .serve(task::Handles { hub, ops }, tasks, stop)
+                .await;
         }
         if let Some(ended) = ended {
             ended.await;
         }
     }
+}
+
+/// A new channel key: a UUIDv7 at mesh time read through `time`, with random bits
+/// from `entropy`.
+fn channel_key(
+    time: &clock::Reader,
+    entropy: &env::entropy::Entropy,
+) -> types::channel::Key {
+    // The time only orders keys, so a key before mesh time or 1970 has the time 0.
+    // Not an edge or the midpoint of the interval: an edge moves back when the error
+    // changes, and the midpoint when one edge stops at the end of the stamp range.
+    let at = match time.status() {
+        clock::Status::Synced(mesh) | clock::Status::Holdover(mesh, _) => {
+            mesh.time().max(Stamp::EPOCH)
+        }
+        clock::Status::Unsynced(_) => Stamp::EPOCH,
+    };
+    let mut random = [0; 16];
+    entropy.fill(&mut random);
+    types::channel::Key::v7(at, u128::from_le_bytes(random))
+}
+
+/// The operations on `mesh`, whose keys [`channel_key`] makes.
+fn operations(
+    mesh: mesh::Mesh,
+    time: clock::Reader,
+    entropy: env::entropy::Entropy,
+) -> ops::Node {
+    let key = move || channel_key(&time, &entropy);
+    let front_ends = BTreeMap::from([("hcl", ops::FrontEnd { read: hcl })]);
+    ops::Node::new(mesh, key, front_ends, connector::kind::Table::new())
+}
+
+/// The HCL front end.
+fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
+    config_hcl::read(source, text)
+        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
 /// Resolves with the stop of the group of `mesh`, or never when the node has no mesh.

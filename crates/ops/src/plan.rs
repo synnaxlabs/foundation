@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use document::Source;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use spec::definition::{Definition, Kind};
 use types::name::Name;
 
@@ -75,8 +76,17 @@ pub(crate) struct Output {
 }
 
 impl Output {
+    /// The output as JSON.
+    pub(crate) fn json(&self) -> Value {
+        serde_json::to_value(self).expect("invariant: an output is plain JSON data")
+    }
+
     /// One line for each change, with a `key` line under it for each fingerprint, then
     /// the counts.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the table entries of #1744 call it")
+    )]
     pub(crate) fn text(&self) -> String {
         let lines: Vec<String> = self
             .changes
@@ -236,6 +246,10 @@ impl Action {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the table entries of #1744 call it")
+    )]
     const fn symbol(self) -> char {
         match self {
             Self::Add => '+',

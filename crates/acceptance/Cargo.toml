@@ -9,11 +9,15 @@ publish.workspace = true
 
 [dev-dependencies]
 block = { path = "../block" }
+codec = { path = "../codec" }
 connector-influx = { path = "../connector-influx", features = ["sim"] }
 env = { path = "../env" }
+hub = { path = "../hub" }
 mesh = { path = "../mesh" }
 node = { path = "../node" }
+ops = { path = "../ops" }
 proptest.workspace = true
+serde_json.workspace = true
 sim = { path = "../sim" }
 spec = { path = "../spec" }
 transport = { path = "../transport" }

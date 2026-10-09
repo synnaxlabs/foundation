@@ -9,6 +9,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::slice;
 use std::task::Poll;
+use std::time::{Duration, Instant};
 
 use block::Block;
 use bytes::Bytes;
@@ -1130,6 +1131,38 @@ impl Streams {
     pub(super) fn end(&self, error: Error) {
         let set = self.closed.set(error);
         assert!(set.is_ok(), "invariant: a connection closes once");
+    }
+
+    /// Starts the wait for the peer's hello at `now`, when the handshake ends.
+    pub(super) fn start(&mut self, now: Instant) {
+        self.peer.wait(now);
+    }
+
+    /// When the peer's hello is due on a connection whose idle timeout `idle` gives:
+    /// twice it after the handshake, while the hello has not arrived and the
+    /// connection has not ended. A cut that the connection lives through ends within
+    /// the idle timeout. Calls `idle` only while it waits.
+    pub(super) fn deadline(&self, idle: impl FnOnce() -> Duration) -> Option<Instant> {
+        let since = self.peer.since()?;
+        self.closed.get().is_none().then(|| since + 2 * idle())
+    }
+
+    /// Checks the wait for the peer's hello at `now`, on a connection whose idle
+    /// timeout `idle` gives.
+    ///
+    /// # Errors
+    ///
+    /// [`Fault`] when the hello is due by `now`, has not arrived, and the connection
+    /// has not ended.
+    pub(super) fn timeout(
+        &self,
+        now: Instant,
+        idle: impl FnOnce() -> Duration,
+    ) -> Result<(), Fault> {
+        match self.deadline(idle) {
+            Some(due) if due <= now => Err(Fault("a peer with no hello".to_owned())),
+            Some(_) | None => Ok(()),
+        }
     }
 
     /// Sends this side's hello on `inner`, on this side's first one-way stream, ahead
@@ -3735,7 +3768,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_sender_that_the_peer_stops_gives_no_event() {
+    fn a_reset_sender_that_the_peer_stops_gives_only_its_freed_stream() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
             let mut sender = open_sender(&mut pair, Class::Complete);
@@ -3747,7 +3780,10 @@ mod tests {
             pair.client.endpoint.reset(now, &mut sender, Code(9));
             pair.server.endpoint.stop(now, receiver, Code(9));
             pair.run(RUN);
-            assert_eq!(pair.client.events.len(), seen, "{:?}", pair.client.events);
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
+            assert_eq!(events(&pair.client).split_off(seen), [&available]);
         });
     }
 
@@ -4229,11 +4265,13 @@ mod tests {
             let id = sender.key().id;
             let now = pair.now();
             pair.client.endpoint.reset(now, &mut sender, Code(9));
-            // The stop goes before the client's reset arrives, and the link loses it.
+            // The stop goes before the client's reset arrives. The link loses it and
+            // the next datagram, the `MAX_STREAMS` of the stream that the reset frees,
+            // so the resent stop comes after the reset's ACK.
             let over = VarInt::from_u64(1 << 32).expect("a varint");
             let stopped = pair.server.connection().recv_stream(id).stop(over);
             stopped.expect("stopped");
-            pair.server.drops = 1;
+            pair.server.drops = 2;
             pair.run(Duration::ZERO);
             assert_ignored_late_stop(&mut pair, false, id);
         });
@@ -4524,7 +4562,11 @@ mod tests {
             let writable = Event::Writable {
                 stream: sender.key(),
             };
-            assert_eq!(events(&pair.client).last(), Some(&&writable));
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
+            let given = events(&pair.client);
+            assert_eq!(given[given.len() - 2..], [&writable, &available]);
             let now = pair.now();
             for _ in 0..2 {
                 let written = pair::write(
@@ -4592,6 +4634,108 @@ mod tests {
                 .streams()
                 .remote_open_streams(Dir::Uni);
             assert_eq!(open, 0);
+        });
+    }
+
+    /// The count of `MAX_STREAMS` frames for one-way streams that the server sent.
+    fn announced(pair: &mut Pair) -> u64 {
+        pair.server.connection().stats().frame_tx.max_streams_uni
+    }
+
+    /// Ends the client's `sender`, whose stream the server holds in `incoming`, and
+    /// reads it to its end on the server, which frees the stream.
+    fn end(pair: &mut Pair, sender: &mut Sender, incoming: &mut [Incoming]) {
+        let finished = pair.client.endpoint.finish(pair.now(), sender);
+        assert_eq!(finished, Ok(()));
+        pair.run(RUN);
+        let id = sender.key().id;
+        let at = |incoming: &&mut Incoming| incoming.receiver.key().id == id;
+        let incoming = incoming.iter_mut().find(at).expect("an incoming stream");
+        let now = pair.now();
+        let read = drain(&mut pair.server, now, &mut incoming.receiver);
+        assert_eq!(read, (vec![b"a".to_vec()], true));
+        pair.run(RUN);
+    }
+
+    /// Opens `n` streams from the client, each with "a", and accepts each on the
+    /// server.
+    fn open(pair: &mut Pair, shard: &Shard, n: u32) -> (Vec<Sender>, Vec<Incoming>) {
+        let now = pair.now();
+        let senders = (0..n)
+            .map(|_| {
+                let mut sender = open_sender(pair, Class::Complete);
+                write(&mut pair.client, now, &mut sender, &[shard.block(b"a")]);
+                sender
+            })
+            .collect();
+        pair.run(RUN);
+        let server = key(&pair.server);
+        let incoming = iter::from_fn(|| pair.server.endpoint.accept(server)).collect();
+        (senders, incoming)
+    }
+
+    /// Opens a stream from the client with no wait.
+    fn try_open(pair: &mut Pair) -> Option<Sender> {
+        let (now, key) = (pair.now(), key(&pair.client));
+        pair.client.endpoint.open_sender(now, key, Class::Complete)
+    }
+
+    #[test]
+    fn each_freed_stream_at_the_limit_gives_a_max_streams_frame_with_or_without_a_wait()
+    {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (mut senders, mut incoming) =
+                open(&mut pair, shard, testing::STREAMS_MAX);
+            let before = announced(&mut pair);
+            end(&mut pair, &mut senders[0], &mut incoming);
+            assert_eq!(announced(&mut pair), before + 1, "a free, and no wait");
+            assert!(try_open(&mut pair).is_some());
+            assert!(try_open(&mut pair).is_none());
+            pair.run(RUN);
+            assert_eq!(announced(&mut pair), before + 1, "no stream is free");
+            end(&mut pair, &mut senders[1], &mut incoming);
+            assert_eq!(announced(&mut pair), before + 2, "a wait, then a free");
+            assert!(try_open(&mut pair).is_some());
+        });
+    }
+
+    #[test]
+    fn each_freed_stream_below_the_limit_gives_a_max_streams_frame() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (mut senders, mut incoming) = open(&mut pair, shard, 2);
+            let before = announced(&mut pair);
+            for (ended, sender) in (1..).zip(&mut senders) {
+                end(&mut pair, sender, &mut incoming);
+                assert_eq!(announced(&mut pair), before + ended);
+            }
+        });
+    }
+
+    #[test]
+    fn a_burst_of_freed_streams_gives_one_max_streams_frame() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (mut senders, mut incoming) =
+                open(&mut pair, shard, testing::STREAMS_MAX);
+            let before = announced(&mut pair);
+            for sender in &mut senders[..2] {
+                let finished = pair.client.endpoint.finish(pair.now(), sender);
+                assert_eq!(finished, Ok(()));
+            }
+            pair.run(RUN);
+            let now = pair.now();
+            for incoming in &mut incoming[..2] {
+                let read = drain(&mut pair.server, now, &mut incoming.receiver);
+                assert_eq!(read, (vec![b"a".to_vec()], true));
+            }
+            pair.run(RUN);
+            assert_eq!(announced(&mut pair), before + 1);
+            for _ in 0..2 {
+                assert!(try_open(&mut pair).is_some());
+            }
+            assert!(try_open(&mut pair).is_none());
         });
     }
 
@@ -5747,8 +5891,11 @@ mod tests {
             let writable = |sender: &Sender| Event::Writable {
                 stream: sender.key(),
             };
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
             let given = events(&pair.client).split_off(seen);
-            assert_eq!(given, [&writable(&second), &writable(&first)]);
+            assert_eq!(given, [&writable(&second), &writable(&first), &available]);
         });
     }
 
@@ -5857,7 +6004,10 @@ mod tests {
             let woken = Event::Writable {
                 stream: sender.key(),
             };
-            assert_eq!(events(&pair.client).split_off(seen), [&woken]);
+            let available = Event::Available {
+                key: key(&pair.client),
+            };
+            assert_eq!(events(&pair.client).split_off(seen), [&woken, &available]);
         });
     }
 
@@ -7156,6 +7306,213 @@ mod tests {
                 let opened = pair.client.endpoint.open_sender(now, key, Class::Command);
                 assert!(opened.is_some());
             });
+        }
+
+        /// On `Endpoint` events, not through `Session`: no public peer can skip its
+        /// hello, and a `sim` link that loses a hello loses other datagrams too, so
+        /// only a foreign peer pins the time and the close of the bound.
+        #[test]
+        fn end_a_session_whose_peer_sends_no_hello_for_twice_idle() {
+            testing::run(1, |shard| {
+                let mut accepted = foreign_dial(shard, |_| {});
+                accepted.run(Duration::from_secs(3));
+                let mut dialed = dial_foreign(shard, Foreign::new(shard, |_| {}));
+                dialed.run(Duration::from_secs(3));
+                for side in [&accepted.server, &dialed.client] {
+                    let [
+                        (connected, Event::Connected { key, .. }),
+                        (closed, Event::Closed { key: ended, error }),
+                    ] = &side.events[..]
+                    else {
+                        panic!("{:?}", side.events);
+                    };
+                    assert_eq!(*closed, *connected + Duration::from_secs(2));
+                    assert_eq!(ended, key);
+                    let reason = "a peer with no hello".to_owned();
+                    assert_eq!(error, &Error::Broken { reason });
+                }
+                for pair in [&accepted, &dialed] {
+                    let reason =
+                        "closed by peer: a peer with no hello (code 4294967296)";
+                    assert_eq!(lost(pair), reason);
+                }
+            });
+        }
+
+        /// On `Endpoint` events, not through `Session`: no public peer can skip its
+        /// hello.
+        #[test]
+        fn end_a_silent_session_with_no_hello_at_idle_as_timed_out() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let mut foreign = Foreign::new(shard, |_| {});
+                foreign.dial(pair.now(), pair::SERVER_KEY.public(), pair::SERVER);
+                pair.foreign = Some(foreign);
+                while pair.server.events.is_empty() {
+                    pair.run(Duration::from_millis(1));
+                }
+                pair.foreign = None;
+                pair.run(Duration::from_secs(3));
+                let [
+                    (connected, Event::Connected { .. }),
+                    (closed, Event::Closed { error, .. }),
+                ] = &pair.server.events[..]
+                else {
+                    panic!("{:?}", pair.server.events);
+                };
+                assert_eq!(*closed, *connected + Duration::from_secs(1));
+                assert_eq!(error, &Error::TimedOut);
+            });
+        }
+
+        /// A peer that sends no hello goes silent, and the one wake after it comes past
+        /// both the idle timeout and the hello's bound: at the handshake, when the idle
+        /// timeout is due first, and 1.5 s after it, when the bound is. On `Endpoint`,
+        /// not through `Session`: no public peer can skip its hello, and the test picks
+        /// the instant of the wake.
+        #[test]
+        fn end_a_silent_session_at_a_late_wake_as_timed_out() {
+            for (quiet, wake) in [(0, 2_100), (1_500, 2_600)] {
+                testing::run(1, move |shard| {
+                    let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                    let mut foreign = Foreign::new(shard, |_| {});
+                    foreign.dial(pair.now(), pair::SERVER_KEY.public(), pair::SERVER);
+                    pair.foreign = Some(foreign);
+                    while pair.server.events.is_empty() {
+                        pair.run(Duration::from_millis(1));
+                    }
+                    pair.run(Duration::from_millis(quiet));
+                    pair.foreign = None;
+                    let (connected, _) = pair.server.events[0];
+                    let wake = pair::at(connected + Duration::from_millis(wake));
+                    pair.server.endpoint.timeout(wake);
+                    let mut events = Vec::new();
+                    while let Some(event) = pair.server.endpoint.poll() {
+                        events.push(event);
+                    }
+                    let [Event::Closed { error, .. }] = &events[..] else {
+                        panic!("{events:?}");
+                    };
+                    assert_eq!(error, &Error::TimedOut);
+                    let deadline = pair.server.endpoint.deadline();
+                    assert!(deadline.is_none_or(|due| due > wake), "{deadline:?}");
+                });
+            }
+        }
+
+        /// A peer that sends no hello goes silent 810 ms after the handshake. The
+        /// server's next keep-alive starts the idle timeout again, so at the hello's
+        /// bound the peer was silent more than `idle`, and the session still ends with
+        /// [`Error::Broken`]. On `Endpoint`, not through `Session`: no public peer can
+        /// skip its hello.
+        #[test]
+        fn end_a_session_silent_for_idle_at_the_bound_as_broken() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let mut foreign = Foreign::new(shard, |_| {});
+                foreign.dial(pair.now(), pair::SERVER_KEY.public(), pair::SERVER);
+                pair.foreign = Some(foreign);
+                while pair.server.events.is_empty() {
+                    pair.run(Duration::from_millis(1));
+                }
+                pair.run(Duration::from_millis(810));
+                let idle = pair.server.connection().idle_timeout().expect("an idle");
+                let cut = Duration::from_nanos(pair.now().0);
+                pair.foreign = None;
+                pair.run(Duration::from_secs(3));
+                let [
+                    (connected, Event::Connected { .. }),
+                    (closed, Event::Closed { error, .. }),
+                ] = &pair.server.events[..]
+                else {
+                    panic!("{:?}", pair.server.events);
+                };
+                assert_eq!(*closed, *connected + 2 * idle);
+                // The peer's last datagram arrives by `cut + DELAY`.
+                let silent = closed.checked_sub(cut + DELAY).expect("a close after");
+                assert!(silent > idle, "{silent:?}");
+                let reason = "a peer with no hello".to_owned();
+                assert_eq!(error, &Error::Broken { reason });
+            });
+        }
+
+        /// A connection whose socket broke, with no hello from a live peer, gives no
+        /// second [`Event::Closed`] and no fault when the hello's bound passes. On
+        /// `Endpoint` events, not through `Session`: the carrier stops at a broken
+        /// socket, so only a direct caller of `Endpoint` runs a timer after `fail`.
+        #[test]
+        fn end_a_failed_session_once_when_the_bound_passes() {
+            testing::run(1, |shard| {
+                let mut pair = foreign_dial(shard, |_| {});
+                let error = env::net::Error::Io { code: 5 };
+                pair.server.endpoint.fail(&error);
+                pair.run(Duration::from_secs(3));
+                let [
+                    (_, Event::Connected { key, .. }),
+                    (
+                        _,
+                        Event::Closed {
+                            key: ended,
+                            error: closed,
+                        },
+                    ),
+                ] = &pair.server.events[..]
+                else {
+                    panic!("{:?}", pair.server.events);
+                };
+                assert_eq!(ended, key);
+                assert_eq!(closed, &Error::Network { error });
+            });
+        }
+
+        /// On `Endpoint` events, not through `Session`: no public peer can send its
+        /// hello at a chosen instant.
+        #[test]
+        fn keep_a_session_whose_peer_hello_arrives_before_twice_idle() {
+            testing::run(1, |shard| {
+                let mut pair = dial_foreign(shard, Foreign::new(shard, |_| {}));
+                let (connected, _) = pair.client.events[0];
+                let now = Duration::from_nanos(pair.now().0);
+                // One step before the bound.
+                let arrival = connected + Duration::from_nanos(1_999_999_999);
+                pair.run(arrival.checked_sub(now + DELAY).expect("a send after now"));
+                raw(foreign(&mut pair), Dir::Uni, &OWN.encode(), true);
+                pair.run(Duration::from_secs(3));
+                let key = key(&pair.client);
+                assert!(
+                    matches!(
+                        events(&pair.client)[..],
+                        [Event::Connected { .. }, Event::Available { key: available }]
+                            if *available == key
+                    ),
+                    "{:?}",
+                    pair.client.events
+                );
+                assert_eq!(pair.client.events[1].0, arrival);
+            });
+        }
+
+        /// The carrier sets its sleep only when the deadline changes, so one timeout
+        /// at a late wake must leave no deadline at or before it. On `Endpoint`: the
+        /// deadline is the carrier's input, and no `Session` call shows it.
+        #[test]
+        fn leave_no_past_deadline_after_a_late_wake() {
+            for late in [100, 300, 600, 900].map(Duration::from_millis) {
+                testing::run(1, move |shard| {
+                    let mut pair = dial_foreign(shard, Foreign::new(shard, |_| {}));
+                    let (connected, _) = pair.client.events[0];
+                    let now = Duration::from_nanos(pair.now().0);
+                    let before = connected + Duration::from_millis(1_950);
+                    pair.run(before.checked_sub(now).expect("a run after now"));
+                    let wake = pair::at(connected + Duration::from_secs(2) + late);
+                    pair.client.endpoint.timeout(wake);
+                    let deadline = pair.client.endpoint.deadline();
+                    assert!(
+                        deadline.is_none_or(|due| due > wake),
+                        "{late:?}: {deadline:?}"
+                    );
+                });
+            }
         }
 
         #[test]

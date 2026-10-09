@@ -16,6 +16,9 @@ mod files;
 mod kept;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod net;
+#[cfg(target_os = "linux")]
+#[path = "../common/seccomp.rs"]
+mod seccomp;
 mod shards;
 mod threads;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

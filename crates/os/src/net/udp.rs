@@ -5,11 +5,11 @@ use std::io::{self, IoSliceMut};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::num::NonZeroUsize;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::task::{Context, Poll, ready};
 use std::thread::{self, ThreadId};
 
-use env::net::udp::{self, Meta, Transmit, sender};
+use env::net::udp::{self, Meta, Transmit, receiver, sender};
 use env::net::{Ecn, Error};
 use noq_udp::{EcnCodepoint, RecvMeta, UdpSocketState};
 use rustix::io::Errno;
@@ -20,14 +20,9 @@ use tokio::io::unix::AsyncFd;
 use super::socket;
 use super::{bind, canonical, errno, from_io, io_error};
 
-/// A bound UDP socket, and the receive half of it.
+/// A bound UDP socket.
 pub(super) struct Udp {
     bound: Arc<Bound>,
-    /// The thread of the receiver's first poll.
-    thread: OnceLock<ThreadId>,
-    /// The receiver's `dup` of the socket, registered for readable by the first poll
-    /// that succeeds.
-    readable: OnceLock<AsyncFd<UdpSocket>>,
 }
 
 /// What each half of one socket reads.
@@ -41,8 +36,9 @@ struct Bound {
 }
 
 impl Udp {
-    /// Binds a socket to `config.local`, with don't-fragment set. Needs no runtime.
-    pub(super) fn bind(config: &udp::Config) -> Result<Self, Error> {
+    /// Binds a socket to `config.local`, with don't-fragment set, and gives it with
+    /// the driver of its one receiver. Needs no runtime.
+    pub(super) fn bind(config: &udp::Config) -> Result<(Self, Receiver), Error> {
         let local = config.local;
         let fd =
             super::socket(local, SocketType::DGRAM, ipproto::UDP).map_err(io_error)?;
@@ -62,11 +58,13 @@ impl Udp {
             state,
             local,
         };
-        Ok(Self {
-            bound: Arc::new(bound),
-            thread: OnceLock::new(),
-            readable: OnceLock::new(),
-        })
+        let bound = Arc::new(bound);
+        let receiver = Receiver {
+            bound: Arc::clone(&bound),
+            thread: None,
+            readable: None,
+        };
+        Ok((Self { bound }, receiver))
     }
 }
 
@@ -101,23 +99,36 @@ impl udp::Driver for Udp {
             writer: None,
         })
     }
+}
 
+/// The driver of the `Receiver`.
+pub(super) struct Receiver {
+    bound: Arc<Bound>,
+    /// The thread of the first poll.
+    thread: Option<ThreadId>,
+    /// A `dup` of the socket, registered for readable by the first poll that
+    /// succeeds.
+    readable: Option<AsyncFd<UdpSocket>>,
+}
+
+impl receiver::Driver for Receiver {
     fn poll_recv(
-        &self,
+        &mut self,
         cx: &mut Context<'_>,
         buffers: &mut [IoSliceMut<'_>],
         meta: &mut [Meta],
     ) -> Poll<Result<usize, Error>> {
-        let bound = &self.bound;
-        let thread = self.thread.get_or_init(|| thread::current().id());
+        let bound = &*self.bound;
+        let thread = self.thread.get_or_insert_with(|| thread::current().id());
         socket::on_thread("UDP receiver", *thread);
-        let socket = if let Some(socket) = self.readable.get() {
-            socket
-        } else {
-            let socket = (bound.socket.try_clone())
-                .and_then(|fd| AsyncFd::with_interest(fd, Interest::READABLE))
-                .map_err(|e| from_io(&e))?;
-            self.readable.get_or_init(|| socket)
+        let socket = match &mut self.readable {
+            Some(socket) => socket,
+            none @ None => {
+                let socket = (bound.socket.try_clone())
+                    .and_then(|fd| AsyncFd::with_interest(fd, Interest::READABLE))
+                    .map_err(|e| from_io(&e))?;
+                none.insert(socket)
+            }
         };
         loop {
             let mut guard =
@@ -176,6 +187,10 @@ struct Sender {
 struct Writer {
     /// A registration of `fd`. It drops first, so it never outlives `fd`.
     full: Option<AsyncFd<RawFd>>,
+    /// The index of the next datagram of a transmit that got `Pending`, else 0. A send
+    /// that its caller drops while it waits leaves it set. A different transmit in its
+    /// place can lose its first datagrams.
+    next: usize,
     fd: UdpSocket,
 }
 
@@ -185,15 +200,42 @@ impl Writer {
         AsyncFd::with_interest(fd.as_raw_fd(), Interest::WRITABLE)
     }
 
-    /// Runs `send` on the descriptor until it is ready, and waits for writable while
-    /// it is `Pending`.
+    /// Sends each datagram of `transmit` from `bound` with `send` on the descriptor,
+    /// as [`send_all`] does, and starts a retry after `Pending` at `next`.
+    fn poll_transmit(
+        &mut self,
+        cx: &mut Context<'_>,
+        bound: &Bound,
+        transmit: &Transmit<'_>,
+        mut send: impl FnMut(&UdpSocket, &noq_udp::Transmit<'_>) -> io::Result<()>,
+    ) -> Poll<Result<(), Error>> {
+        self.poll_send(cx, |fd, next| {
+            send_all(bound, transmit, next, |datagram| send(fd, datagram))
+        })
+    }
+
+    /// Runs `send` on the descriptor and the index of its next datagram until it is
+    /// ready, and waits for writable while it is `Pending`. The index goes to 0 at
+    /// each `Ready`.
     fn poll_send(
         &mut self,
         cx: &mut Context<'_>,
-        mut send: impl FnMut(&UdpSocket) -> Poll<Result<(), Error>>,
+        send: impl FnMut(&UdpSocket, &mut usize) -> Poll<Result<(), Error>>,
+    ) -> Poll<Result<(), Error>> {
+        let outcome = self.poll_until_ready(cx, send);
+        if outcome.is_ready() {
+            self.next = 0;
+        }
+        outcome
+    }
+
+    fn poll_until_ready(
+        &mut self,
+        cx: &mut Context<'_>,
+        mut send: impl FnMut(&UdpSocket, &mut usize) -> Poll<Result<(), Error>>,
     ) -> Poll<Result<(), Error>> {
         loop {
-            if let Poll::Ready(sent) = send(&self.fd) {
+            if let Poll::Ready(sent) = send(&self.fd, &mut self.next) {
                 self.full = None;
                 return Poll::Ready(sent);
             }
@@ -231,22 +273,24 @@ impl sender::Driver for Sender {
                 // stream does.
                 let fd = bound.socket.try_clone().map_err(|e| from_io(&e))?;
                 let full = Some(Writer::register(&fd).map_err(|e| from_io(&e))?);
-                none.insert(Writer { full, fd })
+                none.insert(Writer { full, next: 0, fd })
             }
         };
-        writer.poll_send(cx, |fd| {
-            send_all(bound, transmit, |datagram| {
-                bound.state.try_send(fd.into(), datagram)
-            })
+        writer.poll_transmit(cx, bound, transmit, |fd, datagram| {
+            bound.state.try_send(fd.into(), datagram)
         })
     }
 }
 
 /// Sends each datagram of `transmit` from `bound` with `send`. Gives `Pending` when
-/// the OS send buffer is full, with no waker kept.
+/// the OS send buffer is full, with no waker kept. With GSO off and more than one
+/// datagram, it starts at index `next` and moves `next` past each datagram that it sent
+/// or lost over the path MTU; else it gives the whole transmit to `send` in one call
+/// and leaves `next`.
 fn send_all(
     bound: &Bound,
     transmit: &Transmit<'_>,
+    next: &mut usize,
     mut send: impl FnMut(&noq_udp::Transmit<'_>) -> io::Result<()>,
 ) -> Poll<Result<(), Error>> {
     let remote = transmit.destination;
@@ -265,16 +309,14 @@ fn send_all(
     let Some(segment) = segment else {
         return sent(send(&datagram(contents, None)), remote);
     };
-    // When the kernel or the card cannot segment, `noq-udp` turns GSO off for the
-    // socket, and each datagram goes out alone.
+    // When the kernel or the card cannot segment, `noq-udp` sends the batch a
+    // datagram at a time and turns GSO off for the socket.
     if bound.state.max_gso_segments().get() > 1 {
-        match send(&datagram(contents, Some(segment))) {
-            Err(_) if bound.state.max_gso_segments().get() == 1 => {}
-            outcome => return sent(outcome, remote),
-        }
+        return sent(send(&datagram(contents, Some(segment))), remote);
     }
-    for contents in contents.chunks(segment) {
+    for contents in contents.chunks(segment).skip(*next) {
         ready!(sent(send(&datagram(contents, None)), remote))?;
+        *next += 1;
     }
     Poll::Ready(Ok(()))
 }
@@ -301,9 +343,11 @@ fn sent(outcome: io::Result<()>, remote: SocketAddr) -> Poll<Result<(), Error>> 
 ///
 /// - [`Error::Unreachable`] with the destination as given when the socket's family
 ///   cannot reach it.
-/// - [`Error::Io`] with `EINVAL` for an IPv6 source on an IPv4 socket, or for an
-///   unspecified source in any form. Linux skips the `IPV6_PKTINFO` of the first and
-///   reads the second as no source, and sends each from an address of its choice.
+/// - [`Error::Io`] with `EINVAL` for an IPv6 source on an IPv4 socket, for an IPv6
+///   source that is not mapped with an IPv4 destination, or for an unspecified source
+///   in any form. Linux skips the `IPV6_PKTINFO` of the first, macOS skips that of the
+///   second, and Linux reads the third as no source; each then sends from an address
+///   of its choice.
 fn route(
     local: SocketAddr,
     transmit: &Transmit<'_>,
@@ -319,7 +363,10 @@ fn route(
         return Err(Error::Unreachable { remote });
     }
     if transmit.source.is_some_and(|source| {
-        source.to_canonical().is_unspecified() || local.is_ipv4() && source.is_ipv6()
+        let canonical = source.to_canonical();
+        canonical.is_unspecified()
+            || local.is_ipv4() && source.is_ipv6()
+            || destination.is_ipv4() && canonical.is_ipv6()
     }) {
         return Err(io_error(Errno::INVAL));
     }
@@ -370,7 +417,7 @@ mod tests {
     }
 
     fn loopback() -> Udp {
-        Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap()
+        Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap().0
     }
 
     fn transmit(destination: SocketAddr, contents: &[u8]) -> Transmit<'_> {
@@ -482,10 +529,25 @@ mod tests {
                 source: Some(source),
                 ..transmit(v4(2), b"")
             };
-            let routed = super::route(any_v6(), &from(V4.into()));
-            assert_eq!(routed, Ok((mapped(2), Some(V4.to_ipv6_mapped().into()))));
-            let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
-            assert_eq!(super::route(any_v6(), &from(v6)), Ok((mapped(2), Some(v6))));
+            let mapped_v4 = IpAddr::V6(V4.to_ipv6_mapped());
+            for source in [V4.into(), mapped_v4] {
+                let routed = super::route(any_v6(), &from(source));
+                assert_eq!(routed, Ok((mapped(2), Some(mapped_v4))), "{source}");
+            }
+        }
+
+        /// Linux refuses this send in the kernel too, so only macOS shows the check
+        /// through a send.
+        #[test]
+        fn an_ipv6_source_to_ipv4_gives_einval() {
+            for remote in [mapped(2), v4(2)] {
+                let from = Transmit {
+                    source: Some(Ipv6Addr::LOCALHOST.into()),
+                    ..transmit(remote, b"")
+                };
+                let routed = super::route(any_v6(), &from);
+                assert_eq!(routed, Err(Error::Io { code: 22 }), "{remote}");
+            }
         }
 
         #[test]
@@ -532,9 +594,7 @@ mod tests {
         )]
         enum Outcome {
             Fails(Errno),
-            /// `noq-udp` refuses a batch with `EINVAL` from the OS, which turns GSO
-            /// off for the socket.
-            Refused,
+            Sent,
         }
 
         /// The contents and segment size of each send, with the outcomes to give.
@@ -551,26 +611,22 @@ mod tests {
                 }
             }
 
-            fn send(
-                &mut self,
-                bound: &Bound,
-                datagram: &noq_udp::Transmit<'_>,
-            ) -> io::Result<()> {
+            fn send(&mut self, datagram: &noq_udp::Transmit<'_>) -> io::Result<()> {
                 let send = (datagram.contents.to_vec(), datagram.segment_size);
                 self.sends.push(send);
                 match self.outcomes.pop() {
                     Some(Outcome::Fails(code)) => {
                         Err(io::Error::from_raw_os_error(code.raw_os_error()))
                     }
-                    Some(Outcome::Refused) => refuse(bound),
-                    None => Ok(()),
+                    Some(Outcome::Sent) | None => Ok(()),
                 }
             }
         }
 
-        /// Sends a batch that Linux refuses with `EINVAL`: more than 64 or 128
-        /// segments.
-        fn refuse(bound: &Bound) -> io::Result<()> {
+        /// Sends a batch of more than 64 or 128 segments, which Linux refuses with
+        /// `EINVAL`. Its first datagram goes out alone, so `noq-udp` turns GSO off.
+        #[cfg(target_os = "linux")]
+        fn turn_gso_off(bound: &Bound) {
             let refused = noq_udp::Transmit {
                 destination: bound.local,
                 ecn: None,
@@ -579,8 +635,8 @@ mod tests {
                 src_ip: None,
             };
             let sent = bound.state.try_send((&bound.socket).into(), &refused);
-            assert_eq!(sent.as_ref().map_err(errno), Err(Errno::INVAL));
-            sent
+            assert_eq!(sent.map_err(|e| errno(&e)), Ok(()));
+            assert_eq!(bound.state.max_gso_segments().get(), 1);
         }
 
         fn batch(contents: &[u8], segment: usize) -> Transmit<'_> {
@@ -595,7 +651,7 @@ mod tests {
             transmit: &Transmit<'_>,
             recorded: &mut Recorded,
         ) -> Poll<Result<(), Error>> {
-            send_all(&udp.bound, transmit, |d| recorded.send(&udp.bound, d))
+            send_all(&udp.bound, transmit, &mut 0, |d| recorded.send(d))
         }
 
         #[test]
@@ -625,22 +681,6 @@ mod tests {
 
         #[test]
         #[cfg(target_os = "linux")]
-        fn sends_each_datagram_alone_when_the_os_refuses_a_batch() {
-            let mut recorded = Recorded::new(&[Outcome::Refused]);
-            let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
-            assert_eq!(sent, Poll::Ready(Ok(())));
-            let alone = |bytes: &[u8]| (bytes.to_vec(), None);
-            let expected = [
-                (b"abcde".to_vec(), Some(2)),
-                alone(b"ab"),
-                alone(b"cd"),
-                alone(b"e"),
-            ];
-            assert_eq!(recorded.sends, expected);
-        }
-
-        #[test]
-        #[cfg(target_os = "linux")]
         fn gives_a_failure_of_a_batch_that_leaves_gso_on() {
             let failed = Outcome::Fails(Errno::INVAL);
             let mut recorded = Recorded::new(&[failed]);
@@ -652,9 +692,26 @@ mod tests {
 
         #[test]
         #[cfg(target_os = "linux")]
+        fn a_refused_transmit_in_segments_of_0_bytes_leaves_gso_on() {
+            let udp = loopback();
+            let bound = &udp.bound;
+            let refused = noq_udp::Transmit {
+                destination: SocketAddr::new(bound.local.ip(), 0),
+                ecn: None,
+                contents: b"abc",
+                segment_size: Some(0),
+                src_ip: None,
+            };
+            let sent = bound.state.try_send((&bound.socket).into(), &refused);
+            assert_eq!(sent.map_err(|e| errno(&e)), Err(Errno::INVAL));
+            assert!(bound.state.max_gso_segments().get() > 1);
+        }
+
+        #[test]
+        #[cfg(target_os = "linux")]
         fn sends_each_datagram_alone_after_the_os_refused_a_batch() {
             let udp = loopback();
-            assert!(refuse(&udp.bound).is_err());
+            turn_gso_off(&udp.bound);
             let mut recorded = Recorded::new(&[]);
             let sent = run(&udp, &batch(b"abc", 2), &mut recorded);
             assert_eq!(sent, Poll::Ready(Ok(())));
@@ -674,9 +731,11 @@ mod tests {
         #[test]
         #[cfg(target_os = "linux")]
         fn stops_at_a_failure_of_one_datagram() {
-            let outcomes = [Outcome::Refused, Outcome::Fails(Errno::NETUNREACH)];
+            let udp = loopback();
+            turn_gso_off(&udp.bound);
+            let outcomes = [Outcome::Sent, Outcome::Fails(Errno::NETUNREACH)];
             let mut recorded = Recorded::new(&outcomes);
-            let sent = run(&loopback(), &batch(b"abcde", 2), &mut recorded);
+            let sent = run(&udp, &batch(b"abcde", 2), &mut recorded);
             let remote = v4(2);
             assert_eq!(sent, Poll::Ready(Err(Error::Unreachable { remote })));
             assert_eq!(recorded.sends.len(), 2);
@@ -692,61 +751,100 @@ mod tests {
         }
     }
 
-    mod writer {
+    fn idle(fd: UdpSocket) -> Writer {
+        Writer {
+            full: None,
+            next: 0,
+            fd,
+        }
+    }
+
+    fn runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_io()
+            .enable_time()
+            .build()
+            .unwrap()
+    }
+
+    /// The epoll entries of any runtime in this process for the socket of `inode`.
+    fn registrations(inode: u64) -> usize {
+        let entry = format!("ino:{inode:x} ");
+        std::fs::read_dir("/proc/self/fdinfo")
+            .unwrap()
+            .filter_map(|fd| std::fs::read_to_string(fd.ok()?.path()).ok())
+            .map(|info| {
+                info.lines()
+                    .filter(|line| line.starts_with("tfd:") && line.contains(&entry))
+                    .count()
+            })
+            .sum()
+    }
+
+    mod receiver {
         use std::task::Waker;
 
         use super::*;
 
-        fn runtime() -> tokio::runtime::Runtime {
-            tokio::runtime::Builder::new_current_thread()
-                .enable_io()
-                .enable_time()
-                .build()
-                .unwrap()
+        /// While the senders live, a dropped receiver drops its readable
+        /// registration.
+        #[test]
+        #[cfg_attr(not(target_os = "linux"), ignore = "needs /proc")]
+        fn a_dropped_receiver_drops_its_registration() {
+            use std::os::unix::fs::MetadataExt;
+
+            use env::net::udp::receiver::Driver as _;
+
+            runtime().block_on(async {
+                let (udp, mut receiver) =
+                    Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap();
+                let path = format!("/proc/self/fd/{}", udp.bound.socket.as_raw_fd());
+                let inode = std::fs::metadata(path).unwrap().ino();
+                let mut buffer = [0; 64];
+                let mut meta = [Meta::default()];
+                let poll = receiver.poll_recv(
+                    &mut Context::from_waker(Waker::noop()),
+                    &mut [IoSliceMut::new(&mut buffer)],
+                    &mut meta,
+                );
+                assert_eq!(poll, Poll::Pending);
+                assert_ne!(registrations(inode), 0);
+                drop(receiver);
+                assert_eq!(registrations(inode), 0);
+            });
         }
+    }
+
+    mod writer {
+        use std::task::Waker;
+
+        use super::*;
 
         #[test]
         fn waits_while_the_buffer_is_full_and_then_drops_the_registration() {
             runtime().block_on(async {
                 let udp = loopback();
                 let fd = udp.bound.socket.try_clone().unwrap();
-                let mut writer = Writer { full: None, fd };
+                let mut writer = idle(fd);
                 let mut cx = Context::from_waker(Waker::noop());
                 let mut sends = 0;
-                let full = writer.poll_send(&mut cx, |_| {
+                let full = writer.poll_send(&mut cx, |_, _| {
                     sends += 1;
                     Poll::Pending
                 });
                 assert_eq!(full, Poll::Pending);
                 assert_eq!(sends, 1);
                 assert!(writer.full.is_some());
-                let done = writer.poll_send(&mut cx, |_| Poll::Ready(Ok(())));
+                let done = writer.poll_send(&mut cx, |_, _| Poll::Ready(Ok(())));
                 assert_eq!(done, Poll::Ready(Ok(())));
                 assert!(writer.full.is_none());
             });
         }
 
-        /// The epoll entries of any runtime in this process for the socket of `inode`.
-        #[cfg(target_os = "linux")]
-        fn registrations(inode: u64) -> usize {
-            let entry = format!("ino:{inode:x} ");
-            std::fs::read_dir("/proc/self/fdinfo")
-                .unwrap()
-                .filter_map(|fd| std::fs::read_to_string(fd.ok()?.path()).ok())
-                .map(|info| {
-                    info.lines()
-                        .filter(|line| {
-                            line.starts_with("tfd:") && line.contains(&entry)
-                        })
-                        .count()
-                })
-                .sum()
-        }
-
         /// While the socket stays open in `Bound`, epoll keeps a registration whose
         /// descriptor closed before it.
-        #[cfg(target_os = "linux")]
         #[test]
+        #[cfg_attr(not(target_os = "linux"), ignore = "needs /proc")]
         fn drop_removes_the_registration_from_epoll() {
             use std::os::unix::fs::MetadataExt;
 
@@ -755,56 +853,14 @@ mod tests {
                 let fd = udp.bound.socket.try_clone().unwrap();
                 let path = format!("/proc/self/fd/{}", fd.as_raw_fd());
                 let inode = std::fs::metadata(path).unwrap().ino();
-                let mut writer = Writer { full: None, fd };
+                let mut writer = idle(fd);
                 let mut cx = Context::from_waker(Waker::noop());
                 assert_eq!(registrations(inode), 0);
-                let full = writer.poll_send(&mut cx, |_| Poll::Pending);
+                let full = writer.poll_send(&mut cx, |_, _| Poll::Pending);
                 assert_eq!(full, Poll::Pending);
                 assert_ne!(registrations(inode), 0);
                 drop(writer);
                 assert_eq!(registrations(inode), 0);
-            });
-        }
-
-        #[test]
-        fn retries_a_pending_send_when_the_socket_is_writable() {
-            runtime().block_on(async {
-                let udp = loopback();
-                let fd = udp.bound.socket.try_clone().unwrap();
-                let mut writer = Writer { full: None, fd };
-                let mut sends = 0;
-                let sent = std::future::poll_fn(|cx| {
-                    writer.poll_send(cx, |_| {
-                        sends += 1;
-                        if sends == 1 {
-                            Poll::Pending
-                        } else {
-                            Poll::Ready(Ok(()))
-                        }
-                    })
-                });
-                let bound = std::time::Duration::from_secs(10);
-                assert_eq!(tokio::time::timeout(bound, sent).await, Ok(Ok(())));
-                assert_eq!(sends, 2);
-            });
-        }
-
-        #[test]
-        fn a_failed_wait_drops_the_registration() {
-            let udp = loopback();
-            let fd = udp.bound.socket.try_clone().unwrap();
-            let mut writer = Writer { full: None, fd };
-            let mut cx = Context::from_waker(Waker::noop());
-            let full = runtime()
-                .block_on(async { writer.poll_send(&mut cx, |_| Poll::Pending) });
-            assert_eq!(full, Poll::Pending);
-            runtime().block_on(async {
-                let gone = writer.poll_send(&mut cx, |_| Poll::Pending);
-                assert_eq!(gone, Poll::Ready(Err(Error::Io { code: 5 })));
-                assert!(writer.full.is_none());
-                let full = writer.poll_send(&mut cx, |_| Poll::Pending);
-                assert_eq!(full, Poll::Pending);
-                assert!(writer.full.is_some());
             });
         }
 
@@ -814,10 +870,11 @@ mod tests {
                 let udp = loopback();
                 let fd = udp.bound.socket.try_clone().unwrap();
                 let full = Some(Writer::register(&fd).unwrap());
-                let mut writer = Writer { full, fd };
+                let mut writer = Writer { full, next: 0, fd };
                 let mut cx = Context::from_waker(Waker::noop());
                 let failed = Err(Error::Io { code: 1 });
-                let sent = writer.poll_send(&mut cx, |_| Poll::Ready(failed.clone()));
+                let sent =
+                    writer.poll_send(&mut cx, |_, _| Poll::Ready(failed.clone()));
                 assert_eq!(sent, Poll::Ready(failed));
                 assert!(writer.full.is_none());
             });

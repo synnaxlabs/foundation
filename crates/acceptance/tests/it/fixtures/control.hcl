@@ -1,11 +1,11 @@
-policy "operator" {
-  subject = "operator"
-  allow = ["read", "write"]
-  names = ["dev.*"]
+access "operator" {
+  subjects = "operator"
+  select = "dev.*"
+  allow = [read, write]
 }
 
-policy "viewer" {
-  subject = "viewer"
-  allow = ["read"]
-  names = ["dev.*"]
+access "viewer" {
+  subjects = "viewer"
+  select = "dev.*"
+  allow = [read]
 }

@@ -1,147 +1,37 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::future::poll_fn;
-use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::pin::pin;
-use std::rc::Rc;
 use std::task::Poll;
 
 use connector::cancel;
 use connector::kind::{self, Channels, Context, Table};
 use document::Document;
 use document::diagnostic::{Code, Diagnostic};
-use env::tasks::Tasks;
-use mesh::card::addresses::Addresses;
-use mesh::card::{self, Card};
-use mesh::region::Founding;
-use mesh::status::Status;
+use mesh::Mesh;
 use mesh::used::{Behind, Cause};
-use mesh::{Member, Mesh};
 use sim::Sim;
 use spec::Pointer;
 use spec::channel::{Edge, Problem};
 use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
-use transport::{Port, Transport};
-use types::channel::Key;
 use types::digest::Digest;
 use types::ed25519::PrivateKey;
 use types::name::{Name, Prefix};
-use types::node::{self, SealKey};
-use types::time::Span;
 
 use super::{Applied, apply};
-use crate::common::{PLANT, Reader, files, front_ends, name, placed_site};
+use crate::common::{
+    ADMIN, NODE, PLANT, Reader, files, founded, front_ends, keys, name, open,
+    placed_site, solo,
+};
 use crate::error::Error;
 use crate::plan::{self, Counts, Output, plan};
 
-const NODE: node::Key = node::Key::from_u128(1);
-const PRIVATE_KEY: PrivateKey = PrivateKey([1; 32]);
-const ADMIN: PrivateKey = PrivateKey([7; 32]);
-const PORT: u16 = 7000;
-
-/// The record of the one node, `edge`, which the plans name.
-fn create_member() -> Member {
-    let card = Card {
-        name: name("edge"),
-        public_key: PRIVATE_KEY.public(),
-        seal_key: SealKey::new([9; 32]).expect("a seal key"),
-        addresses: Addresses::new(Vec::new()).expect("no addresses"),
-        version: 1,
-    };
-    Member {
-        card: card::Signed::sign(NODE, card, &PRIVATE_KEY),
-        admission: [0; 64],
-        ephemeral: None,
-        status: Status::new([].into()).expect("a status"),
-    }
-}
-
-/// The mesh of a root region whose one member and voter is `edge`, with the founding
-/// `definitions`.
-async fn open(
-    node: &sim::node::Node,
-    tasks: &Tasks,
-    definitions: BTreeMap<Name, Definition>,
-) -> Mesh {
-    let budget = block::Config { budget: 1 << 20 };
-    let memory = block::Heap::new(budget.reservation());
-    let pool = Rc::new(block::Pool::new(budget, memory));
-    let at = SocketAddr::new(node.addresses()[0], PORT);
-    let mut parts = Port::bind(&node.net(), at)
-        .expect("a port")
-        .split(NonZeroUsize::MIN);
-    let config = transport::Config {
-        private_key: PRIVATE_KEY,
-        message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
-        window_bytes: 1 << 20,
-        streams_max: NonZeroU32::new(16).expect("not zero"),
-        idle: Span::from_nanos(60 * Span::SECOND.nanos()),
-        clock: node.clock(),
-        entropy: node.entropy(),
-        tasks: tasks.clone(),
-        pool: Rc::clone(&pool),
-    };
-    let part = parts.pop().expect("a part");
-    let transport = Transport::new(config, part).expect("a transport");
-    let store = blob::Store::open(blob::Config {
-        files: node.files(),
-        dir: "blob".into(),
-        pool: Rc::clone(&pool),
-    })
-    .await
-    .expect("a store");
-    let member = create_member();
-    let config = mesh::Config {
-        key: NODE,
-        private_key: PRIVATE_KEY,
-        founding: Founding {
-            prefix: Prefix::ROOT,
-            voters: [NODE].into(),
-            members: vec![member],
-            definitions,
-            homes: BTreeMap::new(),
-        },
-        files: node.files(),
-        dir: PathBuf::new(),
-        clock: node.clock(),
-        entropy: node.entropy(),
-        tasks: tasks.clone(),
-        transport: Rc::new(transport),
-        pool,
-        store: Rc::new(store),
-    };
-    Mesh::open(config).await.expect("a mesh")
-}
-
-/// Runs `body` with the mesh of [`open`] on the one node of a run, with the
-/// definitions of a first start.
-fn solo<F: Future<Output = ()> + 'static>(
-    body: impl FnOnce(Mesh) -> F + Send + 'static,
-) {
-    founded(spec::founding::create(ADMIN.public()), body);
-}
-
-/// Runs `body` with the mesh of [`open`] on the one node of a run, with the founding
-/// `definitions`.
-fn founded<F: Future<Output = ()> + 'static>(
-    definitions: BTreeMap<Name, Definition>,
-    body: impl FnOnce(Mesh) -> F + Send + 'static,
-) {
-    let mut sim = Sim::new(sim::Config::default());
-    let node = sim.node(sim::node::Config::default());
-    let ran = sim.run_on(&node, |node, tasks| async move {
-        body(open(&node, &tasks, definitions).await).await;
-    });
-    assert_eq!(ran, Ok(()));
-}
-
 /// The plan of `texts` on the spec that `mesh` uses.
 async fn plan_on(mesh: &Mesh, texts: &[(&str, &str)]) -> (Output, config::plan::Plan) {
-    plan_among(mesh, texts, &members()).await
+    plan_among(mesh, texts, &mesh.names()).await
 }
 
 /// The plan of `texts` on the spec that `mesh` uses, with the members `members`.
@@ -162,28 +52,9 @@ async fn plan_among(
     .expect("a plan")
 }
 
-/// The one member, `edge`.
-fn members() -> BTreeSet<Name> {
-    BTreeSet::from([name("edge")])
-}
-
-/// `edge` and `other`.
-fn two() -> BTreeSet<Name> {
-    BTreeSet::from([name("edge"), name("other")])
-}
-
 /// The kinds of the connectors of the fixtures.
 fn kinds() -> Table {
     Table::new().with("influx", Reader).with("opcua", Reader)
-}
-
-/// Gives `Key::from_u128(n)` for each `n` from `from` up.
-fn keys(from: u128) -> impl FnMut() -> Key {
-    let mut next = from;
-    move || {
-        next += 1;
-        Key::from_u128(next)
-    }
 }
 
 fn path() -> &'static Path {
@@ -194,15 +65,7 @@ fn path() -> &'static Path {
 fn applies_a_plan_and_then_plans_no_change() {
     solo(|mesh| async move {
         let (_, planned) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
-        let applied = apply(
-            path(),
-            &planned.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(0),
-        )
-        .await;
+        let applied = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0)).await;
         let pointer = mesh.pointer();
         assert_eq!(pointer.version, 1);
         let applied = applied.expect("an apply");
@@ -239,20 +102,13 @@ fn refuses_a_plan_of_a_spec_that_changed_and_proposes_nothing() {
         let base = mesh.pointer();
         let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
-        apply(path(), &site.encode(), &mesh, &members(), &kinds(), keys(0))
+        apply(path(), &site.encode(), &mesh, &kinds(), keys(0))
             .await
             .expect("an apply");
         let pointer = mesh.pointer();
-        let error = apply(
-            path(),
-            &plant.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(10),
-        )
-        .await
-        .expect_err("a stale plan");
+        let error = apply(path(), &plant.encode(), &mesh, &kinds(), keys(10))
+            .await
+            .expect_err("a stale plan");
         assert_eq!(error, Error::Stale { base, pointer });
         assert_eq!(
             error.text(),
@@ -278,28 +134,14 @@ fn counts_each_change_and_removal_of_an_apply() {
         };
         let wide = format!("{}{}{}", placed_site(), channel("extra"), channel("more"));
         let (_, planned) = plan_on(&mesh, &[("site.hcl", &wide)]).await;
-        apply(
-            path(),
-            &planned.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(0),
-        )
-        .await
-        .expect("an apply");
+        apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
+            .await
+            .expect("an apply");
         let narrow = placed_site().replace("f64", "f32");
         let (_, planned) = plan_on(&mesh, &[("site.hcl", &narrow)]).await;
-        let applied = apply(
-            path(),
-            &planned.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(10),
-        )
-        .await
-        .expect("an apply");
+        let applied = apply(path(), &planned.encode(), &mesh, &kinds(), keys(10))
+            .await
+            .expect("an apply");
         assert_eq!(
             applied.counts,
             Counts {
@@ -326,20 +168,13 @@ fn refuses_a_stale_plan_with_a_founding_change_as_stale() {
             Some(Definition::Subject(other)),
         );
         let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
-        apply(path(), &site.encode(), &mesh, &members(), &kinds(), keys(0))
+        apply(path(), &site.encode(), &mesh, &kinds(), keys(0))
             .await
             .expect("an apply");
         let pointer = mesh.pointer();
-        let error = apply(
-            path(),
-            &founding.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(10),
-        )
-        .await
-        .expect_err("a stale plan");
+        let error = apply(path(), &founding.encode(), &mesh, &kinds(), keys(10))
+            .await
+            .expect_err("a stale plan");
         assert_eq!(error, Error::Stale { base, pointer });
         assert_eq!(mesh.pointer(), pointer);
     });
@@ -352,9 +187,9 @@ fn gives_a_stale_plan_when_another_apply_commits_first() {
         let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let (site, plant) = (site.encode(), plant.encode());
-        let (members, kinds) = (members(), kinds());
-        let mut first = pin!(apply(path(), &site, &mesh, &members, &kinds, keys(0)));
-        let mut second = pin!(apply(path(), &plant, &mesh, &members, &kinds, keys(10)));
+        let kinds = kinds();
+        let mut first = pin!(apply(path(), &site, &mesh, &kinds, keys(0)));
+        let mut second = pin!(apply(path(), &plant, &mesh, &kinds, keys(10)));
         let (mut a, mut b) = (None, None);
         poll_fn(|cx| {
             if a.is_none() {
@@ -384,6 +219,7 @@ fn gives_a_stale_plan_when_another_apply_commits_first() {
             ends => panic!("no apply in {ends:?}"),
         };
         assert_eq!(won.pointer, plan::Pointer::from(pointer));
+        assert_eq!(lost.as_ref().map_err(Error::status), Err(1));
         assert_eq!(lost, Err(stale));
     });
 }
@@ -435,16 +271,9 @@ fn refuses_a_change_of_a_founding_definition_and_proposes_nothing() {
             ),
         ];
         for (planned, at) in cases {
-            let error = apply(
-                path(),
-                &planned.encode(),
-                &mesh,
-                &members(),
-                &kinds(),
-                keys(0),
-            )
-            .await
-            .expect_err("a founding definition");
+            let error = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
+                .await
+                .expect_err("a founding definition");
             let mismatch = config::plan::Error::Mismatch { name: name(at) };
             assert_eq!(error, Error::Plan(mismatch));
             assert_eq!(
@@ -497,16 +326,9 @@ fn refuses_a_plan_that_plan_refuses_and_proposes_nothing() {
             ),
         ];
         for (planned, code, message, fix) in cases {
-            let error = apply(
-                path(),
-                &planned.encode(),
-                &mesh,
-                &members(),
-                &kinds(),
-                keys(0),
-            )
-            .await
-            .expect_err("a plan that plan refuses");
+            let error = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
+                .await
+                .expect_err("a plan that plan refuses");
             let problem = crate::error::Problem {
                 code: code.into(),
                 message: message.into(),
@@ -610,7 +432,8 @@ async fn split(mesh: &Mesh) -> config::plan::Plan {
 
 #[test]
 fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
-    solo(|mesh| async move {
+    let definitions = spec::founding::create(ADMIN.public());
+    founded(&["edge", "other"], definitions, |mesh| async move {
         let base = mesh.pointer();
         let (_, placed) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         let mut unplaced = placed.clone();
@@ -619,9 +442,9 @@ fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
         let writer = |at, node| format!("{A_TIME}{}", connector(at, node, &["a.time"]));
         let (_, on_edge) = plan_on(&mesh, &[("w.hcl", &writer("w", "edge"))]).await;
         let other = writer("v", "other");
-        let (_, on_other) = plan_among(&mesh, &[("v.hcl", &other)], &two()).await;
+        let (_, on_other) = plan_on(&mesh, &[("v.hcl", &other)]).await;
         let stray = connector("site.c", "other", &[]);
-        let (_, stray) = plan_among(&mesh, &[("c.hcl", &stray)], &two()).await;
+        let (_, stray) = plan_on(&mesh, &[("c.hcl", &stray)]).await;
         let writer_nodes = problem(
             "config.writer-nodes",
             "connectors on the nodes `other` and `edge` write the index `a.time`, so \
@@ -667,10 +490,9 @@ fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
             ),
         ];
         for (planned, problems) in cases {
-            let error =
-                apply(path(), &planned.encode(), &mesh, &two(), &kinds(), keys(0))
-                    .await
-                    .expect_err("a plan that check refuses");
+            let error = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
+                .await
+                .expect_err("a plan that check refuses");
             assert_eq!(error, Error::Config(problems));
             assert_eq!(mesh.pointer(), base);
         }
@@ -683,16 +505,9 @@ fn refuses_a_config_that_its_kind_refuses_at_the_apply() {
         let base = mesh.pointer();
         let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let refusing = Table::new().with("influx", Reader).with("opcua", Refuser);
-        let error = apply(
-            path(),
-            &plant.encode(),
-            &mesh,
-            &members(),
-            &refusing,
-            keys(0),
-        )
-        .await
-        .expect_err("a config that its kind refuses");
+        let error = apply(path(), &plant.encode(), &mesh, &refusing, keys(0))
+            .await
+            .expect_err("a config that its kind refuses");
         let refused = problem("test.refused", "refused", "Fix it");
         assert_eq!(error, Error::Config(vec![refused]));
         assert_eq!(mesh.pointer(), base);
@@ -700,28 +515,28 @@ fn refuses_a_config_that_its_kind_refuses_at_the_apply() {
 }
 
 #[test]
-fn refuses_a_plan_with_only_a_home_on_a_node_that_left() {
-    solo(|mesh| async move {
-        let site = placed_site().replace("home = \"edge\"", "home = \"other\"");
-        let (_, mut site) = plan_among(&mesh, &[("site.hcl", &site)], &two()).await;
-        let homes = std::mem::take(&mut site.homes);
-        apply(path(), &site.encode(), &mesh, &two(), &kinds(), keys(0))
-            .await
-            .expect("a plan with no home applies");
+fn refuses_a_plan_with_only_a_home_on_a_node_that_is_not_a_member() {
+    let founding = spec::founding::create(ADMIN.public());
+    let site = placed_site().replace("home = \"edge\"", "home = \"other\"");
+    let members = BTreeSet::from([name("edge"), name("other")]);
+    let base = Pointer {
+        version: 0,
+        root: Digest::of(b"root"),
+    };
+    let texts = files(&[("site.hcl", &site)]);
+    let (_, planned) = plan(&texts, base, &founding, &members, &front_ends(), &kinds())
+        .expect("a plan");
+    let definitions = planned
+        .definitions(&founding, keys(0))
+        .expect("definitions");
+    founded(&["edge"], definitions, move |mesh| async move {
+        let (_, site) = plan_among(&mesh, &[("site.hcl", &site)], &members).await;
+        assert!(site.changes.is_empty());
+        assert_eq!(site.homes.len(), 1);
         let pointer = mesh.pointer();
-        site.base = pointer;
-        site.changes.clear();
-        site.homes = homes;
-        let error = apply(
-            path(),
-            &site.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(10),
-        )
-        .await
-        .expect_err("a home on a node that left");
+        let error = apply(path(), &site.encode(), &mesh, &kinds(), keys(10))
+            .await
+            .expect_err("a home on a node that is not a member");
         let problem = problem(
             "config.unknown-node",
             "no node of the mesh is named `other`",
@@ -736,11 +551,12 @@ fn refuses_a_plan_with_only_a_home_on_a_node_that_left() {
 fn refuses_bytes_that_are_not_a_plan_and_proposes_nothing() {
     solo(|mesh| async move {
         let base = mesh.pointer();
-        let error = apply(path(), b"plan", &mesh, &members(), &kinds(), keys(0))
+        let error = apply(path(), b"plan", &mesh, &kinds(), keys(0))
             .await
             .expect_err("no plan");
         let version = config::plan::Error::Version { found: b'p' };
         assert_eq!(error, Error::Plan(version));
+        assert_eq!(error.status(), 2);
         assert_eq!(
             error.text(),
             "error[ops.bad-plan]: the plan has format version 112, and this build \
@@ -750,11 +566,12 @@ fn refuses_bytes_that_are_not_a_plan_and_proposes_nothing() {
         let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let mut bytes = planned.encode();
         bytes.truncate(2);
-        let error = apply(path(), &bytes, &mesh, &members(), &kinds(), keys(0))
+        let error = apply(path(), &bytes, &mesh, &kinds(), keys(0))
             .await
             .expect_err("a cut plan");
         let malformed = config::plan::Error::Malformed { at: 1 };
         assert_eq!(error, Error::Plan(malformed));
+        assert_eq!(error.status(), 2);
         assert_eq!(mesh.pointer(), base);
     });
 }
@@ -763,7 +580,7 @@ fn refuses_bytes_that_are_not_a_plan_and_proposes_nothing() {
 fn refuses_a_path_that_is_not_utf8_before_it_reads_the_plan() {
     solo(|mesh| async move {
         let path = Path::new(OsStr::from_bytes(b"a\xff.plan"));
-        let error = apply(path, b"plan", &mesh, &members(), &kinds(), keys(0))
+        let error = apply(path, b"plan", &mesh, &kinds(), keys(0))
             .await
             .expect_err("a path that is not UTF-8");
         assert_eq!(
@@ -780,7 +597,7 @@ fix: Rename the file to a UTF-8 name
 fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
     solo(|mesh| async move {
         let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
-        apply(path(), &site.encode(), &mesh, &members(), &kinds(), keys(0))
+        apply(path(), &site.encode(), &mesh, &kinds(), keys(0))
             .await
             .expect("an apply");
         let pointer = mesh.pointer();
@@ -792,16 +609,9 @@ fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
         };
         let mut removal = one(&site, "site.time", Some(stored), None);
         removal.base = pointer;
-        let error = apply(
-            path(),
-            &removal.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(10),
-        )
-        .await
-        .expect_err("a dangling edge");
+        let error = apply(path(), &removal.encode(), &mesh, &kinds(), keys(10))
+            .await
+            .expect_err("a dangling edge");
         let dangling = Problem::Dangling {
             from: name("site.temp"),
             edge: Edge::Index,
@@ -817,6 +627,7 @@ fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
             )
         );
         assert_eq!(error, Error::Apply(cause));
+        assert_eq!(error.status(), 1);
         assert_eq!(mesh.pointer(), pointer);
     });
 }
@@ -891,7 +702,7 @@ fn refuses_a_plan_on_a_node_that_uses_no_spec_as_behind() {
     let subject = Subject::new(vec![PrivateKey([8; 32]).public()]).expect("a subject");
     let misplaced = name("plant.@x.@subject");
     definitions.insert(misplaced.clone(), Definition::Subject(subject));
-    founded(definitions, |mesh| async move {
+    founded(&["edge"], definitions, |mesh| async move {
         let spec = mesh.spec().await.expect("a spec");
         assert_eq!(spec.pointer, None);
         let behind = spec.behind.expect("a node behind");
@@ -904,21 +715,14 @@ fn refuses_a_plan_on_a_node_that_uses_no_spec_as_behind() {
             &files(&[]),
             behind.pointer,
             &BTreeMap::new(),
-            &members(),
+            &mesh.names(),
             &front_ends(),
             &kinds(),
         )
         .expect("a plan");
-        let error = apply(
-            path(),
-            &planned.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(0),
-        )
-        .await
-        .expect_err("a node behind");
+        let error = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
+            .await
+            .expect_err("a node behind");
         assert_eq!(error, Error::Behind(Box::new(behind.clone())));
         assert_eq!(error.status(), 1);
         assert_eq!(
@@ -930,7 +734,7 @@ fn refuses_a_plan_on_a_node_that_uses_no_spec_as_behind() {
                 behind.pointer.root
             )
         );
-        let error = apply(path(), b"plan", &mesh, &members(), &kinds(), keys(0))
+        let error = apply(path(), b"plan", &mesh, &kinds(), keys(0))
             .await
             .expect_err("no plan");
         let version = config::plan::Error::Version { found: b'p' };
@@ -1000,23 +804,16 @@ fn proposes_nothing_for_a_plan_with_no_change() {
     );
     solo(move |mesh| async move {
         let (_, site) = plan_on(&mesh, &[("people.hcl", people)]).await;
-        apply(path(), &site.encode(), &mesh, &members(), &kinds(), keys(0))
+        apply(path(), &site.encode(), &mesh, &kinds(), keys(0))
             .await
             .expect("an apply");
         let pointer = mesh.pointer();
         assert_eq!(pointer.version, 1);
         let (_, planned) = plan_on(&mesh, &[("people.hcl", people)]).await;
         assert!(planned.changes.is_empty() && planned.homes.is_empty());
-        let applied = apply(
-            path(),
-            &planned.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(10),
-        )
-        .await
-        .expect("an apply");
+        let applied = apply(path(), &planned.encode(), &mesh, &kinds(), keys(10))
+            .await
+            .expect("an apply");
         assert_eq!(
             applied,
             Applied {
@@ -1042,20 +839,13 @@ fn refuses_a_plan_with_no_change_at_an_old_base_as_stale() {
         let (_, empty) = plan_on(&mesh, &[]).await;
         assert!(empty.changes.is_empty() && empty.homes.is_empty());
         let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
-        apply(path(), &site.encode(), &mesh, &members(), &kinds(), keys(0))
+        apply(path(), &site.encode(), &mesh, &kinds(), keys(0))
             .await
             .expect("an apply");
         let pointer = mesh.pointer();
-        let error = apply(
-            path(),
-            &empty.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(10),
-        )
-        .await
-        .expect_err("a stale plan");
+        let error = apply(path(), &empty.encode(), &mesh, &kinds(), keys(10))
+            .await
+            .expect_err("a stale plan");
         assert_eq!(error, Error::Stale { base, pointer });
         assert_eq!(mesh.pointer(), pointer);
     });
@@ -1067,7 +857,7 @@ fn applies_a_plan_with_no_home_and_then_a_plan_with_only_a_home() {
         let (_, mut site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         let homes = std::mem::take(&mut site.homes);
         assert!(!homes.is_empty());
-        apply(path(), &site.encode(), &mesh, &members(), &kinds(), keys(0))
+        apply(path(), &site.encode(), &mesh, &kinds(), keys(0))
             .await
             .expect("a plan with no home applies");
         let pointer = mesh.pointer();
@@ -1082,16 +872,9 @@ fn applies_a_plan_with_no_home_and_then_a_plan_with_only_a_home() {
         only.base = pointer;
         only.changes.clear();
         only.homes = homes;
-        let applied = apply(
-            path(),
-            &only.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(10),
-        )
-        .await
-        .expect("a plan with only a home applies");
+        let applied = apply(path(), &only.encode(), &mesh, &kinds(), keys(10))
+            .await
+            .expect("a plan with only a home applies");
         assert_eq!(applied.pointer, plan::Pointer::from(mesh.pointer()));
         assert_eq!(applied.text(), "Applied site.plan: 1 home listed.\n");
         assert_eq!(mesh.pointer().version, 2);
@@ -1105,9 +888,9 @@ fn refuses_a_plan_on_a_node_that_uses_an_old_spec_as_behind() {
     let node = sim.node(sim::node::Config::default());
     let ran = sim.run_on(&node, |node, tasks| async move {
         let definitions = spec::founding::create(ADMIN.public());
-        let mesh = open(&node, &tasks, definitions).await;
+        let mesh = open(&node, &tasks, &["edge"], definitions).await;
         let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
-        apply(path(), &site.encode(), &mesh, &members(), &kinds(), keys(0))
+        apply(path(), &site.encode(), &mesh, &kinds(), keys(0))
             .await
             .expect("an apply");
         let first = mesh.pointer();
@@ -1115,29 +898,15 @@ fn refuses_a_plan_on_a_node_that_uses_an_old_spec_as_behind() {
         let (_, both) =
             plan_on(&mesh, &[("site.hcl", &site), ("plant.hcl", PLANT)]).await;
         node.fail_file(Path::new("spec"), env::files::Operation::SyncDir);
-        apply(
-            path(),
-            &both.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(10),
-        )
-        .await
-        .expect("a second apply");
+        apply(path(), &both.encode(), &mesh, &kinds(), keys(10))
+            .await
+            .expect("a second apply");
         let spec = mesh.spec().await.expect("a spec");
         assert_eq!(spec.pointer, Some(first));
         let behind = spec.behind.expect("a node behind");
-        let error = apply(
-            path(),
-            &both.encode(),
-            &mesh,
-            &members(),
-            &kinds(),
-            keys(20),
-        )
-        .await
-        .expect_err("a node behind");
+        let error = apply(path(), &both.encode(), &mesh, &kinds(), keys(20))
+            .await
+            .expect_err("a node behind");
         assert_eq!(error, Error::Behind(Box::new(behind)));
     });
     assert_eq!(ran, Ok(()));

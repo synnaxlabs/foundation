@@ -24,11 +24,13 @@ config-hcl = { path = "../crates/config-hcl" }
 connector = { path = "../crates/connector" }
 connector-influx = { path = "../crates/connector-influx" }
 connector-modbus = { path = "../crates/connector-modbus" }
+connector-opcua = { path = "../crates/connector-opcua", features = ["sim"] }
 crc32c = "0.6.8"
 document = { path = "../crates/document" }
 env = { path = "../crates/env" }
 libfuzzer-sys = "0.4.13"
 mesh = { path = "../crates/mesh", features = ["sim"] }
+node = { path = "../crates/node", features = ["sim"] }
 ops = { path = "../crates/ops" }
 secret = { path = "../crates/secret" }
 sim = { path = "../crates/sim" }
@@ -206,6 +208,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "node_identity"
+path = "fuzz_targets/node_identity.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "spec_tree"
 path = "fuzz_targets/spec_tree.rs"
 test = false
@@ -313,6 +322,13 @@ bench = false
 [[bin]]
 name = "wire_header"
 path = "fuzz_targets/wire_header.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connector_opcua_decode"
+path = "fuzz_targets/connector_opcua_decode.rs"
 test = false
 doc = false
 bench = false

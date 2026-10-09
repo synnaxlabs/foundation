@@ -99,7 +99,7 @@ mod tests {
     use types::frame::key_set::Group;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, key};
+    use crate::common::{create_pool, intern, key};
 
     fn writer(subject: &str, authority: u8) -> Writer {
         Writer {
@@ -113,7 +113,7 @@ mod tests {
 
         /// The index entry of slot 4 in a key set of its own.
         fn index() -> key_set::Entry {
-            let set = create_interner().intern(&[Group {
+            let set = intern(&[Group {
                 index: key(Slot::new(4)),
                 data: &[],
             }]);

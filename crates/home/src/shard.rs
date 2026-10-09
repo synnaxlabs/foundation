@@ -49,10 +49,10 @@ use crate::{handoff, order, split, stored};
 /// #     let (stamps, values) = (Key::from_u128(1), Key::from_u128(2));
 /// #     let mut slots = Slots::new();
 /// #     let mut interner = Interner::new();
-/// #     let index = slots.assign(stamps);
-/// #     slots.assign(values);
-/// #     interner.slots().assign(stamps);
-/// #     interner.slots().assign(values);
+/// #     let index = slots.index(stamps);
+/// #     slots.data(values);
+/// #     interner.slots().index(stamps);
+/// #     interner.slots().data(values);
 /// #     let set = interner.intern(&[Group {
 /// #         index: stamps,
 /// #         data: &[(values, Type::Scalar(Scalar::I64))],
@@ -327,13 +327,15 @@ impl Shard {
     /// that waits for room. Each named reader of the index stops holding its position.
     /// Its frames stay in the buffer, so a later [`carry`](Self::carry) of `slot`
     /// continues each path from its tail in the buffer: the last entry appended, on
-    /// disk or not.
+    /// disk or not. It does nothing when the shard does not carry `slot`.
     ///
     /// # Panics
     ///
-    /// If the shard does not carry `slot`, or a writer or a reader is open on it.
+    /// If a writer or a reader is open on it.
     pub fn shed(&mut self, slot: Slot) {
-        let place = self.place(slot);
+        let Some(&place) = self.places.get(&slot) else {
+            return;
+        };
         let mut claims = self.writers.values().flat_map(|session| &session.claims);
         assert!(
             claims.all(|claim| claim.place != place),
@@ -351,6 +353,14 @@ impl Shard {
                 claim.place = place;
             }
         }
+    }
+
+    /// Mesh time now, as the shard stamps each entry and checks each stamp: the
+    /// midpoint of the clock's interval, which never goes back. `None` before the
+    /// node first has mesh time.
+    #[must_use]
+    pub fn now(&self) -> Option<Stamp> {
+        self.clocks().map(|(_, mesh)| mesh)
     }
 
     /// The pool of the shard's buffer. Frames that a writer fills come from it.
@@ -382,7 +392,7 @@ impl Shard {
             lease,
             set,
         } = writer;
-        let (now, mesh) = self.now().ok_or(writer::Error::Unsynced)?;
+        let (now, mesh) = self.clocks().ok_or(writer::Error::Unsynced)?;
         let lease = lease.map(writer::lease).transpose()?;
         let control = control::Writer { subject, authority };
         let entries = set.entries();
@@ -578,7 +588,7 @@ impl Shard {
         charge: reader::complete::Charge,
     ) -> Result<reader::Opened<reader::complete::Key>, reader::Unsynced> {
         let place = self.place(slot);
-        let (_, now) = self.now().ok_or(reader::Unsynced)?;
+        let (_, now) = self.clocks().ok_or(reader::Unsynced)?;
         let live = self.indexes[place].live_tail();
         let named = Reader::Named { reader, hold };
         let opened = self.readers.open_named_complete(
@@ -629,7 +639,7 @@ impl Shard {
         reader: reader::named::Key,
     ) -> Result<reader::Opened<reader::Key>, reader::Unsynced> {
         let place = self.place(slot);
-        let (_, now) = self.now().ok_or(reader::Unsynced)?;
+        let (_, now) = self.clocks().ok_or(reader::Unsynced)?;
         let opened = self.readers.open_named_latest(place, reader, now);
         Ok(reader::Opened {
             key: reader::Key {
@@ -696,7 +706,7 @@ impl Shard {
     ///
     /// If the shard never gave `key`, or does not carry the index of `key`.
     pub fn close_reader(&mut self, key: reader::Key) {
-        let now = self.now().map(|(_, now)| now);
+        let now = self.clocks().map(|(_, now)| now);
         self.readers.close(self.place(key.slot), key.session, now);
     }
 
@@ -718,21 +728,21 @@ impl Shard {
     /// clock's interval, which never goes back. The latest edge can go back as the
     /// error shrinks, and is a century out while the error is unknown. `None` before
     /// the node first has mesh time.
-    fn now(&self) -> Option<(Monotonic, Stamp)> {
+    fn clocks(&self) -> Option<(Monotonic, Stamp)> {
         let clock::Time { monotonic, mesh } = self.clock.now();
         let mesh = mesh?;
         let midpoint = mesh.earliest.nanos().midpoint(mesh.latest.nanos());
         Some((monotonic, Stamp::from_nanos(midpoint)))
     }
 
-    /// Both clocks now, as [`now`](Self::now) gives them.
+    /// Both clocks now, as [`clocks`](Self::clocks) gives them.
     ///
     /// # Panics
     ///
     /// Before the node first has mesh time. No writer or named reader opens before it,
     /// and mesh time stays once known.
     fn time(&self) -> (Monotonic, Stamp) {
-        let now = self.now();
+        let now = self.clocks();
         now.expect("invariant: mesh time stays once known")
     }
 
@@ -941,7 +951,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, data_type, key, values};
+    use crate::common::{create_interner, create_pool, data_type, intern, key, values};
     use crate::reader::complete::Charge;
 
     const DIR: &str = "shard-0";
@@ -1062,7 +1072,7 @@ mod tests {
             };
             let mut assigned = Slots::new();
             for n in 0..slots {
-                assigned.assign(key(Slot::new(n)));
+                assigned.index(key(Slot::new(n)));
             }
             Buffer::open(config, &mut assigned).await.expect("opens")
         }
@@ -1103,7 +1113,7 @@ mod tests {
                     }
                 })
                 .collect();
-            (shard, create_interner().intern(&groups))
+            (shard, intern(&groups))
         }
 
         /// The bytes of the ring file.
@@ -1177,7 +1187,7 @@ mod tests {
 
     /// Two indexes: slot 0 with an `i64` channel at slot 1, then slot 2 alone.
     fn two_indexes() -> Arc<KeySet> {
-        create_interner().intern(&[
+        intern(&[
             Group {
                 index: key(Slot::new(0)),
                 data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I64))],
@@ -1191,7 +1201,7 @@ mod tests {
 
     /// The key set of one index, at a slot that [`Test::shard`] does not carry.
     fn not_carried() -> Arc<KeySet> {
-        create_interner().intern(&[Group {
+        intern(&[Group {
             index: key(Slot::new(3)),
             data: &[],
         }])
@@ -1785,7 +1795,7 @@ mod tests {
         run(73, |test| async move {
             let mut shard = test.open(AREA, 2).await;
             shard.carry(Slot::new(1));
-            let set = create_interner().intern(&[Group {
+            let set = intern(&[Group {
                 index: key(Slot::new(1)),
                 data: &[(key(Slot::new(0)), Type::Scalar(Scalar::I64))],
             }]);
@@ -2066,11 +2076,11 @@ mod tests {
     fn records_a_handoff_with_room_at_close_when_an_earlier_one_has_none() {
         run(25, |test| async move {
             let set = two_indexes();
-            let zero = create_interner().intern(&[Group {
+            let zero = intern(&[Group {
                 index: key(Slot::new(0)),
                 data: &[],
             }]);
-            let two = create_interner().intern(&[Group {
+            let two = intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &[],
             }]);
@@ -2296,7 +2306,7 @@ mod tests {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let edges = test.reader.now().mesh.expect("the node has mesh time");
-            let mesh = test.now();
+            let mesh = shard.now().expect("the node has mesh time");
             let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
             let write = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
             shard.write(a, LIVE, write).expect("written");
@@ -2524,6 +2534,7 @@ mod tests {
             let mut shard = test.unsynced().await;
             shard.carry(Slot::new(0));
             shard.carry(Slot::new(2));
+            assert_eq!(shard.now(), None);
             let a = shard.open_writer(writer("a", 1, &two_indexes()));
             assert_eq!(a, Err(writer::Error::Unsynced));
         });
@@ -2762,7 +2773,7 @@ mod tests {
             let buffer = test.create_buffer(AREA, 4087, 1).await;
             let mut shard = test.over(buffer).await;
             shard.carry(Slot::new(0));
-            let set = create_interner().intern(&[Group {
+            let set = intern(&[Group {
                 index: key(Slot::new(0)),
                 data: &[],
             }]);
@@ -2832,7 +2843,7 @@ mod tests {
     #[test]
     fn stores_a_body_under_its_index_when_a_data_channel_has_a_lower_slot() {
         run(46, |test| async move {
-            let set = create_interner().intern(&[Group {
+            let set = intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I64))],
             }]);
@@ -3780,7 +3791,7 @@ mod tests {
 
         /// The key set of the index at slot 2 alone.
         fn only_two() -> Arc<KeySet> {
-            create_interner().intern(&[Group {
+            intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &[],
             }])
@@ -3840,7 +3851,7 @@ mod tests {
                 index: key(Slot::new(slot)),
                 data: &[],
             });
-            create_interner().intern(&groups)
+            intern(&groups)
         }
 
         /// Shed at place 0 moves the index at place 2 there, and not the one at
@@ -3929,8 +3940,18 @@ mod tests {
         }
 
         #[test]
-        fn panics_at_the_shed_of_an_index_it_does_not_carry() {
-            check_not_carried(135, |shard| shard.shed(Slot::new(3)));
+        fn does_nothing_at_the_shed_of_an_index_it_does_not_carry() {
+            run(135, |test| async move {
+                let mut shard = test.shard(AREA).await;
+                shard.shed(Slot::new(3));
+                shard.shed(Slot::new(0));
+                shard.shed(Slot::new(0));
+                let carried = latest(&mut shard, Slot::new(2));
+                close(&mut shard, carried);
+                shard.carry(Slot::new(0));
+                let carried = latest(&mut shard, Slot::new(0));
+                close(&mut shard, carried);
+            });
         }
 
         #[test]
@@ -3941,6 +3962,47 @@ mod tests {
                 shard.close_reader(reader);
                 shard.shed(Slot::new(2));
                 drop(shard.take(reader));
+            });
+        }
+
+        /// Slot 3 is carried for the first time after a shed of slot 0, which gave
+        /// latest keys 0 and 1. The shard never gave latest key 0 on slot 3.
+        #[test]
+        fn panics_at_the_take_of_a_key_never_given_on_an_index_carried_after_a_shed() {
+            let message = "latest session 0 was never open";
+            check_panics(152, message, |shard| {
+                let two = latest(shard, Slot::new(2));
+                for _ in 0..2 {
+                    let reader = latest(shard, Slot::new(0));
+                    close(shard, reader);
+                }
+                shard.shed(Slot::new(0));
+                shard.carry(Slot::new(3));
+                let never = reader::Key {
+                    slot: Slot::new(3),
+                    session: two.session,
+                };
+                drop(shard.take(never));
+            });
+        }
+
+        #[test]
+        fn closes_the_keys_of_each_earlier_carry_of_an_index_shed_two_times() {
+            run(153, |test| async move {
+                let mut shard = test.shard(AREA).await;
+                let mut old = Vec::new();
+                for _ in 0..2 {
+                    let reader = latest(&mut shard, Slot::new(0));
+                    close(&mut shard, reader);
+                    old.push(reader);
+                    shard.shed(Slot::new(0));
+                    shard.carry(Slot::new(0));
+                }
+                for &reader in &old {
+                    assert!(matches!(shard.take(reader), reader::Next::Empty));
+                }
+                let new = latest(&mut shard, Slot::new(0));
+                assert!(!old.contains(&new), "{new:?} names an earlier reader");
             });
         }
 
@@ -4727,7 +4789,7 @@ mod tests {
     /// and gives the run.
     fn write_of_another_key_set(seed: u64, label: Label) -> Result<(), sim::Error> {
         let (mut sim, _handle) = start(seed, move |test| async move {
-            let mut interner = create_interner();
+            let mut interner = create_interner(&[0, 2]);
             let group = Group {
                 index: key(Slot::new(2)),
                 data: &[],
@@ -4819,7 +4881,7 @@ mod tests {
                 .zip(&series[1..])
                 .map(|(slot, &(data_type, _))| (key(Slot::new(slot)), data_type))
                 .collect();
-            let set = create_interner().intern(&[Group {
+            let set = intern(&[Group {
                 index: key(Slot::new(2)),
                 data: &data,
             }]);

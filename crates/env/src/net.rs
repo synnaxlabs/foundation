@@ -70,10 +70,11 @@ impl Net {
         &self,
         config: &udp::Config,
     ) -> Result<(udp::Sender, udp::Receiver), Error> {
-        let socket: Arc<dyn udp::Driver> = Arc::from(self.0.udp(config)?);
+        let (socket, receiver) = self.0.udp(config)?;
+        let socket: Arc<dyn udp::Driver> = Arc::from(socket);
         Ok((
             udp::Sender::new(Arc::clone(&socket)),
-            udp::Receiver::new(socket),
+            udp::Receiver::new(socket, receiver),
         ))
     }
 
@@ -485,12 +486,18 @@ pub type Resolve<'a> =
 /// }
 /// ```
 pub trait Driver: Send + Sync {
-    /// Binds a UDP socket, with the rules of [`Net::udp`].
+    /// Binds a UDP socket, with the rules of [`Net::udp`]. Gives the socket, which
+    /// gives the driver of each [`udp::Sender`] clone, and the driver of its one
+    /// [`udp::Receiver`], not bound to a thread yet.
     ///
     /// # Errors
     ///
     /// As [`Net::udp`].
-    fn udp(&self, config: &udp::Config) -> Result<Box<dyn udp::Driver>, Error>;
+    #[expect(clippy::type_complexity, reason = "the two drivers of one bind")]
+    fn udp(
+        &self,
+        config: &udp::Config,
+    ) -> Result<(Box<dyn udp::Driver>, Box<dyn udp::receiver::Driver>), Error>;
 
     /// Connects a TCP stream, with the rules of [`Net::connect`].
     fn connect<'a>(&'a self, config: &'a tcp::Config) -> Connect<'a>;
@@ -575,7 +582,11 @@ mod tests {
     struct Network;
 
     impl Driver for Network {
-        fn udp(&self, _: &udp::Config) -> Result<Box<dyn udp::Driver>, Error> {
+        fn udp(
+            &self,
+            _: &udp::Config,
+        ) -> Result<(Box<dyn udp::Driver>, Box<dyn udp::receiver::Driver>), Error>
+        {
             Err(Error::Io { code: 95 })
         }
 

@@ -14,6 +14,12 @@ use env::net::{Ecn, Error, Net};
 use tokio::sync::Notify;
 use tokio::time::timeout;
 
+#[cfg(target_os = "linux")]
+mod full;
+#[cfg(target_os = "linux")]
+#[path = "../../common/gso.rs"]
+mod gso;
+
 use super::{
     BOUND, Counted, LOCALHOST, assert_joins, net, on_thread, runtime,
     runtime_with_no_io,
@@ -183,6 +189,121 @@ fn a_batch_arrives_as_one_batch() {
     });
 }
 
+/// Receives one batch, and gives its contents, stride, and ECN mark.
+#[cfg(target_os = "linux")]
+async fn receive_batch(receiver: &mut Receiver) -> (Vec<u8>, usize, Option<Ecn>) {
+    let mut buffer = vec![0; receiver.batch_max().get() * DATAGRAM_BYTES_MAX];
+    let mut meta = [Meta::default()];
+    let mut buffers = [IoSliceMut::new(&mut buffer)];
+    let batches = timeout(
+        BOUND,
+        poll_fn(|cx| receiver.poll_recv(cx, &mut buffers, &mut meta)),
+    )
+    .await;
+    assert_eq!(batches.expect("the batch arrives"), Ok(1));
+    let [meta] = meta;
+    (buffers[0][..meta.len].to_vec(), meta.stride, meta.ecn)
+}
+
+/// A transmit that the kernel refuses leaves GSO and the IPv4 ECN mark on.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_refused_transmit_leaves_gso_and_ecn_on() {
+    on_thread("udp-refused", || async {
+        let net = net();
+        let any_v6 = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0);
+        let to_v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9);
+        let far_v6 = IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]);
+        let cases = [
+            (Some(far_v6), to_v6),
+            (None, SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0)),
+            (None, SocketAddr::new(LOCALHOST.into(), 0)),
+            (Some(LOCALHOST.into()), to_v6),
+        ];
+        let (_, mut receiver) = loopback(&net);
+        let contents = [5; 300];
+        let batch = Transmit {
+            ecn: Some(Ecn::Ce),
+            segment: NonZeroUsize::new(100),
+            ..transmit(receiver.local(), &contents)
+        };
+        for (source, destination) in cases {
+            for segment in [None, NonZeroUsize::new(1)] {
+                let (mut sender, _) = bind(&net, any_v6);
+                let refused = Transmit {
+                    source,
+                    segment,
+                    ..transmit(destination, b"xy")
+                };
+                let case = format!("source {source:?}, to {destination}, {segment:?}");
+                assert_eq!(
+                    send(&mut sender, &refused).await,
+                    Err(Error::Io { code: 22 }),
+                    "{case}"
+                );
+                assert_eq!(send(&mut sender, &batch).await, Ok(()));
+                assert_eq!(
+                    receive_batch(&mut receiver).await,
+                    (contents.to_vec(), 100, Some(Ecn::Ce)),
+                    "after {case}"
+                );
+            }
+        }
+    });
+}
+
+/// A kernel that refuses GSO still gets each datagram of a batch, with its ECN mark.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_batch_arrives_when_the_kernel_refuses_gso() {
+    on_thread("udp-no-gso", || async {
+        let net = net();
+        let (mut sender, _) = loopback(&net);
+        gso::refuse(sender.local());
+        let (_, mut receiver) = loopback(&net);
+        let contents: Vec<u8> = (0..3).flat_map(|i| [i; 100]).collect();
+        let batch = Transmit {
+            ecn: Some(Ecn::Ce),
+            segment: NonZeroUsize::new(100),
+            ..transmit(receiver.local(), &contents)
+        };
+        for round in ["first", "second"] {
+            assert_eq!(send(&mut sender, &batch).await, Ok(()), "{round} batch");
+            for datagram in contents.chunks(100) {
+                assert_eq!(
+                    receive_batch(&mut receiver).await,
+                    (datagram.to_vec(), 100, Some(Ecn::Ce)),
+                    "{round} batch"
+                );
+            }
+        }
+    });
+}
+
+/// Each batch sent one datagram at a time arrives whole, also after the first.
+#[test]
+#[cfg(target_os = "linux")]
+fn each_batch_sent_one_datagram_at_a_time_arrives_whole() {
+    on_thread("udp-batches", || async {
+        let net = net();
+        let (mut sender, _) = loopback(&net);
+        gso::refuse(sender.local());
+        let (_, mut receiver) = loopback(&net);
+        let batch = Transmit {
+            segment: NonZeroUsize::new(2),
+            ..transmit(receiver.local(), b"abcd")
+        };
+        for round in ["first", "second", "third"] {
+            assert_eq!(send(&mut sender, &batch).await, Ok(()), "{round} batch");
+            let contents: Vec<_> = (receive(&mut receiver, 2).await)
+                .into_iter()
+                .map(|datagram| datagram.contents)
+                .collect();
+            assert_eq!(contents, [b"ab", b"cd"], "{round} batch");
+        }
+    });
+}
+
 /// macOS loses it: `a_datagram_over_the_path_mtu_is_lost`.
 #[test]
 #[cfg(target_os = "linux")]
@@ -228,18 +349,45 @@ fn a_datagram_over_the_path_mtu_is_lost() {
 }
 
 #[test]
-fn an_ecn_mark_arrives() {
-    on_thread("udp-ecn", || async {
+fn a_datagram_past_the_end_of_its_buffer_arrives_cut() {
+    on_thread("udp-cut", || async {
         let net = net();
         let (mut sender, _) = loopback(&net);
         let (_, mut receiver) = loopback(&net);
-        for ecn in [Ecn::Ect0, Ecn::Ect1, Ecn::Ce] {
-            let to = Transmit {
-                ecn: Some(ecn),
-                ..transmit(receiver.local(), b"marked")
-            };
-            assert_eq!(send(&mut sender, &to).await, Ok(()));
-            assert_eq!(receive(&mut receiver, 1).await[0].ecn, Some(ecn));
+        let contents: Vec<u8> = (0..100).collect();
+        let to = transmit(receiver.local(), &contents);
+        assert_eq!(send(&mut sender, &to).await, Ok(()));
+        tokio::time::sleep(SILENCE).await;
+        let mut buffer = [0; 10];
+        let mut buffers = [IoSliceMut::new(&mut buffer)];
+        let mut meta = [Meta::default()];
+        let batches = timeout(
+            Duration::from_secs(2),
+            poll_fn(|cx| receiver.poll_recv(cx, &mut buffers, &mut meta)),
+        )
+        .await;
+        assert_eq!(batches, Ok(Ok(1)));
+        assert_eq!(meta[0].len, 10);
+        assert_eq!(buffer, contents[..10]);
+    });
+}
+
+#[test]
+fn an_ecn_mark_arrives() {
+    on_thread("udp-ecn", || async {
+        let net = net();
+        for ip in [IpAddr::from(LOCALHOST), Ipv6Addr::LOCALHOST.into()] {
+            let (mut sender, _) = bind(&net, SocketAddr::new(ip, 0));
+            let (_, mut receiver) = bind(&net, SocketAddr::new(ip, 0));
+            for ecn in [Ecn::Ect0, Ecn::Ect1, Ecn::Ce] {
+                let to = Transmit {
+                    ecn: Some(ecn),
+                    ..transmit(receiver.local(), b"marked")
+                };
+                assert_eq!(send(&mut sender, &to).await, Ok(()));
+                let marked = receive(&mut receiver, 1).await[0].ecn;
+                assert_eq!(marked, Some(ecn), "{ip}");
+            }
         }
     });
 }
@@ -271,8 +419,7 @@ fn an_any_v6_socket_talks_plain_ipv4() {
     });
 }
 
-/// Linux holds all of 127.0.0.0/8 on the loopback. macOS ignores each IPv4 source
-/// until #1972 patches `noq-udp`.
+/// Linux holds all of 127.0.0.0/8 on the loopback, and macOS holds only 127.0.0.1.
 #[test]
 #[cfg(target_os = "linux")]
 fn a_source_address_picks_the_local_address() {
@@ -430,6 +577,43 @@ fn a_bad_source_or_port_0_gives_the_answer_of_linux() {
                 send(&mut sender, &to).await,
                 expected,
                 "a socket on {local}, source {source:?}, to {destination}"
+            );
+        }
+    });
+}
+
+/// ENV SEAMS: `os` gives the kernel's answer for a source that is not local.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_source_that_is_not_local_gives_the_answer_of_macos() {
+    on_thread("udp-far-source", || async {
+        let net = net();
+        let any_v4 = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
+        let any_v6 = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0);
+        let to_v4 = SocketAddr::new(LOCALHOST.into(), 9);
+        let to_v6 = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 9);
+        let cases = [
+            (any_v4, IpAddr::from([192, 0, 2, 1]), to_v4),
+            (any_v4, IpAddr::from([127, 0, 0, 2]), to_v4),
+            (any_v6, IpAddr::from([192, 0, 2, 1]), to_v4),
+            (any_v6, IpAddr::from([192, 0, 2, 1]), to_v6),
+            (any_v6, IpAddr::from(LOCALHOST), to_v6),
+            (
+                any_v6,
+                IpAddr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]),
+                to_v6,
+            ),
+        ];
+        for (local, source, destination) in cases {
+            let (mut sender, _) = bind(&net, local);
+            let to = Transmit {
+                source: Some(source),
+                ..transmit(destination, b"x")
+            };
+            assert_eq!(
+                send(&mut sender, &to).await,
+                Err(Error::Io { code: 49 }),
+                "a socket on {local}, source {source}"
             );
         }
     });
@@ -675,6 +859,69 @@ fn an_ipv6_source_on_an_ipv4_socket_gives_einval() {
             assert_eq!(send(&mut sender, &after).await, Ok(()), "{case}");
             let arrived = receive(&mut receiver, 1).await;
             assert_eq!(arrived[0].contents, b"after", "{case}");
+        }
+    });
+}
+
+/// macOS ignores the `IPV6_PKTINFO` of a send to an IPv4 destination, and sends from
+/// an address of its choice.
+#[test]
+fn an_ipv6_source_to_an_ipv4_destination_gives_einval() {
+    on_thread("udp-source-family", || async {
+        let net = net();
+        let (_, mut receiver) = loopback(&net);
+        let (mut sender, _) =
+            bind(&net, SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0));
+        let v4 = receiver.local();
+        let mapped = SocketAddr::new(LOCALHOST.to_ipv6_mapped().into(), v4.port());
+        let sources = [
+            Ipv6Addr::LOCALHOST,
+            Ipv6Addr::from([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1]),
+        ];
+        for (source, destination) in sources
+            .into_iter()
+            .flat_map(|source| [(source, v4), (source, mapped)])
+        {
+            let from = Transmit {
+                source: Some(source.into()),
+                ..transmit(destination, b"from")
+            };
+            let case = format!("source {source}, to {destination}");
+            let refused = send(&mut sender, &from).await;
+            assert_eq!(refused, Err(Error::Io { code: 22 }), "{case}");
+            let after = transmit(destination, b"after");
+            assert_eq!(send(&mut sender, &after).await, Ok(()), "{case}");
+            let arrived = receive(&mut receiver, 1).await;
+            assert_eq!(arrived[0].contents, b"after", "{case}");
+        }
+    });
+}
+
+/// A mapped IPv4 source is not one of the IPv6 sources that `os` refuses.
+#[test]
+fn an_ipv4_source_on_an_any_v6_socket_sends_in_either_form() {
+    on_thread("udp-source-mapped", || async {
+        let net = net();
+        let (_, mut receiver) = loopback(&net);
+        let (mut sender, _) =
+            bind(&net, SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), 0));
+        let v4 = receiver.local();
+        let mapped = SocketAddr::new(LOCALHOST.to_ipv6_mapped().into(), v4.port());
+        let from = SocketAddr::new(LOCALHOST.into(), sender.local().port());
+        let sources = [IpAddr::from(LOCALHOST), LOCALHOST.to_ipv6_mapped().into()];
+        for (source, destination) in sources
+            .into_iter()
+            .flat_map(|source| [(source, v4), (source, mapped)])
+        {
+            let to = Transmit {
+                source: Some(source),
+                ..transmit(destination, b"from")
+            };
+            let case = format!("source {source}, to {destination}");
+            assert_eq!(send(&mut sender, &to).await, Ok(()), "{case}");
+            let arrived = receive(&mut receiver, 1).await;
+            assert_eq!(arrived[0].source, from, "{case}");
+            assert_eq!(arrived[0].contents, b"from", "{case}");
         }
     });
 }

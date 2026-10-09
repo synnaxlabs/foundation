@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::mem;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use block::Pool;
 use bytes::Bytes;
@@ -44,6 +44,9 @@ pub(super) struct Connection {
     pub(super) streams: Streams,
     /// The datagrams that arrived and wait to be taken.
     pub(super) datagrams: Received,
+    /// The number of the first packet sent after the last ping, until the peer
+    /// acknowledges it or a later one.
+    pinged: Option<u64>,
     state: State,
 }
 
@@ -90,8 +93,43 @@ impl Connection {
             queued: false,
             streams,
             datagrams: Received::default(),
+            pinged: None,
             state,
         }
+    }
+
+    /// When [`Connection::timeout`] must next run, if ever.
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        let streams = self.streams.deadline(|| self.idle());
+        self.inner.poll_timeout().into_iter().chain(streams).min()
+    }
+
+    /// The idle timeout as noq-proto counts it, at least 3 PTO.
+    fn idle(&self) -> Duration {
+        let idle = self.inner.idle_timeout();
+        idle.expect("invariant: a `Setup` sets an idle timeout")
+    }
+
+    /// Runs the timers due at `now`, and queues in `events` the [`Event::Closed`] of a
+    /// fault that it finds. Gives whether one ran, so that the caller drives the
+    /// connection. The idle timeout goes first: a wake past it and the hello's bound
+    /// ends a silent peer with [`Error::TimedOut`].
+    pub(super) fn timeout(
+        &mut self,
+        now: Instant,
+        events: &mut VecDeque<Event>,
+    ) -> bool {
+        let ran = self.inner.poll_timeout().is_some_and(|due| due <= now);
+        if ran {
+            self.inner.handle_timeout(now);
+        }
+        if let Err(Fault(reason)) = self.streams.timeout(now, || self.idle())
+            && !self.inner.is_closed()
+        {
+            events.extend(self.fault(now, reason));
+            return true;
+        }
+        ran
     }
 
     /// Moves the connection's events to `endpoint` and to `events` at `now`, and
@@ -120,6 +158,13 @@ impl Connection {
         // After every event, so that each stop has reset its stream.
         if self.live() {
             self.streams.pump(&mut self.inner, events);
+            if self
+                .pinged
+                .is_some_and(|mark| self.inner.largest_acked() >= Some(mark))
+            {
+                self.pinged = None;
+                events.push_back(Event::Acked { key: self.key });
+            }
         }
         assert!(
             !drained || !self.live(),
@@ -148,6 +193,7 @@ impl Connection {
                     return;
                 }
                 self.state = State::Open;
+                self.streams.start(now);
                 let peer = self.peer();
                 events.push_back(Event::Connected { key, peer });
             }
@@ -195,6 +241,13 @@ impl Connection {
             | noq_proto::Event::Path(_)
             | noq_proto::Event::NatTraversal(_) => {}
         }
+    }
+
+    /// Sends a packet that the peer must acknowledge. [`Event::Acked`] comes once the
+    /// peer acknowledges it or a later packet. A later ping moves that mark.
+    pub(super) fn ping(&mut self) {
+        self.pinged = Some(self.inner.next_packet_number());
+        self.inner.ping();
     }
 
     /// Whether the connection has not ended.

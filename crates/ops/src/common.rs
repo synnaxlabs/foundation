@@ -1,13 +1,29 @@
-//! Fixtures that the tests of `plan` and `apply` share.
+//! Fixtures that the tests of `plan`, `apply`, and `Node` share.
 
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use connector::cancel;
 use connector::kind::{self, Channels, Context};
 use document::diagnostic::Diagnostic;
 use document::{Document, Source};
-use types::name::Name;
+use env::tasks::Tasks;
+use mesh::card::addresses::Addresses;
+use mesh::card::{self, Card};
+use mesh::region::Founding;
+use mesh::status::Status;
+use mesh::{Member, Mesh};
+use sim::Sim;
+use spec::definition::Definition;
+use transport::{Port, Transport};
+use types::channel::Key;
+use types::ed25519::PrivateKey;
+use types::name::{Name, Prefix};
+use types::node::{self, SealKey};
+use types::time::Span;
 
 use crate::front_end::{File, FrontEnd};
 
@@ -37,6 +53,7 @@ impl kind::Kind for Reader {
         Ok(Channels {
             reads: Vec::new(),
             writes: writes.clone(),
+            counts: Vec::new(),
         })
     }
 
@@ -81,4 +98,119 @@ pub(crate) fn files(files: &[(&str, &str)]) -> Vec<File> {
 /// `site.hcl` with a placement that homes its index on `edge`.
 pub(crate) fn placed_site() -> String {
     format!("{SITE}placement \"p\" {{\n  select = \"site.*\"\n  home = \"edge\"\n}}\n")
+}
+
+pub(crate) const NODE: node::Key = node::Key::from_u128(1);
+pub(crate) const PRIVATE_KEY: PrivateKey = PrivateKey([1; 32]);
+pub(crate) const ADMIN: PrivateKey = PrivateKey([7; 32]);
+pub(crate) const PORT: u16 = 7000;
+
+/// The record of the member `name` at the key `n`, whose private key is `[n; 32]`.
+pub(crate) fn create_member(n: u8, name: &str) -> Member {
+    let private_key = PrivateKey([n; 32]);
+    let card = Card {
+        name: self::name(name),
+        public_key: private_key.public(),
+        seal_key: SealKey::new([9; 32]).expect("a seal key"),
+        addresses: Addresses::new(Vec::new()).expect("no addresses"),
+        version: 1,
+    };
+    Member {
+        card: card::Signed::sign(node::Key::from_u128(n.into()), card, &private_key),
+        admission: [0; 64],
+        ephemeral: None,
+        status: Status::new([].into()).expect("a status"),
+    }
+}
+
+/// The mesh of a root region with the founding `definitions`, whose members are
+/// `names` at the keys from 1 up. The first is this node and the one voter.
+pub(crate) async fn open(
+    node: &sim::node::Node,
+    tasks: &Tasks,
+    names: &[&str],
+    definitions: BTreeMap<Name, Definition>,
+) -> Mesh {
+    let budget = block::Config { budget: 1 << 20 };
+    let memory = block::Heap::new(budget.reservation());
+    let pool = Rc::new(block::Pool::new(budget, memory));
+    let at = SocketAddr::new(node.addresses()[0], PORT);
+    let mut parts = Port::bind(&node.net(), at)
+        .expect("a port")
+        .split(NonZeroUsize::MIN);
+    let config = transport::Config {
+        private_key: PRIVATE_KEY,
+        message_bytes_max: NonZeroUsize::new(1 << 16).expect("not zero"),
+        window_bytes: 1 << 20,
+        streams_max: NonZeroU32::new(16).expect("not zero"),
+        idle: Span::from_nanos(60 * Span::SECOND.nanos()),
+        clock: node.clock(),
+        entropy: node.entropy(),
+        tasks: tasks.clone(),
+        pool: Rc::clone(&pool),
+    };
+    let part = parts.pop().expect("a part");
+    let transport = Transport::new(config, part).expect("a transport");
+    let store = blob::Store::open(blob::Config {
+        files: node.files(),
+        dir: "blob".into(),
+        pool: Rc::clone(&pool),
+    })
+    .await
+    .expect("a store");
+    let config = mesh::Config {
+        key: NODE,
+        private_key: PRIVATE_KEY,
+        founding: Founding {
+            prefix: Prefix::ROOT,
+            voters: [NODE].into(),
+            members: (1..)
+                .zip(names)
+                .map(|(n, name)| create_member(n, name))
+                .collect(),
+            definitions,
+            homes: BTreeMap::new(),
+        },
+        files: node.files(),
+        dir: PathBuf::new(),
+        clock: node.clock(),
+        entropy: node.entropy(),
+        tasks: tasks.clone(),
+        transport: Rc::new(transport),
+        pool,
+        store: Rc::new(store),
+    };
+    Mesh::open(config).await.expect("a mesh")
+}
+
+/// Runs `body` with the mesh of [`open`] on the one node of a run, whose one member is
+/// `edge`, with the definitions of a first start.
+pub(crate) fn solo<F: Future<Output = ()> + 'static>(
+    body: impl FnOnce(Mesh) -> F + Send + 'static,
+) {
+    founded(&["edge"], spec::founding::create(ADMIN.public()), body);
+}
+
+/// Runs `body` with the mesh of [`open`] on the one node of a run, with the members
+/// `names` and the founding `definitions`.
+pub(crate) fn founded<F: Future<Output = ()> + 'static>(
+    names: &'static [&'static str],
+    definitions: BTreeMap<Name, Definition>,
+    body: impl FnOnce(Mesh) -> F + Send + 'static,
+) {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let ran = sim.run_on(&node, move |node, tasks| async move {
+        body(open(&node, &tasks, names, definitions).await).await;
+    });
+    assert_eq!(ran, Ok(()));
+}
+
+/// Gives `Key::from_u128(n)` for each `n` from `from` up.
+pub(crate) fn keys(from: u128) -> impl FnMut() -> Key {
+    let mut next = from;
+    move || {
+        next += 1;
+        Key::from_u128(next)
+    }
 }

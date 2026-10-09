@@ -76,6 +76,7 @@ jobs:
               - 'Cargo.toml'
               - '**/Cargo.toml'
               - 'Cargo.lock'
+              - 'fuzz/Cargo.lock'
               - 'deny.toml'
               - '.github/workflows/**'
             models:
@@ -103,7 +104,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
       - name: Format
-        run: cargo fmt --check
+        run: |
+          cargo fmt --check
+          cargo fmt --check --manifest-path fuzz/Cargo.toml
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Layers
@@ -143,8 +146,12 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny@0.20.2
+      # `fuzz/` is a workspace of its own, with its own lock file.
       - name: Dependencies
-        run: cargo deny check advisories bans licenses sources
+        run: |
+          cargo deny check advisories bans licenses sources
+          cargo deny --manifest-path fuzz/Cargo.toml \
+            check advisories bans licenses sources
       # A patched crate is a path package, which no advisory reaches. A package that
       # depends on the exact release of each path package outside the workspace
       # checks those releases.
@@ -216,6 +223,42 @@ jobs:
       - name: Miri
         run: cargo xtask miri
 
+  fuzz:
+    needs: changes
+    if: "!cancelled() && needs.changes.outputs.rust != 'false'"
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned nightly
+        run: |
+          rustup toolchain install "$(cat rust-toolchain-nightly)" --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            fuzz -> target
+      - name: Read the cargo-fuzz pin
+        id: cargo-fuzz
+        run: echo "tool=cargo-fuzz@$(cat fuzz/cargo-fuzz-version)" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ${{ steps.cargo-fuzz.outputs.tool }}
+      # `fuzz/` is a workspace of its own, which the Clippy step of `check` does not
+      # see.
+      - name: Clippy
+        run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
+      - name: Fuzz
+        if: ${{ !cancelled() }}
+        run: cargo xtask fuzz 60
+      - name: Clean tree
+        run: test -z "$(git status --porcelain)" || { git status; exit 1; }
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts
+          if-no-files-found: ignore
+
   mutants:
     needs: changes
     if: >-
@@ -271,6 +314,8 @@ jobs:
         with:
           tool: cargo-mutants@27.1.0
       - name: Mutants in the diff
+        env:
+          TMPDIR: ${{ runner.temp }}
         run: |
           git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
           status=0

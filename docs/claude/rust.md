@@ -111,8 +111,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 - An internal invariant that breaks panics. Bad outside input never panics: it returns
   an error. Panic and assert messages state what broke and the values (r16 20).
 - `Drop` never panics. It never blocks unless the type also gives a call that does
-  not block (r16 23). One exception: `sim::Sim` (SIM DROP in
-  `docs/decisions/testing/sim-drop.md`).
+  not block (r16 23). Two exceptions: `sim::Sim` (SIM DROP in
+  `docs/decisions/testing/sim-drop.md`), and the test types that TEST DROP names
+  (`docs/decisions/testing/test-drop.md`).
 
 ## Unsafe
 
@@ -123,7 +124,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   `net::resolve` module of `os` (architect, 2026-10-08 16:52 UTC, #1095,
   https://github.com/synnaxlabs/foundation/issues/1095#issuecomment-6064802287), the
   `allocate` module of `os` on macOS (architect, #931,
-  https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099), and
+  https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099), the
+  `signal` module of `os` (architect, #1732,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545), and
   later FFI connectors. Such a module uses `#[expect(unsafe_code, reason = "...")]`
   and runs under Miri (r16 24). Those modules of `os` only call the OS, which Miri
   cannot run, so tests on the real OS check them, and `cargo xtask miri` skips `os`

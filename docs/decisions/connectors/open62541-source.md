@@ -89,6 +89,15 @@
   release. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
   2026-10-08 15:49 UTC).
+  The generator is PCG32 (`UA_ENABLE_DETERMINISTIC_RNG`), which a peer can predict from
+  a few of its values. Foundation code takes no nonce, key, or session token from
+  `UA_UInt32_random` or `UA_Guid_random`. The copy does so in two places: the nonces of
+  the security policy None, which protect nothing, and the session authentication token
+  of its server, which only the test server of `connector-opcua` runs. Before Foundation
+  builds a security policy that encrypts or an OPC UA server, that work takes each
+  nonce, key, and token from a cryptographic source, and its PR records the source here.
+  Decided by `laptop.architect-2`, 2026-10-09 13:10 UTC
+  (https://github.com/synnaxlabs/foundation/pull/1997#issuecomment-6081545452).
   A second change of `src/util/ua_util.c` keeps a flag for each thread, which
   `UA_random_seed` and `UA_random_seed_deterministic` set, and `UA_UInt32_random` and
   `UA_Guid_random` call `abort()` on a thread with no start value. The C driver then
@@ -139,7 +148,7 @@
   copy and of `shim.c` call no libc function that gives or takes a heap pointer. A
   crypto library that a later PR links keeps its own allocator. So the counting
   allocator of a test or benchmark binary counts C too. The copy check compiles
-  without `alloc.h`. A test reads the archives that `build.rs` makes with it, and
+  without `alloc.h`. A test reads the archive that `build.rs` makes with it, and
   fails on each symbol outside the copy and `shim.c` that its closed list does not
   hold. The list holds no clock function and no libc function that gives or takes a
   heap pointer. Lost: `UA_ENABLE_MALLOC_SINGLETON` (a global), `--wrap=malloc`
@@ -149,7 +158,7 @@
   2026-10-08 19:13 UTC; the header:
   https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6067771921,
   2026-10-08 19:46 UTC). The exception for `UA_ARCH_HEADER` in the flags passage
-  above, the copy check without `alloc.h`, and the test of the archives: approved by
+  above, the copy check without `alloc.h`, and the test of the archive: approved by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1981#issuecomment-6068060133,
   2026-10-08 20:04 UTC, and at 1a593331:
@@ -163,7 +172,7 @@
   `static UA_THREAD_LOCAL` buffers of `src/client/ua_client.c` and the server files.
   So our change of `src_generated/open62541/config.h` moves its thread-local block out
   of `#if UA_MULTITHREADING >= 100`. The driver test of `UA_rng` is its positive
-  control, and the test of the archives fails on each `pthread_mutex_*` symbol: the
+  control, and the test of the archive fails on each `pthread_mutex_*` symbol: the
   closed list holds none. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6068041912,
   2026-10-08 20:03 UTC). Supersedes the note "a copy config with `UA_MULTITHREADING`
@@ -185,3 +194,73 @@
   `config.h` for each target is its check. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1995#issuecomment-6071050895,
   2026-10-08 23:26 UTC).
+  The event loop of `connector-opcua` is a `UA_EventLoop` that `shim.c` fills and
+  `event::Loop` owns, on one thread. Its monotonic time is the clock of `env`.
+  `dateTime_now` gives that time counted from the Unix epoch, and the UTC offset is 0,
+  until #1992 gives it the wall time of the node through `hub`, in the PR of the first
+  connection with a security policy other than `None`. No connection that checks a
+  certificate runs before. Its drop runs the queued delayed callbacks in at most 64
+  passes, then aborts: a callback that queues itself at each pass is a defect. The
+  hidden module `bench`, behind the feature `sim`, gives the benchmark and the
+  allocation test a client on the loop. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211,
+  2026-10-08 19:05 UTC); the abort supersedes "panics" in that comment
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
+  2026-10-08 20:22 UTC).
+  The logger of the loop writes each message of level warning and up to fd 2, and
+  drops the lower levels: it formats the line into a stack buffer of 512 bytes with
+  `mp_vsnprintf` and sends it in one `write`, so a line allocates nothing, takes no
+  `stdio` lock, and does not mix with a line of another thread. A longer line is cut,
+  not dropped. Trigger: when `node` has a log, the loop takes its sink from its
+  caller. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068103327,
+  2026-10-08 20:07 UTC;
+  https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
+  2026-10-08 20:22 UTC).
+  Two timers due at one time run in an order that no code may depend on. The timer
+  tree of the copy orders by due time, then by `id`, so that order is the order of
+  their adds and a simulation with such timers replays; open62541 ranks them by heap
+  address. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6073878926,
+  2026-10-09 03:49 UTC). The batch search of the copy goes in the order of the tree,
+  so whether a current-time timer batches does not depend on addresses (approved by
+  `laptop.architect-2`, 2026-10-09T05:27:21Z,
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074900634).
+  The TCP connection manager of `connector-opcua` is `connection::Manager`. It owns its
+  loop and its connections, on one thread, and takes the clock, network, and randomness
+  of `env` at `new`. `drive(run)` moves each connection on and polls `run` with the
+  context of the drive until `run` gives a value, so `run` can poll its own sources. One
+  drive of a manager runs at a time. A connect, a send, or a close from `run` or from
+  another task on that thread wakes the drive. After each `run`, also the one that gives
+  the value, the drive moves on each connection again after each connect, send, or close
+  on it that the `run` or such a step asks for, so it can also read and call open62541
+  back after that `run`. At most 256 sends wait on one connection: a send past them
+  closes the connection. open62541 allocates each send at most at the send buffer size
+  of its channel, so this bounds the memory of a connection at 256 send buffers. Sends
+  wait from one pass to the next, and longer while a stream is full, so an owner keeps
+  the chunks of its messages in flight at 256 or fewer. A client does so with its
+  requests in flight times the chunks of a message. A close reads and drops what the
+  peer sends while it writes what waits, closes its side, then reads until the peer
+  closes its side, so that the drop sends no reset. It drops the stream with a warning
+  10 s after the first close, so that a peer that reads slowly or never closes cannot
+  hold it. Each connect, read, write, or close error gives a warning through the logger
+  of the loop. The first close, or an error before it, gives `CLOSING` once, at the next
+  run of the loop. The wake of a send on the thread of the drive: decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6074418284,
+  2026-10-09 04:43 UTC). The rest, before the send bound and the context of `run`:
+  approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6085824086,
+  2026-10-09 17:22 UTC). The send bound and the context of `run`: approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086043036,
+  2026-10-09 17:36 UTC). The sends between two passes, the passes before the value, and
+  the order of a close: approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086204518,
+  2026-10-09 17:46 UTC). The moves of the woken connections alone before the value:
+  approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086285343,
+  2026-10-09 17:51 UTC). The moves after each `run`, and the `CLOSING` of the first
+  close or an error before it: approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086768731,
+  2026-10-09 18:21 UTC).

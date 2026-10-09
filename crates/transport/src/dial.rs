@@ -2,7 +2,7 @@
 //! address, staggered, until one gives a session.
 
 use std::future::poll_fn;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV6};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -27,7 +27,7 @@ const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 /// connected first, or [`Error::Unreachable`] with each attempt's cause, in the order
 /// started, when none connects.
 pub(crate) async fn dial(
-    dialer: &quic::Dialer,
+    carrier: &quic::Handle,
     peer: PublicKey,
     addresses: &[Address],
 ) -> Result<quic::Session, Error> {
@@ -37,9 +37,9 @@ pub(crate) async fn dial(
         Address::Tcp(_) => 1,
         Address::Relay { .. } => 2,
     });
-    let clock = dialer.clock();
+    let clock = carrier.clock();
     let mut dial = Dial {
-        dialer,
+        carrier,
         peer,
         addresses,
         causes: Vec::new(),
@@ -53,7 +53,7 @@ pub(crate) async fn dial(
 
 /// The attempts of one [`dial`].
 struct Dial<'a> {
-    dialer: &'a quic::Dialer,
+    carrier: &'a quic::Handle,
     clock: Clock,
     peer: PublicKey,
     addresses: Vec<Address>,
@@ -73,7 +73,7 @@ impl Dial<'_> {
                 return Poll::Ready(ended);
             }
             // After the attempts, so one that connected before a break wins.
-            if let Err(error) = self.dialer.check() {
+            if let Err(error) = self.carrier.check() {
                 return Poll::Ready(Err(error));
             }
             let next = self.causes.len();
@@ -132,8 +132,8 @@ impl Dial<'_> {
     /// [`Error::Network`] when the socket broke.
     fn start(&mut self, index: usize) -> Result<(), Error> {
         match self.addresses[index] {
-            Address::Udp(remote) if routable(remote) => {
-                let session = self.dialer.dial(self.peer, remote)?;
+            Address::Udp(remote) if let Some(remote) = route(remote) => {
+                let session = self.carrier.dial(self.peer, remote)?;
                 self.flying.push((index, session));
                 self.causes.push(None);
                 self.sleep.reset(self.clock.now() + STAGGER);
@@ -158,16 +158,35 @@ impl Dial<'_> {
     }
 }
 
-/// Whether a datagram can go to `remote`: its port is not 0 and its IP is specified.
-fn routable(remote: SocketAddr) -> bool {
-    remote.port() != 0 && !remote.ip().is_unspecified()
+/// Where a datagram to `remote` goes, or `None` when its port is 0 or its IP is
+/// unspecified. It is `remote` in the form in which a socket at `[::]` gives the
+/// source of each reply, as a remote in another form would make each reply come from
+/// an unknown peer: an IPv4-mapped IP becomes IPv4, and an IPv6 address has no flow
+/// label, and a scope only when its IP is link-local.
+fn route(remote: SocketAddr) -> Option<SocketAddr> {
+    let remote = match remote {
+        SocketAddr::V6(v6) if let Some(v4) = v6.ip().to_ipv4_mapped() => {
+            SocketAddr::new(v4.into(), v6.port())
+        }
+        SocketAddr::V6(v6) => {
+            let ip = *v6.ip();
+            let scope = if ip.is_unicast_link_local() {
+                v6.scope_id()
+            } else {
+                0
+            };
+            SocketAddrV6::new(ip, v6.port(), 0, scope).into()
+        }
+        SocketAddr::V4(_) => remote,
+    };
+    (remote.port() != 0 && !remote.ip().is_unspecified()).then_some(remote)
 }
 
 #[cfg(test)]
 mod tests {
     use std::future::poll_fn;
     use std::io::IoSliceMut;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
     use std::pin::pin;
     use std::sync::{Arc, Mutex};
     use std::task::Poll;
@@ -277,6 +296,19 @@ mod tests {
             accepted,
             dialed.lock().expect("a lock").take().expect("a dial"),
         )
+    }
+
+    /// A private call, as `sim` has no link-local address (#2075).
+    #[test]
+    fn a_route_keeps_the_scope_of_a_link_local_address_and_no_flow_label() {
+        let ip = "fe80::1".parse().expect("an IPv6 address");
+        let remote = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 7, 2));
+        let route = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 2));
+        assert_eq!(super::route(remote), Some(route));
+        let ip = "fd00::1".parse().expect("an IPv6 address");
+        let remote = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 7, 2));
+        let route = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 0));
+        assert_eq!(super::route(remote), Some(route));
     }
 
     #[test]
@@ -445,8 +477,8 @@ mod tests {
             ];
             testing::carrier(&client, CLIENT, move |carrier, node| async move {
                 let clock = node.clock();
-                let dialer = carrier.dialer();
-                let mut dial = pin!(super::dial(&dialer, SERVER.public(), &addresses));
+                let handle = carrier.handle();
+                let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
                 let after_stagger =
                     super::STAGGER.nanos() + Span::MILLISECOND.nanos() * 10;
                 for wait in [Span::ZERO, Span::from_nanos(after_stagger)] {
@@ -549,8 +581,8 @@ mod tests {
         let other = address(&impostor_node);
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let addresses = [Address::Udp(other), Address::Udp(PORT_ZERO)];
-            let dialer = carrier.dialer();
-            let mut dial = pin!(super::dial(&dialer, SERVER.public(), &addresses));
+            let handle = carrier.handle();
+            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
             let started =
                 poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx).is_pending()));
             assert!(started.await);
@@ -573,8 +605,8 @@ mod tests {
         let other = address(&impostor_node);
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let addresses = [Address::Udp(PORT_ZERO), Address::Udp(other)];
-            let dialer = carrier.dialer();
-            let mut dial = pin!(super::dial(&dialer, SERVER.public(), &addresses));
+            let handle = carrier.handle();
+            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
             let started =
                 poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx).is_pending()));
             assert!(started.await);
@@ -641,16 +673,20 @@ mod tests {
             at: a,
         };
         let unspecified = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4433);
+        let mapped = Ipv4Addr::UNSPECIFIED.to_ipv6_mapped();
+        let mapped = SocketAddr::new(IpAddr::V6(mapped), 4433);
         let addresses = vec![
             relay,
             Address::Tcp(b),
             Address::Udp(PORT_ZERO),
             Address::Tcp(a),
             Address::Udp(unspecified),
+            Address::Udp(mapped),
         ];
         let attempts = vec![
             (Address::Udp(PORT_ZERO), Error::Unroutable),
             (Address::Udp(unspecified), Error::Unroutable),
+            (Address::Udp(mapped), Error::Unroutable),
             (Address::Tcp(b), Error::Unroutable),
             (Address::Tcp(a), Error::Unroutable),
             (relay, Error::Unroutable),
@@ -675,8 +711,8 @@ mod tests {
         });
         let addresses = [Address::Udp(address(&server))];
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
-            let dialer = carrier.dialer();
-            let mut dial = pin!(super::dial(&dialer, SERVER.public(), &addresses));
+            let handle = carrier.handle();
+            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
             assert!(testing::poll_once(dial.as_mut()).await.is_none());
             drop(carrier);
             node.clock().sleep(spans(Span::MILLISECOND, 200)).await;

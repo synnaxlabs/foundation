@@ -1,12 +1,11 @@
 //! Applies a plan file to the spec of the region.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use types::channel;
-use types::name::Name;
 
 use crate::error::{self, Error};
 use crate::front_end;
@@ -18,8 +17,8 @@ mod tests;
 
 /// Applies the plan in `bytes`, read from the plan file at `path`, to the spec of
 /// `mesh`. A new channel gets its key from `key`, as
-/// [`config::plan::Plan::definitions`] states. `members` and `kinds` are the names of
-/// the members and the connector kinds of the node that applies, read at the apply.
+/// [`config::plan::Plan::definitions`] states. `kinds` holds the connector kinds of the
+/// node that applies. The members are those of `mesh` at the apply.
 ///
 /// # Errors
 ///
@@ -41,7 +40,6 @@ pub(crate) async fn apply(
     path: &Path,
     bytes: &[u8],
     mesh: &mesh::Mesh,
-    members: &BTreeSet<Name>,
     kinds: &connector::kind::Table,
     key: impl FnMut() -> channel::Key,
 ) -> Result<Applied, Error> {
@@ -63,7 +61,7 @@ pub(crate) async fn apply(
         pointer
     } else {
         let definitions = planned.definitions(&applied, key).map_err(Error::Plan)?;
-        config::plan::check(&definitions, members, kinds)
+        config::plan::check(&definitions, &mesh.names(), kinds)
             .map_err(|diagnostics| Error::config(diagnostics, &[]))?;
         mesh.apply(planned.base, definitions, planned.homes)
             .await
@@ -94,9 +92,18 @@ pub(crate) struct Applied {
 }
 
 impl Applied {
+    /// The output as JSON.
+    pub(crate) fn json(&self) -> Value {
+        serde_json::to_value(self).expect("invariant: an output is plain JSON data")
+    }
+
     /// `Applied <file>: <a> added, <c> changed, <r> removed, <h> homes listed.`, with
     /// each count of 0 left out and `1 home listed` for one home, or `no change` in
     /// place of the counts when each is 0.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the table entries of #1744 call it")
+    )]
     pub(crate) fn text(&self) -> String {
         let counts = [
             (self.counts.added, "added"),
