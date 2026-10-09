@@ -86,7 +86,7 @@ struct Member {
 }
 
 /// One node in a [`Lab`]: its index in `members`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Node(usize);
 
 /// A live reader on one channel, opened with [`Lab::reader`].
@@ -354,6 +354,11 @@ impl Lab {
     /// Runs `plan` then `apply` of `hcl` on `node` through the JSON CLI.
     pub(crate) fn apply(&mut self, _node: Node, _hcl: &str) {
         todo!("waits on #337")
+    }
+
+    /// The node that holds the home of the index `index`, as `node` sees it.
+    pub(crate) fn home(&mut self, _node: Node, _index: &str) -> Option<Node> {
+        todo!("waits on #1756")
     }
 
     /// Runs the MCP `plan` tool on `node` and returns the plan and the names of the

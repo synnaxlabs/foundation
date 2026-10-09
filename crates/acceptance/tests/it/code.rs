@@ -40,6 +40,33 @@ fn check(front: Front) {
     lab.stop();
 }
 
+/// An index that `site.hcl` does not hold.
+const CLOCK: &str = r#"channel "site.clock" { kind = "index" }"#;
+
+#[test]
+fn a_second_plan_of_an_applied_channel_gives_no_change() {
+    let mut lab = Lab::new(1);
+    let node = lab.start("cloud");
+    lab.mesh(&[node]);
+    assert_eq!(lab.plan(node, HCL), ["site.temp", "site.time"], "first plan");
+    lab.apply(node, HCL);
+    assert_eq!(lab.plan(node, HCL), Vec::<String>::new(), "second plan");
+    lab.stop();
+}
+
+#[test]
+fn an_applied_index_gets_a_home_and_keeps_it() {
+    let mut lab = Lab::new(1);
+    let node = lab.start("cloud");
+    lab.mesh(&[node]);
+    lab.apply(node, HCL);
+    assert_eq!(lab.home(node, "site.time"), Some(node), "first apply");
+    lab.apply(node, &format!("{HCL}{CLOCK}\n"));
+    assert_eq!(lab.home(node, "site.time"), Some(node), "first index");
+    assert_eq!(lab.home(node, "site.clock"), Some(node), "second index");
+    lab.stop();
+}
+
 #[test]
 #[ignore = "waits on #337"]
 fn plan_and_apply_from_hcl_through_the_json_cli() {
