@@ -723,18 +723,6 @@ struct Serve {
     time: clock::Reader,
 }
 
-/// Keeps `budget` in `files`, then loads the node's identity. Shard 0 calls it once
-/// each buffer has opened, so a budget that gives a shard too little is not kept.
-async fn load(
-    files: &env::files::Files,
-    budget: Budget,
-    time: &clock::Reader,
-    entropy: &env::entropy::Entropy,
-) -> Result<identity::Identity, Error> {
-    budget::keep(files, budget).await?;
-    identity::load(files, time, entropy).await
-}
-
 /// What shard 0 opens the node's transport and mesh from, but its files, pool, and
 /// tasks.
 struct Endpoint {
@@ -829,7 +817,12 @@ impl Serve {
                 "invariant: shard 0 serves only once its claim and open succeed",
             );
         };
-        let loaded = load(&files, self.budget, &self.time, &self.endpoint.entropy);
+        // After each buffer has opened, so a budget that gives a shard too little is
+        // not kept.
+        let loaded = async {
+            budget::keep(&files, self.budget).await?;
+            identity::load(&files, &self.time, &self.endpoint.entropy).await
+        };
         let identity = match loaded.await {
             Ok(identity) => identity,
             Err(error) => return fail(error),
@@ -869,31 +862,43 @@ impl Serve {
         hub.set_definitions(definitions.iter().flatten());
         let ended = mesh.as_ref().map(mesh::Mesh::ended);
         let group = stopped(mesh.as_ref());
-        // The port's future holds the mesh, so it drops before the wait.
-        {
-            let port =
-                route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
-            let mut port = pin!(port);
-            let mut group = pin!(group);
-            let mut guard = pin!(guard);
-            let stop = poll_fn(|cx| {
-                let ended = end(
-                    guard.as_mut().poll(cx),
-                    port.as_mut().poll(cx),
-                    group.as_mut().poll(cx),
-                );
-                // Set before the tasks drop, so that `join` ranks it above a panic in
-                // a task's drop.
-                ended.map(|error| error.map_or((), fail))
-            });
-            self.inbox
-                .serve(task::Handles { hub, ops }, tasks, stop)
-                .await;
-        }
+        let port = route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
+        // `serve` drops the port's future, which holds the mesh, before the wait.
+        let handles = task::Handles { hub, ops };
+        serve(self.inbox, handles, tasks, port, group, guard, fail).await;
         if let Some(ended) = ended {
             ended.await;
         }
     }
+}
+
+/// Runs each task given to `inbox` with `handles` on `tasks`, and serves the node's
+/// `port`, until `guard` completes, `port` ends, or `group` ends, by the rank of
+/// [`end`]. Gives `fail` the error of a port or a group that ends it, before it drops
+/// the tasks given that still run.
+async fn serve(
+    inbox: task::Inbox<task::Task>,
+    handles: task::Handles,
+    tasks: env::tasks::Tasks,
+    port: impl Future<Output = transport::Error>,
+    group: impl Future<Output = mesh::Stopped>,
+    guard: Guard,
+    fail: impl Fn(Error),
+) {
+    let mut port = pin!(port);
+    let mut group = pin!(group);
+    let mut guard = pin!(guard);
+    let stop = poll_fn(|cx| {
+        let ended = end(
+            guard.as_mut().poll(cx),
+            port.as_mut().poll(cx),
+            group.as_mut().poll(cx),
+        );
+        // Set before the tasks drop, so that `join` ranks it above a panic in a task's
+        // drop.
+        ended.map(|error| error.map_or((), &fail))
+    });
+    inbox.serve(handles, tasks, stop).await;
 }
 
 /// A new channel key: a UUIDv7 at mesh time read through `time`, with random bits
