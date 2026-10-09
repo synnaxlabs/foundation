@@ -85,10 +85,12 @@
   hello stream when it ends, so after the hello the peer has at most `streams_max` open.
   Until the peer's hello arrives, a node opens and accepts no stream; a peer whose hello
   has not arrived twice the idle timeout after the handshake breaks the protocol, with
-  the reason `a peer with no hello`. A check that comes only after the peer was also
-  silent for the idle timeout ends the session as timed out (`laptop.architect-2`,
+  the reason `a peer with no hello`. A check that comes after the idle timeout was also
+  due ends the session as timed out. QUIC counts the idle timeout again from this side's
+  first send after the peer's last packet that asks for an ack (`laptop.architect-2`,
   #2149, 2026-10-09 16:42 UTC:
-  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085189583). The idle
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085189583; 17:07 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2149#issuecomment-6085581998). The idle
   timeout is QUIC's: `idle`, or 3 PTO when that is longer. The second idle timeout is
   for the probe that resends a hello that a cut the session lives through (PROBE GAP)
   held back (`laptop.architect-2`, #1628, 2026-10-09 13:35 UTC:

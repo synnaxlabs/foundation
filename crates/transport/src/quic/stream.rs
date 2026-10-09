@@ -7399,6 +7399,41 @@ mod tests {
             }
         }
 
+        /// A peer that sends no hello goes silent 810 ms after the handshake. The
+        /// server's next keep-alive starts the idle timeout again, so at the hello's
+        /// bound the peer was silent more than `idle`, and the session still ends with
+        /// [`Error::Broken`]. On `Endpoint`, not through `Session`: no public peer can
+        /// skip its hello.
+        #[test]
+        fn end_a_session_silent_for_idle_at_the_bound_as_broken() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                let mut foreign = Foreign::new(shard, |_| {});
+                foreign.dial(pair.now(), pair::SERVER_KEY.public(), pair::SERVER);
+                pair.foreign = Some(foreign);
+                while pair.server.events.is_empty() {
+                    pair.run(Duration::from_millis(1));
+                }
+                pair.run(Duration::from_millis(810));
+                let idle = pair.server.connection().idle_timeout().expect("an idle");
+                let cut = Duration::from_nanos(pair.now().0);
+                pair.foreign = None;
+                pair.run(Duration::from_secs(3));
+                let [
+                    (connected, Event::Connected { .. }),
+                    (closed, Event::Closed { error, .. }),
+                ] = &pair.server.events[..]
+                else {
+                    panic!("{:?}", pair.server.events);
+                };
+                assert_eq!(*closed, *connected + 2 * idle);
+                // The peer's last datagram arrives by `cut + DELAY`.
+                assert!(*closed - (cut + DELAY) > idle, "{closed:?} {cut:?}");
+                let reason = "a peer with no hello".to_owned();
+                assert_eq!(error, &Error::Broken { reason });
+            });
+        }
+
         /// A connection whose socket broke, with no hello from a live peer, gives no
         /// second [`Event::Closed`] and no fault when the hello's bound passes. On
         /// `Endpoint` events, not through `Session`: the carrier stops at a broken
