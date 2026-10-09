@@ -90,15 +90,18 @@
   `Pending` can lose its first datagrams (`laptop.architect-2`, 2026-10-09 13:18 UTC,
   https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081691897).
   Supersedes the counts of
-  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081443711 (13:03
-  UTC) and https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081528612
-  (13:09 UTC), the count of
-  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081197695 (12:48
-  UTC), and "at most once for each socket" of
-  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6076288463 (07:15
-  UTC) and
-  https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130 (21:15
-  UTC). Each half has its own `dup` of the socket. The receiver registers for readable
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081443711
+  (2026-10-09 13:03 UTC) and
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081528612
+  (2026-10-09 13:09 UTC), the count of
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081197695
+  (2026-10-09 12:48 UTC), and "at most once for each socket" of
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6076288463
+  (2026-10-09 07:15 UTC) and
+  https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130
+  (2026-10-08 21:15 UTC) (`laptop.architect-2`, 2026-10-09 13:43 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6082138285).
+  Each half has its own `dup` of the socket. The receiver registers for readable
   at its first poll, in a field of its driver (`laptop.architect-2`, 2026-10-08
   19:12 UTC,
   https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
