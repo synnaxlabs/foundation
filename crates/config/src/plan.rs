@@ -87,8 +87,8 @@ pub fn plan(
 /// Checks `definitions`, the definitions of a spec by tree key, with `members` and
 /// `kinds` as [`plan`] takes them: `kinds` accepts the kind and the config of each
 /// connector, then each rule of `plan` from `config.unplaced` to
-/// `config.unknown-node`. An apply runs it on [`Plan::definitions`], so that a plan
-/// file that `plan` did not make cannot apply what `plan` refuses.
+/// `config.unknown-node`. Run it on the result of [`Plan::definitions`] before an
+/// apply, since a plan file that `plan` did not make can hold what `plan` refuses.
 ///
 /// # Errors
 ///
