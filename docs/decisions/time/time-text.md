@@ -15,8 +15,8 @@
   uses the largest unit that divides the size, with no fraction: `1.5GiB` is written
   `1536MiB`, and zero is `0B` (#505). The reader's `byte::Error` gives the data for a
   fix: where the unit starts, the unit a text likely means (`GiB` for `gib` or `GB`,
-  none for `Gb`), and the largest size in the text's unit (#650).
-  A rate has no text form yet. The first caller that reads or writes a rate as text
-  adds `Display` and `FromStr` with the tests of #843, after `laptop.architect`
-  approves the form. `laptop.architect` decided on 2026-10-08 at 17:25 UTC
+  none for `Gb`), and the largest size in the text's unit (#650). A rate has no text
+  form yet. The first caller that reads or writes a rate as text adds `Display` and
+  `FromStr` with the tests of #843, after `laptop.architect` approves the form.
+  `laptop.architect` decided on 2026-10-08 at 17:25 UTC
   (https://github.com/synnaxlabs/foundation/issues/1922#issuecomment-6065369163).
