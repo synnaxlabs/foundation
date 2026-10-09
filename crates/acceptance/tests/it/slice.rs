@@ -30,7 +30,8 @@ fn check(key: u64, link: sim::link::Config) -> Run {
     let reader = lab.reader(b, "a.value");
     let values: Vec<f64> = (0..COUNT).map(|i| f64::from(i).sin() * 1e3).collect();
     lab.send(a, "a.value", &values);
-    lab.run(Duration::from_secs(10));
+    let span = std::env::var("PREVIEW_RUN").map_or(10, |r| r.parse().unwrap());
+    lab.run(Duration::from_secs(span));
     let run = Run {
         sent: values.iter().map(|v| v.to_bits()).collect(),
         received: lab.received(reader),
@@ -83,4 +84,38 @@ fn a_link_that_reorders_drops_and_duplicates_changes_nothing_the_reader_gets() {
     for key in 1..=4 {
         assert_delivered(key, &check(key, link));
     }
+}
+
+/// Preview only: many keys on harsher links.
+#[test]
+fn preview_sweep() {
+    let links = [(2, 0.05, 0.05), (20, 0.2, 0.1), (50, 0.4, 0.2)];
+    for (ms, loss, duplication) in links {
+        let link = sim::link::Config {
+            jitter: Span::from_nanos(ms * Span::MILLISECOND.nanos()),
+            loss,
+            duplication,
+            ..sim::link::Config::default()
+        };
+        for key in 1..=100 {
+            eprintln!("link {ms} {loss} {duplication} key {key}");
+            let run = check(key, link);
+            assert_delivered(key, &run);
+        }
+    }
+}
+
+/// Preview only: one key and link from the environment.
+#[test]
+fn preview_one() {
+    let var = |n: &str| std::env::var(n).unwrap();
+    let ms: i64 = var("PREVIEW_MS").parse().unwrap();
+    let link = sim::link::Config {
+        jitter: Span::from_nanos(ms * Span::MILLISECOND.nanos()),
+        loss: var("PREVIEW_LOSS").parse().unwrap(),
+        duplication: var("PREVIEW_DUP").parse().unwrap(),
+        ..sim::link::Config::default()
+    };
+    let key = var("PREVIEW_KEY").parse().unwrap();
+    assert_delivered(key, &check(key, link));
 }

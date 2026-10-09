@@ -48,7 +48,17 @@ pub(crate) struct Lab {
     stores: BTreeMap<String, Influx>,
     /// The samples written, by channel.
     written: BTreeMap<String, Written>,
+    /// What each reader got, by [`Reader`].
+    readers: Vec<Got>,
+    /// What a local reader at the home got, by channel. A stand-in for a read of
+    /// the home (#340), for the preview only.
+    homes: BTreeMap<String, Got>,
+    /// The key of the next channel.
+    next: u128,
 }
+
+/// The samples a reader got, and why it ended, and whether it opened.
+type Got = Arc<Mutex<(Vec<Sample>, Option<String>, bool)>>;
 
 /// A simulated InfluxDB store and the names of the connector that writes to it.
 #[derive(Debug, Default)]
@@ -88,7 +98,7 @@ pub(crate) struct Node(usize);
 
 /// A live reader on one channel, opened with [`Lab::reader`].
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Reader;
+pub(crate) struct Reader(usize);
 
 /// A join ticket. It is a secret, never written to a file.
 #[derive(Debug)]
@@ -153,6 +163,9 @@ impl Lab {
             members: Vec::new(),
             stores: BTreeMap::new(),
             written: BTreeMap::new(),
+            readers: Vec::new(),
+            homes: BTreeMap::new(),
+            next: 1,
         }
     }
 
@@ -289,26 +302,156 @@ impl Lab {
         }
     }
 
-    /// Creates the `f64` channel `channel`, whose home is `home`.
-    pub(crate) fn channel(&mut self, _home: Node, _channel: &str) {
-        todo!("waits on #462, #1931, #1957")
+    /// Creates the `f64` channel `channel`, whose home is `home`, on the index
+    /// `{channel}_time`. Call it after [`Lab::mesh`] and before the first run.
+    pub(crate) fn channel(&mut self, home: Node, channel: &str) {
+        use spec::channel::{Channel, Data, Kind};
+        use spec::data_type::DataType;
+        use spec::definition::Definition;
+        use types::sample::{Scalar, Type};
+        let (index, data) = (
+            types::channel::Key::from_u128(self.next),
+            types::channel::Key::from_u128(self.next + 1),
+        );
+        self.next += 2;
+        let kind = Data::new(
+            index,
+            None,
+            DataType::Sample(Type::Scalar(Scalar::F64)),
+            None,
+        );
+        let definitions = [
+            (
+                format!("{channel}_time"),
+                Channel {
+                    key: index,
+                    kind: Kind::Index {
+                        error: None,
+                        control: None,
+                    },
+                },
+            ),
+            (
+                channel.to_string(),
+                Channel {
+                    key: data,
+                    kind: Kind::Data(kind.expect("lab failure: a data channel")),
+                },
+            ),
+        ];
+        let home = self.members[home.0].key;
+        for member in &mut self.members {
+            let Some(region) = member.region.as_mut() else {
+                continue;
+            };
+            for (name, channel) in &definitions {
+                let name = name.parse().expect("lab failure: a channel name");
+                region
+                    .definitions
+                    .insert(name, Definition::Channel(channel.clone()));
+            }
+            region.homes.insert(index, home);
+        }
     }
 
     /// Opens a live reader on `channel` at `node`. It gets the samples written from
     /// now on.
-    pub(crate) fn reader(&mut self, _node: Node, _channel: &str) -> Reader {
-        todo!("waits on #340, #462, #585")
+    pub(crate) fn reader(&mut self, node: Node, channel: &str) -> Reader {
+        self.boot();
+        let got = collect(&self.members[node.0], channel);
+        self.until_open(&got);
+        self.readers.push(got);
+        Reader(self.readers.len() - 1)
     }
 
     /// Writes `values` to `channel` on `node`, one each millisecond, as the
     /// simulation runs.
-    pub(crate) fn send(&mut self, _node: Node, _channel: &str, _values: &[f64]) {
-        todo!("waits on #462")
+    pub(crate) fn send(&mut self, node: Node, channel: &str, values: &[f64]) {
+        use hub::writer;
+        use types::authority::Authority;
+        use types::frame::{Form, Label, Path as Stream};
+        self.boot();
+        let member = &self.members[node.0];
+        let home = collect(member, channel);
+        self.until_open(&home);
+        self.homes.insert(channel.to_string(), home);
+        let member = &self.members[node.0];
+        let (clock, wall) = (member.host.clock(), member.host.wall());
+        let values = values.to_vec();
+        let name: types::name::Name =
+            channel.parse().expect("lab failure: a channel name");
+        member.node.as_ref().unwrap().spawn(move |hub| async move {
+            let config = writer::Config {
+                subject: "admin".parse().unwrap(),
+                authority: Authority(1),
+                lease: None,
+                channels: vec![name],
+            };
+            let mut writer = loop {
+                match hub.writer(config.clone()).await {
+                    Err(writer::Error::Home(hub::home::writer::Error::Unsynced)) => {
+                        clock.sleep(Span::MILLISECOND).await;
+                    }
+                    opened => break opened.expect("lab failure: the writer opens"),
+                }
+            };
+            for value in values {
+                clock.sleep(Span::MILLISECOND).await;
+                let set = writer.set();
+                let entries = set.entries();
+                let time = entries
+                    .iter()
+                    .position(|e| {
+                        e.data_type
+                            == types::sample::Type::Scalar(types::sample::Scalar::Stamp)
+                    })
+                    .expect("an index");
+                let data = 1 - time;
+                let group = entries[time].group;
+                let mut draft = writer
+                    .draft(Form::Raw, &[(0, 8), (1, 8)])
+                    .expect("lab failure: a frame");
+                let stamp = wall.now().time.nanos();
+                for (entry, bytes) in
+                    [(time, stamp.to_le_bytes()), (data, value.to_le_bytes())]
+                {
+                    draft
+                        .series_mut(entry)
+                        .expect("a series")
+                        .copy_from_slice(&bytes);
+                }
+                draft.set_count(group, 1);
+                let outcomes = writer.write(Label::Path(Stream::Live), draft);
+                assert_eq!(outcomes.map(<[_]>::len), Ok(1), "the write of {value}");
+            }
+        });
+    }
+
+    /// Runs the simulation a millisecond at a time until `got` opens, at most 10 s.
+    fn until_open(&mut self, got: &Got) {
+        let wait: u32 =
+            std::env::var("PREVIEW_WAIT").map_or(10_000, |w| w.parse().unwrap());
+        for at in 0..wait {
+            if got.lock().unwrap().2 {
+                if at > 100 {
+                    eprintln!("a reader opened after {at} ms");
+                }
+                return;
+            }
+            if let Err(e) = self.sim.run_for(Span::MILLISECOND) {
+                panic!("{e}");
+            }
+        }
+        panic!("lab failure: the reader did not open in 10 s");
     }
 
     /// Every sample that `reader` got, in the order it got them.
-    pub(crate) fn received(&self, _reader: Reader) -> Vec<Sample> {
-        todo!("waits on #340, #462, #585")
+    pub(crate) fn received(&self, reader: Reader) -> Vec<Sample> {
+        let got = self.readers[reader.0].lock().unwrap();
+        if let Some(ended) = &got.1 {
+            eprintln!("the reader ended: {ended}");
+        }
+        got.0.clone()
     }
 
     /// Creates a single-use join ticket on `admin`.
@@ -421,13 +564,18 @@ impl Lab {
     }
 
     /// Reads every sample of `channel` on `node`, as `subject`. For short runs only.
+    /// For the preview, what a local reader at the home got from [`Lab::send`] on.
     pub(crate) fn samples(
         &mut self,
         _node: Node,
         _subject: &str,
-        _channel: &str,
+        channel: &str,
     ) -> Vec<Sample> {
-        todo!("waits on #340")
+        let got = self.homes[channel].lock().unwrap();
+        if let Some(ended) = &got.1 {
+            eprintln!("the home reader ended: {ended}");
+        }
+        got.0.clone()
     }
 
     /// The commands recorded on `channel`, with their acknowledgments.
@@ -519,6 +667,60 @@ impl Lab {
             }
         }
     }
+}
+
+/// A complete reader on `channel` at `member`, which puts each sample it gets in
+/// the returned value.
+fn collect(member: &Member, channel: &str) -> Got {
+    let got: Got = Arc::default();
+    let out = Arc::clone(&got);
+    let name: types::name::Name = channel.parse().expect("lab failure: a channel name");
+    member.node.as_ref().unwrap().spawn(move |hub| async move {
+        let opened = hub.reader(&[name], hub::reader::Mode::Complete).await;
+        let mut reader = opened.expect("lab failure: the reader opens");
+        out.lock().unwrap().2 = true;
+        loop {
+            match reader.next().await {
+                Ok(received) => {
+                    let samples = decode(&received);
+                    out.lock().unwrap().0.extend(samples);
+                }
+                Err(ended) => {
+                    out.lock().unwrap().1 = Some(format!("{ended:?}"));
+                    return;
+                }
+            }
+        }
+    });
+    got
+}
+
+/// The samples of `received`: its index and its one data channel.
+fn decode(received: &hub::reader::Received<'_>) -> Vec<Sample> {
+    let entries = received.set.entries();
+    let mut series: Vec<(usize, Vec<u8>)> = Vec::new();
+    for (entry, bytes) in received.view.iter() {
+        let e = &entries[entry];
+        let range = received.view.range(e.group).expect("a range");
+        let count = usize::try_from(range.count).unwrap();
+        let mut out = vec![0; count * 8];
+        codec::decode(e.data_type, count, bytes, &mut out).expect("decodes");
+        series.push((entry, out));
+    }
+    let stamp = types::sample::Type::Scalar(types::sample::Scalar::Stamp);
+    let (time, data): (Vec<_>, Vec<_>) = series
+        .into_iter()
+        .partition(|(entry, _)| entries[*entry].data_type == stamp);
+    let (time, data) = (&time[0].1, &data[0].1);
+    let (time, _) = time.as_chunks::<8>();
+    let (data, _) = data.as_chunks::<8>();
+    time.iter()
+        .zip(data)
+        .map(|(t, d)| Sample {
+            ns: i64::from_le_bytes(*t),
+            value: f64::from_le_bytes(*d),
+        })
+        .collect()
 }
 
 /// The names that `dir` of `node`'s data directory holds at 1 s, or the error of the
