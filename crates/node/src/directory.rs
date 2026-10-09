@@ -37,13 +37,11 @@ pub(crate) fn shard(core: usize) -> PathBuf {
 /// Locks the data directory, then records `cores` in it when no count is there, and
 /// syncs the record before any ring is made. Refuses a directory that records
 /// another count. With no record, rings up to `shard-<k>` are a record of `k + 1`.
-/// Reads names only, so a file named as a record or a ring counts as one. Then keeps
-/// `name` in the file `name` ([`crate::name::keep`]). Gives the lock, which keeps out
-/// other nodes until it drops.
+/// Reads names only, so a file named as a record or a ring counts as one. Gives the
+/// lock, which keeps out other nodes until it drops.
 pub(crate) async fn claim(
     files: &env::files::Files,
     cores: usize,
-    name: &types::name::Name,
 ) -> Result<env::files::File, Error> {
     let lock = files
         .open(Path::new(LOCK), env::files::Mode::Create { len: 0 })
@@ -75,7 +73,6 @@ pub(crate) async fn claim(
     }
     // Also when the record is there: a crash may have left it unsynced.
     files.sync_dir(root).await.map_err(Error::Directory)?;
-    crate::name::keep(files, name).await?;
     Ok(lock)
 }
 

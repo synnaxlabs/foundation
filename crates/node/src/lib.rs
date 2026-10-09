@@ -14,6 +14,7 @@ mod identity;
 mod name;
 mod route;
 mod scope;
+mod sector;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the publish task waits on hub writer sessions")
@@ -426,25 +427,23 @@ pub async fn create_key(
     identity::store(files, &identity::Identity { key, private_key }).await
 }
 
-/// The name of the node of `files`, the data directory of a node that has not
-/// started: the one that the file `name` holds, else `given`. Writes nothing, and
-/// reads also while another node runs on `files`.
+/// The name of the node of the data directory `files`: `given`, else the one that the
+/// file `name` holds. Reads the file only when `given` is `None`, writes nothing, and
+/// reads also while another node runs on `files`. A `given` that is not the stored
+/// name stops the start with [`Error::Renamed`].
 ///
 /// # Errors
 ///
-/// [`Error::Unnamed`] when there is neither, [`Error::Renamed`] when `given` is
-/// another name, [`Error::Name`] for a file `name` that a node did not write, and
+/// When `given` is `None`: [`Error::Unnamed`] when the file holds no name,
+/// [`Error::Name`] for a file `name` that a node did not write, and
 /// [`Error::Directory`] for a file call that fails.
 pub async fn name(
     files: &env::files::Files,
     given: Option<types::name::Name>,
 ) -> Result<types::name::Name, Error> {
-    match (name::read(files).await?, given) {
-        (Some(stored), Some(given)) if stored != given => {
-            Err(Error::Renamed { stored, given })
-        }
-        (Some(name), _) | (None, Some(name)) => Ok(name),
-        (None, None) => Err(Error::Unnamed),
+    match given {
+        Some(given) => Ok(given),
+        None => name::read(files).await?.ok_or(Error::Unnamed),
     }
 }
 
@@ -647,7 +646,12 @@ impl Open {
         if self.stop.raised() {
             return None;
         }
-        match directory::claim(files, cores, name).await {
+        let claimed = async {
+            let lock = directory::claim(files, cores).await?;
+            name::keep(files, name).await?;
+            Ok::<_, Error>(lock)
+        };
+        match claimed.await {
             Ok(lock) => {
                 give.give(Interner::new());
                 Some(lock)
@@ -949,7 +953,7 @@ fn end(
     group.map(|stopped| Some(Error::Group(stopped)))
 }
 
-/// Why a node failed.
+/// Why a node failed, or why [`name`] gave no name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A shard could not start or pin.
@@ -1046,7 +1050,7 @@ impl fmt::Display for Error {
                  {cores}; start it on {stored} cores"
             ),
             Self::Directory(error) => {
-                write!(f, "cannot claim the data directory: {error}")
+                write!(f, "cannot use the data directory: {error}")
             }
             Self::Disk { disk, cores, min } => write!(
                 f,
@@ -1064,15 +1068,15 @@ impl fmt::Display for Error {
                 write!(f, "cannot open the node's chunk store: {error}")
             }
             Self::Key => f.write_str(
-                "the file node.key in the data directory is not a node key; restore it \
+                "the file `node.key` in the data directory is not a node key; restore it \
                  from a backup of this node",
             ),
             Self::Port { listen, error } => {
                 write!(f, "cannot bind the node's port at {listen}: {error}")
             }
             Self::Name => f.write_str(
-                "the file name in the data directory is not a node name; restore it \
-                 from a backup of this node",
+                "the file `name` in the data directory is not a node name; remove it, and \
+                 start the node with its name",
             ),
             Self::Renamed { stored, given } => write!(
                 f,
@@ -1080,7 +1084,7 @@ impl fmt::Display for Error {
                  {stored}, or another data directory"
             ),
             Self::Unnamed => f.write_str(
-                "the data directory holds no node; give the new node a name",
+                "the data directory holds no node name; give the node a name",
             ),
         }
     }
