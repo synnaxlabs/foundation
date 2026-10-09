@@ -7,8 +7,9 @@
   member of: its prefix, its members (one card has the node's key), the voters before
   the first entry of the log, and its founding definitions. The caller gives the same
   region at each start: a start whose mesh log holds no record keeps it in the data
-  directory, and a later start with another region stops the node with
-  `mesh::Error::Founding` (#1209, `laptop.architect-2`, 2026-10-08T16:32:10Z:
+  directory, and a start whose log holds a record and that gives another region stops
+  the node with `mesh::Error::Founding` (#1209, `laptop.architect-2`,
+  2026-10-08T16:32:10Z:
   https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6064460084; the
   doc of `Config::region` on `main` with that meaning, `laptop.architect-2`,
   2026-10-09T23:23:58Z:

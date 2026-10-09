@@ -78,7 +78,8 @@ pub struct Config {
     /// This node's private key. It signs the node's claims.
     pub private_key: PrivateKey,
     /// The region before the first entry of its log, the same at each open. An open
-    /// whose log holds no record keeps it in `dir`, and a later open checks it.
+    /// whose log holds no record keeps it in `dir`, and an open whose log holds a
+    /// record checks it.
     pub founding: region::Founding,
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
