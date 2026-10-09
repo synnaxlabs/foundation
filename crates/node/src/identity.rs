@@ -105,16 +105,42 @@ pub(crate) fn encode(identity: &Identity) -> [u8; LEN] {
 
 /// The identity in `bytes`, or `None` for another tag or checksum.
 fn decode(bytes: &[u8; LEN]) -> Option<Identity> {
-    let (body, crc) = bytes.split_first_chunk::<64>()?;
-    let (tag, rest) = body.split_first_chunk::<16>()?;
-    let (key, private_key) = rest.split_first_chunk::<16>()?;
-    if tag != TAG || crc32c::crc32c(body).to_le_bytes() != *crc {
-        return None;
-    }
-    Some(Identity {
-        key: types::node::Key::from_u128(u128::from_be_bytes(*key)),
-        private_key: PrivateKey(private_key.try_into().ok()?),
+    let (body, crc) = bytes.split_at(64);
+    let valid = body[..16] == *TAG && crc32c::crc32c(body).to_le_bytes() == *crc;
+    valid.then(|| Identity {
+        key: types::node::Key::from_u128(u128::from_be_bytes(
+            body[16..32].try_into().expect("invariant: 16 bytes"),
+        )),
+        private_key: PrivateKey(body[32..].try_into().expect("invariant: 32 bytes")),
     })
+}
+
+/// `body` with its CRC32C after it.
+#[cfg(any(test, feature = "sim"))]
+pub(crate) fn with_checksum(body: &[u8; 64]) -> [u8; LEN] {
+    let mut bytes = [0; LEN];
+    bytes[..64].copy_from_slice(body);
+    bytes[64..].copy_from_slice(&crc32c::crc32c(body).to_le_bytes());
+    bytes
+}
+
+/// Checks that `decode` gives an identity exactly when `bytes` has the tag and the
+/// checksum, and that the identity encodes to `bytes`.
+///
+/// # Panics
+///
+/// When a check fails.
+#[cfg(any(test, feature = "sim"))]
+pub(crate) fn check(bytes: &[u8; LEN]) {
+    let valid = bytes[..16] == *TAG
+        && bytes[64..] == crc32c::crc32c(&bytes[..64]).to_le_bytes();
+    match decode(bytes) {
+        Some(identity) => {
+            assert!(valid, "decodes {bytes:02x?}");
+            assert_eq!(encode(&identity), *bytes, "encodes {bytes:02x?}");
+        }
+        None => assert!(!valid, "refuses {bytes:02x?}"),
+    }
 }
 
 #[cfg(test)]
@@ -175,47 +201,27 @@ mod tests {
         }
 
         #[test]
-        fn decodes_only_the_tag_and_the_checksum_and_encodes_the_same_bytes(
-            bytes in any::<[u8; LEN]>(),
+        fn refuses_each_one_bit_change_of_the_tag_with_its_checksum(
+            key in any::<u128>(),
+            private_key in any::<[u8; 32]>(),
+            bit in 0..TAG.len() * 8,
         ) {
-            check(&bytes)?;
+            let bytes = encode(&identity(key, private_key));
+            let mut body = *bytes.first_chunk::<64>().expect("68 bytes");
+            prop_assert_eq!(with_checksum(&body), bytes);
+            check(&bytes);
+            body[bit / 8] ^= 1 << (bit % 8);
+            prop_assert!(decode(&with_checksum(&body)).is_none());
         }
 
         #[test]
-        fn decodes_a_checksum_only_with_the_tag(body in any::<[u8; 64]>()) {
-            check(&with_checksum(body))?;
+        fn checks_any_bytes(bytes in any::<[u8; LEN]>()) {
+            check(&bytes);
         }
 
         #[test]
-        fn decodes_each_key_and_private_key_after_the_tag(rest in any::<[u8; 48]>()) {
-            let mut body = [0; 64];
-            body[..16].copy_from_slice(TAG);
-            body[16..].copy_from_slice(&rest);
-            let bytes = with_checksum(body);
-            let identity = decode(&bytes).expect("decodes");
-            prop_assert_eq!(encode(&identity), bytes);
+        fn checks_any_body_with_its_checksum(body in any::<[u8; 64]>()) {
+            check(&with_checksum(&body));
         }
-    }
-
-    fn with_checksum(body: [u8; 64]) -> [u8; LEN] {
-        let mut bytes = [0; LEN];
-        bytes[..64].copy_from_slice(&body);
-        bytes[64..].copy_from_slice(&crc32c::crc32c(&body).to_le_bytes());
-        bytes
-    }
-
-    /// `decode` gives an identity exactly when `bytes` has the tag and the checksum,
-    /// and that identity encodes to `bytes`.
-    fn check(bytes: &[u8; LEN]) -> Result<(), TestCaseError> {
-        let valid = bytes[..16] == *TAG
-            && bytes[64..] == crc32c::crc32c(&bytes[..64]).to_le_bytes();
-        match decode(bytes) {
-            Some(identity) => {
-                prop_assert!(valid, "decodes {bytes:02x?}");
-                prop_assert_eq!(encode(&identity), *bytes);
-            }
-            None => prop_assert!(!valid, "refuses {bytes:02x?}"),
-        }
-        Ok(())
     }
 }
