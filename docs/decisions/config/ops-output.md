@@ -66,13 +66,16 @@
   `Mesh::apply`, is `ops.stopped`, status 1, in `plan` and in `apply`, with the
   `Display` of the stop as the message and the fix `Fix the cause in the message, then
   start the node and plan again`. It can come after a proposal, so plan again to see
-  whether the change applied. `ops.stopped` decided by `laptop.architect-2`
+  whether the change applied. Lost: a code for each variant of the stop, which gives a
+  better hint but adds three codes for one cause. `ops.stopped` decided by `laptop.architect-2`
   (2026-10-09T03:42:35Z, (b) of
   https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6073812317); the
   fix, which supersedes the fix of (b), by `laptop.architect` (2026-10-09T22:19:11Z,
   https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090194371) and
   `laptop.architect-2` (2026-10-09T22:24:28Z,
-  https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090256164), and
+  https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090256164), one
+  code with this fix for each stop by `laptop.architect-2` (2026-10-09T23:12:10Z,
+  https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090836329), and
   "except a stop" by `laptop.architect-2` (2026-10-09T22:19:29Z,
   https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090197852).
   Supersedes the code of `mesh::Error::Stopped` in step 4 of
