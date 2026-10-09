@@ -257,10 +257,11 @@ impl Endpoint {
         }
     }
 
-    /// Refuses each connection that a peer dials from now on, and closes with code 0
-    /// each one whose handshake is in flight, in either direction. The peer's dial
-    /// ends at once, and each dial of the caller gets its [`Event::Closed`].
-    pub(crate) fn refuse(&mut self, now: Monotonic) {
+    /// Shuts the endpoint to new connections: refuses each one that a peer dials from
+    /// now on, and closes with code 0 each one whose handshake is in flight, in either
+    /// direction. The peer's dial ends at once, and each dial of the caller gets its
+    /// [`Event::Closed`].
+    pub(crate) fn shut(&mut self, now: Monotonic) {
         self.refusing = true;
         let now = self.instant(now);
         for handle in (0..self.connections.len()).map(ConnectionHandle) {

@@ -227,7 +227,7 @@ impl Drop for Carrier {
     fn drop(&mut self) {
         let mut state = self.0.borrow_mut();
         let now = state.clock.now();
-        state.endpoint.refuse(now);
+        state.endpoint.shut(now);
         for key in state.accepted.take().into_iter().flatten() {
             state.sessions.remove(&key);
             state.close(key, Code(0));
