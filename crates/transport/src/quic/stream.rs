@@ -1152,7 +1152,8 @@ impl Streams {
     ///
     /// # Errors
     ///
-    /// [`Fault`] when the hello is due by `now` and has not arrived.
+    /// [`Fault`] when the hello is due by `now`, has not arrived, and the connection
+    /// has not ended.
     pub(super) fn timeout(
         &self,
         now: Instant,
