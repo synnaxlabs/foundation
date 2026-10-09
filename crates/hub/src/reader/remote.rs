@@ -780,6 +780,7 @@ fn refusal(ended: &Ended) -> Option<Refusal> {
         Ended::Buffer(_)
         | Ended::Behind
         | Ended::Removed(_)
+        | Ended::Replaced
         | Ended::Stream(_)
         | Ended::Refused(_) => None,
     }

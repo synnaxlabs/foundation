@@ -28,7 +28,7 @@ use types::authority::Authority;
 use types::channel::{self, Slot};
 use types::frame::key_set::Interner;
 use types::frame::{self, Form, Label, Path, Range, View};
-use types::name::Name;
+use types::name::{Name, Selector};
 use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
@@ -38,6 +38,7 @@ mod net;
 mod client;
 mod definitions;
 mod link;
+mod named;
 #[path = "../common/node.rs"]
 mod node;
 mod region;
@@ -217,8 +218,10 @@ impl Test {
     }
 
     async fn reader(&self, channels: &[&str], mode: Mode) -> reader::Reader {
-        let names: Vec<_> = channels.iter().map(|n| name(n)).collect();
-        self.hub.reader(&names, mode).await.expect("opens")
+        self.hub
+            .reader(unnamed(channels, mode))
+            .await
+            .expect("opens")
     }
 
     /// How many blocks the pool gives, largest first, until it has no room.
@@ -348,6 +351,17 @@ fn unsynced_on<F>(
 
 fn name(name: &str) -> Name {
     name.parse().expect("a valid name")
+}
+
+/// An unnamed reader of `reader` on the channels named `channels`.
+fn unnamed(channels: &[impl AsRef<str>], mode: Mode) -> reader::Config {
+    reader::Config {
+        select: Selector::new(channels.iter().map(AsRef::as_ref)).expect("a selector"),
+        mode,
+        subject: name("reader"),
+        name: None,
+        hold: Span::ZERO,
+    }
 }
 
 fn config(subject: &str, channels: &[&str]) -> writer::Config {
@@ -548,38 +562,71 @@ fn opens_no_session_on_an_unknown_name() {
         let error = writer.expect_err("an error");
         assert_eq!(error, writer::Error::Unknown(name("nope")));
         assert_eq!(error.to_string(), "no channel is named nope");
-        let reader = test.hub.reader(&[name("nope")], Mode::Complete).await;
+        let reader = test.hub.reader(unnamed(&["nope"], Mode::Complete)).await;
         let error = reader.expect_err("an error");
-        assert_eq!(error, reader::Error::Unknown(name("nope")));
-        assert_eq!(error.to_string(), "no channel is named nope");
+        assert_eq!(error, reader::Error::Empty);
+        assert_eq!(error.to_string(), "the selector matches no channel");
     });
 }
 
 #[test]
-fn opens_no_session_on_two_indexes_or_on_no_channel() {
+fn opens_no_session_on_two_indexes_and_names_the_least_channel_of_each() {
     run(3, |test| async move {
-        let names = [name("value"), name("value-b")];
+        let names = ["value-c", "value-b", "value"];
         let error = test
             .hub
-            .reader(&names, Mode::Latest)
+            .reader(unnamed(&names, Mode::Latest))
             .await
             .expect_err("an error");
-        assert_eq!(error, reader::Error::ManyIndexes);
+        let many = reader::Error::ManyIndexes {
+            first: name("value"),
+            other: name("value-b"),
+        };
+        assert_eq!(error, many);
         assert_eq!(
             error.to_string(),
-            "the channels are on more than one index: open a reader per index"
+            "the channels value and value-b are on different indexes: open a reader \
+             per index"
         );
-        let error = test
-            .hub
-            .reader(&[], Mode::Latest)
-            .await
-            .expect_err("an error");
-        assert_eq!(error, reader::Error::Empty);
-        assert_eq!(error.to_string(), "a reader names at least one channel");
+        let error = test.hub.reader(unnamed(&["**"], Mode::Latest)).await;
+        let many = reader::Error::ManyIndexes {
+            first: name("time"),
+            other: name("time-b"),
+        };
+        assert_eq!(error.expect_err("an error"), many);
         let writer = test.hub.writer(config("a", &[])).await;
         let error = writer.expect_err("an error");
         assert_eq!(error, writer::Error::Empty);
         assert_eq!(error.to_string(), "a writer names at least one channel");
+    });
+}
+
+#[test]
+fn gives_a_reader_each_channel_that_its_selector_matches() {
+    run(41, |test| async move {
+        let select = ["**", "!time-b", "!value-b"];
+        let mut all = test.reader(&select, Mode::Complete).await;
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        write_series(&mut writer, &[(1, &[now]), (2, &[7]), (5, &[9])]);
+        let received = all.next().await.expect("a frame");
+        assert_eq!(keys(&received), [1, 2, 5]);
+        assert_eq!(samples(&received, 2), [7]);
+        assert_eq!(samples(&received, 5), [9]);
+    });
+}
+
+#[test]
+fn leaves_a_channel_that_an_exclusion_matches_out_of_the_view() {
+    run(42, |test| async move {
+        let select = ["**", "!time-b", "!value-b", "!value-c"];
+        let mut reader = test.reader(&select, Mode::Complete).await;
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        write_series(&mut writer, &[(1, &[now]), (2, &[7]), (5, &[9])]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(keys(&received), [1, 2]);
+        assert_eq!(samples(&received, 2), [7]);
     });
 }
 
@@ -942,8 +989,8 @@ fn gives_a_complete_reader_frames_past_its_window_only_as_it_takes_them() {
 #[test]
 fn gives_a_reader_on_some_channels_of_a_frame_those_and_their_index() {
     run(20, |test| async move {
-        let mut both = test.reader(&["value-c", "value"], Mode::Complete).await;
         let mut one = test.reader(&["value-c"], Mode::Complete).await;
+        let mut both = test.reader(&["value-c", "value"], Mode::Complete).await;
         let mut writer = test.writer("a", &["value", "value-c"]).await;
         let now = test.now();
         write_series(&mut writer, &[(1, &[now]), (2, &[7]), (5, &[9])]);
@@ -1678,8 +1725,8 @@ fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff_in_a_failed_write() {
 fn opens_a_reader_at_the_first_poll() {
     run(19, |test| async move {
         let mut writer = test.writer("a", &["value"]).await;
-        let names = [name("value")];
-        let opening = test.hub.reader(&names, Mode::Complete);
+        let names = ["value"];
+        let opening = test.hub.reader(unnamed(&names, Mode::Complete));
         write(&mut writer, &[test.now()], &[1]);
         let mut complete = opening.await.expect("opens");
         test.clock.sleep(SETTLE).await;
