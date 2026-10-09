@@ -24,9 +24,8 @@
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). The
   tests of `connector` and of each kind build that config with
   `connector::testing::create_config`, behind `sim`, which opens the hub through
-  `hub::testing::open`. It gives the mesh time as `hub::testing::open` does, and
-  drops it when #2143 gives a task mesh time, if no test needs it then
-  (`laptop.architect-2`, 2026-10-09T13:37:08Z:
+  `hub::testing::open`. It gives no mesh time, since a task gets it from its writer
+  (#2143) (`laptop.architect-2`, 2026-10-09T13:37:08Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6082035824;
   `laptop.architect`, 2026-10-08T17:50:53Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6065807610). After
@@ -34,6 +33,36 @@
   constants). The waits start again from 1 s after a run that lasted at least 60 s.
   `Ok` from `run` ends the connector.
   `Config` returns to the caller, which starts a new supervisor when the spec
-  changes (R12-4). Restart errors reach the connector's status in #420. Decided by the
-  `connector` builder in the plan on #338, after `/eb-review`; approved by the
-  coordinator (#338), with the reset after a long run approved on #338 later.
+  changes (R12-4). Restart errors reach the connector's status (CONNECTOR STATUS).
+  Decided by the `connector` builder in the plan on #338, after `/eb-review`; approved
+  by the coordinator (#338), with the reset after a long run approved on #338 later.
+- **CONNECTOR STATUS** `Supervisor::run` writes the status channels of its connector,
+  `<connector>.status.<name>`, on their own index `<connector>.status.time`, as the
+  connector, at `Authority::ABSOLUTE` with no lease (the advisor on #455,
+  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6008006459). The
+  index is homed on the connector's node. `connector::status::channels` gives each name
+  and sample type:
+
+  | Channel | Type | Values |
+  | --- | --- | --- |
+  | `state` | `u8` | 0 running, 1 waiting to restart, 2 stopped, 3 ending |
+  | `class` | `u8` | the end of the last run: 0 none or `Ok`, 1 `Config`, 2 `Device`, 3 `Retry` |
+  | `restarts` | `u64` | the restarts in this call |
+  | each count of the kind | `u64` | as the kind sets it through `Context::status` |
+
+  Each write is one frame with the last value of every status channel. Each start of a
+  run writes the whole status. A change of `state`, `class`, or `restarts` is written
+  at once. A change of counts alone is written at most once each second after the
+  last write, timed with the clock of `supervisor::Config` (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6054035730, rules
+  1 to 3). When a run returns, `state` 3 with the class of that end is written at
+  once. When each task of the run ended, `state` 1, or 2 when the call returns
+  (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6067099903). A
+  frame that the home does not apply leaves the status staged, so it is written again
+  one second later. The status writer that does not open panics on an unknown or
+  remote channel, which is a defect of `node`, and gives `Ok` when the mesh stopped
+  (`laptop.architect-2`, 2026-10-09T18:46:26Z:
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6087144669). The
+  tests define the status channels with `connector::testing::create_status`, behind
+  `sim`.
