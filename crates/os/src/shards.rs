@@ -60,7 +60,7 @@ fn build(
 }
 
 /// Runs `main` until it ends or a task panics, then drops every task. Returns whether a
-/// task panicked.
+/// task panicked, or a panic escaped Tokio in `block_on` or in the drop of `runtime`.
 fn serve(runtime: LocalRuntime, main: Main) -> bool {
     let alarm = Rc::new(Alarm::default());
     let tasks = Tasks::new(Spawner(Rc::clone(&alarm)));
