@@ -51,15 +51,13 @@ impl Loop {
     }
 
     /// Gives the due time of the next timer, now when a delayed callback waits, or
-    /// `None` when nothing waits.
+    /// `None` when nothing waits. A due time before the clock's epoch comes as the
+    /// epoch: a once timer may have a date that has passed.
     pub(crate) fn next(&self) -> Option<Monotonic> {
         // SAFETY: the member takes its own loop.
         let ticks = unsafe { (self.members().next_timer)(self.raw()) };
-        (ticks != i64::MAX).then(|| {
-            let ticks = u64::try_from(ticks)
-                .expect("invariant: each due time is the clock's time or later");
-            Monotonic(ticks.saturating_mul(100))
-        })
+        (ticks != i64::MAX)
+            .then(|| Monotonic(ticks.max(0).unsigned_abs().saturating_mul(100)))
     }
 }
 

@@ -470,6 +470,57 @@ fn a_client_runs_its_housekeeping_on_the_loop() {
     assert_eq!(f.events.next(), None);
 }
 
+unsafe extern "C" {
+    fn UA_Client_addTimedCallback(
+        client: *mut ffi::Client,
+        callback: ffi::Callback,
+        data: *mut c_void,
+        date: i64,
+        key: *mut u64,
+    ) -> u32;
+}
+
+/// Counts the runs in the `Cell<usize>` at `data`.
+unsafe extern "C" fn count(_: *mut c_void, data: *mut c_void) {
+    // SAFETY: `data` is the cell of the test, which outlives the client.
+    let runs = unsafe { &*data.cast::<Cell<usize>>() };
+    runs.set(runs.get() + 1);
+}
+
+/// The copy runs a once timer whose date has passed at the next run. A date before
+/// the epoch of the clock has passed too.
+#[test]
+fn a_timed_callback_at_a_past_date_runs_at_the_next_run() {
+    let f = Fixture::new();
+    // SAFETY: the loop lives until the client is deleted.
+    let client = unsafe { ffi::shim_client_new(f.events.raw()) };
+    assert!(!client.is_null());
+    // SAFETY: the client lives.
+    let status = Status(unsafe { ffi::UA_Client_run_iterate(client, 0) });
+    assert_eq!(status, Status::GOOD);
+    let runs = Cell::new(0_usize);
+    let mut key = 0;
+    // SAFETY: `count` reads `runs`, which outlives the client.
+    let status = Status(unsafe {
+        UA_Client_addTimedCallback(
+            client,
+            count,
+            ptr::from_ref(&runs).cast_mut().cast(),
+            -1,
+            &raw mut key,
+        )
+    });
+    assert_eq!(status, Status::GOOD);
+    let next = f.events.next();
+    assert!(next.is_some_and(|due| due <= f.now()), "{next:?}");
+    // SAFETY: the client lives.
+    let status = Status(unsafe { ffi::UA_Client_run_iterate(client, 0) });
+    assert_eq!(status, Status::GOOD);
+    assert_eq!(runs.get(), 1);
+    // SAFETY: the client lives, and the loop outlives it.
+    unsafe { ffi::UA_Client_delete(client) };
+}
+
 fn ms(n: i64) -> Span {
     Span::from_nanos(n * Span::MILLISECOND.nanos())
 }
