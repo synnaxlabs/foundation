@@ -92,9 +92,9 @@
   transport and each session lives in a future that shard 0 drops before it waits for
   the port, in a task of the mesh that it waits for, or in the hub's task of a reader
   whose home is another node, which ends at its next poll after the drop of the reader.
-  So a leak holds the stop. The drop of each session closes it. The drop of the
-  transport closes each session that no caller accepted and each handshake in flight,
-  its own dials too (#2084, by `laptop.architect-2`, 02:57 UTC:
+  So, unless the socket broke, a leak holds the stop. The drop of each session closes
+  it. The drop of the transport closes each session that no caller accepted and each
+  handshake in flight, its own dials too (#2084, by `laptop.architect-2`, 02:57 UTC:
   https://github.com/synnaxlabs/foundation/issues/2084). The stop waits for each to
   drain, in about 3 PTO, and at most 3 s after the last one ended, because a peer's
   round trip sets the PTO with no bound (`laptop.architect`, 03:46 UTC:
