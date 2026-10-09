@@ -12,8 +12,9 @@
 //!   frames hold one sample of each. A write, then one poll, which sends that frame.
 //! - `wide 1472`, `wide 64k`: as `narrow`, with an index and one data channel of
 //!   `SAMPLES` samples per frame. At 1472 bytes the body takes two messages.
-//! - `one set 1472`: the `narrow` session, while one writer of the index and half of
-//!   its data channels writes, the control of `two sets`.
+//! - `one set 1472`: the control of `two sets`, with one key set: the `narrow` session,
+//!   while a writer of the index and half of its data channels writes, and closes and
+//!   opens again before each frame.
 //! - `complete 1472`: a complete session of the `narrow` channels. The round's writes
 //!   and their commit, then one poll, which sends the round's frames. The open grants
 //!   the bytes of the run, so no frame waits for credit.
@@ -116,7 +117,7 @@ impl Shape {
         match self {
             Self::Narrow | Self::Half => vec![narrow(base).collect()],
             Self::Wide => vec![vec![base + WIDE, base + WIDE_DATA]],
-            Self::OneSet => vec![first(base)],
+            Self::OneSet => vec![first(base), first(base)],
             Self::TwoSets => vec![
                 first(base),
                 narrow(base)
