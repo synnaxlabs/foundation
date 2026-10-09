@@ -267,10 +267,12 @@
   https://github.com/synnaxlabs/foundation/pull/1938#issuecomment-6067736678).
   Amended (2026-10-08T17:39:11Z, #1940): `tcp::Options::unsent_bytes_max` is a
   `NonZeroUsize`. A bound of 0 has no meaning in its doc, and the drivers did not agree
-  on it: Linux and the macOS kernel read it as no bound, `os` on macOS wrote 1 byte per
-  call, and `sim` never wrote. No caller gives 0.
-  Decided by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/issues/1940).
+  on it: Linux read it as the host sysctl `net.ipv4.tcp_notsent_lowat`, by default no
+  bound, the macOS kernel read it as no bound, `os` on macOS wrote 1 byte per call, and
+  `sim` never wrote. No caller gives 0. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/1940). The Linux text is from the
+  audit of #2044:
+  https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072622027.
   Amended (2026-10-08T21:01:28Z, #2000): each socket that `os` opens is closed on
   exec. On Linux, the call that opens the socket sets that and non-blocking, so a child
   that another thread spawns never holds it. macOS has no such flag, and Tokio sets it
