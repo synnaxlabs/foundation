@@ -50,9 +50,9 @@ use crate::{handoff, order, split, stored};
 /// #     let mut slots = Slots::new();
 /// #     let mut interner = Interner::new();
 /// #     let index = slots.index(stamps);
-/// #     slots.data(values);
+/// #     slots.data(values, Type::Scalar(Scalar::I64));
 /// #     interner.slots().index(stamps);
-/// #     interner.slots().data(values);
+/// #     interner.slots().data(values, Type::Scalar(Scalar::I64));
 /// #     let set = interner.intern(&[Group {
 /// #         index: stamps,
 /// #         data: &[(values, Type::Scalar(Scalar::I64))],
@@ -4789,7 +4789,7 @@ mod tests {
     /// and gives the run.
     fn write_of_another_key_set(seed: u64, label: Label) -> Result<(), sim::Error> {
         let (mut sim, _handle) = start(seed, move |test| async move {
-            let mut interner = create_interner(&[0, 2]);
+            let mut interner = create_interner(&[0, 2], &[]);
             let group = Group {
                 index: key(Slot::new(2)),
                 data: &[],

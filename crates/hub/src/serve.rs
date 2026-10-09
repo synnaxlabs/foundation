@@ -462,7 +462,7 @@ impl<'s> Opening<'s> {
         let state = &mut *self.state.borrow_mut();
         let checked = state.opens.keys_mut(self.key);
         for key in keys {
-            let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
+            let (of, _) = *state.defined.get(&key).ok_or(Error::Unknown(key))?;
             if *self.index.get_or_insert(of) != of {
                 return Err(Error::ManyIndexes);
             }
@@ -756,9 +756,9 @@ mod tests {
         let mut interner = Interner::new();
         let slots = interner.slots();
         slots.index(key(1));
-        slots.data(key(2));
+        slots.data(key(2), I64);
         let index = slots.index(key(4));
-        slots.data(key(5));
+        slots.data(key(5), I64);
         let set = interner.intern(&[
             Group {
                 index: key(1),

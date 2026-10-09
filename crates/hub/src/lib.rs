@@ -22,6 +22,7 @@ use types::channel::Key;
 use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
+use types::sample::Type;
 
 use channel::Channel;
 pub use link::{Link, Served};
@@ -94,8 +95,8 @@ struct State {
     home: ::home::Shard,
     interner: Interner,
     channels: hash::Map<Name, Channel>,
-    /// The index of each channel in `channels`, by key.
-    indexes: hash::Map<Key, Key>,
+    /// The index and sample type of each channel in `channels`, by key.
+    defined: hash::Map<Key, (Key, Type)>,
     /// Each open writer, by its home key.
     writers: Sessions<::home::writer::Key>,
     readers: Sessions<::home::reader::Key>,
@@ -146,7 +147,7 @@ impl Hub {
             home,
             interner,
             channels: hash::Map::default(),
-            indexes: hash::Map::default(),
+            defined: hash::Map::default(),
             writers: Sessions::default(),
             readers: Sessions::default(),
             remotes: reader::remote::Sessions::default(),
@@ -399,15 +400,9 @@ impl State {
             let slot = self.interner.slots().index(key);
             self.home.shed(slot);
         }
-        let slots = self.interner.slots();
-        self.channels.retain(|_, known| {
-            let gone = removed.contains(&known.key());
-            if gone {
-                slots.retire(known.key());
-            }
-            !gone
-        });
-        self.indexes.retain(|key, _| !removed.contains(key));
+        self.channels
+            .retain(|_, known| !removed.contains(&known.key()));
+        self.defined.retain(|key, _| !removed.contains(key));
         let mut new: Vec<_> = channels
             .iter()
             .filter(|&(name, _)| !self.channels.contains_key(*name))
@@ -459,7 +454,8 @@ impl State {
     /// Makes `channel` known to sessions as `name`.
     fn define(&mut self, name: &Name, channel: &spec::channel::Channel) {
         let channel = Channel(channel.clone());
-        self.indexes.insert(channel.key(), channel.index());
+        self.defined
+            .insert(channel.key(), (channel.index(), channel.sample()));
         self.channels.insert(name.clone(), channel);
     }
 
@@ -491,7 +487,12 @@ impl State {
     }
 
     /// Carries `index` at the home, and gives the slot of each of `keys` in its role:
-    /// `index` as an index, and each other key as a data channel.
+    /// `index` as an index, and each other key as a data channel of its defined
+    /// sample type.
+    ///
+    /// # Panics
+    ///
+    /// When a key of `keys` is not defined.
     fn slots(&mut self, index: Key, keys: &[Key]) -> Box<[types::channel::Slot]> {
         self.carry(index);
         let assigned = self.interner.slots();
@@ -499,10 +500,10 @@ impl State {
         keys.iter()
             .map(|&key| {
                 if key == index {
-                    slot
-                } else {
-                    assigned.data(key)
+                    return slot;
                 }
+                let (_, sample) = self.defined[&key];
+                assigned.data(key, sample)
             })
             .collect()
     }

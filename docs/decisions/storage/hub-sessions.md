@@ -198,14 +198,16 @@
   scan of its keys, and a served open by a count of the opens. The home stops carrying
   an index only when its key is not an index
   of the new definitions (`Shard::shed`, HOME SURFACE), and carries it again when it
-  returns. A key holds at most two slots (`channel::Slots`): its slot as an index, which
-  never changes, as the buffer keys its tails by slot (X42), and its slot as a data
-  channel, which the hub retires at each removal. So a channel defined later at a key
-  gets a new slot, and a reader takes no series written under the old definition. An
+  returns. A key holds one slot as an index (`channel::Slots`), which never changes, as
+  the buffer keys its tails by slot (X42), and one slot as a data channel for each
+  sample type. So a reader takes no series of its key of another type, and a rename or
+  a move of index keeps the history of the channel (A4) (`laptop.architect`,
+  2026-10-09T02:59:13Z:
+  https://github.com/synnaxlabs/foundation/issues/274#issuecomment-6073342524). An
   index continues its seq after its key was a data channel, also after a restart
   (`laptop.architect`, 2026-10-09T01:25:59Z:
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072361464). So a slot
-  names one definition of a data channel, and the newest frame of an index stays the
+  names one key, role, and sample type, and the newest frame of an index stays the
   current value of each other channel on it (B4). Lost: a drop of the newest frame of
   each index that a removed channel was on, as each other channel of the index then has
   no current value until the next live frame; a copy of the newest frame without the
