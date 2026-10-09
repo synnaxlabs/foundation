@@ -289,7 +289,11 @@
   an end time no earlier than the end of each such call and of a remove through a
   handle, where a later call with the same end time ends after it: `laptop.architect-2`,
   2026-10-09T16:10:14Z
-  (https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6084674649). `sim`
+  (https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6084674649). In
+  `sim`, a call through a handle is on each path that has named its file and on the
+  path of each dropped rename of the file, so `sim` can wait longer than the rule needs,
+  never less: `laptop.architect-2`, 2026-10-09T17:41:15Z
+  (https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6086107940). `sim`
   gives each `Files` of a node as clones of one. Lost there: the wait in `Files`, which
   cannot see the end of a dropped call without a change to `Driver`.
   Amended (2026-10-08T17:19:48Z, #1921): on macOS, an accepted socket does not keep
