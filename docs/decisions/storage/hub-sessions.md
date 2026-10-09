@@ -263,7 +263,7 @@
   `home::writer::Error::Unsynced`. The wait comes before the open resolves its channels
   again, so it sees a change of the definitions during the wait. A task gets mesh time
   from `writer::Writer::now`, which gives `home::Shard::now` (HOME CLOCKS) and cannot
-  fail, since mesh time stays once known. Lost: `Hub::now() -> Option<Stamp>`, because
+  fail, because mesh time stays once known. Lost: `Hub::now() -> Option<Stamp>`, because
   each caller holds a writer and would expect mesh time itself. Lost: a `hub` export of
   `clock::Reader`, because each task would compute the home's midpoint again. Lost: a
   writer that stamps the frame, because only the caller knows when it read each sample.
