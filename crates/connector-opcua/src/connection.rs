@@ -75,7 +75,8 @@ impl Manager {
             driving: Cell::new(false),
             held: Cell::new(false),
             ahead: Cell::new(usize::MAX),
-            again: Cell::new(false),
+            again: RefCell::new(Vec::new()),
+            moving: Cell::new(Vec::new()),
             ends: RefCell::new(VecDeque::new()),
             closed: UnsafeCell::new(ffi::DelayedCallback {
                 next: ptr::null_mut(),
@@ -111,8 +112,9 @@ impl Manager {
     /// server, and may poll its own sources with the context it gets. Between calls,
     /// the drive sleeps until the next timer of the loop or a wake, also from a send or
     /// a close that `run` or another task asks for. Before it gives the value, it
-    /// passes again after each connect, send, or close that the last call or such a
-    /// pass asks for, so it can also read and call open62541 back after that call.
+    /// moves on each connection again after each connect, send, or close on it that
+    /// the last call or such a step asks for, so it can also read and call open62541
+    /// back after that call.
     ///
     /// # Panics
     ///
@@ -132,15 +134,13 @@ impl Manager {
         poll_fn(|cx| {
             state.driving.set(true);
             let poll = loop {
-                state.again.set(false);
+                state.again.borrow_mut().clear();
                 self.pass(cx);
                 if let Poll::Ready(value) = run(cx) {
-                    while state.again.replace(false) {
-                        self.pass(cx);
-                    }
+                    state.move_on_again(cx);
                     break Poll::Ready(value);
                 }
-                if state.again.get() {
+                if !state.again.borrow().is_empty() {
                     continue;
                 }
                 let Some(next) = self.events.next() else {
@@ -223,8 +223,11 @@ struct State {
     /// The first key that the running pass has not reached, or `usize::MAX` outside a
     /// pass.
     ahead: Cell<usize>,
-    /// Whether the drive passes again before it sleeps.
-    again: Cell<bool>,
+    /// The connections that a hook asks to move on again during a drive, once the
+    /// running pass has gone past them.
+    again: RefCell<Vec<usize>>,
+    /// The buffer of `again` that the drive moves on, kept to reuse its memory.
+    moving: Cell<Vec<usize>>,
     /// The connections whose `CLOSING` the next run of the loop gives.
     ends: RefCell<VecDeque<usize>>,
     /// The delayed callback that gives each `CLOSING`. C writes its `next`.
@@ -250,12 +253,30 @@ impl State {
     /// drive, or in a drive that its waker starts.
     fn wake(&self, id: usize) {
         if self.driving.get() {
-            if id < self.ahead.get() {
-                self.again.set(true);
+            let mut again = self.again.borrow_mut();
+            if id < self.ahead.get() && !again.contains(&id) {
+                again.push(id);
             }
         } else if let Some(waker) = self.waker.borrow().as_ref() {
             waker.wake_by_ref();
         }
+    }
+
+    /// Moves on each connection in `again`, and each that those steps add, until
+    /// none is left.
+    fn move_on_again(&self, cx: &mut Context<'_>) {
+        let mut ids = self.moving.take();
+        loop {
+            std::mem::swap(&mut ids, &mut *self.again.borrow_mut());
+            if ids.is_empty() {
+                break;
+            }
+            for &id in &ids {
+                self.move_on(id, cx);
+            }
+            ids.clear();
+        }
+        self.moving.set(ids);
     }
 
     /// Logs `what` of connection `id` as a warning through the logger of the loop.
