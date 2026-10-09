@@ -2836,17 +2836,7 @@ mod port {
         node.stop();
         let seen = Arc::clone(&events);
         sim.run_on(&host, move |host, _| async move {
-            let files = host.files();
-            let clock = host.clock();
-            let lock = loop {
-                let mode = env::files::Mode::Create { len: 0 };
-                match files.open(Path::new("lock"), mode).await {
-                    Err(env::files::Error::Busy { .. }) => {
-                        clock.sleep(Span::from_nanos(1_000)).await;
-                    }
-                    opened => break opened.expect("the lock opens"),
-                }
-            };
+            let lock = take_lock(&host).await;
             let bound = transport::Port::bind(&host.net(), listen).map(drop);
             seen.lock().unwrap().push(Event::Locked(bound));
             drop(lock);
@@ -2857,6 +2847,66 @@ mod port {
         assert_eq!(events, [Event::Closed(closed), Event::Locked(Ok(()))]);
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(node.join(), Ok(()));
+    }
+
+    /// A program with no key starts a handshake that gets no answer, and sends its
+    /// first packet again on each PTO, which keeps the handshake from the idle time.
+    /// The stop holds the lock only for the drain of that handshake, 3 PTO of 1024
+    /// ms, and less than 1 ms for its other steps.
+    #[test]
+    fn a_handshake_in_flight_holds_the_lock_only_for_its_drain() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = keyed(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        let peer = sim.node(sim::node::Config::default());
+        let cut = sim::link::Config {
+            loss: 1.0,
+            ..sim::link::Config::default()
+        };
+        sim.link(&host, &peer, cut);
+        let listen = listen(&host);
+        let shard = env::shards::Config {
+            name: "peer".into(),
+            core: None,
+        };
+        let own = peer.clone();
+        let started = peer.shards().start(shard, move |tasks| async move {
+            let (client, _pool) = program(&own, tasks);
+            let dialed = client.dial(KEY.public(), &[Address::Udp(listen)]).await;
+            let refused = dialed.expect_err("the dial fails");
+            assert!(
+                matches!(refused, transport::Error::Unreachable { .. }),
+                "{refused:?}"
+            );
+        });
+        drop(started.expect("the peer starts"));
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        node.stop();
+        let waited = sim
+            .run_on(&host, move |host, _| async move {
+                let before = host.clock().now();
+                drop(take_lock(&host).await);
+                host.clock().now() - before
+            })
+            .expect("the probe ends");
+        let drain = Span::from_nanos((3 * 1024 + 1) * Span::MILLISECOND.nanos());
+        assert!(waited <= drain, "the stop held the lock {waited:?}");
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+    }
+
+    /// Takes the lock of the data directory of `host` once the node frees it.
+    async fn take_lock(host: &sim::node::Node) -> env::files::File {
+        let (files, clock) = (host.files(), host.clock());
+        loop {
+            let mode = env::files::Mode::Create { len: 0 };
+            match files.open(Path::new("lock"), mode).await {
+                Err(env::files::Error::Busy { .. }) => {
+                    clock.sleep(Span::from_nanos(1_000)).await;
+                }
+                opened => break opened.expect("the lock opens"),
+            }
+        }
     }
 
     mod key {
