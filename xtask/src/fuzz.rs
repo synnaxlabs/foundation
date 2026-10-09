@@ -390,9 +390,13 @@ impl<'a> Package<'a> {
                     self.id, dependency.name
                 )
             })?;
-            // Cargo writes a requirement with no version as `*`, which meets a
-            // pre-release too.
-            if parsed == VersionReq::STAR || parsed.matches(&version) {
+            // Only a path or git requirement can have no version, which Cargo writes
+            // as `*` and which meets a pre-release too.
+            let unversioned = parsed == VersionReq::STAR
+                && requirement["source"]
+                    .as_str()
+                    .is_none_or(|source| source.starts_with("git+"));
+            if unversioned || parsed.matches(&version) {
                 resolved.push((requirement, parsed));
             }
         }
@@ -967,6 +971,41 @@ mod tests {
         let me = "path+file:///w/fuzz#noq-proto@9.0.0-dev";
         let fuzz = fuzz(&[own("9.0.0-dev")], &[(me, me)]);
         assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
+        let mut git = own("9.0.0-dev");
+        git["dependencies"][0]["source"] = json!("git+https://github.com/synnaxlabs/p");
+        let fuzz = self::fuzz(&[git], &[(me, me)]);
+        assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn pairs_no_requirement_with_a_path_and_a_version_that_the_package_does_not_meet() {
+        let me = "path+file:///w/fuzz#noq-proto@9.0.0";
+        let mut own = own("9.0.0");
+        own["dependencies"][0]["req"] = json!("^1");
+        let fuzz = fuzz(&[own], &[(me, me)]);
+        assert_eq!(
+            unpatched(&root(), &fuzz),
+            Err(format!(
+                "`{me}` has no requirement that its edge `noq_proto` to `{me}` resolves"
+            ))
+        );
+    }
+
+    #[test]
+    fn refuses_a_self_edge_beside_an_edge_whose_version_meets_both_requirements() {
+        let root = crate::fixture().join("patched");
+        let case = root.join("cases").join("selfwide");
+        assert_eq!(
+            patched("selfwide"),
+            Ok(vec![format!(
+                "fuzz/Cargo.toml builds `p` `*` of `path+file://{0}#p@1.4.0` from \
+                 `{0}/Cargo.toml`, not from the copy `{1}/patches/p/Cargo.toml` that \
+                 meets it. Give fuzz/Cargo.toml the [patch.crates-io] table of the \
+                 root Cargo.toml.",
+                case.display(),
+                root.display()
+            )])
+        );
     }
 
     #[test]
