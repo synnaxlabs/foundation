@@ -332,25 +332,24 @@ async fn session(
     run(receiving, grant(queue, state, sender, limit)).await;
 }
 
-/// Polls `receiving` and `granting`, the two halves of the task of a session, until
-/// both end. Polls `granting` again in the poll in which `receiving` ends.
+/// Polls `granting` and `receiving`, the two halves of the task of a session, until
+/// both end. Polls `granting` again in the poll in which `receiving` ends, which ends
+/// it too.
 async fn run(receiving: impl Future<Output = ()>, granting: impl Future<Output = ()>) {
     let (mut receiving, mut granting) = (pin!(receiving), pin!(granting));
-    let (mut received, mut granted) = (false, false);
+    let mut granted = false;
     poll_fn(|cx| {
         // Each end reaches both halves in this poll, before the caller can drop the
         // queue: `receive` follows `grant`, and `grant` runs again after an end of
         // `receive`. `receive` runs once, so its yield after a streak holds.
         granted = granted || granting.as_mut().poll(cx).is_ready();
-        if !received && receiving.as_mut().poll(cx).is_ready() {
-            received = true;
-            granted = granted || granting.as_mut().poll(cx).is_ready();
-        }
-        if received && granted {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
+        ready!(receiving.as_mut().poll(cx));
+        granted = granted || granting.as_mut().poll(cx).is_ready();
+        assert!(
+            granted,
+            "invariant: grant ends in the poll that ends receive"
+        );
+        Poll::Ready(())
     })
     .await;
 }
