@@ -88,7 +88,8 @@
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084 and the
   meaning of 19 in item 3 of
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483 ("the node
-  had no memory for a reply or a request body"); trigger: the block refusal of a reader (#2003) widens it to the text of
+  had no memory for a reply or a request body"); trigger: the block refusal of a reader
+  (#2003) widens it to the text of
   https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074), and 2
   `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
   or breaks a rule above), which every protocol may use. A reset drops the frames in
