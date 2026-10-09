@@ -41,6 +41,8 @@ pub enum Error {
     NoIndex,
     /// The open names a channel that this node does not know. Code `UNKNOWN`.
     Unknown(channel::Key),
+    /// A channel of the open was removed from the definitions. Code `UNKNOWN`.
+    Removed(channel::Key),
     /// The mesh names another node as the home of the open's index. Code `NOT_HOME`.
     NotHome,
     /// The mesh stopped, so the home of the open's index is not known. Code `FAILED`.
@@ -79,7 +81,7 @@ impl Error {
             | Self::Pending => Some(Code(MALFORMED)),
             Self::Access(error) => Some(Code(client::refusal(error).code())),
             Self::Stale => Some(Code(Refusal::Stale.code())),
-            Self::Unknown(_) => Some(Code(UNKNOWN)),
+            Self::Unknown(_) | Self::Removed(_) => Some(Code(UNKNOWN)),
             Self::NotHome => Some(Code(NOT_HOME)),
             Self::Buffer(_) | Self::Mesh(_) => Some(Code(FAILED)),
             Self::Pool(_) => Some(Code(BUSY)),
@@ -110,6 +112,10 @@ impl fmt::Display for Error {
                     "the open names channel {key}, which this node does not know"
                 )
             }
+            Self::Removed(key) => write!(
+                f,
+                "the open names channel {key}, which was removed from this node"
+            ),
             Self::NotHome => f.write_str(
                 "the mesh names another node as the home of the open's index",
             ),
@@ -242,6 +248,9 @@ async fn serve(
             Event::Frame(Err(Stop::Buffer(error))) => {
                 return Err(Error::Buffer(error));
             }
+            Event::Frame(Err(Stop::Removed(key))) => {
+                return Err(Error::Removed(key));
+            }
         }
     }
 }
@@ -279,8 +288,9 @@ struct Opened {
 }
 
 /// Reads the open and its keys, checks each key as it arrives, waits until the mesh
-/// names a home for the index, and opens the session in the order of the keys. Gives
-/// `None` when the peer finishes first.
+/// names this node the home of the index, checks each key again, and carries the index
+/// and opens the session in the order of the keys. When the index changed meanwhile,
+/// it waits again for the new one. Gives `None` when the peer finishes first.
 async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
@@ -300,47 +310,41 @@ async fn open(
     if class != wanted {
         return Err(Error::Class(class));
     }
-    let (mut slots, mut index) = (Vec::new(), None);
+    let (mut keys, mut index) = (Vec::new(), None);
     loop {
         let Some(message) = receiver.recv().await? else {
             return Ok(None);
         };
-        let FromReader::Keys { keys, last } = home.decode(&message)? else {
+        let FromReader::Keys { keys: run, last } = home.decode(&message)? else {
             unreachable!("invariant: Home gives the keys run after the open");
         };
-        let mut state = state.borrow_mut();
-        let state = &mut *state;
-        for key in keys {
-            let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
-            let (first, slot) = index.get_or_insert((of, None));
-            if *first != of {
-                return Err(Error::ManyIndexes);
-            }
-            let assigned = state.interner.slots().assign(key);
-            if key == of {
-                *slot = Some(assigned);
-            }
-            slots.push(assigned);
-        }
+        let start = keys.len();
+        keys.extend(run);
+        check(&state.borrow(), &keys[start..], &mut index)?;
         if last {
             break;
         }
     }
-    let Some((of, Some(index))) = index else {
-        return Err(Error::NoIndex);
-    };
-    let Some(granted) = wait(state, of, home, receiver).await? else {
+    let Some((at, granted)) = wait(state, &keys, index, home, receiver).await? else {
         return Ok(None);
     };
-    let slots: Box<[Slot]> = slots.into();
+    let slots = state.borrow_mut().slots(keys[at], &keys);
+    let index = slots[at];
+    let keys: Box<[channel::Key]> = keys.into();
     let (session, credit) = match open.mode {
         Mode::Complete { limit_bytes } => {
             let charge = ::home::reader::complete::Charge::Places(slots.clone());
-            let (session, credit) =
-                Session::complete(state, slots.clone(), index, limit_bytes, charge);
+            let (session, credit) = Session::complete(
+                state,
+                keys,
+                slots.clone(),
+                index,
+                limit_bytes,
+                charge,
+            );
             (session, Some(credit))
         }
-        Mode::Latest => (Session::latest(state, slots.clone(), index), None),
+        Mode::Latest => (Session::latest(state, keys, slots.clone(), index), None),
     };
     if let Some(credit) = &credit {
         credit.grant(granted);
@@ -352,27 +356,81 @@ async fn open(
     }))
 }
 
-/// Waits until the home carries `index`, and reads the peer meanwhile. Gives the
-/// highest grant that the peer sent, 0 for none, or `None` when the peer finished
-/// first.
+/// The position of `index` in `keys`.
+fn position(
+    keys: &[channel::Key],
+    index: Option<channel::Key>,
+) -> Result<usize, Error> {
+    index
+        .and_then(|index| keys.iter().position(|&key| key == index))
+        .ok_or(Error::NoIndex)
+}
+
+/// Checks that each of `keys` is known and on `index`, which the first key sets when
+/// it is `None`.
+fn check(
+    state: &State,
+    keys: &[channel::Key],
+    index: &mut Option<channel::Key>,
+) -> Result<(), Error> {
+    for &key in keys {
+        let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
+        if *index.get_or_insert(of) != of {
+            return Err(Error::ManyIndexes);
+        }
+    }
+    Ok(())
+}
+
+/// Waits until the mesh names this node the home of the index of `keys`, and checks
+/// `keys` again after it, as a call of `set_definitions` while the open reads or
+/// waits can change a key. Waits again when the index changed. Gives the position of
+/// the index in `keys` and the highest grant that the peer sent, or `None` when the
+/// peer finished first.
 async fn wait(
+    state: &Rc<RefCell<State>>,
+    keys: &[channel::Key],
+    mut index: Option<channel::Key>,
+    home: &mut Home,
+    receiver: &mut Receiver,
+) -> Result<Option<(usize, u64)>, Error> {
+    let mut granted = 0;
+    loop {
+        let at = position(keys, index)?;
+        let Some(grant) = wait_for(state, keys[at], home, receiver).await? else {
+            return Ok(None);
+        };
+        granted = granted.max(grant);
+        let mut again = None;
+        check(&state.borrow(), keys, &mut again)?;
+        if again == index {
+            return Ok(Some((at, granted)));
+        }
+        index = again;
+    }
+}
+
+/// Waits until the mesh names this node the home of `index`, and reads the peer
+/// meanwhile. Gives the highest grant that the peer sent, 0 for none, or `None` when
+/// the peer finished first.
+async fn wait_for(
     state: &Rc<RefCell<State>>,
     index: channel::Key,
     home: &mut Home,
     receiver: &mut Receiver,
 ) -> Result<Option<u64>, Error> {
-    let mut carry = pin!(crate::carry(state, index));
+    let mut homed = pin!(crate::home(state, index));
     let mut granted = 0;
     loop {
         let mut recv = pin!(receiver.recv());
-        let read = poll_fn(|cx| match carry.as_mut().poll(cx) {
-            Poll::Ready(carried) => Poll::Ready(Err(carried)),
+        let read = poll_fn(|cx| match homed.as_mut().poll(cx) {
+            Poll::Ready(found) => Poll::Ready(Err(found)),
             Poll::Pending => recv.as_mut().poll(cx).map(Ok),
         })
         .await;
         let message = match read {
-            Err(carried) => {
-                carried?;
+            Err(found) => {
+                found?;
                 return Ok(Some(granted));
             }
             Ok(read) => match read? {
@@ -557,7 +615,7 @@ mod tests {
     fn gives_the_path_range_and_series_count_of_the_frame_in_the_head() {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
-        let index = interner.slots().assign(key(1));
+        let index = interner.slots().index(key(1));
         let (frame, set) = frame(&mut interner, &pool, &[2, 3], &[8, 8, 8]);
         let head = head(&frame, &set, index, 2);
         assert_eq!(head.path, Path::Live);
@@ -570,7 +628,11 @@ mod tests {
     fn gives_the_range_of_the_index_group_of_the_session() {
         let pool = block::Pool::heap(block::Config { budget: 1 << 20 });
         let mut interner = Interner::new();
-        let [_, _, index, _] = [1, 2, 4, 5].map(|k| interner.slots().assign(key(k)));
+        let slots = interner.slots();
+        slots.index(key(1));
+        slots.data(key(2));
+        let index = slots.index(key(4));
+        slots.data(key(5));
         let set = interner.intern(&[
             Group {
                 index: key(1),

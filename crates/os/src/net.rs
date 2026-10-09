@@ -6,8 +6,7 @@ use std::net::SocketAddr;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 
 use env::net::{Connect, Error, Resolve, tcp};
-use rustix::fs::OFlags;
-use rustix::io::{Errno, FdFlags};
+use rustix::io::Errno;
 use rustix::net::{AddressFamily, Protocol, SocketType, sockopt};
 use tokio::net::TcpStream;
 
@@ -36,8 +35,15 @@ impl env::net::Driver for Driver {
     fn udp(
         &self,
         config: &env::net::udp::Config,
-    ) -> Result<Box<dyn env::net::udp::Driver>, Error> {
-        Ok(Box::new(Udp::bind(config)?))
+    ) -> Result<
+        (
+            Box<dyn env::net::udp::Driver>,
+            Box<dyn env::net::udp::receiver::Driver>,
+        ),
+        Error,
+    > {
+        let (udp, receiver) = Udp::bind(config)?;
+        Ok((Box::new(udp), Box::new(receiver)))
     }
 
     fn connect<'a>(&'a self, config: &'a tcp::Config) -> Connect<'a> {
@@ -118,7 +124,8 @@ fn canonical(address: SocketAddr) -> SocketAddr {
     }
 }
 
-/// A non-blocking socket of the family of `address`, closed on exec.
+/// A non-blocking socket of the family of `address`, closed on exec. macOS has no flag
+/// to open it so, and a child that another thread spawns between the calls holds it.
 fn socket(
     address: SocketAddr,
     kind: SocketType,
@@ -128,9 +135,20 @@ fn socket(
         SocketAddr::V4(_) => AddressFamily::INET,
         SocketAddr::V6(_) => AddressFamily::INET6,
     };
-    let fd = rustix::net::socket(family, kind, Some(protocol))?;
-    rustix::io::fcntl_setfd(&fd, FdFlags::CLOEXEC)?;
-    rustix::fs::fcntl_setfl(&fd, OFlags::NONBLOCK)?;
+    #[cfg(target_os = "linux")]
+    let fd = {
+        use rustix::net::SocketFlags;
+
+        let flags = SocketFlags::CLOEXEC | SocketFlags::NONBLOCK;
+        rustix::net::socket_with(family, kind, flags, Some(protocol))?
+    };
+    #[cfg(target_os = "macos")]
+    let fd = {
+        let fd = rustix::net::socket(family, kind, Some(protocol))?;
+        rustix::io::fcntl_setfd(&fd, rustix::io::FdFlags::CLOEXEC)?;
+        rustix::fs::fcntl_setfl(&fd, rustix::fs::OFlags::NONBLOCK)?;
+        fd
+    };
     Ok(fd)
 }
 

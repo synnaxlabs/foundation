@@ -105,3 +105,25 @@
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6071836755), and the
   file with no bytes approved by `laptop.architect-2` (2026-10-09T00:51:50Z,
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6072002986).
+  Amended (2026-10-09, #1756): `node` builds one `ops::Node` on shard 0 when the mesh
+  opens, and keeps it until the stop. `Node::operate` gives a task that value
+  (`Rc<ops::Node>`), the value that `ops::serve` of #1744 takes, so the lab runs the
+  production value and the node has one key maker. A new channel key is a UUIDv7 at mesh
+  time. `ops::Node` holds the handles that the operation table uses: the mesh, the key
+  maker, the front ends, and the connector kinds, and `new` refuses an empty table of
+  front ends. `node` may take `config-hcl`, as the composition root. Trigger: when the
+  lab reaches the node through the CLI, remove `Node::operate` if nothing else calls it.
+  Lost: a `call(body)` dispatch, which is a table entry of #1744; typed methods on
+  `ops::Node` that make `Output`, `Applied`, `Error`, and `Problem` public; a `hub` that
+  gives the mesh. Decided by `laptop.architect-2` (2026-10-09T01:55:14Z,
+  https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6072660664).
+  Amended in review (2026-10-09, #2078): the key time is the best guess of mesh time
+  (`Measurement::time`), which never goes back, and 0 before the node has mesh time or
+  before 1970: the time only orders keys, and the random bits make each key unique.
+  `ops::Node::mesh` gives the mesh, so the lab reads the home of a channel. `node` also
+  takes `document` and `connector`. The trigger above also makes `ops::Node::plan`,
+  `apply`, and `mesh` crate-private. Approved by `laptop.architect` for the key time
+  rule and `ops::Node::mesh` (2026-10-09T03:33:40Z,
+  https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6073726053). Approved
+  by `laptop.architect-2` for the `node` and `ops` parts (2026-10-09T03:40:04Z,
+  https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6073787912).

@@ -3,7 +3,6 @@
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 
 use access::proof::{Error as Refusal, Field};
@@ -11,7 +10,7 @@ use hub::{Served, serve};
 use spec::definition::{Definition, Kind};
 use spec::subject::Subject;
 use transport::stream::{Incoming, Receiver, Sender};
-use transport::{Address, Class, Code, Port, Session};
+use transport::{Address, Class, Code, Session};
 use types::connection;
 use types::ed25519::{Pair, PrivateKey};
 use types::hello::Hello;
@@ -394,18 +393,14 @@ impl Agent {
         at: Address,
     ) -> Self {
         let pool = own_pool();
-        let own = SocketAddr::new(node.addresses()[0], PORT);
-        let mut parts = Port::bind(&node.net(), own)
-            .expect("binds")
-            .split(NonZeroUsize::MIN);
         let config = transport::client::Config {
+            net: node.net(),
             clock: node.clock(),
             entropy: node.entropy(),
             tasks,
             pool: std::rc::Rc::clone(&pool),
         };
-        let client = transport::Client::new(config, parts.pop().expect("one part"))
-            .expect("a client");
+        let client = transport::Client::new(config).expect("a client");
         let session = client.dial(public_key(&HOME), &[at]).await.expect("dials");
         let (sender, receiver) = session.open(Class::Complete).await.expect("opens");
         let mut hello = Stream {

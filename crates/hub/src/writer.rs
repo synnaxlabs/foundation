@@ -14,7 +14,7 @@ use types::name::Name;
 use types::sample::Type;
 use types::time::Span;
 
-use crate::{Away, State};
+use crate::{Away, Removal, State};
 
 /// What a writer session opens with.
 #[derive(Clone, Debug)]
@@ -76,11 +76,67 @@ impl From<Away> for Error {
     }
 }
 
+/// Why a write failed. No seq moves for either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Failure {
+    /// The home refused the frame.
+    Home(::home::Error),
+    /// A channel of the writer was removed from the definitions. The writer takes no
+    /// more frames: open a new writer.
+    Removed(channel::Key),
+}
+
+impl fmt::Display for Failure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Home(error) => error.fmt(f),
+            Self::Removed(key) => {
+                write!(f, "channel {key} was removed: open a new writer")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Failure {}
+
+/// An index, and the key and sample type of each data channel of a writer on it.
+type Indexed = (channel::Key, Vec<(channel::Key, Type)>);
+
+/// The key of each of `channels`, and their data channels by index, in the order of
+/// `channels`.
+fn resolve(
+    state: &State,
+    channels: &[Name],
+) -> Result<(Vec<channel::Key>, Vec<Indexed>), Error> {
+    let mut groups: Vec<Indexed> = Vec::new();
+    let mut keys = Vec::with_capacity(channels.len());
+    let mut positions = hash::Map::default();
+    let mut data = hash::Set::default();
+    for name in channels {
+        let channel = state
+            .channels
+            .get(name)
+            .ok_or_else(|| Error::Unknown(name.clone()))?;
+        let (key, index) = (channel.key(), channel.index());
+        keys.push(key);
+        let at = *positions.entry(index).or_insert_with(|| {
+            groups.push((index, Vec::new()));
+            groups.len() - 1
+        });
+        if key != index && data.insert(key) {
+            groups[at].1.push((key, channel.sample()));
+        }
+    }
+    Ok((keys, groups))
+}
+
 /// A writer session. Dropping it closes the session.
 #[derive(Debug)]
 pub struct Writer {
     state: Rc<RefCell<State>>,
     key: ::home::writer::Key,
+    /// The channel whose removal ended the writer.
+    removed: Removal,
     set: Arc<KeySet>,
     /// The outcomes of the last write.
     outcomes: Vec<::home::Outcome>,
@@ -101,30 +157,25 @@ impl Writer {
         if channels.is_empty() {
             return Err(Error::Empty);
         }
-        let mut groups: Vec<(channel::Key, Vec<(channel::Key, Type)>)> = Vec::new();
-        {
-            let borrowed = state.borrow();
-            let mut positions = hash::Map::default();
-            let mut data = hash::Set::default();
-            for name in &channels {
-                let channel = borrowed
-                    .channels
-                    .get(name)
-                    .ok_or_else(|| Error::Unknown(name.clone()))?;
-                let at = *positions.entry(channel.index).or_insert_with(|| {
-                    groups.push((channel.index, Vec::new()));
-                    groups.len() - 1
-                });
-                if channel.key != channel.index && data.insert(channel.key) {
-                    groups[at].1.push((channel.key, channel.data_type));
-                }
+        let (mut keys, groups) = loop {
+            let (_, groups) = resolve(&state.borrow(), &channels)?;
+            for (index, _) in &groups {
+                crate::home(state, *index).await?;
             }
-        }
-        for (index, _) in &groups {
-            crate::carry(state, *index).await?;
-        }
+            // A call of `set_definitions` while the open waits can change a channel.
+            let (keys, again) = resolve(&state.borrow(), &channels)?;
+            let indexes = |groups: &[Indexed]| -> Vec<channel::Key> {
+                groups.iter().map(|&(index, _)| index).collect()
+            };
+            if indexes(&again) == indexes(&groups) {
+                break (keys, again);
+            }
+        };
         let mut borrowed = state.borrow_mut();
         let borrowed = &mut *borrowed;
+        for &(index, _) in &groups {
+            borrowed.carry(index);
+        }
         let groups: Vec<_> = groups
             .iter()
             .map(|(index, data)| Group {
@@ -141,9 +192,12 @@ impl Writer {
         };
         let key = borrowed.home.open_writer(writer).map_err(Error::Home)?;
         borrowed.commit.appended();
+        keys.extend(groups.iter().map(|group| group.index));
+        let removed = borrowed.writers.add(key, keys.into());
         Ok(Self {
             state: Rc::clone(state),
             key,
+            removed,
             set,
             outcomes: Vec::new(),
         })
@@ -177,26 +231,32 @@ impl Writer {
     ///
     /// # Errors
     ///
-    /// No seq moves for any error. [`Error::Resend`](crate::home::Error::Resend) for a
-    /// frame labeled resend. [`Error::Full`](crate::home::Error::Full) for a backfill
-    /// frame with no room: write it again on a timer.
+    /// [`Failure::Removed`] once a channel of the writer is removed, on this and every
+    /// later call. Else [`Failure::Home`] with the home's error.
+    /// [`Error::Resend`](crate::home::Error::Resend) for a frame labeled resend.
+    /// [`Error::Full`](crate::home::Error::Full) for a backfill frame with no room:
+    /// write it again on a timer.
     /// [`Error::Large`](crate::home::Error::Large) for a frame too large for one write:
     /// split it. [`Error::Disk`](crate::home::Error::Disk) after a failed commit: the
     /// shard takes no more frames.
     ///
     /// # Panics
     ///
-    /// If `frame` is not of [`Self::set`] and is not labeled resend.
+    /// If `frame` is not of [`Self::set`] and is not labeled resend, and no channel of
+    /// the writer is removed.
     pub fn write(
         &mut self,
         label: Label,
         frame: Draft,
-    ) -> Result<&[::home::Outcome], ::home::Error> {
+    ) -> Result<&[::home::Outcome], Failure> {
+        if let Some(key) = self.removed.get() {
+            return Err(Failure::Removed(key));
+        }
         let mut state = self.state.borrow_mut();
         let state = &mut *state;
         let written = state.home.write(self.key, label, frame);
         state.commit.appended();
-        let outcomes = written?;
+        let outcomes = written.map_err(Failure::Home)?;
         self.outcomes.clear();
         self.outcomes.extend_from_slice(outcomes);
         state.wake();
@@ -206,8 +266,6 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
-        let mut state = self.state.borrow_mut();
-        state.home.close_writer(self.key);
-        state.commit.appended();
+        self.state.borrow_mut().close_writer(self.key);
     }
 }

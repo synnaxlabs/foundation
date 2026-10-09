@@ -29,6 +29,7 @@ document = { path = "../crates/document" }
 env = { path = "../crates/env" }
 libfuzzer-sys = "0.4.13"
 mesh = { path = "../crates/mesh", features = ["sim"] }
+node = { path = "../crates/node", features = ["sim"] }
 ops = { path = "../crates/ops" }
 secret = { path = "../crates/secret" }
 sim = { path = "../crates/sim" }
@@ -201,6 +202,13 @@ bench = false
 [[bin]]
 name = "secret_sealed"
 path = "fuzz_targets/secret_sealed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "node_identity"
+path = "fuzz_targets/node_identity.rs"
 test = false
 doc = false
 bench = false

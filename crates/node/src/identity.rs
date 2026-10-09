@@ -17,8 +17,10 @@ use crate::Error;
 pub(crate) const FILE: &str = "node.key";
 /// The first bytes of the file; a new form gets a new tag.
 const TAG: &[u8; 16] = b"foundation/key/1";
-/// The length of the file.
-pub(crate) const LEN: usize = 68;
+/// The length of the tag, the node key, and the private key.
+pub(crate) const BODY: usize = 64;
+/// The length of the file: the body and its CRC32C.
+pub(crate) const LEN: usize = BODY + 4;
 /// The pool of the file's two blocks. The load holds them while the shard's buffer
 /// holds blocks of the shard's pool, so that pool can lack room for them.
 const POOL: block::Config = block::Config { budget: 4096 };
@@ -133,27 +135,56 @@ fn create(now: Stamp, entropy: &env::entropy::Entropy) -> Identity {
 
 /// The bytes of the file that holds `identity`.
 pub(crate) fn encode(identity: &Identity) -> [u8; LEN] {
-    let mut bytes = [0; LEN];
-    bytes[..16].copy_from_slice(TAG);
-    bytes[16..32].copy_from_slice(&identity.key.as_u128().to_be_bytes());
-    bytes[32..64].copy_from_slice(&identity.private_key.0);
-    let crc = crc32c::crc32c(&bytes[..64]);
-    bytes[64..].copy_from_slice(&crc.to_le_bytes());
-    bytes
+    let mut body = [0; BODY];
+    body[..16].copy_from_slice(TAG);
+    body[16..32].copy_from_slice(&identity.key.as_u128().to_be_bytes());
+    body[32..].copy_from_slice(&identity.private_key.0);
+    with_checksum(&body)
 }
 
 /// The identity in `bytes`, or `None` for another tag or checksum.
 fn decode(bytes: &[u8; LEN]) -> Option<Identity> {
-    let (body, crc) = bytes.split_first_chunk::<64>()?;
-    let (tag, rest) = body.split_first_chunk::<16>()?;
-    let (key, private_key) = rest.split_first_chunk::<16>()?;
-    if tag != TAG || crc32c::crc32c(body).to_le_bytes() != *crc {
-        return None;
+    let (body, crc) = bytes.split_at(BODY);
+    let valid = body[..16] == *TAG && crc32c::crc32c(body).to_le_bytes() == *crc;
+    valid.then(|| fields(bytes))
+}
+
+/// The key and the private key in `bytes`, whatever its tag and checksum.
+fn fields(bytes: &[u8; LEN]) -> Identity {
+    Identity {
+        key: types::node::Key::from_u128(u128::from_be_bytes(
+            bytes[16..32].try_into().expect("invariant: 16 bytes"),
+        )),
+        private_key: PrivateKey(
+            bytes[32..BODY].try_into().expect("invariant: 32 bytes"),
+        ),
     }
-    Some(Identity {
-        key: types::node::Key::from_u128(u128::from_be_bytes(*key)),
-        private_key: PrivateKey(private_key.try_into().ok()?),
-    })
+}
+
+/// `body` with its CRC32C after it.
+pub(crate) fn with_checksum(body: &[u8; BODY]) -> [u8; LEN] {
+    let mut bytes = [0; LEN];
+    bytes[..BODY].copy_from_slice(body);
+    bytes[BODY..].copy_from_slice(&crc32c::crc32c(body).to_le_bytes());
+    bytes
+}
+
+/// Checks that `decode` gives an identity exactly for the bytes that `encode` writes,
+/// and that the identity encodes to `bytes`.
+///
+/// # Panics
+///
+/// When a check fails.
+#[cfg(any(test, feature = "sim"))]
+pub(crate) fn check(bytes: &[u8; LEN]) {
+    let valid = encode(&fields(bytes)) == *bytes;
+    match decode(bytes) {
+        Some(identity) => {
+            assert!(valid, "decodes {bytes:02x?}");
+            assert_eq!(encode(&identity), *bytes, "encodes {bytes:02x?}");
+        }
+        None => assert!(!valid, "refuses {bytes:02x?}"),
+    }
 }
 
 #[cfg(test)]
@@ -211,6 +242,29 @@ mod tests {
             let mut bytes = encode(&identity(key, private_key));
             bytes[bit / 8] ^= 1 << (bit % 8);
             prop_assert!(decode(&bytes).is_none());
+        }
+
+        #[test]
+        fn refuses_each_one_bit_change_of_the_tag_with_its_checksum(
+            key in any::<u128>(),
+            private_key in any::<[u8; 32]>(),
+            bit in 0..TAG.len() * 8,
+        ) {
+            let bytes = encode(&identity(key, private_key));
+            let mut body = *bytes.first_chunk::<BODY>().expect("68 bytes");
+            check(&bytes);
+            body[bit / 8] ^= 1 << (bit % 8);
+            prop_assert!(decode(&with_checksum(&body)).is_none());
+        }
+
+        #[test]
+        fn checks_any_bytes(bytes in any::<[u8; LEN]>()) {
+            check(&bytes);
+        }
+
+        #[test]
+        fn checks_any_body_with_its_checksum(body in any::<[u8; BODY]>()) {
+            check(&with_checksum(&body));
         }
     }
 }

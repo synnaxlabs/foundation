@@ -11,8 +11,11 @@ use std::task::{Context, Poll, Waker, ready};
 use block::Block;
 use transport::stream::{Receiver, Sender};
 use transport::{Class, Code};
-use types::frame::key_set::KeySet;
+use types::channel;
+use types::frame::key_set::{Group, KeySet};
 use types::frame::{Draft, Form, Frame, Layout, Mask};
+use types::hash;
+use types::sample::Type;
 use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Open, Refusal, keys};
 
@@ -69,14 +72,24 @@ struct Inbound {
 }
 
 impl Remote {
-    /// Opens a session of `mode` on `set` at `home`, another node, and waits for the
-    /// home to open it. Then spawns the task that takes its frames.
+    /// Opens a session of `mode` on the channels of `data`, each with its sample type,
+    /// and their index `index` at `home`, another node, and waits for the home to open
+    /// it. Then spawns the task that takes its frames.
     pub(super) async fn open(
         state: &Rc<RefCell<State>>,
         home: types::node::Key,
-        set: Arc<KeySet>,
+        data: Vec<(channel::Key, Type)>,
+        index: channel::Key,
         mode: Mode,
     ) -> Result<Self, Error> {
+        let mut held = hash::Set::default();
+        held.insert(index);
+        let data: Vec<_> = data
+            .into_iter()
+            .filter(|&(key, _)| held.insert(key))
+            .collect();
+        let group = Group { index, data: &data };
+        let set = state.borrow_mut().interner.intern(&[group]);
         let (class, wire_mode, credit) = match mode {
             Mode::Complete => (
                 Class::Complete,
@@ -599,7 +612,11 @@ fn refusal(ended: &Ended) -> Option<Refusal> {
             Some(Refusal::Malformed)
         }
         Ended::Pool(_) => Some(Refusal::Busy),
-        Ended::Buffer(_) | Ended::Behind | Ended::Stream(_) | Ended::Refused(_) => None,
+        Ended::Buffer(_)
+        | Ended::Behind
+        | Ended::Removed(_)
+        | Ended::Stream(_)
+        | Ended::Refused(_) => None,
     }
 }
 

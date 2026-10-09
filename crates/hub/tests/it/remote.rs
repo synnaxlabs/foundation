@@ -26,8 +26,8 @@ use wire::hub::{Credit, Head, Refusal, Reply, ends};
 use super::region::OTHER;
 use super::serve::{HOME, PEER, PORT, own_pool, transport_sized};
 use super::{
-    AREA, BODY_MAX, I64, POOL, TIME, Test, VALUE, definition, fill, name, samples,
-    write, write_series, write_wide,
+    AREA, BODY_MAX, I64, POOL, TIME, Test, VALUE, fill, name, samples, write,
+    write_series, write_wide,
 };
 
 /// The fewest bytes that a transport takes in one message.
@@ -287,8 +287,7 @@ fn a_reader_of_a_channel_that_the_home_does_not_know_is_refused_with_unknown() {
             hub_home(node, tasks, transport, steps, |_| async {}).await;
         },
         |test, _| async move {
-            let extra = (name("extra"), definition(9, DataType::Sample(I64), 1));
-            test.hub.define([(&extra.0, &extra.1)]);
+            test.define([(9, "extra", DataType::Sample(I64), 1)]);
             let names = [name("extra")];
             let error = test
                 .hub
@@ -912,17 +911,18 @@ fn a_reader_stops_the_stream_as_malformed_when_a_body_message_is_longer_than_the
     );
 }
 
-/// Defines `count` data channels on `time` at `test`'s hub, and gives their names.
+/// Defines `count` more data channels on `time` at `test`'s hub, and gives their
+/// names.
 fn define_many(test: &Test, count: u128) -> Vec<types::name::Name> {
-    let channels: Vec<_> = (100..100 + count)
-        .map(|key| {
-            let channel = definition(key, DataType::Sample(I64), 1);
-            (name(&format!("extra-{key}")), channel)
-        })
+    let names: Vec<_> = (100..100 + count)
+        .map(|key| format!("extra-{key}"))
         .collect();
-    test.hub
-        .define(channels.iter().map(|(name, channel)| (name, channel)));
-    channels.into_iter().map(|(name, _)| name).collect()
+    test.define(
+        (100..)
+            .zip(&names)
+            .map(|(key, channel)| (key, channel.as_str(), DataType::Sample(I64), 1)),
+    );
+    names.iter().map(|channel| name(channel)).collect()
 }
 
 #[test]

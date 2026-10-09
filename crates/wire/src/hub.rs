@@ -37,7 +37,7 @@ pub use home::{FromReader, Home};
 pub use reader::{FromHome, Reader};
 use types::frame::{Path, Range};
 
-use crate::common::{Fields, Writer};
+use crate::common::{Fields, Writer, body};
 
 const LATEST: u8 = 1;
 const COMPLETE: u8 = 2;
@@ -633,6 +633,16 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<body::Error> for Error {
+    fn from(error: body::Error) -> Self {
+        match error {
+            body::Error::Empty => Self::Empty,
+            body::Error::Over { len, remain } => Self::Body { len, remain },
+            body::Error::Unfinished { remain } => Self::Unfinished { remain },
+        }
+    }
+}
 
 /// The items that remain in a run of `remain` after a message of `items` items.
 fn rest_of_run(remain: u32, items: usize) -> Result<u32, Error> {
