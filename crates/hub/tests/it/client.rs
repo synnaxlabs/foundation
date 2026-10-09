@@ -655,6 +655,74 @@ fn closes_the_session_on_a_challenge_that_is_not_valid() {
     );
 }
 
+/// A request in flight when a challenge that `wire` refuses ends the renewal gives
+/// that error, not the error of the close.
+#[test]
+fn gives_the_error_of_the_renewal_to_a_request_in_flight() {
+    raw(
+        135,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let _request = read_request(&session).await;
+            let sender = hello.sender.as_mut().expect("two-way");
+            let refused = own_pool().copy(&[0xff]).expect("room");
+            sender.send(refused).await.expect("sends");
+            drop(session.closed().await);
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            assert_eq!(
+                client.request(b"ab").await,
+                Err(Error::Message(wire::hub::Error::Kind { kind: 0xff }))
+            );
+        },
+    );
+}
+
+/// A request in flight when the node finishes the hello stream gives
+/// [`Error::Unanswered`], the error that ended the renewal.
+#[test]
+fn gives_an_unanswered_renewal_to_a_request_in_flight() {
+    raw(
+        136,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let _request = read_request(&session).await;
+            let sender = hello.sender.as_mut().expect("two-way");
+            sender.finish().expect("finishes");
+            drop(session.closed().await);
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            assert_eq!(client.request(b"ab").await, Err(Error::Unanswered));
+        },
+    );
+}
+
+/// A body over the cap gives [`Error::Body`] also once the renewal ended.
+#[test]
+fn gives_the_body_error_first_after_the_renewal_ended() {
+    raw(
+        152,
+        |session, mut hello, node| async move {
+            admit(&mut hello, &node.clock()).await;
+            let sender = hello.sender.as_mut().expect("two-way");
+            let refused = own_pool().copy(&[0xff]).expect("room");
+            sender.send(refused).await.expect("sends");
+            drop(session.closed().await);
+        },
+        |node, tasks, at| async move {
+            let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+            node.clock().sleep(LIFE).await;
+            let length = usize::try_from(BODY_BYTES_MAX).expect("fits") + 1;
+            assert_eq!(
+                client.request(&vec![0; length]).await,
+                Err(Error::Body { length })
+            );
+        },
+    );
+}
+
 /// The retry of a message that finds the pool full, as the record states it.
 const RETRY: Span = Span::from_nanos(10_000_000);
 
