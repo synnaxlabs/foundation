@@ -208,3 +208,9 @@
   2026-10-08 20:07 UTC;
   https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
   2026-10-08 20:22 UTC).
+  Two timers due at one time run in an order that no code may depend on. Until PR 6 of
+  #435 orders the timer tree of the copy by due time, then by `id`, that order comes
+  from heap addresses, so a simulation with such timers does not replay. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6073878926,
+  2026-10-09 03:49 UTC).
