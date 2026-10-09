@@ -72,10 +72,10 @@ impl Supervisor {
     /// not open, and otherwise once the run returned. It returns, with `Ok` or an
     /// error, only once each task of its last run ended, and the home applied its last
     /// status frame or `cancel` is cancelled. Neither wait holds once the home refused
-    /// a status frame because the status channels were removed or its disk failed: the
-    /// home refuses each later frame too. A drop of the future cancels the run and
-    /// does not wait for its tasks: to wait, cancel `cancel` and await the future. The
-    /// future is not `Send`: call it on a shard.
+    /// a status frame because the status channels were removed or its disk failed:
+    /// after it, the call writes no more status. A drop of the future cancels the run
+    /// and does not wait for its tasks: to wait, cancel `cancel` and await the future.
+    /// The future is not `Send`: call it on a shard.
     ///
     /// # Errors
     ///
