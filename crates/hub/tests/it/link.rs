@@ -143,14 +143,7 @@ where
     let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
     let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
         let (test, session, link) = accept(&node, &tasks, pool, synced, rules).await;
-        while let Ok(mut incoming) = session.accept().await {
-            let (link, kept, clock) = (link.clone(), Arc::clone(&kept), node.clock());
-            tasks.spawn(async move {
-                header(&mut incoming).await;
-                let got = answer(link.serve(incoming), &clock).await;
-                kept.lock().expect("not poisoned").push(got);
-            });
-        }
+        serve_streams(&node, &tasks, &session, &link, &kept).await;
         *ended.lock().expect("not poisoned") = Some(session.closed().await);
         drop((link, test));
     };
@@ -166,6 +159,35 @@ where
 /// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
 /// A [`Test`] hub as [`home`] gives it, with `rules` set unless `None`, and the
 /// session of the first program that dials it, with its link.
+/// Serves each hub stream of `session` on `link`, once it reads the stream's header,
+/// and keeps each result in `kept`, until the session closes.
+pub(super) async fn serve_streams(
+    node: &sim::node::Node,
+    tasks: &env::tasks::Tasks,
+    session: &Session,
+    link: &hub::Link,
+    kept: &Arc<Mutex<Vec<Result<Got, serve::Error>>>>,
+) {
+    while let Ok(mut incoming) = session.accept().await {
+        let (link, kept, clock) = (link.clone(), Arc::clone(kept), node.clock());
+        tasks.spawn(async move {
+            header(&mut incoming).await;
+            let got = answer(link.serve(incoming), &clock).await;
+            kept.lock().expect("not poisoned").push(got);
+        });
+    }
+}
+
+/// Makes the error of the wall clock of `node` unknown, and 10 ms one minute later.
+pub(super) fn shrink_wall_error(node: &sim::node::Node, tasks: &env::tasks::Tasks) {
+    node.set_wall_error(None);
+    let shrink = node.clone();
+    tasks.spawn(async move {
+        shrink.clock().sleep(Span::MINUTE).await;
+        shrink.set_wall_error(Some(Span::from_nanos(10_000_000)));
+    });
+}
+
 pub(super) async fn accept(
     node: &sim::node::Node,
     tasks: &env::tasks::Tasks,
@@ -1073,23 +1095,10 @@ fn closes_the_session_at_the_cap_of_a_renewal_after_a_drop() {
     run(
         173,
         move |node, tasks| async move {
-            node.set_wall_error(None);
+            shrink_wall_error(&node, &tasks);
             let (test, session, link) =
                 accept(&node, &tasks, POOL, true, Some(rules())).await;
-            let shrink = node.clone();
-            tasks.spawn(async move {
-                shrink.clock().sleep(Span::MINUTE).await;
-                shrink.set_wall_error(Some(Span::from_nanos(10_000_000)));
-            });
-            while let Ok(mut incoming) = session.accept().await {
-                let (link, kept, clock) =
-                    (link.clone(), Arc::clone(&kept), node.clock());
-                tasks.spawn(async move {
-                    header(&mut incoming).await;
-                    let got = answer(link.serve(incoming), &clock).await;
-                    kept.lock().expect("not poisoned").push(got);
-                });
-            }
+            serve_streams(&node, &tasks, &session, &link, &kept).await;
             drop((link, test));
         },
         move |mut agent| async move {

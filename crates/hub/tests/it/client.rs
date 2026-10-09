@@ -1230,24 +1230,10 @@ fn keeps_a_session_when_the_error_of_mesh_time_shrinks() {
     run_program(
         172,
         move |node, tasks| async move {
-            node.set_wall_error(None);
+            super::link::shrink_wall_error(&node, &tasks);
             let (test, session, link) =
                 accept(&node, &tasks, POOL, true, Some(rules())).await;
-            let shrink = node.clone();
-            tasks.spawn(async move {
-                shrink.clock().sleep(Span::MINUTE).await;
-                shrink.set_wall_error(Some(Span::from_nanos(10_000_000)));
-            });
-            while let Ok(mut incoming) = session.accept().await {
-                let (link, seen, clock) =
-                    (link.clone(), Arc::clone(&seen), node.clock());
-                tasks.spawn(async move {
-                    header(&mut incoming).await;
-                    let result =
-                        super::link::answer(link.serve(incoming), &clock).await;
-                    seen.lock().expect("not poisoned").push(result.map(drop));
-                });
-            }
+            super::link::serve_streams(&node, &tasks, &session, &link, &seen).await;
             drop((link, test));
         },
         move |node, tasks, at| async move {
