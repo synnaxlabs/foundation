@@ -6,12 +6,10 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
 
-use access::proof::{Admitted, Error as Refusal};
+use access::proof::{self, Admitted};
 use transport::Code;
 use transport::stream::{Incoming, Receiver, Sender};
-use wire::hub::client::{
-    CAPPED, CHANGED, Challenge, EXPIRED, REFUSED, Response, Signed, UNSYNCED, VIA,
-};
+use wire::hub::client::{Challenge, Refusal, Response, Signed};
 
 use super::{Error, alloc, halves, stop};
 use crate::State;
@@ -95,18 +93,18 @@ impl Drop for Open {
     }
 }
 
-/// The code that `error` stops a client stream with. The errors that tell about the
-/// spec share `REFUSED`.
-pub(crate) fn code(error: &Refusal) -> u32 {
+/// The refusal that `error` stops a client stream with. The errors that tell about
+/// the spec share `Refusal::Refused`.
+pub(crate) fn refusal(error: &proof::Error) -> Refusal {
     match error {
-        Refusal::Unknown { .. } | Refusal::Unlisted { .. } | Refusal::Signature => {
-            REFUSED
-        }
-        Refusal::Unsynced => UNSYNCED,
-        Refusal::Via { .. } => VIA,
-        Refusal::Expired { .. } => EXPIRED,
-        Refusal::Capped { .. } => CAPPED,
-        Refusal::Changed { .. } => CHANGED,
+        proof::Error::Unknown { .. }
+        | proof::Error::Unlisted { .. }
+        | proof::Error::Signature => Refusal::Refused,
+        proof::Error::Unsynced => Refusal::Unsynced,
+        proof::Error::Via { .. } => Refusal::Via,
+        proof::Error::Expired { .. } => Refusal::Expired,
+        proof::Error::Capped { .. } => Refusal::Capped,
+        proof::Error::Changed { .. } => Refusal::Changed,
     }
 }
 
@@ -187,7 +185,7 @@ async fn challenge(session: &Session, sender: &mut Sender) -> Result<[u8; 16], E
             .time
             .now()
             .mesh
-            .ok_or(Error::Access(Refusal::Unsynced))?;
+            .ok_or(Error::Access(proof::Error::Unsynced))?;
         state.entropy.fill(&mut nonce);
         let mut block = alloc(&session.state, Challenge::LEN)?;
         Challenge { nonce, now }.encode(&mut block);
@@ -213,7 +211,7 @@ async fn expiry(session: &Session) -> Error {
                 .mesh
                 .expect("invariant: mesh time stays once the clock has synced");
             if now.latest >= expires {
-                return Error::Access(Refusal::Expired {
+                return Error::Access(proof::Error::Expired {
                     expires,
                     now: now.latest,
                 });
@@ -321,6 +319,7 @@ async fn respond(
 #[cfg(test)]
 mod tests {
     use types::time::Stamp;
+    use wire::hub::client::{CAPPED, CHANGED, EXPIRED, REFUSED, UNSYNCED, VIA};
 
     use super::*;
 
@@ -332,44 +331,44 @@ mod tests {
         let stamp = Stamp::from_nanos(1);
         let cases = [
             (
-                Refusal::Unknown {
+                proof::Error::Unknown {
                     subject: subject.clone(),
                 },
                 REFUSED,
             ),
-            (Refusal::Unlisted { subject, key }, REFUSED),
-            (Refusal::Signature, REFUSED),
-            (Refusal::Unsynced, UNSYNCED),
+            (proof::Error::Unlisted { subject, key }, REFUSED),
+            (proof::Error::Signature, REFUSED),
+            (proof::Error::Unsynced, UNSYNCED),
             (
-                Refusal::Via {
+                proof::Error::Via {
                     via: node,
                     peer: node,
                 },
                 VIA,
             ),
             (
-                Refusal::Expired {
+                proof::Error::Expired {
                     expires: stamp,
                     now: stamp,
                 },
                 EXPIRED,
             ),
             (
-                Refusal::Capped {
+                proof::Error::Capped {
                     expires: stamp,
                     cap: stamp,
                 },
                 CAPPED,
             ),
             (
-                Refusal::Changed {
+                proof::Error::Changed {
                     field: access::proof::Field::Key,
                 },
                 CHANGED,
             ),
         ];
         for (error, expected) in cases {
-            assert_eq!(code(&error), expected, "{error:?}");
+            assert_eq!(refusal(&error).code(), expected, "{error:?}");
         }
     }
 }
