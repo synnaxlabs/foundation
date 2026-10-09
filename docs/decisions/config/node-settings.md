@@ -22,12 +22,15 @@
   `MemAvailable` and the room left in the memory cgroup of the process and in each
   cgroup above it (`os::memory::available`). The room is the limit less the working set,
   which is the usage less the inactive file pages (`inactive_file`, or
-  `total_inactive_file` on cgroup v1, in `memory.stat`), as the kubelet counts it. Each
-  subtraction saturates, because the files are read one after another. Lost:
+  `total_inactive_file` on cgroup v1, in `memory.stat`), as the kubelet counts it. A
+  cgroup with no `memory.stat`, as under gVisor, counts its whole usage as the working
+  set. Each subtraction saturates, because the files are read one after another. Lost:
   `active_file` too. Decided by `laptop.architect-2` (2026-10-09T22:37:18Z,
   https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6090424579, which
   supersedes item 2, the cgroup doc, of
-  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6088506863). The
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6088506863;
+  2026-10-09T23:43:24Z, no `memory.stat`,
+  https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6091170677). The
   node keeps its budgets in the file `budget` of its data directory: one sector with the
   tag `foundation/budget/1`, the two budgets as `u64`, and a CRC32C. `node::budget`
   reads it outside the lock. Under the lock, once each shard has opened its buffer,
