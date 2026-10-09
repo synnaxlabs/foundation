@@ -57,9 +57,9 @@
   https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
   `os` receiver's driver has no `Mutex` of its own (item 2 of `laptop.architect-2`,
   2026-10-08 18:27 UTC,
-  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). The
-  `Mutex`es under it are Tokio's own, in its `AsyncFd` and its I/O driver. The
-  receiver's `receiver::Driver` is its alone, as a sender clone's is:
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541). Its
+  poll and its drop lock only Tokio's `Mutex`es, in Tokio's `AsyncFd` and I/O driver.
+  The receiver's `receiver::Driver` is its alone, as a sender clone's is:
   `net::Driver::udp` gives it at the bind, beside the socket (`laptop.architect-2`,
   2026-10-09 01:42 UTC,
   https://github.com/synnaxlabs/foundation/pull/2068#issuecomment-6072529426).
