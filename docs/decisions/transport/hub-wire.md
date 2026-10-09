@@ -95,14 +95,17 @@
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084 ("the
   home had no memory for a reply"), and the meaning of 19 in item 3 of
   https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483 ("the node
-  had no memory for a reply or a request body"), which #2012 replaces with a text for
-  both causes (`laptop.architect`, 2026-10-09T00:13:01Z,
-  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6071579227). A reset drops the frames in flight, which is
-  correct for `FAILED`, since the session cannot go on (lost: a `Reply::Failed` that
-  keeps them, a second end message to fuzz). Each reply block
-  holds one message. An ends message holds at most the frame's series, at 8 bytes each,
-  the size of their descriptors in the frame's block, so the pool can always hold it
-  (the architect, 2026-10-07T22:17:44Z,
+  had no memory for a reply or a request body"). #2012 replaces that text with one for
+  both causes
+  (https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074), and
+  this record keeps the text above until then (`laptop.architect`,
+  2026-10-09T00:13:01Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6071579227). A reset
+  drops the frames in flight, which is correct for `FAILED`, since the session cannot
+  go on (lost: a `Reply::Failed` that keeps them, a second end message to fuzz). Each
+  reply block holds one message. An ends message holds at most the frame's series, at
+  8 bytes each, the size of their descriptors in the frame's block, so the pool can
+  always hold it (the architect, 2026-10-07T22:17:44Z,
   https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6047985988).
   Supersedes "A reply block holds at most `min(bytes_max, Pool::largest)` bytes"
   (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084). The
