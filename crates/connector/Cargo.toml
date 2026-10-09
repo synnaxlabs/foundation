@@ -19,6 +19,8 @@ document = { path = "../document" }
 types = { path = "../types" }
 
 [dev-dependencies]
+# Turns on `sim`, because the bench host runs no features.
+connector = { path = ".", features = ["sim"] }
 codec = { path = "../codec" }
 counting = { path = "../counting" }
 hub = { path = "../hub", features = ["sim"] }
@@ -29,6 +31,11 @@ spec = { path = "../spec" }
 [[test]]
 name = "alloc"
 harness = false
+
+[[bench]]
+name = "run"
+harness = false
+test = true
 
 [lints]
 workspace = true
