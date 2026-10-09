@@ -120,7 +120,7 @@ mod tests {
                 disk: Size::from_bytes(disk),
             };
             let bytes = encode(budget);
-            prop_assert_eq!(sector::held(&bytes, TAG), Held::Written(bytes));
+            prop_assert_eq!(sector::written(&bytes, TAG), Some(bytes));
             prop_assert_eq!(decode(&bytes), budget);
         }
 
@@ -138,7 +138,7 @@ mod tests {
                 disk: Size::from_bytes(disk),
             });
             bytes[at] ^= flip;
-            prop_assert_eq!(sector::held(&bytes, TAG), Held::Foreign);
+            prop_assert_eq!(sector::written(&bytes, TAG), None);
         }
     }
 }
