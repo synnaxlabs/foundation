@@ -21,9 +21,11 @@ pub fn available() -> Result<Size, Error> {
 
 #[cfg(target_os = "linux")]
 mod linux {
+    use std::ffi::OsString;
     use std::fs;
     use std::io;
-    use std::path::Path;
+    use std::os::unix::ffi::OsStringExt;
+    use std::path::{Path, PathBuf};
 
     /// The files of a cgroup that give its limit and its use.
     struct Files {
@@ -53,7 +55,7 @@ mod linux {
             let Some((point, files, inside)) = hierarchy(mount, &cgroups)? else {
                 continue;
             };
-            let top = root.join(point.trim_start_matches('/'));
+            let top = root.join(point.strip_prefix("/").unwrap_or(&point));
             let mut dir = top.join(inside);
             loop {
                 if let Some(room) = room(&dir, &files)? {
@@ -70,10 +72,10 @@ mod linux {
     /// For a line of `mountinfo` that mounts a memory cgroup hierarchy, its mount
     /// point, its files, and the cgroup of the process inside the mount, from the
     /// lines of `cgroups`. `None` for another mount, or a cgroup outside it.
-    fn hierarchy<'a>(
-        line: &'a str,
-        cgroups: &'a str,
-    ) -> io::Result<Option<(&'a str, Files, &'a str)>> {
+    fn hierarchy(
+        line: &str,
+        cgroups: &str,
+    ) -> io::Result<Option<(PathBuf, Files, PathBuf)>> {
         let bad = || invalid(format!("a line of mountinfo has too few fields: {line}"));
         let (mount, kind) = line.split_once(" - ").ok_or_else(bad)?;
         let mount: Vec<&str> = mount.split(' ').collect();
@@ -99,8 +101,33 @@ mod linux {
             };
             found.then_some(path)
         });
-        let inside = path.and_then(|path| path.strip_prefix(mount_root));
-        Ok(inside.map(|inside| (point, files, inside.trim_start_matches('/'))))
+        let mount_root = unescape(mount_root);
+        let inside =
+            path.and_then(|path| Path::new(path).strip_prefix(&mount_root).ok());
+        Ok(inside.map(|inside| (unescape(point), files, inside.to_path_buf())))
+    }
+
+    /// A path field of `mountinfo`, where the kernel writes each space, tab, newline,
+    /// and backslash as `\` and three octal digits.
+    fn unescape(field: &str) -> PathBuf {
+        let mut bytes = Vec::with_capacity(field.len());
+        let mut rest = field.as_bytes();
+        loop {
+            let (byte, after) = match rest {
+                [
+                    b'\\',
+                    a @ b'0'..=b'3',
+                    b @ b'0'..=b'7',
+                    c @ b'0'..=b'7',
+                    after @ ..,
+                ] => ((a - b'0') << 6 | (b - b'0') << 3 | (c - b'0'), after),
+                [byte, after @ ..] => (*byte, after),
+                [] => break,
+            };
+            bytes.push(byte);
+            rest = after;
+        }
+        PathBuf::from(OsString::from_vec(bytes))
     }
 
     /// The room left in the cgroup `dir`, or `None` when it has no limit.
@@ -157,8 +184,6 @@ mod linux {
 
     #[cfg(test)]
     mod tests {
-        use std::path::PathBuf;
-
         use super::*;
 
         /// A file system root in a new temporary directory.
@@ -310,6 +335,53 @@ mod linux {
                 )
                 .write("sys/fs/cgroup/cpu/memory.usage_in_bytes", "0\n");
             assert_eq!(root.available().unwrap(), 8192 * MIB);
+        }
+
+        /// The process is in `/ab/c`, outside the mount whose root is `/a`. The
+        /// cgroup `/a/b/c` of that mount is not above the process.
+        #[test]
+        fn a_cgroup_whose_name_only_starts_with_the_mount_root_is_outside_it() {
+            let root = Root::new("v2-prefix");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "0::/ab/c\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "37 31 0:31 /a /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n",
+                )
+                .write("sys/fs/cgroup/b/c/memory.max", &format!("{MIB}\n"))
+                .write("sys/fs/cgroup/b/c/memory.current", "0\n");
+            assert_eq!(root.available().unwrap(), 8192 * MIB);
+        }
+
+        /// The kernel writes a space and a backslash in the root of a mount as
+        /// `\040` and `\134`.
+        #[test]
+        fn a_mount_root_with_a_space_and_a_backslash_counts() {
+            let root = Root::new("v2-root-space");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "0::/a b\\c/d\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "37 31 0:31 /a\\040b\\134c /cg rw - cgroup2 cgroup2 rw\n",
+                )
+                .write("cg/d/memory.max", &format!("{MIB}\n"))
+                .write("cg/d/memory.current", "0\n");
+            assert_eq!(root.available().unwrap(), MIB);
+        }
+
+        /// The kernel writes a space in a mount point of mountinfo as `\040`.
+        #[test]
+        fn a_mount_point_with_a_space_counts() {
+            let root = Root::new("v2-space");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "0::/a\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "37 31 0:31 / /cg\\040root rw - cgroup2 cgroup2 rw\n",
+                )
+                .write("cg root/a/memory.max", &format!("{MIB}\n"))
+                .write("cg root/a/memory.current", "0\n");
+            assert_eq!(root.available().unwrap(), MIB);
         }
 
         #[test]
