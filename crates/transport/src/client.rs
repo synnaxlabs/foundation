@@ -7,7 +7,9 @@ use std::rc::Rc;
 use types::ed25519::PublicKey;
 use types::time::Span;
 
-use crate::{Address, Error, MESSAGE_BYTES_MIN, POOL_RULE, Session, dial, port, quic};
+use crate::{
+    Address, Error, MESSAGE_BYTES_MIN, POOL_RULE, Session, dial, port, quic, window_min,
+};
 
 /// The smallest window of a program: 1 Gbit/s over a round trip of 8 ms.
 const WINDOW_BYTES_MIN: usize = 1 << 20;
@@ -139,7 +141,7 @@ impl Config {
         Ok(quic::Setup {
             role: quic::Role::Program,
             message_bytes_max,
-            window_bytes: (2 * message_bytes_max).max(WINDOW_BYTES_MIN),
+            window_bytes: window_min(message_bytes_max).max(WINDOW_BYTES_MIN),
             streams_max: NonZeroU32::MIN,
             idle: IDLE,
             clock: self.clock,

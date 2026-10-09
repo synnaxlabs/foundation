@@ -4,8 +4,8 @@
 use noq_proto::{Dir, ReadError, StreamEvent, StreamId, VarInt};
 
 use super::connection::Fault;
-use crate::MESSAGE_BYTES_MIN;
 use crate::varint::{self, Varint};
+use crate::{MESSAGE_BYTES_MIN, window_min};
 
 /// The most bytes a hello takes.
 pub(super) const BYTES_MAX: usize = 256;
@@ -88,7 +88,7 @@ impl Hello {
                  {MESSAGE_BYTES_MIN}"
             )));
         }
-        if window_bytes / 2 < message_bytes_max {
+        if window_bytes < window_min(message_bytes_max) {
             return Err(Fault(format!(
                 "a hello with window_bytes {window_bytes} below twice \
                  message_bytes_max {message_bytes_max}"

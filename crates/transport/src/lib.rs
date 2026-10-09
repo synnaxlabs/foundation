@@ -95,6 +95,12 @@ const PAYLOAD_IPV4: u16 = 1472;
 /// and so does a hub head or key.
 const MESSAGE_BYTES_MIN: usize = PAYLOAD_IPV4 as usize;
 
+/// The smallest `window_bytes` for a message limit of `message` bytes, so that a
+/// message of one class leaves room for a message of the other.
+const fn window_min(message: usize) -> usize {
+    message.saturating_mul(2)
+}
+
 /// The rule that a pool breaks when its largest block is below [`MESSAGE_BYTES_MIN`].
 const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 
@@ -329,7 +335,7 @@ impl Config {
             } else {
                 ("message_bytes_max", "must be at least 1472")
             }
-        } else if self.window_bytes < 2 * limit {
+        } else if self.window_bytes < window_min(limit) {
             ("window_bytes", "must be at least twice the message limit")
         } else {
             return Ok(quic::Setup {
