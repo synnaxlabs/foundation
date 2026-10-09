@@ -69,6 +69,17 @@ fn refuses_an_empty_table_of_front_ends() {
 }
 
 #[test]
+fn applies_with_each_connector_kind_of_the_node() {
+    solo(|mesh| async move {
+        let node = create_node(mesh);
+        let files = vec![(PathBuf::from("plant.hcl"), PLANT.to_owned())];
+        let (plan, _) = node.plan(files).await.expect("a plan");
+        let applied = node.apply(Path::new("plant.plan"), &plan).await;
+        assert!(applied.is_ok(), "{applied:?}");
+    });
+}
+
+#[test]
 fn plans_and_applies_in_the_json_of_the_cli() {
     solo(|mesh| async move {
         let node = create_node(mesh.clone());
