@@ -79,7 +79,11 @@ impl Slot {
 /// The node's table of channel slots. The node's
 /// [`Interner`](crate::frame::key_set::Interner) owns it.
 #[derive(Debug, Default)]
-pub struct Slots(hash::Map<Key, Slot>);
+pub struct Slots {
+    assigned: hash::Map<Key, Slot>,
+    /// The slots given, which a retire does not lower.
+    given: u64,
+}
 
 impl Slots {
     /// A table with no slots.
@@ -88,18 +92,27 @@ impl Slots {
         Self::default()
     }
 
-    /// The slot of `key`. The first call for a key assigns the next slot, from 0. A
-    /// slot is never reused. Give it only keys from the spec or the node's disk, which
-    /// limit the keys that the table holds: it hashes with no key.
+    /// The slot of `key`. The first call for a key, and the first call after each
+    /// [`retire`](Self::retire) of it, assigns the next slot, from 0. A slot is never
+    /// reused. Give it only keys from the spec or the node's disk, which limit the keys
+    /// that the table holds: it hashes with no key.
     ///
     /// # Panics
     ///
-    /// If the table already holds 2^32 channels.
+    /// If the table already assigned 2^32 slots.
     pub fn assign(&mut self, key: Key) -> Slot {
-        let next = self.0.len();
-        *self.0.entry(key).or_insert_with(|| {
-            Slot(u32::try_from(next).expect("a node holds at most 2^32 channels"))
+        *self.assigned.entry(key).or_insert_with(|| {
+            let slot =
+                u32::try_from(self.given).expect("a node assigns at most 2^32 slots");
+            self.given += 1;
+            Slot(slot)
         })
+    }
+
+    /// Retires the slot of `key`: the next [`assign`](Self::assign) of `key` gives a
+    /// slot that no key had.
+    pub fn retire(&mut self, key: Key) {
+        self.assigned.remove(&key);
     }
 }
 
@@ -236,5 +249,20 @@ mod tests {
         assert_eq!(slots.assign(b), Slot::new(1));
         assert_eq!(slots.assign(a), Slot::new(0));
         assert_eq!(slots.assign(Key::from_u128(9)), Slot::new(2));
+    }
+
+    #[test]
+    fn assigns_a_new_slot_to_a_retired_key() {
+        let mut slots = Slots::new();
+        let (a, b, c) = (Key::from_u128(7), Key::from_u128(3), Key::from_u128(9));
+        assert_eq!(slots.assign(a), Slot::new(0));
+        assert_eq!(slots.assign(b), Slot::new(1));
+        slots.retire(a);
+        assert_eq!(slots.assign(a), Slot::new(2));
+        assert_eq!(slots.assign(c), Slot::new(3));
+        assert_eq!(slots.assign(b), Slot::new(1));
+        let unassigned = Key::from_u128(5);
+        slots.retire(unassigned);
+        assert_eq!(slots.assign(unassigned), Slot::new(4));
     }
 }
