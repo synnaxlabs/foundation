@@ -1001,13 +1001,13 @@ mod tests {
                 let mut held = fill(&hog);
                 clock.sleep(ms(200)).await;
                 let one = held.pop().expect("one draft");
-                let failed = hog.write(Label::Path(Path::Live), one);
+                let written = hog.write(Label::Path(Path::Live), one);
                 assert!(
                     matches!(
-                        failed,
+                        written,
                         Err(hub::writer::Failure::Home(hub::home::Error::Disk(_)))
                     ),
-                    "the shard failed on disk at 1.4 s: {failed:?}"
+                    "the shard failed on disk at 1.4 s: {written:?}"
                 );
                 held.extend(fill(&hog));
                 clock.sleep(ms(19_800)).await;
