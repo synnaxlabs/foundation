@@ -31,9 +31,7 @@ fn pool() -> Pool {
 }
 
 fn block(pool: &Pool, bytes: &[u8]) -> Block {
-    let mut unique = pool.alloc(bytes.len()).unwrap();
-    unique.copy_from_slice(bytes);
-    unique.freeze()
+    pool.copy(bytes).unwrap()
 }
 
 /// The `len` bytes of `file` at `offset`.
