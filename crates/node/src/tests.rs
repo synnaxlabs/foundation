@@ -182,6 +182,28 @@ fn stop_before_the_shards_run_ends_them_and_repeats_freely() {
 }
 
 #[test]
+fn a_stopper_from_another_thread_stops_its_node() {
+    fn sendable<T: Send + Sync + 'static>(_: &T) {}
+    let mut run = start(7, 2, &[]);
+    let stopper = run.node.stopper();
+    sendable(&stopper);
+    assert_eq!(run.sim.run_for(Span::HOUR), Ok(()));
+    stopper.clone().stop();
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(run.node.join(), Ok(()));
+}
+
+#[test]
+fn a_stop_after_the_node_ended_does_nothing() {
+    let mut run = start(7, 2, &[]);
+    let stopper = run.node.stopper();
+    run.node.stop();
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(run.node.join(), Ok(()));
+    stopper.stop();
+}
+
+#[test]
 fn a_panic_in_one_shard_stops_the_others() {
     for seed in 0..32 {
         let mut run = start(seed, 3, &[(1, Fault::Panic)]);
