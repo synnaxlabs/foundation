@@ -309,9 +309,11 @@ fn sent(outcome: io::Result<()>, remote: SocketAddr) -> Poll<Result<(), Error>> 
 ///
 /// - [`Error::Unreachable`] with the destination as given when the socket's family
 ///   cannot reach it.
-/// - [`Error::Io`] with `EINVAL` for an IPv6 source on an IPv4 socket, or for an
-///   unspecified source in any form. Linux skips the `IPV6_PKTINFO` of the first and
-///   reads the second as no source, and sends each from an address of its choice.
+/// - [`Error::Io`] with `EINVAL` for an IPv6 source on an IPv4 socket, for an IPv6
+///   source that is not mapped with an IPv4 destination, or for an unspecified source
+///   in any form. Linux skips the `IPV6_PKTINFO` of the first, macOS skips that of the
+///   second, and Linux reads the third as no source; each then sends from an address
+///   of its choice.
 fn route(
     local: SocketAddr,
     transmit: &Transmit<'_>,
@@ -327,7 +329,10 @@ fn route(
         return Err(Error::Unreachable { remote });
     }
     if transmit.source.is_some_and(|source| {
-        source.to_canonical().is_unspecified() || local.is_ipv4() && source.is_ipv6()
+        let canonical = source.to_canonical();
+        canonical.is_unspecified()
+            || local.is_ipv4() && source.is_ipv6()
+            || destination.is_ipv4() && canonical.is_ipv6()
     }) {
         return Err(io_error(Errno::INVAL));
     }
@@ -490,10 +495,23 @@ mod tests {
                 source: Some(source),
                 ..transmit(v4(2), b"")
             };
-            let routed = super::route(any_v6(), &from(V4.into()));
-            assert_eq!(routed, Ok((mapped(2), Some(V4.to_ipv6_mapped().into()))));
-            let v6 = IpAddr::V6(Ipv6Addr::LOCALHOST);
-            assert_eq!(super::route(any_v6(), &from(v6)), Ok((mapped(2), Some(v6))));
+            let mapped_v4 = IpAddr::V6(V4.to_ipv6_mapped());
+            for source in [V4.into(), mapped_v4] {
+                let routed = super::route(any_v6(), &from(source));
+                assert_eq!(routed, Ok((mapped(2), Some(mapped_v4))), "{source}");
+            }
+        }
+
+        #[test]
+        fn an_ipv6_source_to_ipv4_gives_einval() {
+            for remote in [mapped(2), v4(2)] {
+                let from = Transmit {
+                    source: Some(Ipv6Addr::LOCALHOST.into()),
+                    ..transmit(remote, b"")
+                };
+                let routed = super::route(any_v6(), &from);
+                assert_eq!(routed, Err(Error::Io { code: 22 }), "{remote}");
+            }
         }
 
         #[test]

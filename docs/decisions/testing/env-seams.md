@@ -114,12 +114,15 @@
   Supersedes "or the errno" of item 2 of
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541: a
   failure is not stored. One exception: `os` gives `Io { code: 22 }` for each IPv6
-  source on an IPv4 socket, mapped too, or an unspecified source in any form. Linux
-  skips the `IPV6_PKTINFO` of the first and reads the second as no source, and sends
-  each from an address of its choice. Decided by `laptop.architect-2` (2026-10-08 20:06
-  and 20:38 UTC, #1965,
+  source on an IPv4 socket, mapped too, for an IPv6 source that is not mapped with an
+  IPv4 destination, and for an unspecified source in any form. Linux skips the
+  `IPV6_PKTINFO` of the first, macOS skips that of the second, and Linux reads the
+  third as no source; each then sends from an address of its choice. Decided by
+  `laptop.architect-2` (2026-10-08 20:06 and 20:38 UTC, #1965,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068090235,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068606545).
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068606545; the
+  second case 2026-10-09 04:36 UTC, #2097,
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074356047).
   Supersedes https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068520601,
   which refused only `0.0.0.0`. On macOS, `os` has no GSO, so `batch_max` is 1, and the
   loopback, with an MTU of 16,384 bytes, loses a larger datagram. Decided by
