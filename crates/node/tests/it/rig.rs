@@ -97,7 +97,7 @@ impl Rig {
 }
 
 /// [`Rig::wait`], with `limit` in place of 90 s.
-fn wait<T>(
+pub(crate) fn wait<T>(
     clock: &Clock,
     limit: Span,
     what: &str,
@@ -236,16 +236,19 @@ impl Drop for Process {
         // `kill` gives `Ok` for a command that exited. No wait: while the thread
         // panics, a wait can block, and `run` waits for its command itself.
         match self.0.kill() {
-            // A panic out of this drop aborts the test binary, and `eprintln!`
-            // panics when stderr is closed. Only the macro writes to the output
-            // that the test harness captures for the report of the test.
             Err(error) if std::thread::panicking() => {
                 let line = format!("kill the command: {error}");
                 #[expect(
                     clippy::print_stderr,
-                    reason = "a second panic aborts the test binary"
+                    reason = "only `eprintln!` writes to the output that the harness \
+                              captures for the report of the test"
                 )]
-                let _printed = std::panic::catch_unwind(move || eprintln!("{line}"));
+                match std::panic::catch_unwind(move || eprintln!("{line}")) {
+                    Ok(()) => {}
+                    // The test fails already, and a panic out of this drop aborts
+                    // the test binary.
+                    Err(_closed) => {}
+                }
             }
             kill => kill.expect("kill the command"),
         }
@@ -412,7 +415,9 @@ fn reaped(reaped: &str) -> Command {
         .args(["-e", "$SIG{CHLD} = 'IGNORE'; exec @ARGV or die"])
         .arg(binary)
         .args(["--exact", "rig::a_command_that_the_kernel_reaped_drops"])
-        .env(REAPED, reaped);
+        .env(REAPED, reaped)
+        // With it, the harness of the child writes the panic to stderr, not stdout.
+        .env_remove("RUST_TEST_NOCAPTURE");
     command
 }
 
@@ -463,6 +468,19 @@ fn a_failed_kill_while_the_test_panics_reports_its_error() {
         report.contains("kill the command: No such process (os error 3)\n"),
         "{report}"
     );
+}
+
+/// A developer can set `RUST_TEST_NOCAPTURE` for the whole run.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs perl and /proc")]
+fn a_failed_kill_panics_in_a_run_that_does_not_capture() {
+    let output = Command::new(std::env::current_exe().expect("the test binary"))
+        .args(["--exact", "rig::a_failed_kill_panics"])
+        .env("RUST_TEST_NOCAPTURE", "1")
+        .output()
+        .expect("run the test binary");
+    let report = String::from_utf8(output.stdout).expect("UTF-8");
+    assert!(report.contains("test result: ok. 1 passed"), "{report}");
 }
 
 #[test]

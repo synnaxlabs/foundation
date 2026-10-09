@@ -39,7 +39,7 @@ pub(super) struct Influx {
     address: Option<SocketAddr>,
     /// The token that stops the shard that serves, and that shard. The panic tests put
     /// a shard that panics or blocks here, since no input to [`Influx::serve`] makes
-    /// it do so, and read the token that a drop cancels.
+    /// it do so.
     serving: Option<(Token, Handle)>,
 }
 
@@ -155,13 +155,18 @@ where
 /// Writes `lines` to the database `plant` at `address` from a shard of its own, and
 /// gives the status of the answer or the error of the client.
 fn write(address: SocketAddr, lines: &'static str) -> String {
+    write_within(address, lines, Span::MINUTE)
+}
+
+/// [`write`], with a client timeout of `timeout`.
+fn write_within(address: SocketAddr, lines: &'static str, timeout: Span) -> String {
     let (send, answer) = mpsc::channel();
     let shard = start("write", move |tasks| async move {
         let client = Client::new(connector::http::Config {
             net: os::net(),
             clock: os::clock(),
             tasks,
-            timeout: Span::MINUTE,
+            timeout,
             body_max: 1 << 10,
         });
         let request = Request::post(format!("http://{address}/write?db=plant"))
@@ -248,16 +253,32 @@ fn a_dropped_influx_does_not_join_its_server_when_the_test_panics() {
 }
 
 #[test]
-fn a_dropped_influx_cancels_its_server_when_the_test_panics() {
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs SOCK_CLOEXEC and the shutdown of a listener"
+)]
+fn a_dropped_influx_stops_its_server_when_the_test_panics() {
     let mut influx = Influx::default();
-    influx.serve();
-    let stop = influx.serving.as_ref().expect("it serves").0.clone();
+    let address = influx.serve();
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let _influx = influx;
         panic!("the test broke");
     }));
     unwound.expect_err("the test panics");
-    assert!(stop.cancelled(), "the server serves on");
+    // The drop does not join, so the server stops a moment later.
+    crate::rig::wait(
+        &os::clock(),
+        Span::from_nanos(5_000_000_000),
+        "the server stops",
+        || {
+            let written = write_within(address, "m f=1 1", Span::SECOND);
+            if written == refused(address) {
+                Ok(())
+            } else {
+                Err(written)
+            }
+        },
+    );
 }
 
 #[test]

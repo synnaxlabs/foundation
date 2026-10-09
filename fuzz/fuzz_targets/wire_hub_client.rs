@@ -8,6 +8,7 @@
 //! takes each later message.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use libfuzzer_sys::{
     arbitrary::{self, Unstructured},

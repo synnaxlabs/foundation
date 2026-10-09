@@ -104,6 +104,83 @@
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6067290747), which
   supersedes "`define` carries at once" in item 2 of
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066677536.
+  Amended (2026-10-08T20:07:32Z, #340 PR 4d-b): a reader of an index whose home is
+  another node reads from that home over one hub stream (HUB WIRE), and
+  `reader::Error::Remote` goes. `hub::Config::region: Option<hub::Region>` replaces
+  `hub::Config::mesh`: a `Region` holds the mesh and the shard's transport, so a mesh
+  with no transport is a state the type cannot hold. Each remote reader opens its
+  stream on the session that `transport::Transport::dial` gives at that open, the one
+  session of the shard to the home (ONE SESSION PER PEER). When that session closes with
+  `Code(0)` before the home's `Opened`, as a session that loses the tie-break of ONE
+  SESSION PER PEER does, the task of the remote reader dials again and opens on the
+  session that this dial gives, at most twice. The home's node dials only when it has no
+  open session, and runs one dial at a time, so its session beats at most the session
+  that was open and one that this node dialed before that session arrived. A third loss
+  needs a session of the home's node to end first, and fails the open with
+  `Error::Transport`. The home never served an open on a losing session: the lower node
+  holds its streams until it closes it. Amended by `laptop.architect`
+  (2026-10-09T09:12:45Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077974207; "the task
+  of the remote reader", 2026-10-09T09:25:27Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6078169582).
+  Supersedes the one more dial of
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6077794101. A complete
+  reader sends `Credit` once its grant is half a window (512 KiB) short of the frames
+  given back plus a window. A task on `hub::Config::tasks` takes each frame off the
+  stream of a remote reader as it arrives, so the node takes each byte that it let the
+  home send (STREAM WIRE), and an idle caller never holds the window of its session. The
+  task also dials the home, sends the open, and sends each `Credit`, so no message that
+  waits for room in the session waits for the caller. A complete reader queues at most
+  its grant plus one frame, and a frame that starts once the charges that arrived reach
+  the grant ends the session with `Refusal::Malformed`. A latest reader keeps only the
+  newest frame. Lost: a bound on the sum of the credit at one home; a receive window for
+  each stream in `transport`; one task for each session. Trigger: a link that a remote
+  latest reader with an idle caller fills, as measured, then a credit of one frame for a
+  latest reader (HUB WIRE). Decided by `laptop.architect` (2026-10-09T03:24:37Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6073632038), and the
+  open in the task by `laptop.architect` (2026-10-09T06:07:04Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6075355092). The new
+  errors: `reader::Error::{Transport, Refused, Message, Pool}` and
+  `reader::Ended::{Stream, Refused, Message, Frame, Pool, Credit}`. Each `Refused` holds
+  a `wire::hub::Refusal`, the code of HUB WIRE that stopped or reset the stream. A code
+  outside HUB WIRE and a failed dial are `Transport` or `Stream`. A stream that the
+  home finishes before it ends the session is `Message(Unfinished)` inside a body and
+  `Message(Finished)` at each other point, which `wire::hub::Reader::end` gives.
+  Decided by `laptop.architect`: the reader's errors (2026-10-07T23:31:29Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511, which
+  approves the plan in
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048861311),
+  `Region` (2026-10-08T20:07:32Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6068108715), which
+  supersedes `hub::Config::mesh` of
+  https://github.com/synnaxlabs/foundation/pull/1979#issuecomment-6067438821 and
+  `hub::Config::transport` of 6048960511, and `Refusal`, `Finished`, `end`, and the
+  dial at each open, which supersede `Refused(transport::Code)` of `reader::Error` and
+  `reader::Ended` in 6048960511 and the session for each home of that plan
+  (2026-10-08T21:19:24Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6069259471). The
+  removal of `reader::Error::Remote` in 6069259471 supersedes it in
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6066821273.
+  `laptop.architect` approved `reader::Ended::Credit` (2026-10-09T03:26:05Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6073648189).
+  The remote reader costs `complete wait` +2 ns (27 to 29 ns, +7.4%) and
+  `complete grant` +2 ns (64 to 66 ns, +3.1%) on a quiet host
+  (https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6069990547), with no
+  allocation. Accepted until #2025 by `laptop.architect`
+  (2026-10-08T22:34:29Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6070407790). Trigger:
+  when #2025 merges, #2031 steps the stream in the task of the remote reader with the
+  poll forms, and `complete wait` is at most 5% over 27 ns on a quiet host. The task of
+  the remote reader costs, per frame on the whole reader node, +16.2% when the caller
+  lags (11129 to 12937 ns for 16 KB frames), +13.1% with 1 sample per series when the
+  caller lags, and +1.5% when the caller waits, on a loaded host
+  (https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6074115276).
+  Accepted until #2031 by `laptop.architect` (2026-10-09T04:13:57Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6074122773).
+  Trigger: #2031 runs the three cases on the `remote()` rig for 1f2796b4 and its own
+  head on one quiet host in one run, and a case more than 5% over 1f2796b4 needs a new
+  P1 judgment of `laptop.architect` (2026-10-09T05:15:21Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6074769168).
   Amended (2026-10-08T22:24:43Z, #2020): `Hub::set_definitions` replaces `Hub::define`.
   It makes the channels of a spec's definitions the channels that sessions may name. A
   known channel whose key, name, and definition stay keeps its sessions. Each other
@@ -167,3 +244,14 @@
   https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814;
   2026-10-08T22:09:38Z:
   https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6070012949).
+  Amended (#340) by `laptop.architect` (2026-10-09T05:44Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6075092459): a
+  remote reader ends at a removal as a local reader does. The hub keeps each remote
+  reader with its keys from before it dials the home, so a removal during the open
+  also ends it. A removal clears the frames that wait, so the reader
+  gives `reader::Ended::Removed` at its next take, wakes the caller that waits in
+  `next`, and drops its stream with code 0, as each end that is not a refusal does
+  (HUB WIRE). `Remote::take` reads this end from the queue it already reads, so it adds
+  no check per call. Lost: an end only at the home, which closes the session when the
+  home's own definitions change, and which the reader may never see when the two nodes
+  apply a spec at different times.

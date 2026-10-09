@@ -16,13 +16,14 @@ use transport::{Class, Code};
 use types::channel::{self, Slot};
 use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
+use types::name::Name;
 use wire::header::MALFORMED;
 use wire::hub::client::{BODY_BYTES_MAX, Refusal};
 use wire::hub::{
     BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends, keys,
 };
 
-use crate::reader::{Credit, Ended, Session};
+use crate::reader::{Credit, Session, Stop};
 use crate::{Away, Removal, State};
 
 pub use client::{Reply, Request};
@@ -30,7 +31,8 @@ pub use client::{Reply, Request};
 /// The most bytes of client request bodies that one hub holds at once, over each of
 /// its links: each from the decode of its request until the caller sends or drops
 /// its [`Reply`]. A request whose body does not fit stops with `BUSY` before the
-/// hub reads a byte of it.
+/// hub reads a byte of it. The requests of one subject hold at most
+/// [`BODY_BYTES_MAX`] of it ([`Error::Share`]).
 pub const BODIES_BYTES_MAX: u64 = 2 * BODY_BYTES_MAX;
 
 /// Why [`Link::serve`](crate::Link::serve) ended a stream.
@@ -64,8 +66,8 @@ pub enum Error {
     Stream(transport::Error),
     /// `access` refused a hello or a request, or the hub refused the session:
     /// `Unsynced` when it has no mesh time for a challenge, and `Expired` when the
-    /// admitted hello expires. Code: the one that CLIENT HELLO gives for the error,
-    /// `REFUSED` for each that tells about the spec.
+    /// admitted hello ends ([`access::proof::Admitted::ends`]). Code: the one that
+    /// CLIENT HELLO gives for the error, `REFUSED` for each that tells about the spec.
     Access(access::proof::Error),
     /// The hello does not echo the nonce of the last challenge. Code `STALE`.
     Stale,
@@ -81,6 +83,18 @@ pub enum Error {
         /// The body length of the refused request.
         length: u64,
         /// The body bytes that the open requests of the hub held.
+        held: u64,
+    },
+    /// The open requests of `subject`, over each link of the hub, hold so many body
+    /// bytes that a body of `length` more is over the share of one subject,
+    /// [`BODY_BYTES_MAX`]. Code `BUSY`. The same request can succeed once enough open
+    /// requests of the subject reply.
+    Share {
+        /// The subject of the link's admitted hello.
+        subject: Name,
+        /// The body length of the refused request.
+        length: u64,
+        /// The body bytes that the open requests of `subject` held.
         held: u64,
     },
 }
@@ -101,7 +115,9 @@ impl Error {
             Self::Unknown(_) | Self::Removed(_) => Some(Code(UNKNOWN)),
             Self::NotHome => Some(Code(NOT_HOME)),
             Self::Buffer(_) | Self::Mesh(_) => Some(Code(FAILED)),
-            Self::Pool(_) | Self::Bodies { .. } => Some(Code(BUSY)),
+            Self::Pool(_) | Self::Bodies { .. } | Self::Share { .. } => {
+                Some(Code(BUSY))
+            }
             Self::Stream(_) => None,
         }
     }
@@ -160,6 +176,16 @@ impl fmt::Display for Error {
                  {BODIES_BYTES_MAX} bytes: the open requests of the hub hold {held} \
                  bytes"
             ),
+            Self::Share {
+                subject,
+                length,
+                held,
+            } => write!(
+                f,
+                "a request body of {length} bytes does not fit under the share of \
+                 {BODY_BYTES_MAX} bytes of subject {subject}: its open requests hold \
+                 {held} bytes"
+            ),
         }
     }
 }
@@ -169,7 +195,7 @@ impl std::error::Error for Error {}
 impl From<Away> for Error {
     fn from(away: Away) -> Self {
         match away {
-            Away::Remote(_) => Self::NotHome,
+            Away::Remote(..) => Self::NotHome,
             Away::Mesh(stopped) => Self::Mesh(stopped),
         }
     }
@@ -263,15 +289,15 @@ async fn serve(
             Event::Frame(Ok((frame, set, _))) => {
                 layout.send(state, sender, &frame, set).await?;
             }
-            Event::Frame(Err(Ended::Behind)) => {
+            Event::Frame(Err(Stop::Behind)) => {
                 sender.send(reply(state, wire::hub::Reply::Behind)?).await?;
                 sender.finish()?;
                 return Ok(());
             }
-            Event::Frame(Err(Ended::Buffer(error))) => {
+            Event::Frame(Err(Stop::Buffer(error))) => {
                 return Err(Error::Buffer(error));
             }
-            Event::Frame(Err(Ended::Removed(key))) => {
+            Event::Frame(Err(Stop::Removed(key))) => {
                 return Err(Error::Removed(key));
             }
         }
@@ -281,7 +307,7 @@ async fn serve(
 enum Event<F> {
     /// The peer finished, or broke the stream or HUB WIRE.
     Finished(Result<(), Error>),
-    Frame(Result<F, Ended>),
+    Frame(Result<F, Stop>),
 }
 
 /// Reads what the peer sends after the keys run, and grants each credit. Returns when
@@ -523,21 +549,7 @@ fn reply(state: &RefCell<State>, reply: wire::hub::Reply) -> Result<Block, Error
 /// largest block: a reply, an ends run, which is smaller than the frame's
 /// descriptors, or a message of a client stream.
 fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
-    state
-        .borrow()
-        .home
-        .pool()
-        .alloc(len)
-        .map_err(|error| match error {
-            block::Error::TooLarge { .. } => {
-                unreachable!(
-                    "invariant: no caller asks for more than the largest block"
-                )
-            }
-            block::Error::Exhausted { .. } | block::Error::Refused { .. } => {
-                Error::Pool(error)
-            }
-        })
+    state.borrow().alloc(len).map_err(Error::Pool)
 }
 
 /// How a session sends each frame, through its places. It keeps its buffers across
@@ -654,11 +666,6 @@ impl Cut {
     }
 }
 
-#[cfg(test)]
-#[path = "../tests/common/shard.rs"]
-#[expect(dead_code, reason = "the tests use only the shard")]
-mod shard;
-
 // These tests call the private `head`, `runs`, and `Cut::next`, so each case of the
 // pure parts has a test; the tests through `Link::serve` check them on the wire.
 #[cfg(test)]
@@ -684,17 +691,14 @@ mod tests {
         let mut sim = sim::Sim::new(sim::Config::default());
         let node = sim.node(sim::node::Config::default());
         let ran = sim.run_on(&node, |node, tasks| async move {
-            let (home, interner, _, time) =
-                super::shard::shard(&node, tasks.clone()).await;
-            let hub = crate::Hub::new(crate::Config {
-                home,
-                interner,
-                tasks,
-                node: types::node::Key::from_u128(1),
-                time,
+            let (hub, _) = crate::testing::open(crate::testing::Env {
+                files: node.files(),
+                clock: node.clock(),
+                wall: node.wall(),
                 entropy: node.entropy(),
-                mesh: None,
-            });
+                tasks,
+            })
+            .await;
             let entries = || {
                 let state = hub.0.borrow();
                 (state.opens.0.len(), state.waiting.len())
