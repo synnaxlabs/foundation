@@ -797,6 +797,8 @@ mod tests {
             });
         }
 
+        /// No public call sees where a send starts: the public `Sender` cannot turn
+        /// GSO off on loopback, and with GSO on every send starts at 0.
         #[test]
         #[cfg(target_os = "linux")]
         fn a_different_transmit_of_one_datagram_after_pending_goes_out_whole() {
@@ -822,6 +824,37 @@ mod tests {
                 let attempts: Vec<_> =
                     recorded.sends.iter().map(|s| &s.0[..]).collect();
                 assert_eq!(attempts, [b"ab", b"cd", b"ef", b"XY"]);
+            });
+        }
+
+        /// No public call sees where a send starts: the public `Sender` cannot turn
+        /// GSO off on loopback, and with GSO on every send starts at 0.
+        #[test]
+        #[cfg(target_os = "linux")]
+        fn a_different_transmit_skips_one_datagram_for_each_lost_over_the_path_mtu() {
+            runtime().block_on(async {
+                let udp = loopback();
+                turn_gso_off(&udp.bound);
+                let over = Outcome::Fails(Errno::MSGSIZE);
+                let full = Outcome::Fails(Errno::AGAIN);
+                let mut recorded = Recorded::new(&[over, full]);
+                let fd = udp.bound.socket.try_clone().unwrap();
+                let mut writer = idle(fd);
+                let mut cx = Context::from_waker(std::task::Waker::noop());
+                let dropped = batch(b"abcd", 2);
+                let pending =
+                    writer.poll_transmit(&mut cx, &udp.bound, &dropped, |_, d| {
+                        recorded.send(d)
+                    });
+                assert_eq!(pending, Poll::Pending);
+                let other = batch(b"ABCD", 2);
+                let sent = writer.poll_transmit(&mut cx, &udp.bound, &other, |_, d| {
+                    recorded.send(d)
+                });
+                assert_eq!(sent, Poll::Ready(Ok(())));
+                let attempts: Vec<_> =
+                    recorded.sends.iter().map(|s| &s.0[..]).collect();
+                assert_eq!(attempts, [b"ab", b"cd", b"CD"]);
             });
         }
 
