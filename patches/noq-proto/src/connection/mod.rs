@@ -2714,7 +2714,7 @@ impl Connection {
         Ok(())
     }
 
-    /// The number of the next packet sent in the Data space on [`PathId::ZERO`]
+    /// The number of the next packet sent in the Data space on [`PathId::ZERO`].
     ///
     /// A later [`Connection::largest_acked`] at or above it proves that the peer got a
     /// packet sent after this call. Foundation patch.
