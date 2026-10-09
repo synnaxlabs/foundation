@@ -15,9 +15,9 @@
   `laptop.monitor` the PR number, and `laptop.monitor` runs the hot-path benchmarks on a
   quiet Linux host at the merge commit and at its parent on `main`. A slowdown over 5%
   is an issue for the PR's author, who fixes it next. The daily run stays. Each other PR
-  keeps the rule above. Decided by the person, as `laptop.coordinator` recorded it from
-  `laptop.monitor` (2026-10-09T01:05:23Z,
-  https://github.com/synnaxlabs/foundation/issues/462#issuecomment-6072145282).
+  keeps the rule above. The person (2026-10-09T01:04:51Z), on the question of
+  `laptop.monitor` at 2026-10-09T01:04:26Z: "Approved" (`laptop.monitor`'s record:
+  https://github.com/synnaxlabs/foundation/issues/462#issuecomment-6074405652).
   Amended (2026-10-09, #2044): when each changed hot function compiles only on an OS for
   which no quiet host exists, the PR gives a diff of the disassembly in place of the
   rerun. It covers each such function, with its inlined callers, at `main` and at the PR
