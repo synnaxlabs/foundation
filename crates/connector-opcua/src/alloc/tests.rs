@@ -137,7 +137,11 @@ fn write_before(ptr: *mut c_void, offset: usize) {
             count: usize,
         ) -> *mut c_void;
     }
-    assert!((1..=super::ALIGN).contains(&offset));
+    assert!(
+        (1..=super::ALIGN).contains(&offset),
+        "offset {offset} is outside the header of {} bytes",
+        super::ALIGN
+    );
     // SAFETY: the header of the block holds the `ALIGN` bytes before `ptr`.
     let before = unsafe { ptr.cast::<u8>().sub(offset) };
     // SAFETY: `before` is in a live block.

@@ -62,11 +62,13 @@ pub(crate) const PROBE: &str = "build/asan.c";
 ///
 /// # Errors
 ///
-/// When `tool` cannot preprocess `PROBE`: the message gives the reason, or the
-/// standard error of `tool`.
+/// When `tool` cannot preprocess `PROBE`: the message names the program that ran,
+/// which is the wrapper of `CC` when it has one, and gives the reason or the standard
+/// error of `tool`.
 pub(crate) fn asan(tool: &Tool) -> Result<bool, String> {
     let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join(PROBE);
-    let output = tool.to_command().arg("-E").arg(&probe).output();
+    let mut command = tool.to_command();
+    let output = command.arg("-E").arg(&probe).output();
     let reason = match output {
         Ok(output) if output.status.success() => {
             let mut lines = output.stdout.split(|&byte| byte == b'\n');
@@ -77,7 +79,7 @@ pub(crate) fn asan(tool: &Tool) -> Result<bool, String> {
     };
     Err(format!(
         "connector-opcua: {} cannot preprocess {}: {reason}",
-        tool.path().display(),
+        Path::new(command.get_program()).display(),
         probe.display()
     ))
 }

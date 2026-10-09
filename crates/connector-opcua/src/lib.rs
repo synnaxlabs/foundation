@@ -152,12 +152,12 @@ mod tests {
         }
     }
 
-    /// Gives the error of `asan` for `tool` with `reason`.
-    fn cannot_preprocess(tool: &cc::Tool, reason: &str) -> String {
+    /// Gives the error of `asan` when `program` fails with `reason`.
+    fn cannot_preprocess(program: &Path, reason: &str) -> String {
         let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join(compiler::PROBE);
         format!(
             "connector-opcua: {} cannot preprocess {}: {reason}",
-            tool.path().display(),
+            program.display(),
             probe.display()
         )
     }
@@ -169,14 +169,39 @@ mod tests {
         let reason = std::io::Error::from_raw_os_error(2);
         assert_eq!(
             compiler::asan(&tool),
-            Err(cannot_preprocess(&tool, &reason.to_string()))
+            Err(cannot_preprocess(tool.path(), &reason.to_string()))
         );
     }
 
     #[test]
     fn asan_fails_when_the_tool_cannot_preprocess() {
         let tool = tool(cc::Build::new(), "false");
-        assert_eq!(compiler::asan(&tool), Err(cannot_preprocess(&tool, "")));
+        assert_eq!(
+            compiler::asan(&tool),
+            Err(cannot_preprocess(tool.path(), ""))
+        );
+    }
+
+    #[test]
+    fn asan_names_the_missing_wrapper_in_a_child_process() {
+        if child::running() {
+            let reason = std::io::Error::from_raw_os_error(2);
+            assert_eq!(
+                compiler::asan(&probe()),
+                Err(cannot_preprocess(
+                    Path::new("/missing/ccache"),
+                    &reason.to_string()
+                ))
+            );
+        }
+    }
+
+    #[test]
+    fn asan_names_the_missing_wrapper() {
+        child::run(
+            "tests::asan_names_the_missing_wrapper_in_a_child_process",
+            &[("CC", "/missing/ccache clang")],
+        );
     }
 
     #[test]
@@ -186,7 +211,7 @@ mod tests {
         let tool = child::tool(&mut build, env!("CONNECTOR_OPCUA_TARGET"));
         let message = compiler::asan(&tool).unwrap_err();
         let stderr = message
-            .strip_prefix(&cannot_preprocess(&tool, ""))
+            .strip_prefix(&cannot_preprocess(tool.path(), ""))
             .unwrap_or_else(|| panic!("{message}"));
         assert!(
             stderr.contains("--connector-opcua-no-such-flag"),
