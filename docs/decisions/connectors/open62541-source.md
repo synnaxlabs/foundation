@@ -89,6 +89,15 @@
   release. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1906#issuecomment-6063691059,
   2026-10-08 15:49 UTC).
+  The generator is PCG32 (`UA_ENABLE_DETERMINISTIC_RNG`), which a peer can predict from
+  a few of its values. Foundation code takes no nonce, key, or session token from
+  `UA_UInt32_random` or `UA_Guid_random`. The copy does so in two places: the nonces of
+  the security policy None, which protect nothing, and the session authentication token
+  of its server, which only the test server of `connector-opcua` runs. Before Foundation
+  builds a security policy that encrypts or an OPC UA server, that work takes each
+  nonce, key, and token from a cryptographic source, and its PR records the source here.
+  Decided by `laptop.architect-2`, 2026-10-09 13:10 UTC
+  (https://github.com/synnaxlabs/foundation/pull/1997#issuecomment-6081545452).
   A second change of `src/util/ua_util.c` keeps a flag for each thread, which
   `UA_random_seed` and `UA_random_seed_deterministic` set, and `UA_UInt32_random` and
   `UA_Guid_random` call `abort()` on a thread with no start value. The C driver then
@@ -208,9 +217,12 @@
   2026-10-08 20:07 UTC;
   https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
   2026-10-08 20:22 UTC).
-  Two timers due at one time run in an order that no code may depend on. Until PR 6 of
-  #435 orders the timer tree of the copy by due time, then by `id`, that order comes
-  from heap addresses, so a simulation with such timers does not replay. Decided by
-  `laptop.architect-2`
+  Two timers due at one time run in an order that no code may depend on. The timer
+  tree of the copy orders by due time, then by `id`, so that order is the order of
+  their adds and a simulation with such timers replays; open62541 ranks them by heap
+  address. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6073878926,
-  2026-10-09 03:49 UTC).
+  2026-10-09 03:49 UTC). The batch search of the copy goes in the order of the tree,
+  so whether a current-time timer batches does not depend on addresses (approved by
+  `laptop.architect-2`, 2026-10-09T05:27:21Z,
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074900634).

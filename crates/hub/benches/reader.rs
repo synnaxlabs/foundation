@@ -5,6 +5,7 @@
 //! and times these lines:
 //!
 //! - `timer`: an empty closure, the floor of each line's figure.
+//! - `now`: one `Writer::now`, before each write.
 //! - `first write`: the first `Writer::write` of a round, after the round before it
 //!   committed. It wakes the commit task.
 //! - `write`, the control: each later `Writer::write` of a round but the last. The
@@ -107,12 +108,14 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
     };
     let mut writer = hub.writer(config).await.expect("opens");
     let channels = [name("value")];
-    let mut latest = hub.reader(&channels, Mode::Latest).await.expect("opens");
-    let mut complete = hub.reader(&channels, Mode::Complete).await.expect("opens");
+    let mut latest_reader = hub.reader(&channels, Mode::Latest).await.expect("opens");
+    let mut complete_reader =
+        hub.reader(&channels, Mode::Complete).await.expect("opens");
     let count = Arc::new(Count::default());
     let waker = Waker::from(Arc::clone(&count));
     let mut timer = Line::new("timer", FRAMES);
     let mut lines = [
+        Line::new("now", FRAMES),
         Line::new("first write", 1),
         Line::new("write", FRAMES - 2),
         Line::new("write wake", 1),
@@ -122,13 +125,14 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
         Line::new("complete wait", FRAMES - 1),
     ];
     for round in 0..WARMUP + ROUNDS {
-        let [first, write, wake, latest_next, complete_next, grant, wait] = &mut lines;
+        let [now, first, write, wake, latest, complete, grant, wait] = &mut lines;
         for frame in 0..FRAMES {
             let draft = common::draft(&writer, stamp);
             stamp += 1;
             timer.add(table::timed(&ALLOCATOR, || ()).1);
+            now.add(table::timed(&ALLOCATOR, || writer.now()).1);
             if frame == FRAMES - 1 {
-                assert!(!poll(&mut latest, &waker), "the latest reader waits");
+                assert!(!poll(&mut latest_reader, &waker), "the latest reader waits");
                 assert_eq!(count.wakes(), round, "the poll wakes nothing");
             }
             let line = match frame {
@@ -137,25 +141,25 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
                 _ => &mut *write,
             };
             line.add(table::timed(&ALLOCATOR, || common::write(&mut writer, draft)).1);
-            latest_next.add(take(&mut latest));
+            latest.add(take(&mut latest_reader));
         }
         let woken = count.wakes();
         assert_eq!(woken, round + 1, "each round's last write wakes the reader");
         node.clock().sleep(SETTLE).await;
         for _ in 0..FRAMES {
-            complete_next.add(take(&mut complete));
+            complete.add(take(&mut complete_reader));
         }
-        grant.add(table::timed(&ALLOCATOR, || pending(&mut complete)).1);
+        grant.add(table::timed(&ALLOCATOR, || pending(&mut complete_reader)).1);
         for _ in 1..FRAMES {
-            wait.add(table::timed(&ALLOCATOR, || pending(&mut complete)).1);
+            wait.add(table::timed(&ALLOCATOR, || pending(&mut complete_reader)).1);
         }
         for line in std::iter::once(&mut timer).chain(&mut lines) {
             line.close(round >= WARMUP);
         }
     }
-    fill(&node, &mut writer, &mut complete, &mut stamp).await;
+    fill(&node, &mut writer, &mut complete_reader, &mut stamp).await;
     let mut lines = Vec::from(lines);
-    lines.push(lose(&mut writer, &mut latest, stamp));
+    lines.push(lose(&mut writer, &mut latest_reader, stamp));
     (timer, lines)
 }
 

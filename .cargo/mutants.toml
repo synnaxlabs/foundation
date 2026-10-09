@@ -4,6 +4,12 @@ all_features = true
 
 # Mutants that no test can catch, each with the reason.
 exclude_re = [
+  # A type name shows only in a panic of `connector_opcua::fuzz::decode`, which a
+  # correct open62541 never gives. `fuzz::tests` checks the names.
+  'crates/connector-opcua/src/ffi\.rs:.*replace DataType::name -> &.static str with',
+  # A larger size only allocates more for a decoded value, and no count sees it.
+  # `fuzz::tests` checks the sizes.
+  'crates/connector-opcua/src/ffi\.rs:.*replace & with (\||\^) in DataType::size',
   # Benchmarks ship in no binary; the run itself checks them.
   '^bench/',
   # `main` reads the arguments and calls a task. Each task has its own tests.
@@ -12,7 +18,7 @@ exclude_re = [
   # break in that job shows that it fails.
   'xtask/src/miri\.rs:.*(replace run ->| in run$)',
   # The build and the runs need the pinned nightly and cargo-fuzz, which no test has. A
-  # crash planted in a target must fail the fuzz CI job of #2100 (#2105).
+  # crash planted in a target must fail the `fuzz` job of `ci.yaml` (#2105).
   'xtask/src/fuzz\.rs:.*(replace run_one ->| in run$)',
   # Calls the GitHub API. The review workflow runs it on each PR: a round with findings
   # shows that it fails.
@@ -22,6 +28,12 @@ exclude_re = [
   'xtask/src/review\.rs:.*(replace gh ->| in gh$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
+  # Empty outside a build with the address sanitizer, which no CI job makes until
+  # #1912. In a C ASan build, `asan_reports_a_write_before_a_block` fails without it.
+  'crates/connector-opcua/src/alloc\.rs:.*replace poison with \(\)$',
+  # Empty outside a build with the address sanitizer. Only the Rust ASan build of
+  # #1912 reads the header in `block`, and its alloc tests fail without it.
+  'crates/connector-opcua/src/alloc\.rs:.*replace unpoison with \(\)$',
   # The fields of a UUIDv7 share no bit, so `^` gives the same bits as `|`.
   'crates/types/src/uuid\.rs:.*replace \| with \^ in v7$',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
@@ -58,6 +70,9 @@ exclude_re = [
   # `decode` show that `check` does.
   'crates/node/src/identity\.rs:.*replace check with \(\)',
   'crates/node/src/fuzz\.rs:.*replace identity with \(\)',
+  # No public call reads the entries that an open leaks. The unit test
+  # `an_open_keeps_no_entry_once_it_drops` reads them.
+  'crates/hub/src/serve\.rs:.*replace <impl Drop for Opening<._>>::drop with \(\)',
   # Only Miri sees the stub task that a skipped clear leaks, and the miri job runs
   # those tests.
   'crates/connector-ni/src/daqmx\.rs:.*replace <impl Drop for Task>::drop with \(\)',

@@ -302,7 +302,7 @@ impl Shared {
 
 /// Renews the hello at half of [`LIFE`] after each admission, until the session
 /// closes or a renewal fails. A renewal waits while the pool is full, and the node
-/// closes the session if the hello expires first. Keeps the error that ended it, and
+/// closes the session if the hello ends first. Keeps the error that ended it, and
 /// closes the session.
 async fn renew(
     shared: Rc<Shared>,

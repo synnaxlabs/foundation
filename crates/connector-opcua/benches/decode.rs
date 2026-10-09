@@ -23,7 +23,7 @@ struct Bytes {
 
 /// A `UA_NodeId` with a numeric identifier.
 #[repr(C, align(8))]
-struct NodeId {
+struct Key {
     namespace: u16,
     kind: u32,
     numeric: u32,
@@ -31,7 +31,7 @@ struct NodeId {
 }
 
 unsafe extern "C" {
-    fn UA_findDataType(id: *const NodeId) -> *const c_void;
+    fn UA_findDataType(key: *const Key) -> *const c_void;
     fn UA_new(kind: *const c_void) -> *mut c_void;
     fn UA_delete(value: *mut c_void, kind: *const c_void);
     fn UA_clear(value: *mut c_void, kind: *const c_void);
@@ -51,14 +51,14 @@ const DATA_CHANGE: u16 = 811;
 
 /// Gives the type of namespace 0 with the key `numeric`.
 fn kind(numeric: u32) -> *const c_void {
-    let id = NodeId {
+    let key = Key {
         namespace: 0,
         kind: 0,
         numeric,
         rest: [0; 3],
     };
-    // SAFETY: `id` is a valid numeric node key.
-    let kind = unsafe { UA_findDataType(&raw const id) };
+    // SAFETY: `key` is a valid numeric node key.
+    let kind = unsafe { UA_findDataType(&raw const key) };
     assert!(!kind.is_null(), "the copy holds the type {numeric}");
     kind
 }

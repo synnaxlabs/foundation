@@ -69,3 +69,4 @@
 | Code 19 of #340 6047519084: "the home had no memory for a reply" | HUB WIRE (6048960511; the too-large exception 6071260886) |
 | Code 19 in item 3 of #1946 6069496483: "the node had no memory for a reply or a request body" | HUB WIRE (6071260886), until #2012 (6071577074) |
 | "It is never less than the PTO base." of 6060065670 | PROBE GAP (6066780738): a probe of data in flight never comes before the PTO base; the client's probe in a dial with no data in flight keeps the release's rule |
+| "A stalled request holds its reservation until its stream or session ends; only an admitted subject can do this" of #1946 6069496483 | HUB LINK (#2121 6081223893): the share of a subject |

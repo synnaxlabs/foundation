@@ -193,15 +193,17 @@
   (`serve::Error::Removed`). Each names the key of the first channel of the session that
   was removed. Each per-call check of a session (`Writer::write`, `Session::take`,
   `Credit::grant`) reads only a cell that the session shares with the hub, never a map,
-  so its cost stays the same while other sessions end. The hub finds a session by its
-  home key, as the shard never gives a key twice. The home stops carrying an index only
-  when its key is not an index of the new definitions (`Shard::shed`, HOME SURFACE), and
-  carries it again when it returns. A key holds at most two slots (`channel::Slots`):
-  its slot as an index, which never changes, as the buffer keys its tails by slot (X42),
-  and its slot as a data channel, which the hub retires at each removal. So a channel
-  defined later at a key gets a new slot, and a reader takes no series written under the
-  old definition. An index continues its seq after its key was a data channel, also
-  after a restart (`laptop.architect`, 2026-10-09T01:25:59Z:
+  so its cost stays the same while other sessions end. The hub finds a local writer or
+  reader by its home key, as the shard never gives a key twice, a remote reader by a
+  scan of its keys, and a served open by a count of the opens. The home stops carrying
+  an index only when its key is not an index
+  of the new definitions (`Shard::shed`, HOME SURFACE), and carries it again when it
+  returns. A key holds at most two slots (`channel::Slots`): its slot as an index, which
+  never changes, as the buffer keys its tails by slot (X42), and its slot as a data
+  channel, which the hub retires at each removal. So a channel defined later at a key
+  gets a new slot, and a reader takes no series written under the old definition. An
+  index continues its seq after its key was a data channel, also after a restart
+  (`laptop.architect`, 2026-10-09T01:25:59Z:
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072361464). So a slot
   names one definition of a data channel, and the newest frame of an index stays the
   current value of each other channel on it (B4). Lost: a drop of the newest frame of
@@ -211,18 +213,29 @@
   frame in each session, a cost per frame for a change that comes at an apply
   (`laptop.architect`, 2026-10-09T00:41:53Z:
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071897947). A served
-  open checks each key as its message arrives, and checks all of them again after it
-  waits for the home of its index, as a call between two messages of its keys run, or
-  during the wait, can remove one. Each open checks its names or keys again after it
-  waits for the home, and then carries each index and opens with no `await` between.
-  When the check gives another result, the open waits again (`laptop.architect`,
+  open checks each key as its message arrives, and is a session on each channel whose
+  key it checked, from that check. A removal of one of them ends it at once, in the
+  call, with `serve::Error::Removed` of the first channel of the open that a call
+  removed, and code `UNKNOWN`: also a rename, a move to another index, another data type
+  at the same key, and a removal that a later call undoes. While it reads its keys and
+  while it waits for the home, the call wakes it, as a peer can send nothing more and a
+  removed index can get no home. It reads its removal before it checks each later key
+  and after the wait, and then carries the index and opens with no `await` between. So
+  its index changes only at a removal, and it waits once. A key that a call changes
+  before the open checks it is checked against the new definitions. A local open by name
+  checks its names again after it waits for the home, then carries each index and opens
+  with no `await` between, and when the check gives another index, it waits again
+  (`laptop.architect`, 2026-10-09T05:24:32Z:
+  https://github.com/synnaxlabs/foundation/issues/2112#issuecomment-6074871156;
   2026-10-09T00:55:16Z:
-  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072038723). The call
-  checks the definitions before it changes anything: two channels with one key or one
-  name, or a data channel whose index is not an index of the definitions, panic. This
-  changes "A known key or name panics", "The hub keeps the key, the sample type, and the
-  index of each", and "The PR that defines channels at each new spec decides what a
-  known, renamed, or removed channel does" in
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072038723). This
+  changes "After it waits for each index, the open (writer, reader, and served) runs
+  its check again" in the second comment: a served open reads its removal in place of
+  that check. The call checks the definitions before it changes anything: two channels
+  with one key or one name, or a data channel whose index is not an index of the
+  definitions, panic. This changes "A known key or name panics", "The hub keeps the
+  key, the sample type, and the index of each", and "The PR that defines channels at
+  each new spec decides what a known, renamed, or removed channel does" in
   https://github.com/synnaxlabs/foundation/issues/1917#issuecomment-6064624349. Lost: a
   session ends at its next call, under which a writer keeps the control of a removed
   index until it calls, and a reader that waits in `next` needs a wake anyway; and the
@@ -243,3 +256,24 @@
   no check per call. Lost: an end only at the home, which closes the session when the
   home's own definitions change, and which the reader may never see when the two nodes
   apply a spec at different times.
+  Amended (#2143) by `laptop.architect` (2026-10-09T13:40:05Z:
+  https://github.com/synnaxlabs/foundation/issues/2143#issuecomment-6082087720):
+  `Hub::writer` waits for the node's first mesh time (`clock::Reader::reach` on
+  `hub::Config::time`, the reader of the home), as it waits for a home, so a hub caller
+  never sees `home::writer::Error::Unsynced`. The open first resolves its channels, so
+  an unknown channel fails at once. It then waits, and only then checks each home in its
+  loop, so it sees a change of the definitions during the wait, and the wait never comes
+  between a home check and the carry. The home check of the open ends only after a pass
+  over each index that waited for no home, because a home can move while the open waits
+  for another (#2164) (PR #2161, rounds 1 to 3, approved by `laptop.architect`,
+  2026-10-09T17:50:57Z:
+  https://github.com/synnaxlabs/foundation/pull/2161#issuecomment-6086275768).
+  Supersedes "in the loop of `Writer::open`, before its second `resolve`" of item 1 of
+  https://github.com/synnaxlabs/foundation/issues/2143#issuecomment-6082087720.
+  A task gets mesh time from `writer::Writer::now`, which gives `home::Shard::now`
+  (HOME CLOCKS) and cannot fail, because mesh time stays once known. Lost:
+  `Hub::now() -> Option<Stamp>`, because each caller holds a writer and would `expect`
+  mesh time itself. Lost: a `hub::clock` export of `clock::Reader`, because each task
+  would compute the midpoint again, and a change of the home's rule would make its
+  stamps `Ahead`. Connector time sync adds what it needs with its own caller. Lost: a
+  writer that stamps the frame, because only the caller knows when it read each sample.

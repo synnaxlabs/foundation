@@ -106,6 +106,8 @@ pub(crate) struct File {
     durable: bool,
     /// The edits in the log that name the file.
     logged: u64,
+    /// Each normal path that an open made it at or a rename gave it.
+    names: BTreeSet<PathBuf>,
 }
 
 /// The durable bytes of a sector, its clean bytes in the cache, and its writes.
@@ -164,6 +166,28 @@ impl Disk {
         }
     }
 
+    /// Whether `path` has named file `inode`, which a hold keeps.
+    pub(crate) fn named_by(&self, inode: u64, path: &Path) -> bool {
+        match self.inodes.get(&inode) {
+            Some(Inode::File(file)) => file.names.contains(&normal(path)),
+            _ => unreachable!("invariant: held file {inode} is there"),
+        }
+    }
+
+    /// The directory of `path`, its last name, and the inode of that entry, if any.
+    /// `None` for an empty path.
+    fn lookup<'a>(&self, path: &'a Path) -> Result<Option<Entry<'a>>, Cause> {
+        let segments = segments(path);
+        let Some((name, parent)) = segments.split_last() else {
+            return Ok(None);
+        };
+        let dir = self.dir(parent)?;
+        let Inode::Dir(Dir { entries, .. }) = &self.inodes[&dir] else {
+            unreachable!("invariant: inode {dir} is a directory");
+        };
+        Ok(Some((dir, name, entries.get(*name).copied())))
+    }
+
     /// Directory `key`.
     fn dir_mut(&mut self, key: u64) -> &mut Dir {
         match self.inodes.get_mut(&key) {
@@ -217,6 +241,7 @@ impl Disk {
                     linked: true,
                     durable: false,
                     logged: 0,
+                    names: BTreeSet::from([normal(path)]),
                 };
                 self.inodes.insert(key, Inode::File(file));
                 self.edit(dir, vec![(name.into(), Some(key))]);
@@ -278,17 +303,11 @@ impl Disk {
     /// Unlinks the file at `path`. It stays while a hold, a durable entry, or a change
     /// in the log keeps it.
     pub(crate) fn remove(&mut self, path: &Path) -> Result<(), Cause> {
-        let (segments, slashed) = (segments(path), slashed(path));
-        let Some((name, parent)) = segments.split_last() else {
+        let Some((dir, name, found)) = self.lookup(path)? else {
             return Err(Cause::Code(DIRECTORY));
         };
-        let dir = self.dir(parent)?;
-        let inode = *self
-            .dir_mut(dir)
-            .entries
-            .get(*name)
-            .ok_or(Cause::NotFound)?;
-        self.named(inode, slashed)?.linked = false;
+        let inode = found.ok_or(Cause::NotFound)?;
+        self.named(inode, slashed(path))?.linked = false;
         self.edit(dir, vec![(name.into(), None)]);
         Ok(())
     }
@@ -319,6 +338,7 @@ impl Disk {
             return Err(Cause::Exists(to.to_path_buf()));
         }
         self.edit(dir, vec![(old.into(), None), (new.to_owned(), Some(inode))]);
+        self.file(inode).names.insert(normal(to));
         if let Some(path) = self.descriptors.get_mut(&handle.key) {
             *path = to.to_path_buf();
         }
@@ -328,15 +348,11 @@ impl Disk {
     /// The directory and the name of the entry at `path`, a path of a handle of file
     /// `inode`. `NotFound` when the entry no longer names it.
     fn entry<'a>(&self, inode: u64, path: &'a Path) -> Result<(u64, &'a OsStr), Cause> {
-        let segments = segments(path);
-        let (name, parent) = segments
-            .split_last()
-            .expect("invariant: a handle names a file");
-        let dir = self.dir(parent)?;
-        match &self.inodes[&dir] {
-            Inode::Dir(entries) if entries.entries.get(*name) == Some(&inode) => {
-                Ok((dir, name))
-            }
+        match self
+            .lookup(path)?
+            .expect("invariant: a handle names a file")
+        {
+            (dir, name, Some(found)) if found == inode => Ok((dir, name)),
             _ => Err(Cause::NotFound),
         }
     }
@@ -486,17 +502,13 @@ impl Disk {
     /// What an open of `path` by `mode` finds, with each fault it gives before it
     /// takes space.
     fn target<'a>(&self, path: &'a Path, mode: Mode) -> Result<Target<'a>, Cause> {
-        let (segments, slashed) = (segments(path), slashed(path));
-        let Some((name, parent)) = segments.split_last() else {
+        let slashed = slashed(path);
+        let Some((dir, name, found)) = self.lookup(path)? else {
             return Err(Cause::Code(DIRECTORY));
         };
-        let dir = self.dir(parent)?;
-        let Inode::Dir(Dir { entries, .. }) = &self.inodes[&dir] else {
-            unreachable!("invariant: inode {dir} is a directory");
-        };
-        let inode = match (entries.get(*name), mode) {
+        let inode = match (found, mode) {
             (_, Mode::Create { .. }) if slashed => return Err(Cause::Code(DIRECTORY)),
-            (Some(&inode), _) => inode,
+            (Some(inode), _) => inode,
             (None, Mode::Create { len }) => return Ok(Target::New { dir, name, len }),
             (None, Mode::Read | Mode::Write) => return Err(Cause::NotFound),
         };
@@ -814,6 +826,9 @@ fn within(start: u64, part: &Range<u64>) -> Range<usize> {
     index(part.start - start)..index(part.end - start)
 }
 
+/// A directory, a name in it, and the inode that the name gives, if any.
+type Entry<'a> = (u64, &'a OsStr, Option<u64>);
+
 /// The segments of a checked path: only its names, since `.` adds nothing.
 fn segments(path: &Path) -> Vec<&OsStr> {
     (path.components())
@@ -858,6 +873,7 @@ mod tests {
             linked: true,
             durable: false,
             logged: 0,
+            names: BTreeSet::new(),
         }
     }
 

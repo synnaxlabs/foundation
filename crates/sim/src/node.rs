@@ -211,6 +211,9 @@ impl Node {
     /// - A failure gives the code that Linux gives: 20 (`ENOTDIR`) for a path
     ///   through a file, 21 (`EISDIR`) for a file call on a directory, and 17
     ///   (`EEXIST`) for `create_dir` on a file.
+    /// - Each `Files` that it gives acts as a clone of one: a write open, a remove, or
+    ///   a rename from any of them waits for each call that a drop from any of them
+    ///   left to run.
     #[must_use]
     pub fn files(&self) -> env::files::Files {
         env::files::Files::new(self.0.clone())

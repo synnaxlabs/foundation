@@ -646,13 +646,12 @@ mod buffer {
         let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
         let assigned = Arc::new(Mutex::new(Vec::new()));
         let out = Arc::clone(&assigned);
-        let clock = host.clock();
         node.spawn(move |hub| async move {
             let names = ["c", "b", "a"];
             let channels = [3, 2, 1].map(super::hub::index);
             let channels: Vec<_> = names.into_iter().zip(channels).collect();
             super::hub::define(&hub, &channels);
-            let writer = super::hub::writer(&hub, &clock, &names).await;
+            let writer = super::hub::writer(&hub, &names).await;
             let entries = writer.set().entries();
             let slot = |key| entries.iter().find(|e| e.key == Key::from_u128(key));
             let slots = [3, 2, 1].map(|key| slot(key).expect("an entry").slot.get());
@@ -1897,27 +1896,15 @@ mod hub {
         );
     }
 
-    /// A writer on `channels`, opened again each millisecond of `clock` until the node
-    /// has mesh time.
-    pub(super) async fn writer(
-        hub: &Hub,
-        clock: &env::clock::Clock,
-        channels: &[&str],
-    ) -> Writer {
+    /// A writer on `channels`.
+    pub(super) async fn writer(hub: &Hub, channels: &[&str]) -> Writer {
         let config = writer::Config {
             subject: name("a"),
             authority: Authority(1),
             lease: None,
             channels: channels.iter().map(|n| name(n)).collect(),
         };
-        loop {
-            match hub.writer(config.clone()).await {
-                Err(writer::Error::Home(::hub::home::writer::Error::Unsynced)) => {
-                    clock.sleep(Span::MILLISECOND).await;
-                }
-                opened => return opened.expect("the writer opens"),
-            }
-        }
+        hub.writer(config).await.expect("the writer opens")
     }
 
     /// The position of channel `key` in `set`.
@@ -1974,17 +1961,16 @@ mod hub {
     #[test]
     fn a_task_writes_and_reads_through_the_hub_of_shard_0() {
         let mut sim = sim::Sim::new(sim::Config::default());
-        let (host, node) = node(&mut sim, 2);
+        let (_, node) = node(&mut sim, 2);
         let read = Arc::new(Mutex::new(None));
         let out = Arc::clone(&read);
-        let clock = host.clock();
         let probe = probe(&node);
         node.spawn(move |hub| async move {
             define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
             let reader = hub.reader(&[name("value")], Mode::Complete).await;
             let mut reader = reader.expect("the reader opens");
-            let mut writer = writer(&hub, &clock, &["value"]).await;
-            let stamp = WALL;
+            let mut writer = writer(&hub, &["value"]).await;
+            let stamp = writer.now().nanos();
             write(&mut writer, stamp, 7);
             let received = reader.next().await.expect("a frame");
             let samples = (samples(&received, 1), samples(&received, 2));
@@ -2174,7 +2160,6 @@ mod hub {
             let stop = Stop::default();
             let (open, pool, next, time) =
                 super::home::create_open(&host, &tasks, 0, stop.clone());
-            let monotonic = host.clock();
             let entropy = host.entropy();
             let spawn = tasks.clone();
             let hold = async move |home, guard| {
@@ -2189,7 +2174,7 @@ mod hub {
                     region: None,
                 });
                 define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
-                let writer = writer(&hub, &monotonic, &["value"]).await;
+                let writer = writer(&hub, &["value"]).await;
                 drop(guard);
                 drop((writer, hub));
             };
@@ -3485,12 +3470,11 @@ mod port {
             let node = start(host, founded(host));
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
-            let clock = host.clock();
             node.spawn(move |hub| async move {
                 let value = "plant.value".parse().unwrap();
                 let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
                 let mut reader = reader.expect("the reader opens");
-                let mut writer = writer(&hub, &clock, &["plant.value"]).await;
+                let mut writer = writer(&hub, &["plant.value"]).await;
                 write(&mut writer, stamp, 7);
                 let received = reader.next().await.expect("a frame");
                 *out.lock().unwrap() =
@@ -4774,7 +4758,7 @@ mod port {
             });
             peer_hub(&hosts[1], founding, move |hub, _, host| async move {
                 let clock = host.clock();
-                let mut writer = writer(&hub, &clock, &["plant.value"]).await;
+                let mut writer = writer(&hub, &["plant.value"]).await;
                 for at in 0..1000 {
                     write(&mut writer, super::super::hub::WALL + at, 7);
                     clock.sleep(Span::from_nanos(10_000_000)).await;
@@ -4817,7 +4801,7 @@ mod port {
                 peer_hub(&hosts[1], theirs, move |hub, _, host| async move {
                     if opened {
                         let clock = host.clock();
-                        let mut writer = writer(&hub, &clock, &["plant.value"]).await;
+                        let mut writer = writer(&hub, &["plant.value"]).await;
                         for at in 0..100 {
                             write(&mut writer, WALL + at, 7);
                             clock.sleep(Span::from_nanos(10_000_000)).await;
@@ -4909,7 +4893,7 @@ mod port {
             let node = start(&hosts[0], founding.clone());
             let clock = hosts[0].clock();
             node.spawn(move |hub| async move {
-                let mut writer = writer(&hub, &clock, &["plant.value"]).await;
+                let mut writer = writer(&hub, &["plant.value"]).await;
                 for at in 0..1000 {
                     write(&mut writer, super::super::hub::WALL + at, 7);
                     clock.sleep(Span::from_nanos(10_000_000)).await;

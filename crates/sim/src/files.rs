@@ -75,6 +75,17 @@ impl Call {
             _ => None,
         }
     }
+
+    /// The path whose file a call of `path` replaces, makes, or removes.
+    fn changes<'a>(&'a self, path: &'a Path) -> Option<&'a Path> {
+        match self {
+            Self::Open(Mode::Write | Mode::Create { .. })
+            | Self::Remove
+            | Self::Unlink { .. } => Some(path),
+            Self::Rename { to, .. } => Some(to),
+            _ => None,
+        }
+    }
 }
 
 /// The error of `operation` on `path`, which failed by `cause`.
@@ -223,7 +234,10 @@ impl Files {
                 before = disk.file(handle.inode).start_read(range, &mut self.rng);
             }
         }
-        let at = Monotonic(now.0.saturating_add(delay));
+        let mut at = Monotonic(now.0.saturating_add(delay));
+        if let Some(path) = call.changes(&path) {
+            at = at.max(self.wait_end(node, path));
+        }
         self.queue.insert((at, key));
         let flight = Flight {
             node,
@@ -237,6 +251,39 @@ impl Files {
         };
         self.flights.insert(key, flight);
         key
+    }
+
+    /// The time that a call of `node` that changes what `path` names ends no earlier
+    /// than: the end of the last call on `path` that a dropped future or handle left
+    /// to run, or of a remove through a handle, live or not, or zero. A call without a
+    /// handle is on its path. A call through a handle is on each path that has named
+    /// its file, and on the path of each dropped rename of the file, so it stays on
+    /// them after a rename or a remove.
+    fn wait_end(&self, node: usize, path: &Path) -> Monotonic {
+        let (path, disk) = (disk::normal(path), &self.disks[node]);
+        let pending: Vec<_> = (self.queue.iter().rev())
+            .map(|(at, key)| (*at, &self.flights[key]))
+            .filter(|(_, flight)| {
+                let unlink = matches!(flight.call, Call::Unlink { .. });
+                flight.node == node && (flight.dropped || unlink)
+            })
+            .collect();
+        let moved: BTreeSet<_> = (pending.iter())
+            .filter_map(|(_, flight)| match &flight.call {
+                Call::Rename { handle, to } if disk::normal(to) == path => {
+                    Some(handle.inode)
+                }
+                _ => None,
+            })
+            .collect();
+        (pending.iter())
+            .find(|(_, flight)| match flight.call.handle() {
+                Some(handle) => {
+                    moved.contains(&handle.inode) || disk.named_by(handle.inode, &path)
+                }
+                None => disk::normal(&flight.path) == path,
+            })
+            .map_or(Monotonic::default(), |(at, _)| *at)
     }
 
     /// The true time at which the first call in flight ends.

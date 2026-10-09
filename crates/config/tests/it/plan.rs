@@ -27,6 +27,14 @@ mod codec;
 
 const EDGE: &str = include_str!("../../../acceptance/tests/it/fixtures/edge.hcl");
 const INFLUX: &str = include_str!("../../../acceptance/tests/it/fixtures/influx.hcl");
+const CONTROL: &str = include_str!("../../../acceptance/tests/it/fixtures/control.hcl");
+/// The device fixtures of `acceptance`. Each ends with its connector block.
+const DEVICES: [&str; 4] = [
+    include_str!("../../../acceptance/tests/it/fixtures/opcua.hcl"),
+    include_str!("../../../acceptance/tests/it/fixtures/modbus_tcp.hcl"),
+    include_str!("../../../acceptance/tests/it/fixtures/modbus_rtu.hcl"),
+    include_str!("../../../acceptance/tests/it/fixtures/ni.hcl"),
+];
 
 /// One index, placed on `n`, and a data channel on it.
 const PLANT: &str = "\
@@ -61,6 +69,7 @@ impl Kind for Writer {
         Ok(Channels {
             reads: Vec::new(),
             writes: writes.clone(),
+            counts: Vec::new(),
         })
     }
 
@@ -264,6 +273,7 @@ impl Kind for Commander {
         Ok(Channels {
             reads: writes.clone(),
             writes: Vec::new(),
+            counts: Vec::new(),
         })
     }
 
@@ -308,6 +318,7 @@ impl Kind for Once {
         Ok(Channels {
             reads: Vec::new(),
             writes: vec![name("a.time")],
+            counts: Vec::new(),
         })
     }
 
@@ -433,6 +444,37 @@ fn plans_no_change_after_its_apply() {
     assert_eq!(plan.homes, homes);
     assert_eq!(plan.base.version, 1);
     assert_eq!(plan.base, spec.pointer);
+}
+
+/// A device fixture with the kind of its connector made a [`Writer`] of `dev.p`, the
+/// channel that a `read` block writes. A `command` block only reads, so `dev.q_time`
+/// needs the placement.
+#[test]
+fn places_each_index_of_a_device_fixture_at_its_connector() {
+    for device in DEVICES {
+        let connector = device.find("connector \"dev\"").expect("a connector");
+        let start = connector + device[connector..].find("kind = ").expect("a kind");
+        let end = start + device[start..].find('\n').expect("a line");
+        let text = format!(
+            "{}kind = \"writer\"\n  writes = [\"dev.p\"]{}",
+            &device[..start],
+            &device[end..]
+        );
+        let mut spec = Spec::create_empty();
+        let plan = spec
+            .plan(&[&text, CONTROL], &["edge"])
+            .expect("no problems");
+        let homes = BTreeMap::from([
+            (name("dev.q_time"), name("edge")),
+            (name("dev.time"), name("edge")),
+        ]);
+        assert_eq!(plan.homes, homes);
+        spec.apply(&plan);
+        let plan = spec
+            .plan(&[&text, CONTROL], &["edge"])
+            .expect("no problems");
+        assert_eq!(changes(&plan), []);
+    }
 }
 
 #[test]

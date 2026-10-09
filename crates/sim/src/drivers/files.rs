@@ -202,11 +202,9 @@ impl env::files::Descriptor for Descriptor {
             handle: self.handle,
         };
         let wait = self.node.submit(path, call, None);
-        Box::pin(async move {
-            let result = wait.await.result.map(drop);
-            Close(Some(*self)).await;
-            result
-        })
+        // The call holds the file until it ends, as the descriptor of `os` does.
+        drop(self);
+        Box::pin(async move { wait.await.result.map(drop) })
     }
 }
 

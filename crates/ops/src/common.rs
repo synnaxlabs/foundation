@@ -53,6 +53,7 @@ impl kind::Kind for Reader {
         Ok(Channels {
             reads: Vec::new(),
             writes: writes.clone(),
+            counts: Vec::new(),
         })
     }
 
