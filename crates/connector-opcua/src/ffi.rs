@@ -348,18 +348,17 @@ unsafe extern "C" {
     ) -> *mut ConnectionManager;
     pub(crate) fn shim_cm_free(cm: *mut ConnectionManager);
     pub(crate) fn shim_buffer_free(buffer: *mut Bytes);
-    pub(crate) fn shim_params_string(
-        map: *mut KeyValueMap,
+    pub(crate) fn shim_establish(
+        cm: *mut ConnectionManager,
+        id: usize,
+        application: *mut c_void,
+        context: *mut *mut c_void,
+        callback: ConnectionCallback,
         key: *const c_char,
-        value: *const u8,
+        address: *const u8,
         length: usize,
-    ) -> u32;
-    pub(crate) fn shim_params_uint16(
-        map: *mut KeyValueMap,
-        key: *const c_char,
-        value: u16,
-    ) -> u32;
-    pub(crate) fn UA_KeyValueMap_clear(map: *mut KeyValueMap);
+        port: *const u16,
+    );
 }
 
 /// Only tests use these.
@@ -501,6 +500,7 @@ pub(crate) mod test {
             value: *const c_void,
             kind: *const c_void,
         ) -> u32;
+        pub(crate) fn UA_KeyValueMap_clear(map: *mut KeyValueMap);
         pub(crate) fn UA_KeyValueMap_getScalar(
             map: *const KeyValueMap,
             key: QualifiedName,

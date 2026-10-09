@@ -20,12 +20,10 @@ use super::{LINGER, Manager, OPTIONS, READ_BYTES, SENDS};
 use crate::child;
 use crate::event::Loop;
 use crate::ffi::test::{
-    Members, NodeId, QualifiedName, UA_Client_disconnect, UA_KeyValueMap_getScalar,
-    UA_KeyValueMap_setScalar, UA_findDataType,
+    Members, NodeId, QualifiedName, UA_Client_disconnect, UA_KeyValueMap_clear,
+    UA_KeyValueMap_getScalar, UA_KeyValueMap_setScalar, UA_findDataType,
 };
-use crate::ffi::{
-    self, Bytes, ConnectionState, KeyValueMap, Status, UA_KeyValueMap_clear,
-};
+use crate::ffi::{self, Bytes, ConnectionState, KeyValueMap, Status};
 
 const PORT: u16 = 4840;
 

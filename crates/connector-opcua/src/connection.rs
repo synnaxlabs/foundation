@@ -6,10 +6,10 @@
 
 use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::{BTreeMap, VecDeque};
-use std::ffi::{CStr, c_void};
+use std::ffi::c_void;
 use std::fmt;
 use std::future::poll_fn;
-use std::io::IoSlice;
+use std::io::{IoSlice, Write as _};
 use std::net::SocketAddr;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
@@ -429,23 +429,21 @@ impl State {
             .expect(
                 "invariant: a listen connection keeps its callback while it listens",
             );
-        let params = Params::remote(tcp.peer());
+        let peer = tcp.peer();
         let id = self.insert(callback, Stream::Open(tcp));
-        self.establish(id, &params);
+        self.establish(id, Params::Remote(peer));
         self.wake(id);
     }
 
     /// Calls the connection callback of `id` with `state` and `message`.
     fn call(&self, id: usize, state: ffi::ConnectionState, message: &mut [u8]) {
-        self.callback(id)
-            .call(self.raw.get(), id, state, &Params::NONE, message);
+        self.callback(id).call(self.raw.get(), id, state, message);
     }
 
     /// Calls the connection callback of `id` with `ESTABLISHED`, `params`, and no
     /// message, as the first callback of a connection that a listen made.
-    fn establish(&self, id: usize, params: &Params) {
-        self.callback(id)
-            .call(self.raw.get(), id, ffi::ESTABLISHED, params, &mut []);
+    fn establish(&self, id: usize, params: Params) {
+        self.callback(id).establish(self.raw.get(), id, params);
     }
 
     /// Gives the callback of `id`.
@@ -479,15 +477,49 @@ struct Callback {
 }
 
 impl Callback {
+    /// Calls the callback with `ESTABLISHED`, `params`, and no message. It
+    /// allocates nothing.
+    fn establish(&self, cm: *mut ffi::ConnectionManager, id: usize, params: Params) {
+        let (key, address, port) = match params {
+            Params::Listen(local) => {
+                (c"listen-address", local.ip(), Some(local.port()))
+            }
+            Params::Remote(peer) => (c"remote-address", peer.ip(), None),
+        };
+        let mut text = [0; ADDRESS_BYTES];
+        let mut cursor = &mut text[..];
+        write!(cursor, "{address}").expect("invariant: an IP address fits");
+        let length = ADDRESS_BYTES - cursor.len();
+        let length = if address.is_unspecified() { 0 } else { length };
+        // SAFETY: open62541 gave the callback with its application, and C reads the
+        // key and the text only during the call.
+        unsafe {
+            ffi::shim_establish(
+                cm,
+                id,
+                self.application,
+                self.context.as_ptr(),
+                self.function,
+                key.as_ptr(),
+                text.as_ptr(),
+                length,
+                port.as_ref().map_or(ptr::null(), ptr::from_ref),
+            );
+        }
+    }
+
     /// Calls the callback, which may write `context`.
     fn call(
         &self,
         cm: *mut ffi::ConnectionManager,
         id: usize,
         state: ffi::ConnectionState,
-        params: &Params,
         message: &mut [u8],
     ) {
+        let params = ffi::KeyValueMap {
+            size: 0,
+            map: ptr::null_mut(),
+        };
         let message = Bytes {
             length: message.len(),
             data: if message.is_empty() {
@@ -505,70 +537,28 @@ impl Callback {
                 self.application,
                 self.context.as_ptr(),
                 state,
-                &raw const params.0,
+                &raw const params,
                 message,
             );
         }
     }
 }
 
-/// The parameters of a callback, in a map that C allocates.
-struct Params(ffi::KeyValueMap);
-
-impl Params {
-    const NONE: Self = Self(ffi::KeyValueMap {
-        size: 0,
-        map: ptr::null_mut(),
-    });
-
-    /// The `listen-address` and `listen-port` of `local`, from which a server makes
-    /// its discovery URL. None when `local` is on each address, which names no host.
-    fn listen(local: SocketAddr) -> Self {
-        let mut params = Self::NONE;
-        if !local.ip().is_unspecified() {
-            params.string(c"listen-address", &local.ip().to_string());
-            // SAFETY: the map is one that C allocates, and the key is a C string.
-            let status = unsafe {
-                ffi::shim_params_uint16(
-                    &raw mut params.0,
-                    c"listen-port".as_ptr(),
-                    local.port(),
-                )
-            };
-            assert_eq!(Status(status), Status::GOOD, "a C allocation failed");
-        }
-        params
-    }
-
-    /// The `remote-address` of `peer`, which a server gives its channel.
-    fn remote(peer: SocketAddr) -> Self {
-        let mut params = Self::NONE;
-        params.string(c"remote-address", &peer.ip().to_string());
-        params
-    }
-
-    fn string(&mut self, key: &CStr, value: &str) {
-        // SAFETY: as in `listen`; C copies the `len` bytes of `value`.
-        let status = unsafe {
-            ffi::shim_params_string(
-                &raw mut self.0,
-                key.as_ptr(),
-                value.as_ptr(),
-                value.len(),
-            )
-        };
-        assert_eq!(Status(status), Status::GOOD, "a C allocation failed");
-    }
+/// The parameters of the first callback of a connection that a listen made, as the
+/// POSIX manager gives them.
+#[derive(Clone, Copy)]
+enum Params {
+    /// `listen-address` and `listen-port` of the address of a listen, from which a
+    /// server makes its discovery URL. None when the listen is on each address,
+    /// which names no host.
+    Listen(SocketAddr),
+    /// `remote-address` of an accepted stream from the address, which a server
+    /// gives its channel.
+    Remote(SocketAddr),
 }
 
-impl Drop for Params {
-    fn drop(&mut self) {
-        if self.0.size > 0 {
-            // SAFETY: C allocated the map.
-            unsafe { ffi::UA_KeyValueMap_clear(&raw mut self.0) };
-        }
-    }
-}
+/// The longest text of an IP address: an IPv6 address that holds an IPv4 address.
+const ADDRESS_BYTES: usize = 45;
 
 enum Stream {
     Connecting(Pin<Box<dyn Future<Output = Result<Tcp, net::Error>>>>),
@@ -863,7 +853,7 @@ unsafe extern "C" fn listen(
         function: callback,
     };
     let id = state.insert(callback, Stream::Listening(listener));
-    state.establish(id, &Params::listen(local));
+    state.establish(id, Params::Listen(local));
     state.wake(id);
     Status::GOOD.0
 }
@@ -930,7 +920,7 @@ unsafe extern "C" fn closed(application: *mut c_void, _: *mut c_void) {
             .get_mut(&id)
             .and_then(|c| c.callback.take())
             .expect("invariant: a connection keeps its callback until its `CLOSING`");
-        callback.call(state.raw.get(), id, ffi::CLOSING, &Params::NONE, &mut []);
+        callback.call(state.raw.get(), id, ffi::CLOSING, &mut []);
         state.wake(id);
     }
 }

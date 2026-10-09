@@ -529,19 +529,30 @@ void shim_cm_free(UA_ConnectionManager *cm) {
     UA_free(cm);
 }
 
-/* Sets `key` of `map` to a copy of the `length` bytes at `value`, as a string. */
-UA_StatusCode shim_params_string(UA_KeyValueMap *map, const char *key,
-                                 const UA_Byte *value, size_t length) {
-    UA_String text = {length, (UA_Byte *)(uintptr_t)value};
-    return UA_KeyValueMap_setScalar(map, UA_QUALIFIEDNAME(0, (char *)(uintptr_t)key),
-                                    &text, &UA_TYPES[UA_TYPES_STRING]);
-}
-
-/* Sets `key` of `map` to `value`. */
-UA_StatusCode shim_params_uint16(UA_KeyValueMap *map, const char *key,
-                                 UA_UInt16 value) {
-    return UA_KeyValueMap_setScalar(map, UA_QUALIFIEDNAME(0, (char *)(uintptr_t)key),
-                                    &value, &UA_TYPES[UA_TYPES_UINT16]);
+/* Calls `callback` with `ESTABLISHED`, no message, and the params `key`, a string of
+ * the `length` bytes at `address`, and `listen-port` when `port` is not NULL. A
+ * `length` of 0 gives no params. The params live on the stack. */
+void shim_establish(UA_ConnectionManager *cm, uintptr_t id, void *application,
+                    void **context, UA_ConnectionManager_connectionCallback callback,
+                    const char *key, const UA_Byte *address, size_t length,
+                    const UA_UInt16 *port) {
+    UA_String text = {length, (UA_Byte *)(uintptr_t)address};
+    UA_KeyValuePair pairs[2];
+    UA_KeyValueMap params = {0, pairs};
+    if(length > 0) {
+        pairs[0].key = UA_QUALIFIEDNAME(0, (char *)(uintptr_t)key);
+        UA_Variant_setScalar(&pairs[0].value, &text, &UA_TYPES[UA_TYPES_STRING]);
+        params.mapSize = 1;
+        if(port) {
+            pairs[1].key = UA_QUALIFIEDNAME(0, "listen-port");
+            UA_Variant_setScalar(&pairs[1].value, (void *)(uintptr_t)port,
+                                 &UA_TYPES[UA_TYPES_UINT16]);
+            params.mapSize = 2;
+        }
+    }
+    UA_ByteString message = UA_BYTESTRING_NULL;
+    callback(cm, id, application, context, UA_CONNECTIONSTATE_ESTABLISHED, &params,
+             message);
 }
 
 /* Gives a client on `el`, or NULL on a failure. */
