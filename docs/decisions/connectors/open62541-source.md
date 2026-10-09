@@ -181,8 +181,10 @@
   indirect call of `shim.c` that the check reads runs the cast callbacks of the copy.
   The flags follow `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018,
-  2026-10-08 02:24 UTC, and the `function` check:
+  2026-10-08 02:24 UTC, and the `function` check, 2026-10-09 17:35 UTC:
   https://github.com/synnaxlabs/foundation/pull/2165#issuecomment-6086019787).
+  Supersedes, for the `function` check, the C flags of rule 1 of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018.
   The copy builds with `UA_MULTITHREADING` 0, so it takes no `UA_LOCK` and links no
   `pthread_mutex_*` symbol: each server and each client runs on one thread. Level 0
   alone makes `UA_THREAD_LOCAL` empty, so two threads would share `UA_rng` and the
