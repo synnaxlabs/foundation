@@ -375,6 +375,16 @@ pub(crate) mod test {
     #[repr(C)]
     pub(crate) struct Server([u8; 0]);
 
+    /// `UA_LifecycleState` of a server.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(transparent)]
+    pub(crate) struct Lifecycle(pub(crate) c_int);
+
+    impl Lifecycle {
+        pub(crate) const STOPPED: Self = Self(0);
+        pub(crate) const STOPPING: Self = Self(2);
+    }
+
     /// The members of `UA_ConnectionManager`. `shim.c` asserts the same size and
     /// offsets.
     #[repr(C)]
@@ -522,7 +532,7 @@ pub(crate) mod test {
         pub(crate) fn UA_Server_run_startup(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_run_shutdown(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;
-        pub(crate) fn UA_Server_getLifecycleState(server: *mut Server) -> c_int;
+        pub(crate) fn UA_Server_getLifecycleState(server: *mut Server) -> Lifecycle;
         pub(crate) fn shim_server_discovery_url(
             server: *mut Server,
             index: usize,

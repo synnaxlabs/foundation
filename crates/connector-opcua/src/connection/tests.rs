@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
 use std::convert::Infallible;
-use std::ffi::{CStr, CString, c_char, c_int, c_void};
+use std::ffi::{CStr, CString, c_char, c_void};
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -44,10 +44,6 @@ fn sends(count: usize, length: usize) -> Vec<Vec<u8>> {
 const BOOLEAN: u32 = 1;
 const UINT16: u32 = 5;
 const STRING: u32 = 12;
-
-/// The lifecycle states of a server.
-const STOPPED: c_int = 0;
-const STOPPING: c_int = 2;
 
 /// A value of the parameters of `openConnection`.
 #[derive(Clone, Copy)]
@@ -2447,12 +2443,12 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
             assert_eq!(status, Status::GOOD);
             // SAFETY: the server lives.
             let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
-            assert_eq!(state, STOPPING);
+            assert_eq!(state, ffi::test::Lifecycle::STOPPING);
             side.drive(Span::SECOND).await;
             assert_eq!(side.connections(), 0);
             // SAFETY: the server lives.
             let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
-            assert_eq!(state, STOPPED);
+            assert_eq!(state, ffi::test::Lifecycle::STOPPED);
             // SAFETY: the server is stopped.
             let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
             assert_eq!(status, Status::GOOD);
