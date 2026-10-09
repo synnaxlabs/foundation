@@ -96,7 +96,7 @@ logic that a simulated test can reach.
   adds or changes an arm that a target reaches adds an input that reaches it, and never
   defers it: a fuzz input needs no approval.
 - Each PR runs every target for 60 seconds. A nightly schedule runs them longer on
-  the ARM runner, which is idle at night.
+  the ARM runner.
 - `cargo xtask fuzz [seconds]` runs every target on the pinned nightly, with its
   inputs in `oracles/fuzz/`.
 

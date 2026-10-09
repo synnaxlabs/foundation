@@ -31,7 +31,7 @@ pub(crate) fn packages(metadata: &Value) -> Result<Vec<select::Package>, String>
 /// It uses rustup and the nightly in `rust-toolchain-nightly`. It fails when a crate
 /// fails or runs no tests.
 pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
-    let nightly = crate::nightly(root).map_err(|e| vec![e])?;
+    let nightly = crate::nightly::Toolchain::read(root).map_err(|e| vec![e])?;
     let metadata = crate::metadata(root).map_err(|e| vec![e])?;
     let packages = packages(&metadata).map_err(|e| vec![e])?;
     if packages.is_empty() {
@@ -68,7 +68,7 @@ pub(crate) fn run(root: &Path) -> Result<(), Vec<String>> {
 
 /// The command that runs Miri with `flags` on `package`, on the toolchain `nightly`.
 fn command(
-    nightly: &crate::Nightly,
+    nightly: &crate::nightly::Toolchain,
     package: &select::Package,
     flags: &str,
 ) -> Command {
@@ -113,10 +113,7 @@ mod tests {
             id: "path+file:///w/crates/model#0.0.0".to_string(),
             name: "model".to_string(),
         };
-        let nightly = crate::Nightly {
-            root: "/w".into(),
-            pin: "nightly-x".to_string(),
-        };
+        let nightly = crate::nightly::Toolchain::new("/w", "nightly-x");
         let command = command(&nightly, &package, PASSES[0]);
         let args: Vec<_> = command.get_args().collect();
         assert_eq!(

@@ -10,13 +10,14 @@ mod fuzz;
 mod globals;
 mod map;
 mod miri;
+mod nightly;
 mod open62541;
 mod oracles;
 mod review;
 mod select;
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, ExitCode};
 
 use serde_json::Value;
@@ -153,36 +154,6 @@ fn metadata_with(dir: &Path, flags: &[&str]) -> Result<Value, String> {
     serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata: {e}"))
 }
 
-/// The toolchain in `rust-toolchain-nightly` of a workspace, which Miri and cargo-fuzz
-/// use.
-struct Nightly {
-    root: PathBuf,
-    pin: String,
-}
-
-impl Nightly {
-    /// A command that runs cargo of this toolchain through rustup, at the workspace
-    /// root.
-    fn cargo(&self) -> Command {
-        let mut command = Command::new("rustup");
-        command
-            .current_dir(&self.root)
-            .args(["run", &self.pin, "cargo"]);
-        command
-    }
-}
-
-/// The toolchain in `rust-toolchain-nightly` of the workspace at `root`.
-fn nightly(root: &Path) -> Result<Nightly, String> {
-    let pin = root.join("rust-toolchain-nightly");
-    let nightly =
-        std::fs::read_to_string(&pin).map_err(|e| format!("{}: {e}", pin.display()))?;
-    Ok(Nightly {
-        root: root.to_path_buf(),
-        pin: nightly.trim().to_string(),
-    })
-}
-
 /// A command that runs the cargo that runs this task.
 fn cargo() -> Command {
     #[expect(clippy::disallowed_methods, reason = "cargo sets CARGO for its tools")]
@@ -192,34 +163,47 @@ fn cargo() -> Command {
 
 /// The test workspace in `xtask/fixture`.
 #[cfg(test)]
-fn fixture() -> PathBuf {
+fn fixture() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture")
+}
+
+#[cfg(test)]
+mod common {
+    use std::os::unix::process::ExitStatusExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{ExitStatus, Output};
+
+    /// A new folder named `name` in the temp folder whose `rust-toolchain-nightly`
+    /// pins the installed toolchain of `rust-toolchain.toml`. The caller removes it.
+    pub(crate) fn create_stable_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let toolchain = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../rust-toolchain.toml"),
+        )
+        .unwrap();
+        let channel = toolchain
+            .lines()
+            .find_map(|line| line.strip_prefix("channel = "))
+            .unwrap()
+            .trim_matches('"');
+        std::fs::write(root.join("rust-toolchain-nightly"), channel).unwrap();
+        root
+    }
+
+    /// An output of a process that exits with `code`.
+    pub(crate) fn output(code: i32, stdout: &str, stderr: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(code << 8),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn nightly_runs_cargo_of_the_pin_at_the_root() {
-        let cargo = nightly(&fixture()).unwrap().cargo();
-        let args: Vec<_> = cargo.get_args().collect();
-        assert_eq!(cargo.get_program(), "rustup");
-        assert_eq!(args, ["run", "nightly-2000-01-01", "cargo"]);
-        assert_eq!(cargo.get_current_dir(), Some(fixture().as_path()));
-    }
-
-    #[test]
-    fn nightly_names_a_missing_pin() {
-        let root = fixture().join("stale");
-        assert_eq!(
-            nightly(&root).err(),
-            Some(format!(
-                "{}: No such file or directory (os error 2)",
-                root.join("rust-toolchain-nightly").display()
-            ))
-        );
-    }
 
     #[test]
     fn layers_reports_crates_missing_from_the_map() {

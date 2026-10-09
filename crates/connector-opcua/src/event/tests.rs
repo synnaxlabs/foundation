@@ -126,6 +126,11 @@ impl Fixture {
         (status == Status::GOOD).then_some(key).ok_or(status)
     }
 
+    fn remove(&self, key: u64) {
+        // SAFETY: the member takes its own loop and a key that it gave.
+        unsafe { (self.members().remove_timer)(self.events.raw(), key) };
+    }
+
     /// Changes the timer of `key`, timed from `base` when given, and gives the
     /// status.
     fn modify(
@@ -345,6 +350,84 @@ fn a_base_time_timer_keeps_its_phase_after_a_missed_cycle() {
     assert_eq!(f.events.next(), Some(at(start, ms(30))));
 }
 
+/// open62541 ranks timers with equal due times by address, so the second set takes the
+/// memory of the first, which the allocator gives back in another order.
+#[test]
+fn timers_due_at_one_time_run_in_the_order_of_their_adds() {
+    let mut f = Fixture::new();
+    f.start();
+    let order: Vec<usize> = (1..=32).collect();
+    for _ in 0..2 {
+        let keys: Vec<u64> = order
+            .iter()
+            .map(|&n| f.add(n, 10.0, ffi::BASE_TIME))
+            .collect();
+        for _ in 0..3 {
+            f.advance(ms(10));
+            f.run();
+            assert_eq!(f.ran(), order);
+        }
+        for key in keys {
+            f.remove(key);
+        }
+    }
+}
+
+/// A current-time timer due within a quarter of its interval of one with the same
+/// interval runs with it, bounds included. No assert reads the order of the run, since
+/// no code may depend on the order of a tie.
+#[test]
+fn a_current_time_timer_runs_with_one_of_its_interval_due_near_it() {
+    for (due_ms, next_ms, ran) in [
+        (34, 34, vec![1, 2]),
+        (35, 60, vec![1, 2]),
+        (85, 60, vec![1, 2]),
+        (86, 60, vec![1]),
+    ] {
+        let mut f = Fixture::new();
+        f.start();
+        let start = f.now();
+        let now = i64::try_from(start.0 / 100).unwrap();
+        for (n, due_ms) in [(1, 60), (2, due_ms)] {
+            let base = Some(now + due_ms * 10_000);
+            f.try_timer(record, number(n), 100.0, base, ffi::CURRENT_TIME)
+                .expect("a timer of 100 ms");
+        }
+        let due = Some(at(start, ms(next_ms)));
+        assert_eq!(f.events.next(), due, "timer 2 due at {due_ms} ms");
+        f.advance(ms(60));
+        f.run();
+        assert_eq!(sorted(f.ran()), ran, "timer 2 due at {due_ms} ms");
+    }
+}
+
+/// open62541 searches the window of a batch in the wrong direction, so whether a timer
+/// batches hangs on the shape of the timer tree, which the other timers and their
+/// addresses set.
+#[test]
+fn a_batch_does_not_hang_on_the_other_timers() {
+    let mut kept = Vec::new();
+    for others in 0..64_u32 {
+        let mut f = Fixture::new();
+        f.start();
+        for (n, i) in (100..).zip(0..others / 8) {
+            f.add(n, 10.0 + f64::from(i), ffi::ONCE);
+        }
+        for (n, i) in (200..).zip(0..others % 8) {
+            f.add(n, 10_000.0 * (1.0 + f64::from(i)), ffi::ONCE);
+        }
+        f.add(1, 100.0, ffi::CURRENT_TIME);
+        f.advance(ms(5));
+        f.add(2, 100.0, ffi::CURRENT_TIME);
+        f.advance(ms(95));
+        f.run();
+        let ran = f.ran().into_iter().filter(|&n| n <= 2).collect();
+        assert_eq!(sorted(ran), [1, 2], "with {others} other timers");
+        // Held, so each pass gets new heap addresses.
+        kept.push(f);
+    }
+}
+
 #[test]
 fn a_timer_changes_its_interval_and_goes() {
     let mut f = Fixture::new();
@@ -354,8 +437,7 @@ fn a_timer_changes_its_interval_and_goes() {
     f.advance(ms(5));
     assert_eq!(f.modify(key, 50.0, None, ffi::ONCE), Status::GOOD);
     assert_eq!(f.events.next(), Some(at(start, ms(55))));
-    // SAFETY: as above.
-    unsafe { (f.members().remove_timer)(f.events.raw(), key) };
+    f.remove(key);
     assert_eq!(f.events.next(), None);
     f.advance(ms(1000));
     f.run();
@@ -450,7 +532,7 @@ fn a_repeated_timer_due_within_1_s_of_the_last_date_after_a_run_is_refused() {
         }
     }
     let outside = repeated_before_the_last_date(2.0e7);
-    // Timers due at one time run in an order that the heap sets.
+    // Distinct due times, since no code may depend on the order of a tie.
     for (n, policy, base) in [(1, ffi::CURRENT_TIME, 0), (2, ffi::BASE_TIME, 10_000)] {
         let base = Some(now + 30_000_000 + base);
         f.try_timer(record, number(n), outside, base, policy)
@@ -809,6 +891,11 @@ fn a_timed_callback_at_a_past_date_runs_at_the_next_run() {
     assert_eq!(runs.get(), 1);
     // SAFETY: the client lives, and the loop outlives it.
     unsafe { ffi::UA_Client_delete(client) };
+}
+
+fn sorted(mut ran: Vec<usize>) -> Vec<usize> {
+    ran.sort_unstable();
+    ran
 }
 
 fn ms(n: i64) -> Span {

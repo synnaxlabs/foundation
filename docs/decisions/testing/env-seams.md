@@ -80,9 +80,30 @@
   goes out alone; that is the only GSO flag (`laptop.architect-2`, 2026-10-08 21:15
   UTC, https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130).
   Supersedes the store of 1 on `EIO` or `EINVAL` of item 1 of
-  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541. Each
-  half has its own `dup` of the socket. The receiver registers for readable at its
-  first poll, in a field of its driver (`laptop.architect-2`, 2026-10-08 19:12 UTC,
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541. After
+  `Pending` partway through a transmit sent one datagram at a time, the `os` sender
+  keeps the index of the next datagram, so the retry with the same transmit sends only
+  the datagrams that did not go out (`laptop.architect-2`, 2026-10-09 07:15 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6076288463). A
+  transmit in flight when GSO turns off is the exception: its retry can send again
+  datagrams that went out. A different transmit in place of the one that got
+  `Pending` can lose its first datagrams (`laptop.architect-2`, 2026-10-09 13:18 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081691897).
+  Supersedes the counts of
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081443711
+  (2026-10-09 13:03 UTC) and
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081528612
+  (2026-10-09 13:09 UTC), the count of
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081197695
+  (2026-10-09 12:48 UTC), and "at most once for each socket" of
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6076288463
+  (2026-10-09 07:15 UTC) and
+  https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130
+  (2026-10-08 21:15 UTC) (`laptop.architect-2`, 2026-10-09 13:43 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6082138285).
+  Each half has its own `dup` of the socket. The receiver registers for readable
+  at its first poll, in a field of its driver (`laptop.architect-2`, 2026-10-08
+  19:12 UTC,
   https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
   `os` receiver's driver has no `Mutex` of its own (item 2 of `laptop.architect-2`,
   2026-10-08 18:27 UTC,

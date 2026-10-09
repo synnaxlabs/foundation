@@ -15,6 +15,8 @@ use tokio::sync::Notify;
 use tokio::time::timeout;
 
 #[cfg(target_os = "linux")]
+mod full;
+#[cfg(target_os = "linux")]
 #[path = "../../common/gso.rs"]
 mod gso;
 
@@ -274,6 +276,30 @@ fn a_batch_arrives_when_the_kernel_refuses_gso() {
                     "{round} batch"
                 );
             }
+        }
+    });
+}
+
+/// Each batch sent one datagram at a time arrives whole, also after the first.
+#[test]
+#[cfg(target_os = "linux")]
+fn each_batch_sent_one_datagram_at_a_time_arrives_whole() {
+    on_thread("udp-batches", || async {
+        let net = net();
+        let (mut sender, _) = loopback(&net);
+        gso::refuse(sender.local());
+        let (_, mut receiver) = loopback(&net);
+        let batch = Transmit {
+            segment: NonZeroUsize::new(2),
+            ..transmit(receiver.local(), b"abcd")
+        };
+        for round in ["first", "second", "third"] {
+            assert_eq!(send(&mut sender, &batch).await, Ok(()), "{round} batch");
+            let contents: Vec<_> = (receive(&mut receiver, 2).await)
+                .into_iter()
+                .map(|datagram| datagram.contents)
+                .collect();
+            assert_eq!(contents, [b"ab", b"cd"], "{round} batch");
         }
     });
 }
