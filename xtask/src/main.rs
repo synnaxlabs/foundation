@@ -85,7 +85,7 @@ fn layers(root: &Path) -> Result<(), Vec<String>> {
         if name == "xtask" || bench {
             continue;
         }
-        problems.extend(sim::check(package));
+        problems.extend(sim::check(package).unwrap_or_else(|e| vec![e]));
         let Some(entry) = map::find(name) else {
             problems.push(format!(
                 "crate `{name}` is not in the crate map. Add it to xtask/src/map.rs \
