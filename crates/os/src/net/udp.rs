@@ -189,8 +189,7 @@ struct Writer {
     full: Option<AsyncFd<RawFd>>,
     /// The index of the next datagram of a transmit that got `Pending`, else 0. A send
     /// that its caller drops while it waits leaves it set. A different transmit in its
-    /// place can lose its first datagrams, at most as many as went out before the
-    /// `Pending`.
+    /// place can lose its first datagrams.
     next: usize,
     fd: UdpSocket,
 }

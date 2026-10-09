@@ -92,10 +92,10 @@ impl Sender {
 
     /// Sends every datagram of `transmit`. It is pending while the OS send buffer is
     /// full. After `Pending`, call it again with the same transmit: it sends only the
-    /// datagrams that did not go out. Once for each socket, on the transmit that turns
-    /// GSO off, the retry can send again datagrams that went out. A different transmit
-    /// in its place can lose its first datagrams, at most as many as went out before
-    /// the `Pending`. Some datagrams may have gone out before an error.
+    /// datagrams that did not go out, except for a transmit in flight when GSO turns
+    /// off, whose retry can send again datagrams that went out. A different transmit in
+    /// its place can lose its first datagrams. Some datagrams may have gone out before
+    /// an error.
     ///
     /// # Errors
     ///
