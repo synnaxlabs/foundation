@@ -57,8 +57,8 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 
 /// Frames per round. A round fits the window of a complete reader.
 const FRAMES: usize = 64;
-/// `WARMUP + ROUNDS` commits, under the 341 of `FRAMES` frames that the ring of
-/// `shard::shard` holds.
+/// `WARMUP + ROUNDS` commits, under the 341 of `FRAMES` frames that a ring of
+/// `shard::AREA` holds.
 const WARMUP: usize = 20;
 const ROUNDS: usize = 200;
 

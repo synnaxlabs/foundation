@@ -12,7 +12,7 @@ use types::frame::key_set::{Group, KeySet};
 use types::frame::{Draft, Form, Label, Path};
 use types::sample::{Scalar, Type};
 
-use crate::shard::{name, shard};
+use crate::shard::{AREA, name, shard};
 
 /// The shard, its readers, and the keys of `woken`.
 pub(crate) struct Woken {
@@ -36,7 +36,7 @@ impl Woken {
         tasks: Tasks,
         indexes: usize,
     ) -> Self {
-        let (mut shard, mut interner, stamp, _) = shard(node, tasks).await;
+        let (mut shard, mut interner, stamp, _) = shard(node, tasks, AREA).await;
         let key = |n| channel::Key::from_u128(u128::try_from(n).expect("few"));
         let channels: Vec<_> = (0..indexes)
             .map(|n| {

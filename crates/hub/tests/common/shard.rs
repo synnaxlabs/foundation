@@ -11,16 +11,21 @@ use types::name::Name;
 use types::time::{Span, Stamp};
 
 const COMMIT: Span = Span::from_nanos(10_000_000);
+/// The area of a ring that holds the runs of the tests and of the `reader` and `woken`
+/// benches. A commit takes whole 4 KiB blocks (one for a frame, three for 64), and
+/// nothing frees the ring until #160, so a run fills it at 1023 one-frame commits.
+pub(crate) const AREA: u64 = 1 << 22;
 
 pub(crate) fn name(name: &str) -> Name {
     name.parse().expect("a valid name")
 }
 
-/// A home shard on a new ring of `node`, its interner, the node's mesh time now once
-/// it has one, and the reader of that time.
+/// A home shard on a new ring of `area` bytes of `node`, its interner, the node's mesh
+/// time now once it has one, and the reader of that time.
 pub(crate) async fn shard(
     node: &sim::node::Node,
     tasks: Tasks,
+    area: u64,
 ) -> (home::Shard, Interner, i64, clock::Reader) {
     let config = block::Config { budget: 1 << 23 };
     let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
@@ -35,10 +40,7 @@ pub(crate) async fn shard(
         clock: node.clock(),
         tasks,
         entropy: node.entropy(),
-        // A commit takes whole 4 KiB blocks (one for a frame, three for 64), and
-        // nothing frees the ring until #160, so a run fills it at 1023 one-frame
-        // commits.
-        layout: buffer::Layout::new(1 << 22, 1 << 16).expect("a ring"),
+        layout: buffer::Layout::new(area, 1 << 16).expect("a ring"),
         commit: COMMIT,
     };
     let buffer = buffer::Buffer::open(config, interner.slots())

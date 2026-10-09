@@ -29,8 +29,8 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 /// The counts of indexes, each with the name of its line.
 const INDEXES: [(usize, &str); 3] =
     [(1, "woken 1"), (16, "woken 16"), (256, "woken 256")];
-/// `WARMUP + ROUNDS` commits, under the 113 of 256 frames that the ring of
-/// `shard::shard` holds.
+/// `WARMUP + ROUNDS` commits, under the 113 of 256 frames that a ring of
+/// `shard::AREA` holds.
 const WARMUP: usize = 10;
 const ROUNDS: usize = 100;
 

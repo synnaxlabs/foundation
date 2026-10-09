@@ -64,10 +64,20 @@ pub(crate) fn own_pool() -> Rc<Pool> {
 /// The first session of `transport`, and its first stream, after the stream's header.
 pub(crate) async fn accept(transport: &Transport) -> (transport::Session, Incoming) {
     let session = transport.accept().await.expect("a session");
+    let incoming = stream(&session).await;
+    (session, incoming)
+}
+
+/// The next stream of `session`, after its header.
+pub(crate) async fn stream(session: &transport::Session) -> Incoming {
     let mut incoming = session.accept().await.expect("a stream");
     let header = incoming.receiver.recv().await.expect("a header");
     let header = header.expect("the header comes before the finish");
-    assert_eq!(wire::header::decode(&header), Ok((Protocol::Hub, &[][..])));
+    assert_eq!(
+        wire::header::decode(&header),
+        Ok((Protocol::Hub, &[][..])),
+        "the stream is of the hub"
+    );
     drop(header);
-    (session, incoming)
+    incoming
 }

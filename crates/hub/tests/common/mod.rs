@@ -13,14 +13,14 @@ use types::frame::{Draft, Form, Label, Path};
 use types::sample::{Scalar, Type};
 use types::time::Span;
 
-use crate::shard::{name, shard};
+use crate::shard::{AREA, name, shard};
 
 /// Past the commit of a write.
 pub(crate) const SETTLE: Span = Span::from_nanos(20_000_000);
 
 /// A hub on a new shard, with `time` and `value` defined, and the node's mesh time now.
 pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
-    let (home, interner, now, time) = shard(node, tasks.clone()).await;
+    let (home, interner, now, time) = shard(node, tasks.clone(), AREA).await;
     let hub = Hub::new(hub::Config {
         home,
         interner,
