@@ -23,7 +23,7 @@ struct Bytes {
 
 /// A `UA_NodeId` with a numeric identifier.
 #[repr(C, align(8))]
-struct NodeId {
+struct Key {
     namespace: u16,
     kind: u32,
     numeric: u32,
@@ -31,7 +31,7 @@ struct NodeId {
 }
 
 unsafe extern "C" {
-    fn UA_findDataType(id: *const NodeId) -> *const c_void;
+    fn UA_findDataType(key: *const Key) -> *const c_void;
     fn UA_ByteString_allocBuffer(bytes: *mut Bytes, length: usize) -> u32;
     fn UA_clear(value: *mut c_void, kind: *const c_void);
     fn connector_opcua_malloc(size: usize) -> *mut c_void;
@@ -50,15 +50,15 @@ fn main() {
 }
 
 fn c_allocates_through_the_global_allocator() {
-    let id = NodeId {
+    let key = Key {
         namespace: 0,
         kind: 0,
         // The type ByteString.
         numeric: 15,
         rest: [0; 3],
     };
-    // SAFETY: `id` is a valid numeric node key.
-    let kind = unsafe { UA_findDataType(&raw const id) };
+    // SAFETY: `key` is a valid numeric node key.
+    let kind = unsafe { UA_findDataType(&raw const key) };
     assert!(!kind.is_null(), "the copy holds the type ByteString");
     let before = ALLOCATOR.held();
     let mut bytes = Bytes {
