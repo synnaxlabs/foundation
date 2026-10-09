@@ -725,6 +725,79 @@ mod tests {
     }
 
     #[test]
+    fn writes_a_last_frame_refused_twice_until_the_home_applies_it() {
+        let (statuses, returned) = refused_until(ms(1_500), None);
+        assert_eq!(
+            states(&statuses),
+            [(2, 0, 0)],
+            "the frames of 0 s and 1 s refused"
+        );
+        assert_eq!(returned, ms(2_000), "returns once the frame of 2 s applied");
+    }
+
+    #[test]
+    fn writes_a_frame_refused_as_ahead_again_at_the_next_flush() {
+        let (statuses, returned) = run_on(|node, tasks| async move {
+            let script = Script {
+                steps: Mutex::new([Step::Done].into()),
+                ..Script::default()
+            };
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            let channels = ["state", "class", "restarts"];
+            let other = hub::writer::Config {
+                subject: name("plant.other"),
+                authority: Authority::ABSOLUTE,
+                lease: None,
+                channels: channels
+                    .map(|c| name(&format!("plant.script.status.{c}")))
+                    .into(),
+            };
+            let mut other = inputs.hub.writer(other).await.expect("opens");
+            let entries = other.set().entries();
+            let mut series: Vec<_> = (0..entries.len()).map(|i| (i, 8)).collect();
+            for (i, entry) in entries.iter().enumerate() {
+                if entry.key.as_u128() <= STATUS.as_u128() + 2 && entry.key != STATUS {
+                    series[i].1 = 1;
+                }
+            }
+            let mut draft = other.draft(Form::Raw, &series).expect("a frame");
+            let stamp = other.now().nanos() + Span::SECOND.nanos();
+            for (i, entry) in entries.iter().enumerate() {
+                let bytes = draft.series_mut(i).expect("a series");
+                let value = if entry.key == STATUS { stamp } else { 9 };
+                let len = bytes.len();
+                bytes.copy_from_slice(&value.to_le_bytes()[..len]);
+            }
+            draft.set_count(entries[0].group, 1);
+            let outcomes = other.write(Label::Path(Path::Live), draft);
+            let applied = matches!(outcomes, Ok([hub::home::Outcome::Applied { .. }]));
+            assert!(applied, "the frame 1 s ahead applies: {outcomes:?}");
+            drop(other);
+            let (clock, token) = (node.clock(), Token::new());
+            let (supervisor, start) = (Supervisor::new(inputs), clock.now());
+            let result = supervisor
+                .run("script", name("plant.script"), &config(), &token)
+                .await;
+            result.expect("ok");
+            let returned = clock.now() - start;
+            clock.sleep(ms(5_000)).await;
+            let statuses = statuses.borrow().clone();
+            (statuses, returned)
+        });
+        // The other frame is at 1 s, and the frames of 0 s are written again after it,
+        // where each is ahead of the mesh time until the flush of 1 s.
+        let want = [
+            (Span::ZERO, vec![9, 9, 9]),
+            (Span::from_nanos(4), vec![2, 0, 0]),
+        ];
+        assert_eq!(statuses, want);
+        assert_eq!(returned, Span::SECOND);
+    }
+
+    #[test]
     fn returns_at_a_cancel_while_the_last_frame_waits() {
         let (statuses, returned) = refused_until(ms(2_500), Some(ms(500)));
         assert_eq!(states(&statuses), [], "no frame after the cancel");
@@ -1442,6 +1515,44 @@ mod tests {
         let at: Vec<_> = statuses.iter().map(|(at, _)| *at).collect();
         assert_eq!(at, [Span::ZERO, Span::SECOND], "nothing after 1.5 s");
         assert_eq!(states(&statuses), [(0, 0, 0); 2]);
+    }
+
+    #[test]
+    fn writes_no_status_after_a_failed_commit() {
+        let (statuses, returned) = run_on(|node, tasks| async move {
+            let kind = Tally {
+                count: "samples",
+                n: 10,
+                gap: ms(300),
+            };
+            let kinds = Table::new().with("tally", kind);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
+            let (connector, counts) = (name("plant.tally"), [name("samples")]);
+            let status = testing::create_status(&connector, &counts, STATUS);
+            inputs
+                .hub
+                .set_definitions(status.iter().map(|(name, def)| (name, def)));
+            let statuses = read_status(&inputs.hub, "plant.tally", &[], &tasks).await;
+            let (failer, clock) = (node.clone(), node.clock());
+            tasks.spawn(async move {
+                clock.sleep(ms(1_500)).await;
+                let ring = std::path::Path::new("shard-0/ring");
+                failer.fail_file(ring, env::files::Operation::Sync);
+            });
+            let (clock, start) = (node.clock(), node.clock().now());
+            let result = Supervisor::new(inputs)
+                .run("tally", connector, &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            let returned = clock.now() - start;
+            clock.sleep(Span::SECOND).await;
+            let statuses = statuses.borrow().clone();
+            (statuses, returned)
+        });
+        let at: Vec<_> = statuses.iter().map(|(at, _)| *at).collect();
+        assert_eq!(at, [Span::ZERO, Span::SECOND], "nothing after 1.5 s");
+        assert_eq!(returned, ms(3_000));
     }
 
     #[test]
