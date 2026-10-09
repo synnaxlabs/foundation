@@ -288,7 +288,7 @@
   of a lookup, because the C library opens them, and it cannot open them another way
   without its own resolver. Lost: a resolver in `os`, which changes what each lookup
   gives on macOS. Trigger: the first change that makes a node spawn a process closes
-  both macOS gaps on the spawn side. Decided by `laptop.architect`
+  each macOS gap of this amendment on the spawn side. Decided by `laptop.architect`
   (2026-10-09T02:37:32Z:
   https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073119953; the socket
   that the C library keeps open, 2026-10-09T02:42:31Z:
