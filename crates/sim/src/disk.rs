@@ -359,12 +359,8 @@ impl Disk {
     /// Closes descriptor `handle`: drops its hold and logs its path.
     pub(crate) fn close(&mut self, handle: Handle) {
         self.release(handle);
-        let Some((_, path)) = self.descriptors.remove(&handle.key) else {
-            unreachable!(
-                "invariant: descriptor {} of file {} has a path",
-                handle.key, handle.inode
-            )
-        };
+        let path = self.path(handle).to_path_buf();
+        self.descriptors.remove(&handle.key);
         self.closes.push(path);
     }
 

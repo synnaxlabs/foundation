@@ -13,13 +13,12 @@ use crate::files::{Call, Done, Ended, Held};
 use crate::state::lock;
 
 impl Node {
-    /// Starts `call` on `path`, or with no `path` on the path of its descriptor, now,
-    /// keeping `held` until it ends.
+    /// Starts `call` on `path` now, keeping `held` until it ends.
     ///
     /// # Panics
     ///
     /// Outside a thread that the sim started, and on a thread of another node.
-    fn submit(&self, path: Option<&Path>, call: Call, held: Option<Held>) -> Wait {
+    fn submit(&self, path: &Path, call: Call, held: Option<Held>) -> Wait {
         self.running("a file call");
         let mut state = lock(&self.shared);
         let now = state.now();
@@ -39,7 +38,7 @@ impl Node {
         call: Call,
         map: impl FnOnce(Done) -> T + 'a,
     ) -> Request<'a, T> {
-        let wait = self.submit(Some(path), call, None);
+        let wait = self.submit(path, call, None);
         Box::pin(async move { Ok(map(wait.await.result?)) })
     }
 }
@@ -129,6 +128,16 @@ struct Descriptor {
     len: u64,
 }
 
+impl Descriptor {
+    /// Starts `call` on the path of this descriptor now, keeping `held` until it ends.
+    fn submit(&self, call: Call, held: Option<Held>) -> Wait {
+        let path = lock(&self.node.shared)
+            .files()
+            .path(self.node.node, self.handle);
+        self.node.submit(&path, call, held)
+    }
+}
+
 impl env::files::Descriptor for Descriptor {
     fn len(&self) -> u64 {
         self.len
@@ -142,7 +151,7 @@ impl env::files::Descriptor for Descriptor {
             bytes,
         };
         let held = Some(Held::Parts(parts.to_vec()));
-        let wait = self.node.submit(None, call, held);
+        let wait = self.submit(call, held);
         Box::pin(async move { wait.await.result.map(drop) })
     }
 
@@ -153,7 +162,7 @@ impl env::files::Descriptor for Descriptor {
             offset,
             len,
         };
-        let wait = self.node.submit(None, call, Some(Held::Into(into)));
+        let wait = self.submit(call, Some(Held::Into(into)));
         Box::pin(async move {
             let Ended { result, held } = wait.await;
             let (Done::Read(bytes), Some(Held::Into(mut into))) = (result?, held)
@@ -169,7 +178,7 @@ impl env::files::Descriptor for Descriptor {
         let call = Call::Sync {
             handle: self.handle,
         };
-        let wait = self.node.submit(None, call, None);
+        let wait = self.submit(call, None);
         Box::pin(async move { wait.await.result.map(drop) })
     }
 
@@ -178,8 +187,7 @@ impl env::files::Descriptor for Descriptor {
             handle: self.handle,
             to: to.to_path_buf(),
         };
-        let wait = self.node.submit(Some(from), call, None);
-        Box::pin(async move { wait.await.result.map(drop) })
+        self.node.request(from, call, drop)
     }
 
     fn close(self: Box<Self>) -> Pin<Box<dyn Future<Output = ()>>> {
@@ -193,7 +201,7 @@ impl env::files::Descriptor for Descriptor {
         let call = Call::Unlink {
             handle: self.handle,
         };
-        let wait = self.node.submit(Some(&path), call, None);
+        let wait = self.node.submit(&path, call, None);
         Box::pin(async move {
             let result = wait.await.result.map(drop);
             Close(Some(*self)).await;

@@ -199,28 +199,19 @@ impl Files {
         self.tick
     }
 
-    /// Starts `call` of `node` on `path`, or with no `path` on the path of its
-    /// descriptor now, at true time `now`, keeping `held` until it ends, and returns
-    /// its key.
+    /// Starts `call` of `node` on `path` at true time `now`, keeping `held` until it
+    /// ends, and returns its key.
     pub(crate) fn submit(
         &mut self,
         now: Monotonic,
         node: usize,
-        path: Option<&Path>,
+        path: &Path,
         call: Call,
         held: Option<Held>,
     ) -> u64 {
-        let path = match (path, call.handle()) {
-            (Some(path), _) => path.to_path_buf(),
-            (None, Some(handle)) => self.disks[node].path(handle).to_path_buf(),
-            (None, None) => unreachable!(
-                "invariant: a {:?} call with no path has a handle",
-                call.operation()
-            ),
-        };
         let key = self.tick();
         let delay = self.rng.below(DELAYS);
-        let fault = (node, disk::normal(&path), call.operation());
+        let fault = (node, disk::normal(path), call.operation());
         let fault = self.faults.iter().position(|aimed| *aimed == fault);
         let failed = fault.map(|at| self.faults.remove(at)).is_some();
         let disk = &mut self.disks[node];
@@ -236,7 +227,7 @@ impl Files {
         self.queue.insert((at, key));
         let flight = Flight {
             node,
-            path,
+            path: path.to_path_buf(),
             call,
             held,
             failed,
@@ -464,6 +455,11 @@ impl Files {
             return (Poll::Ready(()), Some(waker));
         }
         (Poll::Pending, self.closing.insert(handle.key, waker))
+    }
+
+    /// The path of descriptor `handle` of `node` now.
+    pub(crate) fn path(&self, node: usize, handle: Handle) -> PathBuf {
+        self.disks[node].path(handle).to_path_buf()
     }
 
     /// Makes `handle`, which an open of `path` on `node` gave, a descriptor.
