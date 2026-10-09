@@ -370,31 +370,35 @@ fn timers_due_at_one_time_run_in_the_order_of_their_adds() {
 }
 
 /// A current-time timer due within a quarter of its interval of one with the same
-/// interval runs with it, bounds included.
+/// interval runs with it, bounds included. No assert reads the order of the run, since
+/// no code may depend on the order of a tie.
 #[test]
 fn a_current_time_timer_runs_with_one_of_its_interval_due_near_it() {
-    for (due_ms, ran) in [
-        (34, vec![2, 1]),
-        (35, vec![1, 2]),
-        (85, vec![1, 2]),
-        (86, vec![1]),
+    for (due_ms, next_ms, ran) in [
+        (34, 34, vec![1, 2]),
+        (35, 60, vec![1, 2]),
+        (85, 60, vec![1, 2]),
+        (86, 60, vec![1]),
     ] {
         let mut f = Fixture::new();
         f.start();
-        let now = i64::try_from(f.now().0 / 100).unwrap();
+        let start = f.now();
+        let now = i64::try_from(start.0 / 100).unwrap();
         for (n, due_ms) in [(1, 60), (2, due_ms)] {
             let base = Some(now + due_ms * 10_000);
             f.try_timer(record, number(n), 100.0, base, ffi::CURRENT_TIME)
                 .expect("a timer of 100 ms");
         }
+        let due = Some(at(start, ms(next_ms)));
+        assert_eq!(f.events.next(), due, "timer 2 due at {due_ms} ms");
         f.advance(ms(60));
         f.run();
-        assert_eq!(f.ran(), ran, "timer 2 due at {due_ms} ms");
+        assert_eq!(sorted(f.ran()), ran, "timer 2 due at {due_ms} ms");
     }
 }
 
-/// open62541 searched the window of a batch in the wrong direction, so whether a
-/// timer batched hung on the shape of the timer tree, which the other timers and their
+/// open62541 searches the window of a batch in the wrong direction, so whether a timer
+/// batches hangs on the shape of the timer tree, which the other timers and their
 /// addresses set.
 #[test]
 fn a_batch_does_not_hang_on_the_other_timers() {
@@ -413,8 +417,8 @@ fn a_batch_does_not_hang_on_the_other_timers() {
         f.add(2, 100.0, ffi::CURRENT_TIME);
         f.advance(ms(95));
         f.run();
-        let ran: Vec<usize> = f.ran().into_iter().filter(|&n| n <= 2).collect();
-        assert_eq!(ran, [1, 2], "with {others} other timers");
+        let ran = f.ran().into_iter().filter(|&n| n <= 2).collect();
+        assert_eq!(sorted(ran), [1, 2], "with {others} other timers");
         // Held, so each pass gets new heap addresses.
         kept.push(f);
     }
@@ -883,6 +887,11 @@ fn a_timed_callback_at_a_past_date_runs_at_the_next_run() {
     assert_eq!(runs.get(), 1);
     // SAFETY: the client lives, and the loop outlives it.
     unsafe { ffi::UA_Client_delete(client) };
+}
+
+fn sorted(mut ran: Vec<usize>) -> Vec<usize> {
+    ran.sort_unstable();
+    ran
 }
 
 fn ms(n: i64) -> Span {
