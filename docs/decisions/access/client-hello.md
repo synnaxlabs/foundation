@@ -23,8 +23,12 @@
   a bad signature, which tell about the spec and so share one code (`Signature` too:
   `admit` checks it only for a listed key); each other step its own code, `UNSYNCED`
   21, `STALE` 22, `VIA` 23, `EXPIRED` 24, `CHANGED` 26. Code 25 was `CAPPED` and stays
-  unused (#2088). `hub` maps each `access::proof::Error` to its `Refusal` in one
-  exhaustive `match`, and `serve` returns the exact error for the node's log.
+  unused (`laptop.architect`, 2026-10-09T03:15:58Z,
+  https://github.com/synnaxlabs/foundation/pull/2088#issuecomment-6073528599).
+  Supersedes `CAPPED` 25 of
+  https://github.com/synnaxlabs/foundation/issues/1748#issuecomment-6057298526. `hub`
+  maps each `access::proof::Error` to its `Refusal` in one exhaustive `match`, and
+  `serve` returns the exact error for the node's log.
   `connection::Key` writes as UUID text in byte order.
   Lost: one `REFUSED` for each refusal, which hides an unsynced node from a program;
   and a verify before the spec lookup, so that each refusal costs the same, which costs

@@ -61,5 +61,6 @@
   the edge of the challenge (two edges); a fresh challenge before each renewal (a wire
   message for the same result). Decided by `laptop.architect` at 2026-10-09T03:15:58Z
   (https://github.com/synnaxlabs/foundation/pull/2088#issuecomment-6073528599).
-  Supersedes `Error::Capped` and `CAPPED` of
-  https://github.com/synnaxlabs/foundation/issues/2066#issuecomment-6072526453.
+  Supersedes `Error::Capped` of
+  https://github.com/synnaxlabs/foundation/issues/1747#issuecomment-6055033237 and its
+  docs of https://github.com/synnaxlabs/foundation/issues/2066#issuecomment-6072526453.
