@@ -1248,6 +1248,69 @@ fn takes_a_request_of_another_subject_while_a_body_trickles() {
     );
 }
 
+/// A reply gives back exactly the bytes of its body to the share of its subject, and
+/// the subject's count stays while another of its requests is open.
+#[test]
+fn frees_the_share_of_a_request_that_replied() {
+    let served = sessions(
+        112,
+        [SUBJECT, SUBJECT],
+        |[mut first, mut second]| async move {
+            for agent in [&mut first, &mut second] {
+                agent.admit().await;
+            }
+            let _open = first.unfinished(1, &[]).await;
+            first.sleep(Span::MILLISECOND).await;
+            let mut replied = second.request(1, b"b").await;
+            assert_eq!(replied.response().await, b"b");
+            let mut busy = second.unfinished(BODY_BYTES_MAX, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+        },
+    );
+    let each = closed_after(
+        vec![
+            Ok(Got::Request(name(SUBJECT), b"b".to_vec())),
+            Err(serve::Error::Share {
+                subject: name(SUBJECT),
+                length: BODY_BYTES_MAX,
+                held: 1,
+            }),
+        ],
+        2,
+        1,
+    );
+    assert_eq!(served, each);
+}
+
+/// A request over both the share of its subject and the cap of the hub gets `Share`.
+#[test]
+fn stops_a_request_over_the_share_and_the_cap_with_share() {
+    let served = sessions(
+        113,
+        [SUBJECT, SECOND, SUBJECT],
+        |[mut first, mut other, mut third]| async move {
+            for agent in [&mut first, &mut other, &mut third] {
+                agent.admit().await;
+            }
+            let _first = first.unfinished(BODY_BYTES_MAX, &[]).await;
+            let _other = other.unfinished(BODY_BYTES_MAX, &[]).await;
+            third.sleep(Span::MILLISECOND).await;
+            let mut busy = third.unfinished(1, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+        },
+    );
+    let each = closed_after(
+        vec![Err(serve::Error::Share {
+            subject: name(SUBJECT),
+            length: 1,
+            held: BODY_BYTES_MAX,
+        })],
+        3,
+        2,
+    );
+    assert_eq!(served, each);
+}
+
 /// Two open requests of one subject with empty bodies, over two links, each get their
 /// response.
 #[test]
