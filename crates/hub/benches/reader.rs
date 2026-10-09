@@ -5,6 +5,7 @@
 //! and times these lines:
 //!
 //! - `timer`: an empty closure, the floor of each line's figure.
+//! - `now`: one `Writer::now`, before each write.
 //! - `first write`: the first `Writer::write` of a round, after the round before it
 //!   committed. It wakes the commit task.
 //! - `write`, the control: each later `Writer::write` of a round but the last. The
@@ -113,6 +114,7 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
     let waker = Waker::from(Arc::clone(&count));
     let mut timer = Line::new("timer", FRAMES);
     let mut lines = [
+        Line::new("now", FRAMES),
         Line::new("first write", 1),
         Line::new("write", FRAMES - 2),
         Line::new("write wake", 1),
@@ -122,11 +124,21 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
         Line::new("complete wait", FRAMES - 1),
     ];
     for round in 0..WARMUP + ROUNDS {
-        let [first, write, wake, latest_next, complete_next, grant, wait] = &mut lines;
+        let [
+            now,
+            first,
+            write,
+            wake,
+            latest_next,
+            complete_next,
+            grant,
+            wait,
+        ] = &mut lines;
         for frame in 0..FRAMES {
             let draft = common::draft(&writer, stamp);
             stamp += 1;
             timer.add(table::timed(&ALLOCATOR, || ()).1);
+            now.add(table::timed(&ALLOCATOR, || writer.now()).1);
             if frame == FRAMES - 1 {
                 assert!(!poll(&mut latest, &waker), "the latest reader waits");
                 assert_eq!(count.wakes(), round, "the poll wakes nothing");
