@@ -8,7 +8,7 @@
   question: https://github.com/synnaxlabs/foundation/pull/2004#issuecomment-6070953004).
   That a helper may also block while the thread panics is the reading of
   `laptop.director`: option b keeps `Drop for Influx` and `Drop for Rig`, which block
-  before they check
+  before they check `std::thread::panicking()`
   (https://github.com/synnaxlabs/foundation/pull/2036#issuecomment-6071417937,
   2026-10-08 23:58 UTC).
   A type in test code (under `tests/` or in a `#[cfg(test)]` module) whose `Drop`
