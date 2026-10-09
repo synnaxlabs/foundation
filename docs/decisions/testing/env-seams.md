@@ -82,11 +82,7 @@
   which refused only `0.0.0.0`. On macOS, `os` has no GSO, so `batch_max` is 1, and the
   loopback, with an MTU of 16,384 bytes, loses a larger datagram. Decided by
   `laptop.architect-2` (2026-10-08 22:35 UTC, #1965,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767). Until
-  #1972 patches noq-udp to send an IPv4 source as `IP_PKTINFO` on Apple, macOS ignores
-  each IPv4 source and sends from an address of its choice, with no error. Decided by
-  `laptop.architect-2` (2026-10-08 22:51 UTC, #1965,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958).
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767).
   `os::net()` is behind the `os` cargo feature `net`, off by default, because Tokio has
   no `net` under `--cfg loom`. Decided by `laptop.architect-2` (2026-10-08 23:42 UTC,
   #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415).
