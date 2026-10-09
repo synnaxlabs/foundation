@@ -2169,10 +2169,15 @@ fn an_error_of_a_descriptor_names_the_path_of_its_rename_as_given() {
     });
 }
 
-/// Whether the block of a dropped write of a handle is still in use when the end of
-/// the handle (`File::remove`, or `File::close` when `closed`) returns. A
-/// `Files::remove` unlinked the path of the handle before the write.
-fn block_held_after_end(value: u64, closed: bool) -> bool {
+/// How a test ends a handle.
+enum End {
+    Close,
+    Remove,
+}
+
+/// Whether the block of a dropped write of a handle is still in use when `end` of the
+/// handle returns. A `Files::remove` unlinked the path of the handle before the write.
+fn block_held_after_end(value: u64, end: End) -> bool {
     run(value, MIB, move |node, _| async move {
         let (pool, files) = (pool(), node.files());
         let big = pool.largest();
@@ -2184,11 +2189,12 @@ fn block_held_after_end(value: u64, closed: bool) -> bool {
         drop(write);
         drop(parts);
         pool.alloc(pool.largest()).unwrap_err();
-        if closed {
-            file.close().await;
-        } else {
-            let found = file.remove().await;
-            assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        match end {
+            End::Close => file.close().await,
+            End::Remove => {
+                let found = file.remove().await;
+                assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+            }
         }
         pool.alloc(pool.largest()).is_err()
     })
@@ -2197,14 +2203,14 @@ fn block_held_after_end(value: u64, closed: bool) -> bool {
 #[test]
 fn a_close_ends_after_the_dropped_write_of_its_handle() {
     for value in 0..32 {
-        assert!(!block_held_after_end(value, true), "value {value}");
+        assert!(!block_held_after_end(value, End::Close), "value {value}");
     }
 }
 
 #[test]
 fn a_remove_through_the_handle_ends_after_the_dropped_write_of_its_handle() {
     for value in 0..32 {
-        assert!(!block_held_after_end(value, false), "value {value}");
+        assert!(!block_held_after_end(value, End::Remove), "value {value}");
     }
 }
 
