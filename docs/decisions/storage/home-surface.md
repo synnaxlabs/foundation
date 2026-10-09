@@ -53,14 +53,19 @@
   https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6072038723). A shed
   frees the place of the index in the shard, and the index at the last place moves
   there. The hub sheds an index only when its key leaves the definitions; a rename or a
-  changed definition at the same key ends its sessions and keeps the index.
-  No reader key is given twice, also after a shed and a carry: `delivery::Readers::end`
-  gives the number after each key of a shed index, and panics while a record waits to be
-  taken, and the shard carries each index with `Readers::after` at the highest of these.
-  So a hub finds a session by its home key alone. Decided by `laptop.architect`
-  (2026-10-08T22:24:43Z:
+  changed definition at the same key ends its sessions and keeps the index. No reader
+  key is given twice, also after a shed and a carry: `delivery::Readers::end` gives the
+  number after each key of a shed index, and panics while a record waits to be taken.
+  So a hub finds a session by its home key alone. The shard keeps the number of each
+  index that it sheds, until it carries that index again with `Readers::after` at that
+  number. It carries a new index at 0. So a key that the shard never gave on an index
+  panics, also after a shed of another index (#2057). Lost: the highest number over
+  each shed index, as it counts the keys of other indexes as closed keys of a new
+  index. Decided by `laptop.architect` (2026-10-08T22:24:43Z:
   https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070259814, and the
   `delivery` items, 2026-10-08T22:31:27Z:
   https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070368046, and the
   panic of `Readers::end`, 2026-10-08T22:50:41Z:
-  https://github.com/synnaxlabs/foundation/pull/2026#issuecomment-6070616191).
+  https://github.com/synnaxlabs/foundation/pull/2026#issuecomment-6070616191, and the
+  number of each slot, 2026-10-09T01:08:43Z:
+  https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6072181209).

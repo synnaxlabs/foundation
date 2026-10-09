@@ -3956,6 +3956,47 @@ mod tests {
             });
         }
 
+        /// Slot 3 is carried for the first time after a shed of slot 0, which gave
+        /// latest keys 0 and 1. The shard never gave latest key 0 on slot 3.
+        #[test]
+        fn panics_at_the_take_of_a_key_never_given_on_an_index_carried_after_a_shed() {
+            let message = "latest session 0 was never open";
+            check_panics(152, message, |shard| {
+                let two = latest(shard, Slot::new(2));
+                for _ in 0..2 {
+                    let reader = latest(shard, Slot::new(0));
+                    close(shard, reader);
+                }
+                shard.shed(Slot::new(0));
+                shard.carry(Slot::new(3));
+                let never = reader::Key {
+                    slot: Slot::new(3),
+                    session: two.session,
+                };
+                drop(shard.take(never));
+            });
+        }
+
+        #[test]
+        fn closes_the_keys_of_each_earlier_carry_of_an_index_shed_two_times() {
+            run(153, |test| async move {
+                let mut shard = test.shard(AREA).await;
+                let mut old = Vec::new();
+                for _ in 0..2 {
+                    let reader = latest(&mut shard, Slot::new(0));
+                    close(&mut shard, reader);
+                    old.push(reader);
+                    shard.shed(Slot::new(0));
+                    shard.carry(Slot::new(0));
+                }
+                for &reader in &old {
+                    assert!(matches!(shard.take(reader), reader::Next::Empty));
+                }
+                let new = latest(&mut shard, Slot::new(0));
+                assert!(!old.contains(&new), "{new:?} names an earlier reader");
+            });
+        }
+
         /// The ring is full, so the handoff of the close waits, and the shed drops it.
         /// No entry is appended after the lost frames, so their gap goes.
         #[test]
