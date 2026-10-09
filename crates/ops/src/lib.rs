@@ -6,6 +6,13 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{Value, json};
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the table entries of #1744 call it")
+)]
+mod apply;
+#[cfg(test)]
+mod common;
 mod error;
 #[cfg_attr(
     not(test),
@@ -21,6 +28,11 @@ mod operation;
 mod plan;
 #[cfg(test)]
 mod tests;
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the table entries of #1744 call it")
+)]
+mod used;
 
 use error::Error;
 pub use front_end::FrontEnd;
