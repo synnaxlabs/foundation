@@ -855,10 +855,15 @@ connector \"a\" {
 /// The definitions of one connector, `rogue`, of `kind` on the node `nowhere`, with
 /// `config`.
 fn rogue(kind: &str, config: &str) -> BTreeMap<Name, Stored> {
+    BTreeMap::from([connector("rogue", kind, config)])
+}
+
+/// The connector `key` of `kind` on the node `nowhere`, with `config`.
+fn connector(key: &str, kind: &str, config: &str) -> (Name, Stored) {
     let config = Checked::new(read(0, config)).expect("a shallow config");
     let connector =
         spec::connector::Connector::new(name(kind), name("nowhere"), config);
-    BTreeMap::from([(name("rogue"), Stored::Connector(connector))])
+    (name(key), Stored::Connector(connector))
 }
 
 #[test]
@@ -904,6 +909,31 @@ connector \"rogue\" {
     let codes: Vec<_> = planned.iter().map(|problem| problem.0).collect();
     assert_eq!(codes, ["document.bad-name"]);
     assert_eq!(text(found), text(planned));
+}
+
+#[test]
+fn check_refuses_each_connector_that_the_kinds_refuse() {
+    let members = BTreeSet::from([name("n")]);
+    let definitions = BTreeMap::from([
+        connector("a", "nothing", ""),
+        connector("b", "writer", "writes = 1"),
+    ]);
+    let found = config::plan::check(&definitions, &members, &kinds());
+    let expected = [
+        (
+            "connector.unknown-kind",
+            None,
+            "this build has no connector kind \"nothing\"".into(),
+            "Use one of [\"commander\", \"influx\", \"writer\"]".into(),
+        ),
+        (
+            "document.bad-name",
+            None,
+            "a name is a string or a reference, not an integer".into(),
+            "Write a name such as \"site_a.node_1\"".into(),
+        ),
+    ];
+    assert_eq!(problems(found.map(|()| unreachable())), expected);
 }
 
 /// A plan for `problems` to refuse, which a `check` that refuses never gives.
@@ -2336,29 +2366,29 @@ connector \"b\" {
 }
 
 #[test]
-fn takes_the_first_writer_in_source_order_in_any_order_of_the_files() {
+fn takes_the_first_writer_in_name_order_in_any_order_of_the_files() {
     let first = format!(
         "{PLANT}\
-connector \"w1\" {{
+connector \"w2\" {{
   kind = \"writer\"
   node = \"n2\"
-  writes = [\"a.value\"]
+  writes = [\"a.time\"]
 }}
 "
     );
     let second = "\
-connector \"w2\" {
+connector \"w1\" {
   kind = \"writer\"
   node = \"n1\"
-  writes = [\"a.time\"]
+  writes = [\"a.value\"]
 }
 ";
     let members = BTreeSet::from([name("n"), name("n1"), name("n2")]);
     let spec = Spec::create_empty();
     let expected = [problem(
         "config.writer-nodes",
-        (1, value(second, "node", "\"n1\"")),
-        "connectors on the nodes `n2` and `n1` write the index `a.time`, so it has no \
+        (0, value(&first, "node", "\"n2\"")),
+        "connectors on the nodes `n1` and `n2` write the index `a.time`, so it has no \
          one home",
         "Run each connector that writes `a.time` on one node",
     )];
@@ -2462,8 +2492,14 @@ connector \"w1\" {
 }
 ";
     let planned = problems(Spec::create_empty().plan(&[text], &["n1", "n2"]));
-    let codes: Vec<_> = planned.iter().map(|problem| problem.0).collect();
-    assert_eq!(codes, ["config.writer-nodes"]);
+    let expected = problem(
+        "config.writer-nodes",
+        (0, value(text, "node", "\"n2\"")),
+        "connectors on the nodes `n1` and `n2` write the index `a.time`, so it has no \
+         one home",
+        "Run each connector that writes `a.time` on one node",
+    );
+    assert_eq!(planned, [expected]);
 }
 
 #[test]
