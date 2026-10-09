@@ -15,6 +15,9 @@ use types::name::Name;
 use types::sample::{Scalar, Type};
 use types::time::{Monotonic, Span, Stamp};
 
+use hub::home::{self, Outcome, Refusal};
+use hub::writer::Failure;
+
 use crate::kind;
 
 /// The name of the index of the status channels.
@@ -86,9 +89,6 @@ impl Status {
     /// A status with each of `counts` at 0, that no writer writes yet.
     pub(crate) fn new(counts: Vec<Name>) -> Self {
         Self(Rc::new(Values {
-            state: Cell::new(State::Running),
-            class: Cell::new(Class::None),
-            restarts: Cell::new(0),
             counts: counts.into_iter().map(|n| (n, Cell::new(0))).collect(),
             staged: Cell::new(false),
             waker: Cell::new(None),
@@ -169,12 +169,8 @@ impl Class {
     }
 }
 
-/// The last value of each status channel, and whether a count changed since the
-/// last write.
+/// The last value of each count, and whether the status waits for a write.
 struct Values {
-    state: Cell<State>,
-    class: Cell<Class>,
-    restarts: Cell<u64>,
     counts: Box<[(Name, Cell<u64>)]>,
     staged: Cell<bool>,
     /// The flush, while it waits for a staged count.
@@ -195,9 +191,6 @@ impl Values {
 impl fmt::Debug for Values {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Values")
-            .field("state", &self.state.get())
-            .field("class", &self.class.get())
-            .field("restarts", &self.restarts.get())
             .field("counts", &self.counts)
             .field("staged", &self.staged.get())
             .finish_non_exhaustive()
@@ -210,8 +203,6 @@ pub(crate) struct Writer {
     session: RefCell<Session>,
     values: Rc<Values>,
     clock: Clock,
-    /// Set at the first start, after which each start is a restart.
-    started: Cell<bool>,
 }
 
 impl Writer {
@@ -255,50 +246,53 @@ impl Writer {
             group,
             last: None,
             wrote: Monotonic::default(),
-            removed: false,
+            closed: false,
+            state: State::Running,
+            class: Class::None,
+            restarts: 0,
+            started: false,
         };
         let writer = Self {
             session: RefCell::new(session),
             values: Rc::clone(&status.0),
             clock,
-            started: Cell::new(false),
         };
         Ok((writer, status))
     }
 
     /// Writes `state` 0, with one more restart after the first start.
     pub(crate) fn start(&self) {
-        if self.started.replace(true) {
-            let restarts = &self.values.restarts;
-            restarts.set(restarts.get().strict_add(1));
-        }
-        self.set(State::Running);
+        self.set(|session| {
+            if session.started {
+                session.restarts = session.restarts.strict_add(1);
+            }
+            session.started = true;
+            session.state = State::Running;
+        });
     }
 
     /// Writes `state` 3 with the class of a run that ended with `end`.
     pub(crate) fn end(&self, end: &Result<(), kind::Error>) {
-        self.values.class.set(Class::of(end));
-        self.set(State::Ending);
+        self.set(|session| {
+            session.class = Class::of(end);
+            session.state = State::Ending;
+        });
     }
 
     /// Writes `state` 1.
     pub(crate) fn wait(&self) {
-        self.set(State::Waiting);
+        self.set(|session| session.state = State::Waiting);
     }
 
     /// Writes `state` 2.
     pub(crate) fn stop(&self) {
-        self.set(State::Stopped);
+        self.set(|session| session.state = State::Stopped);
     }
 
-    fn set(&self, state: State) {
-        self.values.state.set(state);
-        self.write();
-    }
-
-    fn write(&self) {
-        let now = self.clock.now();
-        self.session.borrow_mut().write(&self.values, now);
+    fn set(&self, change: impl FnOnce(&mut Session)) {
+        let mut session = self.session.borrow_mut();
+        change(&mut session);
+        session.write(&self.values, self.clock.now());
     }
 
     /// Writes the status that a kind staged or the home did not apply, at most once
@@ -318,22 +312,38 @@ impl Writer {
                 Poll::Pending
             })
             .await;
-            // A write by the supervisor while this sleeps moves the next write later.
-            loop {
-                let next = self.session.borrow().wrote + PERIOD;
-                if self.clock.now() >= next {
-                    break;
-                }
-                self.clock.sleep_until(next).await;
+            self.write_staged().await;
+        }
+    }
+
+    /// Writes the status until the home applied it or the writer writes no more, at
+    /// most once each [`PERIOD`] after the last write.
+    pub(crate) async fn settle(&self) {
+        while self.values.staged.get() {
+            self.write_staged().await;
+        }
+    }
+
+    /// Waits until [`PERIOD`] after the last write, then writes the status if it is
+    /// still staged.
+    async fn write_staged(&self) {
+        // A write by the supervisor while this sleeps moves the next write later.
+        loop {
+            let next = self.session.borrow().wrote + PERIOD;
+            if self.clock.now() >= next {
+                break;
             }
-            if values.staged.get() {
-                self.write();
-            }
+            self.clock.sleep_until(next).await;
+        }
+        if self.values.staged.get() {
+            let now = self.clock.now();
+            self.session.borrow_mut().write(&self.values, now);
         }
     }
 }
 
-/// The hub's writer session of the status channels.
+/// The hub's writer session of the status channels, and the supervisor's part of the
+/// status.
 struct Session {
     hub: hub::writer::Writer,
     /// The entries of the index and the supervisor's channels, then the counts.
@@ -344,17 +354,27 @@ struct Session {
     last: Option<Stamp>,
     /// When the last write was, by the node's clock.
     wrote: Monotonic,
-    /// Set once a status channel is removed: the writer writes no more.
-    removed: bool,
+    /// Set once a status channel is removed or a commit failed: the writer writes no
+    /// more.
+    closed: bool,
+    state: State,
+    class: Class,
+    restarts: u64,
+    /// Set at the first start, after which each start is a restart.
+    started: bool,
 }
 
 impl Session {
     /// Writes the last value of each status channel. A frame that the home does not
     /// apply leaves the status staged, so the flush writes it again.
+    ///
+    /// # Panics
+    ///
+    /// When the home refuses the frame for a cause that only a defect gives.
     fn write(&mut self, values: &Values, now: Monotonic) {
         values.staged.set(false);
         self.wrote = now;
-        if self.removed {
+        if self.closed {
             return;
         }
         let mut stamp = self.hub.now();
@@ -367,9 +387,9 @@ impl Session {
             .draft(Form::Raw, &self.series)
             .expect("invariant: the series follow the key set");
         let supervisor = [
-            u64::from(values.state.get() as u8),
-            u64::from(values.class.get() as u8),
-            values.restarts.get(),
+            u64::from(self.state as u8),
+            u64::from(self.class as u8),
+            self.restarts,
         ];
         let counts = values.counts.iter().map(|(_, count)| count.get());
         let mut samples = supervisor.into_iter().chain(counts);
@@ -386,19 +406,30 @@ impl Session {
             bytes.copy_from_slice(&sample.to_le_bytes()[..len]);
         }
         draft.set_count(self.group, 1);
-        let applied = match self.hub.write(Label::Path(Path::Live), draft) {
-            Ok(outcomes) => matches!(outcomes, [hub::home::Outcome::Applied { .. }]),
-            Err(hub::writer::Failure::Home(hub::home::Error::Disk(_))) => false,
-            Err(hub::writer::Failure::Home(error)) => {
-                panic!("invariant: a live frame of one sample is not refused: {error}")
+        match self.hub.write(Label::Path(Path::Live), draft) {
+            Ok([Outcome::Applied { .. }]) => {}
+            Ok(
+                [
+                    Outcome::Lost { .. }
+                    | Outcome::Refused {
+                        refusal:
+                            Refusal::Waiting | Refusal::Reserved | Refusal::Order(_),
+                        ..
+                    },
+                ],
+            ) => values.stage(),
+            Ok([Outcome::Refused { refusal, .. }]) => {
+                panic!("the home refuses a status frame: {refusal}")
             }
-            Err(hub::writer::Failure::Removed(_)) => {
-                self.removed = true;
-                true
+            Ok(outcomes) => {
+                panic!("invariant: a frame of one group has one outcome: {outcomes:?}")
             }
-        };
-        if !applied {
-            values.stage();
+            Err(Failure::Removed(_) | Failure::Home(home::Error::Disk(_))) => {
+                self.closed = true;
+            }
+            Err(Failure::Home(error)) => {
+                panic!("the home refuses a status frame: {error}")
+            }
         }
     }
 }
@@ -431,7 +462,7 @@ mod tests {
     fn debugs_each_value_but_the_waker() {
         let status = Status::new(vec![name("samples")]);
         status.count("samples").set(3);
-        let want = "Status(Values { state: Running, class: None, restarts: 0, counts: \
+        let want = "Status(Values { counts: \
                     [(Name(\"samples\"), Cell { value: 3 })], staged: true, .. })";
         assert_eq!(format!("{status:?}"), want);
     }

@@ -67,10 +67,10 @@ impl Supervisor {
     ///
     /// Returns `Ok` when `run` returns `Ok`, when `cancel` is cancelled and the run
     /// returned, or when the mesh stopped before the status channels opened. It
-    /// returns, with `Ok` or an error, only once each task of its
-    /// last run ended. A drop of the future cancels the run and does not wait for its
-    /// tasks: to wait, cancel `cancel` and await the future. The future is not
-    /// `Send`: call it on a shard.
+    /// returns, with `Ok` or an error, only once each task of its last run ended, and
+    /// the home applied its last status frame or `cancel` is cancelled. A drop of the
+    /// future cancels the run and does not wait for its tasks: to wait, cancel
+    /// `cancel` and await the future. The future is not `Send`: call it on a shard.
     ///
     /// # Errors
     ///
@@ -80,7 +80,9 @@ impl Supervisor {
     /// # Panics
     ///
     /// When the status channels of `name` do not open for a reason other than a
-    /// stopped mesh: `node` did not define them, or homed them on another node.
+    /// stopped mesh: `node` did not define them, or homed them on another node. Or
+    /// when the home refuses a status frame for a cause that only a defect of
+    /// `connector` gives.
     pub async fn run(
         &self,
         kind: &str,
@@ -107,13 +109,15 @@ impl Supervisor {
         };
         let mut runs = pin!(self.runs(kind, &name, config, cancel, &writer, &status));
         let mut flush = pin!(writer.flush());
-        poll_fn(|cx| {
+        let end = poll_fn(|cx| {
             if let Poll::Ready(never) = flush.as_mut().poll(cx) {
                 match never {}
             }
             runs.as_mut().poll(cx)
         })
-        .await
+        .await;
+        cancel.race(writer.settle()).await;
+        end
     }
 
     /// Runs the connector and restarts it, as [`Self::run`] says, and writes its
@@ -162,7 +166,7 @@ impl Supervisor {
                     writer.stop();
                     return end;
                 }
-                // The class reaches the status; the error text reaches it in #420.
+                // The status gives their class. #420 adds their text.
                 Err(Error::Device(_) | Error::Retry(_)) => {}
             }
             if cancel.cancelled() {
@@ -648,6 +652,71 @@ mod tests {
             Span::SECOND,
             "written again at 1 s, the tasks ended at 2 s"
         );
+    }
+
+    /// The status frames of one connector of [`Script`] that returns `Ok` at once,
+    /// whose frames another writer refuses until `held`, and when the call returned.
+    fn refused_until(held: Span, cancel: Option<Span>) -> (Vec<Written>, Span) {
+        run_on(move |node, tasks| async move {
+            let script = Script {
+                steps: Mutex::new([Step::Done].into()),
+                ..Script::default()
+            };
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            let holder = hub::writer::Config {
+                subject: name("plant.other"),
+                authority: Authority::ABSOLUTE,
+                lease: None,
+                channels: vec![name("plant.script.status.state")],
+            };
+            let holder = inputs.hub.writer(holder).await.expect("opens");
+            let (token, clock) = (Token::new(), node.clock());
+            let (canceller, sleeper) = (token.clone(), clock.clone());
+            tasks.spawn(async move {
+                sleeper.sleep(held).await;
+                drop(holder);
+            });
+            if let Some(cancel) = cancel {
+                let sleeper = clock.clone();
+                tasks.spawn(async move {
+                    sleeper.sleep(cancel).await;
+                    canceller.cancel();
+                });
+            }
+            let (supervisor, start) = (Supervisor::new(inputs), clock.now());
+            let name = name("plant.script");
+            let result = supervisor.run("script", name, &config(), &token).await;
+            result.expect("ok");
+            let returned = clock.now() - start;
+            clock.sleep(ms(5_000)).await;
+            let statuses = statuses.borrow().clone();
+            (statuses, returned)
+        })
+    }
+
+    #[test]
+    fn writes_a_refused_last_frame_again_before_the_call_returns() {
+        let (statuses, returned) = refused_until(ms(500), None);
+        assert_eq!(
+            states(&statuses),
+            [(2, 0, 0)],
+            "the frames of 0 s were refused"
+        );
+        assert_eq!(
+            returned,
+            Span::SECOND,
+            "returns once the frame of 1 s applied"
+        );
+    }
+
+    #[test]
+    fn returns_at_a_cancel_while_the_last_frame_waits() {
+        let (statuses, returned) = refused_until(ms(2_500), Some(ms(500)));
+        assert_eq!(states(&statuses), [], "no frame after the cancel");
+        assert_eq!(returned, ms(500));
     }
 
     #[test]
@@ -1256,6 +1325,43 @@ mod tests {
         let states = states(&statuses);
         assert_eq!(states[..10], [(0, 0, 0); 10]);
         assert_eq!(states[10..], [(3, 0, 0), (2, 0, 0)]);
+    }
+
+    #[test]
+    fn writes_no_status_once_a_status_channel_is_removed() {
+        let statuses = run_on(|node, tasks| async move {
+            let gap = ms(300);
+            let kind = Tally {
+                count: "samples",
+                n: 10,
+                gap,
+            };
+            let kinds = Table::new().with("tally", kind);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
+            let (connector, counts) = (name("plant.tally"), [name("samples")]);
+            let status = testing::create_status(&connector, &counts, STATUS);
+            inputs
+                .hub
+                .set_definitions(status.iter().map(|(name, def)| (name, def)));
+            let statuses = read_status(&inputs.hub, "plant.tally", &[], &tasks).await;
+            let (hub, clock) = (inputs.hub.clone(), node.clock());
+            tasks.spawn(async move {
+                clock.sleep(ms(1_500)).await;
+                let samples = name("plant.tally.status.samples");
+                let kept = status.iter().filter(|(name, _)| *name != samples);
+                hub.set_definitions(kept.map(|(name, def)| (name, def)));
+            });
+            let result = Supervisor::new(inputs)
+                .run("tally", connector, &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            node.clock().sleep(Span::SECOND).await;
+            statuses.borrow().clone()
+        });
+        let at: Vec<_> = statuses.iter().map(|(at, _)| *at).collect();
+        assert_eq!(at, [Span::ZERO, Span::SECOND], "nothing after 1.5 s");
+        assert_eq!(states(&statuses), [(0, 0, 0); 2]);
     }
 
     #[test]

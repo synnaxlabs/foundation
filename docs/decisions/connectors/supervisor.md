@@ -33,8 +33,8 @@
   constants). The waits start again from 1 s after a run that lasted at least 60 s.
   `Ok` from `run` ends the connector.
   `Config` returns to the caller, which starts a new supervisor when the spec
-  changes (R12-4). The class of a restart error reaches the connector's status
-  (CONNECTOR STATUS), and its text reaches it in #420.
+  changes (R12-4). The class of each restart error reaches the connector's status
+  (CONNECTOR STATUS), and its text with #420.
   Decided by the `connector` builder in the plan on #338, after `/eb-review`; approved
   by the coordinator (#338), with the reset after a long run approved on #338 later.
 - **CONNECTOR STATUS** `Supervisor::run` writes the status channels of its connector,
@@ -60,9 +60,11 @@
   once. When each task of the run ended, `state` 1, or 2 when the call returns
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6067099903). A
-  frame that the home refuses, or whose commit fails, leaves the status staged, so it
-  is written again one second later. The other errors of a write panic, since a live
-  frame of one sample cannot get them. The status writer that does not open panics on an unknown or
+  frame that the home does not apply (`Waiting`, `Reserved`, `Order`, or `Lost`)
+  leaves the status staged, so it is written again one second later, also the last
+  frame of a call: the call returns once the home applied it, or once `cancel` is
+  cancelled. After `Failure::Removed` or `home::Error::Disk` the call writes no more
+  status. Each other refusal is a defect of `connector`, and panics. The status writer that does not open panics on an unknown or
   remote channel, which is a defect of `node`, and gives `Ok` when the mesh stopped
   (`laptop.architect-2`, 2026-10-09T18:46:26Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6087144669).
