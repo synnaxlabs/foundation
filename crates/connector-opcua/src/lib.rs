@@ -224,14 +224,14 @@ mod tests {
 
     #[test]
     fn sanitize_keeps_gcc_when_the_c_has_no_sanitizer() {
-        for sanitize in ["", "leak"] {
+        let cases: [Vars<'_>; 2] = [&[], &[(SANITIZE, "leak")]];
+        for vars in cases {
             let mut builds = builds("/missing/gcc");
-            let vars = [(SANITIZE, sanitize)];
-            assert_eq!(builds.sanitize(env(&vars)), Ok(()), "{sanitize}");
-            assert!(!builds.asan, "{sanitize}");
+            assert_eq!(builds.sanitize(env(vars)), Ok(()), "{vars:?}");
+            assert!(!builds.asan, "{vars:?}");
             for build in [&mut builds.library, &mut builds.shim] {
                 let path = child::tool(build, TARGET).path().to_owned();
-                assert_eq!(path, Path::new("/missing/gcc"), "{sanitize}");
+                assert_eq!(path, Path::new("/missing/gcc"), "{vars:?}");
             }
         }
     }
