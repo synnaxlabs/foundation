@@ -90,10 +90,26 @@ mod tests {
         builds
     }
 
-    /// The flags of `args` that start with `-fsanitize` or `-fno-sanitize`.
-    fn sanitizers(args: &[String]) -> Vec<&str> {
-        let flags = args.iter().map(String::as_str);
-        flags.filter(|arg| arg.contains("sanitize")).collect()
+    /// The arguments that `after` adds in one place to `before`.
+    fn added<'a>(before: &[String], after: &'a [String]) -> Vec<&'a str> {
+        let common = |a: &[String], b: &[String]| {
+            a.iter().zip(b).take_while(|(a, b)| a == b).count()
+        };
+        let start = common(before, after);
+        let rest = &before[start..];
+        let end = common(
+            &rest.iter().rev().cloned().collect::<Vec<_>>(),
+            &after.iter().rev().cloned().collect::<Vec<_>>(),
+        )
+        .min(rest.len());
+        assert_eq!(
+            [&after[..start], &after[after.len() - end..]].concat(),
+            before
+        );
+        after[start..after.len() - end]
+            .iter()
+            .map(String::as_str)
+            .collect()
     }
 
     #[test]
@@ -109,27 +125,52 @@ mod tests {
             ("address", false, address.to_vec()),
             ("leak,address", false, address.to_vec()),
             ("memory", false, vec![]),
+            ("hwaddress", false, vec![]),
             ("addressx", false, vec![]),
             ("", true, vec![fuzzer]),
             ("address", true, [&address[..], &[fuzzer]].concat()),
         ];
         for (sanitize, fuzzing, expected) in cases {
-            let mut builds = builds("/missing/clang");
-            let asan = builds.sanitize(sanitize, fuzzing);
+            let (mut plain, mut sanitized) =
+                (builds("/missing/clang"), builds("/missing/clang"));
+            let asan = sanitized.sanitize(sanitize);
+            if fuzzing {
+                sanitized.fuzz();
+            }
             assert_eq!(asan, expected.contains(&address[0]), "{sanitize} {fuzzing}");
-            for build in [&mut builds.library, &mut builds.shim] {
+            let pairs = [
+                (&mut sanitized.library, &mut plain.library),
+                (&mut sanitized.shim, &mut plain.shim),
+            ];
+            for (build, plain) in pairs {
                 let tool = child::tool(build, TARGET);
                 assert_eq!(tool.path(), Path::new("/missing/clang"));
-                assert_eq!(sanitizers(&args(&tool)), expected, "{sanitize} {fuzzing}");
+                let before = args(&child::tool(plain, TARGET));
+                let after = args(&tool);
+                assert_eq!(added(&before, &after), expected, "{sanitize} {fuzzing}");
             }
         }
     }
 
+    /// `cc` adds the `CFLAGS` of the caller, which `sanitize_follows_the_rust_build`
+    /// does not check.
+    #[test]
+    fn sanitize_follows_the_rust_build_with_cflags() {
+        child::run(
+            "tests::sanitize_follows_the_rust_build",
+            &[("CFLAGS", "-fno-sanitize-recover=all")],
+        );
+    }
+
     #[test]
     fn sanitize_moves_gcc_to_clang() {
-        for (sanitize, fuzzing) in [("address", false), ("", true)] {
+        let adds: [fn(&mut compiler::Builds); 2] = [
+            |builds| _ = builds.sanitize("address"),
+            compiler::Builds::fuzz,
+        ];
+        for add in adds {
             let mut builds = builds("/missing/gcc");
-            builds.sanitize(sanitize, fuzzing);
+            add(&mut builds);
             for build in [&mut builds.library, &mut builds.shim] {
                 assert_eq!(child::tool(build, TARGET).path(), Path::new("clang"));
             }
@@ -139,7 +180,7 @@ mod tests {
     #[test]
     fn sanitize_keeps_gcc_with_no_sanitizer() {
         let mut builds = builds("/missing/gcc");
-        builds.sanitize("memory", false);
+        assert!(!builds.sanitize("memory"));
         for build in [&mut builds.library, &mut builds.shim] {
             assert_eq!(child::tool(build, TARGET).path(), Path::new("/missing/gcc"));
         }

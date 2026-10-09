@@ -55,39 +55,40 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
 }
 
 impl Builds {
-    /// Gives both builds the sanitizers of the Rust build, and returns whether the C
-    /// builds with the address sanitizer. `sanitize` is the comma list of
-    /// `cfg(sanitize)`. When it holds `address`, the C runs under the address and
-    /// undefined behavior sanitizers, and stops at the first error. With `fuzzing`, it
-    /// gives libFuzzer its coverage. With either, a compiler that is not clang gives
-    /// way to `clang`, since rustc links the LLVM runtimes.
-    pub(crate) fn sanitize(&mut self, sanitize: &str, fuzzing: bool) -> bool {
+    /// Gives both builds the address sanitizer of the Rust build, and returns whether
+    /// it did. `sanitize` is the comma list of `cfg(sanitize)`. When it holds
+    /// `address`, the C runs under the address and undefined behavior sanitizers, and
+    /// stops at the first error.
+    pub(crate) fn sanitize(&mut self, sanitize: &str) -> bool {
         let address = sanitize.split(',').any(|name| name == "address");
-        let mut flags = Vec::new();
         if address {
             // `ZIP_FUNCTIONS` of the copy calls each comparator through a generic
             // function type, which `-fsanitize=function` stops on.
-            flags.extend([
+            self.add(&[
                 "-fsanitize=address,undefined",
                 "-fno-sanitize=function",
                 "-fno-sanitize-recover=all",
             ]);
         }
-        if fuzzing {
-            flags.push("-fsanitize=fuzzer-no-link");
-        }
-        if flags.is_empty() {
-            return false;
-        }
+        address
+    }
+
+    /// Gives both builds the coverage that libFuzzer reads, for a `cfg(fuzzing)` build.
+    pub(crate) fn fuzz(&mut self) {
+        self.add(&["-fsanitize=fuzzer-no-link"]);
+    }
+
+    /// Adds `flags` to both builds. A compiler that is not clang gives way to `clang`,
+    /// since rustc links the LLVM runtimes of the sanitizers.
+    fn add(&mut self, flags: &[&str]) {
         let clang = self.library.get_compiler().is_like_clang();
         for build in [&mut self.library, &mut self.shim] {
             if !clang {
                 build.compiler("clang");
             }
-            for flag in &flags {
+            for flag in flags {
                 build.flag(flag);
             }
         }
-        address
     }
 }

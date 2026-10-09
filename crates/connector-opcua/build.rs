@@ -41,10 +41,13 @@ fn build() {
     )]
     let (sanitize, fuzzing) = (
         std::env::var("CARGO_CFG_SANITIZE").unwrap_or_default(),
-        std::env::var_os("CARGO_CFG_FUZZING").is_some(),
+        std::env::var_os("CARGO_CFG_FUZZING"),
     );
-    if builds.sanitize(&sanitize, fuzzing) {
+    if builds.sanitize(&sanitize) {
         println!("cargo::rustc-cfg=asan");
+    }
+    if fuzzing.is_some() {
+        builds.fuzz();
     }
     let compiler::Builds { mut library, shim } = builds;
     if let Err(e) = compiler::check(&library.get_compiler()) {
