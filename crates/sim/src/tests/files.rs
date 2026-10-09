@@ -2207,3 +2207,30 @@ fn a_remove_through_the_handle_ends_after_the_dropped_write_of_its_handle() {
         assert!(!block_held_after_end(value, false), "value {value}");
     }
 }
+
+/// What a create of `a` gives, and whether it ended before a `File::remove` of `a`
+/// whose future lives. A durable `Files::remove` of `a` unlinked the file of the
+/// handle first, so only the handle holds its 600 KiB.
+fn create_beside_handle_remove_of_unlinked(value: u64) -> (Result<(), Error>, bool) {
+    run(value, MIB, |node, _| async move {
+        let (files, path) = (node.files(), Path::new("a"));
+        let file = create(&node, "a", 600 * KIB).await;
+        files.sync_dir(Path::new("")).await.unwrap();
+        files.remove(path).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        let mut remove = Box::pin(file.remove());
+        pend(remove.as_mut()).await;
+        let made = files.open(path, Mode::Create { len: 600 * KIB }).await;
+        let ended =
+            poll_fn(|cx| Poll::Ready(remove.as_mut().poll(cx).is_ready())).await;
+        (made.map(drop), !ended)
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_a_remove_through_a_handle_whose_path_names_another_file() {
+    for value in 0..32 {
+        let found = create_beside_handle_remove_of_unlinked(value);
+        assert_eq!(found, (Ok(()), false), "value {value}");
+    }
+}

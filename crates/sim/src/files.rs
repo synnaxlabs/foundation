@@ -236,7 +236,10 @@ impl Files {
         }
         let mut at = Monotonic(now.0.saturating_add(delay));
         if let Some(path) = call.changes(&path) {
-            let file = call.handle().map(|handle| handle.inode);
+            let file = match &call {
+                Call::Unlink { handle } => Some(handle.inode),
+                _ => None,
+            };
             at = at.max(self.wait_end(node, path, file));
         }
         self.queue.insert((at, key));
@@ -258,7 +261,8 @@ impl Files {
     /// than: the end of the last call on `path` that a dropped future or handle left
     /// to run, or of a remove through a handle, live or not, or zero. A call on `path`
     /// uses it, or the file that it names, or a file that a rename to it moves there,
-    /// or `file`, the file of the handle of the call.
+    /// or `file`, the file of a remove through a handle. A remove through a handle is on
+    /// the path that it was sent on and on its file.
     fn wait_end(&self, node: usize, path: &Path, file: Option<u64>) -> Monotonic {
         let path = disk::normal(path);
         let pending: Vec<_> = (self.queue.iter().rev())
@@ -281,9 +285,14 @@ impl Files {
             .chain(moved)
             .collect();
         (pending.iter())
-            .find(|(_, flight)| match flight.call.handle() {
-                Some(handle) => inodes.contains(&handle.inode),
-                None => disk::normal(&flight.path) == path,
+            .find(|(_, flight)| {
+                let named = disk::normal(&flight.path) == path;
+                match &flight.call {
+                    Call::Unlink { handle } => named || inodes.contains(&handle.inode),
+                    call => call
+                        .handle()
+                        .map_or(named, |handle| inodes.contains(&handle.inode)),
+                }
             })
             .map_or(Monotonic::default(), |(at, _)| *at)
     }

@@ -1091,3 +1091,26 @@ fn a_remove_through_the_handle_ends_after_the_dropped_write_of_its_handle() {
         drop(pool.alloc(big).unwrap());
     });
 }
+
+#[test]
+fn a_write_open_waits_for_a_remove_through_a_handle_whose_path_names_another_file() {
+    run(|files, data| async move {
+        let file = create(&files, "a", KIB).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let (mut remove, mut open) = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(file.remove());
+            pend(&mut remove, context);
+            let mode = Mode::Create { len: KIB };
+            let mut open = Box::pin(files.open(Path::new("a"), mode));
+            pend(&mut open, context);
+            (remove, open)
+        })
+        .await;
+        assert_eq!(open.as_mut().await.map(drop), Ok(()));
+        let found = poll_fn(|cx| Poll::Ready(remove.as_mut().poll(cx))).await;
+        assert_eq!(
+            found,
+            Poll::Ready(Err(Error::NotFound { path: "a".into() }))
+        );
+    });
+}
