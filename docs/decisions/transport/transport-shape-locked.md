@@ -15,7 +15,7 @@
   class fits (STREAM WIRE). Decided by `laptop.architect-2` (#1998,
   2026-10-09T03:45:09Z):
   https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073837407.
-  Supersedes the window of that or 1 MiB of #1754.
+  Changes the window of that or 1 MiB of #1754.
   `Client::new` binds the program's UDP socket at `[::]` port 0 on
   `client::Config::net`, through the same private function in `port` as `Port::bind`,
   and binds no TCP. A `local` field in `client::Config` comes when a program must send
