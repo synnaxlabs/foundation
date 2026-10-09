@@ -822,7 +822,8 @@ fn channel_key(
     entropy: &env::entropy::Entropy,
 ) -> types::channel::Key {
     // The time only orders keys, so a key before mesh time or 1970 has the time 0.
-    // The midpoint, not an edge: only it never goes back.
+    // The midpoint, not an edge: only it never goes back, while mesh time is before
+    // 2162.
     let at = time.now().mesh.map_or(Stamp::EPOCH, |mesh| {
         Stamp::from_nanos(mesh.earliest.nanos().midpoint(mesh.latest.nanos()))
             .max(Stamp::EPOCH)
