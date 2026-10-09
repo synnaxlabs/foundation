@@ -160,6 +160,31 @@ fn resumes_a_named_complete_reader_past_a_frame_released_before_its_position() {
 }
 
 #[test]
+fn ends_a_named_complete_reader_behind_on_a_frame_dropped_before_it_resumes() {
+    for (seed, queued) in [(20, true), (21, false)] {
+        run(seed, move |test| async move {
+            let open = named("a", "r", Mode::Complete, Span::SECOND);
+            let first = test.hub.reader(open).await.expect("opens");
+            let mut writer = test.writer("w", &["value"]).await;
+            test.clock.sleep(SETTLE).await;
+            test.paused.pause();
+            if queued {
+                write(&mut writer, &[test.now()], &[7]);
+                drop(first);
+            } else {
+                drop(first);
+                write(&mut writer, &[test.now()], &[7]);
+            }
+            let open = named("a", "r", Mode::Complete, Span::SECOND);
+            let mut reader = test.hub.reader(open).await.expect("opens");
+            test.paused.resume();
+            let ended = reader.next().await.expect_err("behind");
+            assert_eq!(ended, Ended::Behind, "queued: {queued}");
+        });
+    }
+}
+
+#[test]
 fn resumes_each_later_open_of_a_named_complete_reader_at_the_same_position() {
     run(17, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);

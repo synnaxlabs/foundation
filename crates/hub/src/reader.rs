@@ -58,7 +58,8 @@ pub struct Config {
     /// index: an open takes over the session of the same subject and name on its index.
     /// A named complete reader that opens while the home holds its position resumes at
     /// the position where its last complete session opened, and ends with
-    /// [`Ended::Behind`] when a frame after that position was released.
+    /// [`Ended::Behind`] when a frame after that position was released, or dropped
+    /// while no complete session on its index was open.
     pub name: Option<Name>,
     /// How long the home holds a named complete reader's position after its session
     /// closes. Zero or more. It must be zero when the reader is unnamed or latest.

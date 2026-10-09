@@ -317,8 +317,9 @@
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057332703. A named
   complete reader that opens while the home holds its position resumes at the position
   where its last complete session opened, and ends with `Ended::Behind` when a frame
-  after that position was released (`laptop.architect`, 2026-10-09T21:04:47Z and
-  21:34:41Z: https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192
+  after that position was released, or dropped while no complete session on its index
+  was open (`laptop.architect`, 2026-10-09T21:04:47Z and 21:34:41Z:
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192
   and https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089638162).
   Trigger: #1742 PR 3 adds `Reader::ack`, and the reader then resumes past its last ack.
   A named open before mesh time gives `Unsynced`. A hold on an unnamed or latest reader
