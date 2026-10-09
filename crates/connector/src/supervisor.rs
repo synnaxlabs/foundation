@@ -836,6 +836,44 @@ mod tests {
         assert_eq!(live, (1, 0), "the second run's task outlives the drop");
     }
 
+    /// Polls a `run` of [`Spawner`] for `name` until `span` passed, then drops it.
+    async fn drop_after(
+        supervisor: &Supervisor,
+        name: &Name,
+        clock: &Clock,
+        span: Span,
+    ) {
+        let (config, token) = (config(), Token::new());
+        let mut run = pin!(supervisor.run("spawner", name.clone(), &config, &token));
+        let mut later = pin!(clock.sleep(span));
+        poll_fn(|cx| {
+            assert!(run.as_mut().poll(cx).is_pending(), "it runs until dropped");
+            later.as_mut().poll(cx)
+        })
+        .await;
+    }
+
+    #[test]
+    fn waits_for_a_dropped_run_after_a_drop_during_that_wait() {
+        let seen = run_on(|node, tasks| async move {
+            let kind = Spawner {
+                linger: ms(2_000),
+                ..Spawner::default()
+            };
+            let seen = Arc::clone(&kind.seen);
+            let kinds = Table::new().with("spawner", kind);
+            let supervisor = Supervisor::new(inputs(&node, tasks, kinds));
+            let clock = node.clock();
+            let name: Name = "plant.spawner".parse().expect("a valid name");
+            drop_after(&supervisor, &name, &clock, ms(5_000)).await;
+            drop_after(&supervisor, &name, &clock, ms(1_000)).await;
+            drop_after(&supervisor, &name, &clock, ms(5_000)).await;
+            seen.lock().expect("no panic").clone()
+        });
+        assert_eq!(seen, [0, 0, 0], "the first dropped run's task still runs");
+    }
+
+    /// Reads the private map: no public call shows an entry whose count is 0.
     #[test]
     fn keeps_nothing_for_dropped_runs_whose_tasks_ended() {
         let (kept, live) = run_on(|node, tasks| async move {
@@ -846,20 +884,10 @@ mod tests {
             let live = Arc::clone(&kind.live);
             let kinds = Table::new().with("spawner", kind);
             let supervisor = Supervisor::new(inputs(&node, tasks, kinds));
-            let config = config();
             let clock = node.clock();
-            let token = Token::new();
             for i in 0..100 {
                 let name: Name = format!("plant.spawner{i}").parse().expect("a name");
-                let mut run =
-                    Box::pin(supervisor.run("spawner", name, &config, &token));
-                let mut later = pin!(clock.sleep(ms(5_000)));
-                poll_fn(|cx| {
-                    assert!(run.as_mut().poll(cx).is_pending(), "it runs");
-                    later.as_mut().poll(cx)
-                })
-                .await;
-                drop(run);
+                drop_after(&supervisor, &name, &clock, ms(5_000)).await;
             }
             let kept = supervisor.left.borrow().len();
             (kept, *live.lock().expect("no panic"))
@@ -871,6 +899,7 @@ mod tests {
         );
     }
 
+    /// Reads the private map: no public call shows an entry whose count is 0.
     #[test]
     fn waits_for_the_tasks_of_a_dropped_run_before_a_new_run_of_its_connector() {
         let (seen, kept) = run_on(|node, tasks| async move {
@@ -883,17 +912,8 @@ mod tests {
             let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
             let config = config();
             let clock = node.clock();
-            let token = Token::new();
             let name: Name = "plant.spawner".parse().expect("a valid name");
-            let mut run =
-                Box::pin(supervisor.run("spawner", name.clone(), &config, &token));
-            let mut later = pin!(clock.sleep(ms(5_000)));
-            poll_fn(|cx| {
-                assert!(run.as_mut().poll(cx).is_pending(), "it runs until dropped");
-                later.as_mut().poll(cx)
-            })
-            .await;
-            drop(run);
+            drop_after(&supervisor, &name, &clock, ms(5_000)).await;
             let again = Token::new();
             let (canceller, sleeper) = (again.clone(), clock.clone());
             tasks.spawn(async move {
