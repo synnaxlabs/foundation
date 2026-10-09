@@ -85,8 +85,8 @@
   2026-10-08T18:36:00Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6066565970). The X22
   condition with writers: `laptop.architect`, 2026-10-09T22:21:16Z,
-  https://github.com/synnaxlabs/foundation/issues/1961#issuecomment-6090219134. For
-  "another" and the placements of the indexes: `laptop.architect`, #1901,
+  https://github.com/synnaxlabs/foundation/issues/1961#issuecomment-6090219134. The
+  list of placements in the fix: `laptop.architect`, #1901,
   2026-10-08T15:12:13Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6062948556,
   2026-10-08T15:21:54Z,
@@ -117,11 +117,10 @@
   for the indexes of `c` or one names a `home` that is not `n`, the fix is "Exclude the
   indexes of the connector `c` from the `select` of `p`, and select the connector and
   its indexes with another placement whose `home` is `n`", where `p` is each placement
-  that wins for an index of `c`. A
-  list of winners is "`p`", "`p` and `q`", or "`p`, `q`, and `r`": the winner of `c`
-  first, then the others in tree key order. "Another" keeps a listed placement from
-  being the new one, which its exclusion would empty (`laptop.architect`,
-  2026-10-08T15:46:46Z,
+  that wins for an index of `c`. A list of winners is "`p`", "`p` and `q`", or "`p`,
+  `q`, and `r`": the winner of `c` first, then the others in tree key order. "Another"
+  keeps a listed placement from being the new one, which its exclusion would empty
+  (`laptop.architect`, 2026-10-08T15:46:46Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980, and
   2026-10-08T16:04:09Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063962123). A tie for
