@@ -43,11 +43,6 @@ impl Session {
         Weak(Rc::downgrade(&self.0))
     }
 
-    /// Whether this node dialed the session.
-    pub(crate) fn dialed(&self) -> bool {
-        self.0.dialed()
-    }
-
     /// Whether the session is open: no caller closed it, and it has not ended.
     pub(crate) fn live(&self) -> bool {
         self.0.live()

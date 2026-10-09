@@ -403,11 +403,6 @@ impl Session {
         self.state.borrow().endpoint.live(self.key)
     }
 
-    /// Whether this side dialed the session. `false` once it ended.
-    pub(crate) fn dialed(&self) -> bool {
-        self.state.borrow().endpoint.dialed(self.key)
-    }
-
     /// Pings the peer, and gives a future that completes when the peer acknowledges
     /// the ping or a later packet. The future does not keep the session open.
     ///
