@@ -205,13 +205,13 @@ impl Files {
         &mut self,
         now: Monotonic,
         node: usize,
-        path: &Path,
+        path: PathBuf,
         call: Call,
         held: Option<Held>,
     ) -> u64 {
         let key = self.tick();
         let delay = self.rng.below(DELAYS);
-        let fault = (node, disk::normal(path), call.operation());
+        let fault = (node, disk::normal(&path), call.operation());
         let fault = self.faults.iter().position(|aimed| *aimed == fault);
         let failed = fault.map(|at| self.faults.remove(at)).is_some();
         let disk = &mut self.disks[node];
@@ -227,7 +227,7 @@ impl Files {
         self.queue.insert((at, key));
         let flight = Flight {
             node,
-            path: path.to_path_buf(),
+            path,
             call,
             held,
             failed,
@@ -457,7 +457,7 @@ impl Files {
         (Poll::Pending, self.closing.insert(handle.key, waker))
     }
 
-    /// The path of descriptor `handle` of `node` now.
+    /// The path of descriptor `handle` of `node` now, as its open or rename gave it.
     pub(crate) fn path(&self, node: usize, handle: Handle) -> PathBuf {
         self.disks[node].path(handle).to_path_buf()
     }
