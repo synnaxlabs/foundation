@@ -190,17 +190,9 @@ pub fn files(
 /// [`Error::Thread`] when the thread that waits for them cannot start.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub fn interrupt() -> Result<impl Future<Output = ()> + Send + 'static, Error> {
-    let set = signal::set();
-    let old = signal::block(&set);
     let (fire, fired) = tokio::sync::oneshot::channel();
     // The future may be gone, as when the process stops on its own.
-    signal::start(set, move || fire.send(()).unwrap_or(())).map_err(|e| {
-        signal::restore(&old);
-        Error::Thread(env::thread::Error::Start {
-            name: "signal".to_owned(),
-            reason: e.to_string(),
-        })
-    })?;
+    signal::hold(move || fire.send(()).unwrap_or(())).map_err(Error::Thread)?;
     Ok(wait(fired))
 }
 

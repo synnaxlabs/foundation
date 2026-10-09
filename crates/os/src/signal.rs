@@ -1,10 +1,39 @@
 //! The signal mask and `sigwait` calls of [`interrupt`](crate::interrupt).
 
 use std::mem::MaybeUninit;
-use std::{io, thread};
+use std::thread;
 
-/// The set of SIGINT and SIGTERM.
-pub(crate) fn set() -> libc::sigset_t {
+use env::thread::Error;
+
+/// Holds SIGINT and SIGTERM on the calling thread and each thread it starts later, and
+/// starts thread `signal`, which calls `fire` at the first, then takes them as with no
+/// hold. The thread has no handle: it lives until the process ends, to take the
+/// second signal. When the thread cannot start, the mask stays as it was.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "an env Handle joins its thread, and this one never ends"
+)]
+pub(crate) fn hold(fire: impl FnOnce() + Send + 'static) -> Result<(), Error> {
+    let set = set();
+    // Before the start, so that the thread inherits the block.
+    let old = mask(libc::SIG_BLOCK, &set);
+    let name = "signal";
+    match thread::Builder::new()
+        .name(name.to_owned())
+        .spawn(move || serve(&set, fire))
+    {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            mask(libc::SIG_SETMASK, &old);
+            Err(Error::Start {
+                name: name.to_owned(),
+                reason: e.to_string(),
+            })
+        }
+    }
+}
+
+fn set() -> libc::sigset_t {
     let mut set = MaybeUninit::<libc::sigset_t>::uninit();
     // SAFETY: `set` is one sigset, which the call initializes.
     let rc = unsafe { libc::sigemptyset(set.as_mut_ptr()) };
@@ -16,34 +45,6 @@ pub(crate) fn set() -> libc::sigset_t {
     }
     // SAFETY: `sigemptyset` initialized it.
     unsafe { set.assume_init() }
-}
-
-/// Blocks the signals of `set` on the calling thread and each thread it starts later,
-/// and returns the mask it had before.
-pub(crate) fn block(set: &libc::sigset_t) -> libc::sigset_t {
-    mask(libc::SIG_BLOCK, set)
-}
-
-/// Sets the mask of the calling thread to `old`.
-pub(crate) fn restore(old: &libc::sigset_t) {
-    mask(libc::SIG_SETMASK, old);
-}
-
-/// Starts thread `signal`, which calls `fire` at the first signal of `set`, which each
-/// thread blocks, then takes them as with no block. The thread has no handle: it lives
-/// until the process ends, to take the second signal.
-#[expect(
-    clippy::disallowed_methods,
-    reason = "an env Handle joins its thread, and this one never ends"
-)]
-pub(crate) fn start(
-    set: libc::sigset_t,
-    fire: impl FnOnce() + Send + 'static,
-) -> io::Result<()> {
-    thread::Builder::new()
-        .name("signal".to_owned())
-        .spawn(move || serve(&set, fire))
-        .map(drop)
 }
 
 fn serve(set: &libc::sigset_t, fire: impl FnOnce()) -> ! {
