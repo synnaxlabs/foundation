@@ -2,6 +2,7 @@
 //! bytes, because the encoding is canonical.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use config::plan::Plan;
 use libfuzzer_sys::fuzz_target;

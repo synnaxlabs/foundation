@@ -17,13 +17,19 @@ use types::channel::{self, Slot};
 use types::frame::key_set::KeySet;
 use types::frame::{self, Frame, Placed};
 use wire::header::MALFORMED;
-use wire::hub::client::Refusal;
+use wire::hub::client::{BODY_BYTES_MAX, Refusal};
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
-use crate::reader::{Credit, Ended, Session};
+use crate::reader::{Credit, Session, Stop};
 use crate::{Away, State};
 
 pub use client::{Reply, Request};
+
+/// The most bytes of client request bodies that one hub holds at once, over each of
+/// its links: each from the decode of its request until the caller sends or drops
+/// its [`Reply`]. A request whose body does not fit stops with `BUSY` before the
+/// hub reads a byte of it.
+pub const BODIES_BYTES_MAX: u64 = 2 * BODY_BYTES_MAX;
 
 /// Why [`Link::serve`](crate::Link::serve) ended a stream.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +72,15 @@ pub enum Error {
     /// A request stream while another request of the link waits for its reply. Code
     /// `MALFORMED`.
     Pending,
+    /// The open requests of the hub hold so many body bytes that a body of `length`
+    /// more is over [`BODIES_BYTES_MAX`]. Code `BUSY`. The same request can succeed
+    /// once enough open requests reply.
+    Bodies {
+        /// The body length of the refused request.
+        length: u64,
+        /// The body bytes that the open requests of the hub held.
+        held: u64,
+    },
 }
 
 impl Error {
@@ -84,7 +99,7 @@ impl Error {
             Self::Unknown(_) | Self::Removed(_) => Some(Code(UNKNOWN)),
             Self::NotHome => Some(Code(NOT_HOME)),
             Self::Buffer(_) | Self::Mesh(_) => Some(Code(FAILED)),
-            Self::Pool(_) => Some(Code(BUSY)),
+            Self::Pool(_) | Self::Bodies { .. } => Some(Code(BUSY)),
             Self::Stream(_) => None,
         }
     }
@@ -137,6 +152,12 @@ impl fmt::Display for Error {
             Self::Pending => f.write_str(
                 "the program sent a request while another request waits for its reply",
             ),
+            Self::Bodies { length, held } => write!(
+                f,
+                "a request body of {length} bytes does not fit under the cap of \
+                 {BODIES_BYTES_MAX} bytes: the open requests of the hub hold {held} \
+                 bytes"
+            ),
         }
     }
 }
@@ -146,7 +167,7 @@ impl std::error::Error for Error {}
 impl From<Away> for Error {
     fn from(away: Away) -> Self {
         match away {
-            Away::Remote(_) => Self::NotHome,
+            Away::Remote(..) => Self::NotHome,
             Away::Mesh(stopped) => Self::Mesh(stopped),
         }
     }
@@ -240,15 +261,15 @@ async fn serve(
             Event::Frame(Ok((frame, set, _))) => {
                 layout.send(state, sender, &frame, set).await?;
             }
-            Event::Frame(Err(Ended::Behind)) => {
+            Event::Frame(Err(Stop::Behind)) => {
                 sender.send(reply(state, wire::hub::Reply::Behind)?).await?;
                 sender.finish()?;
                 return Ok(());
             }
-            Event::Frame(Err(Ended::Buffer(error))) => {
+            Event::Frame(Err(Stop::Buffer(error))) => {
                 return Err(Error::Buffer(error));
             }
-            Event::Frame(Err(Ended::Removed(key))) => {
+            Event::Frame(Err(Stop::Removed(key))) => {
                 return Err(Error::Removed(key));
             }
         }
@@ -258,7 +279,7 @@ async fn serve(
 enum Event<F> {
     /// The peer finished, or broke the stream or HUB WIRE.
     Finished(Result<(), Error>),
-    Frame(Result<F, Ended>),
+    Frame(Result<F, Stop>),
 }
 
 /// Reads what the peer sends after the keys run, and grants each credit. Returns when
@@ -456,21 +477,7 @@ fn reply(state: &RefCell<State>, reply: wire::hub::Reply) -> Result<Block, Error
 /// largest block: a reply, an ends run, which is smaller than the frame's
 /// descriptors, or a message of a client stream.
 fn alloc(state: &RefCell<State>, len: usize) -> Result<Unique, Error> {
-    state
-        .borrow()
-        .home
-        .pool()
-        .alloc(len)
-        .map_err(|error| match error {
-            block::Error::TooLarge { .. } => {
-                unreachable!(
-                    "invariant: no caller asks for more than the largest block"
-                )
-            }
-            block::Error::Exhausted { .. } | block::Error::Refused { .. } => {
-                Error::Pool(error)
-            }
-        })
+    state.borrow().alloc(len).map_err(Error::Pool)
 }
 
 /// How a session sends each frame, through its places. It keeps its buffers across

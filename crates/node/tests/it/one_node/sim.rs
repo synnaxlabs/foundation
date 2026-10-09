@@ -12,7 +12,7 @@ use connector::cancel::Token;
 use connector::http::Client;
 use connector_influx::sim::Store;
 use env::net::tcp::{Listen, Options};
-use env::thread::{Handle, Panicked};
+use env::thread::Handle;
 use http::Request;
 use types::quality::Quality;
 use types::time::{Span, Stamp};
@@ -32,13 +32,14 @@ pub(super) struct Opcua {}
 /// The simulated InfluxDB, with the database `plant`. Drop stops it.
 #[derive(Debug, Default)]
 pub(super) struct Influx {
-    /// The tests read it while [`Influx::stored`] waits on #1734. The two
-    /// `a_dropped_influx_ends_its_shard` tests count its owners.
+    /// The tests read it while [`Influx::stored`] waits on #1734. The test
+    /// `a_dropped_influx_ends_its_shard` counts its owners.
     store: Arc<Mutex<Store>>,
     /// The address of the first [`Influx::serve`].
     address: Option<SocketAddr>,
     /// The token that stops the shard that serves, and that shard. The panic tests put
-    /// a shard that panics here, since no input to [`Influx::serve`] makes it panic.
+    /// a shard that panics or blocks here, since no input to [`Influx::serve`] makes
+    /// it do so.
     serving: Option<(Token, Handle)>,
 }
 
@@ -101,15 +102,18 @@ impl Influx {
     /// Stops, and panics when the server panicked. A process that holds or takes the
     /// port before the next [`Influx::serve`] makes that serve panic.
     pub(super) fn stop(&mut self) {
-        let joined = self.halt().expect("it serves");
-        joined.expect("the simulated InfluxDB stops with no panic");
+        let shard = self.cancel().expect("it serves");
+        shard
+            .join()
+            .expect("the simulated InfluxDB stops with no panic");
     }
 
-    /// Cancels the server and joins its shard, or gives `None` when it does not serve.
-    fn halt(&mut self) -> Option<Result<(), Panicked>> {
+    /// Cancels the server, and gives its shard to join, or `None` when it does not
+    /// serve.
+    fn cancel(&mut self) -> Option<Handle> {
         let (stop, shard) = self.serving.take()?;
         stop.cancel();
-        Some(shard.join())
+        Some(shard)
     }
 
     /// Each sample stored, by data channel, in time order.
@@ -120,11 +124,13 @@ impl Influx {
 
 impl Drop for Influx {
     fn drop(&mut self) {
-        let joined = self.halt();
-        // A second panic aborts the test binary.
-        if !std::thread::panicking() {
-            joined
-                .transpose()
+        // While the thread panics, a join can block and a second panic aborts the
+        // test binary. The server stops on its own.
+        if let Some(shard) = self.cancel()
+            && !std::thread::panicking()
+        {
+            shard
+                .join()
                 .expect("the simulated InfluxDB serves with no panic");
         }
     }
@@ -149,13 +155,18 @@ where
 /// Writes `lines` to the database `plant` at `address` from a shard of its own, and
 /// gives the status of the answer or the error of the client.
 fn write(address: SocketAddr, lines: &'static str) -> String {
+    write_within(address, lines, Span::MINUTE)
+}
+
+/// [`write`], with a client timeout of `timeout`.
+fn write_within(address: SocketAddr, lines: &'static str, timeout: Span) -> String {
     let (send, answer) = mpsc::channel();
     let shard = start("write", move |tasks| async move {
         let client = Client::new(connector::http::Config {
             net: os::net(),
             clock: os::clock(),
             tasks,
-            timeout: Span::MINUTE,
+            timeout,
             body_max: 1 << 10,
         });
         let request = Request::post(format!("http://{address}/write?db=plant"))
@@ -189,7 +200,10 @@ fn influx_stores_each_line_written_to_plant_and_keeps_it_after_a_stop() {
 }
 
 #[test]
-#[cfg_attr(not(target_os = "linux"), ignore = "needs SOCK_CLOEXEC")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs SOCK_CLOEXEC and the shutdown of a listener"
+)]
 fn a_stopped_influx_refuses_and_serves_again_on_its_port_with_what_it_stored() {
     let mut influx = Influx::default();
     let address = influx.serve();
@@ -217,19 +231,54 @@ fn a_dropped_influx_ends_its_shard() {
 }
 
 #[test]
-fn a_dropped_influx_ends_its_shard_when_the_test_panics() {
+fn a_dropped_influx_does_not_join_its_server_when_the_test_panics() {
+    let (release, released) = mpsc::channel::<()>();
     let mut influx = Influx::default();
-    let address = influx.serve();
-    let store = Arc::clone(&influx.store);
+    let shard = start("influx", move |_| async move {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the shard blocks until the test releases it"
+        )]
+        let _waited = released.recv_timeout(std::time::Duration::from_secs(30));
+    });
+    influx.serving = Some((Token::new(), shard));
     let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let _influx = influx;
         panic!("the test broke");
     }));
     unwound.expect_err("the test panics");
-    assert_eq!(Arc::strong_count(&store), 1, "the shard holds no store");
-    if cfg!(target_os = "linux") {
-        assert_eq!(write(address, "m f=1 1"), refused(address));
-    }
+    release
+        .send(())
+        .expect("the drop did not wait for the server");
+}
+
+#[test]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "needs SOCK_CLOEXEC and the shutdown of a listener"
+)]
+fn a_dropped_influx_stops_its_server_when_the_test_panics() {
+    let mut influx = Influx::default();
+    let address = influx.serve();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+        let _influx = influx;
+        panic!("the test broke");
+    }));
+    unwound.expect_err("the test panics");
+    // The drop does not join, so the server stops a moment later.
+    crate::rig::wait(
+        &os::clock(),
+        Span::from_nanos(5_000_000_000),
+        "the server stops",
+        || {
+            let written = write_within(address, "m f=1 1", Span::SECOND);
+            if written == refused(address) {
+                Ok(())
+            } else {
+                Err(written)
+            }
+        },
+    );
 }
 
 #[test]

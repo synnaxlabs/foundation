@@ -42,7 +42,7 @@ use crate::message::Reader;
 use crate::stream::Part;
 use crate::{Class, Code, Error, Peer};
 
-pub(crate) use self::carrier::{Carrier, Dialer, Session};
+pub(crate) use self::carrier::{Carrier, Handle, Session};
 #[cfg(feature = "fuzzing")]
 pub use self::hello::Hello;
 pub(crate) use self::settings::{Role, Setup};
@@ -114,6 +114,8 @@ pub(crate) enum Event {
     /// `stream` may take more, or the peer stopped it. It can repeat, and it can
     /// name a stream the caller no longer holds or has not accepted yet.
     Writable { stream: stream::Key },
+    /// The peer acknowledged a packet sent after the last [`Endpoint::ping`] of `key`.
+    Acked { key: connection::Key },
     /// [`Endpoint::datagrams`] has a datagram of `key` to take. It comes when one
     /// arrives and none waited, so take them all after it.
     Datagram { key: connection::Key },
@@ -298,6 +300,18 @@ impl Endpoint {
         let closed = connection.close(now, code);
         self.events.extend(closed);
         self.drive(key.handle, now);
+    }
+
+    /// Pings the peer on the connection of `key`: [`Event::Acked`] follows once the
+    /// peer acknowledges the ping or a later packet. Does nothing when the connection
+    /// ended.
+    pub(crate) fn ping(&mut self, now: Monotonic, key: connection::Key) {
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        connection.ping();
+        self.drive(key.handle, self.instant(now));
     }
 
     /// Opens a stream of `class` that goes both ways. `None` until the peer's hello
@@ -699,8 +713,6 @@ impl Endpoint {
         if dropped(&datagram) {
             return;
         }
-        // noq-proto answers a short header only with a stateless reset.
-        let short = datagram.first().is_some_and(|form| form & 0x80 == 0);
         let mut reply = Vec::new();
         let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
@@ -729,8 +741,9 @@ impl Endpoint {
                 }
             }
             Some(DatagramEvent::Response(response)) => {
+                let reset = reply.first().is_some_and(|form| form & 0x80 == 0);
                 let admitted =
-                    !short || self.resets.admit(now, response.destination.ip());
+                    !reset || self.resets.admit(now, response.destination.ip());
                 admitted.then_some(response)
             }
         };
@@ -1122,6 +1135,30 @@ mod tests {
                 endpoint.connect(later, server(), pair::SERVER);
                 while endpoint.transmit(later, &mut buffer).is_some() {}
                 assert_eq!(endpoint.deadline(), Some(earliest));
+            });
+        }
+    }
+
+    mod ping {
+        use super::*;
+
+        fn acks(side: &Side) -> Vec<&Event> {
+            let acked = |event: &&Event| matches!(event, Event::Acked { .. });
+            events(side).into_iter().filter(acked).collect()
+        }
+
+        // The server acknowledged the client's handshake packets, all before the mark.
+        #[test]
+        fn gives_acked_once_the_peer_acknowledges_a_packet_after_it() {
+            testing::run(1, |shard| {
+                let mut pair = dial(shard, server());
+                let key = pair.client.key.expect("a key");
+                let now = pair.now();
+                pair.client.endpoint.ping(now, key);
+                pair.run(DELAY);
+                assert!(acks(&pair.client).is_empty());
+                pair.run(Duration::from_millis(100));
+                assert_eq!(acks(&pair.client), [&Event::Acked { key }]);
             });
         }
     }
