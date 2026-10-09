@@ -326,7 +326,7 @@ impl Running {
 /// The process of a command. Drop kills it, so a test that panics leaves no
 /// `foundation` process. A process that it starts lives on: `foundation` starts none.
 #[derive(Debug)]
-struct Process(Child);
+pub(crate) struct Process(pub(crate) Child);
 
 impl Process {
     /// Kills the command and waits for it to exit.
