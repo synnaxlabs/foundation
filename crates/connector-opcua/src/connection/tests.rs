@@ -923,6 +923,39 @@ fn a_send_from_the_run_that_ends_a_drive_goes_out() {
     assert_eq!(parts, [(due + DELAY, &b"late"[..])]);
 }
 
+/// Sends from one `run` on one connection ask for one move of it.
+#[test]
+fn sends_from_one_run_on_one_connection_ask_for_one_move() {
+    let mut network = Network::new();
+    let reads = network.serve(None);
+    let remote = network.remote();
+    let (woken, sent) = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::from_nanos(100_000_000)).await;
+            let mut woken = Vec::new();
+            side.manager
+                .drive(|_| {
+                    for bytes in [&b"a"[..], b"b", b"c"] {
+                        assert_eq!(side.send(1, bytes), Status::GOOD);
+                    }
+                    woken = side.manager.state().again.borrow().clone();
+                    Poll::Ready(())
+                })
+                .await;
+            let sent = side.clock.now();
+            side.drive(Span::SECOND).await;
+            (woken, sent)
+        })
+        .expect("the run ends");
+    assert_eq!(woken, [1]);
+    let reads = reads.lock().expect("no panic under the lock");
+    let parts: Vec<_> = reads.parts.iter().map(|(at, b)| (*at, &b[..])).collect();
+    assert_eq!(parts, [(sent + DELAY, &b"abc"[..])]);
+}
+
 /// `run` polls its own source with the context it gets, and the wake of that source
 /// runs it again, with no timer of the loop.
 #[test]
