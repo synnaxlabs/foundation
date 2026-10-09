@@ -29,7 +29,8 @@ const MAX_LEN: u64 = 16 * 1024;
 /// Runs each target of `fuzz/` at `root` for `seconds`, as many at once as the host has
 /// cores. Each run reads `fuzz/corpus/<target>`, which libFuzzer writes to, and
 /// `oracles/fuzz/<target>`. It fails before the build on each problem that [`check`]
-/// finds, and then when the build fails or a target fails. cargo-fuzz keeps the input
+/// finds and when the pinned nightly gives no host triple, and then when the build
+/// fails or a target fails. cargo-fuzz keeps the input
 /// of a crash in `fuzz/artifacts/<target>/`.
 pub(crate) fn run(root: &Path, seconds: NonZeroU16) -> Result<(), Vec<String>> {
     let targets = check(root)?;
@@ -1350,6 +1351,28 @@ mod tests {
             host(&output(0, text, "")),
             Err(format!("`rustc -vV` gives no host: {text}"))
         );
+    }
+
+    #[test]
+    fn reads_the_host_of_the_pinned_toolchain() {
+        let root = std::env::temp_dir()
+            .join(format!("xtask-fuzz-host-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let toolchain = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../rust-toolchain.toml"),
+        )
+        .unwrap();
+        let channel = toolchain
+            .lines()
+            .find_map(|line| line.strip_prefix("channel = "))
+            .unwrap()
+            .trim_matches('"');
+        std::fs::write(root.join("rust-toolchain-nightly"), channel).unwrap();
+        let fuzz = Fuzz::new(&root);
+        std::fs::remove_dir_all(&root).unwrap();
+        let host = fuzz.unwrap().host;
+        assert!(host.starts_with(std::env::consts::ARCH), "{host}");
+        assert!(host.contains(std::env::consts::OS), "{host}");
     }
 
     #[test]
