@@ -97,9 +97,9 @@ impl Spawned {
             running.waker.clone_from(cx.waker());
             running.future.as_mut().poll(cx)
         };
-        if self.running.strong_count() == 0 {
-            // The future dropped the scope in this poll, so this holds its last
-            // reference.
+        if Rc::strong_count(&slot) == 1 {
+            // The future dropped the scope in this poll, which could not take this
+            // slot, so this holds its last reference.
             drop(slot);
             return Poll::Ready(());
         }
@@ -107,9 +107,7 @@ impl Spawned {
             drop(slot);
             let running = self.running.upgrade().expect("invariant: a live scope");
             let done = running.borrow_mut().remove(&self.key);
-            // A future's drop may do anything, so it runs with no borrow held, and with
-            // no reference to the map, so that a task it polls sees its scope drop.
-            drop(running);
+            // A future's drop may do anything, so it runs with no borrow held.
             drop(done);
         }
         polled
