@@ -95,30 +95,42 @@
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063369171, and
   2026-10-08T16:04:09Z, for "another" and the placements of the indexes,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063962123).
-  `config.split-placement` (BQ10) is at each index, for each connector that writes it,
-  when the placement that wins for the index is not the one that wins for the
-  connector: at the label of the index's placement, or of the connector's when no
-  placement selects the index. A connector only reads a command index, so command
-  indexes leave the unit (same ruling of 18:36:00Z). When the connectors that write an
-  index are on two nodes, `config.writer-nodes` reports it and the index gets no
+  `config.split-placement` (BQ10) works on units. A unit is a connector, each index
+  that it writes, each other connector that writes one of those indexes, and so on. A
+  connector only reads a command index, so command indexes leave the unit (same ruling
+  of 18:36:00Z). When the connectors that write an index are on two nodes,
+  `config.writer-nodes` reports it, and the index joins no unit and gets no
   `config.split-placement`, because no one fix holds for each writer
   (`laptop.architect`, 2026-10-09T22:37:54Z,
-  https://github.com/synnaxlabs/foundation/issues/1961#issuecomment-6090432989). Its fix
-  is "Make the placement `p` win for the connector `c` and its indexes", where `p` wins
-  for `c`, or for the index when no placement selects `c` (same comment of 15:21:54Z,
-  and `laptop.architect`, 2026-10-08T16:22:59Z). It is the target state that each other
-  fix names, so each split diagnostic of `c` gives one edit. When no placement can win
-  for `c` and each of its indexes at the node `n` of `c`, each diagnostic of `c` gives
-  one fix that names each winner, so one edit applies it. When `t` wins for `c` and gets
-  case 2 of `config.connector-home`, the fix is that of case 2: "Exclude the connector
-  `c` and its indexes from the `select` of `t` and `r`, and select them with another
-  placement whose `home` is `n`", where `t` and `r` are each placement that wins for `c`
-  or an index of `c`. When no placement selects `c`, and more than one placement wins
-  for the indexes of `c` or one names a `home` that is not `n`, the fix is "Exclude the
-  indexes of the connector `c` from the `select` of `p`, and select the connector and
-  its indexes with another placement whose `home` is `n`", where `p` is each placement
-  that wins for an index of `c`. A list of winners is "`p`", "`p` and `q`", or "`p`,
-  `q`, and `r`": the winner of `c` first, then the others in tree key order. "Another"
+  https://github.com/synnaxlabs/foundation/issues/1961#issuecomment-6090432989). So
+  each unit is on one node `n`. There is one `config.split-placement` at each index of
+  a unit when a writer has another winner: at the label of the index's placement, or of
+  the first such writer's when no placement selects the index. Its message names each
+  such writer: "the placement `p` wins for the index `i.time`, but the placement `q`
+  wins for the connector `b`", with ", and the placement `r` wins for the connector
+  `c`" for each more, and "no placement selects the connector `c`" for a writer with no
+  winner. Each diagnostic of a unit gives one fix with one target `t`: the winner of the
+  first connector of the unit, in name order, that a placement selects, else the
+  placement that wins for the indexes of the unit. The fix is "Make the placement `t`
+  win for the connectors `a` and `b` and their indexes", so one edit applies it. A unit
+  of one connector `c` keeps "the connector `c` and its indexes" in each fix (same
+  comment of 15:21:54Z, and `laptop.architect`, 2026-10-08T16:22:59Z, and
+  `laptop.architect`, 2026-10-09T22:58:00Z,
+  https://github.com/synnaxlabs/foundation/pull/2194#issuecomment-6090684061). When no
+  placement can win for each connector and index of the unit at `n`, each of its
+  diagnostics gives one fix that names each winner. When `t` gets case 2 of
+  `config.connector-home`, the fix is that of case 2: "Exclude the connectors `a` and
+  `b` and their indexes from the `select` of `t` and `r`, and select them with another
+  placement whose `home` is `n`", where `t` and `r` are each placement that wins for a
+  connector or an index of the unit. When no placement selects a connector of the
+  unit, and more than one placement wins for its indexes or one names a `home` that is
+  not `n`, the fix is "Exclude the indexes of the connectors `a` and `b` from the
+  `select` of `p`, and select the connectors and their indexes with another placement
+  whose `home` is `n`", where `p` is each placement that wins for an index of the unit.
+  The winner of an index that `config.writer-nodes` reports is in no such list, but its
+  writers' nodes still count for case 2 (same comment of 22:58:00Z). A list of winners
+  is "`p`", "`p` and `q`", or "`p`, `q`, and `r`": `t` first, then the others in tree
+  key order. "Another"
   keeps a listed placement from being the new one, which its exclusion would empty
   (`laptop.architect`, 2026-10-08T15:46:46Z,
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063647980, and
@@ -152,7 +164,8 @@
   `Overlap` of `p`, the nearest connector by name, which checks an index that the
   connector does not write and no index that it writes under another name, and a
   `config.split-placement` for each writer of an index on two nodes, whose fixes cannot
-  all hold.
+  all hold, and an index that fails over apart from a writer, with one target for each
+  connector, whose fixes for the writers of one index cannot all hold.
   Supersedes the nearest-connector rule of
   https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6063118459 and item 1
   of https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6064796239.
