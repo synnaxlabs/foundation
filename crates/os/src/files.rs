@@ -26,11 +26,11 @@ const PARTS: usize = 1_024;
 /// so a stalled disk does not grow the queue.
 const DEPTH: usize = 64;
 
-/// The permissions of a new file.
-const FILE: fs::Mode = fs::Mode::from_raw_mode(0o644);
+/// The mode of a new file: it gives the group and other users no access.
+const FILE: fs::Mode = fs::Mode::from_raw_mode(0o600);
 
-/// The permissions of a new directory.
-const DIR: fs::Mode = fs::Mode::from_raw_mode(0o755);
+/// The mode of a new directory: it gives the group and other users no access.
+const DIR: fs::Mode = fs::Mode::from_raw_mode(0o700);
 
 /// The flags that open a directory to read.
 const READ_DIR: OFlags = OFlags::RDONLY

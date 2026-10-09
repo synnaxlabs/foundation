@@ -34,6 +34,7 @@ use types::time::{Span, Stamp};
 
 mod client;
 mod definitions;
+mod link;
 mod region;
 mod serve;
 

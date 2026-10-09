@@ -3,6 +3,7 @@
 
 use std::io;
 use std::io::IoSlice;
+use std::num::NonZeroUsize;
 use std::task::{Context, Poll, ready};
 
 use rustix::io::Errno;
@@ -13,19 +14,15 @@ use super::errno;
 
 /// The bytes a stream wrote since the count last reached the bound.
 pub(super) struct Bound {
-    max: usize,
+    max: NonZeroUsize,
     /// Below `max`.
     written: usize,
 }
 
 impl Bound {
     /// A bound of `max` unsent bytes.
-    pub(super) fn new(max: usize) -> Self {
-        Self {
-            // A bound of 0 would write nothing, and wait for no event.
-            max: max.max(1),
-            written: 0,
-        }
+    pub(super) fn new(max: NonZeroUsize) -> Self {
+        Self { max, written: 0 }
     }
 
     /// Writes from `buffers` to `stream`, at most the bound less the count. When the
@@ -39,7 +36,7 @@ impl Bound {
         cx: &mut Context<'_>,
         buffers: &[IoSlice<'_>],
     ) -> Poll<Result<usize, Errno>> {
-        let room = self.max - self.written;
+        let room = self.max.get() - self.written;
         let (mut whole, mut len) = (0, 0);
         while let Some(buffer) = buffers.get(whole)
             && len + buffer.len() <= room
@@ -63,7 +60,7 @@ impl Bound {
             let _cleared = stream.try_io(Interest::WRITABLE, || {
                 sent = rustix::io::writev(stream, buffers);
                 match sent {
-                    Ok(n) if self.written + n < self.max => Ok(()),
+                    Ok(n) if self.written + n < self.max.get() => Ok(()),
                     _ => Err(io::ErrorKind::WouldBlock.into()),
                 }
             });

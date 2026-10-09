@@ -17,8 +17,8 @@
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6065299343), and
   refuses a base64 word that differs from the one that `ssh-key` writes for the key,
   since `from_openssh` accepts a key length field over 32 when 32 bytes follow. So one
-  key has one base64 form (#1943 round 1, 2026-10-08T18:00:44Z,
-  https://github.com/synnaxlabs/foundation/pull/1943#issuecomment-6065971637). A
+  key has one base64 form (`laptop.architect-2`, 2026-10-08T17:59:19Z,
+  https://github.com/synnaxlabs/foundation/pull/1943#issuecomment-6065948208). A
   string that holds `PRIVATE KEY` (the OpenSSH, PEM, and RFC 4716 forms) or
   `PuTTY-User-Key-File` (a `.ppk` file) gives `config.private-key`, whose message
   quotes none of the value. A `.pub` line whose

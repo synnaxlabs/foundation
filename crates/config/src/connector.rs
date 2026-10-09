@@ -3,16 +3,21 @@ use document::encoding::Checked;
 use document::{Block, Document, Map, read};
 use spec::connector::Connector;
 use spec::definition;
+use types::name::Name;
 
-use crate::{Definition, Found, Writer, span};
+use crate::{Definition, Found, span};
 
 /// The keys that `check` reads. The kind reads each other key and block.
 const KEYS: [&str; 2] = ["kind", "node"];
 
 /// Checks a `connector` block and gives its connector. The kind of the block checks
 /// its config, which is the body without `kind` and `node`, also when `node` is
-/// missing.
-pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
+/// missing. Keeps what the connector writes at `key`.
+pub(crate) fn check(
+    found: &mut Found<'_>,
+    block: &Block,
+    key: Option<&Name>,
+) -> Option<Definition> {
     let fix = "Add a `kind` attribute with the connector's kind";
     let kind = found.required(block, "kind", read::name, fix.into());
     let fix = "Add a `node` attribute with the name of the node that runs it, such as \
@@ -27,8 +32,7 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
     };
     let kind = kind.ok()?;
     let at = span(block, "kind");
-    let checked = found.kinds.check(kind.as_str(), at, config.document());
-    let channels = match checked {
+    let channels = match found.kinds.check(kind.as_str(), at, config.document()) {
         Ok(channels) => channels,
         Err(diagnostics) => {
             found.diagnostics.extend(diagnostics);
@@ -36,12 +40,9 @@ pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> 
         }
     };
     let node = node.ok()?;
-    let at = span(block, "node");
-    found.writers.push(Writer {
-        node: node.clone(),
-        at,
-        writes: channels.writes,
-    });
+    if let Some(key) = key {
+        found.writes.insert(key.clone(), channels.writes);
+    }
     let connector = Connector::new(kind, node, config);
     Some(Definition::Spec(definition::Definition::Connector(
         connector,

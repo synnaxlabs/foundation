@@ -5,9 +5,9 @@
 //! keeps whole or old, so a write never tears it. 68 zero bytes are a key that a crash
 //! kept from being written.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use env::files::{Files, Mode};
+use env::files::{File, Files, Mode};
 use types::ed25519::PrivateKey;
 use types::time::Stamp;
 
@@ -30,33 +30,28 @@ pub(crate) struct Identity {
     pub(crate) private_key: PrivateKey,
 }
 
-/// The identity in `node.key` of `files`. When the file is not there, or holds only
-/// zero bytes, makes a new one at mesh time from `clock`, once it has mesh time, and
-/// from `entropy`. Writes the identity back and makes it durable before it returns,
-/// also one it read: a failed sync of an earlier start can leave a key that a read
-/// sees but a crash loses. Never writes another key over a file that holds one.
+/// The identity in `node.key` of `files`. When the file is not there, has no bytes,
+/// or holds 68 zero bytes, makes a new one at mesh time from `clock`, once it has
+/// mesh time, and from `entropy`. Writes the identity back and makes it durable
+/// before it returns, also one it read: a failed sync of an earlier start can leave
+/// a key that a read sees but a crash loses. Never writes another key over a file
+/// that holds one.
 ///
 /// # Errors
 ///
-/// [`Error::Key`] for a file of another length, tag, or checksum, and
-/// [`Error::Directory`] for a file call that fails.
+/// [`Error::Key`] for a file of another length that is not 0, or of another tag or
+/// checksum, and [`Error::Directory`] for a file call that fails.
 pub(crate) async fn load(
     files: &Files,
     clock: &clock::Reader,
     entropy: &env::entropy::Entropy,
 ) -> Result<Identity, Error> {
-    let file = files
-        .open(Path::new(FILE), Mode::Create { len: LEN as u64 })
-        .await
-        .map_err(|error| match error {
-            env::files::Error::Length { .. } => Error::Key,
-            error => Error::Directory(error),
-        })?;
     let pool = block::Pool::heap(POOL);
-    let into = pool.alloc(LEN).expect("invariant: the pool holds a key");
-    let read = file.read_at(0, into).await.map_err(Error::Directory)?;
-    let bytes: &[u8; LEN] = (&*read).try_into().expect("invariant: a read fills it");
-    let identity = if *bytes == [0; LEN] {
+    let (file, bytes) = read(files, &pool).await.map_err(|error| match error {
+        env::files::Error::Length { .. } => Error::Key,
+        error => Error::Directory(error),
+    })?;
+    let identity = if bytes == [0; LEN] {
         clock.reach(Stamp::from_nanos(i64::MIN)).await;
         let now = match clock.status() {
             clock::Status::Synced(now) | clock::Status::Holdover(now, _) => now.time(),
@@ -64,18 +59,62 @@ pub(crate) async fn load(
         };
         create(now, entropy)
     } else {
-        decode(bytes).ok_or(Error::Key)?
+        decode(&bytes).ok_or(Error::Key)?
     };
-    let block = pool
-        .copy(&encode(&identity))
-        .expect("invariant: the pool holds a key");
-    file.write_at(0, &[block]).await.map_err(Error::Directory)?;
-    file.sync().await.map_err(Error::Directory)?;
-    files
-        .sync_dir(Path::new(""))
+    write(files, &file, &pool, &identity)
         .await
         .map_err(Error::Directory)?;
     Ok(identity)
+}
+
+/// Writes `identity` to `node.key` in `files` when the file is not there, has no
+/// bytes, or holds 68 zero bytes, and makes it durable.
+///
+/// # Errors
+///
+/// [`Error::Directory`] with [`env::files::Error::Exists`] when the file holds 68
+/// bytes that are not all zero, with [`env::files::Error::Length`] when it has another
+/// length that is not 0, and with the error of each other file call that fails.
+pub(crate) async fn store(files: &Files, identity: &Identity) -> Result<(), Error> {
+    let pool = block::Pool::heap(POOL);
+    let (file, bytes) = read(files, &pool).await.map_err(Error::Directory)?;
+    if bytes != [0; LEN] {
+        let path = PathBuf::from(FILE);
+        return Err(Error::Directory(env::files::Error::Exists { path }));
+    }
+    write(files, &file, &pool, identity)
+        .await
+        .map_err(Error::Directory)
+}
+
+/// Opens `node.key` in `files`, made of zero bytes when it is not there, and reads
+/// it.
+async fn read(
+    files: &Files,
+    pool: &block::Pool,
+) -> Result<(File, [u8; LEN]), env::files::Error> {
+    let file = files
+        .open(Path::new(FILE), Mode::Create { len: LEN as u64 })
+        .await?;
+    let into = pool.alloc(LEN).expect("invariant: the pool holds a key");
+    let read = file.read_at(0, into).await?;
+    let bytes = (&*read).try_into().expect("invariant: a read fills it");
+    Ok((file, bytes))
+}
+
+/// Writes `identity` to `file` and makes the file and its name durable.
+async fn write(
+    files: &Files,
+    file: &File,
+    pool: &block::Pool,
+    identity: &Identity,
+) -> Result<(), env::files::Error> {
+    let block = pool
+        .copy(&encode(identity))
+        .expect("invariant: the pool holds a key");
+    file.write_at(0, &[block]).await?;
+    file.sync().await?;
+    files.sync_dir(Path::new("")).await
 }
 
 /// A new identity: a UUIDv7 key at `now`, and a random private key.

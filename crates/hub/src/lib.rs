@@ -2,6 +2,7 @@
 //! of a shard's home.
 
 mod channel;
+pub mod client;
 mod commit;
 mod link;
 pub mod reader;
@@ -46,8 +47,9 @@ pub mod mesh {
 }
 
 /// The hub of one shard: it opens writer and reader sessions on the indexes of the
-/// shard's home, and serves each hub stream of a transport session through a
-/// [`Link`]. It is not `Send`: each call is on the shard's thread. Clones share it.
+/// shard's home, and serves each hub stream of a transport session that its caller
+/// gives to a [`Link`]. It is not `Send`: each call is on the shard's thread. Clones
+/// share it.
 #[derive(Clone, Debug)]
 pub struct Hub(Rc<RefCell<State>>);
 
@@ -211,8 +213,8 @@ impl Hub {
         self.0.borrow_mut().rules = rules;
     }
 
-    /// The hub's part of `session`. Give each hub stream of the session to
-    /// [`Link::serve`].
+    /// The hub's part of `session`. Give to [`Link::serve`] each hub stream of the
+    /// session that the caller does not reject.
     #[must_use]
     pub fn link(&self, session: transport::Session) -> Link {
         Link::new(Rc::clone(&self.0), session)
