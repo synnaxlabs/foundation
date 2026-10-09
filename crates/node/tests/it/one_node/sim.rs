@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZeroUsize;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
@@ -20,7 +21,7 @@ use types::time::{Span, Stamp};
 const OPTIONS: Options = Options {
     send_buffer_bytes: 1 << 16,
     recv_buffer_bytes: 1 << 16,
-    unsent_bytes_max: 1 << 14,
+    unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
     delayed: false,
 };
 

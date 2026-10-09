@@ -77,8 +77,10 @@ impl Shards {
     /// It returns when the thread runs, is pinned, and has its executor.
     ///
     /// When the future that `main` returns completes, the shard drops its other tasks
-    /// and the thread ends. A panic in any of its tasks ends the shard, and
-    /// [`Handle::join`] returns [`Panicked`](crate::thread::Panicked).
+    /// and the thread ends. A panic in `main`, in its future, or in a task of its
+    /// [`Tasks`] ends the shard, and [`Handle::join`] returns
+    /// [`Panicked`](crate::thread::Panicked). As anywhere in Rust, a panic that unwinds
+    /// into the unwind of another panic aborts the process.
     ///
     /// # Errors
     ///
