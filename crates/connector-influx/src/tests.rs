@@ -1,9 +1,8 @@
 #![expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
 
-use std::sync::Arc;
-
 use connector::kind::{Kind as _, Table};
-use connector::supervisor::{self, Supervisor};
+use connector::supervisor::Supervisor;
+use connector::testing;
 use document::value::Kind as Value;
 use document::{Attribute, Block, Map, Position, Source, Span};
 use env::tasks::Tasks;
@@ -263,20 +262,23 @@ fn discovers_nothing() {
 /// The result of supervising one influx connector with `config`.
 fn connector_run(config: Document) -> Result<(), Error> {
     run(move |node, tasks| async move {
-        Supervisor::new(supervisor::Config {
-            kinds: Arc::new(Table::new().with("influx", Kind)),
+        let env = hub::testing::Env {
+            files: node.files(),
             clock: node.clock(),
+            wall: node.wall(),
             entropy: node.entropy(),
-            net: node.net(),
             tasks,
-        })
-        .run(
-            "influx",
-            "influx".parse().expect("a name"),
-            &config,
-            &cancel::Token::new(),
-        )
-        .await
+        };
+        let kinds = Table::new().with("influx", Kind);
+        let (inputs, _) = testing::create_config(env, node.net(), kinds).await;
+        Supervisor::new(inputs)
+            .run(
+                "influx",
+                "influx".parse().expect("a name"),
+                &config,
+                &cancel::Token::new(),
+            )
+            .await
     })
 }
 

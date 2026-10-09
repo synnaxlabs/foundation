@@ -69,6 +69,7 @@ impl Kind for Writer {
         Ok(Channels {
             reads: Vec::new(),
             writes: writes.clone(),
+            counts: Vec::new(),
         })
     }
 
@@ -272,6 +273,7 @@ impl Kind for Commander {
         Ok(Channels {
             reads: writes.clone(),
             writes: Vec::new(),
+            counts: Vec::new(),
         })
     }
 
@@ -316,6 +318,7 @@ impl Kind for Once {
         Ok(Channels {
             reads: Vec::new(),
             writes: vec![name("a.time")],
+            counts: Vec::new(),
         })
     }
 

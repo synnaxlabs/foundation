@@ -39,6 +39,8 @@ pub struct Config {
     pub net: Net,
     /// The shard's tasks.
     pub tasks: Tasks,
+    /// The shard's hub. Each session a kind opens acts as its connector.
+    pub hub: hub::Hub,
 }
 
 /// Runs connectors of the kinds in a table, one `run` call at a time per connector.
@@ -196,8 +198,17 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::{inputs, run_on};
+    use crate::common::{create_config, run_on};
     use crate::kind::{Channels, Kind, Table};
+    use hub::home::Refusal;
+    use hub::reader::{Mode, Received};
+    use spec::channel::{Channel, Data};
+    use spec::data_type::DataType;
+    use spec::definition::Definition;
+    use types::authority::Authority;
+    use types::channel;
+    use types::frame::{Form, Label, Path};
+    use types::sample::{Scalar, Type};
 
     const BAD: Code = Code::new("test.bad");
 
@@ -351,7 +362,8 @@ mod tests {
             };
             let runs = Arc::clone(&script.runs);
             let kinds = Table::new().with("script", script);
-            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let supervisor =
+                Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
             let clock = node.clock();
             let token = Token::new();
             if cancel == Some(Span::ZERO) {
@@ -642,7 +654,8 @@ mod tests {
         let result = sim
             .run_on(&client, move |node, tasks| async move {
                 let kinds = Table::new().with("dial", dial);
-                let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+                let supervisor =
+                    Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
                 let token = Token::new();
                 let canceller = token.clone();
                 let clock = node.clock();
@@ -728,7 +741,8 @@ mod tests {
             };
             let (seen, live) = (Arc::clone(&kind.seen), Arc::clone(&kind.live));
             let kinds = Table::new().with("spawner", kind);
-            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let supervisor =
+                Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
             let token = Token::new();
             let canceller = token.clone();
             let clock = node.clock();
@@ -801,7 +815,8 @@ mod tests {
             let kind = Spawner::default();
             let live = Arc::clone(&kind.live);
             let kinds = Table::new().with("spawner", kind);
-            let supervisor = Supervisor::new(inputs(&node, tasks, kinds));
+            let supervisor =
+                Supervisor::new(create_config(&node, tasks, kinds).await.0);
             let token = Token::new();
             let name = "plant.spawner".parse().expect("a valid name");
             let config = config();
@@ -824,7 +839,8 @@ mod tests {
             };
             let seen = Arc::clone(&kind.seen);
             let kinds = Table::new().with("spawner", kind);
-            let supervisor = Supervisor::new(inputs(&node, tasks.clone(), kinds));
+            let supervisor =
+                Supervisor::new(create_config(&node, tasks.clone(), kinds).await.0);
             let (token, config) = (Token::new(), config());
             let name: Name = "plant.spawner".parse().expect("a valid name");
             let clock = node.clock();
@@ -847,5 +863,263 @@ mod tests {
             [0, 0, 1],
             "the new call waited for the task of the dropped call"
         );
+    }
+
+    /// A kind that writes one sample of `plant.value` for each of `values`, `gap`
+    /// apart, through a writer of its context at `authority` with `lease`, stamped
+    /// from `start` on. It keeps the refusal of each write in `refusals`, or `None`
+    /// when the home applied it.
+    struct Write {
+        start: i64,
+        values: Vec<i64>,
+        authority: Authority,
+        lease: Option<Span>,
+        gap: Span,
+        refusals: Arc<Mutex<Vec<Option<Refusal>>>>,
+    }
+
+    impl Write {
+        /// One write of each of `values` at `start`, with no gap, at authority 1 and no
+        /// lease.
+        fn new(start: i64, values: Vec<i64>) -> Self {
+            Self {
+                start,
+                values,
+                authority: Authority(1),
+                lease: None,
+                gap: Span::ZERO,
+                refusals: Arc::default(),
+            }
+        }
+    }
+
+    impl Kind for Write {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Ok(Channels::default())
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
+            let channels = vec![name("plant.value")];
+            let mut writer = ctx
+                .writer(channels, self.authority, self.lease)
+                .await
+                .expect("the writer opens");
+            let entries = writer.set().entries();
+            let entry = |key| {
+                let key = channel::Key::from_u128(key);
+                entries.iter().position(|entry| entry.key == key)
+            };
+            let (time, value) = (entry(1).expect("time"), entry(2).expect("value"));
+            let group = entries[time].group;
+            let clock = ctx.clock();
+            let began = clock.now();
+            for (i, sample) in (0..).zip(&self.values) {
+                if i > 0 {
+                    clock.sleep(self.gap).await;
+                }
+                let stamp = self.start + (clock.now() - began).nanos() + i;
+                let mut series = [(time, 8), (value, 8)];
+                series.sort_unstable();
+                let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+                let time = draft.series_mut(time).expect("the index series");
+                time.copy_from_slice(&stamp.to_le_bytes());
+                let value = draft.series_mut(value).expect("the value series");
+                value.copy_from_slice(&sample.to_le_bytes());
+                draft.set_count(group, 1);
+                let outcomes = writer
+                    .write(Label::Path(Path::Live), draft)
+                    .expect("the home takes it");
+                let refusal = match outcomes {
+                    [hub::home::Outcome::Applied { .. }] => None,
+                    [hub::home::Outcome::Refused { refusal, .. }] => {
+                        Some(refusal.clone())
+                    }
+                    _ => panic!("one group applied or refused: {outcomes:?}"),
+                };
+                self.refusals.lock().expect("no panic").push(refusal);
+            }
+            Ok(())
+        }
+    }
+
+    fn name(text: &str) -> Name {
+        text.parse().expect("a valid name")
+    }
+
+    /// Defines `plant.time` (key 1) and `plant.value` (key 2, `i64`) on `hub`.
+    fn define(hub: &hub::Hub) {
+        let time = Channel {
+            key: channel::Key::from_u128(1),
+            kind: spec::channel::Kind::Index {
+                error: None,
+                control: None,
+            },
+        };
+        let i64 = DataType::Sample(Type::Scalar(Scalar::I64));
+        let data = Data::new(time.key, None, i64, None).expect("no unit");
+        let value = Channel {
+            key: channel::Key::from_u128(2),
+            kind: spec::channel::Kind::Data(data),
+        };
+        let (time, value) = (Definition::Channel(time), Definition::Channel(value));
+        hub.set_definitions([
+            (&name("plant.time"), &time),
+            (&name("plant.value"), &value),
+        ]);
+    }
+
+    /// The `i64` samples of the channel of key 2 in `received`.
+    fn values(received: &Received<'_>) -> Vec<i64> {
+        let set = received.set;
+        let key = channel::Key::from_u128(2);
+        let entry = set.entries().iter().position(|entry| entry.key == key);
+        let entry = entry.expect("the set holds the channel");
+        let range = received.view.range(set.entries()[entry].group);
+        let count = range.expect("the group is present").count;
+        let count = usize::try_from(count).expect("a count");
+        let (_, bytes) = received
+            .view
+            .iter()
+            .find(|&(present, _)| present == entry)
+            .expect("the view holds the series");
+        let mut out = vec![0; count * 8];
+        let data_type = set.entries()[entry].data_type;
+        codec::decode(data_type, count, bytes, &mut out).expect("decodes");
+        let (chunks, _) = out.as_chunks::<8>();
+        chunks
+            .iter()
+            .map(|chunk| i64::from_le_bytes(*chunk))
+            .collect()
+    }
+
+    #[test]
+    fn gives_a_kind_a_writer_whose_samples_a_hub_reader_gets_in_order() {
+        let got = run_on(|node, tasks| async move {
+            let (mut inputs, now) = create_config(&node, tasks, Table::new()).await;
+            define(&inputs.hub);
+            let write = Write::new(now.nanos(), vec![30, 10, 20]);
+            let refusals = Arc::clone(&write.refusals);
+            inputs.kinds = Arc::new(Table::new().with("write", write));
+            let mut reader = inputs
+                .hub
+                .reader(&[name("plant.value")], Mode::Complete)
+                .await
+                .expect("the reader opens");
+            let supervisor = Supervisor::new(inputs);
+            let result = supervisor
+                .run("write", name("plant.write"), &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            assert_eq!(*refusals.lock().expect("no panic"), [None, None, None]);
+            let mut got = Vec::new();
+            for _ in 0..3 {
+                got.extend(values(&reader.next().await.expect("a frame")));
+            }
+            got
+        });
+        assert_eq!(got, [30, 10, 20]);
+    }
+
+    /// Runs `write(now)` as `plant.write` on a new shard, while a writer as
+    /// `plant.other` at `holder` holds `plant.value` when it is some. Gives the
+    /// refusal of each write, or `None` for one the home applied.
+    fn refusals(
+        holder: Option<Authority>,
+        write: impl FnOnce(i64) -> Write + Send + 'static,
+    ) -> Vec<Option<Refusal>> {
+        run_on(move |node, tasks| async move {
+            let (mut inputs, now) = create_config(&node, tasks, Table::new()).await;
+            define(&inputs.hub);
+            let write = write(now.nanos());
+            let refusals = Arc::clone(&write.refusals);
+            inputs.kinds = Arc::new(Table::new().with("write", write));
+            let mut other = None;
+            if let Some(authority) = holder {
+                let config = hub::writer::Config {
+                    subject: name("plant.other"),
+                    authority,
+                    lease: None,
+                    channels: vec![name("plant.value")],
+                };
+                other = Some(inputs.hub.writer(config).await.expect("opens"));
+            }
+            let supervisor = Supervisor::new(inputs);
+            let result = supervisor
+                .run("write", name("plant.write"), &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            drop(other);
+            refusals.lock().expect("no panic").clone()
+        })
+    }
+
+    #[test]
+    fn gives_a_kind_control_only_over_a_holder_of_lower_authority() {
+        for (kind, holder, want) in [
+            (1, 0, None),
+            (1, 1, Some(Refusal::Waiting)),
+            (2, 1, None),
+            (2, 2, Some(Refusal::Waiting)),
+            (255, 254, None),
+            (255, 255, Some(Refusal::Waiting)),
+        ] {
+            let refusals = refusals(Some(Authority(holder)), move |start| Write {
+                authority: Authority(kind),
+                ..Write::new(start, vec![7])
+            });
+            assert_eq!(refusals, [want], "kind {kind}, holder {holder}");
+        }
+    }
+
+    /// The refusals of two writes of a kind with `lease`, `gap` apart.
+    fn two_writes(lease: Option<Span>, gap: Span) -> Vec<Option<Refusal>> {
+        refusals(None, move |start| Write {
+            lease,
+            gap,
+            ..Write::new(start, vec![7, 8])
+        })
+    }
+
+    #[test]
+    fn applies_the_writes_of_a_kind_with_no_lease_a_day_apart() {
+        assert_eq!(two_writes(None, Span::DAY), [None, None]);
+    }
+
+    #[test]
+    fn refuses_the_write_of_a_kind_once_its_lease_runs_out() {
+        for nanos in [
+            Span::SECOND,
+            Span::from_nanos(3 * Span::SECOND.nanos()),
+            Span::DAY,
+        ]
+        .map(Span::nanos)
+        {
+            let lease = Some(Span::from_nanos(nanos));
+            let just_before = Span::from_nanos(nanos - 1);
+            let at = Span::from_nanos(nanos);
+            assert_eq!(
+                two_writes(lease, just_before),
+                [None, None],
+                "a lease of {nanos} ns, the second write 1 ns before its end"
+            );
+            assert_eq!(
+                two_writes(lease, at),
+                [None, Some(Refusal::Expired)],
+                "a lease of {nanos} ns, the second write at its end"
+            );
+        }
     }
 }
