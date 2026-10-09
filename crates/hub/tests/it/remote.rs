@@ -1785,6 +1785,57 @@ fn a_complete_reader_whose_waiting_credit_fails_to_send_sends_no_later_credit() 
 }
 
 #[test]
+fn a_complete_reader_ends_at_a_frame_past_the_grant_while_its_credit_waits() {
+    const BODY: usize = 16_320;
+    const FIRST: usize = 40;
+    remote_sized(
+        146,
+        sim::link::Config::default(),
+        [(1 << 16, WINDOW), (MESSAGE_MIN, 2 * MESSAGE_MIN)],
+        move |node, _, transport, steps| async move {
+            let (session, mut sender, mut receiver) = fake_open(&transport).await;
+            // The home reads neither stream, so the credit never leaves the reader.
+            let _second = session.accept().await.expect("a second stream");
+            for _ in 0..FIRST {
+                send_frame(&mut sender, BODY).await.expect("sends");
+            }
+            node.clock().sleep(Span::from_nanos(500_000_000)).await;
+            let stopped = loop {
+                if let Err(error) = send_frame(&mut sender, BODY).await {
+                    break error;
+                }
+            };
+            let malformed = Code(Refusal::Malformed.code());
+            assert_eq!(stopped, transport::Error::Stopped { code: malformed });
+            // The home never got a credit.
+            if let Ok(message) = receiver.recv().await {
+                panic!("the home got a credit: {message:?}");
+            }
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let names = define_many(&test, 1000);
+            let hub = test.hub.clone();
+            test.tasks.spawn(async move {
+                drop(hub.reader(&names, Mode::Complete).await);
+            });
+            let (charges, ended) = super::take_all(&mut reader).await;
+            let window = u64::try_from(WINDOW).expect("a u64");
+            assert_eq!(
+                (charges.len(), ended),
+                (
+                    64,
+                    Ended::Credit {
+                        limit_bytes: window
+                    }
+                )
+            );
+        },
+    );
+}
+
+#[test]
 fn a_complete_reader_whose_waiting_credit_fails_to_send_ends_at_a_frame_past_the_grant()
 {
     const BODY: usize = 16_320;

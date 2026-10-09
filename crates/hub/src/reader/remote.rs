@@ -29,11 +29,9 @@ pub(super) struct Remote {
     queue: Rc<RefCell<Queue>>,
     /// `None` once the session ended.
     out: Option<Out>,
-    /// The grant that the home has, and the charge of each frame given back, for a
-    /// complete reader.
-    credit: Option<(u64, u64)>,
-    /// The limit of the last credit put on its way, which the task checks. A failed
-    /// send sets it back to the grant that the home has.
+    /// The charge of each frame given back, for a complete reader.
+    credit: Option<u64>,
+    /// The grant that the home has, which the task checks.
     limit: Rc<Cell<u64>>,
     /// The reader's key set. Place `n` of the open is entry `n`.
     set: Arc<KeySet>,
@@ -66,7 +64,7 @@ struct Inbound {
     /// The entry and end of each series of the frame that arrives.
     ends: Vec<(usize, usize)>,
     draft: Option<Draft>,
-    /// The limit of the last credit put on its way, for a complete reader.
+    /// The grant that the home has, for a complete reader.
     limit: Option<Rc<Cell<u64>>>,
     /// The charges of the frames that arrived.
     arrived: u64,
@@ -87,7 +85,7 @@ impl Remote {
                 wire::hub::Mode::Complete {
                     limit_bytes: WINDOW,
                 },
-                Some((WINDOW, 0)),
+                Some(0),
             ),
             Mode::Latest => (Class::Latest, wire::hub::Mode::Latest, None),
         };
@@ -144,7 +142,7 @@ impl Remote {
 
     /// Adds the charge of `frame`, which the reader gave back, to the credit.
     pub(super) fn give_back(&mut self, frame: &Frame) {
-        if let Some((_, taken)) = &mut self.credit {
+        if let Some(taken) = &mut self.credit {
             *taken += frame.charge();
         }
     }
@@ -197,14 +195,14 @@ impl Remote {
     /// no more credits: the home stopped reading them, and the frames that it sent
     /// still arrive.
     fn grant(&mut self) -> Result<(), Ended> {
-        let Some((granted, taken)) = &mut self.credit else {
+        let Some(taken) = self.credit else {
             return Ok(());
         };
-        let limit_bytes = *taken + WINDOW;
+        let limit_bytes = taken + WINDOW;
         let Some(Out::Idle(sender)) = &mut self.out else {
             return Ok(());
         };
-        if limit_bytes - *granted < WINDOW / 2 {
+        if limit_bytes - self.limit.get() < WINDOW / 2 {
             return Ok(());
         }
         let mut block = self
@@ -213,15 +211,13 @@ impl Remote {
             .alloc(Credit::LEN)
             .map_err(Ended::Pool)?;
         Credit { limit_bytes }.encode(&mut block);
-        self.limit.set(limit_bytes);
         let block = match sender.try_send(block.freeze()) {
             Ok(None) => {
-                *granted = limit_bytes;
+                self.limit.set(limit_bytes);
                 return Ok(());
             }
             Ok(Some(block)) => block,
             Err(_) => {
-                self.limit.set(*granted);
                 (self.out, self.credit) = (None, None);
                 return Ok(());
             }
@@ -457,12 +453,12 @@ impl fmt::Debug for Out {
     }
 }
 
-/// Polls the credit that `out` has on its way, and raises the grant in `credit` once
-/// the stream holds it. A send that fails clears both, as [`Remote::grant`] says, and
-/// sets `limit` back to the grant that the home has.
+/// Polls the credit that `out` has on its way, and raises the grant in `limit` once
+/// the stream holds it. A send that fails clears both `out` and `credit`, as
+/// [`Remote::grant`] says.
 fn poll_credit(
     out: &mut Option<Out>,
-    credit: &mut Option<(u64, u64)>,
+    credit: &mut Option<u64>,
     limit: &Cell<u64>,
     cx: &mut Context<'_>,
 ) {
@@ -470,16 +466,11 @@ fn poll_credit(
         && let Poll::Ready((sender, limit_bytes, sent)) = sending.as_mut().poll(cx)
     {
         if sent.is_err() {
-            if let Some((granted, _)) = credit {
-                limit.set(*granted);
-            }
             (*out, *credit) = (None, None);
             return;
         }
         *out = Some(Out::Idle(sender));
-        if let Some((granted, _)) = credit {
-            *granted = limit_bytes;
-        }
+        limit.set(limit_bytes);
     }
 }
 
