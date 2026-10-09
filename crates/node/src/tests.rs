@@ -3793,10 +3793,10 @@ mod port {
         }
 
         /// A stop of the node from a task on shard 0, in the poll that breaks the
-        /// node's UDP socket: the node sees its stop, the transport's, and the group's
-        /// `Dropped` at one poll, and its stop ranks first.
+        /// node's UDP socket: the node sees its stop and the transport's at one poll,
+        /// with the group still pending, and its stop ranks first.
         #[test]
-        fn a_stop_as_the_transport_and_the_group_stop_gives_no_error() {
+        fn a_stop_as_the_transport_of_a_mesh_stops_gives_no_error() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let node = Arc::new(std::sync::Mutex::new(start_alone(&host)));
