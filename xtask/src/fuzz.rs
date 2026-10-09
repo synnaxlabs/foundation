@@ -839,6 +839,19 @@ mod tests {
             unpatched(&root(), &fuzz),
             Err(format!("`{TYPES}` has no dependency named `noq_proto`"))
         );
+        let copied = self::fuzz(&[types(), copy()], &[(TYPES, PATCHED)]);
+        assert_eq!(
+            unpatched(&root(), &copied),
+            Err(format!("`{TYPES}` has no dependency named `noq_proto`"))
+        );
+    }
+
+    #[test]
+    fn passes_a_requirement_from_git_that_the_copy_meets() {
+        let git = |requirement: &mut Value| {
+            requirement["source"] = json!("git+https://github.com/x/noq");
+        };
+        assert_eq!(paired("noq_proto", git), Ok(Vec::new()));
     }
 
     /// The `fuzz` graph in which `types` needs `noq-proto` `^1.3` as `change` makes it,
