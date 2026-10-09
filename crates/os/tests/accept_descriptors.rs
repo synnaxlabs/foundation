@@ -59,6 +59,12 @@ fn an_accept_with_no_free_descriptor_is_emfile_and_leaves_the_listener_usable() 
         }
     );
     drop(held);
+    // macOS closes the connection that the failed accept took off the queue.
+    let next = if cfg!(target_os = "macos") {
+        std::net::TcpStream::connect(listener.local()).unwrap()
+    } else {
+        second
+    };
     let accepted = runtime.block_on(async {
         tokio::time::timeout(
             Duration::from_secs(10),
@@ -67,5 +73,5 @@ fn an_accept_with_no_free_descriptor_is_emfile_and_leaves_the_listener_usable() 
         .await
     });
     let accepted = accepted.expect("the listener stays usable").unwrap();
-    assert_eq!(accepted.peer(), second.local_addr().unwrap());
+    assert_eq!(accepted.peer(), next.local_addr().unwrap());
 }
