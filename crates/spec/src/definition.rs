@@ -762,14 +762,15 @@ impl<'a> Reader<'a> {
             Actions::from_bits(bits).ok_or(Error::Actions { at: actions, bits })?;
         let at = self.at();
         let authority = Authority(self.byte()?);
+        let policy = Policy::new(subjects, select, allow, authority)
+            .map_err(|error| Error::Access { at: actions, error })?;
         if authority.0 != 0 && !allow.contains(Action::Write) {
             return Err(Error::Authority {
                 at,
                 found: authority,
             });
         }
-        Policy::new(subjects, select, allow, authority)
-            .map_err(|error| Error::Access { at: actions, error })
+        Ok(policy)
     }
 }
 
