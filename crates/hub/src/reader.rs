@@ -82,7 +82,7 @@ pub enum Ended {
     /// The shard's buffer failed.
     Buffer(env::files::Error),
     /// A complete reader missed a frame ([`Mode::Complete`]), or a named one resumed
-    /// before a frame that it can no longer get ([`Config::name`]).
+    /// at a held position, as [`Config::name`] states.
     Behind,
     /// A channel of the reader was removed from the definitions.
     Removed(channel::Key),

@@ -321,8 +321,8 @@
   21:34:41Z: https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192
   and https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089638162), or
   dropped because no complete session on its index was open (`laptop.architect`,
-  2026-10-09T21:46:32Z:
-  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089795529).
+  2026-10-09T21:53:40Z:
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089887271).
   Trigger: #1742 PR 3 adds `Reader::ack`, and the reader then resumes past its last ack.
   A named open before mesh time gives `Unsynced`. A hold on an unnamed or latest reader
   panics (`laptop.architect`, 2026-10-08T10:01:19Z:

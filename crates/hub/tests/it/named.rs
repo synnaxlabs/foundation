@@ -2,6 +2,7 @@
 
 use std::pin::pin;
 use std::sync::atomic::Ordering;
+use std::task::Poll;
 
 use hub::reader::{self, Ended, Mode};
 use types::channel::Key;
@@ -189,17 +190,28 @@ fn resumes_a_named_complete_reader_past_a_frame_lost_while_held() {
     run(22, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);
         let first = test.hub.reader(open).await.expect("opens");
+        let mut latest = test.reader(&["value"], Mode::Latest).await;
         let mut writer = test.writer("w", &["value"]).await;
         test.clock.sleep(SETTLE).await;
         drop(first);
-        let draft = super::draft(&writer, &[(1, &[test.now()]), (2, &[7])]);
-        let blocks = super::fill(&test.pool);
-        let outcomes = writer.write(super::LIVE, draft).expect("taken").to_vec();
+        // A frame that the pool cannot freeze never reaches the readers. Frees one
+        // block at a time until a write freezes the frame and still loses it, which
+        // the latest reader shows.
+        let mut blocks = super::fill(&test.pool);
+        let lost = loop {
+            drop(blocks.pop().expect("a write that freezes its frame"));
+            let draft = super::draft(&writer, &[(1, &[test.now()]), (2, &[7])]);
+            let outcomes = writer.write(super::LIVE, draft).expect("taken").to_vec();
+            assert!(
+                matches!(outcomes[..], [hub::home::Outcome::Lost { .. }]),
+                "{outcomes:?}"
+            );
+            if let Poll::Ready(received) = super::poll_once(latest.next()) {
+                break received.expect("a frame");
+            }
+        };
+        assert_eq!(samples(&lost, 2), [7]);
         drop(blocks);
-        assert!(
-            matches!(outcomes[..], [hub::home::Outcome::Lost { .. }]),
-            "{outcomes:?}"
-        );
         test.clock.sleep(SETTLE).await;
         let open = named("a", "r", Mode::Complete, Span::SECOND);
         let mut reader = test.hub.reader(open).await.expect("opens");
