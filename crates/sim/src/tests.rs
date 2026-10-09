@@ -1470,6 +1470,16 @@ fn a_timer_wakes_its_task_at_each_arm_max_until_due() {
     assert_eq!(polls.load(Ordering::Relaxed), 4);
 }
 
+#[test]
+#[should_panic(expected = "arm_max Span(0) is not positive")]
+fn a_node_with_an_arm_max_of_zero_panics() {
+    let mut sim = sim(0);
+    sim.node(node::Config {
+        arm_max: Some(Span::ZERO),
+        ..node::Config::default()
+    });
+}
+
 fn millis(n: i64) -> Span {
     Span::from_nanos(n * Span::MILLISECOND.nanos())
 }

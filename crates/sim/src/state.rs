@@ -295,7 +295,7 @@ impl State {
         }
         let mut wait = deadline.0 - now.0;
         if let Some(max) = self.nodes[node].arm_max {
-            wait = wait.min(max.max(Span::ZERO).nanos().unsigned_abs());
+            wait = wait.min(max.nanos().unsigned_abs());
         }
         match self.now.0.checked_add(wait) {
             Some(at) => Due::At(Monotonic(at)),

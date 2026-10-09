@@ -330,7 +330,8 @@ pub struct Config {
     pub disk_bytes: u64,
     /// The longest wait that a timer arms for, as `os` arms each Tokio sleep for at
     /// most a second. A timer with a later deadline wakes its task early, and arms
-    /// again only at its next poll. `None` arms each timer for its deadline.
+    /// again only at its next poll. `None` arms each timer for its deadline. A span
+    /// must be positive.
     pub arm_max: Option<Span>,
 }
 
