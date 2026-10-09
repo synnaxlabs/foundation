@@ -9,7 +9,7 @@
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
-use std::task::{Context, Poll, Waker};
+use std::task::{Context, Waker};
 
 use env::net::tcp;
 use rustix::fs::{Mode, OFlags, open};
@@ -44,8 +44,8 @@ fn a_first_poll_with_no_free_descriptor_leaves_the_listener_usable() {
     }
     assert!(listener.poll_accept(&mut cx).is_pending());
     drop(held);
-    let _client = std::net::TcpStream::connect(listener.local()).unwrap();
+    let client = std::net::TcpStream::connect(listener.local()).unwrap();
     let accepted =
         runtime.block_on(std::future::poll_fn(|cx| listener.poll_accept(cx)));
-    assert!(accepted.is_ok());
+    assert_eq!(accepted.unwrap().peer(), client.local_addr().unwrap());
 }
