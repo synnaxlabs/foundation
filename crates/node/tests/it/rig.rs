@@ -22,7 +22,7 @@ const PATIENCE: Span = Span::from_nanos(90_000_000_000);
 const POLL: Duration = Duration::from_millis(100);
 
 /// One `foundation` node in a temporary directory of its own. Drop removes the
-/// directory.
+/// directory, except while the thread panics: a failed test keeps it.
 #[derive(Debug)]
 pub(crate) struct Rig {
     /// The working directory of each command. It holds `plant.hcl`.
@@ -101,18 +101,31 @@ fn wait<T>(
     clock: &Clock,
     limit: Span,
     what: &str,
-    mut check: impl FnMut() -> Result<T, String>,
+    check: impl FnMut() -> Result<T, String>,
 ) -> T {
+    poll(clock, limit, check).unwrap_or_else(|seen| late(what, limit, &seen))
+}
+
+/// Panics: `what` did not happen within `limit`, and the last check saw `seen`.
+fn late(what: &str, limit: Span, seen: &str) -> ! {
+    panic!("{what}: not within {limit}. The last check saw:\n{seen}")
+}
+
+/// Gives the first value of `check`, or what its last check saw once `limit` passes.
+fn poll<T>(
+    clock: &Clock,
+    limit: Span,
+    mut check: impl FnMut() -> Result<T, String>,
+) -> Result<T, String> {
     let deadline = clock.now() + limit;
     loop {
         let seen = match check() {
-            Ok(value) => return value,
+            Ok(value) => return Ok(value),
             Err(seen) => seen,
         };
-        assert!(
-            clock.now() < deadline,
-            "{what}: not within {limit}. The last check saw:\n{seen}"
-        );
+        if clock.now() >= deadline {
+            return Err(seen);
+        }
         #[expect(
             clippy::disallowed_methods,
             reason = "a process test waits on another process in real time"
@@ -126,13 +139,16 @@ fn wait<T>(
 /// output so far.
 fn run(clock: &Clock, limit: Span, command: Command, input: &[u8]) -> Output {
     let mut running = Running::new(command, input);
-    let status = wait(
-        clock,
-        limit,
-        "the command exits and closes its pipes",
-        || running.ended().ok_or_else(|| running.seen()),
-    );
-    running.output(status)
+    let ended = poll(clock, limit, || {
+        running.ended().ok_or_else(|| running.seen())
+    });
+    match ended {
+        Ok(status) => running.output(status),
+        Err(seen) => {
+            running.process.end();
+            late("the command exits and closes its pipes", limit, &seen)
+        }
+    }
 }
 
 /// A command that runs, with a thread for each of its pipes.
@@ -205,13 +221,25 @@ impl Running {
 /// `foundation` process. A process that it starts lives on: `foundation` starts none.
 struct Process(Child);
 
-impl Drop for Process {
-    fn drop(&mut self) {
+impl Process {
+    /// Kills the command and waits for it to exit.
+    fn end(&mut self) {
         // `kill` gives `Ok` for a command that exited.
-        self.0
-            .kill()
+        (self.0.kill())
             .and_then(|()| self.0.wait())
             .expect("kill the command");
+    }
+}
+
+impl Drop for Process {
+    fn drop(&mut self) {
+        // While the thread panics, a wait can block and a second panic aborts the
+        // test binary, so the command only gets the signal, and a failed kill drops.
+        if std::thread::panicking() {
+            drop(self.0.kill());
+        } else {
+            self.end();
+        }
     }
 }
 
@@ -264,10 +292,10 @@ impl Capture {
 
 impl Drop for Rig {
     fn drop(&mut self) {
-        let removed = std::fs::remove_dir_all(&self.dir);
-        // A second panic aborts the test binary.
+        // While the thread panics, a remove can block and a second panic aborts the
+        // test binary.
         if !std::thread::panicking() {
-            removed.expect("remove the directory");
+            std::fs::remove_dir_all(&self.dir).expect("remove the directory");
         }
     }
 }
@@ -299,16 +327,18 @@ fn a_rig_removes_its_directory_with_its_files() {
 }
 
 #[test]
-fn a_rig_removes_its_directory_when_the_test_fails() {
+fn a_rig_keeps_its_directory_when_the_test_fails() {
     let mut dir = PathBuf::new();
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let rig = Rig::new();
+        rig.config("");
         dir.clone_from(&rig.dir);
         panic!("the test fails");
     }))
     .expect_err("the test panics");
     assert_eq!(panic.downcast_ref::<&str>(), Some(&"the test fails"));
-    assert!(!dir.exists(), "{} is still there", dir.display());
+    assert!(dir.join("plant.hcl").exists(), "{} is gone", dir.display());
+    std::fs::remove_dir_all(&dir).expect("remove the directory");
 }
 
 #[test]
