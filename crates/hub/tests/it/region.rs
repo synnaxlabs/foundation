@@ -256,8 +256,7 @@ fn a_writer_does_not_open_at_a_home_that_moved_while_it_waits_for_a_middle_home(
 }
 
 #[test]
-fn a_writer_of_two_indexes_opens_after_an_index_it_left_moves_away()
- {
+fn a_writer_of_two_indexes_opens_after_an_index_it_left_moves_away() {
     run(19, |test| async move {
         let config = config("a", &["value", "value-b"]);
         let mut opening = std::pin::pin!(test.hub.writer(config));
