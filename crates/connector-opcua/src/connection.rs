@@ -68,18 +68,32 @@ pub(crate) struct Manager {
 
 impl Manager {
     /// Makes a loop on `clock` and `rng`, as [`Loop::new`] does, and a manager that
-    /// connects through `net` and accepts on `listener`, linked first into the event
-    /// sources of the loop, where a client or server finds it.
+    /// connects through `net`, linked first into the event sources of the loop, where a
+    /// client finds it.
     ///
     /// # Panics
     ///
     /// When a C allocation fails.
-    pub(crate) fn new(
+    pub(crate) fn new(clock: Clock, net: Net, rng: &mut Rng) -> Self {
+        Self::make(clock, net, None, rng)
+    }
+
+    /// As [`Manager::new`], and the manager also accepts on `listener`, where a server
+    /// finds it.
+    ///
+    /// # Panics
+    ///
+    /// When a C allocation fails.
+    pub(crate) fn listening(
         clock: Clock,
         net: Net,
-        listener: Option<Listener>,
+        listener: Listener,
         rng: &mut Rng,
     ) -> Self {
+        Self::make(clock, net, Some(listener), rng)
+    }
+
+    fn make(clock: Clock, net: Net, listener: Option<Listener>, rng: &mut Rng) -> Self {
         let events = Loop::new(Clock::clone(&clock), rng);
         let state = NonNull::from(Box::leak(Box::new(State {
             net,
@@ -841,7 +855,7 @@ unsafe extern "C" fn listen(
     let listener = state
         .listener
         .take()
-        .expect("a listen open takes the listener that `Manager::new` got");
+        .expect("a listen open takes the listener that `Manager::listening` got");
     let local = listener.local();
     assert!(
         local.port() == port,

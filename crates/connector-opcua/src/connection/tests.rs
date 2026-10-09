@@ -128,15 +128,22 @@ struct Side {
 
 impl Side {
     fn new(node: &node::Node) -> Self {
-        Self::with(node, None)
+        let clock = node.clock();
+        let manager =
+            Manager::new(Clock::clone(&clock), node.net(), &mut Rng::from_seed(0));
+        Self::of(clock, manager)
     }
 
     /// A side whose manager accepts on `listener`.
-    fn with(node: &node::Node, listener: Option<Listener>) -> Self {
+    fn listening(node: &node::Node, listener: Listener) -> Self {
         let clock = node.clock();
-        let net = node.net();
+        let rng = &mut Rng::from_seed(0);
         let manager =
-            Manager::new(Clock::clone(&clock), net, listener, &mut Rng::from_seed(0));
+            Manager::listening(Clock::clone(&clock), node.net(), listener, rng);
+        Self::of(clock, manager)
+    }
+
+    fn of(clock: Clock, manager: Manager) -> Self {
         let events = manager.events();
         // SAFETY: the member takes its own loop.
         let status = Status(unsafe { (events.members().start)(events.raw()) });
@@ -1869,7 +1876,7 @@ fn listener(node: &node::Node) -> Listener {
 /// Gives a side on `node` whose manager accepts on [`listener`], with the callback
 /// [`adopt`].
 fn listening(node: &node::Node) -> Side {
-    let mut side = Side::with(node, Some(listener(node)));
+    let mut side = Side::listening(node, listener(node));
     side.callback = adopt;
     side
 }
@@ -1929,7 +1936,7 @@ fn notes(local: IpAddr) -> Vec<(usize, ConnectionState, String)> {
                 options: OPTIONS,
             };
             let listener = node.net().listen(&listen).expect("the port is free");
-            let mut side = Side::with(&node, Some(listener));
+            let mut side = Side::listening(&node, listener);
             side.callback = note;
             assert_eq!(side.listen(PORT), Status::GOOD);
             side.drive(Span::from_nanos(100_000_000)).await;
@@ -2061,7 +2068,7 @@ fn a_listen_from_a_run_accepts_and_reads_in_that_drive() {
     let calls = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::with(&node, Some(listener(&node)));
+            let side = Side::listening(&node, listener(&node));
             // The stream and its byte wait before the listen.
             side.clock.sleep(Span::MILLISECOND).await;
             let listened = Cell::new(false);
@@ -2105,7 +2112,7 @@ fn a_pass_accepts_each_stream_that_waits() {
     let calls = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::with(&node, Some(listener(&node)));
+            let side = Side::listening(&node, listener(&node));
             side.drive(Span::from_nanos(10_000_000)).await;
             assert_eq!(side.listen(PORT), Status::GOOD);
             side.drive(Span::from_nanos(10_000_000)).await;
@@ -2127,7 +2134,7 @@ fn a_send_on_the_listen_connection_is_refused() {
     let status = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::with(&node, Some(listener(&node)));
+            let side = Side::listening(&node, listener(&node));
             assert_eq!(side.listen(PORT), Status::GOOD);
             side.send(1, b"no")
         })
@@ -2234,7 +2241,7 @@ fn abort(name: &str) -> String {
 
 #[test]
 fn a_listen_with_no_listener_or_after_a_listen_aborts() {
-    let message = "a listen open takes the listener that `Manager::new` got";
+    let message = "a listen open takes the listener that `Manager::listening` got";
     assert_eq!(abort("listen_with_no_listener"), message);
     assert_eq!(abort("listen_twice"), message);
 }
@@ -2267,7 +2274,7 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
     let calls = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::with(&node, Some(listener(&node)));
+            let side = Side::listening(&node, listener(&node));
             // SAFETY: the loop outlives the server, which the test deletes.
             let server =
                 unsafe { ffi::test::shim_server_new(side.events().raw(), PORT) };
