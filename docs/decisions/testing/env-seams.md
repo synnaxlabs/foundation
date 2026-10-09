@@ -279,13 +279,14 @@
   texts on another `Files`, and that `sim` gives each `Files` of a node as clones of
   one: `laptop.architect-2`, 2026-10-09
   (https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6083081272). Each
-  rule has one test of the same name on `os` and on `sim`: `laptop.architect-2`,
-  2026-10-09
+  rule that a call waits has one test of the same name on `os` and on `sim`, and a rule
+  that a call does not wait has its test on `sim` only, as `os` runs the calls of a
+  `Files` in queue order: `laptop.architect-2`, 2026-10-09
   (https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6083166443). Built in
   #2156, where each driver gives the wait: `os` by the order of its I/O queue, `sim` by
-  an end time past the end of each such call and of a remove through a handle. Lost
-  there: the wait in `Files`, which cannot see the end of a dropped call without a
-  change to `Driver`.
+  an end time past the end of each such call and of a remove through a handle. `sim`
+  gives each `Files` of a node as clones of one. Lost there: the wait in `Files`, which
+  cannot see the end of a dropped call without a change to `Driver`.
   Amended (2026-10-08T17:19:48Z, #1921): on macOS, an accepted socket does not keep
   the receive buffer of its listener, so `os` sets the options of the listener again
   on each accepted socket, on every OS. The listener still sets them before `listen`:
