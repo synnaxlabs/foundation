@@ -60,8 +60,9 @@
   once. When each task of the run ended, `state` 1, or 2 when the call returns
   (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6067099903). A
-  frame that the home does not apply leaves the status staged, so it is written again
-  one second later. The status writer that does not open panics on an unknown or
+  frame that the home refuses, or whose commit fails, leaves the status staged, so it
+  is written again one second later. The other errors of a write panic, since a live
+  frame of one sample cannot get them. The status writer that does not open panics on an unknown or
   remote channel, which is a defect of `node`, and gives `Ok` when the mesh stopped
   (`laptop.architect-2`, 2026-10-09T18:46:26Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6087144669).

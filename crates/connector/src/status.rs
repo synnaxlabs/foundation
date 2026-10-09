@@ -388,7 +388,10 @@ impl Session {
         draft.set_count(self.group, 1);
         let applied = match self.hub.write(Label::Path(Path::Live), draft) {
             Ok(outcomes) => matches!(outcomes, [hub::home::Outcome::Applied { .. }]),
-            Err(hub::writer::Failure::Home(_)) => false,
+            Err(hub::writer::Failure::Home(hub::home::Error::Disk(_))) => false,
+            Err(hub::writer::Failure::Home(error)) => {
+                panic!("invariant: a live frame of one sample is not refused: {error}")
+            }
             Err(hub::writer::Failure::Removed(_)) => {
                 self.removed = true;
                 true
