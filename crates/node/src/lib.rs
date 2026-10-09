@@ -712,13 +712,25 @@ impl Open {
 
 /// What shard 0 serves the node's tasks and port with: the interner, once the last
 /// shard has opened its buffer, the tasks given to the node, its endpoint, and the
-/// node's mesh time.
+/// node's mesh time. Also the budget that shard 0 keeps once the interner comes.
 struct Serve {
     interner: Take<Interner>,
     budget: Budget,
     inbox: task::Inbox<task::Task>,
     endpoint: Endpoint,
     time: clock::Reader,
+}
+
+/// Keeps `budget` in `files`, then loads the node's identity. Shard 0 calls it once
+/// each buffer has opened, so a budget that gives a shard too little is not kept.
+async fn load(
+    files: &env::files::Files,
+    budget: Budget,
+    time: &clock::Reader,
+    entropy: &env::entropy::Entropy,
+) -> Result<identity::Identity, Error> {
+    budget::keep(files, budget).await?;
+    identity::load(files, time, entropy).await
 }
 
 /// What shard 0 opens the node's transport and mesh from, but its files, pool, and
@@ -815,26 +827,26 @@ impl Serve {
                 "invariant: shard 0 serves only once its claim and open succeed",
             );
         };
-        // Once each buffer opened, so a budget that gives a shard too little is not
-        // kept.
-        let loaded = async {
-            budget::keep(&files, self.budget).await?;
-            identity::load(&files, &self.time, &self.endpoint.entropy).await
-        };
-        let Ok(identity) = loaded.await.map_err(fail) else {
-            return;
+        let loaded = load(&files, self.budget, &self.time, &self.endpoint.entropy);
+        let identity = match loaded.await {
+            Ok(identity) => identity,
+            Err(error) => return fail(error),
         };
         let (key, entropy) = (identity.key, self.endpoint.entropy.clone());
         let clock = self.endpoint.clock.clone();
         // The endpoint's open takes the founding, so the definitions go first.
-        let founding = self.endpoint.region.as_ref();
-        let definitions = founding.map(|founding| founding.definitions.clone());
-        let opened = self
+        let definitions = self
+            .endpoint
+            .region
+            .as_ref()
+            .map(|region| region.definitions.clone());
+        let (transport, mesh) = match self
             .endpoint
             .open(identity, files, pool, tasks.clone())
-            .await;
-        let Ok((transport, mesh)) = opened.map_err(fail) else {
-            return;
+            .await
+        {
+            Ok(opened) => opened,
+            Err(error) => return fail(error),
         };
         let region = mesh.clone().map(|mesh| hub::Region {
             mesh,
