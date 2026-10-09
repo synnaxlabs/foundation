@@ -94,12 +94,16 @@
   key is a new node to its region. Each other file error on `node.key` gives
   `Error::Directory`. The form is not a contract: only `node` reads it. The seal key
   goes into `node.key` with its first caller, as the tag `foundation/key/2` with 32 more
-  bytes. `admin.key` (#1744 PR 1b) shares this code when it lands. #1988 makes `os` give
-  each file the mode `0600` and each directory `0700`; until then `os` gives `0644` and
-  `0755`: https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831,
-  on the plan
-  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563. The time
-  of a new key, by `laptop.architect-2` (20:10 UTC):
+  bytes. `admin.key` (#1744 PR 1b) shares this code when it lands. `os` gives each new
+  file the mode `0600` and each new directory `0700`, and on Linux a new directory takes
+  the setgid bit of its parent; the umask can clear more bits. It does not change the
+  mode of one that is there (#1988):
+  https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831, on the
+  plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563. The
+  umask, the setgid bit, and a file that is there, by `laptop.architect-2` (23:24 UTC):
+  https://github.com/synnaxlabs/foundation/pull/2028#issuecomment-6071026954, which
+  https://github.com/synnaxlabs/foundation/pull/2028#issuecomment-6071534642 confirms
+  (00:09 UTC). The time of a new key, by `laptop.architect-2` (20:10 UTC):
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068150017. The
   private pool and the rank above `Error::Blob` and `Error::Mesh` are the amendment
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6068057306, which

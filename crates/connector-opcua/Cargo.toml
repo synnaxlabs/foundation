@@ -13,6 +13,19 @@ cc = { workspace = true, optional = true }
 
 [dev-dependencies]
 cc = { workspace = true }
+counting = { path = "../counting" }
+divan = { workspace = true }
+
+[[test]]
+name = "memory"
+harness = false
+required-features = ["open62541"]
+
+[[bench]]
+name = "decode"
+harness = false
+test = true
+required-features = ["open62541"]
 
 [lints]
 workspace = true

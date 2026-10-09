@@ -10,23 +10,30 @@
   problem of the definitions after the plan. Neither checks `homes`, and neither refuses
   a change only because its new bytes equal the stored bytes: with a true `old`, at a
   planned name and kind, such a change states nothing false and changes nothing. #337 PR
-  2b, which applies the homes, checks each one: an index of the definitions after the
-  plan with no home before, on a member. `config::plan::Plan::definitions(applied, key)`
-  gives those definitions with the key rule of PLAN SURFACE, and an edge to no channel
-  gets a key from `key`, which the check refuses as dangling. Each call of `key` must
-  give a key that no channel holds and that no earlier call gave. `definitions` is
-  fallible: it refuses with `plan::Error::Mismatch { name }` at the first change in one
-  of these cases, which `plan` never makes from `applied`, so only a hand-made file
-  holds. The change's `old` is not the digest of the stored definition at its name, or
-  the stored or new definition is of a kind that no block defines or is not at the tree
-  key of an unreserved label of its kind. The rule stays in `config`, in the one place
-  that holds `applied`; apply still checks `base` first. The codec copies the channel
-  kind layout of `spec::definition`; #1975 gives `spec` the bytes of `channel::Kind<E>`,
-  at the next change to the channel kind format of `spec` or at a second user of the
-  bytes of `Kind<Name>`. Each item of a plan has one path, under `config::plan`.
-  `Plan::changes` is a `BTreeMap<Name, Change>`, and `Change` holds no name, so two
-  changes at one name cannot exist; `decode` still refuses a repeated name as
-  `Malformed`. Plan:
+  2b, which applies the homes, does no check of its own: `Mesh::apply` refuses a name
+  that is not an index (`NotIndex`) and, for an index with no home, a home that is no
+  member (`UnknownNode`), and gives no home to an index that has one
+  (`laptop.architect`, 2026-10-08T18:35:16Z:
+  https://github.com/synnaxlabs/foundation/issues/1931#issuecomment-6066553633). No
+  check of its own decided by `laptop.architect-2`, 2026-10-08T21:30:44Z
+  (https://github.com/synnaxlabs/foundation/pull/2007#issuecomment-6069434343), which
+  changes "#337 PR 2b, which applies the homes, checks each one" of
+  https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067669742.
+  `config::plan::Plan::definitions(applied, key)` gives those definitions with the key
+  rule of PLAN SURFACE, and an edge to no channel gets a key from `key`, which the check
+  refuses as dangling. Each call of `key` must give a key that no channel holds and that
+  no earlier call gave. `definitions` is fallible: it refuses with
+  `plan::Error::Mismatch { name }` at the first change in one of these cases, which
+  `plan` never makes from `applied`, so only a hand-made file holds. The change's `old`
+  is not the digest of the stored definition at its name, or the stored or new
+  definition is of a kind that no block defines or is not at the tree key of an
+  unreserved label of its kind. The rule stays in `config`, in the one place that holds
+  `applied`; apply still checks `base` first. The codec copies the channel kind layout
+  of `spec::definition`; #1975 gives `spec` the bytes of `channel::Kind<E>`, at the next
+  change to the channel kind format of `spec` or at a second user of the bytes of
+  `Kind<Name>`. Each item of a plan has one path, under `config::plan`. `Plan::changes`
+  is a `BTreeMap<Name, Change>`, and `Change` holds no name, so two changes at one name
+  cannot exist; `decode` still refuses a repeated name as `Malformed`. Plan:
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6066674221. Decided
   by `laptop.architect-2`: the three methods and the version byte (2026-10-08T16:00:18Z,
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063892745); one
@@ -41,7 +48,7 @@
   `definitions` (2026-10-08T19:27:39Z,
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067449819);
   `Mismatch` refuses only a false `old`, a reserved label, a blockless kind, or a name
-  that is not the tree key of its kind, and PR 2b checks the homes
+  that is not the tree key of its kind, and the check of the homes
   (2026-10-08T19:40:40Z,
   https://github.com/synnaxlabs/foundation/pull/1970#issuecomment-6067669742); `changes`
   keyed by name (2026-10-08T19:54:45Z,

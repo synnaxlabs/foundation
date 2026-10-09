@@ -185,15 +185,21 @@ pub(crate) fn start<F: Future<Output = ()> + 'static>(
 ///
 /// When [`Transport::new`] refuses `config`, with its error.
 pub(crate) fn setup(config: &Config) -> quic::Setup {
-    let config = Config {
+    copy(config)
+        .setup()
+        .unwrap_or_else(|error| panic!("{error}"))
+}
+
+/// A config equal to `config`.
+fn copy(config: &Config) -> Config {
+    Config {
         private_key: config.private_key.clone(),
         clock: config.clock.clone(),
         entropy: config.entropy.clone(),
         tasks: config.tasks.clone(),
         pool: Rc::clone(&config.pool),
         ..*config
-    };
-    config.setup().unwrap_or_else(|error| panic!("{error}"))
+    }
 }
 
 /// Starts a shard on `node` that runs `main` with a QUIC carrier for `key` at
@@ -221,6 +227,21 @@ pub(crate) fn transport<F: Future<Output = ()> + 'static>(
         let transport = Transport::new(config, part).expect("a transport");
         main(transport, node).await;
     });
+}
+
+/// `count` transports on `node` with the limits of `config`, each with its own key
+/// and port from [`PORT`] up, so that each makes its own session to one peer.
+pub(crate) fn transports(config: &Config, node: &Node, count: u8) -> Vec<Transport> {
+    (0..count)
+        .map(|index| {
+            let config = Config {
+                private_key: PrivateKey([10 + index; 32]),
+                ..copy(config)
+            };
+            let at = SocketAddr::new(node.addresses()[0], PORT + u16::from(index));
+            Transport::new(config, part(&node.net(), at)).expect("a transport")
+        })
+        .collect()
 }
 
 /// Runs `test` on one shard of a sim run made from `value`, and gives its result.
