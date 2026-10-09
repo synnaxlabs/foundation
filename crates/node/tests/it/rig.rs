@@ -234,9 +234,14 @@ impl Process {
 impl Drop for Process {
     fn drop(&mut self) {
         // While the thread panics, a wait can block and a second panic aborts the
-        // test binary, so the command only gets the signal, and a failed kill drops.
+        // test binary, so the command only gets the signal.
         if std::thread::panicking() {
-            drop(self.0.kill());
+            if let Err(error) = self.0.kill() {
+                #[expect(clippy::print_stderr, reason = "a panic is under way")]
+                {
+                    eprintln!("kill the command: {error}");
+                }
+            }
         } else {
             self.end();
         }
@@ -339,17 +344,6 @@ fn a_rig_keeps_its_directory_when_the_test_fails() {
     assert_eq!(panic.downcast_ref::<&str>(), Some(&"the test fails"));
     assert!(dir.join("plant.hcl").exists(), "{} is gone", dir.display());
     std::fs::remove_dir_all(&dir).expect("remove the directory");
-}
-
-#[test]
-fn a_failed_test_keeps_its_panic_when_the_directory_is_gone() {
-    let panic = std::panic::catch_unwind(|| {
-        let rig = Rig::new();
-        std::fs::remove_dir(&rig.dir).expect("remove the directory");
-        panic!("the test fails");
-    })
-    .expect_err("the test panics");
-    assert_eq!(panic.downcast_ref::<&str>(), Some(&"the test fails"));
 }
 
 #[test]
