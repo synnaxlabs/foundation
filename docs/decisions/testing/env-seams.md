@@ -403,11 +403,12 @@
   Amended (2026-10-09, #1732): `os::interrupt` holds SIGINT and SIGTERM. A thread of
   the module `os::signal` takes them with `sigwait` and completes a future at the
   first, and then takes them as with no hold, so a second one ends the process and a
-  stop that hangs can still be ended. `main` calls it before the process starts any
-  other thread, since the mask passes to each thread that starts after it.
+  stop that hangs can still be ended. `main` is to call it before it starts any
+  other thread (#1732), since the mask passes to each thread that starts after it.
   `pthread_sigmask`, not `sigprocmask`, which POSIX does not specify in a process with
-  threads. Tokio's `signal` lost: it adds `signal-hook-registry` for one wait.
-  `os::files` makes `dir` and `dir/data` when they are not there, but not the parents
-  of `dir`, so `main` makes no file call of its own and each failure of the data
-  directory is `os::Error::Dir` (`laptop.architect-2`, 2026-10-09T18:30:45Z:
+  threads. A `sigaction` handler lost: it reaches its future only through a global.
+  Tokio's `signal` lost: it adds `signal-hook-registry` for one wait. `os::files`
+  makes `dir` and `dir/data` when they are not there, but not the parents of `dir`,
+  and syncs the holder of each at each call, so `main` is to make no file call of
+  its own and each failure of the data directory is `os::Error::Dir` (`laptop.architect-2`, 2026-10-09T18:30:45Z:
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545).
