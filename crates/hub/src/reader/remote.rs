@@ -552,13 +552,18 @@ fn poll_due(
     queue: &Weak<RefCell<Queue>>,
     cx: &Context<'_>,
 ) -> Poll<Result<u64, Option<Refusal>>> {
-    if let Poll::Ready(refusal) = poll_end(queue, cx) {
-        return Poll::Ready(Err(refusal));
+    let Some(queue) = queue.upgrade() else {
+        return Poll::Ready(Err(None));
+    };
+    let mut queue = queue.borrow_mut();
+    if let Some(ended) = &queue.ended {
+        return Poll::Ready(Err(refusal(ended)));
     }
-    let due = queue
-        .upgrade()
-        .and_then(|queue| queue.borrow_mut().due.take());
-    due.map_or(Poll::Pending, |limit_bytes| Poll::Ready(Ok(limit_bytes)))
+    if let Some(limit_bytes) = queue.due.take() {
+        return Poll::Ready(Ok(limit_bytes));
+    }
+    keep(&mut queue.task, cx);
+    Poll::Pending
 }
 
 /// The refusal of the end once the session ended, or `None` once the [`Remote`]
