@@ -612,6 +612,16 @@ impl Shard {
         reader::Key { slot, session }
     }
 
+    /// Drops the newest live frame of the index at `slot`. A latest reader of the index,
+    /// open or opened later, gets no frame until the index's next live frame.
+    ///
+    /// # Panics
+    ///
+    /// If the shard does not carry `slot`.
+    pub fn drop_newest(&mut self, slot: Slot) {
+        self.readers.drop_newest(self.place(slot));
+    }
+
     /// Opens a latest session for the named reader `reader` on the index at `slot`, as
     /// [`open_latest`](Self::open_latest) does. It takes over the open session of the
     /// same reader, in either mode. A complete session that it takes over closes at the
@@ -3068,6 +3078,31 @@ mod tests {
                 assert_eq!(woken(&mut shard), []);
                 assert_eq!(taken(&mut shard, late, 0), [seq(2, 1)]);
             });
+        }
+
+        #[test]
+        fn gives_a_latest_reader_no_frame_after_a_drop_until_the_next_write() {
+            run(152, |test| async move {
+                let set = two_indexes();
+                let mut shard = test.shard(AREA).await;
+                let open = latest(&mut shard, Slot::new(0));
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                assert_eq!(woken(&mut shard), [open]);
+                shard.drop_newest(Slot::new(0));
+                let late = latest(&mut shard, Slot::new(0));
+                assert_eq!(taken(&mut shard, open, 0), []);
+                assert_eq!(taken(&mut shard, late, 0), []);
+                write(&test, &mut shard, a, &[20]);
+                assert_eq!(woken(&mut shard), [open, late]);
+                assert_eq!(taken(&mut shard, open, 0), [seq(1, 1)]);
+                assert_eq!(taken(&mut shard, late, 0), [seq(1, 1)]);
+            });
+        }
+
+        #[test]
+        fn panics_at_the_drop_of_the_newest_frame_of_an_index_it_does_not_carry() {
+            check_not_carried(153, |shard| shard.drop_newest(Slot::new(3)));
         }
 
         /// A reader replaced by one that takes the newest frame at open is named

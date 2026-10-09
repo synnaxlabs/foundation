@@ -61,3 +61,10 @@
   https://github.com/synnaxlabs/foundation/issues/2020#issuecomment-6070368046, and the
   panic of `Readers::end`, 2026-10-08T22:50:41Z:
   https://github.com/synnaxlabs/foundation/pull/2026#issuecomment-6070616191).
+  Amended (2026-10-09T00:08:41Z, #2040): `Shard::drop_newest` drops the newest live
+  frame of an index, as `delivery::Readers::drop_newest` does for its readers. A latest
+  reader of the index, open or opened later, gets no frame until the next live frame of
+  the index. It panics if the shard does not carry the index. The hub calls it for each
+  index that it keeps and that a removed channel was on. Decided by `laptop.architect`
+  (2026-10-09T00:08:41Z:
+  https://github.com/synnaxlabs/foundation/pull/2040#issuecomment-6071529705).

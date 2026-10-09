@@ -192,6 +192,12 @@ impl Set {
         self.entries[place].readers.open_latest().key
     }
 
+    /// Drops the newest live frame of the index at `place`, as
+    /// [`Readers::drop_newest`] does.
+    pub(crate) fn drop_newest(&mut self, place: usize) {
+        self.entries[place].readers.drop_newest();
+    }
+
     /// Opens a latest session for the named reader `reader` on the index at `place`,
     /// as [`open_latest`](Self::open_latest) does. A complete session that it takes
     /// over closes at mesh time `now`.
