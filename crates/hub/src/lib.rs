@@ -60,7 +60,7 @@ pub struct Config {
     /// The node's key set interner, which owns the slot table that the home's buffer
     /// opened with.
     pub interner: Interner,
-    /// Where the hub spawns its commit task.
+    /// Where the hub spawns its commit task and the task of each remote reader.
     pub tasks: env::tasks::Tasks,
     /// This node's key. A client's hello must name it as `via`.
     pub node: types::node::Key,
@@ -105,6 +105,8 @@ struct State {
     /// Empty, so refusing each hello, until [`Hub::set_rules`] first runs.
     rules: access::Rules,
     region: Option<Region>,
+    /// Where the hub spawns the task of each remote reader.
+    tasks: env::tasks::Tasks,
 }
 
 impl Hub {
@@ -139,6 +141,7 @@ impl Hub {
             entropy,
             rules: access::Rules::default(),
             region,
+            tasks: tasks.clone(),
         }));
         tasks.spawn(commit::run(Rc::downgrade(&state)));
         Self(state)

@@ -1,5 +1,6 @@
 //! Reader sessions at a node whose region names another node as the home of the index.
 
+use std::collections::VecDeque;
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::pin::pin;
@@ -45,6 +46,8 @@ struct Steps {
     full: AtomicBool,
     /// The reader's node is done.
     done: AtomicBool,
+    /// A second reader opened.
+    again: AtomicBool,
     /// The sessions that the home's node accepted.
     sessions: AtomicUsize,
 }
@@ -445,6 +448,191 @@ fn a_reader_past_the_streams_of_its_home_opens_once_another_reader_drops() {
             assert!(
                 race(opening, wait).await.is_ok(),
                 "the reader opens on the freed stream"
+            );
+        },
+    );
+}
+
+#[test]
+fn a_reader_past_the_streams_opens_once_a_reader_that_holds_a_full_window_drops() {
+    churn_with_frames(STREAMS, true);
+}
+
+#[test]
+fn readers_open_while_a_reader_whose_caller_takes_nothing_holds_a_full_window() {
+    churn_with_frames(1, false);
+}
+
+/// Holds `held` complete readers whose callers take nothing while the home writes,
+/// then opens readers one by one, each after a drop of the oldest when `drops`.
+fn churn_with_frames(held: usize, drops: bool) {
+    remote(
+        4,
+        sim::link::Config::default(),
+        move |node, tasks, transport, steps| async move {
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| async move {
+                let mut writer = test.writer("w", &["time", "value"]).await;
+                until(&test.clock, &kept.opened).await;
+                let now = test.now();
+                let mut n = 0;
+                while !kept.done.load(Ordering::Relaxed) {
+                    write_wide(&mut writer, now, n);
+                    n += 1;
+                    test.clock.sleep(Span::from_nanos(1_000_000)).await;
+                }
+            })
+            .await;
+        },
+        move |test, steps| async move {
+            let mut readers = VecDeque::new();
+            for _ in 0..held {
+                readers.push_back(test.reader(&["value"], Mode::Complete).await);
+            }
+            steps.open();
+            test.clock.sleep(Span::from_nanos(100_000_000)).await;
+            for round in 0..STREAMS - held + 32 * usize::from(drops) {
+                if drops {
+                    drop(readers.pop_front());
+                }
+                let opening = test.reader(&["value"], Mode::Complete);
+                let wait = test.clock.sleep(Span::from_nanos(3_000_000_000));
+                let Ok(reader) = race(opening, wait).await else {
+                    panic!("round {round}: the reader does not open");
+                };
+                readers.push_back(reader);
+                test.clock.sleep(Span::from_nanos(20_000_000)).await;
+            }
+        },
+    );
+}
+
+#[test]
+fn a_complete_reader_whose_caller_takes_nothing_lets_another_reader_take_frames() {
+    // The frames of one grant, so that none misses. They fill the window of the
+    // reader's transport.
+    const FRAMES: i64 = 128;
+    remote_sized(
+        50,
+        sim::link::Config::default(),
+        [(1 << 16, WINDOW / 2), (1 << 16, WINDOW)],
+        |node, tasks, transport, steps| async move {
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| async move {
+                let mut writer = test.writer("w", &["time", "value"]).await;
+                until(&test.clock, &kept.opened).await;
+                let now = test.now();
+                for n in 0..FRAMES {
+                    write_wide(&mut writer, now, n);
+                }
+                until(&test.clock, &kept.again).await;
+                write_wide(&mut writer, now, FRAMES);
+            })
+            .await;
+        },
+        |test, steps| async move {
+            let mut held = test.reader(&["value"], Mode::Complete).await;
+            steps.open();
+            test.clock.sleep(Span::from_nanos(1_000_000_000)).await;
+            let opening = test.reader(&["value"], Mode::Complete);
+            let wait = test.clock.sleep(Span::from_nanos(2_000_000_000));
+            let Ok(mut other) = race(opening, wait).await else {
+                panic!("the second reader does not open");
+            };
+            steps.again.store(true, Ordering::Relaxed);
+            let received = other.next().await.expect("a frame");
+            let last = samples(&received, 1);
+            let mut stamps = Vec::new();
+            for _ in 0..=FRAMES {
+                let received = held.next().await.expect("a frame");
+                stamps.extend(samples(&received, 1));
+            }
+            let first = stamps[0];
+            let end = first + (FRAMES + 1) * 1000;
+            assert_eq!(stamps, (first..end).collect::<Vec<_>>());
+            assert_eq!(last, stamps[stamps.len() - 1000..]);
+        },
+    );
+}
+
+#[test]
+fn a_latest_reader_whose_caller_takes_nothing_gets_the_newest_frame() {
+    const FRAMES: i64 = 3 * 128;
+    remote(
+        51,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| async move {
+                let mut writer = test.writer("w", &["time", "value"]).await;
+                until(&test.clock, &kept.opened).await;
+                let now = test.now();
+                for n in 0..FRAMES {
+                    write_wide(&mut writer, now, n);
+                    test.clock.sleep(Span::from_nanos(100_000)).await;
+                }
+                write(&mut writer, &[now + FRAMES * 1000], &[-1]);
+                kept.stopped.store(true, Ordering::Relaxed);
+            })
+            .await;
+        },
+        |test, steps| async move {
+            let mut held = test.reader(&["value"], Mode::Latest).await;
+            steps.open();
+            until(&test.clock, &steps.stopped).await;
+            test.clock.sleep(Span::from_nanos(1_000_000_000)).await;
+            let opening = test.reader(&["value"], Mode::Complete);
+            let wait = test.clock.sleep(Span::from_nanos(2_000_000_000));
+            assert!(race(opening, wait).await.is_ok(), "the second reader opens");
+            let received = held.next().await.expect("a frame");
+            assert_eq!(samples(&received, 2), [-1]);
+            let wait = test.clock.sleep(Span::from_nanos(100_000_000));
+            assert!(race(held.next(), wait).await.is_err(), "no later frame");
+        },
+    );
+}
+
+#[test]
+fn a_complete_reader_whose_home_sends_a_frame_past_the_grant_stops_it_as_malformed() {
+    // 31 frames of the first body and one of the second charge half a window.
+    let body = |n: usize| if n % 32 == 31 { 14_272 } else { 16_320 };
+    let window = u64::try_from(WINDOW).expect("a u64");
+    assert_eq!(
+        (0..64).map(|n| frame::charge(2, body(n))).sum::<u64>(),
+        window
+    );
+    remote(
+        52,
+        sim::link::Config::default(),
+        move |node, _, transport, steps| async move {
+            let (_, mut sender, _receiver) = fake_open(&transport).await;
+            for n in 0..64 {
+                send_frame(&mut sender, body(n)).await.expect("sends");
+            }
+            let stopped = loop {
+                if let Err(error) = send_frame(&mut sender, body(0)).await {
+                    break error;
+                }
+            };
+            let malformed = Code(Refusal::Malformed.code());
+            assert_eq!(stopped, transport::Error::Stopped { code: malformed });
+            steps.stopped.store(true, Ordering::Relaxed);
+            until(&node.clock(), &steps.done).await;
+        },
+        move |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            until(&test.clock, &steps.stopped).await;
+            let (charges, ended) = super::take_all(&mut reader).await;
+            assert_eq!(charges.len(), 64);
+            assert_eq!(
+                ended,
+                Ended::Credit {
+                    limit_bytes: window
+                }
+            );
+            assert_eq!(
+                ended.to_string(),
+                "the home sent a frame past the credit of 1048576 bytes"
             );
         },
     );
@@ -1591,17 +1779,17 @@ fn a_complete_reader_whose_pool_has_no_room_for_a_frame_while_a_credit_waits_res
             let (session, mut sender, mut receiver) = fake_open(&transport).await;
             let _second = session.accept().await.expect("a second stream");
             send_until_stopped(&mut sender, FIRST, BODY).await;
+            let block = own_pool().alloc(1).expect("the pool has room");
+            let stopped = sender.send(block.freeze()).await.expect_err("stopped");
+            let busy = Code(Refusal::Busy.code());
+            assert_eq!(stopped, transport::Error::Stopped { code: busy });
+            steps.stopped.store(true, Ordering::Relaxed);
             let error = loop {
                 if let Err(error) = receiver.recv().await {
                     break error;
                 }
             };
-            let block = own_pool().alloc(1).expect("the pool has room");
-            let stopped = sender.send(block.freeze()).await.expect_err("stopped");
-            let busy = Code(Refusal::Busy.code());
-            assert_eq!(stopped, transport::Error::Stopped { code: busy });
             assert_eq!(error, transport::Error::Reset { code: Code(0) });
-            steps.stopped.store(true, Ordering::Relaxed);
             until(&node.clock(), &steps.done).await;
         },
         |test, steps| async move {
@@ -1614,16 +1802,24 @@ fn a_complete_reader_whose_pool_has_no_room_for_a_frame_while_a_credit_waits_res
             for _ in 0..TAKEN {
                 reader.next().await.expect("a frame");
             }
-            let next = reader.next();
             let blocks = fill(&test.pool);
-            let ended = next.await.expect_err("the pool has no room for the frame");
-            let Ended::Pool(block::Error::Exhausted { requested, .. }) = ended else {
-                panic!("not an exhausted pool: {ended:?}");
-            };
-            let expected = test.pool.alloc(requested).expect_err("the pool is full");
-            drop(blocks);
-            assert_eq!(ended, Ended::Pool(expected));
             until(&test.clock, &steps.stopped).await;
+            let mut interner = Interner::new();
+            let data = [(VALUE, I64)];
+            let set = interner.intern(&[Group {
+                index: TIME,
+                data: &data,
+            }]);
+            let ends = [(0, BODY / 2), (1, BODY)];
+            let layout = frame::Layout::from_ends(&set, &ends).expect("a layout");
+            let expected = test.pool.alloc(layout.block_len()).expect_err("full");
+            drop(blocks);
+            let ended = loop {
+                if let Err(ended) = reader.next().await {
+                    break ended;
+                }
+            };
+            assert_eq!(ended, Ended::Pool(expected));
         },
     );
 }

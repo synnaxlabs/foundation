@@ -69,6 +69,13 @@ pub enum Ended {
     /// The shard's pool had no block for a frame or a credit. The reader stopped the
     /// stream with code `BUSY`.
     Pool(block::Error),
+    /// The home of another node started a frame once the charges of the frames that
+    /// arrived reached the grant that the reader sent. The reader stopped the stream
+    /// with code `MALFORMED`.
+    Credit {
+        /// The grant that the reader sent.
+        limit_bytes: u64,
+    },
 }
 
 impl fmt::Display for Ended {
@@ -93,6 +100,10 @@ impl fmt::Display for Ended {
             Self::Pool(error) => {
                 write!(f, "the pool had no block for the reader: {error}")
             }
+            Self::Credit { limit_bytes } => write!(
+                f,
+                "the home sent a frame past the credit of {limit_bytes} bytes"
+            ),
         }
     }
 }

@@ -1,12 +1,13 @@
 //! A reader session at another node's home: one hub stream to that home (HUB WIRE).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::fmt;
 use std::future::poll_fn;
 use std::pin::{Pin, pin};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use std::task::{Context, Poll, ready};
+use std::task::{Context, Poll, Waker, ready};
 
 use block::Block;
 use transport::stream::{Receiver, Sender};
@@ -19,18 +20,37 @@ use wire::hub::{Credit, FromHome, Head, Open, Refusal, keys};
 use super::{Ended, Error, Mode, Streak, WINDOW};
 use crate::State;
 
-/// A reader session on one stream to the home. Each partial frame and each credit on
-/// its way lives in it, so a dropped [`Remote::take`] loses nothing.
+/// A reader session on one stream to the home. A task takes each frame off the stream
+/// as it arrives, so an idle caller never holds the window of the session. Each credit
+/// on its way lives in it, so a dropped [`Remote::take`] loses nothing.
 #[derive(Debug)]
 pub(super) struct Remote {
+    state: Rc<RefCell<State>>,
+    queue: Rc<RefCell<Queue>>,
     /// `None` once the session ended.
     out: Option<Out>,
-    inbound: Inbound,
     /// The grant that the home has, and the charge of each frame given back, for a
     /// complete reader.
     credit: Option<(u64, u64)>,
-    ended: Option<Ended>,
+    /// The limit of the last credit put on its way, which the task checks.
+    limit: Rc<Cell<u64>>,
+    /// The reader's key set. Place `n` of the open is entry `n`.
+    set: Arc<KeySet>,
+    /// The mask of every entry of `set`.
+    mask: Mask,
     streak: Streak,
+}
+
+/// The frames that the task took and the caller has not, and why the session ended.
+#[derive(Debug, Default)]
+struct Queue {
+    frames: VecDeque<Frame>,
+    /// Why the session ended. The caller gets it after each frame in `frames`.
+    ended: Option<Ended>,
+    /// The waker of a [`Remote::take`] that waits for a frame.
+    taker: Option<Waker>,
+    /// The waker of the task, which ends once the [`Remote`] drops.
+    task: Option<Waker>,
 }
 
 /// The receiving half of the stream, and the frame that arrives on it.
@@ -40,19 +60,20 @@ struct Inbound {
     /// `None` once the session ended.
     receiver: Option<Receiver>,
     decoder: wire::hub::Reader,
-    /// The reader's key set. Place `n` of the open is entry `n`.
     set: Arc<KeySet>,
-    /// The mask of every entry of `set`.
-    mask: Mask,
     head: Option<Head>,
     /// The entry and end of each series of the frame that arrives.
     ends: Vec<(usize, usize)>,
     draft: Option<Draft>,
+    /// The limit of the last credit put on its way, for a complete reader.
+    limit: Option<Rc<Cell<u64>>>,
+    /// The charges of the frames that arrived.
+    arrived: u64,
 }
 
 impl Remote {
     /// Opens a session of `mode` on `set` at `home`, another node, and waits for the
-    /// home to open it.
+    /// home to open it. Then spawns the task that takes its frames.
     pub(super) async fn open(
         state: &Rc<RefCell<State>>,
         home: types::node::Key,
@@ -100,21 +121,22 @@ impl Remote {
             }
             return Err(error);
         }
+        let limit = Rc::new(Cell::new(WINDOW));
+        let queue = Rc::new(RefCell::new(Queue::default()));
+        let checked = credit.map(|_| Rc::clone(&limit));
+        let inbound = Inbound::new(state, receiver, decoder, &set, checked);
+        let latest = mode == Mode::Latest;
+        let task = run(Rc::downgrade(&queue), inbound, latest);
+        state.borrow().tasks.spawn(task);
         let mask = Mask::new(&set, set.entries().iter().map(|entry| entry.slot));
         Ok(Self {
+            state: Rc::clone(state),
+            queue,
             out: Some(Out::Idle(sender)),
-            inbound: Inbound {
-                state: Rc::clone(state),
-                receiver: Some(receiver),
-                decoder,
-                set,
-                mask,
-                head: None,
-                ends: Vec::new(),
-                draft: None,
-            },
             credit,
-            ended: None,
+            limit,
+            set,
+            mask,
             streak: Streak::default(),
         })
     }
@@ -131,48 +153,39 @@ impl Remote {
     ///
     /// # Errors
     ///
-    /// The [`Ended`] that ended the session, on this and every later call.
+    /// The [`Ended`] that ended the session, after each frame that arrived before it,
+    /// on this and every later call.
     pub(super) async fn take(&mut self) -> Result<(Frame, &Arc<KeySet>, &Mask), Ended> {
-        if let Some(ended) = &self.ended {
-            return Err(ended.clone());
+        if let Err(ended) = self.grant() {
+            self.queue.borrow_mut().end(ended);
         }
-        let next = match self.grant() {
-            Ok(()) => {
-                let Self {
-                    out,
-                    inbound,
-                    credit,
-                    streak,
-                    ..
-                } = &mut *self;
-                let mut next = pin!(inbound.next());
-                poll_fn(|cx| {
-                    ready!(streak.poll(cx));
-                    poll_credit(out, credit, cx);
-                    let polled = next.as_mut().poll(cx);
-                    streak.count(&polled);
-                    polled
-                })
-                .await
-            }
-            Err(ended) => Err(ended),
-        };
+        let Self {
+            queue,
+            out,
+            credit,
+            streak,
+            ..
+        } = &mut *self;
+        let next = poll_fn(|cx| {
+            ready!(streak.poll(cx));
+            poll_credit(out, credit, cx);
+            let polled = queue.borrow_mut().poll_take(cx);
+            streak.count(&polled);
+            polled
+        })
+        .await;
         match next {
-            Ok(frame) => Ok((frame, &self.inbound.set, &self.inbound.mask)),
+            Ok(frame) => Ok((frame, &self.set, &self.mask)),
             Err(ended) => {
-                let (out, receiver) = (self.out.take(), self.inbound.receiver.take());
-                if let Some(refusal) = refusal(&ended) {
-                    let code = Code(refusal.code());
-                    receiver
-                        .expect("invariant: a session holds its stream until it ends")
-                        .stop(code);
-                    // A credit on its way drops with its sender, which resets with
-                    // code 0. The home still sees the stop.
-                    if let Some(Out::Idle(sender)) = out {
-                        sender.reset(code);
-                    }
+                // A credit on its way drops with its sender, which resets with code
+                // 0. The home still sees the stop.
+                if let (Some(refusal), Some(Out::Idle(sender))) =
+                    (refusal(&ended), self.out.take())
+                {
+                    sender.reset(Code(refusal.code()));
                 }
-                Err(self.ended.insert(ended).clone())
+                (self.out, self.credit) = (None, None);
+                Err(ended)
             }
         }
     }
@@ -194,12 +207,12 @@ impl Remote {
             return Ok(());
         }
         let mut block = self
-            .inbound
             .state
             .borrow()
             .alloc(Credit::LEN)
             .map_err(Ended::Pool)?;
         Credit { limit_bytes }.encode(&mut block);
+        self.limit.set(limit_bytes);
         let block = match sender.try_send(block.freeze()) {
             Ok(None) => {
                 *granted = limit_bytes;
@@ -223,7 +236,128 @@ impl Remote {
     }
 }
 
+impl Drop for Remote {
+    fn drop(&mut self) {
+        let task = self.queue.borrow_mut().task.take();
+        if let Some(task) = task {
+            task.wake();
+        }
+    }
+}
+
+impl Queue {
+    /// The oldest frame, else the end, else `Pending` with the waker kept.
+    fn poll_take(&mut self, cx: &Context<'_>) -> Poll<Result<Frame, Ended>> {
+        if let Some(frame) = self.frames.pop_front() {
+            return Poll::Ready(Ok(frame));
+        }
+        if let Some(ended) = &self.ended {
+            return Poll::Ready(Err(ended.clone()));
+        }
+        keep(&mut self.taker, cx);
+        Poll::Pending
+    }
+
+    /// Ends the session with `ended` now, ahead of the frames that wait, unless it
+    /// ended. Wakes the task, which stops the stream.
+    fn end(&mut self, ended: Ended) {
+        if self.ended.is_none() {
+            self.frames.clear();
+            self.ended = Some(ended);
+            if let Some(task) = self.task.take() {
+                task.wake();
+            }
+        }
+    }
+}
+
+/// Keeps the waker of `cx` in `slot`, unless the one there wakes the same task.
+fn keep(slot: &mut Option<Waker>, cx: &Context<'_>) {
+    if !slot
+        .as_ref()
+        .is_some_and(|waker| waker.will_wake(cx.waker()))
+    {
+        *slot = Some(cx.waker().clone());
+    }
+}
+
+/// Takes each frame off the stream of `inbound` as it arrives into `queue`, until the
+/// session ends or the [`Remote`] drops. A latest reader keeps only the newest frame.
+/// An end that the task finds stops the stream with its refusal, if it has one.
+async fn run(queue: Weak<RefCell<Queue>>, mut inbound: Inbound, latest: bool) {
+    let mut streak = Streak::default();
+    loop {
+        let next = {
+            let mut next = pin!(inbound.next());
+            poll_fn(|cx| {
+                let Some(queue) = queue.upgrade() else {
+                    return Poll::Ready(None);
+                };
+                let mut queue = queue.borrow_mut();
+                if let Some(ended) = &queue.ended {
+                    return Poll::Ready(Some(Err(ended.clone())));
+                }
+                keep(&mut queue.task, cx);
+                drop(queue);
+                ready!(streak.poll(cx));
+                let polled = next.as_mut().poll(cx);
+                streak.count(&polled);
+                polled.map(Some)
+            })
+            .await
+        };
+        let (Some(next), Some(queue)) = (next, queue.upgrade()) else {
+            return;
+        };
+        let mut queue = queue.borrow_mut();
+        match next {
+            Ok(frame) => {
+                if latest {
+                    queue.frames.clear();
+                }
+                queue.frames.push_back(frame);
+            }
+            Err(ended) => {
+                if let Some(refusal) = refusal(&ended) {
+                    inbound
+                        .receiver
+                        .take()
+                        .expect("invariant: a session holds its stream until it ends")
+                        .stop(Code(refusal.code()));
+                }
+                queue.ended.get_or_insert(ended);
+            }
+        }
+        if let Some(taker) = queue.taker.take() {
+            taker.wake();
+        }
+        if queue.ended.is_some() {
+            return;
+        }
+    }
+}
+
 impl Inbound {
+    fn new(
+        state: &Rc<RefCell<State>>,
+        receiver: Receiver,
+        decoder: wire::hub::Reader,
+        set: &Arc<KeySet>,
+        limit: Option<Rc<Cell<u64>>>,
+    ) -> Self {
+        Self {
+            state: Rc::clone(state),
+            receiver: Some(receiver),
+            decoder,
+            set: Arc::clone(set),
+            head: None,
+            ends: Vec::new(),
+            draft: None,
+            limit,
+            arrived: 0,
+        }
+    }
+
     async fn next(&mut self) -> Result<Frame, Ended> {
         let receiver = self
             .receiver
@@ -253,6 +387,13 @@ impl Inbound {
             let message = recv(receiver, &self.decoder).await?;
             match self.decoder.decode(&message).map_err(Ended::Message)? {
                 FromHome::Head(head) => {
+                    if let Some(limit) = &self.limit
+                        && self.arrived >= limit.get()
+                    {
+                        return Err(Ended::Credit {
+                            limit_bytes: limit.get(),
+                        });
+                    }
                     self.head = Some(head);
                     self.ends.clear();
                 }
@@ -288,7 +429,9 @@ impl Inbound {
         let mut draft = self.draft.take().expect("invariant: a frame has a draft");
         draft.set_count(0, head.range.count);
         draft.set_seq(0, head.range.seq);
-        draft.freeze(head.path)
+        let frame = draft.freeze(head.path);
+        self.arrived += frame.charge();
+        frame
     }
 }
 
@@ -459,7 +602,9 @@ fn finished(decoder: &wire::hub::Reader) -> Ended {
 /// node's to send.
 fn refusal(ended: &Ended) -> Option<Refusal> {
     match ended {
-        Ended::Message(_) | Ended::Frame(_) => Some(Refusal::Malformed),
+        Ended::Message(_) | Ended::Frame(_) | Ended::Credit { .. } => {
+            Some(Refusal::Malformed)
+        }
         Ended::Pool(_) => Some(Refusal::Busy),
         Ended::Buffer(_) | Ended::Behind | Ended::Stream(_) | Ended::Refused(_) => None,
     }
