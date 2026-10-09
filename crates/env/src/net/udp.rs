@@ -186,11 +186,11 @@ pub struct Receiver {
 }
 
 impl Receiver {
-    pub(super) fn new(socket: Arc<dyn Driver>) -> Self {
-        Self {
-            driver: socket.receiver(),
-            socket,
-        }
+    pub(super) fn new(
+        socket: Arc<dyn Driver>,
+        driver: Box<dyn receiver::Driver>,
+    ) -> Self {
+        Self { socket, driver }
     }
 
     /// The local address of the socket.
@@ -372,10 +372,6 @@ pub trait Driver: Send + Sync {
     /// cannot fail, so a driver that needs a resource per clone takes it at the first
     /// poll.
     fn sender(&self) -> Box<dyn sender::Driver>;
-
-    /// Gives the driver of the [`Receiver`], not bound to a thread yet. `Net::udp`
-    /// calls it once, and a second call is a defect of `env`.
-    fn receiver(&self) -> Box<dyn receiver::Driver>;
 }
 
 #[cfg(test)]
@@ -461,10 +457,6 @@ mod tests {
                 sends: Arc::clone(&self.sends),
             })
         }
-
-        fn receiver(&self) -> Box<dyn receiver::Driver> {
-            Box::new(Receiving { len: 3 })
-        }
     }
 
     /// Binds every UDP socket to one [`Socket`]. It has no TCP.
@@ -473,11 +465,15 @@ mod tests {
     }
 
     impl net::Driver for Network {
-        fn udp(&self, _: &Config) -> Result<Box<dyn Driver>, Error> {
-            Ok(Box::new(Socket {
+        fn udp(
+            &self,
+            _: &Config,
+        ) -> Result<(Box<dyn Driver>, Box<dyn receiver::Driver>), Error> {
+            let socket = Socket {
                 senders: AtomicUsize::new(0),
                 sends: Arc::clone(&self.sends),
-            }))
+            };
+            Ok((Box::new(socket), Box::new(Receiving { len: 3 })))
         }
 
         fn connect<'a>(&'a self, _: &'a tcp::Config) -> net::Connect<'a> {

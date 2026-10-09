@@ -36,8 +36,15 @@ impl env::net::Driver for Driver {
     fn udp(
         &self,
         config: &env::net::udp::Config,
-    ) -> Result<Box<dyn env::net::udp::Driver>, Error> {
-        Ok(Box::new(Udp::bind(config)?))
+    ) -> Result<
+        (
+            Box<dyn env::net::udp::Driver>,
+            Box<dyn env::net::udp::receiver::Driver>,
+        ),
+        Error,
+    > {
+        let (udp, receiver) = Udp::bind(config)?;
+        Ok((Box::new(udp), Box::new(receiver)))
     }
 
     fn connect<'a>(&'a self, config: &'a tcp::Config) -> Connect<'a> {

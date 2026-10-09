@@ -36,8 +36,9 @@ struct Bound {
 }
 
 impl Udp {
-    /// Binds a socket to `config.local`, with don't-fragment set. Needs no runtime.
-    pub(super) fn bind(config: &udp::Config) -> Result<Self, Error> {
+    /// Binds a socket to `config.local`, with don't-fragment set, and gives it with
+    /// the driver of its one receiver. Needs no runtime.
+    pub(super) fn bind(config: &udp::Config) -> Result<(Self, Receiver), Error> {
         let local = config.local;
         let fd =
             super::socket(local, SocketType::DGRAM, ipproto::UDP).map_err(io_error)?;
@@ -57,9 +58,13 @@ impl Udp {
             state,
             local,
         };
-        Ok(Self {
-            bound: Arc::new(bound),
-        })
+        let bound = Arc::new(bound);
+        let receiver = Receiver {
+            bound: Arc::clone(&bound),
+            thread: None,
+            readable: None,
+        };
+        Ok((Self { bound }, receiver))
     }
 }
 
@@ -94,18 +99,10 @@ impl udp::Driver for Udp {
             writer: None,
         })
     }
-
-    fn receiver(&self) -> Box<dyn receiver::Driver> {
-        Box::new(Receiver {
-            bound: Arc::clone(&self.bound),
-            thread: None,
-            readable: None,
-        })
-    }
 }
 
 /// The driver of the `Receiver`.
-struct Receiver {
+pub(super) struct Receiver {
     bound: Arc<Bound>,
     /// The thread of the first poll.
     thread: Option<ThreadId>,
@@ -384,7 +381,7 @@ mod tests {
     }
 
     fn loopback() -> Udp {
-        Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap()
+        Udp::bind(&config(SocketAddr::new(V4.into(), 0))).unwrap().0
     }
 
     fn transmit(destination: SocketAddr, contents: &[u8]) -> Transmit<'_> {

@@ -42,7 +42,10 @@ impl Node {
 }
 
 impl env::net::Driver for Node {
-    fn udp(&self, config: &udp::Config) -> Result<Box<dyn udp::Driver>, Error> {
+    fn udp(
+        &self,
+        config: &udp::Config,
+    ) -> Result<(Box<dyn udp::Driver>, Box<dyn receiver::Driver>), Error> {
         let (life, bound) = {
             let mut state = lock(&self.shared);
             (
@@ -50,11 +53,18 @@ impl env::net::Driver for Node {
                 state.net().udp().bind(self.node, config),
             )
         };
-        Ok(Box::new(Socket {
+        let bound = bound?;
+        let receiver = Receiver {
             node: self.clone(),
-            bound: bound?,
+            key: bound.key,
+            owner: Owner::new(HALF, life),
+        };
+        let socket = Socket {
+            node: self.clone(),
+            bound,
             life,
-        }))
+        };
+        Ok((Box::new(socket), Box::new(receiver)))
     }
 
     fn connect<'a>(&'a self, config: &'a tcp::Config) -> Connect<'a> {
@@ -247,14 +257,6 @@ impl udp::Driver for Socket {
 
     fn sender(&self) -> Box<dyn sender::Driver> {
         Box::new(Sender {
-            node: self.node.clone(),
-            key: self.bound.key,
-            owner: Owner::new(HALF, self.life),
-        })
-    }
-
-    fn receiver(&self) -> Box<dyn receiver::Driver> {
-        Box::new(Receiver {
             node: self.node.clone(),
             key: self.bound.key,
             owner: Owner::new(HALF, self.life),
