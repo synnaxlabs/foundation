@@ -36,6 +36,9 @@ pub mod memory;
 #[cfg(all(feature = "net", any(target_os = "linux", target_os = "macos")))]
 mod net;
 mod shards;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[expect(unsafe_code, reason = "a signal mask is an OS call")]
+mod signal;
 mod thread;
 mod threads;
 mod unwind;
@@ -170,6 +173,19 @@ pub fn files(
     name: &str,
 ) -> Result<(Disk, env::thread::Handle), Error> {
     Disk::new(dir, threads, name)
+}
+
+/// Holds SIGINT and SIGTERM: from the call on, neither ends the process, and the
+/// future completes at the first that comes, also one that came before its first
+/// poll. Call it once, on the main thread, before the process starts any other thread:
+/// a thread that was there before still takes them, and ends the process on one.
+///
+/// # Errors
+///
+/// [`Error::Thread`] when the thread that waits for them cannot start.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub fn interrupt() -> Result<impl Future<Output = ()> + Send + 'static, Error> {
+    signal::hold()
 }
 
 /// Why `os` could not build a seam.
