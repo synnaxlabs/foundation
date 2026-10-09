@@ -152,10 +152,9 @@ impl Mesh {
         loop {
             match self.attempt()?.settle(change.clone()).await? {
                 Some(Ok(())) => return Ok(change::pointer(base, root, &homes)),
-                // `change::pointer` panics on a base at the last version, which the
-                // version check refuses first.
+                // `change::pointer` panics on a base at the last version.
                 Some(Err(Refused::Stale { pointer, .. }))
-                    if pointer.version.checked_sub(1) == Some(base.version)
+                    if base.version < u64::MAX
                         && pointer == change::pointer(base, root, &homes)
                         && self.homed(&homes) =>
                 {
