@@ -2815,9 +2815,10 @@ mod port {
     }
 
     /// The node waits at most 3 s for the drain, so a probe takes the lock before a
-    /// peer 4 s away sees its close. The close left before, so it still arrives.
+    /// peer with a one-way delay of 4 s sees its close. The close left before, so it
+    /// still arrives.
     #[test]
-    fn a_peer_over_3_s_away_sees_its_close_after_the_lock_is_free() {
+    fn a_peer_with_a_delay_over_3_s_sees_its_close_after_the_lock_is_free() {
         let closed = transport::Error::PeerClosed { code: Code(0) };
         let seen = stop_with_a_peer(Span::from_nanos(4 * Span::SECOND.nanos()));
         assert_eq!(seen, [Event::Locked(Ok(())), Event::Closed(closed)]);

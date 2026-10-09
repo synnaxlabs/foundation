@@ -179,7 +179,7 @@ fn run<F: Future<Output = ()> + 'static>(
     start(shards, name, main).join().unwrap();
 }
 
-/// A program's transport on a free port of loopback, and its pool.
+/// A program's transport on a free port of `[::]`, and its pool.
 fn client(tasks: env::tasks::Tasks) -> (transport::Client, Rc<block::Pool>) {
     let config = block::Config { budget: 1 << 20 };
     let memory = block::Heap::new(config.reservation());

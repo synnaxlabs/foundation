@@ -696,8 +696,10 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    // The handshake takes 100 ms over the link, so it would finish before the next
-    // poll if the drop did not close it.
+    /// The drop of the carrier wakes a dial in flight, which fails with code 0. The
+    /// handshake takes 100 ms over the link, so with no close the dial would get its
+    /// session. Only this crate sees the wake: `Transport::dial` borrows the transport,
+    /// so no caller drops it while a dial is in flight.
     #[test]
     fn an_attempt_in_flight_when_the_carrier_drops_closes_with_code_0() {
         let (mut sim, client, server) = nodes(0);
