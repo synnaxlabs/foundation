@@ -883,15 +883,16 @@ mod tests {
     type Sessions = Rc<RefCell<Vec<Session>>>;
 
     /// A node of [`two_nodes_that_dial_each_other_keep_the_session_of_the_lower_key`]
-    /// with `key`. After a random delay under the one-way delay of 250 us, so that
-    /// both dials run before either session arrives, it dials `peer` at `at`. It
+    /// with `key`. After a random delay under 700 us, it dials `peer` at `at`. A
+    /// session reaches the peer three one-way delays of 250 us after its dial, so
+    /// both dials start before either session arrives, and one may end first. It
     /// keeps each session that `dial` and `accept` give, and checks that each one
     /// but the open one ended with `Code(0)`.
     fn dial_at_once(node: &Node, key: PrivateKey, peer: PublicKey, at: [Address; 1]) {
         let lower = key.public() < peer;
         testing::shard(node, key, move |config, node| async move {
             let (transport, sessions) = accepting(config, &node);
-            let offset = node.entropy().rng().below(250_000);
+            let offset = node.entropy().rng().below(700_000);
             let offset = Span::from_nanos(i64::try_from(offset).expect("small"));
             node.clock().sleep(offset).await;
             let dialed = transport.dial(peer, &at).await.expect("a session");
