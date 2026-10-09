@@ -446,11 +446,13 @@ fn a_repeated_timer_due_within_1_s_of_the_last_date_after_a_run_is_refused() {
         }
     }
     let outside = repeated_before_the_last_date(2.0e7);
-    for (n, policy) in [(1, ffi::CURRENT_TIME), (2, ffi::BASE_TIME)] {
-        f.try_timer(record, number(n), outside, Some(now + 30_000_000), policy)
+    // Timers due at one time run in an order that the heap sets.
+    for (n, policy, base) in [(1, ffi::CURRENT_TIME, 0), (2, ffi::BASE_TIME, 10_000)] {
+        let base = Some(now + 30_000_000 + base);
+        f.try_timer(record, number(n), outside, base, policy)
             .expect("a repeated timer due 2 s before the last date is in range");
     }
-    f.advance(ms(3000));
+    f.advance(ms(3001));
     f.run();
     assert_eq!(f.ran(), [1, 2]);
     assert_eq!(f.events.next(), None, "each is due after the clock ends");
@@ -598,8 +600,8 @@ fn a_delayed_callback_that_a_timer_queues_runs_after_the_due_timers_of_its_run()
     f.start();
     let mut later = f.delayed(record, number(1));
     f.timer(queue, ptr::from_mut(&mut later).cast(), 1.0, ffi::ONCE);
-    f.add(2, 1.0, ffi::ONCE);
-    f.advance(ms(1));
+    f.add(2, 2.0, ffi::ONCE);
+    f.advance(ms(2));
     f.run();
     assert_eq!(f.ran(), [0, 2, 1]);
     assert_eq!(f.events.next(), None);
