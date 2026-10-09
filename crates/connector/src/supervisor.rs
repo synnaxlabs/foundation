@@ -1097,12 +1097,13 @@ mod tests {
 
     #[test]
     fn refuses_the_write_of_a_kind_once_its_lease_runs_out() {
-        let lease = Some(Span::SECOND);
-        let just_before = Span::from_nanos(Span::SECOND.nanos() - 1);
-        assert_eq!(two_writes(lease, just_before), [None, None]);
-        assert_eq!(
-            two_writes(lease, Span::SECOND),
-            [None, Some(Refusal::Expired)]
-        );
+        for nanos in [Span::SECOND.nanos(), 3 * Span::SECOND.nanos()] {
+            let lease = Some(Span::from_nanos(nanos));
+            let just_before = Span::from_nanos(nanos - 1);
+            let at = Span::from_nanos(nanos);
+            assert_eq!(two_writes(lease, just_before), [None, None], "{nanos}");
+            let refused = [None, Some(Refusal::Expired)];
+            assert_eq!(two_writes(lease, at), refused, "{nanos}");
+        }
     }
 }
