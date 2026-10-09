@@ -171,7 +171,8 @@ fn write(address: SocketAddr, lines: &'static str) -> String {
     answer.try_recv().expect("the shard sent the answer")
 }
 
-/// What [`write`] gives when no server listens at `address`.
+/// What [`write`] gives when no server listens at `address`. On macOS, a child that a
+/// rig test spawns may hold the port (`os::net`), so only Linux checks a refusal.
 fn refused(address: SocketAddr) -> String {
     format!("the connect failed: {address} refused the connection")
 }
@@ -187,7 +188,6 @@ fn influx_stores_each_line_written_to_plant_and_keeps_it_after_a_stop() {
     assert_eq!(times, [Stamp::from_nanos(1), Stamp::from_nanos(2)]);
 }
 
-/// On macOS, a child that a rig test spawns may hold the port (`os::net`).
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "needs SOCK_CLOEXEC")]
 fn a_stopped_influx_refuses_and_serves_again_on_its_port_with_what_it_stored() {
@@ -211,7 +211,6 @@ fn a_dropped_influx_ends_its_shard() {
     let store = Arc::clone(&influx.store);
     drop(influx);
     assert_eq!(Arc::strong_count(&store), 1, "the shard holds no store");
-    // On macOS, a child that a rig test spawns may hold the port.
     if cfg!(target_os = "linux") {
         assert_eq!(write(address, "m f=2 2"), refused(address));
     }
@@ -228,7 +227,6 @@ fn a_dropped_influx_ends_its_shard_when_the_test_panics() {
     }));
     unwound.expect_err("the test panics");
     assert_eq!(Arc::strong_count(&store), 1, "the shard holds no store");
-    // On macOS, a child that a rig test spawns may hold the port.
     if cfg!(target_os = "linux") {
         assert_eq!(write(address, "m f=1 1"), refused(address));
     }
