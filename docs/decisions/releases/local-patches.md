@@ -25,7 +25,9 @@
   `[patch.crates-io]` to each such requirement, so a release that the copy cannot meet
   passes, and so does a requirement that resolves to nothing, such as an optional
   dependency that is off (`laptop.architect-2`, 2026-10-09T04:53:51Z,
-  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391).
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391, and
+  2026-10-09T05:00:42Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074614166).
   The task checks the graphs of `cargo metadata --locked`, not the text of the two
   tables: a patch that `fuzz/` does not use changes no code that it tests
   (`laptop.architect-2`, 2026-10-09T04:27:21Z,
