@@ -764,30 +764,136 @@ fn hold_while_another_create_fails(mode: Mode) {
 fn a_remove_that_drops_while_it_waits_for_room_leaves_the_file() {
     run(|files, data| async move {
         create(&files, "a", KIB).await.close().await;
-        let mode = rustix::fs::Mode::from_raw_mode(0o600);
-        rustix::fs::mkfifoat(rustix::fs::CWD, data.join("p"), mode).unwrap();
-        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
-        // The I/O thread blocks in the open of the FIFO until a writer opens it.
-        let mut blocker = Box::pin(files.open(Path::new("p"), Mode::Read));
-        assert!(blocker.as_mut().poll(&mut context).is_pending());
-        // 64 is the depth of the queue of the I/O thread.
-        let mut frees: Vec<_> = (0..64).map(|_| Box::pin(files.free())).collect();
-        for free in &mut frees {
-            assert!(free.as_mut().poll(&mut context).is_pending());
-        }
-        let mut remove = Box::pin(files.remove(Path::new("a")));
-        assert!(remove.as_mut().poll(&mut context).is_pending());
-        drop(remove);
-        let flags = rustix::fs::OFlags::WRONLY;
-        let writer = rustix::fs::open(data.join("p"), flags, mode).unwrap();
-        drop(blocker.await.unwrap());
-        drop(writer);
+        let frees = stalled(&files, &data, |context| {
+            // 64 is the depth of the queue of the I/O thread.
+            let mut frees: Vec<_> = (0..64).map(|_| Box::pin(files.free())).collect();
+            for free in &mut frees {
+                pend(free, context);
+            }
+            let mut remove = Box::pin(files.remove(Path::new("a")));
+            pend(&mut remove, context);
+            drop(remove);
+            frees
+        })
+        .await;
         for free in frees {
             free.await.unwrap();
         }
         files.free().await.unwrap();
         let found = files.open(Path::new("a"), Mode::Read).await.map(drop);
         assert_eq!(found, Ok(()));
+    });
+}
+
+/// Runs `start` while the I/O thread of `files` blocks in the open of a FIFO, so each
+/// call that `start` polls once waits in the queue, and then frees the thread.
+#[cfg(target_os = "linux")]
+async fn stalled<T>(
+    files: &Files,
+    data: &Path,
+    start: impl FnOnce(&mut std::task::Context<'_>) -> T,
+) -> T {
+    let mode = rustix::fs::Mode::from_raw_mode(0o600);
+    rustix::fs::mkfifoat(rustix::fs::CWD, data.join("p"), mode).unwrap();
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut blocker = Box::pin(files.open(Path::new("p"), Mode::Read));
+    assert!(blocker.as_mut().poll(&mut context).is_pending());
+    let started = start(&mut context);
+    let writer = rustix::fs::open(data.join("p"), rustix::fs::OFlags::WRONLY, mode);
+    drop(blocker.await.unwrap());
+    drop(writer.unwrap());
+    std::fs::remove_file(data.join("p")).unwrap();
+    started
+}
+
+/// Polls `future` once, and expects it to wait.
+#[cfg(target_os = "linux")]
+fn pend<F: Future>(
+    future: &mut std::pin::Pin<Box<F>>,
+    context: &mut std::task::Context<'_>,
+) {
+    assert!(future.as_mut().poll(context).is_pending());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_write_open_waits_for_the_write_of_a_dropped_handle() {
+    run(|files, data| async move {
+        let (file, pool) = (create(&files, "a", KIB).await, pool());
+        let parts = [block(&pool, &[1; 1_024])];
+        let mut open = stalled(&files, &data, |context| {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(&mut write, context);
+            drop(write);
+            drop(file);
+            let mut open = Box::pin(files.open(Path::new("a"), Mode::Write));
+            pend(&mut open, context);
+            open
+        })
+        .await;
+        let file = open.as_mut().await.unwrap();
+        assert_eq!(read(&file, &pool, 0, 4).await, [1; 4]);
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_create_after_a_dropped_remove_keeps_its_file() {
+    run(|files, data| async move {
+        create(&files, "a", KIB).await.close().await;
+        let mut made = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(files.remove(Path::new("a")));
+            pend(&mut remove, context);
+            drop(remove);
+            let mut made =
+                Box::pin(files.open(Path::new("a"), Mode::Create { len: KIB }));
+            pend(&mut made, context);
+            made
+        })
+        .await;
+        made.as_mut().await.unwrap().close().await;
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("a")]);
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_write_open_waits_for_a_dropped_remove_through_the_handle() {
+    run(|files, data| async move {
+        let file = create(&files, "a", KIB).await;
+        let mut open = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(file.remove());
+            pend(&mut remove, context);
+            drop(remove);
+            let mut open = Box::pin(files.open(Path::new("a"), Mode::Write));
+            pend(&mut open, context);
+            open
+        })
+        .await;
+        let found = open.as_mut().await.map(drop);
+        assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_rename_waits_for_a_dropped_remove_of_its_new_name() {
+    run(|files, data| async move {
+        create(&files, "b", KIB).await.close().await;
+        let mut file = create(&files, "a", KIB).await;
+        let mut renamed = stalled(&files, &data, |context| {
+            let mut remove = Box::pin(files.remove(Path::new("b")));
+            pend(&mut remove, context);
+            drop(remove);
+            let mut renamed = Box::pin(file.rename(Path::new("b")));
+            pend(&mut renamed, context);
+            renamed
+        })
+        .await;
+        assert_eq!(renamed.as_mut().await, Ok(()));
+        let names = files.list(Path::new("")).await.unwrap();
+        assert_eq!(names, [PathBuf::from("b")]);
     });
 }
 
