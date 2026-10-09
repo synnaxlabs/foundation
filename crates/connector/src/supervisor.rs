@@ -68,9 +68,10 @@ impl Supervisor {
     /// ended, or after `cancel` is cancelled.
     ///
     /// Returns `Ok` when `run` returns `Ok`, or when `cancel` is cancelled and the
-    /// run returned, in each case once the run's tasks ended. A drop of the future
-    /// cancels the run, and the next `run` of `name` on this supervisor waits for its
-    /// tasks. The future is not `Send`: call it on a shard.
+    /// run returned. It returns, with `Ok` or an error, only once each task of its
+    /// last run ended. A drop of the future cancels the run, and the next `run` of
+    /// `name` on this supervisor waits for its tasks. The future is not `Send`: call
+    /// it on a shard.
     ///
     /// # Errors
     ///
@@ -90,18 +91,17 @@ impl Supervisor {
             tasks,
             ..
         } = &*self.config;
-        let left = self.left.borrow_mut().remove(&name).unwrap_or_default();
-        let mut held = Left {
+        let mut last = Last {
             name: name.clone(),
-            live: left,
+            live: self.left.borrow_mut().remove(&name).unwrap_or_default(),
             map: &self.left,
         };
-        held.live.ended().await;
+        last.live.ended().await;
         let mut backoff = retry::Backoff::new(clock, entropy.rng(), RESTART);
         while !cancel.cancelled() {
             let token = Ended(cancel.child());
             let live = Rc::new(Live::default());
-            held.live = Rc::clone(&live);
+            last.live = Rc::clone(&live);
             let count = Count {
                 tasks: tasks.clone(),
                 live: Rc::clone(&live),
@@ -145,17 +145,18 @@ impl Drop for Ended {
 
 /// Keeps the tasks of a connector's last run for its next `run` when the future of
 /// `run` drops before they ended.
-struct Left<'a> {
+struct Last<'a> {
     name: Name,
     live: Rc<Live>,
     map: &'a RefCell<Map<Name, Rc<Live>>>,
 }
 
-impl Drop for Left<'_> {
+impl Drop for Last<'_> {
     fn drop(&mut self) {
+        let mut map = self.map.borrow_mut();
+        map.retain(|_, live| live.n.get() > 0);
         if self.live.n.get() > 0 {
-            let live = Rc::clone(&self.live);
-            self.map.borrow_mut().insert(self.name.clone(), live);
+            map.insert(self.name.clone(), Rc::clone(&self.live));
         }
     }
 }
@@ -836,6 +837,41 @@ mod tests {
     }
 
     #[test]
+    fn keeps_nothing_for_dropped_runs_whose_tasks_ended() {
+        let (kept, live) = run_on(|node, tasks| async move {
+            let kind = Spawner {
+                linger: ms(2_000),
+                ..Spawner::default()
+            };
+            let live = Arc::clone(&kind.live);
+            let kinds = Table::new().with("spawner", kind);
+            let supervisor = Supervisor::new(inputs(&node, tasks, kinds));
+            let config = config();
+            let clock = node.clock();
+            let token = Token::new();
+            for i in 0..100 {
+                let name: Name = format!("plant.spawner{i}").parse().expect("a name");
+                let mut run =
+                    Box::pin(supervisor.run("spawner", name, &config, &token));
+                let mut later = pin!(clock.sleep(ms(5_000)));
+                poll_fn(|cx| {
+                    assert!(run.as_mut().poll(cx).is_pending(), "it runs");
+                    later.as_mut().poll(cx)
+                })
+                .await;
+                drop(run);
+            }
+            let kept = supervisor.left.borrow().len();
+            (kept, *live.lock().expect("no panic"))
+        });
+        assert_eq!(
+            (kept, live),
+            (1, 1),
+            "keeps only the run whose task still runs"
+        );
+    }
+
+    #[test]
     fn waits_for_the_tasks_of_a_dropped_run_before_a_new_run_of_its_connector() {
         let (seen, kept) = run_on(|node, tasks| async move {
             let kind = Spawner {
@@ -872,6 +908,6 @@ mod tests {
             (seen.lock().expect("no panic").clone(), kept)
         });
         assert_eq!(seen, [0, 0, 0], "the dropped run's task still runs");
-        assert_eq!(kept, 0, "a run whose tasks ended is kept");
+        assert_eq!(kept, 0, "a run whose tasks ended keeps nothing");
     }
 }
