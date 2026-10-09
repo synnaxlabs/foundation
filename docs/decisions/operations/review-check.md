@@ -66,8 +66,8 @@
   (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6069679983) and
   2026-10-09T00:29:41Z
   (https://github.com/synnaxlabs/foundation/issues/2050#issuecomment-6071765169),
-  approved by the director at 2026-10-09T03:19:34Z
-  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6073572138).
+  approved by the director at 2026-10-09T03:27:37Z
+  (https://github.com/synnaxlabs/foundation/pull/1999#issuecomment-6073664668).
   Supersedes the footnote label rule of
   https://github.com/synnaxlabs/foundation/issues/2037#issuecomment-6071274522
   (2026-10-08T23:46:02Z), since `comrak` reads footnote labels as GitHub does.
