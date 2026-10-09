@@ -155,11 +155,10 @@ impl Client {
     ///
     /// [`Error::Body`] when `body` is over `BODY_BYTES_MAX`, with nothing sent. The
     /// error that ended the renewal, when the renewal ended before or during the
-    /// request. Else [`Error::Refused`]
-    /// when the node stopped the request or closed the session with a refusal,
-    /// [`Error::Transport`] when the stream or the session failed;
-    /// [`Error::Message`] for a response that `wire` refuses or that ends early;
-    /// [`Error::Unanswered`] when the node finished the stream with no response.
+    /// request. Else [`Error::Refused`] when the node stopped the request or closed
+    /// the session with a refusal, [`Error::Transport`] when the stream or the session
+    /// failed; [`Error::Message`] for a response that `wire` refuses or that ends
+    /// early; [`Error::Unanswered`] when the node finished the stream with no response.
     pub async fn request(&self, body: &[u8]) -> Result<Vec<u8>, Error> {
         let shared = &self.0.0;
         let length = u64::try_from(body.len())
