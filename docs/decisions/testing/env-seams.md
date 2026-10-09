@@ -283,4 +283,12 @@
   Foundation node spawns no process, so only tests see it, and CI runs on Linux. Lost:
   `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn side, which std does not set, and which
   needs a spawn seam and `unsafe` for tests only. Decided by `laptop.architect-2`
-  (2026-10-08T21:01:28Z: https://github.com/synnaxlabs/foundation/issues/2000).
+  (2026-10-08T21:01:28Z: https://github.com/synnaxlabs/foundation/issues/2000). `os`
+  cannot set the flags of the sockets of a lookup, because the C library opens them, and
+  it cannot open them another way without its own resolver. Lost: a resolver in `os`,
+  which changes what each lookup gives on macOS. Trigger: the first change that makes a
+  node spawn a process closes both macOS gaps on the spawn side. Decided by
+  `laptop.architect` (2026-10-09T02:37:32Z:
+  https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073119953; the socket
+  that the C library keeps open:
+  https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073170413).
