@@ -100,6 +100,7 @@ mod tests {
         let kept = Arc::new(Count(AtomicUsize::new(0)));
         let dropped = Arc::new(Count(AtomicUsize::new(0)));
         let mut ended = Ended::new(&end);
+        assert_eq!(format!("{ended:?}"), "Ended { .. }");
         let mut gone = Ended::new(&end);
         for (ended, count) in [(&mut ended, &kept), (&mut gone, &dropped)] {
             let waker = Waker::from(Arc::clone(count));
