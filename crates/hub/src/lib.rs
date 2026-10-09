@@ -89,6 +89,12 @@ struct State {
     readers: Sessions<::home::reader::Key>,
     /// The waker of each reader that waits for a frame.
     wakers: hash::Map<::home::reader::Key, Waker>,
+    /// Each served open from its first key to its session, by a key from `opened`.
+    opens: Sessions<u64>,
+    /// The waker of each open in `opens` that waits for its home.
+    waiting: hash::Map<u64, Waker>,
+    /// The count of served opens.
+    opened: u64,
     /// The readers that [`::home::Shard::woken`] gave last.
     woken: Vec<::home::reader::Key>,
     commit: commit::Signal,
@@ -128,6 +134,9 @@ impl Hub {
             writers: Sessions::default(),
             readers: Sessions::default(),
             wakers: hash::Map::default(),
+            opens: Sessions::default(),
+            waiting: hash::Map::default(),
+            opened: 0,
             woken: Vec::new(),
             commit: commit::Signal::default(),
             failed: None,
@@ -262,7 +271,7 @@ struct Sessions<K>(hash::Map<K, Open>);
 /// The channels of an open session, and its removal.
 #[derive(Debug)]
 struct Open {
-    keys: Box<[Key]>,
+    keys: Vec<Key>,
     removal: Removal,
 }
 
@@ -289,12 +298,21 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
     fn add(&mut self, key: K, keys: Box<[Key]>) -> Removal {
         let removal = Removal::default();
         let open = Open {
-            keys,
+            keys: keys.into_vec(),
             removal: removal.clone(),
         };
         let added = self.0.insert(key, open);
         assert!(added.is_none(), "invariant: the home gives each key once");
         removal
+    }
+
+    /// Adds `keys` to the channels of the open session `key`.
+    fn extend(&mut self, key: K, keys: &[Key]) {
+        let open = self
+            .0
+            .get_mut(&key)
+            .expect("invariant: the session is open");
+        open.keys.extend_from_slice(keys);
     }
 
     /// Returns whether the session `key` was open, and makes it not open.
@@ -373,6 +391,12 @@ impl State {
         }
         for key in self.readers.end(removed) {
             if let Some(waker) = self.close_reader(key) {
+                waker.wake();
+            }
+        }
+        for key in self.opens.end(removed) {
+            self.opens.remove(key);
+            if let Some(waker) = self.waiting.remove(&key) {
                 waker.wake();
             }
         }

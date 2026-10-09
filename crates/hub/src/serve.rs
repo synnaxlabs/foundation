@@ -21,7 +21,7 @@ use wire::hub::client::Refusal;
 use wire::hub::{BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends};
 
 use crate::reader::{Credit, Ended, Session};
-use crate::{Away, State};
+use crate::{Away, Removal, State};
 
 pub use client::{Reply, Request};
 
@@ -288,9 +288,9 @@ struct Opened {
 }
 
 /// Reads the open and its keys, checks each key as it arrives, waits until the mesh
-/// names this node the home of the index, checks each key again, and carries the index
-/// and opens the session in the order of the keys. When the index changed meanwhile,
-/// it waits again for the new one. Gives `None` when the peer finishes first.
+/// names this node the home of the index, and carries the index and opens the session
+/// in the order of the keys. A removal of a channel that it checked ends it. Gives
+/// `None` when the peer finishes first.
 async fn open(
     state: &Rc<RefCell<State>>,
     class: Class,
@@ -310,6 +310,7 @@ async fn open(
     if class != wanted {
         return Err(Error::Class(class));
     }
+    let pending = Pending::new(state);
     let (mut keys, mut index) = (Vec::new(), None);
     loop {
         let Some(message) = receiver.recv().await? else {
@@ -320,12 +321,13 @@ async fn open(
         };
         let start = keys.len();
         keys.extend(run);
-        check(&state.borrow(), &keys[start..], &mut index)?;
+        pending.check(&keys[start..], &mut index)?;
         if last {
             break;
         }
     }
-    let Some((at, granted)) = wait(state, &keys, index, home, receiver).await? else {
+    let at = position(&keys, index)?;
+    let Some(granted) = wait_for(&pending, keys[at], home, receiver).await? else {
         return Ok(None);
     };
     let slots = state.borrow_mut().slots(keys[at], &keys);
@@ -366,60 +368,87 @@ fn position(
         .ok_or(Error::NoIndex)
 }
 
-/// Checks that each of `keys` is known and on `index`, which the first key sets when
-/// it is `None`.
-fn check(
-    state: &State,
-    keys: &[channel::Key],
-    index: &mut Option<channel::Key>,
-) -> Result<(), Error> {
-    for &key in keys {
-        let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
-        if *index.get_or_insert(of) != of {
-            return Err(Error::ManyIndexes);
-        }
-    }
-    Ok(())
+/// A served open from its first key to its session, which a removal of a channel that
+/// it checked ends.
+struct Pending<'s> {
+    state: &'s Rc<RefCell<State>>,
+    key: u64,
+    removal: Removal,
 }
 
-/// Waits until the mesh names this node the home of the index of `keys`, and checks
-/// `keys` again after it, as a call of `set_definitions` while the open reads or
-/// waits can change a key. Waits again when the index changed. Gives the position of
-/// the index in `keys` and the highest grant that the peer sent, or `None` when the
-/// peer finished first.
-async fn wait(
-    state: &Rc<RefCell<State>>,
-    keys: &[channel::Key],
-    mut index: Option<channel::Key>,
-    home: &mut Home,
-    receiver: &mut Receiver,
-) -> Result<Option<(usize, u64)>, Error> {
-    let mut granted = 0;
-    loop {
-        let at = position(keys, index)?;
-        let Some(grant) = wait_for(state, keys[at], home, receiver).await? else {
-            return Ok(None);
-        };
-        granted = granted.max(grant);
-        let mut again = None;
-        check(&state.borrow(), keys, &mut again)?;
-        if again == index {
-            return Ok(Some((at, granted)));
+impl<'s> Pending<'s> {
+    fn new(state: &'s Rc<RefCell<State>>) -> Self {
+        let mut borrowed = state.borrow_mut();
+        let key = borrowed.opened;
+        borrowed.opened += 1;
+        let removal = borrowed.opens.add(key, Box::default());
+        drop(borrowed);
+        Self {
+            state,
+            key,
+            removal,
         }
-        index = again;
+    }
+
+    /// Fails with the first channel of the open that a call removed.
+    fn removed(&self) -> Result<(), Error> {
+        self.removal
+            .get()
+            .map_or(Ok(()), |key| Err(Error::Removed(key)))
+    }
+
+    /// Checks that each of `keys` is known and on `index`, which the first key sets
+    /// when it is `None`, and adds them to the channels of the open.
+    fn check(
+        &self,
+        keys: &[channel::Key],
+        index: &mut Option<channel::Key>,
+    ) -> Result<(), Error> {
+        self.removed()?;
+        let mut state = self.state.borrow_mut();
+        for &key in keys {
+            let of = *state.indexes.get(&key).ok_or(Error::Unknown(key))?;
+            if *index.get_or_insert(of) != of {
+                return Err(Error::ManyIndexes);
+            }
+        }
+        state.opens.extend(self.key, keys);
+        Ok(())
+    }
+
+    /// Waits until the mesh names this node the home of `index`. Fails at once when a
+    /// call removes a channel of the open.
+    async fn home(&self, index: channel::Key) -> Result<(), Error> {
+        let mut homed = pin!(crate::home(self.state, index));
+        poll_fn(|cx| {
+            self.removed()?;
+            let mut state = self.state.borrow_mut();
+            state.waiting.insert(self.key, cx.waker().clone());
+            drop(state);
+            homed.as_mut().poll(cx).map_err(Error::from)
+        })
+        .await
+    }
+}
+
+impl Drop for Pending<'_> {
+    fn drop(&mut self) {
+        let mut state = self.state.borrow_mut();
+        state.opens.remove(self.key);
+        state.waiting.remove(&self.key);
     }
 }
 
 /// Waits until the mesh names this node the home of `index`, and reads the peer
 /// meanwhile. Gives the highest grant that the peer sent, 0 for none, or `None` when
-/// the peer finished first.
+/// the peer finished first. Fails at once when a call removes a channel of `pending`.
 async fn wait_for(
-    state: &Rc<RefCell<State>>,
+    pending: &Pending<'_>,
     index: channel::Key,
     home: &mut Home,
     receiver: &mut Receiver,
 ) -> Result<Option<u64>, Error> {
-    let mut homed = pin!(crate::home(state, index));
+    let mut homed = pin!(pending.home(index));
     let mut granted = 0;
     loop {
         let mut recv = pin!(receiver.recv());
