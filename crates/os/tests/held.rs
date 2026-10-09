@@ -7,6 +7,7 @@
 #![cfg(test)]
 
 #[path = "common/children.rs"]
+#[expect(dead_code, reason = "this binary starts no thread to work")]
 mod children;
 #[path = "common/sockets.rs"]
 mod sockets;
