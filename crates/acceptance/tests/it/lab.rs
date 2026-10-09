@@ -700,17 +700,17 @@ impl Lab {
         _rate: u64,
         _count: u64,
     ) {
-        todo!("waits on #340")
+        todo!("waits on #2145")
     }
 
     /// The seqs that the home gave the samples written to `channel`.
     pub(crate) fn written(&self, _channel: &str) -> Range<u64> {
-        todo!("waits on #340")
+        todo!("waits on #2145")
     }
 
     /// The true simulated time of each sample written to `channel`, in order.
     pub(crate) fn truth(&self, _channel: &str) -> Vec<i64> {
-        todo!("waits on #340")
+        todo!("waits on #2145")
     }
 
     /// Sends `value` to the command channel `channel` as `subject`.
@@ -721,7 +721,7 @@ impl Lab {
         _channel: &str,
         _value: f64,
     ) -> Result<(), String> {
-        todo!("waits on #340")
+        todo!("waits on #2145")
     }
 
     /// Reads `channel` on `node` from the oldest sample, as `subject`.
@@ -763,7 +763,7 @@ impl Lab {
 
     /// The commands recorded on `channel`, with their acknowledgments.
     pub(crate) fn audit(&mut self, _node: Node, _channel: &str) -> Vec<Command> {
-        todo!("waits on #340")
+        todo!("waits on #2145")
     }
 
     /// What the Influx store at `address` holds for `channel`, folded by
