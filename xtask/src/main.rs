@@ -241,19 +241,21 @@ mod tests {
     #[test]
     fn layers_reports_sim_also_in_a_benchmark_and_a_path_crate_outside_the_members() {
         let problems = layers(&fixture().join("features")).unwrap_err();
-        assert!(
-            problems.iter().any(|p| p.starts_with(
-                "`own` turns on `sim` in its feature `default`. A `sim` feature"
-            )),
-            "{problems:?}"
-        );
-        for name in ["tool", "outer"] {
-            assert!(
-                problems.iter().any(|p| p.starts_with(&format!(
-                    "`{name}` turns on the `sim` feature of its dependency `own`."
-                ))),
-                "`{name}`: {problems:?}"
-            );
+        let rule = "A `sim` feature is test-only: only a dev-dependency, the fuzz \
+                    crate, or another `sim` feature turns it on. A product feature \
+                    turns on `dep:sim` and `simulate` features. See rule 9 in \
+                    docs/decisions/crate-map.md.";
+        let mut found = vec![format!(
+            "`own` turns on `sim` in its feature `default`. {rule}"
+        )];
+        found.extend(["tool", "outer"].map(|name| {
+            format!(
+                "`{name}` turns on the `sim` feature of its dependency `own`. Move it \
+                 to the dev-dependencies. {rule}"
+            )
+        }));
+        for problem in found {
+            assert!(problems.contains(&problem), "{problem}: {problems:?}");
         }
     }
 
