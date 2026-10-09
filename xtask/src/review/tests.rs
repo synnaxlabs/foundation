@@ -1529,6 +1529,38 @@ fn fails_raw_html_after_a_byte_order_mark_at_the_start() {
 }
 
 #[test]
+fn reads_no_heading_after_two_byte_order_marks() {
+    // GitHub drops only the first mark, so it shows the heading line as text.
+    let earlier = ROUND.replace("Findings: none", "Findings: 2");
+    let at = ROUND.find("## Review round 3").unwrap();
+    for (marks, expected) in [
+        ("\u{feff}", vec![]),
+        (
+            "\u{feff}\u{feff}",
+            vec![
+                "review round 3 has findings (2). Fix or answer them, then run another \
+                 round."
+                    .to_owned(),
+            ],
+        ),
+    ] {
+        let last = format!("{marks}{}", &ROUND[at..]);
+        assert_eq!(check(&record(vec![bot(&earlier), bot(&last)])), expected);
+    }
+    // After the second mark, a tag is text, and the heading after it shows.
+    let shown = check(&record(vec![bot(ROUND), bot(&earlier[at..])]));
+    assert_eq!(shown.len(), 1);
+    for line in ["<search x", "<!-- x", "<SEARCH x"] {
+        let last = format!("\u{feff}\u{feff}{line}\n{}", &earlier[at..]);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&last)])),
+            shown,
+            "{line}"
+        );
+    }
+}
+
+#[test]
 fn passes_a_round_whose_heading_github_hides_in_an_html_block() {
     let found = ROUND.replace("Findings: none", "Findings: 2");
     // GitHub starts a block of type 7 at a complete tag alone on its line.

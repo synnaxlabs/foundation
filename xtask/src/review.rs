@@ -569,7 +569,9 @@ impl<'a> Shown<'a> {
         hiding.sort_by_key(|(at, _)| *at);
         shown.hiding = hiding
             .into_iter()
-            .map(|(at, cause)| (body[at..line_end(body, at)].trim(), cause))
+            .map(|(at, cause)| {
+                (body[at.max(mark(body))..line_end(body, at)].trim(), cause)
+            })
             .collect();
         shown
     }
@@ -719,15 +721,16 @@ fn ignorable(c: char) -> bool {
     )
 }
 
-/// `text` with no byte order mark at its start, with each line ended by `\n`, with no
-/// spaces or tabs at the end of a line, and with each tab in the spaces, tabs, and `>`
-/// at the start of a line replaced by spaces to the next multiple of 4 columns. None of
-/// these changes what GitHub shows. A line number then gives the offset of its line,
-/// and comrak gives the right column after a tab that a quote or a list item takes in
-/// part.
+/// `text` with each line ended by `\n`, with no spaces or tabs at the end of a line,
+/// and with each tab in the spaces, tabs, and `>` at the start of a line, after its
+/// [`mark`], replaced by spaces to the next multiple of 4 columns. None of these
+/// changes what GitHub shows. A line number then gives the offset of its line, and
+/// comrak gives the right column after a tab that a quote or a list item takes in part.
 fn normalized(text: &str) -> String {
     let mut normalized = String::with_capacity(text.len());
-    for line in lines(text.strip_prefix('\u{feff}').unwrap_or(text)) {
+    let (mark, text) = text.split_at(mark(text));
+    normalized.push_str(mark);
+    for line in lines(text) {
         let line = line.trim_end_matches([' ', '\t']);
         let content = line.trim_start_matches([' ', '\t', '>']);
         let start = normalized.len();
@@ -753,6 +756,8 @@ fn normalized(text: &str) -> String {
 /// put before `<!` and a lowercase letter, which starts no HTML block on GitHub.
 fn unblocked(body: &str) -> Option<String> {
     let mut text = String::with_capacity(body.len());
+    let (mark, body) = body.split_at(mark(body));
+    text.push_str(mark);
     for line in body.split_inclusive('\n') {
         let rest = bare(line);
         text.push_str(&line[..line.len() - rest.len()]);
@@ -804,18 +809,29 @@ fn number<'n>(heading: &'n AstNode<'n>) -> Option<String> {
     word.then(|| rest.trim_start().to_owned())
 }
 
-/// The first of the line starts `starts` of `body` whose line, after the indent and
-/// the marks of quotes, list items, and footnote labels ([`note`]), starts with raw
-/// HTML: `<` and a letter, `!`, `/`, or `?` that is not an autolink. A line in a code
-/// block (`codes`) does not count. GitHub reads some of these lines as an HTML block
-/// where comrak does not, such as `<source>`. GitHub reads the blocks of a comment
-/// before its spans, so a line inside a code span, a link, or a link definition counts
-/// too.
+/// The length of the byte order mark at the start of `text`, or 0. comrak and GitHub
+/// drop one such mark at the start of a comment, and no other.
+fn mark(text: &str) -> usize {
+    if text.starts_with('\u{feff}') {
+        '\u{feff}'.len_utf8()
+    } else {
+        0
+    }
+}
+
+/// The first of the line starts `starts` of `body` whose line, after its [`mark`], the
+/// indent and the marks of quotes, list items, and footnote labels ([`note`]), starts
+/// with raw HTML: `<` and a letter, `!`, `/`, or `?` that is not an autolink. A line in
+/// a code block (`codes`) does not count. GitHub reads some of these lines as an HTML
+/// block where comrak does not, such as `<source>`. GitHub reads the blocks of a
+/// comment before its spans, so a line inside a code span, a link, or a link definition
+/// counts too.
 fn tagged(body: &str, starts: &[usize], codes: &[Range<usize>]) -> Option<usize> {
     starts.iter().copied().find(|&start| {
-        let line = &body[start..line_end(body, start)];
+        let from = start.max(mark(body));
+        let line = &body[from..line_end(body, start)];
         let rest = bare(line);
-        let at = |rest: &str| start + line.len() - rest.len();
+        let at = |rest: &str| from + line.len() - rest.len();
         !codes.iter().any(|code| code.contains(&at(rest))) && tag(rest)
     })
 }
