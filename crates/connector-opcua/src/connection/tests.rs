@@ -1604,3 +1604,100 @@ fn a_write_to_a_reset_stream_gives_closing_and_a_warning() {
          10.0.0.2:4840 reset the stream\n"
     );
 }
+
+/// Records the call, with a `CLOSING` as one byte: 1 when the context is the
+/// application. On a read, sets the context to the application, closes, and runs the
+/// loop when `ran`.
+#[expect(clippy::too_many_arguments, reason = "a test callback")]
+unsafe fn mark(
+    cm: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    context: *mut *mut c_void,
+    state: ConnectionState,
+    params: *const KeyValueMap,
+    message: Bytes,
+    ran: bool,
+) {
+    if state == ffi::CLOSING {
+        // SAFETY: `open` passes the calls of a live side.
+        let calls = unsafe { &*application.cast::<RefCell<Vec<Call>>>() };
+        // SAFETY: the manager gives a live context slot.
+        let marked = unsafe { *context } == application;
+        calls.borrow_mut().push((id, state, vec![u8::from(marked)]));
+        return;
+    }
+    let read = state == ffi::ESTABLISHED && message.length > 0;
+    // SAFETY: the manager gives the arguments that it gives `record`.
+    unsafe { record(cm, id, application, context, state, params, message) };
+    if read {
+        // SAFETY: the manager gives a live context slot.
+        unsafe { *context = application };
+        // SAFETY: the manager lives through the test.
+        let members = unsafe { &*cm.cast::<Members>() };
+        // SAFETY: the member takes its own manager.
+        assert_eq!(Status(unsafe { (members.close)(cm, id) }), Status::GOOD);
+        if ran {
+            let el = members.event_loop;
+            // SAFETY: the loop of the manager lives through the test.
+            let run = unsafe { (*el).run };
+            // SAFETY: the loop runs on this thread, outside a run of its own.
+            assert_eq!(Status(unsafe { run(el, 0) }), Status::GOOD);
+        }
+    }
+}
+
+unsafe extern "C" fn mark_close(
+    cm: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    context: *mut *mut c_void,
+    state: ConnectionState,
+    params: *const KeyValueMap,
+    message: Bytes,
+) {
+    // SAFETY: the manager gives the arguments.
+    unsafe { mark(cm, id, application, context, state, params, message, false) };
+}
+
+unsafe extern "C" fn mark_close_and_run(
+    cm: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    context: *mut *mut c_void,
+    state: ConnectionState,
+    params: *const KeyValueMap,
+    message: Bytes,
+) {
+    // SAFETY: the manager gives the arguments.
+    unsafe { mark(cm, id, application, context, state, params, message, true) };
+}
+
+fn closing_context(callback: ffi::ConnectionCallback) -> Vec<Call> {
+    let mut network = Network::new();
+    drop(network.serve(Some(b"ack")));
+    let remote = network.remote();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side {
+                callback,
+                ..Side::new(&node)
+            };
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            side.calls()
+        })
+        .expect("the run ends")
+}
+
+/// The `CLOSING` gets the context that the read callback wrote, also when that
+/// callback runs the loop that gives the `CLOSING`.
+#[test]
+fn a_closing_from_a_run_in_a_callback_gets_the_context_it_wrote() {
+    let closing = (1, ffi::CLOSING, vec![1]);
+    let late = closing_context(mark_close);
+    assert_eq!(late.last(), Some(&closing), "a close with no run");
+    let nested = closing_context(mark_close_and_run);
+    assert_eq!(nested.last(), Some(&closing), "a close and a run");
+}

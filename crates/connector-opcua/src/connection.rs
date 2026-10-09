@@ -13,6 +13,7 @@ use std::io::IoSlice;
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
+use std::rc::Rc;
 use std::task::{Context, Poll, Waker};
 
 use env::clock::{Clock, Sleep};
@@ -365,23 +366,13 @@ impl State {
 
     /// Calls the connection callback of `id` with `state` and `message`.
     fn call(&self, id: usize, state: ffi::ConnectionState, message: &mut [u8]) {
-        let mut callback = self
+        let callback = self
             .table
             .borrow()
             .get(&id)
-            .and_then(|c| c.callback)
+            .and_then(|c| c.callback.clone())
             .expect("invariant: a connection that is not closing has its callback");
         callback.call(self.raw.get(), id, state, message);
-        // A run of the loop in the callback, as a synchronous disconnect makes, can
-        // give the `CLOSING` and take the callback.
-        if let Some(slot) = self
-            .table
-            .borrow_mut()
-            .get_mut(&id)
-            .and_then(|c| c.callback.as_mut())
-        {
-            slot.context = callback.context;
-        }
     }
 }
 
@@ -395,17 +386,19 @@ impl Drop for Held<'_> {
 }
 
 /// The connection callback of open62541 for one connection, with its arguments.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Callback {
     application: *mut c_void,
-    context: *mut c_void,
+    /// One slot for each call, since a callback can write it and then run the loop,
+    /// which gives the `CLOSING`.
+    context: Rc<Cell<*mut c_void>>,
     function: ffi::ConnectionCallback,
 }
 
 impl Callback {
     /// Calls the callback, which may write `context`.
     fn call(
-        &mut self,
+        &self,
         cm: *mut ffi::ConnectionManager,
         id: usize,
         state: ffi::ConnectionState,
@@ -430,7 +423,7 @@ impl Callback {
                 cm,
                 id,
                 self.application,
-                &raw mut self.context,
+                self.context.as_ptr(),
                 state,
                 &raw const params,
                 message,
@@ -685,7 +678,7 @@ unsafe extern "C" fn open(
     state.next.set(id + 1);
     let callback = Callback {
         application,
-        context,
+        context: Rc::new(Cell::new(context)),
         function: callback,
     };
     state.table.borrow_mut().insert(
@@ -759,7 +752,7 @@ unsafe extern "C" fn closed(application: *mut c_void, _: *mut c_void) {
         let Some(id) = state.ends.borrow_mut().pop_front() else {
             break;
         };
-        let mut callback = state
+        let callback = state
             .table
             .borrow_mut()
             .get_mut(&id)
