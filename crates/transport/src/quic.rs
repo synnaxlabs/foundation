@@ -282,6 +282,12 @@ impl Endpoint {
         self.connections.iter().all(Option::is_none)
     }
 
+    /// `true` when each connection ended. One that ended may still drain its close.
+    pub(crate) fn ended(&self) -> bool {
+        let mut connections = self.connections.iter().flatten();
+        connections.all(|connection| !connection.live())
+    }
+
     /// Ends each connection after the socket broke, and queues the
     /// [`Event::Closed`] of each one the caller has, with [`Error::Network`].
     pub(crate) fn fail(&mut self, error: &env::net::Error) {

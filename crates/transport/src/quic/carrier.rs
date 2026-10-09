@@ -19,7 +19,7 @@ use env::net::udp::{self, Meta, Transmit};
 use noq_proto::StreamId;
 use types::ed25519::PublicKey;
 use types::hash::Map;
-use types::time::Monotonic;
+use types::time::{Monotonic, Span};
 
 use super::end::{End, Ended, Live};
 use super::stream::{Incoming, Receiver, Sender};
@@ -33,9 +33,15 @@ use crate::{Class, Code, Error, PAYLOAD_IPV4, Peer, Status, port};
 /// shard's other tasks.
 const BATCHES: usize = 8;
 
+/// The longest the task of a dropped carrier lets the closes drain once each
+/// connection ended. A drain takes 3 PTO, and the peer's round trip sets the PTO with
+/// no bound.
+const DRAIN_MAX: Span = Span::from_nanos(3 * Span::SECOND.nanos());
+
 /// One shard's QUIC endpoint on a UDP socket. A task on the shard moves its
 /// datagrams and runs its timers until the socket breaks, or until the carrier
-/// dropped and each connection drained. It stays on the thread that made it.
+/// dropped and each connection drained, for at most [`DRAIN_MAX`] after each one
+/// ended. It stays on the thread that made it.
 pub(crate) struct Carrier(Rc<RefCell<State>>);
 
 impl Carrier {
@@ -716,9 +722,13 @@ impl Drop for Session {
 struct Task {
     state: Rc<RefCell<State>>,
     socket: Socket,
-    /// Completes at the endpoint's deadline as of the last poll that changed it.
+    /// Completes at the first of the endpoint's deadline and `cut`, as of the last
+    /// poll that changed it.
     sleep: Sleep,
     retry: Retry,
+    /// When the task ends while a close still drains: [`DRAIN_MAX`] after a poll first
+    /// saw the carrier dropped and each connection ended.
+    cut: Option<Monotonic>,
     /// Last, so that the socket has dropped when it wakes each [`Ended`].
     _live: Live,
 }
@@ -746,6 +756,7 @@ impl Task {
                 sleep: clock.sleep_until(Monotonic(0)),
                 armed: false,
             },
+            cut: None,
             _live: live,
         }
     }
@@ -754,8 +765,8 @@ impl Task {
         poll_fn(|cx| self.poll(cx)).await;
     }
 
-    /// Ready when the socket broke, or when the carrier dropped, each connection
-    /// drained, and the socket holds no datagram.
+    /// Ready when the socket broke, when the carrier dropped, each connection
+    /// drained, and the socket holds no datagram, or at `cut`.
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         let mut state = self.state.borrow_mut();
         let fresh =
@@ -780,16 +791,20 @@ impl Task {
             state.dispatch(event);
         }
         // Once the carrier dropped, no connection starts again.
-        if state.accepted.is_none()
-            && state.endpoint.drained()
-            && self.socket.held.is_none()
-            && !more
-        {
-            state.task = None;
-            return Poll::Ready(());
+        if state.accepted.is_none() {
+            if self.cut.is_none() && state.endpoint.ended() {
+                self.cut = Some(now + DRAIN_MAX);
+            }
+            let drained =
+                state.endpoint.drained() && self.socket.held.is_none() && !more;
+            if drained || self.cut.is_some_and(|cut| cut <= now) {
+                state.task = None;
+                return Poll::Ready(());
+            }
         }
         // Each poll of the sleep arms the timer again.
-        if let Some(deadline) = state.endpoint.deadline()
+        let deadline = state.endpoint.deadline().into_iter().chain(self.cut).min();
+        if let Some(deadline) = deadline
             && (fresh || deadline != self.sleep.deadline())
         {
             self.sleep.reset(deadline);

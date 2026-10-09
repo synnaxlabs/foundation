@@ -109,9 +109,10 @@ const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 /// no caller accepted, and the sessions it gave stay open. It also closes each
 /// handshake that a peer started, and that peer gets [`Error::Broken`], as for a
 /// refused dial, because QUIC sends no code before the handshake is confirmed. It
-/// refuses each dial from a peer until each of its connections drained: each session
-/// ended, and each close finished, in about 3 PTO. Then it frees its [`port::Part`], so
-/// a later dial gets no answer, and [`Transport::ended`] resolves.
+/// refuses each dial from a peer until each session ended and each close drained. A
+/// close drains in about 3 PTO, and the transport waits at most 3 s for the drains
+/// after the last session ended. Then it frees its [`port::Part`], so a later dial gets
+/// no answer, and [`Transport::ended`] resolves.
 pub struct Transport {
     carrier: quic::Carrier,
     public_key: PublicKey,
@@ -237,8 +238,9 @@ impl Transport {
     }
 
     /// Gives a future that resolves once this transport has freed its
-    /// [`port::Part`]: after the transport dropped and each connection drained, or
-    /// once the socket broke. A session that a caller still holds keeps it pending.
+    /// [`port::Part`]: after the transport dropped and each connection drained, at
+    /// most 3 s after each ended, or once the socket broke. A session that has not
+    /// ended keeps it pending.
     /// The future holds no part of the transport, so the caller can drop the transport
     /// and then wait.
     ///
@@ -745,6 +747,45 @@ mod tests {
     #[test]
     fn ended_resolves_in_the_drain_after_a_handshake_in_flight_that_repeats() {
         ended_after_a_handshake_in_flight(false);
+    }
+
+    /// A one-way delay of 10 s gives a round-trip sample of about 20 s, so the close of
+    /// the session would drain for about 150 s.
+    #[test]
+    fn ended_resolves_at_most_3_s_after_the_last_session_ended_on_a_slow_link() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let slow = sim::link::Config {
+            delay: testing::spans(Span::SECOND, 10),
+            ..sim::link::Config::default()
+        };
+        sim.link(&server, &client, slow);
+        sim.link(&client, &server, slow);
+        let at = testing::address(&server);
+        let idle = testing::spans(Span::SECOND, 120);
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let part = testing::part(&node.net(), at);
+            let transport = Transport::new(Config { idle, ..config }, part);
+            let transport = transport.expect("a transport");
+            let session = transport.accept().await.expect("a session");
+            let ended = transport.ended();
+            drop(transport);
+            let before = node.clock().now();
+            drop(session);
+            ended.await;
+            let waited = node.clock().now() - before;
+            let bound = testing::spans(Span::SECOND, 3);
+            assert!(waited <= bound, "the stop waited {waited:?}");
+        });
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let part = testing::part(&node.net(), testing::address(&node));
+            let setup = testing::setup(&Config { idle, ..config });
+            let carrier = crate::quic::Carrier::new(setup, part);
+            let dialed = carrier.connect(SERVER.public(), at).await;
+            let session = dialed.expect("a session");
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+        });
+        assert_eq!(sim.run(), Ok(()));
     }
 
     #[test]
