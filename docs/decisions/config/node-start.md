@@ -51,6 +51,8 @@
   https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090256620;
   2026-10-09T22:36:49Z, `node.data` by its cause, which supersedes item 2 of
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545,
-  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090417728).
+  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090417728;
+  2026-10-09T23:14:43Z, the escape of `data` in the text form,
+  https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6090863425).
   `--listen`, and the files `address` and `admin.key`, come with #1744
   (https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6053227526).
