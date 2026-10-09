@@ -6,7 +6,7 @@ use env::rng::Rng;
 
 use crate::event::Loop;
 use crate::ffi::Status;
-use crate::ffi::test::{self as ffi, Bytes};
+use crate::ffi::{Bytes, test as ffi};
 
 #[test]
 fn the_copy_names_a_status_code() {
