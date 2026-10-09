@@ -2,7 +2,7 @@
 //! directory.
 
 use std::cell::RefCell;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::path::Path;
 use std::rc::Rc;
@@ -36,26 +36,7 @@ fn the_port_binds_at_once_when_the_lock_is_free() {
         node::create_key(&files, own, KEY).await.unwrap();
     });
     let listen = free();
-    let cores = u64::try_from(shards.cores().get()).unwrap();
-    let node = node::Node::start(node::Config {
-        shards: shards.clone(),
-        clock: os::clock(),
-        wall: os::wall().unwrap(),
-        budget: Size::from_bytes(cores * (512 << 10)),
-        memory: Box::new(|len| Ok(block::Heap::new(len))),
-        files: {
-            let (dir, threads, io) = (rig.dir.clone(), threads.clone(), Rc::clone(&io));
-            Box::new(move || {
-                let disk = files(&dir, &threads, &io);
-                Box::new(move || env::files::Files::new(disk))
-            })
-        },
-        entropy: os::entropy(),
-        disk: Size::from_bytes(cores * (8 << 20)),
-        net: os::net(),
-        listen,
-        region: None,
-    });
+    let node = start_node(&rig, &shards, &threads, &io, listen);
     let (opened, open) = mpsc::channel();
     let (closed, close) = mpsc::channel();
     let peer = start(&shards, "peer", move |tasks| async move {
@@ -73,29 +54,21 @@ fn the_port_binds_at_once_when_the_lock_is_free() {
     let rejected = transport::Error::Reset {
         code: Code(wire::header::REJECTED),
     };
-    assert_eq!(open.recv_timeout(PATIENCE), Ok(Some(rejected)));
+    assert_eq!(wait(&open), Some(rejected));
     node.stop();
     let disk = files(&rig.dir, &threads, &io);
     let (bound, bind) = mpsc::channel();
     let probe = start(&shards, "probe", move |_| async move {
-        let (files, clock) = (env::files::Files::new(disk), os::clock());
-        let lock = loop {
-            let mode = env::files::Mode::Create { len: 0 };
-            match files.open(Path::new("lock"), mode).await {
-                Err(env::files::Error::Busy { .. }) => {
-                    clock.sleep(Span::from_nanos(1_000)).await;
-                }
-                opened => break opened.expect("the lock opens"),
-            }
-        };
+        let files = env::files::Files::new(disk);
+        let lock = lock(&files).await;
         bound
             .send(transport::Port::bind(&os::net(), listen).map(drop))
             .unwrap();
         drop(lock);
     });
-    assert_eq!(bind.recv_timeout(PATIENCE), Ok(Ok(())));
+    assert_eq!(wait(&bind), Ok(()));
     let peer_closed = transport::Error::PeerClosed { code: Code(0) };
-    assert_eq!(close.recv_timeout(PATIENCE), Ok(peer_closed));
+    assert_eq!(wait(&close), peer_closed);
     assert_eq!(node.join(), Ok(()));
     for shard in [peer, probe] {
         shard.join().unwrap();
@@ -103,6 +76,63 @@ fn the_port_binds_at_once_when_the_lock_is_free() {
     for thread in io.take() {
         thread.join().unwrap();
     }
+}
+
+/// Starts a node on the real OS in `rig`, which listens on `listen`.
+fn start_node(
+    rig: &Rig,
+    shards: &env::shards::Shards,
+    threads: &env::threads::Threads,
+    io: &Rc<RefCell<Vec<env::thread::Handle>>>,
+    listen: SocketAddr,
+) -> node::Node {
+    let cores = u64::try_from(shards.cores().get()).unwrap();
+    let (dir, threads, io) = (rig.dir.clone(), threads.clone(), Rc::clone(io));
+    node::Node::start(node::Config {
+        shards: shards.clone(),
+        clock: os::clock(),
+        wall: os::wall().unwrap(),
+        budget: Size::from_bytes(cores * (512 << 10)),
+        memory: Box::new(|len| Ok(block::Heap::new(len))),
+        files: Box::new(move || {
+            let disk = files(&dir, &threads, &io);
+            Box::new(move || env::files::Files::new(disk))
+        }),
+        entropy: os::entropy(),
+        disk: Size::from_bytes(cores * (8 << 20)),
+        net: os::net(),
+        listen,
+        region: None,
+    })
+}
+
+/// Takes the lock of the data directory as soon as no node holds it.
+async fn lock(files: &env::files::Files) -> env::files::File {
+    let clock = os::clock();
+    loop {
+        let mode = env::files::Mode::Create { len: 0 };
+        match files.open(Path::new("lock"), mode).await {
+            Err(env::files::Error::Busy { .. }) => {
+                clock.sleep(Span::from_nanos(1_000)).await;
+            }
+            opened => return opened.expect("the lock opens"),
+        }
+    }
+}
+
+/// What a shard sends on `receiver`.
+///
+/// # Panics
+///
+/// When it sends nothing within 60 s.
+fn wait<T>(receiver: &mpsc::Receiver<T>) -> T {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test thread waits on a shard in real time"
+    )]
+    receiver
+        .recv_timeout(PATIENCE)
+        .expect("the shard sends within 60 s")
 }
 
 /// The disk of `dir` for one shard. `io` gets the handle of its I/O thread.
@@ -120,8 +150,12 @@ fn files(
 
 /// A free UDP port of loopback.
 fn free() -> SocketAddr {
-    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-    socket.local_addr().unwrap()
+    let at = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+    let port = transport::Port::bind(&os::net(), at).unwrap();
+    let [Address::Udp(free)] = port.addresses()[..] else {
+        panic!("invariant: a port has one UDP socket");
+    };
+    free
 }
 
 /// Starts shard `name` on `main`.
