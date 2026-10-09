@@ -379,8 +379,8 @@ struct Session {
 impl Session {
     /// Writes the last value of each status channel. A frame that the home refuses
     /// as `Backwards` is stamped after the stamp the refusal gives and written again,
-    /// one time. A frame that the home does not apply leaves the status staged, so
-    /// the flush writes it again.
+    /// one time. A frame that the home does not apply, or that the shard's pool has
+    /// no room for, leaves the status staged, so the flush writes it again.
     ///
     /// # Panics
     ///
@@ -411,10 +411,15 @@ impl Session {
     ///
     /// When the home refuses the frame for a cause that only a defect gives.
     fn send(&mut self, values: &Values, stamp: Stamp) -> Result<(), Stamp> {
-        let Some(draft) = self.frame(values, stamp) else {
-            values.stage();
-            return Ok(());
+        let mut draft = match self.hub.draft(Form::Raw, &self.series) {
+            Ok(draft) => draft,
+            Err(frame::Error::Pool(_)) => {
+                values.stage();
+                return Ok(());
+            }
+            Err(error) => panic!("invariant: the series follow the key set: {error}"),
         };
+        self.fill(&mut draft, values, stamp);
         self.last = Some(stamp);
         match self.hub.write(Label::Path(Path::Live), draft) {
             // After either failure, the hub gives it again on each later write.
@@ -456,14 +461,8 @@ impl Session {
         Ok(())
     }
 
-    /// A frame of the last value of each status channel at `stamp`, or `None` when
-    /// the shard's pool has no room for it now.
-    fn frame(&self, values: &Values, stamp: Stamp) -> Option<Draft> {
-        let mut draft = match self.hub.draft(Form::Raw, &self.series) {
-            Ok(draft) => draft,
-            Err(frame::Error::Pool(_)) => return None,
-            Err(error) => panic!("invariant: the series follow the key set: {error}"),
-        };
+    /// Fills `draft` with the last value of each status channel at `stamp`.
+    fn fill(&self, draft: &mut Draft, values: &Values, stamp: Stamp) {
         let supervisor = [
             u64::from(self.state as u8),
             u64::from(self.class as u8),
@@ -484,7 +483,6 @@ impl Session {
             bytes.copy_from_slice(&sample.to_le_bytes()[..len]);
         }
         draft.set_count(self.group, 1);
-        Some(draft)
     }
 }
 

@@ -1482,19 +1482,20 @@ mod tests {
                 .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
                 .collect();
             let mut held = Vec::new();
-            let mut fill = || loop {
-                match writer.draft(Form::Raw, &series) {
-                    Ok(draft) => held.push(draft),
-                    Err(error) => break error,
-                }
+            let mut fill = || {
+                let error = loop {
+                    match writer.draft(Form::Raw, &series) {
+                        Ok(draft) => held.push(draft),
+                        Err(error) => break error,
+                    }
+                };
+                assert!(matches!(error, frame::Error::Pool(_)), "{error}");
             };
-            let full = fill();
-            assert!(matches!(full, frame::Error::Pool(_)), "{full}");
+            fill();
             ctx.count("samples").set(7);
             ctx.clock().sleep(ms(900)).await;
             if self.full {
-                let full = fill();
-                assert!(matches!(full, frame::Error::Pool(_)), "{full}");
+                fill();
             }
             ctx.clock().sleep(ms(600)).await;
             drop(held);
