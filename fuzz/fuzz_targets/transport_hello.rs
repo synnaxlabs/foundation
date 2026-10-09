@@ -2,6 +2,7 @@
 //! reader gives, and a hello it reads decodes from its own encoding.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use libfuzzer_sys::fuzz_target;
 use transport::fuzzing::Hello;

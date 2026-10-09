@@ -2,6 +2,7 @@
 //! encodes to the same bytes, because the encoding is canonical.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use libfuzzer_sys::fuzz_target;
 use spec::definition::Definition;
