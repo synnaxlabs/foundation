@@ -114,7 +114,8 @@ fn resolve(
     let mut data = hash::Set::default();
     for name in channels {
         let channel = state
-            .channel(name)
+            .channels
+            .named(name)
             .ok_or_else(|| Error::Unknown(name.clone()))?;
         let (key, index) = (channel.key(), channel.index());
         keys.push(key);

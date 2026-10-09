@@ -324,7 +324,8 @@ fn resolve(
     let mut index = None;
     for name in channels {
         let channel = state
-            .channel(name)
+            .channels
+            .named(name)
             .ok_or_else(|| Error::Unknown(name.clone()))?;
         if *index.get_or_insert(channel.index()) != channel.index() {
             return Err(Error::ManyIndexes);

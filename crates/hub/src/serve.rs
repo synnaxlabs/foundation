@@ -462,7 +462,7 @@ impl<'s> Opening<'s> {
         let state = &mut *self.state.borrow_mut();
         let checked = state.opens.keys_mut(self.key);
         for key in keys {
-            let of = state.defined.get(&key).ok_or(Error::Unknown(key))?.index();
+            let of = state.channels.get(key).ok_or(Error::Unknown(key))?.index();
             if *self.index.get_or_insert(of) != of {
                 return Err(Error::ManyIndexes);
             }

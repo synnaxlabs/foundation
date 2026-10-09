@@ -23,7 +23,6 @@ use types::frame::key_set::Interner;
 use types::hash;
 use types::name::Name;
 
-use channel::Channel;
 pub use link::{Link, Served};
 use reader::Reader;
 use writer::Writer;
@@ -93,10 +92,7 @@ pub struct Region {
 struct State {
     home: ::home::Shard,
     interner: Interner,
-    /// The key of each channel in `defined`, by name.
-    channels: hash::Map<Name, Key>,
-    /// Each defined channel, by key.
-    defined: hash::Map<Key, Channel>,
+    channels: channel::Table,
     /// Each open writer, by its home key.
     writers: Sessions<::home::writer::Key>,
     readers: Sessions<::home::reader::Key>,
@@ -146,8 +142,7 @@ impl Hub {
         let state = Rc::new(RefCell::new(State {
             home,
             interner,
-            channels: hash::Map::default(),
-            defined: hash::Map::default(),
+            channels: channel::Table::default(),
             writers: Sessions::default(),
             readers: Sessions::default(),
             remotes: reader::remote::Sessions::default(),
@@ -375,44 +370,13 @@ impl<K: Copy + Ord + Hash> Sessions<K> {
 }
 
 impl State {
-    /// Makes `channels` the known channels, as [`Hub::set_definitions`] says.
+    /// Makes `channels` the defined channels, as [`Hub::set_definitions`] says.
     fn set(&mut self, channels: &hash::Map<&Name, &spec::channel::Channel>) {
-        let removed: hash::Set<Key> = self
-            .channels
-            .iter()
-            .filter(|&(name, key)| {
-                channels.get(name) != Some(&&known(&self.defined, *key).0)
-            })
-            .map(|(_, &key)| key)
-            .collect();
-        let index = |channel: &spec::channel::Channel| {
-            matches!(channel.kind, Kind::Index { .. }).then_some(channel.key)
-        };
-        let before: hash::Set<Key> = self
-            .defined
-            .values()
-            .filter_map(|known| index(&known.0))
-            .collect();
-        let after: hash::Set<Key> = channels
-            .values()
-            .filter_map(|channel| index(channel))
-            .collect();
-        self.end(&removed);
-        let mut shed: Vec<Key> = before.difference(&after).copied().collect();
-        shed.sort_unstable();
-        for key in shed {
+        let removed = self.channels.set(channels);
+        self.end(&removed.channels);
+        for key in removed.indexes {
             let slot = self.interner.slots().index(key);
             self.home.shed(slot);
-        }
-        self.channels.retain(|_, key| !removed.contains(key));
-        self.defined.retain(|key, _| !removed.contains(key));
-        let mut new: Vec<_> = channels
-            .iter()
-            .filter(|&(name, _)| !self.channels.contains_key(*name))
-            .collect();
-        new.sort_unstable_by_key(|&(name, _)| *name);
-        for (name, channel) in new {
-            self.define(name, channel);
         }
     }
 
@@ -452,18 +416,6 @@ impl State {
             self.home.close_reader(key);
         }
         waker
-    }
-
-    /// Makes `channel` known to sessions as `name`.
-    fn define(&mut self, name: &Name, channel: &spec::channel::Channel) {
-        self.channels.insert(name.clone(), channel.key);
-        self.defined.insert(channel.key, Channel(channel.clone()));
-    }
-
-    /// The defined channel named `name`, if any.
-    fn channel(&self, name: &Name) -> Option<&Channel> {
-        let key = self.channels.get(name)?;
-        Some(known(&self.defined, *key))
     }
 
     /// A block of `len` bytes from the home's pool.
@@ -509,7 +461,7 @@ impl State {
                 if key == index {
                     return slot;
                 }
-                assigned.data(key, known(&self.defined, key).sample())
+                assigned.data(key, self.channels.known(key).sample())
             })
             .collect()
     }
@@ -579,14 +531,4 @@ async fn homes(
             return Ok(());
         }
     }
-}
-
-/// The channel `key` of `defined`.
-///
-/// # Panics
-///
-/// When `key` is not defined: each caller holds a defined key.
-fn known(defined: &hash::Map<Key, Channel>, key: Key) -> &Channel {
-    let channel = defined.get(&key);
-    channel.unwrap_or_else(|| panic!("invariant: channel {key} is defined"))
 }
