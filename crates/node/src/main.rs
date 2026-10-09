@@ -246,25 +246,50 @@ fn failure(start: &Start, error: &node::Error, budget: Budget, kept: bool) -> Fa
         }
         node::Error::Buffer {
             core,
-            error:
-                error @ buffer::Error::Pool(
-                    block::Error::TooLarge { .. } | block::Error::Exhausted { .. },
-                ),
-        } => {
-            let pool = budget.pool;
+            error: error @ buffer::Error::Pool(pool),
+        } => return memory(start, *core, error, pool, budget, kept),
+        error => return failed(error),
+    };
+    Failure { code, message, fix }
+}
+
+/// The failure of shard `core`, whose buffer gave `error`, a pool error `pool`, on
+/// `budget`, which the data directory keeps when `kept`.
+fn memory(
+    start: &Start,
+    core: usize,
+    error: &buffer::Error,
+    pool: &block::Error,
+    budget: Budget,
+    kept: bool,
+) -> Failure {
+    let budget = budget.pool;
+    let (message, fix) = match pool {
+        block::Error::Refused { .. } => (
+            format!(
+                "the system refused memory that the pool budget {budget} of \
+                 shard-{core} has room for: {error}"
+            ),
+            "Free memory on this host".to_owned(),
+        ),
+        block::Error::TooLarge { .. } | block::Error::Exhausted { .. } => {
             let free = (
                 "a quarter of the available memory".to_owned(),
                 "Free memory on this host",
             );
-            let (from, fix) = source(start, kept, pool == POOL_MOST, free);
+            let (from, fix) = source(start, kept, budget == POOL_MOST, free);
             let message = format!(
-                "the pool budget {pool}, {from}, gives shard-{core} too little: {error}"
+                "the pool budget {budget}, {from}, gives shard-{core} too little: \
+                 {error}"
             );
-            (MEMORY, message, fix)
+            (message, fix)
         }
-        error => return failed(error),
     };
-    Failure { code, message, fix }
+    Failure {
+        code: MEMORY,
+        message,
+        fix,
+    }
 }
 
 /// Where a budget that gives the node too little came from, and its fix: the data
@@ -285,7 +310,8 @@ fn source(
         );
         (format!("which {data} keeps from its first start"), fix)
     } else if most {
-        let fix = "Start the node on a host with fewer cores";
+        let fix = "Start the node on fewer cores: on Linux, give it a smaller CPU \
+                   affinity set, such as with `taskset`";
         (
             "the most that a first start gives".to_owned(),
             fix.to_owned(),
@@ -318,12 +344,14 @@ mod tests {
         }
     }
 
-    /// The failure of a disk budget `disk` that holds no ring on each of 16 shards.
-    fn disk(disk: Size, kept: bool) -> Failure {
+    /// The failure of a disk budget `disk` that holds no ring on each of `cores`
+    /// shards, which each need 4120KiB.
+    fn disk(disk: Size, cores: usize, kept: bool) -> Failure {
+        let count = u64::try_from(cores).expect("a core count fits a u64");
         let error = node::Error::Disk {
             disk,
-            cores: 16,
-            min: Size::from_bytes(67_502_080),
+            cores,
+            min: Size::from_bytes(4_218_880 * count),
         };
         let budget = Budget {
             pool: Size::GIBIBYTE,
@@ -336,20 +364,30 @@ mod tests {
     const TOO_LARGE: &str = "the pool has no block: block of 52186 bytes is above the \
                              largest block of 28672 bytes";
 
-    /// The failure of a pool budget `pool` too small for shard 3.
-    fn pool(pool: Size, kept: bool) -> Failure {
+    /// The fix of a budget at its most.
+    const FEWER: &str = "Start the node on fewer cores: on Linux, give it a smaller \
+                         CPU affinity set, such as with `taskset`";
+
+    /// The failure of a pool budget `pool` that gives shard 3 `error`.
+    fn pool_failure(pool: Size, kept: bool, error: block::Error) -> Failure {
         let error = node::Error::Buffer {
             core: 3,
-            error: buffer::Error::Pool(block::Error::TooLarge {
-                requested: 52_186,
-                largest: 28_672,
-            }),
+            error: buffer::Error::Pool(error),
         };
         let budget = Budget {
             pool,
             disk: DISK_MOST,
         };
         failure(&start(), &error, budget, kept)
+    }
+
+    /// The failure of a pool budget `pool` too small for a block of shard 3.
+    fn pool(pool: Size, kept: bool) -> Failure {
+        let error = block::Error::TooLarge {
+            requested: 52_186,
+            largest: 28_672,
+        };
+        pool_failure(pool, kept, error)
     }
 
     #[test]
@@ -365,7 +403,7 @@ mod tests {
     #[test]
     fn a_kept_disk_budget_that_holds_no_ring_tells_the_user_to_remove_it() {
         assert_eq!(
-            disk(Size::from_bytes(1 << 20), true),
+            disk(Size::from_bytes(1 << 20), 16, true),
             Failure {
                 code: DISK,
                 message: "the disk budget 1MiB, which foundation-data keeps from its \
@@ -382,14 +420,14 @@ mod tests {
     #[test]
     fn a_disk_budget_at_its_most_tells_the_user_to_use_fewer_cores() {
         assert_eq!(
-            disk(DISK_MOST, false),
+            disk(DISK_MOST, 2048, false),
             Failure {
                 code: DISK,
                 message: "the disk budget 8GiB, the most that a first start gives, \
-                          holds no ring on each of 16 shards; it needs at least \
-                          65920KiB"
+                          holds no ring on each of 2048 shards; it needs at least \
+                          8240MiB"
                     .to_owned(),
-                fix: "Start the node on a host with fewer cores".to_owned(),
+                fix: FEWER.to_owned(),
             }
         );
     }
@@ -397,7 +435,7 @@ mod tests {
     #[test]
     fn a_disk_budget_from_the_free_disk_tells_the_user_to_free_it() {
         assert_eq!(
-            disk(Size::from_bytes(1 << 20), false),
+            disk(Size::from_bytes(1 << 20), 16, false),
             Failure {
                 code: DISK,
                 message: "the disk budget 1MiB, a quarter of the free disk of \
@@ -430,15 +468,19 @@ mod tests {
 
     #[test]
     fn a_pool_budget_at_its_most_tells_the_user_to_use_fewer_cores() {
+        let full = block::Error::Exhausted {
+            requested: 65_536,
+            available: 4096,
+        };
         assert_eq!(
-            pool(POOL_MOST, false),
+            pool_failure(POOL_MOST, false, full),
             Failure {
                 code: MEMORY,
-                message: format!(
-                    "the pool budget 1GiB, the most that a first start gives, \
-                     gives shard-3 too little: {TOO_LARGE}"
-                ),
-                fix: "Start the node on a host with fewer cores".to_owned(),
+                message: "the pool budget 1GiB, the most that a first start gives, \
+                          gives shard-3 too little: the pool has no block: pool is \
+                          full: asked for 65536 bytes, 4096 bytes free"
+                    .to_owned(),
+                fix: FEWER.to_owned(),
             }
         );
     }
@@ -481,19 +523,12 @@ mod tests {
 
     #[test]
     fn a_full_pool_is_a_pool_budget_that_gives_too_little() {
-        let error = node::Error::Buffer {
-            core: 3,
-            error: buffer::Error::Pool(block::Error::Exhausted {
-                requested: 64,
-                available: 0,
-            }),
-        };
-        let budget = Budget {
-            pool: Size::MEBIBYTE,
-            disk: DISK_MOST,
+        let full = block::Error::Exhausted {
+            requested: 64,
+            available: 0,
         };
         assert_eq!(
-            failure(&start(), &error, budget, false),
+            pool_failure(Size::MEBIBYTE, false, full),
             Failure {
                 code: MEMORY,
                 message: "the pool budget 1MiB, a quarter of the available memory, \
@@ -505,14 +540,34 @@ mod tests {
         );
     }
 
+    /// The failure of memory that the system refused shard 3, on a pool budget
+    /// that the data directory keeps when `kept`.
+    fn refused(kept: bool) -> Failure {
+        pool_failure(POOL_MOST, kept, block::Error::Refused { requested: 64 })
+    }
+
     #[test]
-    fn memory_that_the_system_refused_is_not_a_budget_that_gives_too_little() {
+    fn memory_that_the_system_refused_tells_the_user_to_free_memory() {
+        let refused_memory = Failure {
+            code: MEMORY,
+            message: "the system refused memory that the pool budget 1GiB of shard-3 \
+                      has room for: the pool has no block: the system refused memory \
+                      for a block of 64 bytes"
+                .to_owned(),
+            fix: "Free memory on this host".to_owned(),
+        };
+        assert_eq!(refused(false), refused_memory);
+        assert_eq!(refused(true), refused_memory, "also for a kept budget");
+    }
+
+    #[test]
+    fn another_buffer_error_is_a_failure() {
         let error = node::Error::Buffer {
             core: 3,
-            error: buffer::Error::Pool(block::Error::Refused { requested: 64 }),
+            error: buffer::Error::Version(9),
         };
         let budget = Budget {
-            pool: Size::MEBIBYTE,
+            pool: POOL_MOST,
             disk: DISK_MOST,
         };
         assert_eq!(failure(&start(), &error, budget, false), failed(&error));

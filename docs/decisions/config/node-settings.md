@@ -27,3 +27,13 @@
   file `budget`. Decided by `laptop.architect-2` on #1732:
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6088506863 and
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089288397.
+  A budget that gives a shard too little stops the start with `node.disk` or
+  `node.memory`, whose message names where the budget came from (the file `budget`,
+  the most that a first start gives, or a quarter of the free resource) and whose fix
+  fits it. At the most, the fix is fewer cores, such as a smaller CPU affinity set.
+  Memory that the system refused is `node.memory` too, with its own message and the
+  fix "Free memory on this host". Each other buffer error is `node.failed`. Lost: one
+  text for each budget, also at the most, which tells the operator to free memory
+  that does not raise the budget; and `Refused` as `node.failed`, which gives no fix
+  for a cause that has one. Decided by `laptop.architect-2` on #1732:
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601.
