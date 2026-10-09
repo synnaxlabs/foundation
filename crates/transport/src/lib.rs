@@ -107,13 +107,13 @@ const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 /// A session that a dial made stays open until `accept` takes it, also when each caller
 /// of `dial` dropped it. Dropping the transport closes with `Code(0)` each session that
 /// no caller accepted, and the sessions it gave stay open. It also closes each
-/// handshake in flight, also that of a dial that each caller dropped. A peer whose dial
-/// it closes gets [`Error::Broken`], as for a refused dial, because QUIC sends no code
-/// before the handshake is confirmed. It refuses each dial from a peer until each
-/// session ended and each close drained. A close drains in about 3 PTO, and the
-/// transport waits at most 3 s for the drains after the last session ended. Then it
-/// frees its [`port::Part`], so a later dial gets no answer, and [`Transport::ended`]
-/// resolves.
+/// handshake in flight, which includes the handshake of a dial that each caller
+/// dropped. A peer whose dial it closes gets [`Error::Broken`], as for a refused dial,
+/// because QUIC sends no code before the handshake is confirmed. It refuses each dial
+/// from a peer until each session ended and each close drained. A close drains in
+/// about 3 PTO, and the transport waits at most 3 s for the drains after the last
+/// session ended. Then it frees its [`port::Part`], so a later dial gets no answer, and
+/// [`Transport::ended`] resolves.
 pub struct Transport {
     carrier: quic::Carrier,
     public_key: PublicKey,
@@ -238,12 +238,12 @@ impl Transport {
         self.carrier.status()
     }
 
-    /// Gives a future that resolves once this transport has freed its
-    /// [`port::Part`]: after the transport dropped and each connection drained, at
-    /// most 3 s after each ended, or once the socket broke. A session that has not
-    /// ended keeps it pending.
-    /// The future holds no part of the transport, so the caller can drop the transport
-    /// and then wait.
+    /// Gives a future that resolves once this transport has freed its [`port::Part`]:
+    /// after the transport dropped, each session ended, and each close drained, but at
+    /// most 3 s after the later of the drop and the end of the last session; or once
+    /// the socket broke. A session that has not ended keeps it pending. The future
+    /// holds no part of the transport, so the caller can drop the transport and then
+    /// wait.
     ///
     /// ```
     /// async fn stop(transport: transport::Transport) {
