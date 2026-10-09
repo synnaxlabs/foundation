@@ -2,7 +2,6 @@
 //! closes the session before the message is whole, leaves the receiver with a list of
 //! at most 64 chunks, not one sized by the message.
 
-use std::cell::OnceCell;
 use std::net::SocketAddr;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
@@ -13,14 +12,11 @@ use transport::{Address, Class, Code, Error, Transport};
 use types::time::Span;
 
 use crate::common::{CLIENT, PORT, SERVER, config, filled, part};
-use crate::{ALLOCATOR, next};
+use crate::{ALLOCATOR, CLOSED, next};
 
 /// The most heap that the drop of the receiver gives back: a list of 64 chunks, since
 /// each slot is 32 bytes.
 const KEPT_MAX: usize = 2 << 10;
-/// The heap of the cell that holds a closed session's error, which the drop of its
-/// receiver frees: an `Rc` box, with its two counts.
-const CLOSED: usize = 2 * size_of::<usize>() + size_of::<OnceCell<Error>>();
 /// How long the server waits after the error before it drops the receiver.
 const DROP: Span = Span::from_nanos(1_000_000_000);
 /// How long the client lives after its reset: past the server's drop.

@@ -4,6 +4,7 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::cell::OnceCell;
 use std::future::poll_fn;
 use std::pin::pin;
 use std::task::Poll;
@@ -23,6 +24,10 @@ mod kept;
 mod opened;
 mod peers;
 mod stretch;
+
+/// The heap of the cell that holds a closed session's error, which the drop of its
+/// receiver frees: an `Rc` box, with its two counts.
+pub(crate) const CLOSED: usize = 2 * size_of::<usize>() + size_of::<OnceCell<Error>>();
 
 #[global_allocator]
 static ALLOCATOR: counting::Bytes = counting::Bytes::new();
