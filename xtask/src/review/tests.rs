@@ -1529,6 +1529,16 @@ fn fails_raw_html_after_a_byte_order_mark_at_the_start() {
 }
 
 #[test]
+fn passes_a_code_block_after_a_byte_order_mark_at_the_start() {
+    let at = ROUND.find("## Review round 3").unwrap();
+    let last = format!("\u{feff}    <b>x</b>\n\n{}", &ROUND[at..]);
+    assert_eq!(
+        check(&record(vec![bot(ROUND), bot(&last)])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
 fn reads_no_heading_after_two_byte_order_marks() {
     // GitHub drops only the first mark, so it shows the heading line as text.
     let earlier = ROUND.replace("Findings: none", "Findings: 2");
