@@ -865,7 +865,7 @@ impl Serve {
         let port = route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
         // `serve` drops the port's future, which holds the mesh, before the wait.
         let handles = task::Handles { hub, ops };
-        let stop = stop(guard, port, group, fail);
+        let stop = until_end(guard, port, group, fail);
         self.inbox.serve(handles, tasks, stop).await;
         if let Some(ended) = ended {
             ended.await;
@@ -876,7 +876,7 @@ impl Serve {
 /// Serves the node's `port`, and completes when `guard` completes, `port` ends, or
 /// `group` ends, by the rank of [`end`]. Gives `fail` the error of a port or a group
 /// that ends it as it completes, so before `Inbox::serve` drops the tasks.
-async fn stop(
+async fn until_end(
     guard: Guard,
     port: impl Future<Output = transport::Error>,
     group: impl Future<Output = mesh::Stopped>,
