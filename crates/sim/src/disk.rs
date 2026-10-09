@@ -166,22 +166,21 @@ impl Disk {
 
     /// The inode that `path` names, when it names one.
     pub(crate) fn inode(&self, path: &Path) -> Option<u64> {
-        self.lookup(path).ok()?.2
+        self.lookup(path).ok().flatten()?.2
     }
 
     /// The directory of `path`, its last name, and the inode of that entry, if any.
-    /// An empty path gives code 21, as the data directory is not a file.
-    fn lookup<'a>(
-        &self,
-        path: &'a Path,
-    ) -> Result<(u64, &'a OsStr, Option<u64>), Cause> {
+    /// `None` for an empty path.
+    fn lookup<'a>(&self, path: &'a Path) -> Result<Option<Entry<'a>>, Cause> {
         let segments = segments(path);
-        let (name, parent) = segments.split_last().ok_or(Cause::Code(DIRECTORY))?;
+        let Some((name, parent)) = segments.split_last() else {
+            return Ok(None);
+        };
         let dir = self.dir(parent)?;
         let Inode::Dir(Dir { entries, .. }) = &self.inodes[&dir] else {
             unreachable!("invariant: inode {dir} is a directory");
         };
-        Ok((dir, name, entries.get(*name).copied()))
+        Ok(Some((dir, name, entries.get(*name).copied())))
     }
 
     /// Directory `key`.
@@ -348,7 +347,10 @@ impl Disk {
     /// The directory and the name of the entry at `path`, a path of a handle of file
     /// `inode`. `NotFound` when the entry no longer names it.
     fn entry<'a>(&self, inode: u64, path: &'a Path) -> Result<(u64, &'a OsStr), Cause> {
-        match self.lookup(path)? {
+        match self
+            .lookup(path)?
+            .expect("invariant: a handle names a file")
+        {
             (dir, name, Some(found)) if found == inode => Ok((dir, name)),
             _ => Err(Cause::NotFound),
         }
@@ -500,7 +502,9 @@ impl Disk {
     /// takes space.
     fn target<'a>(&self, path: &'a Path, mode: Mode) -> Result<Target<'a>, Cause> {
         let slashed = slashed(path);
-        let (dir, name, found) = self.lookup(path)?;
+        let Some((dir, name, found)) = self.lookup(path)? else {
+            return Err(Cause::Code(DIRECTORY));
+        };
         let inode = match (found, mode) {
             (_, Mode::Create { .. }) if slashed => return Err(Cause::Code(DIRECTORY)),
             (Some(inode), _) => inode,
@@ -822,6 +826,9 @@ fn within(start: u64, part: &Range<u64>) -> Range<usize> {
 }
 
 /// The segments of a checked path: only its names, since `.` adds nothing.
+/// A directory, a name in it, and the inode that the name gives, if any.
+type Entry<'a> = (u64, &'a OsStr, Option<u64>);
+
 fn segments(path: &Path) -> Vec<&OsStr> {
     (path.components())
         .filter_map(|component| match component {
