@@ -43,9 +43,9 @@ pub(crate) async fn read(files: &Files) -> Result<Option<Name>, Error> {
     }
 }
 
-/// Writes `name` to the file `name` of `files` when no node wrote one there, and
-/// makes it durable, else checks that the file holds `name`. Call it under the lock
-/// of the data directory.
+/// Writes `name` to the file `name` of `files` and makes it durable, when the file
+/// holds no name or holds `name`: a failed sync of an earlier start can leave a name
+/// that a read sees but a crash loses. Call it under the lock of the data directory.
 ///
 /// # Errors
 ///
@@ -61,25 +61,24 @@ pub(crate) async fn keep(files: &Files, name: &Name) -> Result<(), Error> {
             env::files::Error::Length { .. } => Error::Name,
             error => Error::Directory(error),
         })?;
-    match decode(&load(&file).await?)? {
-        Some(stored) if stored == *name => Ok(()),
-        Some(stored) => Err(Error::Renamed {
+    if let Some(stored) = decode(&load(&file).await?)?
+        && stored != *name
+    {
+        return Err(Error::Renamed {
             stored,
             given: name.clone(),
-        }),
-        None => {
-            let pool = block::Pool::heap(POOL);
-            let block = pool
-                .copy(&encode(name))
-                .expect("invariant: the pool holds a name");
-            file.write_at(0, &[block]).await.map_err(Error::Directory)?;
-            file.sync().await.map_err(Error::Directory)?;
-            files
-                .sync_dir(Path::new(""))
-                .await
-                .map_err(Error::Directory)
-        }
+        });
     }
+    let pool = block::Pool::heap(POOL);
+    let block = pool
+        .copy(&encode(name))
+        .expect("invariant: the pool holds a name");
+    file.write_at(0, &[block]).await.map_err(Error::Directory)?;
+    file.sync().await.map_err(Error::Directory)?;
+    files
+        .sync_dir(Path::new(""))
+        .await
+        .map_err(Error::Directory)
 }
 
 /// The bytes of `file`, which has [`LEN`] bytes.

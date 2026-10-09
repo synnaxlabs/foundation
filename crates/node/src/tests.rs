@@ -4991,6 +4991,46 @@ mod name {
         }
     }
 
+    /// A failed sync of a new name can leave it in the cache only. A start that
+    /// keeps that name must make it durable, so a power cut after it keeps it.
+    #[test]
+    fn a_name_kept_after_a_failed_sync_survives_a_power_cut() {
+        let mut tried = Vec::new();
+        for seed in 0..16 {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new(FILE), env::files::Operation::Sync);
+            let error = env::files::Error::Io {
+                path: PathBuf::from(FILE),
+                operation: env::files::Operation::Sync,
+                code: 5,
+            };
+            assert_eq!(
+                start_and_stop(&mut sim, &host, "edge"),
+                Err(Error::Directory(error))
+            );
+            if resolve(&mut sim, &host, None) != Ok(name("edge")) {
+                continue;
+            }
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            tried.push(seed);
+            sim.crash(&host, sim::Crash::Power);
+            let renamed = Error::Renamed {
+                stored: name("edge"),
+                given: name("cloud"),
+            };
+            assert_eq!(
+                start_and_stop(&mut sim, &host, "cloud"),
+                Err(renamed),
+                "seed {seed}"
+            );
+        }
+        assert!(!tried.is_empty(), "no seed kept the name in the cache");
+    }
+
     /// A crash at any point of the first start leaves no name or the whole name, and
     /// the whole name once each ring has opened.
     #[test]
