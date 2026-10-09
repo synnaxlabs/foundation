@@ -599,6 +599,30 @@ fn fails_an_earlier_round_with_fields_and_no_number() {
             vec![format!("`{heading}` has no round number")]
         );
     }
+    // The number comes before raw HTML.
+    let html = bot("## Review round x\n\nReviewers: reviewer\n\n<div>");
+    assert_eq!(
+        check(&record(vec![html, bot(ROUND)])),
+        vec!["`## Review round x` has no round number"]
+    );
+}
+
+#[test]
+fn reads_a_name_with_an_escape_or_an_entity_as_no_name() {
+    // GitHub shows `Hot path: none` and `Hot path: send`, but the check reads the
+    // source of a line.
+    let escaped = ROUND.replace("Hot path: none", "Hot path\\: none");
+    assert_ne!(escaped, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&escaped)])),
+        vec![unended("Hot path")]
+    );
+    let entity =
+        old("## Review round 1\n\nConfirmed a finding.\n\n&#72;ot path: `send`");
+    assert_eq!(
+        check(&record(vec![entity, bot(ROUND)])),
+        Vec::<String>::new()
+    );
 }
 
 #[test]
