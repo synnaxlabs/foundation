@@ -97,7 +97,7 @@ impl Rig {
 }
 
 /// [`Rig::wait`], with `limit` in place of 90 s.
-fn wait<T>(
+pub(crate) fn wait<T>(
     clock: &Clock,
     limit: Span,
     what: &str,

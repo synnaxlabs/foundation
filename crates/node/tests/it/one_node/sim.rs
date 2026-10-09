@@ -248,6 +248,7 @@ fn a_dropped_influx_does_not_join_its_server_when_the_test_panics() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs the shutdown of a listener")]
 fn a_dropped_influx_stops_its_server_when_the_test_panics() {
     let mut influx = Influx::default();
     let address = influx.serve();
@@ -256,20 +257,20 @@ fn a_dropped_influx_stops_its_server_when_the_test_panics() {
         panic!("the test broke");
     }));
     unwound.expect_err("the test panics");
-    // The drop does not join, and on macOS a child can hold the port until its exec.
-    let mut written = String::new();
-    for _ in 0..50 {
-        written = write(address, "m f=1 1");
-        if written == refused(address) {
-            return;
-        }
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "the server stops on its own shard in real time"
-        )]
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    panic!("the server serves on: {written}");
+    // The drop does not join, so the server stops a moment later.
+    crate::rig::wait(
+        &os::clock(),
+        Span::from_nanos(5_000_000_000),
+        "the server stops",
+        || {
+            let written = write(address, "m f=1 1");
+            if written == refused(address) {
+                Ok(())
+            } else {
+                Err(written)
+            }
+        },
+    );
 }
 
 #[test]
