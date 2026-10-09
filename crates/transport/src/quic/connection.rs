@@ -3,7 +3,7 @@
 
 use std::collections::VecDeque;
 use std::mem;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use block::Pool;
 use bytes::Bytes;
@@ -101,8 +101,16 @@ impl Connection {
     /// When [`Connection::timeout`] must next run, if ever.
     pub(super) fn deadline(&self) -> Option<Instant> {
         // An ended connection keeps the wait for a hello that never came.
-        let streams = self.streams.deadline().filter(|_| self.connected());
+        let streams = (self.connected())
+            .then(|| self.streams.deadline(|| self.idle()))
+            .flatten();
         self.inner.poll_timeout().into_iter().chain(streams).min()
+    }
+
+    /// The idle timeout as noq-proto counts it, at least 3 PTO.
+    fn idle(&self) -> Duration {
+        let idle = self.inner.idle_timeout();
+        idle.expect("invariant: a `Setup` sets an idle timeout")
     }
 
     /// Runs a timer due at `now`, and queues in `events` the [`Event::Closed`] of a
@@ -113,9 +121,8 @@ impl Connection {
         now: Instant,
         events: &mut VecDeque<Event>,
     ) -> bool {
-        // The hello's first: a silent peer's idle timer falls at the same instant.
         if self.connected()
-            && let Err(Fault(reason)) = self.streams.timeout(now)
+            && let Err(Fault(reason)) = self.streams.timeout(now, || self.idle())
         {
             events.extend(self.fault(now, reason));
             return true;

@@ -136,8 +136,6 @@ pub(super) struct Streams {
     greeted: bool,
     /// Until the peer's hello arrives, no stream opens or is accepted.
     peer: hello::Peer,
-    /// How long after the handshake the peer's hello may take.
-    idle: Duration,
     /// Streams the peer opened whose first message has not started to arrive.
     arriving: Vec<Arriving>,
     /// Streams the peer opened that the caller has not accepted, by class byte,
@@ -1101,9 +1099,8 @@ impl Streams {
     }
 
     /// The streams of a connection that refuses a message over `bytes_max`, with a
-    /// window of `window_bytes`, whose peer's hello may take `idle` after the
-    /// handshake.
-    pub(super) fn new(window_bytes: usize, bytes_max: usize, idle: Duration) -> Self {
+    /// window of `window_bytes`.
+    pub(super) fn new(window_bytes: usize, bytes_max: usize) -> Self {
         Self {
             own: Hello {
                 window_bytes,
@@ -1111,7 +1108,6 @@ impl Streams {
             },
             greeted: false,
             peer: hello::Peer::new(),
-            idle,
             arriving: Vec::new(),
             incoming: Default::default(),
             halves: Map::default(),
@@ -1139,21 +1135,29 @@ impl Streams {
 
     /// Starts the wait for the peer's hello at `now`, when the handshake ends.
     pub(super) fn start(&mut self, now: Instant) {
-        self.peer.wait(now + self.idle);
+        self.peer.wait(now);
     }
 
-    /// When [`Streams::timeout`] must next run, if ever.
-    pub(super) fn deadline(&self) -> Option<Instant> {
-        self.peer.due()
+    /// When the peer's hello is due on a connection whose idle timeout `idle` gives:
+    /// twice it after the handshake, while the hello has not arrived. A cut that the
+    /// connection lives through ends within the idle timeout, and the hello that it
+    /// held back arrives within a PTO after that. Calls `idle` only while it waits.
+    pub(super) fn deadline(&self, idle: impl FnOnce() -> Duration) -> Option<Instant> {
+        self.peer.since().map(|since| since + 2 * idle())
     }
 
-    /// Checks the wait for the peer's hello at `now`.
+    /// Checks the wait for the peer's hello at `now`, on a connection whose idle
+    /// timeout `idle` gives.
     ///
     /// # Errors
     ///
     /// [`Fault`] when the hello is due by `now` and has not arrived.
-    pub(super) fn timeout(&self, now: Instant) -> Result<(), Fault> {
-        match self.peer.due() {
+    pub(super) fn timeout(
+        &self,
+        now: Instant,
+        idle: impl FnOnce() -> Duration,
+    ) -> Result<(), Fault> {
+        match self.deadline(idle) {
             Some(due) if due <= now => Err(Fault("a peer with no hello".to_owned())),
             Some(_) | None => Ok(()),
         }
@@ -7305,7 +7309,7 @@ mod tests {
         /// On `Endpoint` events, not through `Session`: no public peer can skip its
         /// hello.
         #[test]
-        fn end_a_session_whose_peer_sends_no_hello_for_idle() {
+        fn end_a_session_whose_peer_sends_no_hello_for_twice_idle() {
             testing::run(1, |shard| {
                 let mut accepted = foreign_dial(shard, |_| {});
                 accepted.run(Duration::from_secs(3));
@@ -7319,7 +7323,7 @@ mod tests {
                     else {
                         panic!("{:?}", side.events);
                     };
-                    assert_eq!(*closed, *connected + Duration::from_secs(1));
+                    assert_eq!(*closed, *connected + Duration::from_secs(2));
                     assert_eq!(ended, key);
                     let reason = "a peer with no hello".to_owned();
                     assert_eq!(error, &Error::Broken { reason });
@@ -7332,10 +7336,8 @@ mod tests {
             });
         }
 
-        /// A peer that sends nothing after the handshake is past `idle` for both
-        /// bounds at once; the hello's wins.
         #[test]
-        fn end_a_silent_session_whose_peer_sends_no_hello_as_broken() {
+        fn end_a_silent_session_with_no_hello_at_idle_as_timed_out() {
             testing::run(1, |shard| {
                 let mut pair = Pair::new(shard, Span::SECOND, DELAY);
                 let mut foreign = Foreign::new(shard, |_| {});
@@ -7354,19 +7356,45 @@ mod tests {
                     panic!("{:?}", pair.server.events);
                 };
                 assert_eq!(*closed, *connected + Duration::from_secs(1));
-                let reason = "a peer with no hello".to_owned();
-                assert_eq!(error, &Error::Broken { reason });
+                assert_eq!(error, &Error::TimedOut);
             });
         }
 
+        /// Two nodes with an idle of 1 s, on links of 600 ms and 1.2 s RTT, which lose
+        /// the server's first two datagrams. Each hello arrives late, after `idle`, and
+        /// on the slower link after twice `idle`, but within the idle timeout of 3 PTO.
         #[test]
-        fn keep_a_session_whose_peer_hello_arrives_before_idle() {
+        fn keep_a_session_whose_hello_a_short_cut_delays() {
+            for delay in [300, 600].map(Duration::from_millis) {
+                testing::run(1, move |shard| {
+                    let mut pair = Pair::new(shard, Span::SECOND, delay);
+                    pair.dial(pair::SERVER_KEY.public());
+                    pair.server.drops = 2;
+                    pair.run(Duration::from_secs(20));
+                    for side in [&pair.client, &pair.server] {
+                        let key = key(side);
+                        assert!(
+                            matches!(
+                                events(side)[..],
+                                [Event::Connected { .. }, Event::Available { key: available }]
+                                    if *available == key
+                            ),
+                            "{delay:?}: {:?}",
+                            side.events
+                        );
+                    }
+                });
+            }
+        }
+
+        #[test]
+        fn keep_a_session_whose_peer_hello_arrives_before_twice_idle() {
             testing::run(1, |shard| {
                 let mut pair = dial_foreign(shard, Foreign::new(shard, |_| {}));
                 let (connected, _) = pair.client.events[0];
                 let now = Duration::from_nanos(pair.now().0);
                 // One step before the bound.
-                let arrival = connected + Duration::from_nanos(999_999_999);
+                let arrival = connected + Duration::from_nanos(1_999_999_999);
                 pair.run(arrival.checked_sub(now + DELAY).expect("a send after now"));
                 raw(foreign(&mut pair), Dir::Uni, &OWN.encode(), true);
                 pair.run(Duration::from_secs(3));

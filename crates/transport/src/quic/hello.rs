@@ -111,8 +111,8 @@ pub(super) enum Peer {
         stream: Option<StreamId>,
         /// The bytes of the hello that arrived.
         bytes: Vec<u8>,
-        /// When the hello is due, from the end of the handshake on.
-        due: Option<Instant>,
+        /// When the handshake ended, once it has.
+        since: Option<Instant>,
     },
     Arrived(Hello),
 }
@@ -123,26 +123,26 @@ impl Peer {
         Self::Waiting {
             stream: None,
             bytes: Vec::new(),
-            due: None,
+            since: None,
         }
     }
 
-    /// Starts the wait for the hello, which is due at `until`.
+    /// Starts the wait for the hello at `now`, when the handshake ends.
     ///
     /// # Panics
     ///
     /// After the hello arrived.
-    pub(super) fn wait(&mut self, until: Instant) {
-        let Self::Waiting { due, .. } = self else {
+    pub(super) fn wait(&mut self, now: Instant) {
+        let Self::Waiting { since, .. } = self else {
             panic!("invariant: the handshake ends before the hello arrives");
         };
-        *due = Some(until);
+        *since = Some(now);
     }
 
-    /// When the hello is due, while it has not arrived.
-    pub(super) fn due(&self) -> Option<Instant> {
+    /// When the wait for the hello started, while it has not arrived.
+    pub(super) fn since(&self) -> Option<Instant> {
         match *self {
-            Self::Waiting { due, .. } => due,
+            Self::Waiting { since, .. } => since,
             Self::Arrived(_) => None,
         }
     }

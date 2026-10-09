@@ -71,8 +71,6 @@ pub(crate) struct Endpoint {
     message_bytes_max: usize,
     /// The most bytes in flight on a connection in each direction.
     window_bytes: usize,
-    /// How long a peer may be silent, and may take to send its hello.
-    idle: Duration,
     /// Indexed by noq-proto's handle.
     connections: Vec<Option<Connection>>,
     /// The messages of the drained connections that waited for send budget room.
@@ -108,7 +106,8 @@ pub(crate) enum Event {
     Incoming { key: connection::Key },
     /// [`Endpoint::open`] and [`Endpoint::open_sender`] may now give a stream. It
     /// comes first when the peer's hello arrives. When the peer's hello has not arrived
-    /// `idle` after [`Event::Connected`], the key gets [`Event::Closed`] in its place.
+    /// twice the idle timeout after [`Event::Connected`], the key gets
+    /// [`Event::Closed`] in its place.
     Available { key: connection::Key },
     /// `stream` may have more to read. It can repeat, and it can name a stream the
     /// caller no longer holds or has not accepted yet.
@@ -137,7 +136,6 @@ impl Endpoint {
             pool: Rc::clone(&setup.pool),
             message_bytes_max: setup.message_bytes_max,
             window_bytes: setup.window_bytes,
-            idle: settings::idle(setup.idle),
             connections: Vec::new(),
             budget_waits: 0,
             serial: 0,
@@ -693,8 +691,7 @@ impl Endpoint {
             entry.is_none(),
             "invariant: noq-proto reuses a drained handle"
         );
-        let streams =
-            Streams::new(self.window_bytes, self.message_bytes_max, self.idle);
+        let streams = Streams::new(self.window_bytes, self.message_bytes_max);
         *entry = Some(connection(key, streams));
         key
     }
