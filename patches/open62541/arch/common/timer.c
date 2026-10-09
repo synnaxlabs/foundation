@@ -319,27 +319,26 @@ processEntryCallback(void *context, UA_TimerEntry *te) {
 }
 
 UA_DateTime
-UA_Timer_process(UA_Timer *t, UA_DateTime now) {
+UA_Timer_process(UA_Timer *t, UA_DateTime currentTime) {
     UA_LOCK(&t->timerMutex);
 
-    /* Move all entries <= now to the processTree. The bound is an entry, as cmpDue
-     * needs, after each real entry due at now. */
-    UA_TimerEntry bound;
-    bound.nextTime = now;
-    bound.id = UA_UINT64_MAX;
+    /* Move all entries <= currentTime to the processTree. The split key is an
+     * entry, as cmpDue needs, after each entry due at currentTime. */
+    UA_TimerEntry bound = {.nextTime = currentTime,
+                           .id = UA_UINT64_MAX};
     UA_TimerTree processTree;
     ZIP_INIT(&processTree);
     ZIP_UNZIP(UA_TimerTree, &t->tree, &bound.nextTime, &processTree, &t->tree);
 
     /* Consistency check. The smallest not-processed entry isn't ready. */
     UA_assert(!ZIP_MIN(UA_TimerTree, &t->tree) ||
-              ZIP_MIN(UA_TimerTree, &t->tree)->nextTime > now);
+              ZIP_MIN(UA_TimerTree, &t->tree)->nextTime > currentTime);
         
     /* Iterate over the entries that need processing in-order. This also
      * moves them back to the regular time-ordered tree. */
     struct TimerProcessContext ctx;
     ctx.t = t;
-    ctx.now = now;
+    ctx.now = currentTime;
     ZIP_ITER(UA_TimerTree, &processTree, processEntryCallback, &ctx);
         
     /* Compute the timestamp of the earliest next callback */
