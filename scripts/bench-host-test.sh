@@ -179,7 +179,7 @@ box2.red-team, cap 2.67 USD, ends by" &&
 Still running from this run: none." &&
     [[ $(posted 1047 | grep -c "^table") == 4 ]]'
 check "each remote cargo gets the aligned flags, named in the report" eval '
-    [[ $(wc -l <"$T/rustflags") == 6 &&
+    [[ $(($(wc -l <"$T/rustflags"))) == 6 &&
         $(sort -u "$T/rustflags") == "$aligned" ]] &&
     has "$(posted 1047)" "\`RUSTFLAGS=\"$aligned\"\`"'
 check "each filter goes to the host as one argument" eval '
