@@ -28,17 +28,20 @@ mod tests {
     /// The target of each build that these tests make.
     const TARGET: &str = "x86_64-unknown-linux-gnu";
 
-    /// Gives the tool that `build` picks for `path`. No such file exists, so `cc`
-    /// takes the family from the name, as it does for a compiler it cannot run.
-    fn tool(mut build: cc::Build, path: &str) -> cc::Tool {
+    /// Sets `build` to compile for `target` outside a build script.
+    fn configure<'a>(build: &'a mut cc::Build, target: &str) -> &'a mut cc::Build {
         build
-            .compiler(path)
-            .target(TARGET)
-            .host(TARGET)
+            .target(target)
+            .host(target)
             .opt_level(0)
             .cargo_metadata(false)
             .cargo_warnings(false)
-            .get_compiler()
+    }
+
+    /// Gives the tool that `build` picks for `path`. No such file exists, so `cc`
+    /// takes the family from the name, as it does for a compiler it cannot run.
+    fn tool(mut build: cc::Build, path: &str) -> cc::Tool {
+        configure(build.compiler(path), TARGET).get_compiler()
     }
 
     fn args(tool: &cc::Tool) -> Vec<String> {
@@ -123,58 +126,54 @@ mod tests {
         }
     }
 
-    /// The build of a probe in this process, with the compiler and the `CFLAGS` of its
-    /// environment.
-    fn probe() -> cc::Build {
-        let mut probe = cc::Build::new();
-        probe
-            .target(TARGET)
-            .host(TARGET)
-            .opt_level(0)
-            .cargo_metadata(false)
-            .cargo_warnings(false);
-        probe
+    /// The tool of this process for its own target, with the compiler and the `CFLAGS`
+    /// of its environment.
+    fn probe() -> cc::Tool {
+        configure(&mut cc::Build::new(), env!("CONNECTOR_OPCUA_TARGET")).get_compiler()
     }
 
     #[test]
     fn asan_is_true_in_a_child_process() {
         if child::running() {
-            assert!(compiler::asan(probe()));
+            assert!(compiler::asan(&probe()));
         }
     }
 
     #[test]
     fn asan_is_false_in_a_child_process() {
         if child::running() {
-            assert!(!compiler::asan(probe()));
+            assert!(!compiler::asan(&probe()));
         }
     }
 
     #[test]
     fn asan_is_true_only_with_address_sanitizer_in_cflags() {
-        child::run(
+        let (asan, other) = (
             "tests::asan_is_true_in_a_child_process",
-            Some("-fsanitize=address"),
-        );
-        child::run(
-            "tests::asan_is_true_in_a_child_process",
-            Some("-O1 -fsanitize=undefined,address"),
-        );
-        child::run("tests::asan_is_false_in_a_child_process", None);
-        child::run(
             "tests::asan_is_false_in_a_child_process",
-            Some("-fsanitize=undefined"),
         );
-        child::run(
-            "tests::asan_is_false_in_a_child_process",
-            Some("-fsanitize=address -fno-sanitize=address"),
-        );
+        let cases = [
+            (asan, Some("-fsanitize=address")),
+            (asan, Some("-O1 -fsanitize=undefined,address")),
+            (other, None),
+            (other, Some("-fsanitize=undefined")),
+            (other, Some("-fsanitize=address -fno-sanitize=address")),
+        ];
+        // Clang 18 defines no `__SANITIZE_ADDRESS__`; only `__has_feature` finds it.
+        for compiler in [None, Some("clang")] {
+            for (name, cflags) in cases {
+                let compiler = compiler.map(|compiler| ("CC", compiler));
+                let cflags = cflags.map(|cflags| ("CFLAGS", cflags));
+                let envs: Vec<_> = compiler.into_iter().chain(cflags).collect();
+                child::run(name, &envs);
+            }
+        }
     }
 
     #[test]
     fn the_shim_fails_on_a_warning_with_or_without_cflags() {
-        for cflags in [None, Some("-O1")] {
-            child::run("tests::builds_in_this_environment", cflags);
+        for envs in [&[][..], &[("CFLAGS", "-O1")]] {
+            child::run("tests::builds_in_this_environment", envs);
         }
     }
 }

@@ -16,14 +16,15 @@ pub(crate) fn running() -> bool {
 }
 
 /// Runs the test `name` in a child process, and asserts that it passes. The child
-/// gets only `PATH` and, as `CC`, the compiler that `cc` picks here without its flags,
-/// so `cflags` is the only C flags that `cc` reads there.
-pub(crate) fn run(name: &str, cflags: Option<&str>) {
-    let output = output(name, cflags.map(|cflags| ("CFLAGS", cflags)));
-    let stdout = String::from_utf8(output.stdout).unwrap();
+/// gets only `PATH`, `envs`, and, as `CC` unless `envs` sets it, the compiler that `cc`
+/// picks here without its flags, so `cc` reads C flags there only from `envs`.
+pub(crate) fn run(name: &str, envs: &[(&str, &str)]) {
+    let output = output(name, envs.iter().copied());
+    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         output.status.success() && stdout.contains("test result: ok. 1 passed"),
-        "{name} with CFLAGS={cflags:?}: {stdout}"
+        "{name} with {envs:?}: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 

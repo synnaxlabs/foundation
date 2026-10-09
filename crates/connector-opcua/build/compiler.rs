@@ -52,16 +52,25 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
     Builds { library, shim }
 }
 
-/// Whether `probe` compiles C with `-fsanitize=address`, by its compiler and its
-/// flags, `CFLAGS` included.
+/// Whether `tool` compiles C with `-fsanitize=address`, by its compiler and its flags,
+/// `CFLAGS` included.
 ///
 /// # Panics
 ///
-/// When the compiler cannot preprocess a file.
-pub(crate) fn asan(mut probe: Build) -> bool {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let output = probe.file(root.join("build/asan.c")).expand();
+/// When `tool` cannot preprocess a file.
+pub(crate) fn asan(tool: &Tool) -> bool {
+    let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("build/asan.c");
+    let output = tool.to_command().arg("-E").arg(&probe).output();
+    let output = output.unwrap_or_else(|e| panic!("{}: {e}", tool.path().display()));
+    assert!(
+        output.status.success(),
+        "connector-opcua: {} cannot preprocess {}: {}",
+        tool.path().display(),
+        probe.display(),
+        String::from_utf8_lossy(&output.stderr)
+    );
     output
+        .stdout
         .split(|&byte| byte == b'\n')
         .any(|line| line.trim_ascii() == b"connector_opcua_asan")
 }

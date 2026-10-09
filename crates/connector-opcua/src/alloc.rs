@@ -66,7 +66,8 @@ unsafe fn stamp(block: *mut u8, size: usize) -> *mut c_void {
     unsafe { block.add(ALIGN) }.cast()
 }
 
-/// Gives the block of `ptr` and its layout.
+/// Gives the block of `ptr` and its layout. The header is then unpoisoned: the caller
+/// frees the block, or calls `poison` when the block stays live.
 ///
 /// # Safety
 ///

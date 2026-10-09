@@ -36,10 +36,11 @@ fn build() {
     };
     let compiler::Builds { library, shim } =
         compiler::builds(&copy, &read("flags.txt"), &read("sources.txt"));
-    if let Err(e) = compiler::check(&library.get_compiler()) {
+    let tool = library.get_compiler();
+    if let Err(e) = compiler::check(&tool) {
         panic!("{e}");
     }
-    if compiler::asan(cc::Build::new()) {
+    if compiler::asan(&tool) {
         println!("cargo::rustc-cfg=asan");
     }
     library.compile("open62541");
