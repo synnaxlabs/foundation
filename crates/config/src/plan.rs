@@ -91,7 +91,7 @@ pub fn plan(
 ///
 /// # Errors
 ///
-/// The problems of the first stage that has any, with no span:
+/// The problems of the first stage that has any, with no span or note:
 ///
 /// 1. `config.private-key` for each string of a definition that holds a private key.
 /// 2. The diagnostics of `kinds` for each connector whose kind or config it refuses,

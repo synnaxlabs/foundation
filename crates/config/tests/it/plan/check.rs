@@ -65,7 +65,8 @@ fn writer(label: &str) -> (Name, Stored) {
 
 fn writer_text(label: &str) -> String {
     format!(
-        "connector {label:?} {{\n  kind = \"writer\"\n  node = \"n\"\n  writes = []\n}}\n"
+        "connector {label:?} {{\n  kind = \"writer\"\n  node = \"n\"\n\
+         writes = []\n}}\n"
     )
 }
 
@@ -299,16 +300,46 @@ fn gives_only_one_private_key_problem_for_a_mark_in_any_string_of_a_definition()
 }
 
 #[test]
-fn gives_no_span_for_a_problem_in_a_connector_config_that_holds_spans() {
+fn gives_no_span_or_note_for_a_problem_in_a_connector_config_that_holds_spans() {
     let alarm_found =
         checked([connector("x", "writer", "n", "note = \"PRIVATE KEY\"")]);
     assert_eq!(alarm_found, [alarm()]);
     let refused = checked([connector("x", "writer", "n", "writes = 1")]);
-    assert!(!refused.is_empty());
-    assert!(
-        refused.iter().all(|problem| problem.1.is_none()),
-        "{refused:?}"
+    let bad_name = (
+        "document.bad-name",
+        None,
+        "a name is a string or a reference, not an integer".into(),
+        "Write a name such as \"site_a.node_1\"".into(),
     );
+    assert_eq!(refused, [bad_name]);
+    let config = "address = \"http://influx:8086\"\nselect = \"x.*\"\n\
+                  reader {\n}\nreader {\n}\n";
+    let definitions = [connector("x", "influx", "n", config)]
+        .into_iter()
+        .collect();
+    let members = BTreeSet::from([name("n")]);
+    let found =
+        config::plan::check(&definitions, &members, &kinds()).expect_err("problems");
+    let found: Vec<_> = found
+        .iter()
+        .map(|d| (d.code.as_str(), d.span.is_some(), d.notes.len()))
+        .collect();
+    assert_eq!(found, [("document.repeated-block", false, 0)]);
+}
+
+#[test]
+fn refuses_the_empty_allow_fuzz_input_at_its_allow() {
+    let text = include_str!("../../../../../oracles/fuzz/config_check/empty_allow");
+    let found = config::check(&documents(&[text]), &kinds());
+    let at =
+        u32::try_from(text.find("[]").expect("an empty list")).expect("a short file");
+    let expected = (
+        "config.empty-allow",
+        Some((document::Source(0), at)),
+        "the `allow` list holds no action".into(),
+        "Add one or more actions, such as \"read\"".into(),
+    );
+    assert_eq!(problems(found.map(|_| unreachable())), [expected]);
 }
 
 #[test]

@@ -74,9 +74,9 @@
   `laptop.architect-2` (2026-10-08T23:51:37Z, items 3 and 4 of
   https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071339913).
   `config::plan::check(definitions, members, kinds)` checks the definitions after the
-  plan, with no span. It gives the first stage with problems: `config.private-key` for
-  each string of a definition; then, together, what the kind table refuses in the kind
-  and config of each connector, `config.duplicate-name`, and
+  plan, with no span or note. It gives the first stage with problems:
+  `config.private-key` for each string of a definition; then, together, what the kind
+  table refuses in the kind and config of each connector, `config.duplicate-name`, and
   `config.subject-is-connector`; then `config.unplaced`, `config.connector-home`,
   `config.split-placement`, `config.writer-nodes`, and `config.unknown-node`.
   `spec::access::Policy::new` refuses an empty `allow`, so `Plan::decode` refuses it.
