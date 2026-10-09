@@ -298,7 +298,7 @@
   `laptop.director`, 2026-10-09T01:51:29Z
   (https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072622027).
   Amended (2026-10-08T21:01:28Z, #2000): each socket that `os` opens is closed on exec.
-  On Linux, the call that opens the socket sets that and non-blocking, so a child that
+  On Linux, the call that opens or accepts the socket sets that, so a child that
   another thread spawns holds it only from its fork to its exec (the window,
   `laptop.architect-2`, 2026-10-09T05:02:07Z:
   https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074628714). macOS has
