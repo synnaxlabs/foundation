@@ -235,18 +235,20 @@ impl Drop for Process {
     fn drop(&mut self) {
         // `kill` gives `Ok` for a command that exited. No wait: while the thread
         // panics, a wait can block, and `run` waits for its command itself.
-        killed(self.0.kill(), &mut std::io::stderr());
-    }
-}
-
-/// Panics when `kill` failed, or writes its error to `log` while the thread panics,
-/// since a second panic aborts the test binary.
-fn killed(kill: std::io::Result<()>, log: &mut impl Write) {
-    match kill {
-        Err(error) if std::thread::panicking() => {
-            let _logged = writeln!(log, "kill the command: {error}");
+        match self.0.kill() {
+            // A second panic aborts the test binary. Only the macro writes to the
+            // output that the test harness captures for the report of the test.
+            Err(error) if std::thread::panicking() => {
+                #[expect(
+                    clippy::print_stderr,
+                    reason = "a second panic aborts the test binary"
+                )]
+                {
+                    eprintln!("kill the command: {error}");
+                }
+            }
+            kill => kill.expect("kill the command"),
         }
-        kill => kill.expect("kill the command"),
     }
 }
 
@@ -364,39 +366,82 @@ fn a_test_that_panics_kills_its_command() {
     );
 }
 
-/// Gives a failed kill to [`killed`] when it drops, as `Drop for Process` does. No
-/// test can make the kill of a real command fail: that needs a command that another
-/// process reaps or that changes its user.
-struct Failed<'a>(&'a mut Vec<u8>);
+/// Set to `drop` or `panic` in the test binary that
+/// [`drop_a_command_that_the_kernel_reaped`] runs.
+const REAPED: &str = "RIG_REAPED";
 
-impl Drop for Failed<'_> {
-    fn drop(&mut self) {
-        killed(Err(ErrorKind::PermissionDenied.into()), self.0);
-    }
+/// Drops a command that the kernel reaped, so its kill fails, and panics after the
+/// drop when [`REAPED`] is `panic`. Does nothing when [`REAPED`] is not set.
+#[test]
+fn a_command_that_the_kernel_reaped_drops() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the parent test sets it for the child"
+    )]
+    let Some(reaped) = std::env::var_os(REAPED) else {
+        return;
+    };
+    let mut command = Command::new("sh");
+    command.args(["-c", "exit 0"]);
+    let running = Running::new(command, &[]);
+    let pid = running.process.0.id();
+    wait(
+        &os::clock(),
+        Span::from_nanos(10_000_000_000),
+        "the kernel reaps the command",
+        || {
+            let exists = std::fs::exists(format!("/proc/{pid}")).expect("check /proc");
+            if exists {
+                Err(format!("{pid} runs"))
+            } else {
+                Ok(())
+            }
+        },
+    );
+    let _running = running;
+    assert_ne!(reaped, "panic", "the test fails");
+}
+
+/// Runs [`a_command_that_the_kernel_reaped_drops`] in a test binary that ignores
+/// `SIGCHLD`, so the kernel reaps each command it starts, and gives the report.
+fn drop_a_command_that_the_kernel_reaped(reaped: &str) -> String {
+    let binary = std::env::current_exe().expect("the test binary");
+    let output = Command::new("perl")
+        .args(["-e", "$SIG{CHLD} = 'IGNORE'; exec @ARGV or die"])
+        .arg(binary)
+        .args(["--exact", "rig::a_command_that_the_kernel_reaped_drops"])
+        .env(REAPED, reaped)
+        .output()
+        .expect("run the test binary");
+    assert_eq!(
+        output.status.code(),
+        Some(101),
+        "the test fails with no abort"
+    );
+    String::from_utf8(output.stdout).expect("UTF-8")
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs perl and /proc")]
 fn a_failed_kill_panics() {
-    let mut log = Vec::new();
-    let failed = std::panic::AssertUnwindSafe(|| drop(Failed(&mut log)));
-    let panic = std::panic::catch_unwind(failed).expect_err("the kill panics");
-    assert_eq!(
-        panic.downcast_ref::<String>().map(String::as_str),
-        Some("kill the command: Kind(PermissionDenied)")
+    let report = drop_a_command_that_the_kernel_reaped("drop");
+    assert!(
+        report.contains(
+            "kill the command: Os { code: 3, kind: Uncategorized, message: \"No such process\" }\n"
+        ),
+        "{report}"
     );
 }
 
 #[test]
-fn a_failed_kill_while_the_test_panics_writes_its_error() {
-    let mut log = Vec::new();
-    let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _failed = Failed(&mut log);
-        panic!("the test fails");
-    }))
-    .expect_err("the test panics");
-    assert_eq!(panic.downcast_ref::<&str>(), Some(&"the test fails"));
-    let log = String::from_utf8(log).expect("UTF-8");
-    assert_eq!(log, "kill the command: permission denied\n");
+#[cfg_attr(not(target_os = "linux"), ignore = "needs perl and /proc")]
+fn a_failed_kill_while_the_test_panics_reports_its_error() {
+    let report = drop_a_command_that_the_kernel_reaped("panic");
+    assert!(report.contains("the test fails\n"), "{report}");
+    assert!(
+        report.contains("kill the command: No such process (os error 3)\n"),
+        "{report}"
+    );
 }
 
 #[test]
