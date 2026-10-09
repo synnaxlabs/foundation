@@ -2,8 +2,7 @@
 //!
 //! The file is 277 bytes: the tag, the length of the name in one byte, the name with
 //! zero bytes after it up to [`Name::MAX_BYTES`], and the CRC32C of those 273 bytes
-//! (little-endian), in one sector ([`crate::sector`]). A file with no bytes, or with
-//! 277 zero bytes, is a name that a crash kept from being written.
+//! (little-endian), in one sector ([`crate::sector`]).
 
 use std::path::Path;
 
@@ -38,32 +37,26 @@ pub(crate) async fn read(files: &Files) -> Result<Option<Name>, Error> {
     decode(&held.map_err(Error::Directory)?)
 }
 
-/// Writes `name` to the file `name` of `files` and makes it durable, when the file
-/// holds no name or holds `name`: a failed sync of an earlier start can leave a name
-/// that a read sees but a crash loses. Call it under the lock of the data directory.
+/// Writes `name` to the file `name` of `files` and makes it durable, when the file is
+/// not there. Call it under the lock of the data directory, after the sync of the
+/// directory that the claim makes: a failed sync of an earlier start can leave a name
+/// that a read sees but a crash loses.
 ///
 /// # Errors
 ///
 /// [`Error::Renamed`] when the file holds another name, [`Error::Name`] for a file
 /// that a node did not write, and [`Error::Directory`] for a file call that fails.
-/// Writes no other name over a name.
 pub(crate) async fn keep(files: &Files, name: &Name) -> Result<(), Error> {
-    let opened = sector::open(files, Path::new(FILE), TAG).await;
-    let (file, held) = opened.map_err(|error| match error {
-        env::files::Error::Length { .. } => Error::Name,
-        error => Error::Directory(error),
-    })?;
-    if let Some(stored) = decode(&held)?
-        && stored != *name
-    {
-        return Err(Error::Renamed {
+    match read(files).await? {
+        None => sector::publish(files, Path::new(FILE), &encode(name))
+            .await
+            .map_err(Error::Directory),
+        Some(stored) if stored == *name => Ok(()),
+        Some(stored) => Err(Error::Renamed {
             stored,
             given: name.clone(),
-        });
+        }),
     }
-    sector::write(files, &file, &encode(name))
-        .await
-        .map_err(Error::Directory)
 }
 
 /// The bytes of the file that holds `name`.
@@ -130,11 +123,6 @@ mod tests {
         let bytes = encode(&name);
         assert_eq!(bytes[17], 255);
         assert_eq!(read(&bytes).unwrap(), Some(name));
-    }
-
-    #[test]
-    fn zero_bytes_are_no_name() {
-        assert_eq!(read(&[0; LEN]).unwrap(), None);
     }
 
     proptest! {

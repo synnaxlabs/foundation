@@ -1,8 +1,10 @@
-//! A file of the data directory that fits one sector, which a crash keeps whole or
-//! old, so a write never tears it. It starts with a tag, and its last 4 bytes are the
-//! CRC32C of the bytes before them (little-endian).
+//! A file of the data directory that fits one sector. It starts with a tag, and its
+//! last 4 bytes are the CRC32C of the bytes before them (little-endian). A file that
+//! [`write`] changes in place is whole or old after a crash, since a crash keeps a
+//! sector whole or old. A file that [`publish`] makes is whole or not there, also to
+//! a read while the write runs.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use env::files::{File, Files, Mode};
 
@@ -13,12 +15,13 @@ const POOL: block::Config = block::Config { budget: 4096 };
 /// What a file of `N` bytes holds.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Held<const N: usize> {
-    /// No file, no bytes, or `N` zero bytes: a crash kept a node from writing it.
+    /// No file. For [`open`], also no bytes or `N` zero bytes: a crash kept a write
+    /// in place from its end.
     Nothing,
     /// The bytes that a node wrote, with the tag and a checksum that matches.
     Written([u8; N]),
-    /// A file that no node wrote: another tag or checksum, or, for [`read`], another
-    /// length.
+    /// A file that no node wrote: another tag or checksum. For [`read`], also another
+    /// length, no bytes, or `N` zero bytes, which [`publish`] never leaves.
     Foreign,
 }
 
@@ -40,8 +43,8 @@ pub(crate) async fn open<const N: usize>(
     Ok((file, held))
 }
 
-/// What `path` in `files` holds. Opens it to read only, so it makes nothing and
-/// waits for no lock.
+/// What `path` in `files`, which [`publish`] makes, holds. Opens it to read only, so
+/// it makes nothing and waits for no lock.
 ///
 /// # Errors
 ///
@@ -57,11 +60,37 @@ pub(crate) async fn read<const N: usize>(
         Err(env::files::Error::NotFound { .. }) => return Ok(Held::Nothing),
         Err(error) => return Err(error),
     };
-    match file.len() {
-        0 => Ok(Held::Nothing),
-        len if len == N as u64 => Ok(held(&bytes(&file).await?, tag)),
-        _ => Ok(Held::Foreign),
+    if file.len() != N as u64 {
+        return Ok(Held::Foreign);
     }
+    match held(&bytes(&file).await?, tag) {
+        Held::Nothing => Ok(Held::Foreign),
+        held => Ok(held),
+    }
+}
+
+/// Makes `path` in `files` with `bytes`, which [`checksum`] completed, and makes it
+/// durable: removes the file `<path>.new` that a crash left, writes `bytes` to a new
+/// one, and renames it to `path`. Call it under the lock of the data directory, when
+/// `path` is not there.
+///
+/// # Errors
+///
+/// The error of the first file call that fails. [`env::files::Error::Exists`] when
+/// `path` is there.
+pub(crate) async fn publish<const N: usize>(
+    files: &Files,
+    path: &Path,
+    bytes: &[u8; N],
+) -> Result<(), env::files::Error> {
+    let mut staged = path.as_os_str().to_owned();
+    staged.push(".new");
+    let staged = PathBuf::from(staged);
+    files.remove(&staged).await?;
+    let mut file = files.open(&staged, Mode::Create { len: N as u64 }).await?;
+    file.write_at(0, &[block(bytes)]).await?;
+    file.rename(path).await?;
+    files.sync_dir(Path::new("")).await
 }
 
 /// Writes `bytes`, which [`checksum`] completed, to `file` of `files`, which
@@ -75,11 +104,7 @@ pub(crate) async fn write<const N: usize>(
     file: &File,
     bytes: &[u8; N],
 ) -> Result<(), env::files::Error> {
-    let pool = block::Pool::heap(POOL);
-    let block = pool
-        .copy(bytes)
-        .expect("invariant: the pool holds a sector");
-    file.write_at(0, &[block]).await?;
+    file.write_at(0, &[block(bytes)]).await?;
     file.sync().await?;
     files.sync_dir(Path::new("")).await
 }
@@ -109,4 +134,12 @@ async fn bytes<const N: usize>(file: &File) -> Result<[u8; N], env::files::Error
     let into = pool.alloc(N).expect("invariant: the pool holds a sector");
     let read = file.read_at(0, into).await?;
     Ok((&*read).try_into().expect("invariant: a read fills it"))
+}
+
+/// A block of `bytes`.
+fn block<const N: usize>(bytes: &[u8; N]) -> block::Block {
+    const { assert!(N <= env::files::SECTOR, "the file fits one sector") };
+    let pool = block::Pool::heap(POOL);
+    pool.copy(bytes)
+        .expect("invariant: the pool holds a sector")
 }
