@@ -214,4 +214,6 @@
   address. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6073878926,
   2026-10-09 03:49 UTC). The batch search of the copy goes in the order of the tree,
-  so whether a current-time timer batches does not depend on addresses (#2106).
+  so whether a current-time timer batches does not depend on addresses (approved by
+  `laptop.architect-2`, 2026-10-09T05:27:21Z,
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074900634).
