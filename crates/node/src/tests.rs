@@ -3702,6 +3702,25 @@ mod port {
             assert_eq!(read, Err(transport::Error::Reset { code }));
         }
 
+        /// The node stops a mesh stream of a program, and resets its reply half, with
+        /// the code of a rejected header. The mesh gets no message of it: it stops a
+        /// stream at its first message that is not a mesh message with `MALFORMED`.
+        #[test]
+        fn rejects_a_mesh_stream_of_a_program() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let node = start_alone(&host);
+            let header = wire::header::encode(wire::Protocol::Mesh);
+            let seen = dial(&mut sim, &host, Dialer::Program, &[&header, b"after"]);
+            let Seen {
+                peer, sent, read, ..
+            } = watch(sim, node, &seen);
+            let code = Code(wire::header::REJECTED);
+            assert_eq!(peer, Peer::Node(KEY.public()));
+            assert_eq!(sent, transport::Error::Stopped { code });
+            assert_eq!(read, Err(transport::Error::Reset { code }));
+        }
+
         /// The error of the first send that fails, when a peer that is not a member
         /// opens a one-way mesh stream to the node [`OWN`] of a region with [`OTHER`],
         /// then sends `message` up to 100 times, or `None` when no send fails.
