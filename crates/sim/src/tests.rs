@@ -846,6 +846,53 @@ impl Drop for Bomb {
     }
 }
 
+/// Runs `child` in a copy of this test in a child process, and asserts that the child
+/// aborts at a panic in a drop during an unwind.
+#[cfg(unix)]
+fn assert_aborts(child: impl FnOnce()) {
+    use std::os::unix::process::ExitStatusExt;
+    const CHILD: &str = "SIM_TEST_CHILD";
+    const SIGABRT: i32 = 6;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the parent sets it for the child"
+    )]
+    if std::env::var_os(CHILD).is_some() {
+        child();
+        return;
+    }
+    let thread = std::thread::current();
+    let test = thread.name().expect("invariant: libtest names the thread");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.signal(), Some(SIGABRT), "{stderr}");
+    assert!(
+        stderr.contains("panic in a destructor during cleanup"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_panic_over_a_local_that_panics_in_its_drop_in_a_task_aborts_the_process() {
+    assert_aborts(|| {
+        let mut sim = sim(0);
+        let node = sim.node(node::Config::default());
+        let handle = node.shards().start(shard("shard-0"), |tasks| async move {
+            tasks.spawn(async {
+                let _bomb = Bomb("bomb");
+                panic!("task");
+            });
+            pending::<()>().await;
+        });
+        assert_panicked(&mut sim, handle.unwrap(), "task");
+    });
+}
+
 #[test]
 fn a_panic_in_the_drop_of_a_task_ends_the_run_and_its_thread() {
     let mut sim = sim(0);
