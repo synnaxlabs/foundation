@@ -324,7 +324,10 @@ fn gives_a_latest_reader_no_frame_of_an_index_from_before_it_was_removed() {
         test.hub.set_definitions(&channels());
         let mut reader = test.reader(&["value-b"], Mode::Latest).await;
         let (polled, _) = poll_flagged(pin!(reader.next()));
-        assert!(polled.is_pending(), "the removed index left no newest frame");
+        assert!(
+            polled.is_pending(),
+            "the removed index left no newest frame"
+        );
     });
 }
 
