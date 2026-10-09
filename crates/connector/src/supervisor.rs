@@ -1073,6 +1073,8 @@ mod tests {
             (1, 1, Some(Refusal::Waiting)),
             (2, 1, None),
             (2, 2, Some(Refusal::Waiting)),
+            (255, 254, None),
+            (255, 255, Some(Refusal::Waiting)),
         ] {
             let refusals = refusals(Some(Authority(holder)), move |start| Write {
                 authority: Authority(kind),
@@ -1098,7 +1100,13 @@ mod tests {
 
     #[test]
     fn refuses_the_write_of_a_kind_once_its_lease_runs_out() {
-        for nanos in [Span::SECOND.nanos(), 3 * Span::SECOND.nanos()] {
+        for nanos in [
+            Span::SECOND,
+            Span::from_nanos(3 * Span::SECOND.nanos()),
+            Span::DAY,
+        ]
+        .map(Span::nanos)
+        {
             let lease = Some(Span::from_nanos(nanos));
             let just_before = Span::from_nanos(nanos - 1);
             let at = Span::from_nanos(nanos);
