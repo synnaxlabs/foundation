@@ -605,6 +605,17 @@ mod tests {
         }
 
         #[test]
+        fn of_a_closed_session_lets_a_frame_queue_at_the_end() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let key = unnamed(&mut readers);
+            readers.queue(&frames.frame(1), &frames.set, 0..2);
+            readers.close(key.into(), None);
+            dropped(&mut readers, key.into());
+            readers.queue(&frames.frame(2), &frames.set, 2..3);
+        }
+
+        #[test]
         #[should_panic(expected = "latest session 0 was never open")]
         fn panics_on_a_key_only_a_complete_session_had() {
             let mut readers = Readers::new(0);
