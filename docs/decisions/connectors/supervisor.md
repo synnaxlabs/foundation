@@ -3,7 +3,11 @@
   the caller's token, which the supervisor cancels once the run returns or its future
   drops, so each task that the run spawned to wait on it ends with the run
   (`laptop.architect-2`, 2026-10-08T17:58:15Z:
-  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). After a
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). A drop of
+  the future of `run` cancels the run and does not wait for its tasks. At a spec
+  change, `node` cancels each run and awaits it before it starts the new supervisor
+  (`laptop.architect-2`, 2026-10-09T01:30:51Z:
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072411231). After a
   run returns, the supervisor waits, with no timeout, until each task that the run
   spawned through `Context::tasks` ended, and only then starts its backoff. A task
   that does not end at the cancel is a defect of its kind (`laptop.architect-2`,
@@ -11,10 +15,7 @@
   https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6067043337). It also
   waits so before it returns (`laptop.architect-2`, 2026-10-09T01:06:45Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6072159701, item
-  1). After a drop of the future of `run`, the next `run` of the same name on that
-  supervisor waits for those tasks first (`laptop.architect-2`, 2026-10-09T01:25:39Z:
-  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072358016, item 2).
-  The wait does not count toward the run's length (approval owed:
+  1). The wait does not count toward the run's length (approval owed:
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072423392). One
   supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
   entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
