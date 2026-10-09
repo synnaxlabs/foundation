@@ -29,8 +29,8 @@ mod tests {
     /// The target of each build that these tests make.
     const TARGET: &str = "x86_64-unknown-linux-gnu";
 
-    /// Gives the tool that `build` picks for `path`. No such file exists, so `cc`
-    /// takes the family from the name, as it does for a compiler it cannot run.
+    /// Gives the tool that `build` picks for `path`. When `cc` cannot run `path` to
+    /// find its family, it takes the family from the name.
     fn tool(mut build: cc::Build, path: &str) -> cc::Tool {
         configure(build.compiler(path), TARGET).get_compiler()
     }
@@ -148,6 +148,28 @@ mod tests {
                 "connector-opcua: false cannot preprocess {}: ",
                 probe.display()
             ))
+        );
+    }
+
+    #[test]
+    fn asan_panics_with_the_stderr_of_the_tool() {
+        let mut build = cc::Build::new();
+        build.flag("--connector-opcua-no-such-flag");
+        let tool = configure(&mut build, env!("CONNECTOR_OPCUA_TARGET")).get_compiler();
+        let panic = std::panic::catch_unwind(|| compiler::asan(&tool)).unwrap_err();
+        let message = panic.downcast_ref::<String>().unwrap();
+        let probe = Path::new(env!("CARGO_MANIFEST_DIR")).join("build/asan.c");
+        let prefix = format!(
+            "connector-opcua: {} cannot preprocess {}: ",
+            tool.path().display(),
+            probe.display()
+        );
+        let stderr = message
+            .strip_prefix(&prefix)
+            .unwrap_or_else(|| panic!("{message}"));
+        assert!(
+            stderr.contains("--connector-opcua-no-such-flag'"),
+            "{message}"
         );
     }
 
