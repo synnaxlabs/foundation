@@ -788,11 +788,15 @@ fn reads_the_round_heading_as_github_shows_it() {
         check(&record(vec![bot(ROUND), bot(&word)])),
         Vec::<String>::new()
     );
-    let level = fields.replace("## Review round 3", "# Review round 3");
-    assert_eq!(
-        check(&record(vec![bot(ROUND), bot(&level)])),
-        Vec::<String>::new()
-    );
+    // GitHub shows these headings in a quote, or of level 1: not a round.
+    for heading in ["# Review round 3", "<search\n> ## Review round 3"] {
+        let other = fields.replace("## Review round 3", heading);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&other)])),
+            Vec::<String>::new(),
+            "{heading}"
+        );
+    }
     let lines = fields.replace("## Review round 3", "Review round\n3\n---");
     assert_eq!(
         check(&record(vec![bot(ROUND), bot(&lines)])),
@@ -1448,6 +1452,8 @@ fn fails_raw_html_before_the_fields_or_the_heading() {
         "<search\n## x\nReview round 3\n---",
         "<search\n<search\n## Review *round* 3",
         "<search\n## Review [round][d] 3",
+        " <search\n <search\n## Review *round* 3",
+        "<search\n## Review round 3\n\n<search\n## Review round 4",
     ] {
         let headless = ROUND.replace("## Review round 3", heading) + "\n\n[d]: /x";
         assert_eq!(

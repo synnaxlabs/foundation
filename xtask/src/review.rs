@@ -504,8 +504,8 @@ struct Shown<'a> {
     /// Each line of the comment that can hide text on GitHub or that the check cannot
     /// read, with its cause, in order.
     hiding: Vec<(&'a str, Cause)>,
-    /// When `number` is `None`, the round number of the comment read with each
-    /// top-level HTML block as text ([`unblocked`]). GitHub reads some HTML blocks as
+    /// When `number` is `None`, the round number of the comment read with each HTML
+    /// block as text ([`unblocked`]). GitHub reads some HTML blocks as
     /// text, and then can show a line as a heading.
     html_number: Option<String>,
 }
@@ -561,17 +561,17 @@ impl<'a> Shown<'a> {
                     );
                     shown.text.push(texts(node));
                 }
-                NodeValue::HtmlBlock(_) if top => {
+                NodeValue::HtmlBlock(_) => {
                     hiding.push((start, Cause::Raw));
                     blocks.push(source(data.sourcepos));
                 }
-                NodeValue::HtmlBlock(_) | NodeValue::HtmlInline(_) => {
+                NodeValue::HtmlInline(_) => {
                     hiding.push((start, Cause::Raw));
                 }
                 _ => {}
             }
         }
-        if shown.number.is_none() && !blocks.is_empty() {
+        if shown.number.is_none() {
             shown.html_number = unblocked(body, &blocks);
         }
         hiding.extend(tagged(body, &starts, &codes).map(|at| (at, Cause::Raw)));
@@ -755,8 +755,8 @@ fn normalized(text: &str) -> String {
 }
 
 /// The round number of the first top-level heading that has one ([`number`]) in `body`
-/// read with each line of the HTML `blocks` that starts with `<` after at most three
-/// spaces read as text.
+/// read with each line of the HTML `blocks` that starts with `<` after its indent read
+/// as text.
 fn unblocked(body: &str, blocks: &[Range<usize>]) -> Option<String> {
     let mut text = body.to_owned();
     let starts = blocks.iter().flat_map(|b| {
@@ -766,9 +766,9 @@ fn unblocked(body: &str, blocks: &[Range<usize>]) -> Option<String> {
         std::iter::once(b.start).chain(rest)
     });
     for line in starts.collect::<Vec<_>>().into_iter().rev() {
-        let indent = body[line..].len() - body[line..].trim_start_matches(' ').len();
-        if indent < 4 && body[line + indent..].starts_with('<') {
-            text.insert(line + indent, '\\');
+        let at = body.len() - body[line..].trim_start_matches(' ').len();
+        if body[at..].starts_with('<') {
+            text.insert(at, '\\');
         }
     }
     let arena = Arena::new();
