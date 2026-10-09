@@ -1032,7 +1032,7 @@ impl fmt::Display for Error {
                  {cores}; start it on {stored} cores"
             ),
             Self::Directory(error) => {
-                write!(f, "cannot claim the data directory: {error}")
+                write!(f, "cannot use the data directory: {error}")
             }
             Self::Disk { disk, cores, min } => write!(
                 f,

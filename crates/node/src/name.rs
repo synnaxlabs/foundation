@@ -89,7 +89,7 @@ fn decode(bytes: &[u8; LEN]) -> Result<Option<Name>, Error> {
         return Ok(None);
     }
     let len = usize::from(bytes[TAG.len()]);
-    let name = &bytes[TAG.len() + 1..][..len.min(Name::MAX_BYTES)];
+    let name = &bytes[TAG.len() + 1..][..len];
     let name = std::str::from_utf8(name)
         .ok()
         .and_then(|name| name.parse::<Name>().ok())

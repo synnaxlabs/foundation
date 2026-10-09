@@ -1274,7 +1274,7 @@ mod directory {
             assert_eq!(e, Error::Directory(io), "{operation:?}");
             assert_eq!(
                 e.to_string(),
-                format!("cannot claim the data directory: {text}")
+                format!("cannot use the data directory: {text}")
             );
             let made: Vec<PathBuf> = made.iter().map(PathBuf::from).collect();
             assert_eq!(listed(&mut sim, &host, ""), made, "{operation:?}");
@@ -1708,7 +1708,7 @@ mod lock {
         assert_eq!(e, Err(busy()));
         assert_eq!(
             busy().to_string(),
-            "cannot claim the data directory: file lock is open for writing in \
+            "cannot use the data directory: file lock is open for writing in \
              another handle"
         );
         first.stop();
@@ -3090,7 +3090,7 @@ mod port {
             assert_eq!(read(&mut sim, &host), short, "keeps the file");
             assert_eq!(
                 Error::Directory(exists).to_string(),
-                "cannot claim the data directory: path node.key is already there"
+                "cannot use the data directory: path node.key is already there"
             );
         }
 
@@ -4917,13 +4917,77 @@ mod name {
         let host = host(&mut sim, 2);
         assert_eq!(start_and_stop(&mut sim, &host, "site_a.edge"), Ok(()));
         let kept = read(&mut sim, &host).expect("the file");
-        assert_eq!(kept.len(), LEN);
+        assert_eq!(kept.len(), 277);
         assert_eq!(&kept[..17], b"foundation/name/1");
+        assert_eq!(kept[17], 11);
+        assert_eq!(&kept[18..29], b"site_a.edge");
+        assert_eq!(kept[29..273], [0; 244]);
+        let crc = crc32c::crc32c(&kept[..273]).to_le_bytes();
+        assert_eq!(kept[273..], crc, "little-endian");
         assert_eq!(resolve(&mut sim, &host, None), Ok(name("site_a.edge")));
         let given = resolve(&mut sim, &host, Some("site_a.edge"));
         assert_eq!(given, Ok(name("site_a.edge")));
         assert_eq!(start_and_stop(&mut sim, &host, "site_a.edge"), Ok(()));
         assert_eq!(read(&mut sim, &host), Some(kept));
+    }
+
+    #[test]
+    fn a_name_of_the_most_bytes_is_kept() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let long = "a".repeat(255);
+        assert_eq!(start_and_stop(&mut sim, &host, &long), Ok(()));
+        let kept = read(&mut sim, &host).expect("the file");
+        assert_eq!((kept.len(), kept[17]), (277, 255));
+        assert_eq!(resolve(&mut sim, &host, None), Ok(name(&long)));
+        assert_eq!(start_and_stop(&mut sim, &host, &long), Ok(()));
+    }
+
+    /// Each file call on `name` that fails stops the node with its error, and leaves
+    /// no other name.
+    #[test]
+    fn a_failed_file_call_on_the_name_stops_the_node() {
+        use env::files::Operation::{Open, ReadAt, Sync, WriteAt};
+        for (operation, text) in [
+            (Open, "open of name failed with OS error 5"),
+            (ReadAt, "read_at of name failed with OS error 5"),
+            (WriteAt, "write_at of name failed with OS error 5"),
+            (Sync, "sync of name failed with OS error 5"),
+        ] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new(FILE), operation);
+            let error = Error::Directory(env::files::Error::Io {
+                path: PathBuf::from(FILE),
+                operation,
+                code: 5,
+            });
+            let started = start_and_stop(&mut sim, &host, "edge");
+            assert_eq!(started, Err(error.clone()), "{operation:?}");
+            assert_eq!(
+                error.to_string(),
+                format!("cannot use the data directory: {text}")
+            );
+        }
+    }
+
+    /// A read of the name that fails gives its error, not a name or no name.
+    #[test]
+    fn a_failed_read_of_the_name_gives_its_error() {
+        use env::files::Operation::{Open, ReadAt};
+        for operation in [Open, ReadAt] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            host.fail_file(Path::new(FILE), operation);
+            let error = Error::Directory(env::files::Error::Io {
+                path: PathBuf::from(FILE),
+                operation,
+                code: 5,
+            });
+            let found = resolve(&mut sim, &host, None);
+            assert_eq!(found, Err(error), "{operation:?}");
+        }
     }
 
     #[test]
@@ -5031,27 +5095,37 @@ mod name {
         assert!(!tried.is_empty(), "no seed kept the name in the cache");
     }
 
-    /// A crash at any point of the first start leaves no name or the whole name, and
-    /// the whole name once each ring has opened.
+    /// A crash every 25 µs of the first start, on seeds 0 to 7, leaves no name or the
+    /// whole name, and the whole name once each ring has opened.
     #[test]
     fn a_crash_during_the_first_start_leaves_no_name_or_the_whole_name() {
-        for crash in [sim::Crash::Process, sim::Crash::Power] {
+        let crashes = [sim::Crash::Process, sim::Crash::Power];
+        for (seed, crash) in (0..8).flat_map(|seed| crashes.map(|crash| (seed, crash)))
+        {
             for after in (0..).step_by(25_000).map(Span::from_nanos) {
-                let mut sim = sim::Sim::new(sim::Config::default());
+                let mut sim = sim::Sim::new(sim::Config {
+                    seed,
+                    ..sim::Config::default()
+                });
                 let host = host(&mut sim, 2);
                 let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
                 let probe = probe(&node);
-                assert_eq!(sim.run_for(after), Ok(()), "{crash:?} at {after:?}");
+                let run = sim.run_for(after);
+                assert_eq!(run, Ok(()), "seed {seed}: {crash:?} at {after:?}");
                 let opened = super::buffer::all_opened(&probe, after);
                 sim.crash(&host, crash);
                 drop(node);
                 let found = resolve(&mut sim, &host, None);
                 if opened {
-                    assert_eq!(found, Ok(name("edge")), "{crash:?} at {after:?}");
+                    let at = format!("seed {seed}: {crash:?} at {after:?}");
+                    assert_eq!(found, Ok(name("edge")), "{at}");
                     break;
                 }
                 let kept = [Ok(name("edge")), Err(Error::Unnamed)];
-                assert!(kept.contains(&found), "{found:?}: {crash:?} at {after:?}");
+                assert!(
+                    kept.contains(&found),
+                    "{found:?}: seed {seed}: {crash:?} at {after:?}"
+                );
             }
         }
     }
