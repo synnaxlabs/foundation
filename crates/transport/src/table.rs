@@ -44,7 +44,7 @@ pub(crate) struct Table {
 struct Entry {
     session: session::Weak,
     /// This node dialed `session`.
-    own: bool,
+    dialed: bool,
     dial: Option<Rc<Attempt>>,
     /// The session of a node with a higher key, which this node holds while its own
     /// dial runs or until its own session answers a ping. No caller gets it.
@@ -54,10 +54,10 @@ struct Entry {
 }
 
 impl Entry {
-    /// Makes `session` the open session, which this node dialed when `own`.
-    fn open(&mut self, session: &Session, own: bool) {
+    /// Makes `session` the open session, which this node dialed when `dialed`.
+    fn replace(&mut self, session: &Session, dialed: bool) {
         self.session = session.downgrade();
-        self.own = own;
+        self.dialed = dialed;
     }
 
     /// Closes the held session with `Code(0)`: it lost.
@@ -197,7 +197,7 @@ impl Table {
         let result = match dialed {
             Ok(session) => {
                 entry.close_held();
-                entry.open(&session, true);
+                entry.replace(&session, true);
                 self.push(session.clone());
                 Ok(session)
             }
@@ -231,8 +231,8 @@ impl Table {
         let lower = self.key < node;
         let entry = self.entry(node);
         let open = entry.session.open();
-        let own = open.is_some() && entry.own;
-        if lower && (own || entry.dial.is_some()) {
+        let dialed = open.is_some() && entry.dialed;
+        if lower && (dialed || entry.dial.is_some()) {
             entry.close_held();
             entry.held = Some(session.clone());
             if let Some(open) = open.filter(|_| !entry.proving) {
@@ -242,7 +242,7 @@ impl Table {
             return None;
         }
         entry.close_held();
-        entry.open(&session, false);
+        entry.replace(&session, false);
         if let Some(attempt) = entry.dial.take() {
             attempt.end(Ok(session.clone()));
         }
@@ -300,7 +300,7 @@ impl Table {
             return None;
         }
         let held = entry.held.take().filter(Session::live)?;
-        entry.open(&held, false);
+        entry.replace(&held, false);
         self.push(held.clone());
         Some(held)
     }
@@ -934,7 +934,7 @@ mod tests {
         let table = transport.table.borrow();
         let entry = &table.nodes[&node];
         assert!(entry.session.is(session), "the open session");
-        entry.own
+        entry.dialed
     }
 
     /// A node of [`two_nodes_that_dial_each_other_keep_the_session_of_the_lower_key`]
