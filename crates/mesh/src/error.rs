@@ -261,8 +261,8 @@ pub enum Stopped {
         /// The voter that answered.
         by: node::Key,
     },
-    /// Each `Mesh` of the group dropped. Only `Watch::next` gives it: get a new watch
-    /// from the mesh that opens next.
+    /// Each `Mesh` of the group dropped. Only `Watch::next` and
+    /// `used::Watch::next` give it: get a new watch from the mesh that opens next.
     Dropped,
 }
 
