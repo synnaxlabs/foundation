@@ -232,19 +232,20 @@
   context of the drive until `run` gives a value, so `run` can poll its own sources. One
   drive of a manager runs at a time. A connect, a send, or a close from `run` or from
   another task on that thread wakes the drive. Before the drive gives the value, it
-  passes again after each connect, send, or close that the last `run` or such a pass
-  asks for, so it can also read and call open62541 back after that `run`. At most 256
-  sends wait on one connection: a send past them closes the connection. open62541
-  allocates each send at most at the send buffer size of its channel, so this bounds the
-  memory of a connection at 256 send buffers. Sends wait from one pass to the next, and
-  longer while a stream is full, so an owner keeps the chunks of its messages in flight
-  at 256 or fewer. A client does so with its requests in flight times the chunks of a
-  message. A close reads and drops what the peer sends while it writes what waits,
-  closes its side, then reads until the peer closes its side, so that the drop sends no
-  reset. It drops the stream with a warning 10 s after the first close, so that a peer
-  that reads slowly or never closes cannot hold it. Each connect, read, write, or close
-  error gives a warning through the logger of the loop, then `CLOSING`. The wake of a
-  send on the thread of the drive: decided by `laptop.architect-2`
+  moves on each connection again after each connect, send, or close on it that the last
+  `run` or such a step asks for, so it can also read and call open62541 back after that
+  `run`. At most 256 sends wait on one connection: a send past them closes the
+  connection. open62541 allocates each send at most at the send buffer size of its
+  channel, so this bounds the memory of a connection at 256 send buffers. Sends wait
+  from one pass to the next, and longer while a stream is full, so an owner keeps the
+  chunks of its messages in flight at 256 or fewer. A client does so with its requests
+  in flight times the chunks of a message. A close reads and drops what the peer sends
+  while it writes what waits, closes its side, then reads until the peer closes its
+  side, so that the drop sends no reset. It drops the stream with a warning 10 s after
+  the first close, so that a peer that reads slowly or never closes cannot hold it. Each
+  connect, read, write, or close error gives a warning through the logger of the loop,
+  then `CLOSING`. The wake of a send on the thread of the drive: decided by
+  `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6074418284,
   2026-10-09 04:43 UTC). The rest, before the send bound and the context of `run`:
   approved by `laptop.architect-2`
@@ -255,4 +256,5 @@
   2026-10-09 17:36 UTC). The sends between two passes, the passes before the value, and
   the order of a close: approved by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086204518,
-  2026-10-09 17:46 UTC).
+  2026-10-09 17:46 UTC). The moves of the woken connections
+  alone before the value: approval owed.
