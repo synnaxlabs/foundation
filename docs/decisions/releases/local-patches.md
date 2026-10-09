@@ -28,6 +28,8 @@
   https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391, and
   2026-10-09T05:00:42Z,
   https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074614166).
+  Supersedes the two limits of
+  https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074424462.
   The task checks the graphs of `cargo metadata --locked`, not the text of the two
   tables: a patch that `fuzz/` does not use changes no code that it tests
   (`laptop.architect-2`, 2026-10-09T04:27:21Z,
