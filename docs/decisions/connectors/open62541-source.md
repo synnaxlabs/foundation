@@ -314,4 +314,5 @@
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286,
   2026-10-09 20:26 UTC). The two constructors: decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089351505). The
-  parameters of the first callbacks: approval owed.
+  parameters of the first callbacks: approved by `laptop.architect-2` at `feb6c21a4`
+  (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089521550).
