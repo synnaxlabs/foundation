@@ -7,6 +7,7 @@ use crate::lab::{Lab, Protocol};
 fn a_subject_without_authority_cannot_command_and_the_audit_records_who_did() {
     let mut lab = Lab::new(1);
     let edge = lab.start("edge");
+    lab.mesh(&[edge]);
     lab.device(edge, Protocol::ModbusTcp, "dev");
     lab.apply(edge, include_str!("fixtures/modbus_tcp.hcl"));
     lab.apply(edge, include_str!("fixtures/control.hcl"));

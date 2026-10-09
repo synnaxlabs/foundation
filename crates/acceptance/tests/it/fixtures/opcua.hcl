@@ -10,6 +10,7 @@ channel "dev.q" {
 
 connector "dev" {
   kind = "opcua"
+  node = "edge"
   address = "dev"
   read "dev.p" {
     node = "ns=2;s=p"

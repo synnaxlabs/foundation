@@ -10,6 +10,7 @@ channel "dev.q" {
 
 connector "dev" {
   kind = "modbus"
+  node = "edge"
   transport = "tcp"
   address = "dev"
   read "dev.p" {

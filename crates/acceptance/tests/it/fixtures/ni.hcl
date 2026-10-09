@@ -10,6 +10,7 @@ channel "dev.q" {
 
 connector "dev" {
   kind = "ni"
+  node = "edge"
   address = "dev"
   read "dev.p" {
     physical = "Dev1/ai0"

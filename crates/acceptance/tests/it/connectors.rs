@@ -7,6 +7,7 @@ use crate::lab::{Lab, Protocol};
 fn check(protocol: Protocol, hcl: &str) {
     let mut lab = Lab::new(1);
     let edge = lab.start("edge");
+    lab.mesh(&[edge]);
     lab.device(edge, protocol, "dev");
     lab.set_point("dev", "p", 21.5);
     lab.apply(edge, hcl);
