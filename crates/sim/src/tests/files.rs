@@ -1696,3 +1696,21 @@ fn a_failed_rename_keeps_the_path_of_its_open() {
     .unwrap();
     assert_eq!(node.file_closes(), [PathBuf::from("a")]);
 }
+
+#[test]
+fn each_descriptor_of_a_renamed_file_gives_the_path_of_the_rename() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    sim.run_on(&node, |node, _| async move {
+        let mut writer = create(&node, "a", 0).await;
+        let reader = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
+        writer.rename(Path::new("b")).await.unwrap();
+        drop(writer);
+        drop(reader);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), ["b", "b"].map(PathBuf::from));
+}
