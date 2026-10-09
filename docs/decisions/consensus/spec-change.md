@@ -73,6 +73,10 @@
   defines no channel, and `Config::region` has no panic (#1957 PR 2). The check in the
   mesh only, by `laptop.architect`, 2026-10-09T20:52:20Z
   (https://github.com/synnaxlabs/foundation/issues/2179#issuecomment-6089059684).
+  Supersedes the check in `node` of
+  https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068129791,
+  https://github.com/synnaxlabs/foundation/pull/1966#issuecomment-6068123507, and
+  https://github.com/synnaxlabs/foundation/issues/1957#issuecomment-6070012949.
   Decided by `laptop.architect`: chunks through `blob` and no BQ12 check,
   2026-10-07T06:42:23Z
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6032512454); a spec
