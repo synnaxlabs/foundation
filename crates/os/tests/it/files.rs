@@ -1066,3 +1066,28 @@ fn a_new_directory_takes_the_setgid_bit_of_its_parent() {
     std::fs::set_permissions(&scratch.0, mode).unwrap();
     assert_eq!(opened(&scratch.0), [0o2700, 0o600, 0o2700]);
 }
+
+#[test]
+fn a_remove_through_the_handle_ends_after_the_dropped_write_of_its_handle() {
+    run(|files, data| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let file = create(&files, "a", big as u64).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut remove = stalled(&files, &data, |context| {
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(&mut write, context);
+            drop(write);
+            drop(parts);
+            pool.alloc(big).unwrap_err();
+            let mut remove = Box::pin(file.remove());
+            pend(&mut remove, context);
+            remove
+        })
+        .await;
+        let found = remove.as_mut().await;
+        assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        drop(pool.alloc(big).unwrap());
+    });
+}

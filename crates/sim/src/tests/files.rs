@@ -1903,32 +1903,6 @@ fn a_remove_ends_after_a_dropped_write_ends() {
     assert!(waited, "no remove ended with the write");
 }
 
-/// The time after a `File::remove` of a file with a write in flight whose future
-/// dropped, once a `Files::remove` of its path ended, and what the remove gives.
-fn remove_of_removed_path(value: u64) -> (Monotonic, Result<(), Error>) {
-    run(value, MIB, move |node, _| async move {
-        let (files, pool) = (node.files(), pool());
-        let file = create(&node, "a", KIB).await;
-        let parts = [block(&pool, &[1; 1_024])];
-        let mut write = Box::pin(file.write_at(0, &parts));
-        pend(write.as_mut()).await;
-        files.remove(Path::new("a")).await.unwrap();
-        drop(write);
-        let removed = file.remove().await;
-        (node.clock().now(), removed)
-    })
-}
-
-#[test]
-fn a_remove_through_the_handle_ends_after_a_dropped_write_of_a_removed_path() {
-    for value in 0..32 {
-        let (end, removed) = remove_of_removed_path(value);
-        let (_, written) = write_span(value, false);
-        assert_eq!(removed, Err(Error::NotFound { path: "a".into() }));
-        assert!(written <= end, "value {value}");
-    }
-}
-
 #[test]
 fn a_fault_on_a_remove_fails_it_and_the_file_stays() {
     run(0, MIB, |node, _| async move {
@@ -2193,4 +2167,43 @@ fn an_error_of_a_descriptor_names_the_path_of_its_rename_as_given() {
         let found = file.sync().await;
         assert_eq!(found, Err(Error::Poisoned { path: "./c".into() }));
     });
+}
+
+/// Whether the block of a dropped write of a handle is still in use when the end of
+/// the handle (`File::remove`, or `File::close` when `closed`) returns. A
+/// `Files::remove` unlinked the path of the handle before the write.
+fn block_held_after_end(value: u64, closed: bool) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (pool, files) = (pool(), node.files());
+        let big = pool.largest();
+        let file = create(&node, "a", big as u64).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        pool.alloc(pool.largest()).unwrap_err();
+        if closed {
+            file.close().await;
+        } else {
+            let found = file.remove().await;
+            assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        }
+        pool.alloc(pool.largest()).is_err()
+    })
+}
+
+#[test]
+fn a_close_ends_after_the_dropped_write_of_its_handle() {
+    for value in 0..32 {
+        assert!(!block_held_after_end(value, true), "value {value}");
+    }
+}
+
+#[test]
+fn a_remove_through_the_handle_ends_after_the_dropped_write_of_its_handle() {
+    for value in 0..32 {
+        assert!(!block_held_after_end(value, false), "value {value}");
+    }
 }
