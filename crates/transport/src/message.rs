@@ -600,8 +600,8 @@ mod tests {
                                     limit
                                 );
                                 // Private: only a peer that misframes ends a stream
-                                // inside a message, and no heap count is exact in a
-                                // binary with a test harness.
+                                // inside a message, and no `Transport` call can make
+                                // one.
                                 prop_assert_eq!(reader.buffer().capacity(), 0);
                                 let slots = reader.chunks.capacity();
                                 prop_assert!(
@@ -635,8 +635,7 @@ mod tests {
                         "{len} bytes, then {cut:x?}, {split} per chunk, limit {limit}"
                     );
                     // Private: only a peer that misframes ends a stream inside a
-                    // message, and no heap count is exact in a binary with a test
-                    // harness.
+                    // message, and no `Transport` call can make one.
                     assert_eq!(reader.buffer().capacity(), 0);
                     let slots = reader.chunks.capacity();
                     assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");
@@ -1175,7 +1174,7 @@ mod tests {
             reader.clear();
             assert!(batch.is_unique(), "a chunk outlives the clear");
             // Private: only a peer that misframes ends a stream inside a message, and
-            // no heap count is exact in a binary with a test harness.
+            // no `Transport` call can make one.
             assert_eq!(reader.buffer().capacity(), 0);
             let slots = reader.chunks.capacity();
             assert!(slots <= CHUNKS_MAX, "a list of {slots} slots");

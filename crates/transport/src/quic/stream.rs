@@ -4759,7 +4759,8 @@ mod tests {
         for _ in 0..2 {
             let now = pair.now();
             assert_eq!(next(&mut pair.server, now, receiver), broken);
-            // Private: a message outside the pool shows in no public count.
+            // Private: only a peer that misframes breaks a stream, and no
+            // `Transport` call can misframe.
             assert_eq!(receiver.reader.held(), (None, 0));
         }
         assert_broken(pair, true, reason);
@@ -4804,7 +4805,7 @@ mod tests {
             let now = pair.now();
             let read = next(&mut pair.server, now, &mut receiver);
             assert_eq!(read, Ok(Poll::Pending));
-            // Private: a message outside the pool shows in no public count.
+            // Private: no public call shows a part of a message.
             assert_eq!(receiver.reader.held(), (Some((2, 5)), 0));
             let mut send = pair.client.connection().send_stream(id);
             send.finish().expect("finished");
