@@ -253,6 +253,21 @@ mod tests {
     }
 
     #[test]
+    fn refuses_a_stale_fuzz_lock() {
+        let root = crate::fixture().join("stale");
+        let problems = patched(&root).unwrap_err();
+        let lock = root.join("fuzz/Cargo.lock");
+        let refused = format!(
+            "error: cannot update the lock file {} because --locked was passed to \
+             prevent this\n",
+            lock.display()
+        );
+        assert_eq!(problems.len(), 1);
+        // Cargo can first print that it waits for the lock of its package cache.
+        assert!(problems[0].contains(&refused), "{}", problems[0]);
+    }
+
+    #[test]
     fn graph_holds_each_package_of_the_lock() {
         let graph = graph(&crate::fixture().join("Cargo.toml")).unwrap();
         let mut names: Vec<_> = graph["packages"]
