@@ -110,6 +110,9 @@ state on `main`.
   exchange and one signature, and one signature check more when the peer sends a
   certificate. With no limit, each spoofed Initial holds about 46 KB until the idle
   timeout (#563).
+- Open: #2084 (a peer with no key sends the first packet of a handshake and goes
+  silent, and the stop of the node then waits up to the idle timeout, 30 s, because
+  shard 0 holds `lock` until the transport frees the port).
 
 ### `transport` to protocols
 
