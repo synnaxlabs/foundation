@@ -266,7 +266,7 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
         let dependent = find(field::text(node, "id")?)?;
         for edge in field::list(node, "deps")? {
             let dependency = find(field::text(edge, "pkg")?)?;
-            // Cargo pairs no requirement with an edge from a package to itself.
+            // An edge from a package to itself resolves only a requirement with a path.
             if dependency.copied
                 || dependency.id == dependent.id
                 || !built.iter().any(|(copy, _)| copy.name == dependency.name)
