@@ -43,7 +43,9 @@ impl Drop for Small {
         // While the thread panics, a command can block and a second panic aborts the
         // test binary.
         if !std::thread::panicking() {
-            check(sudo("umount").arg(self.mount()));
+            // Lazy: a command that a parallel test starts can inherit a file on the
+            // mount.
+            check(sudo("umount").arg("-l").arg(self.mount()));
             std::fs::remove_dir_all(&self.0).unwrap();
         }
     }
@@ -97,6 +99,22 @@ fn a_create_after_a_failed_create_gives_full_again() {
         files.open(Path::new("a"), mode).await.unwrap_err();
         let error = files.open(Path::new("a"), mode).await.unwrap_err();
         assert_eq!(error, Error::Full { path: "a".into() });
+    });
+}
+
+/// A command that a parallel test starts inherits a file with no `O_CLOEXEC`, as the
+/// fragmented test holds `fill`.
+#[test]
+fn a_file_that_a_command_inherits_does_not_fail_the_unmount() {
+    use rustix::fs::{self, OFlags};
+    run(|_, data| async move {
+        std::fs::create_dir_all(&data).unwrap();
+        let flags = OFlags::WRONLY.union(OFlags::CREATE);
+        let fill = fs::open(data.join("fill"), flags, fs::Mode::RUSR).unwrap();
+        // The command runs on after the test, and holds the file.
+        let command = Command::new("sleep").arg("2").spawn().unwrap();
+        drop(fill);
+        drop(command);
     });
 }
 
