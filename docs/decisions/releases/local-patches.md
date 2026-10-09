@@ -20,15 +20,19 @@
   2026-10-08T14:16:19Z,
   https://github.com/synnaxlabs/foundation/pull/1864#issuecomment-6061840714).
   `cargo xtask fuzz` fails when `fuzz/` builds a copy that the root does not build, or
-  when the `fuzz` graph resolves a requirement on crates.io that a copy the root builds
-  meets to a package that is not that copy. Cargo applies a patch of
-  `[patch.crates-io]` to each such requirement, so a release that the copy cannot meet
-  passes, and so does a requirement that resolves to nothing, such as an optional
-  dependency that is off (`laptop.architect-2`, 2026-10-09T04:53:51Z,
-  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391, and
-  2026-10-09T05:00:42Z,
-  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074614166).
-  Supersedes the two limits of
+  when a package of the `fuzz` graph has an edge to another package of the name of a
+  copy that the root builds, and a requirement on crates.io, of a kind and target of
+  the edge, that both the copy and that package meet. A requirement that resolves to
+  another package always gives such an edge, so the check has no false pass. Its cost
+  is a false refusal of a requirement of the kind and target of one that resolves to
+  another package, also when it resolves to the copy or to nothing, such as an
+  optional dependency that is off. `fuzz/Cargo.lock` has one package of each copy's
+  name, so no such case exists now (`laptop.architect`, 2026-10-09T06:40:13Z,
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6075796048).
+  Supersedes the pair by edge name of
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074529391 and
+  https://github.com/synnaxlabs/foundation/pull/2099#issuecomment-6074614166, and the
+  two limits of
   https://github.com/synnaxlabs/foundation/issues/1867#issuecomment-6074424462.
   The task checks the graphs of `cargo metadata --locked`, not the text of the two
   tables: a patch that `fuzz/` does not use changes no code that it tests

@@ -20,9 +20,6 @@ pub(crate) fn seconds(text: &str) -> Result<NonZeroU16, String> {
         .map_err(|e| format!("`{text}` is not a count of seconds from 1 to 65535: {e}"))
 }
 
-/// The kinds of a lib target in `cargo metadata`.
-const LIBS: [&str; 6] = ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"];
-
 /// The source of each requirement on crates.io in `cargo metadata`.
 const CRATES_IO: &str = "registry+https://github.com/rust-lang/crates.io-index";
 
@@ -231,15 +228,13 @@ fn bins(graph: &Value) -> Result<Vec<String>, String> {
 
 /// A problem for each package of the `fuzz` graph that is a copy in `patches/` and
 /// that the `root` graph does not build, and for each package and copy that the `root`
-/// graph builds when an edge of the package resolves a requirement on crates.io that
-/// the copy meets to another package. Cargo applies a patch to each such requirement,
-/// so one that an edge to a copy can resolve is not a problem, unless an edge to
-/// another package can resolve only such requirements of one of its kinds and targets.
-/// When two requirements of one
-/// edge name, kind, and target can each resolve, `cargo metadata` does not say which
-/// one an edge resolves, so the check can miss a requirement or refuse one that
-/// resolves to nothing. It fails on an edge to a package with the name of a copy that
-/// no requirement resolves.
+/// graph builds when the package has an edge to another package of the copy's name and
+/// a requirement on crates.io, of a kind and target of the edge, that both the copy and
+/// that package meet. A requirement that resolves to another package always gives such
+/// an edge. A requirement of the kind and target of one that resolves to another
+/// package is refused too, also when it resolves to the copy, or to nothing, such as an
+/// optional one that is off. It fails on an edge to a package with the name of a
+/// copy that no requirement of a kind and target of the edge meets.
 fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
     let root = Package::all(root, &copies)?;
@@ -252,56 +247,33 @@ fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
     let mut problems = strays(&root, &packages);
     for node in field::list(&fuzz["resolve"], "nodes")? {
         let dependent = find(&packages, field::text(node, "id")?)?;
-        let edges = field::list(node, "deps")?;
-        let mut paired = Vec::new();
-        for edge in edges {
-            let dependency = find(&packages, field::text(edge, "pkg")?)?;
-            if built.iter().any(|(copy, _)| copy.name == dependency.name) {
-                let requirements = dependent.requirements(dependency, edge)?;
-                let kinds = field::list(edge, "dep_kinds")?;
-                paired.push((dependency.copied, kinds, requirements));
-            }
-        }
-        let met = |requirement: &Value, parsed: &VersionReq| {
-            let name = requirement["name"].as_str()?;
-            built
-                .iter()
-                .filter(|_| requirement["source"].as_str() == Some(CRATES_IO))
-                .find(|(copy, version)| copy.name == name && parsed.matches(version))
-                .map(|(copy, _)| *copy)
-        };
         let mut reported = Vec::new();
-        for (_, kinds, requirements) in paired.iter().filter(|(copied, ..)| !copied) {
+        for edge in field::list(node, "deps")? {
+            let dependency = find(&packages, field::text(edge, "pkg")?)?;
+            if !built.iter().any(|(copy, _)| copy.name == dependency.name) {
+                continue;
+            }
+            let requirements = dependent.requirements(dependency, edge)?;
+            if dependency.copied {
+                continue;
+            }
             for (requirement, parsed) in requirements {
-                let Some(copy) = met(requirement, parsed) else {
+                let Some((copy, _)) = built.iter().find(|(copy, version)| {
+                    requirement["source"].as_str() == Some(CRATES_IO)
+                        && copy.name == dependency.name
+                        && parsed.matches(version)
+                }) else {
                     continue;
                 };
-                // The edge resolves one requirement of each of its kinds, so when a
-                // copy meets each of one kind, one is not patched.
-                let forced =
-                    kinds
-                        .iter()
-                        .filter(|kind| kinded(kind, requirement))
-                        .any(|kind| {
-                            requirements
-                                .iter()
-                                .filter(|(other, _)| kinded(kind, other))
-                                .all(|(other, parsed)| met(other, parsed).is_some())
-                        });
-                let patched = paired.iter().any(|(copied, _, others)| {
-                    *copied
-                        && others
-                            .iter()
-                            .any(|(other, _)| std::ptr::eq(*other, *requirement))
-                });
-                if patched && !forced || reported.contains(&copy.id) {
+                if reported.contains(&copy.id) {
                     continue;
                 }
                 reported.push(copy.id);
                 problems.push(format!(
                     "fuzz/Cargo.toml does not build `{}` `{}` of `{}` from the copy \
                      `{}` that meets it. Give fuzz/Cargo.toml the [patch.crates-io] \
-                     table of the root Cargo.toml.",
+                     table of the root Cargo.toml. Cargo does not use the copy when \
+                     fuzz/ also needs a release of its series that it does not meet.",
                     copy.name,
                     requirement["req"].as_str().unwrap_or_default(),
                     dependent.id,
@@ -328,12 +300,6 @@ fn strays(root: &[Package<'_>], packages: &[Package<'_>]) -> Vec<String> {
             )
         })
         .collect()
-}
-
-/// Whether `requirement` is of the kind and target of `kind`, an item of the
-/// `dep_kinds` of an edge.
-fn kinded(kind: &Value, requirement: &Value) -> bool {
-    kind["kind"] == requirement["kind"] && kind["target"] == requirement["target"]
 }
 
 /// The package `id` of `packages`, the packages of the `fuzz` graph.
@@ -380,15 +346,11 @@ impl<'a> Package<'a> {
         })
     }
 
-    /// The requirements of the package that `edge` of its node in the resolve, to
-    /// `dependency`, resolves, each with its version requirement: those on
-    /// `dependency` under the name of the edge, of a kind and target of the edge, that
-    /// the version of `dependency` meets. Cargo names an edge from a package to itself
-    /// by the lib target, whatever the rename, so such an edge can resolve a
-    /// requirement on the package with any rename. A package of a registry resolves
-    /// only a requirement on that registry. Two edges can resolve one requirement. It
-    /// fails when none is, or on a version of `dependency` or a requirement that does
-    /// not parse.
+    /// The requirements of the package on `dependency`, each with its version
+    /// requirement, that `edge` of its node in the resolve can resolve: those of a kind
+    /// and target of the edge that the version of `dependency` meets. A requirement
+    /// with a path resolves only to a package with no source. It fails when there is
+    /// none, or on a version of `dependency` or a requirement that does not parse.
     fn requirements(
         &self,
         dependency: &Package<'_>,
@@ -402,17 +364,13 @@ impl<'a> Package<'a> {
             if field::text(requirement, "name")? != dependency.name {
                 continue;
             }
-            let named = match requirement["rename"].as_str() {
-                _ if dependency.id == self.id => true,
-                Some(rename) => rename.replace('-', "_") == name,
-                None => dependency.lib()? == name,
-            };
-            let kind = kinds.iter().any(|kind| kinded(kind, requirement));
-            let sourced = dependency.value["source"].as_str().is_none_or(|source| {
-                source.starts_with("git+")
-                    || requirement["source"].as_str() == Some(source)
+            let kind = kinds.iter().any(|kind| {
+                kind["kind"] == requirement["kind"]
+                    && kind["target"] == requirement["target"]
             });
-            if !named || !kind || !sourced {
+            let sourced = !requirement["source"].is_null()
+                || dependency.value["source"].is_null();
+            if !kind || !sourced {
                 continue;
             }
             let text = field::text(requirement, "req")?;
@@ -439,21 +397,6 @@ impl<'a> Package<'a> {
             ));
         }
         Ok(resolved)
-    }
-
-    /// The name of the lib target of the package, by which a requirement with no rename
-    /// names it.
-    fn lib(&self) -> Result<&'a str, String> {
-        for target in field::list(self.value, "targets")? {
-            let kinds = field::list(target, "kind")?;
-            if kinds
-                .iter()
-                .any(|kind| kind.as_str().is_some_and(|kind| LIBS.contains(&kind)))
-            {
-                return field::text(target, "name");
-            }
-        }
-        Err(format!("`{}` has no lib target", self.id))
     }
 
     /// The version of the package.
@@ -665,7 +608,9 @@ mod tests {
         format!(
             "fuzz/Cargo.toml does not build `noq-proto` `^1.3` of `{TYPES}` from the \
              copy `/w/patches/noq-proto/Cargo.toml` that meets it. Give \
-             fuzz/Cargo.toml the [patch.crates-io] table of the root Cargo.toml."
+             fuzz/Cargo.toml the [patch.crates-io] table of the root Cargo.toml. Cargo \
+             does not use the copy when fuzz/ also needs a release of its series that \
+             it does not meet."
         )
     }
 
@@ -690,7 +635,9 @@ mod tests {
         format!(
             "fuzz/Cargo.toml does not build `p` `{req}` of `{dependent}` from the copy \
              `{}/patches/p/Cargo.toml` that meets it. Give fuzz/Cargo.toml the \
-             [patch.crates-io] table of the root Cargo.toml.",
+             [patch.crates-io] table of the root Cargo.toml. Cargo does not use the \
+             copy when fuzz/ also needs a release of its series that it does not \
+             meet.",
             crate::fixture().join("patched").display()
         )
     }
@@ -742,8 +689,8 @@ mod tests {
     }
 
     #[test]
-    fn passes_a_self_edge_beside_a_patched_requirement_of_the_same_name() {
-        assert_eq!(patched("selfname"), Ok(Vec::new()));
+    fn refuses_a_self_edge_beside_a_patched_requirement_of_the_same_name() {
+        assert_eq!(patched("selfname"), Ok(vec![itself("selfname", "^1")]));
     }
 
     /// The problem of the requirement `req` of `p` 1.4.0, the case `case` of the
@@ -817,6 +764,40 @@ mod tests {
     #[test]
     fn passes_a_path_to_the_copy_beside_a_dev_requirement_of_its_name_with_the_patch() {
         assert_eq!(patched("maskedpatched"), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn refuses_a_release_beside_a_path_to_the_copy_with_a_requirement_of_a_target() {
+        let dependent = format!(
+            "path+file://{}#0.0.0",
+            crate::fixture().join("patched/cases/limitcfg").display()
+        );
+        assert_eq!(patched("limitcfg"), Ok(vec![unmet("^1", &dependent)]));
+    }
+
+    #[test]
+    fn passes_a_requirement_from_git_that_a_patch_points_at_a_release() {
+        assert_eq!(patched("gitpatch"), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn refuses_an_optional_requirement_that_is_off_beside_a_release_of_its_name() {
+        for case in ["offrename", "split"] {
+            let dependent = format!(
+                "path+file://{}#0.0.0",
+                crate::fixture().join("patched/cases").join(case).display()
+            );
+            assert_eq!(patched(case), Ok(vec![unmet("^1", &dependent)]));
+        }
+    }
+
+    #[test]
+    fn refuses_a_requirement_that_a_release_of_the_series_of_the_copy_takes() {
+        let member = format!(
+            "path+file://{}#0.0.0",
+            crate::fixture().join("patched/cases/unified/u").display()
+        );
+        assert_eq!(patched("unified"), Ok(vec![unmet("^1", &member)]));
     }
 
     #[test]
@@ -933,29 +914,7 @@ mod tests {
     }
 
     #[test]
-    fn names_a_missing_field_of_a_target_or_an_edge() {
-        for (key, kind) in [("targets", "array"), ("kind", "array"), ("name", "string")]
-        {
-            let needing = needs(types(), "noq-proto", "^1.3");
-            let mut lacking =
-                fuzz(&[needing, release("1.3.0")], &[(TYPES, &id("1.3.0"))]);
-            lacking["packages"][1]
-                .as_object_mut()
-                .unwrap()
-                .remove("targets");
-            if key != "targets" {
-                lacking["packages"][1]["targets"] =
-                    json!([{ "name": "noq_proto", "kind": ["lib"] }]);
-                lacking["packages"][1]["targets"][0]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove(key);
-            }
-            assert_eq!(
-                unpatched(&root(), &lacking),
-                Err(format!("JSON has no {kind} field `{key}`"))
-            );
-        }
+    fn names_a_missing_field_of_an_edge() {
         for (key, kind) in [("name", "string"), ("dep_kinds", "array")] {
             let needing = needs(types(), "noq-proto", "^1.3");
             let mut lacking =
@@ -1099,12 +1058,15 @@ mod tests {
     }
 
     #[test]
-    fn passes_a_requirement_that_an_edge_to_a_copy_can_resolve() {
+    fn refuses_a_requirement_that_an_edge_to_a_copy_can_resolve_beside_a_release() {
         let types = needs(needs(types(), "noq-proto", "^1.3"), "noq-proto", "^1.5");
         let packages = [types, copy(), self::release("1.5.0")];
         let release = id("1.5.0");
         let edges = [(TYPES, PATCHED), (TYPES, release.as_str())];
-        assert_eq!(unpatched(&root(), &fuzz(&packages, &edges)), Ok(Vec::new()));
+        assert_eq!(
+            unpatched(&root(), &fuzz(&packages, &edges)),
+            Ok(vec![missed()])
+        );
     }
 
     /// The error for an edge `noq_proto` of `types` to `to` that nothing resolves.
@@ -1128,13 +1090,13 @@ mod tests {
     }
 
     #[test]
-    fn pairs_an_edge_with_a_requirement_by_rename_package_kind_and_target() {
+    fn pairs_an_edge_with_a_requirement_by_package_kind_and_target() {
         let unnamed = Err(unresolved(&id("1.3.0")));
         let refused = Ok(vec![missed()]);
         let renamed =
             |requirement: &mut Value| requirement["rename"] = json!("the-proto");
         assert_eq!(paired("the_proto", renamed), refused);
-        assert_eq!(paired("noq_proto", renamed), unnamed);
+        assert_eq!(paired("noq_proto", renamed), refused);
         let other = |requirement: &mut Value| {
             requirement["name"] = json!("other");
             requirement["rename"] = json!("noq-proto");
@@ -1145,33 +1107,6 @@ mod tests {
         let unix = |requirement: &mut Value| requirement["target"] = json!("cfg(unix)");
         assert_eq!(paired("noq_proto", unix), unnamed);
         assert_eq!(paired("noq_proto", |_| ()), refused);
-    }
-
-    #[test]
-    fn names_a_dependency_with_no_lib_target() {
-        let mut bin = release("1.3.0");
-        bin["targets"] = json!([{ "name": "noq_proto", "kind": ["bin"] }]);
-        let needing = needs(types(), "noq-proto", "^1.3");
-        let fuzz = fuzz(&[needing, bin], &[(TYPES, &id("1.3.0"))]);
-        assert_eq!(
-            unpatched(&root(), &fuzz),
-            Err(format!("`{}` has no lib target", id("1.3.0")))
-        );
-    }
-
-    #[test]
-    fn reads_the_lib_target_of_each_kind() {
-        for kind in ["lib", "rlib", "dylib", "cdylib", "staticlib", "proc-macro"] {
-            let mut lib = release("1.3.0");
-            lib["targets"] = json!([
-                { "name": "noq_proto", "kind": ["bin"] },
-                { "name": "noq_proto", "kind": [kind] },
-            ]);
-            assert_eq!(
-                Package::read(&lib, Path::new("/w/patches")).unwrap().lib(),
-                Ok("noq_proto")
-            );
-        }
     }
 
     #[test]
