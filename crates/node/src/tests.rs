@@ -1916,8 +1916,19 @@ mod hub {
 
     /// Writes one sample at `stamp` to `time` and `value` to `value`.
     pub(super) fn write(writer: &mut Writer, stamp: i64, value: i64) {
+        write_at(writer, [1, 2], stamp, value);
+    }
+
+    /// Writes one sample at `stamp` to the index of key `time` and `value` to the
+    /// data channel of key `data`.
+    pub(super) fn write_at(
+        writer: &mut Writer,
+        [time, data]: [u128; 2],
+        stamp: i64,
+        value: i64,
+    ) {
         let set = writer.set();
-        let (time, data) = (entry(set, 1), entry(set, 2));
+        let (time, data) = (entry(set, time), entry(set, data));
         let group = set.entries()[time].group;
         let mut series = [(time, 8), (data, 8)];
         series.sort_unstable();
@@ -3364,6 +3375,7 @@ mod port {
         use spec::subject::Subject;
         use spec::tree::Chunks;
         use types::channel;
+        use types::name::Name;
         use types::node::SealKey;
 
         use super::*;
@@ -3498,37 +3510,45 @@ mod port {
             assert_eq!(read, Some((vec![stamp], vec![7])));
         }
 
-        /// A founding with a data channel whose index the spec does not hold fails the
-        /// node at its first open.
+        /// A founding with a data channel whose index the spec does not hold has
+        /// problems, so the node runs and defines no channel.
         #[test]
-        fn a_founding_with_a_dangling_index_fails_the_node() {
+        fn a_founding_with_a_dangling_index_defines_no_channel() {
             use super::super::hub::{I64, data};
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let mut founding = region(&[member(OWN, &KEY, &host)]);
-            let name = "plant.value".parse().unwrap();
+            let value: Name = "plant.value".parse().unwrap();
             let channel = Definition::Channel(data(2, I64, 1));
-            founding.definitions.insert(name, channel);
+            founding.definitions.insert(value.clone(), channel);
             let node = start(&host, founding);
-            let index = types::channel::Key::from_u128(1);
-            assert_eq!(
-                sim.run(),
-                Err(sim::Error::Panicked {
-                    thread: "shard-0".into(),
-                    message: format!(
-                        "the index {index} of channel plant.value is not an index of the \
-                         definitions"
-                    ),
-                    seed: 0,
-                })
-            );
+            let unknown = ::hub::reader::Error::Unknown(value);
+            assert_eq!(readers(&mut sim, &node, &["plant.value"]), [Some(unknown)]);
+            node.stop();
             assert_eq!(sim.run(), Ok(()));
-            assert_eq!(
-                node.join(),
-                Err(Error::Panicked(thread::Panicked {
-                    name: "shard-0".into()
-                }))
-            );
+            assert_eq!(node.join(), Ok(()));
+        }
+
+        /// The error of a reader that a task on `node` opens on each of `names`, or
+        /// `None` for one that opens.
+        fn readers(
+            sim: &mut sim::Sim,
+            node: &Node,
+            names: &[&str],
+        ) -> Vec<Option<::hub::reader::Error>> {
+            let names: Vec<Name> =
+                names.iter().map(|name| name.parse().unwrap()).collect();
+            let errors = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&errors);
+            node.spawn(move |hub| async move {
+                for name in names {
+                    let reader =
+                        hub.reader(&[name], ::hub::reader::Mode::Complete).await;
+                    out.lock().unwrap().push(reader.err());
+                }
+            });
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            errors.lock().unwrap().drain(..).collect()
         }
 
         /// The node defines the founding channels at each open, not only at the
@@ -5128,21 +5148,147 @@ mod port {
         /// Applies the index `plant.<name>` homed on [`OWN`] through `ops`, and gives
         /// its key.
         async fn apply_index(ops: &ops::Node, name: &str) -> channel::Key {
-            let text = format!(
-                "channel \"plant.{name}\" {{ kind = \"index\" }}\n\
+            key_of(&apply(ops, text(name, &[])).await, name)
+        }
+
+        /// The text of a spec with the index `plant.<index>` homed on [`OWN`] and an
+        /// `i64` data channel `plant.<name>` on it for each of `data`.
+        fn text(index: &str, data: &[&str]) -> String {
+            use std::fmt::Write as _;
+            let mut text = format!(
+                "channel \"plant.{index}\" {{ kind = \"index\" }}\n\
                  placement \"plant\" {{\n  select = \"plant.*\"\n  home = \"plant.node{OWN}\"\n}}\n"
             );
-            let files = vec![(std::path::PathBuf::from(format!("{name}.hcl")), text)];
+            for name in data {
+                writeln!(
+                    text,
+                    "channel \"plant.{name}\" {{\n  data_type = \"i64\"\n  index = \"plant.{index}\"\n}}"
+                )
+                .unwrap();
+            }
+            text
+        }
+
+        /// Applies `text` through `ops`, and gives the definitions of the spec in use
+        /// after it.
+        async fn apply(ops: &ops::Node, text: String) -> BTreeMap<Name, Definition> {
+            let files = vec![(std::path::PathBuf::from("plant.hcl"), text)];
             let (plan, _) = ops.plan(files).await.expect("a plan");
             let path = std::path::Path::new("plant.plan");
             ops.apply(path, &plan).await.expect("an apply");
-            let spec = ops.mesh().spec().await.expect("a spec");
+            Rc::unwrap_or_clone(ops.mesh().spec().await.expect("a spec").definitions)
+        }
+
+        /// The key of the channel `plant.<name>` of `definitions`.
+        fn key_of(
+            definitions: &BTreeMap<Name, Definition>,
+            name: &str,
+        ) -> channel::Key {
             let label = Kind::Channel.key(&format!("plant.{name}")).unwrap();
-            let Some(Definition::Channel(channel)) = spec.definitions.get(&label)
-            else {
+            let Some(Definition::Channel(channel)) = definitions.get(&label) else {
                 panic!("a channel at plant.{name}");
             };
             channel.key
+        }
+
+        /// Starts the node [`OWN`] on `host` with `founding` and applies `text` through
+        /// its operations, then gives the node and the definitions after the apply.
+        fn applied(
+            sim: &mut sim::Sim,
+            host: &sim::node::Node,
+            founding: Founding,
+            text: String,
+        ) -> (Node, BTreeMap<Name, Definition>) {
+            let node = start(host, founding);
+            let applied = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&applied);
+            node.operate(move |ops| async move {
+                let definitions = apply(&ops, text).await;
+                *out.lock().unwrap() = Some(definitions);
+            });
+            assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
+            let definitions = applied.lock().unwrap().take().expect("an apply");
+            (node, definitions)
+        }
+
+        /// The hub knows each channel that an apply adds, so a task opens a writer and
+        /// a reader on them by name.
+        #[test]
+        fn a_task_opens_sessions_on_the_channels_that_an_apply_adds() {
+            use super::super::hub::{WALL, samples, write_at, writer};
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let founding = region(&[member(OWN, &KEY, &host)]);
+            let (node, definitions) =
+                applied(&mut sim, &host, founding, text("time", &["value"]));
+            let keys =
+                ["time", "value"].map(|name| key_of(&definitions, name).as_u128());
+            let read = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&read);
+            node.spawn(move |hub| async move {
+                let value = "plant.value".parse().unwrap();
+                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let mut reader = reader.expect("the reader opens");
+                let mut writer = writer(&hub, &["plant.value"]).await;
+                write_at(&mut writer, keys, WALL, 7);
+                let received = reader.next().await.expect("a frame");
+                *out.lock().unwrap() =
+                    Some((samples(&received, keys[0]), samples(&received, keys[1])));
+            });
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            assert_eq!(read.lock().unwrap().take(), Some((vec![WALL], vec![7])));
+        }
+
+        /// An apply that removes a channel ends each reader on it.
+        #[test]
+        fn an_apply_that_removes_a_channel_ends_each_reader_on_it() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let founding = region(&[member(OWN, &KEY, &host)]);
+            let (node, definitions) =
+                applied(&mut sim, &host, founding, text("time", &["value"]));
+            let ended = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&ended);
+            node.spawn(move |hub| async move {
+                let value = "plant.value".parse().unwrap();
+                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let mut reader = reader.expect("the reader opens");
+                *out.lock().unwrap() = Some(reader.next().await.map(|_| ()));
+            });
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            assert_eq!(*ended.lock().unwrap(), None);
+            node.operate(|ops| async move {
+                apply(&ops, text("time", &[])).await;
+            });
+            assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let removed = ::hub::reader::Ended::Removed(key_of(&definitions, "value"));
+            assert_eq!(ended.lock().unwrap().take(), Some(Err(removed)));
+        }
+
+        /// A node that opens again after an apply defines the spec in use, not the
+        /// founding.
+        #[test]
+        fn a_node_that_opens_again_after_an_apply_knows_the_applied_channels() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let (node, _) =
+                applied(&mut sim, &host, founded(&host), text("time", &["flow"]));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let node = start(&host, founded(&host));
+            let unknown = ::hub::reader::Error::Unknown("plant.value".parse().unwrap());
+            let readers = readers(&mut sim, &node, &["plant.value", "plant.flow"]);
+            assert_eq!(readers, [Some(unknown), None]);
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
         }
 
         /// A node with a region whose port does not bind drops a task of `operate`
