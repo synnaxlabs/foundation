@@ -446,9 +446,9 @@ fn stops_an_open_session_with_unknown_when_its_channel_is_removed() {
     );
 }
 
-/// Sends the open of `[value, time]` and only the first message of its keys run,
-/// which holds `value`, and waits for the stop with `UNKNOWN`.
-async fn open_first_of_two(mut peer: Peer) {
+/// Sends the open of `[value, time]` and the first message of its keys run, which
+/// holds `value`.
+async fn open_first_of_two(peer: &mut Peer) {
     let open = Open {
         mode: Mode::Complete {
             limit_bytes: 1 << 20,
@@ -461,6 +461,12 @@ async fn open_first_of_two(mut peer: Peer) {
     let mut out = vec![0; keys::LEN];
     keys::encode(&[channel::Key::from_u128(2)], &mut out);
     peer.send(&out).await.expect("sends a key");
+}
+
+/// Sends the first message of the keys run of `[value, time]`, and waits for the stop
+/// with `UNKNOWN`.
+async fn stopped_after_first_of_two(mut peer: Peer) {
+    open_first_of_two(&mut peer).await;
     stopped_as_unknown(&mut peer).await;
 }
 
@@ -468,7 +474,7 @@ async fn open_first_of_two(mut peer: Peer) {
 /// ends the open while it waits for the second.
 #[test]
 fn stops_an_open_whose_keys_run_spans_a_removal_with_unknown() {
-    let served = removed(71, open_first_of_two);
+    let served = removed(71, stopped_after_first_of_two);
     let removed = serve::Error::Removed(channel::Key::from_u128(2));
     assert_eq!(served, Some(Err(removed)));
 }
@@ -481,18 +487,70 @@ fn stops_an_open_whose_keys_run_spans_a_removal_undone_with_unknown() {
         hub.set_definitions(&without(&["value"]));
         hub.set_definitions(&channels());
     };
-    let served = changed(81, change, open_first_of_two);
+    let served = changed(81, change, stopped_after_first_of_two);
     let removed = serve::Error::Removed(channel::Key::from_u128(2));
     assert_eq!(served, Some(Err(removed)));
 }
 
-/// The open names the first of its channels that the call removed.
-#[test]
-fn stops_an_open_whose_keys_run_spans_a_removal_of_its_later_key_with_the_first() {
-    let change = |hub: &hub::Hub| {
-        hub.set_definitions(&without(&["time", "value", "value-c"]));
+/// Runs a session whose home removes `time`, `value`, and `value-c` in its first poll
+/// after `SETTLE`, before the poll of `serve` in which a message of the peer has come,
+/// and gives what `serve` returned.
+fn removed_at_arrival<P>(
+    n: u64,
+    peer: impl FnOnce(Peer) -> P + Send + 'static,
+) -> Option<Result<(), serve::Error>>
+where
+    P: Future<Output = ()> + 'static,
+{
+    let result = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&result);
+    let home = move |test: Test, link: Link, incoming| async move {
+        let at = test.clock.now() + SETTLE;
+        let mut serve = pin!(link.serve(incoming));
+        let mut removed = false;
+        let served = poll_fn(|cx| {
+            if !removed && test.clock.now() >= at {
+                removed = true;
+                test.hub
+                    .set_definitions(&without(&["time", "value", "value-c"]));
+            }
+            serve.as_mut().poll(cx)
+        })
+        .await;
+        *kept.lock().expect("not poisoned") = Some(served.map(drop));
     };
-    let served = changed(82, change, open_first_of_two);
+    session(n, Class::Complete, false, home, peer);
+    result.lock().expect("not poisoned").take()
+}
+
+/// The open reads its removal before it checks the later key `time`, which the call
+/// also removed.
+#[test]
+fn stops_an_open_with_its_removal_before_it_checks_a_later_key() {
+    let served = removed_at_arrival(82, |mut peer| async move {
+        open_first_of_two(&mut peer).await;
+        peer.sleep(SETTLE).await;
+        peer.sleep(SETTLE).await;
+        let mut out = vec![0; keys::LEN];
+        keys::encode(&[channel::Key::from_u128(1)], &mut out);
+        peer.send(&out).await.expect("sends a key");
+        stopped_as_unknown(&mut peer).await;
+    });
+    let removed = serve::Error::Removed(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(removed)));
+}
+
+/// The open reads its removal before it reads that its peer finished.
+#[test]
+fn stops_an_open_with_its_removal_before_it_reads_a_finish() {
+    let served = removed_at_arrival(91, |mut peer| async move {
+        open_first_of_two(&mut peer).await;
+        peer.sleep(SETTLE).await;
+        peer.sleep(SETTLE).await;
+        peer.sender.finish().expect("finishes");
+        let code = Code(wire::hub::UNKNOWN);
+        assert_eq!(peer.recv().await, Err(transport::Error::Reset { code }));
+    });
     let removed = serve::Error::Removed(channel::Key::from_u128(2));
     assert_eq!(served, Some(Err(removed)));
 }
