@@ -10,9 +10,12 @@ all-features = true
 allow = [
   "MIT",
   "Apache-2.0",
+  "BSD-2-Clause",
   "BSD-3-Clause",
   "ISC",
   "Unicode-3.0",
+  # `finl_unicode`, under `comrak` (docs/dependencies.md).
+  "Unicode-DFS-2016",
   "Zlib",
   # `libfuzzer-sys` (docs/dependencies.md).
   "NCSA",

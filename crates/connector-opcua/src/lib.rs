@@ -3,9 +3,20 @@
 
 #[cfg(feature = "open62541")]
 mod alloc;
-// Only `link` calls it until the event loop of #435 does.
-#[cfg(test)]
+#[cfg(feature = "sim")]
+#[doc(hidden)]
+pub mod bench;
 #[cfg(feature = "open62541")]
+#[cfg_attr(
+    not(feature = "sim"),
+    expect(dead_code, reason = "only `bench` uses it until the session of #435")
+)]
+mod event;
+#[cfg(feature = "open62541")]
+#[cfg_attr(
+    not(feature = "sim"),
+    expect(dead_code, reason = "only `bench` uses it until the session of #435")
+)]
 mod ffi;
 #[cfg(test)]
 #[cfg(feature = "open62541")]
@@ -103,7 +114,11 @@ mod tests {
         );
         for path in ["/missing/gcc", "/missing/clang"] {
             let shim = args(&tool(shim.clone(), path));
-            assert_eq!(includes(&shim), dirs, "{path}: {shim:?}");
+            assert_eq!(
+                includes(&shim),
+                [dirs[0], dirs[1], "/copy/arch/common"],
+                "{path}: {shim:?}"
+            );
             for arg in ["-Wall", "-Wextra", "-Werror", "-std=c99", &header] {
                 assert!(shim.iter().any(|a| a == arg), "{path}: {arg} in {shim:?}");
             }

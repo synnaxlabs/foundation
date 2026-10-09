@@ -872,6 +872,29 @@ impl Wake for Counted {
 }
 
 #[test]
+fn an_accept_after_an_accepted_stream_is_pending_until_the_next_connect() {
+    on_thread("net-accept-wake", || async {
+        let net = net();
+        let (mut listener, _client, _server) = create_pair(&net).await;
+        let counted = Arc::new(Counted {
+            wakes: AtomicUsize::new(0),
+            woken: Notify::new(),
+        });
+        let waker = Waker::from(Arc::clone(&counted));
+        let mut cx = Context::from_waker(&waker);
+        assert!(listener.poll_accept(&mut cx).is_pending());
+        let client = connect(&net, listener.local()).await;
+        timeout(BOUND, counted.woken.notified())
+            .await
+            .expect("the connect wakes the accept");
+        let Poll::Ready(Ok(accepted)) = listener.poll_accept(&mut cx) else {
+            panic!("the connect waits in the backlog");
+        };
+        assert_eq!(accepted.peer(), client.local());
+    });
+}
+
+#[test]
 fn a_read_with_no_data_is_pending_until_the_peer_writes() {
     on_thread("net-pending", || async {
         let net = net();
