@@ -7,6 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use serde_json::Value;
 
+use crate::field;
+
 /// The seconds of each target when the task names none.
 pub(crate) const SECONDS: NonZeroU64 = NonZeroU64::new(60).unwrap();
 
@@ -159,7 +161,8 @@ fn report(target: &str, output: &Output) -> String {
 /// crate that the root `Cargo.toml` patches from its copy in `patches/`.
 fn patched(root: &Path) -> Result<(), Vec<String>> {
     let graph = |manifest: &str| graph(&root.join(manifest)).map_err(|e| vec![e]);
-    let problems = unpatched(&graph("Cargo.toml")?, &graph("fuzz/Cargo.toml")?);
+    let problems = unpatched(&graph("Cargo.toml")?, &graph("fuzz/Cargo.toml")?)
+        .map_err(|e| vec![e])?;
     if problems.is_empty() {
         Ok(())
     } else {
@@ -186,36 +189,42 @@ fn graph(manifest: &Path) -> Result<Value, String> {
     serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata: {e}"))
 }
 
-/// A problem for each package of the `fuzz` graph whose name the `root` graph builds
-/// from a copy in `patches/`, when the `root` graph has no package of its key.
-fn unpatched(root: &Value, fuzz: &Value) -> Vec<String> {
-    let packages =
-        |graph: &Value| graph["packages"].as_array().cloned().unwrap_or_default();
-    let root_packages = packages(root);
-    let copies =
-        Path::new(root["workspace_root"].as_str().unwrap_or_default()).join("patches");
-    let patched = |name: &str| {
-        root_packages.iter().any(|package| {
-            package["name"] == name
-                && package["manifest_path"]
-                    .as_str()
-                    .is_some_and(|path| Path::new(path).starts_with(&copies))
-        })
+/// A problem for each package of the `fuzz` graph that is a copy in `patches/`, or
+/// whose name the `root` graph builds from such a copy, when the `root` graph has no
+/// package of its key.
+fn unpatched(root: &Value, fuzz: &Value) -> Result<Vec<String>, String> {
+    let root_packages = field::list(root, "packages")?;
+    let copies = Path::new(field::text(root, "workspace_root")?).join("patches");
+    let copy = |package: &Value| {
+        field::text(package, "manifest_path")
+            .map(|path| Path::new(path).starts_with(&copies))
     };
-    packages(fuzz)
-        .iter()
-        .filter(|package| package["name"].as_str().is_some_and(patched))
-        .filter(|package| !root_packages.iter().any(|p| p["id"] == package["id"]))
-        .map(|package| {
-            format!(
-                "fuzz/Cargo.toml builds `{}` from `{}`, not from the copy in patches/ that \
-                 the root Cargo.toml builds. Give fuzz/Cargo.toml the [patch.crates-io] \
-                 table of the root Cargo.toml.",
-                package["name"].as_str().unwrap_or_default(),
-                package["manifest_path"].as_str().unwrap_or_default(),
-            )
-        })
-        .collect()
+    let mut problems = Vec::new();
+    for package in field::list(fuzz, "packages")? {
+        let id = field::text(package, "id")?;
+        if root_packages.iter().any(|p| p["id"] == id) {
+            continue;
+        }
+        let name = field::text(package, "name")?;
+        let manifest = field::text(package, "manifest_path")?;
+        if copy(package)? {
+            problems.push(format!(
+                "fuzz/Cargo.toml builds `{name}` from the copy `{manifest}`, which the \
+                 root Cargo.toml does not build. Give fuzz/Cargo.toml the \
+                 [patch.crates-io] table of the root Cargo.toml."
+            ));
+        }
+        for namesake in root_packages.iter().filter(|p| p["name"] == name) {
+            if copy(namesake)? {
+                problems.push(format!(
+                    "fuzz/Cargo.toml builds `{name}` from `{manifest}`, not from the copy \
+                     in patches/ that the root Cargo.toml builds. Give fuzz/Cargo.toml \
+                     the [patch.crates-io] table of the root Cargo.toml."
+                ));
+            }
+        }
+    }
+    Ok(problems)
 }
 
 #[cfg(test)]
@@ -287,7 +296,7 @@ mod tests {
             PATCHED,
             "/w/patches/noq-proto/Cargo.toml",
         )]);
-        assert_eq!(unpatched(&root(), &fuzz), Vec::<String>::new());
+        assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
     }
 
     #[test]
@@ -299,11 +308,48 @@ mod tests {
         )]);
         assert_eq!(
             unpatched(&root(), &fuzz),
-            [
+            Ok(vec![
                 "fuzz/Cargo.toml builds `noq-proto` from `/r/noq-proto-1.3.0/Cargo.toml`, \
                  not from the copy in patches/ that the root Cargo.toml builds. Give \
                  fuzz/Cargo.toml the [patch.crates-io] table of the root Cargo.toml."
-            ]
+                    .to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn refuses_a_fuzz_graph_that_builds_a_copy_the_root_does_not() {
+        let fuzz = fuzz(&[package(
+            "noq-udp",
+            "path+file:///w/patches/noq-udp#noq-udp@1.3.0",
+            "/w/patches/noq-udp/Cargo.toml",
+        )]);
+        assert_eq!(
+            unpatched(&root(), &fuzz),
+            Ok(vec![
+                "fuzz/Cargo.toml builds `noq-udp` from the copy \
+                 `/w/patches/noq-udp/Cargo.toml`, which the root Cargo.toml does not \
+                 build. Give fuzz/Cargo.toml the [patch.crates-io] table of the root \
+                 Cargo.toml."
+                    .to_string()
+            ])
+        );
+    }
+
+    #[test]
+    fn names_a_missing_field_of_a_graph() {
+        assert_eq!(
+            unpatched(&json!({ "workspace_root": "/w" }), &fuzz(&[])),
+            Err("JSON has no array field `packages`".to_string())
+        );
+        assert_eq!(
+            unpatched(&json!({ "packages": [] }), &fuzz(&[])),
+            Err("JSON has no string field `workspace_root`".to_string())
+        );
+        let nameless = json!({ "id": "x", "manifest_path": "/r/x/Cargo.toml" });
+        assert_eq!(
+            unpatched(&root(), &fuzz(&[nameless])),
+            Err("JSON has no string field `name`".to_string())
         );
     }
 
@@ -321,7 +367,7 @@ mod tests {
                 "/r/crc32c-0.6.8/Cargo.toml",
             ),
         ]);
-        assert_eq!(unpatched(&root(), &fuzz), Vec::<String>::new());
+        assert_eq!(unpatched(&root(), &fuzz), Ok(Vec::new()));
     }
 
     #[test]
