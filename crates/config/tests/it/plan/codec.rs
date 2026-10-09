@@ -3,10 +3,12 @@ use std::collections::BTreeMap;
 use config::Definition;
 use config::plan::{Error, Plan};
 use proptest::prelude::*;
+use spec::access::{self, Action};
 use spec::channel::{Edge, Problem};
-use spec::definition::Definition as Stored;
+use spec::definition::{Definition as Stored, Kind};
 use spec::region;
 use spec::time::{self, Peers};
+use types::authority::Authority;
 use types::channel::Key;
 use types::digest::Digest;
 use types::ed25519::PrivateKey;
@@ -508,6 +510,32 @@ fn refuses_a_wrong_byte_inside_a_spec_definition_at_its_count() {
     found[start + 1] = 0xff;
     let error = Plan::decode(&found).expect_err("an unknown tag");
     assert_eq!(error, Error::Malformed { at: start - 8 });
+}
+
+#[test]
+fn refuses_an_access_change_that_allows_nothing_at_its_count() {
+    let subjects = Selector::new(["s.*"]).expect("a selector");
+    let select = Selector::new(["x.**"]).expect("a selector");
+    let allow = [Action::Read].into_iter().collect();
+    let policy = access::Policy::new(subjects, select, allow, Authority(0));
+    let mut inner = Stored::Access(policy.expect("a policy")).encode();
+    let actions = inner.len() - 2;
+    inner[actions] = 0;
+    let name = Kind::Access.key("x").expect("a tree key");
+    let mut change = [text(name.as_str()), vec![0, 1, 0]].concat();
+    let count = change.len();
+    change.extend_from_slice(&(inner.len() as u64).to_le_bytes());
+    change.extend(inner);
+    let found = bytes(&[change]);
+    let input = include_bytes!("../../../../../oracles/fuzz/config_plan/access_empty");
+    assert_eq!(found, input);
+    let error = Plan::decode(&found);
+    assert_eq!(
+        error,
+        Err(Error::Malformed {
+            at: CHANGES + count
+        })
+    );
 }
 
 /// Each plan of [`plans`], with a part of its changes and homes, and another base

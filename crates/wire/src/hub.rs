@@ -53,7 +53,8 @@ pub const UNKNOWN: u32 = 16;
 pub const NOT_HOME: u32 = 17;
 /// Stop code: the home's buffer failed.
 pub const FAILED: u32 = 18;
-/// Stop code: the home had no memory for a reply. A later open can succeed.
+/// Stop code: the home had no memory for a reply, or the node had no room for a
+/// request body under its cap. A later open or request can succeed.
 pub const BUSY: u32 = 19;
 
 /// The first message from the reader's node, which opens the session. The run of its

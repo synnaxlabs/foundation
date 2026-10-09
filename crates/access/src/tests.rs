@@ -29,6 +29,7 @@ fn policy(subjects: &str, select: &str, allow: &[Action], authority: u8) -> Poli
         allow.iter().copied().collect(),
         Authority(authority),
     )
+    .unwrap()
 }
 
 fn connector() -> Definition {
@@ -340,7 +341,7 @@ fn arbitrary_policy() -> impl Strategy<Value = (&'static str, Policy)> {
     let regions = prop::sample::select(vec!["", "a", "a.b", "b"]);
     let selects = prop::sample::select(vec!["**", "a.**", "b.*", "a.b.**", "*.x"]);
     let subjects = prop::sample::select(vec!["**", "s.*", "s.x", "t.*"]);
-    let allow = prop::sample::subsequence(spec_actions(), 0..=6);
+    let allow = prop::sample::subsequence(spec_actions(), 1..=6);
     (regions, subjects, selects, allow, any::<u8>())
         .prop_map(|(r, s, sel, a, auth)| (r, policy(s, sel, &a, auth)))
 }
