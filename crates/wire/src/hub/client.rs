@@ -56,7 +56,8 @@ pub const STALE: u32 = 22;
 /// Stop code: the hello names another node as `via` than the node that carried it.
 pub const VIA: u32 = 23;
 
-/// Stop code: the hello ended.
+/// Stop code: the hello ended, at its `expires` or earlier, at the cap of the node on the
+/// life of a hello.
 pub const EXPIRED: u32 = 24;
 
 /// Stop code: a renewal names another subject, key, `via`, or connection than the
