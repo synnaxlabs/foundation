@@ -44,8 +44,7 @@
   places. The ends and the body are in place order: the home writes the series of each
   place it has, from 0, each from the frame's block as a slice, with ends it computes in
   that order. It cuts each series from `Frame::body` by `frame::Places::lay`, which
-  finds them with `View::bounds`
-  (the architect, 2026-10-07T22:35:41Z,
+  finds them with `View::bounds` (the architect, 2026-10-07T22:35:41Z,
   https://github.com/synnaxlabs/foundation/issues/1639#issuecomment-6048265226; lost:
   `View::ends`, which gives no start, and `Frame::bounds`, a search for each place).
   `View::bounds` is crate-private, as no crate outside `types` calls it (the architect,
