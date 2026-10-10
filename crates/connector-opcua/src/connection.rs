@@ -33,24 +33,6 @@ const OPTIONS: tcp::Options = tcp::Options {
     delayed: false,
 };
 
-/// Listens on `local` with a queue of `backlog` streams, each with the options of a
-/// stream of a manager, for [`Manager::listening`].
-///
-/// # Errors
-///
-/// As [`Net::listen`].
-pub(crate) fn bind(
-    net: &Net,
-    local: SocketAddr,
-    backlog: u32,
-) -> Result<Listener, net::Error> {
-    net.listen(&tcp::Listen {
-        local,
-        backlog,
-        options: OPTIONS,
-    })
-}
-
 /// The size of the read buffer of each connection.
 const READ_BYTES: usize = 1 << 16;
 
@@ -97,8 +79,12 @@ impl Manager {
         Self::make(clock, net, None, rng)
     }
 
-    /// As [`Manager::new`], and the manager also accepts on `listener`, where a server
-    /// finds it.
+    /// As [`Manager::new`], and the manager also accepts on a listener that it binds on
+    /// `local`, with a queue of `backlog` streams, where a server finds it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Net::listen`].
     ///
     /// # Panics
     ///
@@ -106,10 +92,16 @@ impl Manager {
     pub(crate) fn listening(
         clock: Clock,
         net: Net,
-        listener: Listener,
+        local: SocketAddr,
+        backlog: u32,
         rng: &mut Rng,
-    ) -> Self {
-        Self::make(clock, net, Some(listener), rng)
+    ) -> Result<Self, net::Error> {
+        let listener = net.listen(&tcp::Listen {
+            local,
+            backlog,
+            options: OPTIONS,
+        })?;
+        Ok(Self::make(clock, net, Some(listener), rng))
     }
 
     fn make(clock: Clock, net: Net, listener: Option<Listener>, rng: &mut Rng) -> Self {

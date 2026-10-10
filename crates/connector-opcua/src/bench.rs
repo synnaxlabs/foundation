@@ -157,10 +157,9 @@ impl Manager {
         assert!(idle < SESSIONS, "the server takes {SESSIONS} sessions");
         let local = SocketAddr::new(address, PORT);
         let backlog = u32::try_from(idle + 1).expect("at most 100 clients");
-        let listener =
-            connection::bind(&net, local, backlog).expect("the port is free");
         let rng = &mut Rng::from_seed(0);
-        let manager = connection::Manager::listening(clock, net, listener, rng);
+        let manager = connection::Manager::listening(clock, net, local, backlog, rng)
+            .expect("the port is free");
         let events = manager.events();
         // SAFETY: the member takes its own loop.
         let status = Status(unsafe { (events.members().start)(events.raw()) });

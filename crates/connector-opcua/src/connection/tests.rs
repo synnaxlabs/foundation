@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use env::clock::Clock;
-use env::net::{Listener, Tcp, tcp};
+use env::net::{Tcp, tcp};
 use env::rng::Rng;
 use sim::{Sim, node};
 use types::time::{Monotonic, Span};
@@ -153,12 +153,13 @@ impl Side {
         Self::of(clock, manager)
     }
 
-    /// A side whose manager accepts on `listener`.
-    fn listening(node: &node::Node, listener: Listener) -> Self {
+    /// A side whose manager accepts on a listener at `local`.
+    fn listening(node: &node::Node, local: SocketAddr) -> Self {
         let clock = node.clock();
         let rng = &mut Rng::from_seed(0);
         let manager =
-            Manager::listening(Clock::clone(&clock), node.net(), listener, rng);
+            Manager::listening(Clock::clone(&clock), node.net(), local, 4, rng)
+                .expect("the port is free");
         Self::of(clock, manager)
     }
 
@@ -1882,16 +1883,15 @@ fn a_closing_from_a_run_in_a_callback_gets_the_context_it_wrote() {
     assert_eq!(nested.last(), Some(&closing), "a close and a run");
 }
 
-/// Gives a listener of `node` at [`Network::listening`].
-fn listener(node: &node::Node) -> Listener {
-    let local = SocketAddr::new(node.addresses()[0], PORT);
-    super::bind(&node.net(), local, 4).expect("the port is free")
+/// Gives the address of a listener of `node` at [`Network::listening`].
+fn local(node: &node::Node) -> SocketAddr {
+    SocketAddr::new(node.addresses()[0], PORT)
 }
 
-/// Gives a side on `node` whose manager accepts on [`listener`], with the callback
+/// Gives a side on `node` whose manager accepts at [`local`], with the callback
 /// [`adopt`].
 fn listening(node: &node::Node) -> Side {
-    let mut side = Side::listening(node, listener(node));
+    let mut side = Side::listening(node, local(node));
     side.callback = adopt;
     side
 }
@@ -1948,10 +1948,7 @@ fn notes(
     network
         .sim
         .run_on(&network.local.clone(), move |node, _| async move {
-            let local = SocketAddr::new(local, PORT);
-            let listener =
-                super::bind(&node.net(), local, 4).expect("the port is free");
-            let mut side = Side::listening(&node, listener);
+            let mut side = Side::listening(&node, SocketAddr::new(local, PORT));
             side.callback = note;
             let mut all = vec![
                 ("listen", Value::Boolean(true)),
@@ -1978,7 +1975,7 @@ fn only_a_stream_that_reads_holds_a_read_buffer() {
     let buffers = network
         .sim
         .run_on(&network.local.clone(), move |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
+            let side = Side::listening(&node, local(&node));
             assert_eq!(side.listen(PORT), Status::GOOD);
             assert_eq!(side.connect(peer), Status::GOOD);
             let opened = side.buffers();
@@ -2058,7 +2055,7 @@ fn a_listen_with_two_addresses_or_one_that_is_not_a_string_is_refused() {
     let calls = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
+            let side = Side::listening(&node, local(&node));
             let listen = |address| {
                 side.open(&[
                     ("listen", Value::Boolean(true)),
@@ -2084,7 +2081,7 @@ fn a_server_with_a_host_in_its_url_has_that_url_alone_as_its_discovery_url() {
     network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
+            let side = Side::listening(&node, local(&node));
             let url = c"opc.tcp://plc.example:4840";
             // SAFETY: the loop outlives the server, which the test deletes.
             let server = unsafe {
@@ -2193,7 +2190,7 @@ fn a_listen_from_a_run_accepts_and_reads_in_that_drive() {
     let calls = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
+            let side = Side::listening(&node, local(&node));
             // The stream and its byte wait before the listen.
             side.clock.sleep(Span::MILLISECOND).await;
             let listened = Cell::new(false);
@@ -2237,7 +2234,7 @@ fn a_pass_accepts_each_stream_that_waits() {
     let calls = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
+            let side = Side::listening(&node, local(&node));
             side.drive(Span::from_nanos(10_000_000)).await;
             assert_eq!(side.listen(PORT), Status::GOOD);
             side.drive(Span::from_nanos(10_000_000)).await;
@@ -2259,7 +2256,7 @@ fn a_send_on_the_listen_connection_is_refused() {
     let status = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
+            let side = Side::listening(&node, local(&node));
             assert_eq!(side.listen(PORT), Status::GOOD);
             side.send(1, b"no")
         })
@@ -2399,7 +2396,7 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
     let calls = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
+            let side = Side::listening(&node, local(&node));
             // SAFETY: the loop outlives the server, which the test deletes.
             let server = unsafe {
                 ffi::test::shim_server_new(
@@ -2452,7 +2449,7 @@ fn a_stopped_server_with_a_session_is_deleted_with_its_session() {
     network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
+            let side = Side::listening(&node, local(&node));
             // SAFETY: the loop outlives the server, which the test deletes.
             let server = unsafe {
                 ffi::test::shim_server_new(
@@ -2498,7 +2495,7 @@ fn a_session_that_its_client_closes_is_removed_after_the_service() {
     network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
+            let side = Side::listening(&node, local(&node));
             // SAFETY: the loop outlives the server, which the test deletes.
             let server = unsafe {
                 ffi::test::shim_server_new(
@@ -2566,7 +2563,7 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
         network
             .sim
             .run_on(&network.local.clone(), move |node, _| async move {
-                let side = Side::listening(&node, listener(&node));
+                let side = Side::listening(&node, local(&node));
                 // SAFETY: the loop outlives the server, which the test deletes.
                 let server = unsafe {
                     ffi::test::shim_server_new(
