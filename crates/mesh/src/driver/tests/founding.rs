@@ -647,8 +647,8 @@ fn after_each_crash_before_the_founding_is_durable(
                 crash_in_open(&mut sim, &node, founding, MESH, span, Crash::Process);
             (sim, node, region, listed)
         };
-        // The same seed and span give the same state, so a power cut of a twin tells
-        // whether the founding file was durable.
+        // The same step gives the same state, so a power cut of a twin tells whether
+        // the founding file was durable.
         let (mut twin, node, _, kept) = create();
         twin.crash(&node, Crash::Power);
         if !kept || listed(&mut twin, &node, MESH) {
@@ -682,7 +682,9 @@ fn a_reopen_after_a_crash_before_the_founding_is_durable_makes_it_durable() {
     });
 }
 
-/// `keep` alone, with no open of the log, makes the same founding durable.
+/// `keep` alone, with no open of the log, makes the same founding durable. No open
+/// of the mesh shows this sync: `Log::open` syncs `dir` before `keep`, and
+/// `used::open` syncs it after.
 #[test]
 fn keep_makes_a_founding_that_it_does_not_write_durable() {
     after_each_crash_before_the_founding_is_durable(|step, sim, node, mut region| {
@@ -699,6 +701,27 @@ fn keep_makes_a_founding_that_it_does_not_write_durable() {
         region.members.sort_by_key(|member| member.card.key());
         assert_eq!(read(sim, node, MESH), Some(region), "step {step}");
     });
+}
+
+/// A failed sync of the directory in `keep` gives the files error. It calls `keep`,
+/// not `Mesh::open`, because `Log::open` makes the first sync of the directory, and
+/// a fault fails only the next call.
+#[test]
+fn a_failed_sync_of_the_directory_in_keep_gives_the_files_error() {
+    let (mut sim, node, region) = first_open();
+    let kept = sim
+        .run_on(&node, |node, _| async move {
+            let blocks = Blocks::new(create_pool()).unwrap();
+            node.fail_file(Path::new(""), Operation::SyncDir);
+            keep(&node.files(), Path::new(""), &blocks, &region, false).await
+        })
+        .unwrap();
+    let cause = files::Error::Io {
+        path: PathBuf::new(),
+        operation: Operation::SyncDir,
+        code: 5,
+    };
+    assert_eq!(kept, Err(Error::Files(cause)));
 }
 
 #[test]
@@ -768,7 +791,8 @@ fn memory_that_the_system_refuses_for_the_read_gives_the_pool_error() {
 }
 
 /// A power cut right after a first open keeps its founding, so an open after the
-/// next record checks it.
+/// next record checks it. No open of the mesh shows the sync of `keep`: `Log::open`
+/// syncs `dir` before `keep`, and `used::open` syncs it after.
 #[test]
 fn the_founding_is_durable_when_it_is_kept() {
     for seed in 0..16 {
