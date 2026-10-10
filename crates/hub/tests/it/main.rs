@@ -35,6 +35,8 @@ use types::time::{Span, Stamp};
 #[path = "../common/net.rs"]
 mod net;
 
+#[path = "../common/agent.rs"]
+mod agent;
 mod client;
 mod definitions;
 mod link;
@@ -45,8 +47,8 @@ mod region;
 mod remote;
 mod serve;
 
-/// The node key of the hub under test.
-const NODE: types::node::Key = types::node::Key::from_u128(1);
+use agent::NODE;
+
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const AREA: u64 = 1 << 22;

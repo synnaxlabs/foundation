@@ -20,11 +20,9 @@ use wire::hub::client::{
     BODY_BYTES_MAX, Challenge, REFUSED, Refusal, Request, Response, Signed,
 };
 
-use super::link::{
-    AGENT, Got, OTHER, QUIET, SUBJECT, accept, header, name, rules, run_program,
-    serve_session, serve_session_on,
-};
+use super::link::{OTHER, QUIET, accept, serve_session, serve_session_on};
 use super::{NODE, POOL};
+use crate::agent::{AGENT, Got, SUBJECT, header, name, rules, run_program};
 use crate::net::{HOME, own_pool, public_key, transport};
 
 /// Connects to the home at `at` from `node` as [`SUBJECT`], signing with `key`, with a
@@ -1308,7 +1306,7 @@ fn keeps_a_session_when_the_error_of_mesh_time_shrinks() {
             super::link::shrink_wall_error(&node, &tasks);
             let (test, session, link) =
                 accept(&node, &tasks, POOL, true, Some(rules())).await;
-            super::link::serve_each(
+            crate::agent::serve_each(
                 &session,
                 &link,
                 &tasks,
