@@ -90,9 +90,11 @@ const LEFT_OUT: [&str; 4] = [
     "-fno-fat-lto-objects",
 ];
 
-/// The symbols outside the copy that any file of it may reference. Each reads no
-/// clock, file, network, randomness, or process state. The functions of [`CLOCKS`]
-/// pass too: [`CLOCK_CALLS`] checks each call of one.
+/// The symbols outside the copy that any file of it may reference: no value that one
+/// reads from a clock, file, network, randomness, or the OS reaches a result of the
+/// copy. The functions of [`CLOCKS`] pass too: [`CLOCK_CALLS`] checks each call of
+/// one. `OUTSIDE` in `connector-opcua` lists the symbols of the production build, so a
+/// new symbol outside the copy changes both lists.
 const SYMBOLS: [&str; 20] = [
     // The allocator of libc, since the check builds without `alloc.h`.
     "calloc",
@@ -106,12 +108,12 @@ const SYMBOLS: [&str; 20] = [
     "strcmp",
     "strlen",
     "strncmp",
-    // The `errno` of the thread.
+    // The `errno` of the thread, which holds only the error of a call of the copy.
     "__errno_location",
-    // The stack protector, which GCC adds by default on some systems.
+    // The compiler adds these, and no C of the copy names one: the stack protector,
+    // whose random canary reaches no result, and the table of the linker.
     "__stack_chk_fail",
     "__stack_chk_guard",
-    // The table of the linker, which position-independent code reads.
     "_GLOBAL_OFFSET_TABLE_",
     // `shim.c` defines each to print its name and abort.
     "UA_ConnectionManager_new_POSIX_Ethernet",
@@ -463,7 +465,7 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
     gcc(&macros).map_err(|e| vec![e])?;
     let dirs = system_dirs(&verbose);
     let objects = build(copy, &sources, &flags, out, cc).map_err(|e| vec![e])?;
-    let references = unlisted(&objects).map_err(|e| vec![e])?;
+    let references = outside(&objects).map_err(|e| vec![e])?;
     let mut calls = BTreeSet::new();
     let mut problems = line_directives(copy, Path::new("")).map_err(|e| vec![e])?;
     for (source, object, preprocessed) in objects {
@@ -501,21 +503,18 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
 }
 
 /// Each (source, symbol) pair where the object of the source in `objects` references
-/// a symbol that no object defines and that neither [`SYMBOLS`] nor [`CLOCKS`] lists.
-fn unlisted(
+/// a symbol that no object exports, so the linker takes it from outside the copy.
+fn outside(
     objects: &[(&str, PathBuf, String)],
 ) -> Result<BTreeSet<(String, String)>, String> {
-    let defined = symbols(
+    let exported = symbols(
         objects.iter().map(|(_, object, _)| object),
-        "--defined-only",
+        &["--defined-only", "--extern-only"],
     )?;
     let mut references = BTreeSet::new();
     for (source, object, _) in objects {
-        for symbol in symbols([object], "--undefined-only")?.difference(&defined) {
-            if !SYMBOLS.contains(&symbol.as_str()) && !CLOCKS.contains(&symbol.as_str())
-            {
-                references.insert(((*source).to_owned(), symbol.clone()));
-            }
+        for symbol in symbols([object], &["--undefined-only"])?.difference(&exported) {
+            references.insert(((*source).to_owned(), symbol.clone()));
         }
     }
     Ok(references)
@@ -846,20 +845,29 @@ fn clock_mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
     mismatches(found, &CLOCK_CALLS, new, gone)
 }
 
-/// An error for each (file, symbol) in `found` that [`FILE_SYMBOLS`] does not list,
-/// and for each listed pair that `found` does not hold.
+/// An error for each (file, symbol) in `found` that neither [`SYMBOLS`],
+/// [`CLOCKS`], nor [`FILE_SYMBOLS`] lists, and for each pair of [`FILE_SYMBOLS`] that
+/// `found` does not hold.
 fn symbol_mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
+    let found: BTreeSet<(String, String)> = found
+        .iter()
+        .filter(|(_, symbol)| {
+            !SYMBOLS.contains(&symbol.as_str()) && !CLOCKS.contains(&symbol.as_str())
+        })
+        .cloned()
+        .collect();
     let new = |file: &str, symbol: &str| {
         format!(
             "{file}: references `{symbol}`, which neither SYMBOLS nor FILE_SYMBOLS \
-             lists. Find whether a node runs it; if it reads no clock, file, network, \
-             randomness, or process state, add it with the reason"
+             lists. Find whether a node runs it; if no value it reads from a clock, \
+             file, network, randomness, or the OS reaches a result of the copy, add it \
+             with the reason"
         )
     };
     let gone = |file: &str, symbol: &str| {
         format!("{file}: no longer references `{symbol}`. Remove it from FILE_SYMBOLS")
     };
-    mismatches(found, &FILE_SYMBOLS, new, gone)
+    mismatches(&found, &FILE_SYMBOLS, new, gone)
 }
 
 /// An error from `new` for each (file, name) of `found` that `listed` does not hold,
@@ -883,12 +891,12 @@ fn mismatches(
     new.chain(gone).collect()
 }
 
-/// The names of the symbols that `nm -P` with `flag` gives for `objects`.
+/// The names of the symbols that `nm -P` with `flags` gives for `objects`.
 fn symbols<'a>(
     objects: impl IntoIterator<Item = &'a PathBuf>,
-    flag: &str,
+    flags: &[&str],
 ) -> Result<BTreeSet<String>, String> {
-    let text = exec(Command::new("nm").args(["-P", flag]).args(objects))?;
+    let text = exec(Command::new("nm").arg("-P").args(flags).args(objects))?;
     // A line that names an object has one word.
     Ok(text
         .lines()
@@ -1469,6 +1477,16 @@ End of search list.
         );
     }
 
+    /// The error of [`symbol_mismatches`] for a reference that no list holds.
+    fn unlisted(file: &str, symbol: &str) -> String {
+        format!(
+            "{file}: references `{symbol}`, which neither SYMBOLS nor FILE_SYMBOLS \
+             lists. Find whether a node runs it; if no value it reads from a clock, \
+             file, network, randomness, or the OS reaches a result of the copy, add it \
+             with the reason"
+        )
+    }
+
     #[test]
     fn symbol_mismatches_names_a_new_reference_and_a_listed_one_that_is_gone() {
         let mut found: BTreeSet<(String, String)> = FILE_SYMBOLS
@@ -1476,17 +1494,18 @@ End of search list.
             .map(|&(file, symbol)| (file.to_owned(), symbol.to_owned()))
             .collect();
         assert_eq!(symbol_mismatches(&found), Vec::<String>::new());
+        found.insert(("src/ua_types.c".to_owned(), "memcpy".to_owned()));
+        found.insert(("src/ua_types.c".to_owned(), CLOCKS[0].to_owned()));
+        assert_eq!(symbol_mismatches(&found), Vec::<String>::new());
         found.remove(&("plugins/ua_log_syslog.c".to_owned(), "syslog".to_owned()));
         found.insert(("src/ua_types.c".to_owned(), "socket".to_owned()));
         assert_eq!(
             symbol_mismatches(&found),
             [
-                "src/ua_types.c: references `socket`, which neither SYMBOLS nor \
-                 FILE_SYMBOLS lists. Find whether a node runs it; if it reads no \
-                 clock, file, network, randomness, or process state, add it with the \
-                 reason",
+                unlisted("src/ua_types.c", "socket"),
                 "plugins/ua_log_syslog.c: no longer references `syslog`. Remove it from \
-                 FILE_SYMBOLS",
+                 FILE_SYMBOLS"
+                    .to_owned(),
             ]
         );
     }
@@ -1841,11 +1860,7 @@ End of search list.
                 "src/more/ua_types.c: `UA_new` calls a global clock function. Find \
                  whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
                     .to_owned(),
-                "src/more/ua_types.c: references `stat`, which neither SYMBOLS nor \
-                 FILE_SYMBOLS lists. Find whether a node runs it; if it reads no \
-                 clock, file, network, randomness, or process state, add it with the \
-                 reason"
-                    .to_owned(),
+                unlisted("src/more/ua_types.c", "stat"),
             ])
         );
         assert!(root.join("patches/open62541/kept.c").exists());
@@ -2070,19 +2085,42 @@ End of search list.
             "#include <pthread.h>\n\
              int UA_lock(pthread_mutex_t *m) { return pthread_mutex_lock(m); }\n",
         );
-        let unlisted = |file: &str, symbol: &str| {
-            format!(
-                "{file}: references `{symbol}`, which neither SYMBOLS nor FILE_SYMBOLS \
-                 lists. Find whether a node runs it; if it reads no clock, file, \
-                 network, randomness, or process state, add it with the reason"
-            )
-        };
         assert_eq!(
             check(&root),
             Err(vec![
                 unlisted("src/util/ua_encryptedsecret.c", "time"),
                 unlisted("src/util/ua_util.c", "pthread_mutex_lock"),
             ])
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
+    fn check_finds_an_os_call_whose_name_another_file_defines_as_static() {
+        let (root, repo, result) = run_after("static", |_| {}, &[]);
+        assert_eq!(result, Ok(()));
+        let copy = root.join("patches/open62541");
+        let append = |path: &str, text: &str| {
+            let old = std::fs::read_to_string(copy.join(path)).unwrap();
+            std::fs::write(copy.join(path), old + text).unwrap();
+        };
+        append(
+            "src/util/ua_encryptedsecret.c",
+            "static int socket(void) { return 0; }\n\
+             int UA_open(void) { return socket(); }\n",
+        );
+        append(
+            "src/util/ua_util.c",
+            "#include <sys/socket.h>\n\
+             int UA_connect(void) { return socket(2, 1, 0); }\n",
+        );
+        assert_eq!(
+            check(&root),
+            Err(vec![unlisted("src/util/ua_util.c", "socket")])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }

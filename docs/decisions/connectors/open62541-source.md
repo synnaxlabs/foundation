@@ -28,11 +28,16 @@
   symbol outside the copy that is not on a closed list, with the file and the
   symbol. `SYMBOLS` admits a symbol for any file, and `FILE_SYMBOLS` admits a (file,
   symbol) pair, such as a call of the stdout logger, which we never run. Each entry
-  has its reason. A symbol goes in `SYMBOLS` only when it reads no clock, file,
-  network, randomness, or process state: memory and string functions, the
-  allocator, and the 5 constructors that `shim.c` defines to abort. A pair of
+  has its reason. A symbol goes in `SYMBOLS` only when no value that it reads from a
+  clock, file, network, randomness, or the OS reaches a result of the copy. Its
+  classes: memory, string, and math functions; the allocator; `errno`; symbols that
+  the compiler adds and no C of the copy names (the stack protector, the table of
+  the linker); and the 5 constructors that `shim.c` defines to abort. A symbol is
+  outside the copy when no object exports it: a `static` function of one file does
+  not hide a call of the OS function of its name from another. A pair of
   `FILE_SYMBOLS` with no reference fails, so a file that the build leaves out loses
-  its pairs. A header list is not a check: a listed header can include another
+  its pairs. `OUTSIDE` in `connector-opcua` lists the outside symbols of the
+  production build, so a new outside symbol changes both lists. A header list is not a check: a listed header can include another
   (`pthread.h` includes `time.h`). So the check refuses no system header, and each
   header that the copy includes must be in the copy or in a system directory as
   `cc` finds it. Lost: a header list, and a deny list of OS symbols, which passes a
