@@ -682,7 +682,8 @@ mod tests {
 
     #[test]
     fn writes_no_backoff_when_the_next_run_passed_before_the_write() {
-        let (statuses, runs) = refuse_the_last_wait(vec![Step::Hold(ms(2_000))], None);
+        let (statuses, runs) =
+            refuse_the_last_wait(vec![Step::Hold(ms(2_000))], Span::ZERO);
         let [_, again] = runs[..] else {
             panic!("two runs: {runs:?}");
         };
@@ -743,12 +744,9 @@ mod tests {
 
     /// Runs `steps` and fills the pool from 1.5 s after the start of the last run
     /// for 1 s, so the home refuses the frame of the wait after it. The last step
-    /// holds a task for 2 s. When `step` is given, the wall steps forward by it 2.001
-    /// s after the start of the last run. Returns the status and the start of each run.
-    fn refuse_the_last_wait(
-        steps: Vec<Step>,
-        step: Option<Span>,
-    ) -> (Vec<Written>, Vec<Span>) {
+    /// holds a task for 2 s. The wall steps forward by `wall` 2.001 s after the start
+    /// of the last run. Returns the status and the start of each run.
+    fn refuse_the_last_wait(steps: Vec<Step>, wall: Span) -> (Vec<Written>, Vec<Span>) {
         let count = steps.len();
         run_on(move |node, tasks| async move {
             let script = Script {
@@ -771,7 +769,7 @@ mod tests {
             let hog = inputs.hub.writer(hog).await.expect("opens");
             let (token, clock) = (Token::new(), node.clock());
             let (canceller, sleeper) = (token.clone(), clock.clone());
-            let (filled, stepper) = (Arc::clone(&runs), node.clone());
+            let (filled, node) = (Arc::clone(&runs), node.clone());
             tasks.spawn(async move {
                 while filled.lock().expect("no panic under the lock").len() < count {
                     sleeper.sleep(ms(10)).await;
@@ -779,9 +777,7 @@ mod tests {
                 sleeper.sleep(ms(1_500)).await;
                 let held = fill(&hog);
                 sleeper.sleep(ms(501)).await;
-                if let Some(step) = step {
-                    stepper.step_wall(step);
-                }
+                node.step_wall(wall);
                 sleeper.sleep(ms(499)).await;
                 drop(held);
                 sleeper.sleep(ms(5_000)).await;
@@ -802,7 +798,7 @@ mod tests {
     #[test]
     fn writes_the_backoff_that_is_left_when_the_home_refused_the_wait() {
         let steps = vec![Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
-        let (statuses, runs) = refuse_the_last_wait(steps, None);
+        let (statuses, runs) = refuse_the_last_wait(steps, Span::ZERO);
         let [_, second, third] = runs[..] else {
             panic!("three runs: {runs:?}");
         };
@@ -825,7 +821,7 @@ mod tests {
     #[test]
     fn writes_the_backoff_that_is_left_after_a_wall_step_in_the_wait() {
         let steps = vec![Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
-        let (statuses, _) = refuse_the_last_wait(steps, Some(ms(10_000)));
+        let (statuses, _) = refuse_the_last_wait(steps, ms(10_000));
         let (at, samples, _) = &statuses[5];
         assert_eq!(samples[..2], [1, 2], "the second wait: {statuses:?}");
         let (run, again, _) = &statuses[6];
