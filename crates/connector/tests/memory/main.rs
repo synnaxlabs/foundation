@@ -51,8 +51,8 @@ enum Last {
     Retry,
 }
 
-/// Whether a rival writer keeps the pool full from just after run [`SHORT`] - 1 ends to
-/// 2 s after run [`SHORT`] + 1 starts.
+/// Whether a rival writer keeps the pool full from just after run [`SHORT`] - 1
+/// starts to 2 s after run [`SHORT`] starts.
 #[derive(Clone, Copy, Debug)]
 enum Pool {
     Free,
