@@ -285,6 +285,27 @@ impl Side {
         assert_eq!(status, Status::GOOD);
     }
 
+    /// Makes the test server on the loop with the discovery URL `url`, and starts it.
+    fn start(&self, url: &CStr) -> *mut ffi::test::Server {
+        // SAFETY: the loop outlives the server, which the test deletes.
+        let server = unsafe {
+            ffi::test::shim_server_new(self.events().raw(), PORT, url.as_ptr())
+        };
+        assert!(!server.is_null());
+        // SAFETY: the server lives.
+        let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+        assert_eq!(status, Status::GOOD);
+        server
+    }
+
+    /// Shuts `server` down, then deletes it as [`Side::delete`] does.
+    async fn stop(&self, server: *mut ffi::test::Server) {
+        // SAFETY: the server lives.
+        let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+        assert_eq!(status, Status::GOOD);
+        self.delete(server).await;
+    }
+
     /// Drives until `server` is `STOPPED` and nothing is due on the loop, then deletes
     /// it, with no call between.
     async fn delete(&self, server: *mut ffi::test::Server) {
@@ -1914,7 +1935,7 @@ fn a_closing_from_a_run_in_a_callback_gets_the_context_it_wrote() {
 fn listener(node: &node::Node) -> Listener {
     let listen = tcp::Listen {
         local: SocketAddr::new(node.addresses()[0], PORT),
-        backlog: 4,
+        backlog: 512,
         options: OPTIONS,
     };
     node.net().listen(&listen).expect("the port is free")
@@ -2121,24 +2142,14 @@ fn a_server_with_a_host_in_its_url_has_that_url_alone_as_its_discovery_url() {
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
             let url = c"opc.tcp://plc.example:4840";
-            // SAFETY: the loop outlives the server, which the test deletes.
-            let server = unsafe {
-                ffi::test::shim_server_new(side.events().raw(), PORT, url.as_ptr())
-            };
-            assert!(!server.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-            assert_eq!(status, Status::GOOD);
+            let server = side.start(url);
             // SAFETY: the server lives.
             let first = unsafe { ffi::test::shim_server_discovery_url(server, 0) };
             assert_eq!(string(first), url.to_bytes());
             // SAFETY: the server lives.
             let second = unsafe { ffi::test::shim_server_discovery_url(server, 1) };
             assert!(second.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
-            assert_eq!(status, Status::GOOD);
-            side.delete(server).await;
+            side.stop(server).await;
         })
         .expect("the run ends");
 }
@@ -2434,18 +2445,7 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
-            // SAFETY: the loop outlives the server, which the test deletes.
-            let server = unsafe {
-                ffi::test::shim_server_new(
-                    side.events().raw(),
-                    PORT,
-                    c"opc.tcp://:4840".as_ptr(),
-                )
-            };
-            assert!(!server.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-            assert_eq!(status, Status::GOOD);
+            let server = side.start(c"opc.tcp://:4840");
             // SAFETY: the server lives.
             let url = unsafe { ffi::test::shim_server_discovery_url(server, 0) };
             assert_eq!(string(url), b"opc.tcp://10.0.0.1:4840");
@@ -2486,18 +2486,7 @@ fn a_stopped_server_with_a_session_is_deleted_with_its_session() {
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
-            // SAFETY: the loop outlives the server, which the test deletes.
-            let server = unsafe {
-                ffi::test::shim_server_new(
-                    side.events().raw(),
-                    PORT,
-                    c"opc.tcp://:4840".as_ptr(),
-                )
-            };
-            assert!(!server.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-            assert_eq!(status, Status::GOOD);
+            let server = side.start(c"opc.tcp://:4840");
             // SAFETY: the loop outlives the client, which the test deletes.
             let client = unsafe { ffi::shim_client_new(side.events().raw()) };
             assert!(!client.is_null());
@@ -2508,10 +2497,7 @@ fn a_stopped_server_with_a_session_is_deleted_with_its_session() {
             });
             assert_eq!(status, Status::GOOD);
             side.drive(Span::SECOND).await;
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
-            assert_eq!(status, Status::GOOD);
-            side.delete(server).await;
+            side.stop(server).await;
             // A client that has not seen the close waits in its delete for the answer
             // of `CloseSession`, while the sim clock stands still.
             side.drive(Span::SECOND).await;
@@ -2531,18 +2517,7 @@ fn a_session_that_its_client_closes_is_removed_after_the_service() {
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
-            // SAFETY: the loop outlives the server, which the test deletes.
-            let server = unsafe {
-                ffi::test::shim_server_new(
-                    side.events().raw(),
-                    PORT,
-                    c"opc.tcp://:4840".as_ptr(),
-                )
-            };
-            assert!(!server.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-            assert_eq!(status, Status::GOOD);
+            let server = side.start(c"opc.tcp://:4840");
             // SAFETY: the loop outlives the client, which the test deletes.
             let client = unsafe { ffi::shim_client_new(side.events().raw()) };
             assert!(!client.is_null());
@@ -2558,10 +2533,7 @@ fn a_session_that_its_client_closes_is_removed_after_the_service() {
                 Status(unsafe { ffi::test::UA_Client_disconnectAsync(client) });
             assert_eq!(status, Status::GOOD);
             side.drive(Span::SECOND).await;
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
-            assert_eq!(status, Status::GOOD);
-            side.delete(server).await;
+            side.stop(server).await;
             // SAFETY: nothing uses the client after it.
             unsafe { ffi::UA_Client_delete(client) };
             side.drive(Span::SECOND).await;
@@ -2598,19 +2570,7 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
             .sim
             .run_on(&network.local.clone(), move |node, _| async move {
                 let side = Side::listening(&node, listener(&node));
-                // SAFETY: the loop outlives the server, which the test deletes.
-                let server = unsafe {
-                    ffi::test::shim_server_new(
-                        side.events().raw(),
-                        PORT,
-                        c"opc.tcp://:4840".as_ptr(),
-                    )
-                };
-                assert!(!server.is_null());
-                // SAFETY: the server lives.
-                let status =
-                    Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-                assert_eq!(status, Status::GOOD);
+                let server = side.start(c"opc.tcp://:4840");
                 // SAFETY: the loop outlives the client, which the test deletes.
                 let client = unsafe { ffi::shim_client_new(side.events().raw()) };
                 assert!(!client.is_null());
@@ -2644,11 +2604,7 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
                 side.drive(Span::SECOND).await;
                 assert_eq!(Status(result.get()), Status::GOOD, "the session is made");
                 side.clock.sleep(Span::from_nanos(offset)).await;
-                // SAFETY: the server lives.
-                let status =
-                    Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
-                assert_eq!(status, Status::GOOD);
-                side.delete(server).await;
+                side.stop(server).await;
                 // SAFETY: nothing uses the client after it.
                 unsafe { ffi::UA_Client_delete(client) };
                 side.drive(Span::SECOND).await;
@@ -2669,32 +2625,12 @@ fn a_burst_of_accepts_holds_no_more_than_the_most_secure_channels() {
     let open = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
-            let listen = tcp::Listen {
-                local: SocketAddr::new(node.addresses()[0], PORT),
-                backlog: 512,
-                options: OPTIONS,
-            };
-            let listener = node.net().listen(&listen).expect("the port is free");
-            let side = Side::listening(&node, listener);
-            // SAFETY: the loop outlives the server, which the test deletes.
-            let server = unsafe {
-                ffi::test::shim_server_new(
-                    side.events().raw(),
-                    PORT,
-                    c"opc.tcp://:4840".as_ptr(),
-                )
-            };
-            assert!(!server.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-            assert_eq!(status, Status::GOOD);
+            let side = Side::listening(&node, listener(&node));
+            let server = side.start(c"opc.tcp://:4840");
             side.drive(Span::SECOND).await;
             // Less the listen connection.
             let open = side.connections() - 1;
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
-            assert_eq!(status, Status::GOOD);
-            side.delete(server).await;
+            side.stop(server).await;
             open
         })
         .expect("the run ends");
