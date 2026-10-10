@@ -7,12 +7,13 @@ more of the target it counts against (the cost limit) needs a written judgment b
 merge. For CPU, 1% is 10 ms per second at 100M samples/s: the extra ns per call times
 the calls per second of the path, so 0.1 ns for a path that runs once per sample. A path
 that runs once per frame or data message makes 100M calls per second divided by the
-samples that one call carries. The report states that number and its source; with no
-source, the path counts as once per sample. The other limits are in
-`docs/decisions/memory/p1.md`. The judgment states how often the path runs (per sample,
-frame, session, or start), its absolute cost against the P1 budget, the noise of the
-machine, and what the change buys. The architect accepts or rejects it on those facts. A
-smaller slowdown needs nothing but its numbers.
+samples that one call carries. The report states that number and its source: a decision,
+a documented workload, or a measured per-frame cost that shows P1 cannot hold with
+smaller frames. With no source, the path counts as once per sample. The other limits are
+in `docs/decisions/memory/p1.md`. The judgment states how often the path runs (per
+sample, frame, session, or start), its absolute cost against the P1 budget, the noise of
+the machine, and what the change buys. The architect accepts or rejects it on those
+facts. A smaller slowdown needs nothing but its numbers.
 
 Evidence: `docs/research/r1-thread-model.md`, `docs/research/r11-memory-sync.md`, and
 `docs/research/r11-mem-bench/`. The numbers below are from an M3 Max. Rerun on Linux
