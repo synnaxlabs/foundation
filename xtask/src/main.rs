@@ -239,7 +239,8 @@ mod tests {
             .expect("the changes job has a models output");
         assert_eq!(
             output.trim(),
-            "${{ github.event_name == 'push' && 'false' || steps.filter.outputs.models }}",
+            "${{ github.event_name == 'push' && 'false' || \
+             steps.filter.outputs.models }}",
             "the models output of the changes job is not the models filter on each PR"
         );
         let metadata = metadata(&root).unwrap();
@@ -257,10 +258,19 @@ mod tests {
                 .collect();
             let on_models =
                 "    if: \"!cancelled() && needs.changes.outputs.models != 'false'\"";
+            let run = format!("run: cargo xtask {task}");
+            // The step that runs the task holds only its name, so no `if:` or
+            // `continue-on-error:` of its own can skip or hide the run.
+            let end = job.iter().position(|line| line.trim() == run);
+            let alone = end.is_some_and(|end| {
+                end > 0
+                    && job[end - 1].starts_with("      - name: ")
+                    && (job.get(end + 1)).is_none_or(|next| {
+                        next.is_empty() || next.starts_with("      - ")
+                    })
+            });
             assert!(
-                job.iter()
-                    .any(|line| line.trim() == format!("run: cargo xtask {task}"))
-                    && job.contains(&on_models),
+                job.contains(&on_models) && alone,
                 "the {task} job of .github/workflows/ci.yaml does not run `cargo xtask \
                  {task}` on the models output: {job:#?}"
             );
