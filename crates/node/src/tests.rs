@@ -3197,18 +3197,24 @@ mod port {
             assert_ne!(made[0][64..96], made[1][64..96], "seal keys");
         }
 
-        #[test]
-        fn a_node_proves_the_key_in_its_data_directory() {
+        /// A node started on the `node.key` `bytes` proves the public half of
+        /// `private_key` and keeps the bytes.
+        fn proves(bytes: &[u8], private_key: &PrivateKey) {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
-            write_key(&mut sim, &host, own());
+            write_key(&mut sim, &host, bytes.to_vec());
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
-            let public = KEY.public();
+            let public = private_key.public();
             assert_eq!(dial(&mut sim, &host, public), Ok(Peer::Node(public)));
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
-            assert_eq!(read(&mut sim, &host), own());
+            assert_eq!(read(&mut sim, &host), bytes);
+        }
+
+        #[test]
+        fn a_node_proves_the_key_in_its_data_directory() {
+            proves(&own(), &KEY);
         }
 
         /// Each input of the fuzz corpus in this form is a key that a node proves and
@@ -3220,16 +3226,7 @@ mod port {
             let body =
                 include_bytes!("../../../oracles/fuzz/node_identity/valid-body-2");
             assert_eq!(crate::sector::summed(body).as_ref(), Some(valid));
-            let mut sim = sim::Sim::new(sim::Config::default());
-            let host = host(&mut sim, 2);
-            write_key(&mut sim, &host, valid.to_vec());
-            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
-            let public = PrivateKey([7; 32]).public();
-            assert_eq!(dial(&mut sim, &host, public), Ok(Peer::Node(public)));
-            node.stop();
-            assert_eq!(sim.run(), Ok(()));
-            assert_eq!(node.join(), Ok(()));
-            assert_eq!(read(&mut sim, &host), valid);
+            proves(valid, &PrivateKey([7; 32]));
         }
 
         /// 100 zero bytes are a key that a crash kept from being written.
@@ -3267,11 +3264,10 @@ mod port {
             // Each tag byte with one bit changed, and the tag of the next form.
             let edits = (0..16).map(|i| (i, own()[i] ^ 1)).chain([(15, b'3')]);
             let tags = edits.map(|(i, byte)| {
-                let mut tag = own();
+                let mut tag = <[u8; LEN]>::try_from(own()).unwrap();
                 tag[i] = byte;
-                let crc = crc32c::crc32c(&tag[..96]);
-                tag[96..].copy_from_slice(&crc.to_le_bytes());
-                tag
+                crate::sector::checksum(&mut tag);
+                tag.to_vec()
             });
             let mut changed = own();
             changed[40] ^= 1;
@@ -3279,8 +3275,8 @@ mod port {
             let long = [own(), vec![0]].concat();
             // The form before the seal key: the tag `foundation/key/1`, the node key,
             // and the private key.
-            let mut old = [b"foundation/key/1".as_slice(), &own()[16..64]].concat();
-            old.extend(crc32c::crc32c(&old).to_le_bytes());
+            let old = [b"foundation/key/1".as_slice(), &own()[16..64]].concat();
+            let old = crate::sector::summed::<68>(&old).unwrap().to_vec();
             for bytes in [short, long, changed, old].into_iter().chain(tags) {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
