@@ -14,8 +14,8 @@ const LATEST_HOLD: Code = Code::new("connector.latest-hold");
 
 const READER_KEYS: [&str; 2] = ["mode", "hold"];
 
-/// The reader settings of an out connector. The reader has its connector's name, starts
-/// from now, and has no maximum age.
+/// The reader settings of an out connector. The reader has its connector's name and no
+/// maximum age, and opens as [`hub::reader::Config::name`] says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Settings {
@@ -23,8 +23,9 @@ pub struct Settings {
     pub select: Selector,
     /// Which frames it gets.
     pub mode: Mode,
-    /// How long the buffer keeps samples it has not received after it closes. Zero or
-    /// more, and zero when `mode` is `Latest`.
+    /// How long the home holds the reader's position after its session closes, as
+    /// [`hub::reader::Config::hold`] says. Zero or more, and zero when `mode` is
+    /// `Latest`.
     pub hold: Span,
 }
 

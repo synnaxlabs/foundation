@@ -274,7 +274,7 @@ mod tests {
     use crate::cancel::Token;
     use crate::common::{STATUS, create_config, create_status, env, run_on, run_with};
     use crate::kind::{Channels, Kind, Table};
-    use crate::testing;
+    use crate::{reader, testing};
     use hub::home::Refusal;
     use hub::reader::{Mode, Received};
     use spec::channel::{Channel, Data};
@@ -1966,10 +1966,29 @@ mod tests {
         }
     }
 
-    /// A kind with the count `samples`, whose run is the function it holds.
-    struct Counted<F>(F);
+    /// A kind with the counts `counts`, whose run is the function it holds.
+    struct Closure<F> {
+        counts: Vec<Name>,
+        run: F,
+    }
 
-    impl<F, R> Kind for Counted<F>
+    /// A kind with the count `samples`, whose run is `run`.
+    fn counted<F>(run: F) -> Closure<F> {
+        Closure {
+            counts: vec![name("samples")],
+            run,
+        }
+    }
+
+    /// A kind with no count, whose run is `run`.
+    fn plain<F>(run: F) -> Closure<F> {
+        Closure {
+            counts: Vec::new(),
+            run,
+        }
+    }
+
+    impl<F, R> Kind for Closure<F>
     where
         F: Fn(Context<()>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<(), Error>>,
@@ -1981,7 +2000,10 @@ mod tests {
         }
 
         fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
-            Tally::check(&Tally::new("samples"), &())
+            Ok(Channels {
+                counts: self.counts.clone(),
+                ..Channels::default()
+            })
         }
 
         fn discover(
@@ -1992,7 +2014,7 @@ mod tests {
         }
 
         fn run(&self, ctx: Context<()>) -> impl Future<Output = Result<(), Error>> {
-            (self.0)(ctx)
+            (self.run)(ctx)
         }
     }
 
@@ -2000,7 +2022,7 @@ mod tests {
     /// `Ok` at 600 ms. A task of the run sets it to `value`, if given, at 800 ms and
     /// ends at 2 s.
     fn late(value: Option<u64>) -> impl Kind<Config = ()> {
-        Counted(move |ctx: Context<()>| async move {
+        counted(move |ctx: Context<()>| async move {
             let (late, clock) = (ctx.count("samples"), ctx.clock().clone());
             ctx.tasks().spawn(async move {
                 clock.sleep(ms(800)).await;
@@ -2046,7 +2068,7 @@ mod tests {
     /// A kind with the count `samples`. Its run spawns a task that sets the count to
     /// each of 1 to `n`, `gap` apart, and returns `Ok` once that task ended.
     fn relay(n: u64, gap: Span) -> impl Kind<Config = ()> {
-        Counted(move |ctx: Context<()>| async move {
+        counted(move |ctx: Context<()>| async move {
             let (count, clock) = (ctx.count("samples"), ctx.clock().clone());
             let done = Rc::new((Cell::new(false), Cell::new(None::<Waker>)));
             let signal = Rc::clone(&done);
@@ -2089,7 +2111,7 @@ mod tests {
     /// the room that came back again at 900 ms, so the pool is full at the flush at
     /// 1 s. Else the home has no room to take that flush's frame, and loses it.
     fn hog(full: bool) -> impl Kind<Config = ()> {
-        Counted(move |ctx: Context<()>| async move {
+        counted(move |ctx: Context<()>| async move {
             let channels =
                 ["state", "class", "restarts", "backoff", "error", "samples"]
                     .map(|c| name(&format!("plant.tally.status.{c}")))
@@ -2210,7 +2232,7 @@ mod tests {
         T: Future<Output = ()> + 'static,
     {
         run_with(node, |node, tasks| async move {
-            let kinds = Table::new().with("tally", Counted(run));
+            let kinds = Table::new().with("tally", counted(run));
             let inputs =
                 create_config(&node, tasks.clone(), kinds, "plant.tally").await;
             let (connector, counts) = (name("plant.tally"), [name("samples")]);
@@ -2261,7 +2283,7 @@ mod tests {
     /// the shard's pool until it has no room and gives them back at 500 ms, and
     /// returns `Ok` at 200 ms.
     fn outlive() -> impl Kind<Config = ()> {
-        Counted(|ctx: Context<()>| async move {
+        counted(|ctx: Context<()>| async move {
             let channels =
                 ["state", "class", "restarts", "backoff", "error", "samples"]
                     .map(|c| name(&format!("plant.tally.status.{c}")))
@@ -2699,43 +2721,56 @@ mod tests {
                 .writer(channels, self.authority, self.lease)
                 .await
                 .expect("the writer opens");
-            let entries = writer.set().entries();
-            let entry = |key| {
-                let key = channel::Key::from_u128(key);
-                entries.iter().position(|entry| entry.key == key)
-            };
-            let (time, value) = (entry(1).expect("time"), entry(2).expect("value"));
-            let group = entries[time].group;
             let mut last = None;
-            for (i, sample) in self.values.iter().enumerate() {
+            for (i, &sample) in self.values.iter().enumerate() {
                 if i > 0 {
                     ctx.clock().sleep(self.gap).await;
                 }
                 let now = writer.now().nanos();
                 let stamp = last.map_or(now, |last: i64| now.max(last + 1));
                 last = Some(stamp);
-                let mut series = [(time, 8), (value, 8)];
-                series.sort_unstable();
-                let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
-                let time = draft.series_mut(time).expect("the index series");
-                time.copy_from_slice(&stamp.to_le_bytes());
-                let value = draft.series_mut(value).expect("the value series");
-                value.copy_from_slice(&sample.to_le_bytes());
-                draft.set_count(group, 1);
-                let outcomes = writer
-                    .write(Label::Path(Path::Live), draft)
-                    .expect("the home takes it");
-                let refusal = match outcomes {
-                    [hub::home::Outcome::Applied { .. }] => None,
-                    [hub::home::Outcome::Refused { refusal, .. }] => {
-                        Some(refusal.clone())
+                let refusal = match write_value(&mut writer, stamp, sample) {
+                    hub::home::Outcome::Applied { .. } => None,
+                    hub::home::Outcome::Refused { refusal, .. } => Some(refusal),
+                    outcome @ hub::home::Outcome::Lost { .. } => {
+                        panic!("one group applied or refused: {outcome:?}")
                     }
-                    _ => panic!("one group applied or refused: {outcomes:?}"),
                 };
                 self.refusals.lock().expect("no panic").push(refusal);
             }
             Ok(())
         }
+    }
+
+    /// Writes `sample` of `plant.value` at `stamp` through `writer`, which writes
+    /// `plant.time` and `plant.value`. Gives what the home made of it.
+    fn write_value(
+        writer: &mut hub::writer::Writer,
+        stamp: i64,
+        sample: i64,
+    ) -> hub::home::Outcome {
+        let entries = writer.set().entries();
+        let entry = |key| {
+            let key = channel::Key::from_u128(key);
+            entries.iter().position(|entry| entry.key == key)
+        };
+        let (time, value) = (entry(1).expect("time"), entry(2).expect("value"));
+        let group = entries[time].group;
+        let mut series = [(time, 8), (value, 8)];
+        series.sort_unstable();
+        let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+        let time = draft.series_mut(time).expect("the index series");
+        time.copy_from_slice(&stamp.to_le_bytes());
+        let value = draft.series_mut(value).expect("the value series");
+        value.copy_from_slice(&sample.to_le_bytes());
+        draft.set_count(group, 1);
+        let outcomes = writer
+            .write(Label::Path(Path::Live), draft)
+            .expect("the home takes it");
+        let [outcome] = outcomes else {
+            panic!("the outcome of one group: {outcomes:?}");
+        };
+        outcome.clone()
     }
 
     fn name(text: &str) -> Name {
@@ -2889,6 +2924,199 @@ mod tests {
             got
         });
         assert_eq!(got, [30, 10, 20]);
+    }
+
+    /// The reader settings of `plant.value`, complete, with a hold of `hold`.
+    fn settings(hold: Span) -> reader::Settings {
+        reader::Settings {
+            select: Selector::new(["plant.value"]).expect("a selector"),
+            mode: Mode::Complete,
+            hold,
+        }
+    }
+
+    /// Runs `kind` once as `plant.write`, while a task runs `beside` with the hub and
+    /// the clock. Gives what the kind put in `got`.
+    fn read_through<F, R, T, B, S>(kind: F, beside: B) -> Vec<T>
+    where
+        F: Fn(Context<()>, Arc<Mutex<Vec<T>>>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<(), Error>> + 'static,
+        T: Clone + Send + 'static,
+        B: FnOnce(hub::Hub, Clock) -> S + Send + 'static,
+        S: Future<Output = ()> + 'static,
+    {
+        run_on(move |node, tasks| async move {
+            let got = Arc::new(Mutex::new(Vec::new()));
+            let into = Arc::clone(&got);
+            let kind = plain(move |ctx| kind(ctx, Arc::clone(&into)));
+            let kinds = Table::new().with("read", kind);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.write").await;
+            define(&inputs.hub);
+            tasks.spawn(beside(inputs.hub.clone(), node.clock()));
+            let supervisor = Supervisor::new(inputs);
+            let result = supervisor
+                .run("read", name("plant.write"), &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            got.lock().expect("no panic").clone()
+        })
+    }
+
+    /// Writes each `(at, value)` of `samples` at `at` from the call, through a hub
+    /// writer as `plant.other`.
+    async fn write_at(hub: hub::Hub, clock: Clock, samples: Vec<(Span, i64)>) {
+        let open = hub::writer::Config {
+            subject: name("plant.other"),
+            authority: Authority(1),
+            lease: None,
+            channels: vec![name("plant.value")],
+        };
+        let mut writer = hub.writer(open).await.expect("opens");
+        let start = clock.now();
+        for (at, value) in samples {
+            clock.sleep_until(start + at).await;
+            let stamp = writer.now().nanos();
+            let outcome = write_value(&mut writer, stamp, value);
+            assert!(
+                matches!(outcome, hub::home::Outcome::Applied { .. }),
+                "{outcome:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn gives_a_kind_a_reader_that_gets_the_frames_of_a_hub_writer_in_order() {
+        let writes = vec![(ms(100), 30), (ms(200), 10), (ms(300), 20)];
+        let got = read_through(
+            |ctx, got| async move {
+                let reader = ctx.reader(&settings(Span::ZERO)).await;
+                let mut reader = reader.expect("the reader opens");
+                for _ in 0..3 {
+                    let received = reader.next().await.expect("a frame");
+                    got.lock().expect("no panic").extend(values(&received));
+                }
+                Ok(())
+            },
+            |hub, clock| write_at(hub, clock, writes),
+        );
+        assert_eq!(got, [30, 10, 20]);
+    }
+
+    #[test]
+    fn gives_a_kind_a_reader_that_an_open_of_the_connector_name_takes_over() {
+        let got = read_through(
+            |ctx, got| async move {
+                let reader = ctx.reader(&settings(Span::ZERO)).await;
+                let mut reader = reader.expect("the reader opens");
+                let ended = reader.next().await.expect_err("the session ends");
+                got.lock().expect("no panic").push(ended);
+                Ok(())
+            },
+            |hub, clock| async move {
+                clock.sleep(ms(100)).await;
+                let open = hub::reader::Config {
+                    select: Selector::new(["plant.value"]).expect("a selector"),
+                    mode: Mode::Complete,
+                    subject: name("plant.write"),
+                    name: Some(name("plant.write")),
+                    hold: Span::ZERO,
+                };
+                let reader = hub.reader(open).await.expect("the reader opens");
+                clock.sleep(Span::SECOND).await;
+                drop(reader);
+            },
+        );
+        assert_eq!(got, [hub::reader::Ended::Replaced]);
+    }
+
+    #[test]
+    fn gives_a_kind_a_reader_in_the_mode_of_its_settings() {
+        let writes = vec![(ms(100), 1), (ms(101), 2), (ms(102), 3)];
+        let got = read_through(
+            |ctx, got| async move {
+                let latest = reader::Settings {
+                    mode: Mode::Latest,
+                    ..settings(Span::ZERO)
+                };
+                let mut reader = ctx.reader(&latest).await.expect("the reader opens");
+                ctx.clock().sleep(ms(200)).await;
+                let received = reader.next().await.expect("a frame");
+                got.lock().expect("no panic").extend(values(&received));
+                Ok(())
+            },
+            |hub, clock| write_at(hub, clock, writes),
+        );
+        assert_eq!(got, [3]);
+    }
+
+    #[test]
+    fn holds_the_reader_of_a_kind_for_the_hold_of_its_settings() {
+        for (hold, want) in [
+            (Span::SECOND, Err(hub::reader::Ended::Behind)),
+            (
+                Span::from_nanos(ms(100).nanos() + 1),
+                Err(hub::reader::Ended::Behind),
+            ),
+            (ms(100), Ok(vec![8])),
+            (ms(99), Ok(vec![8])),
+            (Span::ZERO, Ok(vec![8])),
+        ] {
+            let writes = vec![(ms(100), 7), (ms(300), 8)];
+            let got = read_through(
+                move |ctx, got| async move {
+                    let reader = ctx.reader(&settings(hold)).await;
+                    let mut first = reader.expect("the reader opens");
+                    first.next().await.expect("a frame");
+                    drop(first);
+                    ctx.clock().sleep(ms(100)).await;
+                    let reader = ctx.reader(&settings(hold)).await;
+                    let mut reader = reader.expect("the reader opens");
+                    let next = reader.next().await.map(|received| values(&received));
+                    got.lock().expect("no panic").push(next);
+                    Ok(())
+                },
+                |hub, clock| write_at(hub, clock, writes),
+            );
+            assert_eq!(got, [want], "hold {hold:?}");
+        }
+    }
+
+    #[test]
+    fn gives_a_kind_the_errors_of_the_hub_as_they_are() {
+        let many = hub::reader::Error::ManyIndexes {
+            first: name("plant.time"),
+            other: name("plant.write.status.backoff"),
+        };
+        for (select, message, want) in [
+            (
+                "plant.missing",
+                "the selector matches no channel",
+                hub::reader::Error::Empty,
+            ),
+            (
+                "plant.**",
+                "the channels plant.time and plant.write.status.backoff are on \
+                 different indexes: open a reader per index",
+                many,
+            ),
+        ] {
+            let got = read_through(
+                move |ctx, got| async move {
+                    let settings = reader::Settings {
+                        select: Selector::new([select]).expect("a selector"),
+                        ..settings(Span::ZERO)
+                    };
+                    let error = ctx.reader(&settings).await.expect_err("an error");
+                    got.lock()
+                        .expect("no panic")
+                        .push((error.to_string(), error));
+                    Ok(())
+                },
+                |_, _| async {},
+            );
+            assert_eq!(got, [(message.to_owned(), want)], "select {select}");
+        }
     }
 
     /// Runs `write` as `plant.write` on a new shard, while a writer as
