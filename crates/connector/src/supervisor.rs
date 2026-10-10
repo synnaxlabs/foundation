@@ -273,7 +273,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::{STATUS, create_config, create_status, env, run_on};
+    use crate::common::{STATUS, create_config, create_status, env, run_on, run_with};
     use crate::kind::{Channels, Kind, Table};
     use crate::testing;
     use hub::home::Refusal;
@@ -895,7 +895,7 @@ mod tests {
                 Ok(())
             }
         };
-        timed(run, |scene| async move {
+        timed_due(run, |scene| async move {
             scene.node.clock().sleep(ms(500)).await;
             scene.remove("samples");
         });
@@ -928,7 +928,7 @@ mod tests {
                 Ok(())
             }
         };
-        timed(run, |scene| async move {
+        timed_due(run, |scene| async move {
             scene.node.clock().sleep(ms(500)).await;
             scene.remove("samples");
         });
@@ -1061,7 +1061,7 @@ mod tests {
                 Ok(())
             }
         };
-        timed(run, |scene| async move {
+        timed_due(run, |scene| async move {
             scene.node.clock().sleep(ms(500)).await;
             scene.remove("samples");
         });
@@ -1093,7 +1093,7 @@ mod tests {
                 Ok(())
             }
         };
-        timed(run, |scene| async move {
+        timed_due(run, |scene| async move {
             scene.node.clock().sleep(ms(1_500)).await;
             scene.remove("samples");
         });
@@ -1874,7 +1874,34 @@ mod tests {
         S: FnOnce(Scene) -> T + Send + 'static,
         T: Future<Output = ()> + 'static,
     {
-        run_on(|node, tasks| async move {
+        timed_on(sim::node::Config::default(), run, scenario)
+    }
+
+    /// [`timed`] on a node whose timers wake only when due, so a test can count the
+    /// polls of a sleep.
+    fn timed_due<F, R, S, T>(run: F, scenario: S) -> Span
+    where
+        F: Fn(Context<()>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<(), Error>>,
+        S: FnOnce(Scene) -> T + Send + 'static,
+        T: Future<Output = ()> + 'static,
+    {
+        let node = sim::node::Config {
+            arm_max: None,
+            ..sim::node::Config::default()
+        };
+        timed_on(node, run, scenario)
+    }
+
+    /// [`timed`] on a node of `node`.
+    fn timed_on<F, R, S, T>(node: sim::node::Config, run: F, scenario: S) -> Span
+    where
+        F: Fn(Context<()>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<(), Error>>,
+        S: FnOnce(Scene) -> T + Send + 'static,
+        T: Future<Output = ()> + 'static,
+    {
+        run_with(node, |node, tasks| async move {
             let kinds = Table::new().with("tally", Counted(run));
             let inputs =
                 create_config(&node, tasks.clone(), kinds, "plant.tally").await;
