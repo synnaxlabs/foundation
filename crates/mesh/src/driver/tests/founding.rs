@@ -708,8 +708,8 @@ fn keep_makes_a_founding_that_it_does_not_write_durable() {
 }
 
 /// A failed sync of the directory in `keep` gives the files error. It calls `keep`,
-/// not `Mesh::open`, because `Log::open` makes the first sync of the directory, and
-/// a fault fails only the next call.
+/// not `Mesh::open`, because the open syncs the directory before `keep` (`open_log`,
+/// then `Log::open`), and a fault fails only the next call.
 #[test]
 fn a_failed_sync_of_the_directory_in_keep_gives_the_files_error() {
     let (mut sim, node, region) = first_open();
@@ -743,7 +743,10 @@ async fn until(clock: &env::clock::Clock, span: Span, future: impl Future) -> bo
 }
 
 /// A first open with the founding in the directory keeps it, also after a dropped
-/// first open with another founding whose remove of `founding` still runs.
+/// first open with another founding whose remove of `founding` still runs. It calls
+/// `keep`, not `Mesh::open`: the second open's `Log::open` makes its file calls before
+/// `keep`, and those calls end after the dropped remove in each drop time that a scan
+/// of `Mesh::open` tried.
 #[test]
 fn a_keep_after_a_dropped_keep_of_another_founding_keeps_its_founding() {
     let mut dropped = 0_usize;
