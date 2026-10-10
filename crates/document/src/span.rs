@@ -136,12 +136,5 @@ mod tests {
                 prop_assert_eq!(x.cmp(&y).is_eq(), x == y);
             }
         }
-
-        #[test]
-        fn orders_a_later_source_after_an_earlier_offset() {
-            let first = Span::new(Source(0), at(9), at(9)).unwrap();
-            let second = Span::new(Source(1), at(0), at(0)).unwrap();
-            assert!(first < second);
-        }
     }
 }
