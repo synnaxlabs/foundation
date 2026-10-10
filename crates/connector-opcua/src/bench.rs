@@ -20,7 +20,6 @@ use types::time::{Monotonic, Span};
 
 use crate::connection;
 use crate::event::Loop;
-use crate::ffi::test::Session;
 use crate::ffi::{self, Status};
 
 /// A client of open62541 on its own event loop, which also runs a count of repeated
@@ -315,29 +314,27 @@ impl Manager {
         assert!(ready.is_ready(), "a drive whose run is ready ends");
     }
 
-    /// Gives the count of clients with an activated session and the namespaces of the
-    /// server.
+    /// Gives the count of clients with the namespaces of the server, which a client
+    /// reads after its session activates.
     ///
     /// # Panics
     ///
     /// If the connect of a client failed, as a client does not try it again.
     fn connected(&self) -> usize {
         let connected = |client: &&NonNull<ffi::Client>| {
-            let mut session = Session(0);
             let mut status = Status::GOOD;
             // SAFETY: the client lives.
             unsafe {
                 ffi::test::UA_Client_getState(
                     client.as_ptr(),
                     ptr::null_mut(),
-                    &raw mut session,
+                    ptr::null_mut(),
                     &raw mut status.0,
                 );
             }
             assert!(status == Status::GOOD, "a connect failed: {status:?}");
             // SAFETY: the client lives.
-            session == Session::ACTIVATED
-                && unsafe { ffi::test::shim_client_namespaced(client.as_ptr()) }
+            unsafe { ffi::test::shim_client_namespaced(client.as_ptr()) }
         };
         self.clients.iter().filter(connected).count()
     }
