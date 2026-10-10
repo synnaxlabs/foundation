@@ -1727,9 +1727,9 @@ End of search list.
         }
     }
 
-    /// The address of a clock lets other code call the clock, and a reference outside a
-    /// function has no function to key, so no list bounds its use. `check` needs GCC and
-    /// GNU binutils, so this test also runs the rule on macOS.
+    /// The address of a clock lets other code call the clock, and a reference outside
+    /// a function has no function to key, so no list bounds its use. `check` needs GCC
+    /// and GNU binutils, so this test also runs the rule on macOS.
     #[test]
     fn uses_refuses_a_reference_that_no_function_holds_or_no_call_makes() {
         let mut uses = Uses::default();
