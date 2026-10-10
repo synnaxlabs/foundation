@@ -793,13 +793,12 @@ impl Serve {
     /// each spec that takes effect later, and serves the node's port, until `guard`
     /// completes, the transport stops, or the mesh's group stops, by the rank of
     /// [`end`]. A transport or a group that ends it goes into `failed` before it drops
-    /// the tasks given that still run. Before it
-    /// returns, it drops the tasks, the hub, `home`, `guard`, each session and stream
-    /// future, and the mesh, and, with a mesh, waits for each task of the mesh to end.
-    /// The transport drops with the last of the port's future and the tasks of the
-    /// mesh. Runs no task and takes no session when a shard did not open, or when the
-    /// budgets were not kept, the identity did not load, or the mesh did not open,
-    /// which goes into `failed`.
+    /// the tasks given that still run. Before it returns, it drops the tasks, the hub,
+    /// `home`, `guard`, each session and stream future, and the mesh, and, with a mesh,
+    /// waits for each task of the mesh to end. The transport drops with the last of the
+    /// port's future and the tasks of the mesh. Runs no task and takes no session when
+    /// a shard did not open, or when the budgets were not kept, the identity did not
+    /// load, or the mesh did not open, which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
