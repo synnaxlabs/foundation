@@ -2227,7 +2227,10 @@ mod tests {
     proptest! {
         #[test]
         fn gives_the_seq_after_a_range_or_none_past_the_highest_seq(
-            seq in prop_oneof![any::<u64>(), (u64::MAX - u64::from(u32::MAX))..=u64::MAX],
+            seq in prop_oneof![
+                any::<u64>(),
+                (u64::MAX - u64::from(u32::MAX))..=u64::MAX,
+            ],
             count in any::<u32>(),
         ) {
             let sum = u128::from(seq) + u128::from(count);
