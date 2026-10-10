@@ -672,6 +672,7 @@ name = "env"
 version = "0.0.0"
 dependencies = [
  "block",
+ "proptest",
  "types",
 ]
 
