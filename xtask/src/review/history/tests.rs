@@ -12,7 +12,7 @@ impl Repo {
     fn new(name: &str) -> Self {
         let dir = std::env::temp_dir()
             .join(format!("xtask-history-{name}-{}", std::process::id()));
-        // A killed run with the same PID can leave the directory behind.
+        // A failed or killed run with the same PID can leave the directory behind.
         match std::fs::remove_dir_all(&dir) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => panic!("{e}"),
             _ => {}
@@ -1595,7 +1595,22 @@ fn a_directory_left_by_a_killed_run_does_not_break_a_test() {
     assert_eq!(repo.reaches(&end, &end), Ok(true));
     let dir = repo.dir.clone();
     repo.remove();
-    assert!(!dir.exists(), "{}", dir.display());
+    assert!(!dir.exists(), "remove left the directory {}", dir.display());
+}
+
+#[test]
+fn a_failed_removal_fails_the_test() {
+    let (repo, _) = Repo::with_pr("removed-twice");
+    let dir = repo.dir.clone();
+    std::fs::remove_dir_all(&dir).unwrap();
+    let missing = std::fs::remove_dir_all(&dir).unwrap_err();
+    let panic =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| repo.remove()))
+            .unwrap_err();
+    assert_eq!(
+        panic.downcast_ref::<String>(),
+        Some(&format!("remove {}: {missing}", dir.display()))
+    );
 }
 
 #[test]
