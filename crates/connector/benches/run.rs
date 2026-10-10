@@ -11,11 +11,14 @@
 //!   the status writer writes no more.
 //!
 //! Each figure is ns per step, with the count of the allocations of the steps. Judge
-//! `poll` by its p50.
+//! `poll` by its p50. A line panics when its last status state is not `stopped`, or
+//! `running` for the closed line, whose writer wrote no state after the removal.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::cell::RefCell;
 use std::pin::Pin;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{self, Poll};
 use std::time::Instant;
@@ -26,8 +29,10 @@ use connector::supervisor::Supervisor;
 use connector::testing;
 use document::Document;
 use document::diagnostic::Diagnostic;
+use env::tasks::Tasks;
+use hub::reader::Mode;
 use types::channel;
-use types::name::Name;
+use types::name::{Name, Selector};
 use types::time::Span;
 
 #[global_allocator]
@@ -40,6 +45,10 @@ const ROUNDS: usize = 100;
 const REMOVED: Span = Span::from_nanos(500_000_000);
 /// When a `Closed` kind starts its rounds, after the writer saw the removal.
 const CLOSED: Span = Span::from_nanos(3_000_000_000);
+/// The first key of the status channels.
+const STATUS: channel::Key = channel::Key::from_u128(100);
+/// The key of the status channel `state`.
+const STATE: channel::Key = channel::Key::from_u128(101);
 
 fn main() {
     let lines = [Step::Poll, Step::PollSet, Step::Set, Step::Closed].map(run);
@@ -176,11 +185,7 @@ fn run(step: Step) -> Line {
         let kinds = Table::new().with("steps", kind);
         let config = testing::create_config(env, node.net(), kinds).await;
         let connector: Name = "plant.steps".parse().expect("a valid name");
-        let status = testing::create_status(
-            &connector,
-            &[samples()],
-            channel::Key::from_u128(100),
-        );
+        let status = testing::create_status(&connector, &[samples()], STATUS);
         config
             .hub
             .set_definitions(status.iter().map(|(name, def)| (name, def)));
@@ -194,18 +199,71 @@ fn run(step: Step) -> Line {
                 hub.set_definitions(kept.map(|(name, def)| (name, def)));
             });
         }
+        let written = read_states(&config.hub, &connector, &tasks).await;
         let (token, document) = (Token::new(), Document::default());
-        Supervisor::new(config)
+        let result = Supervisor::new(config)
             .run("steps", connector, &document, &token)
-            .await
+            .await;
+        node.clock().sleep(Span::SECOND).await;
+        let last = written.borrow().last().copied();
+        (result, last)
     });
-    result
-        .expect("the run ends")
-        .expect("the connector ends ok");
+    let (result, last) = result.expect("the run ends");
+    result.expect("the connector ends ok");
+    let (running, stopped) = (0_u8, 2);
+    let state = if matches!(step, Step::Closed) {
+        running
+    } else {
+        stopped
+    };
+    assert_eq!(
+        last,
+        Some(state),
+        "the last status state of `{}`",
+        step.name()
+    );
     Arc::into_inner(line)
         .expect("the kind dropped")
         .into_inner()
         .expect("no panic under the lock")
+}
+
+/// Reads the `state` sample of each status frame of `connector` into the vector it
+/// gives, in a task on `tasks`.
+async fn read_states(
+    hub: &hub::Hub,
+    connector: &Name,
+    tasks: &Tasks,
+) -> Rc<RefCell<Vec<u8>>> {
+    let state = format!("{connector}.status.state");
+    let open = hub::reader::Config {
+        select: Selector::new([state.as_str()]).expect("a selector"),
+        mode: Mode::Complete,
+        subject: "bench".parse().expect("a valid name"),
+        name: None,
+        hold: Span::ZERO,
+    };
+    let mut reader = hub.reader(open).await.expect("the reader opens");
+    let states = Rc::new(RefCell::new(Vec::new()));
+    let into = Rc::clone(&states);
+    tasks.spawn(async move {
+        while let Ok(received) = reader.next().await {
+            let entries = received.set.entries();
+            let at = entries.iter().position(|entry| entry.key == STATE);
+            let at = at.expect("the set holds `state`");
+            let range = received.view.range(entries[at].group);
+            let count = range.expect("the group is present").count;
+            let count = usize::try_from(count).expect("a count");
+            let (_, bytes) = (received.view.iter())
+                .find(|&(present, _)| present == at)
+                .expect("the view holds `state`");
+            let mut samples = vec![0; count];
+            codec::decode(entries[at].data_type, count, bytes, &mut samples)
+                .expect("decodes");
+            into.borrow_mut().extend(samples);
+        }
+    });
+    states
 }
 
 /// Prints p10, p50, and p90 of the ns per step of each line, and its allocations.
