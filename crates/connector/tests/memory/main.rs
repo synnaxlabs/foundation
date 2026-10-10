@@ -1,6 +1,6 @@
-//! The status keeps no more than the bound of its error text, also after a device
-//! error of 1 MiB. This binary has no test harness: the count covers each thread, and
-//! a harness allocates on its own thread at any time.
+//! After a device error of 1 MiB, the status holds no more than after a short one,
+//! plus the bound of its error text. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -22,11 +22,15 @@ static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 
 const MIB: usize = 1 << 20;
 
-/// A kind whose first run ends with a device error of 1 MiB, and whose second run
-/// records the bytes held at its start and ends `Ok`.
+/// The runs that end with a short error, so that the bytes a run adds settle.
+const SHORT: usize = 3;
+
+/// A kind whose first [`SHORT`] runs end with a device error of 1 byte, whose next run
+/// ends with one of 1 MiB, and whose last run ends `Ok`. Each run records the bytes
+/// held at its start.
 struct Large {
     runs: AtomicUsize,
-    held: Arc<[AtomicUsize; 2]>,
+    held: Arc<[AtomicUsize; SHORT + 2]>,
 }
 
 impl Kind for Large {
@@ -50,17 +54,17 @@ impl Kind for Large {
     fn run(&self, _: Context<()>) -> impl Future<Output = Result<(), Error>> {
         let run = self.runs.fetch_add(1, Relaxed);
         self.held[run].store(ALLOCATOR.held(), Relaxed);
-        let end = if run == 0 {
-            Err(Error::Device("a".repeat(MIB).into()))
-        } else {
-            Ok(())
+        let end = match run {
+            ..SHORT => Err(Error::Device("a".into())),
+            SHORT => Err(Error::Device("a".repeat(MIB).into())),
+            _ => Ok(()),
         };
         std::future::ready(end)
     }
 }
 
 fn main() {
-    let held = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let held = Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
     let kind = Large {
         runs: AtomicUsize::new(0),
         held: Arc::clone(&held),
@@ -90,10 +94,12 @@ fn main() {
     result
         .expect("the run ends")
         .expect("the connector ends ok");
-    let [first, second] = [0, 1].map(|run| held[run].load(Relaxed));
-    let grown = second.saturating_sub(first);
+    let at = |run: usize| held[run].load(Relaxed);
+    let short = at(SHORT).saturating_sub(at(SHORT - 1));
+    let long = at(SHORT + 1).saturating_sub(at(SHORT));
+    // About 1 KiB for the text and 1 KiB for its series in a frame.
     assert!(
-        grown < MIB / 4,
-        "the status holds {grown} bytes more after a device error of 1 MiB"
+        long <= short + 4 * 1_024,
+        "a run adds {short} bytes after a short error, {long} after one of 1 MiB"
     );
 }
