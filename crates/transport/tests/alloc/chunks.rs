@@ -62,24 +62,33 @@ enum Mode {
 }
 
 pub(crate) fn main() {
-    let pattern: Vec<u8> = (0..=250).cycle().take(PATTERN).collect();
     let cases = [
         (FULL, 0, 0),
         (PAST, 0, 1),
         (240_000, SECOND, 1),
         (220_000, LAST, 0),
     ];
-    let recv = check(&pattern, &cases, Mode::Recv);
-    let into = check(&pattern, &cases, Mode::Into);
+    let recv = check(&cases, Mode::Recv, 0);
+    let into = check(&cases, Mode::Into, cases.len());
     assert_eq!(into, recv, "a recv_into makes the allocations of a recv");
 }
 
+/// The pattern of run `n`. A later run can get the address of a block that an
+/// earlier run freed, and the bytes it does not write keep that run's pattern, so
+/// each run has its own. No block of an earlier run holds the pattern of a later one
+/// while the runs are fewer than 12: the pattern of run 10, then the filler, holds
+/// that of run 11.
+fn pattern(n: usize) -> Vec<u8> {
+    (0..=250).cycle().skip(n).take(PATTERN).collect()
+}
+
 /// Runs each case of a message of `len` bytes with the pattern at `at`, whose read
-/// frees `copies` heap buffers, with reads in `mode`. Returns the allocations of
-/// each case's long read.
-fn check(pattern: &[u8], cases: &[(usize, usize, u64)], mode: Mode) -> Vec<u64> {
+/// frees `copies` heap buffers, with reads in `mode`, as runs from `first`. Returns
+/// the allocations of each case's long read.
+fn check(cases: &[(usize, usize, u64)], mode: Mode, first: usize) -> Vec<u64> {
     let mut allocations = Vec::new();
-    for &(len, at, copies) in cases {
+    for (n, &(len, at, copies)) in (first..).zip(cases) {
+        let pattern = &pattern(n);
         let [(read, freed, allocated), (next, _, next_allocated)] =
             run(pattern, len, at, mode);
         allocations.push(allocated);

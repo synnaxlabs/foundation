@@ -57,7 +57,8 @@ pub use files::Disk;
 /// none or it has no timer. Each thread that `os` starts has one with a timer, but a
 /// runtime that its body starts may not. A sleep completes about 2 ms late on an idle
 /// machine, and later under load. A sleep that waits across a suspend completes up to
-/// 1 s late.
+/// 1 s late. A timer wakes its task early at most a second after each poll, until it
+/// is due.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[must_use]
 pub fn clock() -> env::clock::Clock {

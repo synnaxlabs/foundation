@@ -17,7 +17,7 @@ use crate::cancel;
 ///     let rate = types::time::Rate::new(100, 1).expect("100 Hz is a rate");
 ///     let mut timer = Timer::new(clock, rate);
 ///     while let Some(tick) = timer.tick(cancel).await {
-///         let _ = tick.n;
+///         let _: u64 = tick.n;
 ///     }
 /// }
 /// ```
@@ -85,6 +85,7 @@ impl Timer {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use proptest::prelude::*;
 

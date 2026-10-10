@@ -15,7 +15,10 @@ fuzz_target!(|input: &[u8]| {
         &mut output,
         &mut errors,
     );
-    assert_eq!((status, errors.as_slice()), (0, b"".as_slice()));
+    assert_eq!(
+        (status, errors.as_slice()),
+        (ops::Run::Exit(0), b"".as_slice())
+    );
     let lines = input.split(|&byte| byte == b'\n').count();
     assert!(output.iter().filter(|&&byte| byte == b'\n').count() <= lines);
 });
