@@ -615,10 +615,12 @@ mod tests {
             panic!("two runs, the first ended: {:?}", out.runs);
         };
         assert!(again > ended, "a wait after the end: {:?}", out.runs);
+        let waited = out.statuses[2].0;
+        assert!(waited > ended, "1 ns after `state` 3: {:?}", out.statuses);
         let want = [
             (Span::ZERO, ""),
             (Span::ZERO, "no reply"),
-            (between(ended, again), "no reply"),
+            (between(waited, again), "no reply"),
             (Span::ZERO, "no reply"),
             (Span::ZERO, ""),
             (Span::ZERO, ""),
@@ -2644,6 +2646,81 @@ mod tests {
                 i64::from_le_bytes(sample)
             })
             .collect()
+    }
+
+    #[test]
+    fn writes_a_backoff_that_ends_at_the_next_run_after_a_frame_ahead() {
+        let lead = ms(500);
+        let (statuses, again) = run_on(move |node, tasks| async move {
+            let script = Script {
+                steps: Mutex::new([Step::Device(ms(10))].into()),
+                ..Script::default()
+            };
+            let runs = Arc::clone(&script.runs);
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            let channels = ["state", "class", "restarts", "backoff", "error"];
+            let other = hub::writer::Config {
+                subject: name("plant.other"),
+                authority: Authority::ABSOLUTE,
+                lease: None,
+                channels: channels
+                    .map(|c| name(&format!("plant.script.status.{c}")))
+                    .into(),
+            };
+            let mut other = inputs.hub.writer(other).await.expect("opens");
+            let entries = other.set().entries();
+            let series: Vec<_> = (entries.iter().enumerate())
+                .map(|(i, entry)| (i, entry.data_type.width().unwrap_or(4)))
+                .collect();
+            let mut draft = other.draft(Form::Raw, &series).expect("a frame");
+            let stamp = other.now().nanos() + lead.nanos();
+            for (i, entry) in entries.iter().enumerate() {
+                let bytes = draft.series_mut(i).expect("a series");
+                let value = match entry.data_type {
+                    _ if entry.key == STATUS => stamp,
+                    Type::String => 0,
+                    _ => 9,
+                };
+                let len = bytes.len();
+                bytes.copy_from_slice(&value.to_le_bytes()[..len]);
+            }
+            draft.set_count(entries[0].group, 1);
+            let outcomes = other.write(Label::Path(Path::Live), draft);
+            let applied = matches!(outcomes, Ok([hub::home::Outcome::Applied { .. }]));
+            assert!(applied, "the frame 500 ms ahead applies: {outcomes:?}");
+            drop(other);
+            let (clock, token) = (node.clock(), Token::new());
+            let (canceller, sleeper) = (token.clone(), clock.clone());
+            tasks.spawn(async move {
+                sleeper.sleep(ms(5_000)).await;
+                canceller.cancel();
+            });
+            let (supervisor, start) = (Supervisor::new(inputs), clock.now());
+            let result = supervisor
+                .run("script", name("plant.script"), &config(), &token)
+                .await;
+            result.expect("ok");
+            clock.sleep(Span::SECOND).await;
+            let runs = runs.lock().expect("no panic under the lock").clone();
+            let [_, (again, _)] = runs[..] else {
+                panic!("two runs: {runs:?}");
+            };
+            (statuses.borrow().clone(), again - start)
+        });
+        let (at, samples, _) = statuses
+            .iter()
+            .find(|(_, samples, _)| samples[0] == 1)
+            .expect("a frame of state 1");
+        // `statuses` gives each stamp from the first frame: the one 500 ms ahead.
+        let next = Span::from_nanos(at.nanos() + samples[3]);
+        let run = Span::from_nanos(again.nanos() - lead.nanos());
+        assert_eq!(
+            next, run,
+            "the frame's time plus `backoff` is the next run: {statuses:?}"
+        );
     }
 
     #[test]

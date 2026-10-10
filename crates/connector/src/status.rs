@@ -260,13 +260,20 @@ impl Writer {
         let session = hub.writer(config).await?;
         let entries: Box<[usize]> = session.entries().into();
         let set = session.set();
-        // The length of `error` is set at each write.
+        let error = entries[ERROR];
         let mut series: Box<[_]> = entries
             .iter()
-            .map(|&entry| (entry, set.entries()[entry].data_type.width().unwrap_or(0)))
+            .map(|&entry| {
+                // The length of `error` is set at each write.
+                let width = (entry != error).then(|| {
+                    let width = set.entries()[entry].data_type.width();
+                    width.expect("invariant: a status sample but `error` has one width")
+                });
+                (entry, width.unwrap_or(0))
+            })
             .collect();
         series.sort_unstable();
-        let text = series.partition_point(|&(entry, _)| entry < entries[ERROR]);
+        let error_series = series.partition_point(|&(entry, _)| entry < error);
         let group = set.entries()[entries[0]].group;
         let status = Status::new(counts);
         let session = Session {
@@ -280,8 +287,8 @@ impl Writer {
             class: Class::None,
             restarts: 0,
             error: String::new(),
-            text,
-            next: Monotonic::default(),
+            error_series,
+            next: Stamp::default(),
             started: false,
             unapplied: false,
             closed: false,
@@ -327,12 +334,11 @@ impl Writer {
     /// time of the next run.
     pub(crate) async fn wait(&self, span: Span) -> Monotonic {
         self.applied().await;
-        let next = self.clock.now() + span;
         self.change(|session| {
-            session.next = next;
+            session.next = session.hub.now() + span;
             session.state = State::Waiting;
         });
-        next
+        self.clock.now() + span
     }
 
     /// Writes `state` 2.
@@ -449,10 +455,10 @@ struct Session {
     restarts: u64,
     /// The text of `error`, at most [`ERROR_MAX`] bytes.
     error: String,
-    /// The index in `series` of `error`.
-    text: usize,
-    /// The time of the next run, by the node's clock, while `state` is 1.
-    next: Monotonic,
+    /// The index in `series` of `error`, the one series whose length changes.
+    error_series: usize,
+    /// The time of the next run, by the hub's clock, while `state` is 1.
+    next: Stamp,
     /// Set at the first start, after which each start is a restart.
     started: bool,
     /// Set while the last change of state waits for a frame that the home applies,
@@ -509,7 +515,7 @@ impl Session {
     /// When the draft or the home refuses the frame for a cause that only a defect
     /// gives, which includes a frame larger than the largest block of the pool.
     fn send(&mut self, values: &Values, stamp: Stamp) -> Result<(), Stamp> {
-        self.series[self.text].1 = size_of::<u32>() + self.error.len();
+        self.series[self.error_series].1 = size_of::<u32>() + self.error.len();
         let mut draft = match self.hub.draft(Form::Raw, &self.series) {
             Ok(draft) => draft,
             Err(frame::Error::Pool(error)) => {
@@ -566,7 +572,7 @@ impl Session {
     /// Fills `draft` with the last value of each status channel at `stamp`.
     fn fill(&self, draft: &mut Draft, values: &Values, stamp: Stamp) {
         let backoff = match self.state {
-            State::Waiting => (self.next - self.wrote).max(Span::ZERO),
+            State::Waiting => (self.next - stamp).max(Span::ZERO),
             State::Running | State::Stopped | State::Ending => Span::ZERO,
         };
         let supervisor = [
