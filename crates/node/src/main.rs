@@ -247,6 +247,7 @@ fn data(dir: &Path, error: os::Error) -> Failure {
 }
 
 /// The failure of a node that stopped with `error`, after a start that knew `known`.
+#[expect(clippy::too_many_lines, reason = "one arm for each error")]
 fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
     match error {
         node::Error::Disk { disk, cores, min } => {
@@ -260,17 +261,21 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
                 fix,
             }
         }
-        node::Error::Pool { pool, cores } if known.from.pool == Origin::Kept => {
-            let (from, fix) = kept(dir);
-            Failure {
-                code: MEMORY,
-                message: format!(
-                    "the pool budget {pool}, {from}, gives one of {cores} shards a \
-                     pool that needs more address space than this host has"
-                ),
-                fix,
+        // A first start gives at most 1 GiB, so no process reaches the second arm.
+        node::Error::Pool { pool, cores } => match known.from.pool {
+            Origin::Kept => {
+                let (from, fix) = kept(dir);
+                Failure {
+                    code: MEMORY,
+                    message: format!(
+                        "the pool budget {pool}, {from}, gives one of {cores} shards a \
+                         pool that needs more address space than this host has"
+                    ),
+                    fix,
+                }
             }
-        }
+            Origin::Most | Origin::Quarter => failure(dir, error),
+        },
         node::Error::Memory {
             core,
             error: error @ os::memory::Error::Reserve { .. },
