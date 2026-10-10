@@ -42,8 +42,9 @@ fn a_wake_by_reference_keeps_the_value() {
     assert!(dropped.get());
 }
 
-/// Runs `child` in a copy of this test in a child process, and asserts that the child
-/// aborts with the message of [`check`]. Returns the stderr of the child.
+/// Runs `child` in a copy of this test in a child process, as `cargo test` runs it,
+/// and asserts that the child aborts with the message of [`check`]. Returns the stdout
+/// and the stderr of the child.
 #[cfg(unix)]
 fn assert_aborts(child: impl FnOnce()) -> String {
     use std::os::unix::process::ExitStatusExt;
@@ -61,23 +62,24 @@ fn assert_aborts(child: impl FnOnce()) -> String {
     let thread = thread::current();
     let test = thread.name().expect("invariant: libtest names the thread");
     let output = process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "--nocapture", test])
+        .args(["--exact", test])
         .env(CHILD, "1")
         .output()
         .unwrap();
-    let stderr = String::from_utf8(output.stderr).unwrap();
-    assert_eq!(output.status.signal(), Some(SIGABRT), "{stderr}");
-    let (made, ran) = stderr
+    let printed = String::from_utf8(output.stdout).unwrap()
+        + &String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.signal(), Some(SIGABRT), "{printed}");
+    let (made, ran) = printed
         .lines()
         .find_map(|line| line.strip_prefix("a waker of `waker::holding` made on "))
         .and_then(|threads| threads.split_once(" ran on "))
-        .unwrap_or_else(|| panic!("no abort message: {stderr}"));
+        .unwrap_or_else(|| panic!("no abort message: {printed}"));
     assert!(
         made.starts_with("ThreadId(") && ran.starts_with("ThreadId("),
-        "{stderr}"
+        "{printed}"
     );
-    assert_ne!(made, ran, "{stderr}");
-    stderr
+    assert_ne!(made, ran, "{printed}");
+    printed
 }
 
 /// Runs `call` with a waker of [`holding`] on another thread.
@@ -142,7 +144,7 @@ impl Drop for Loud {
 #[cfg_attr(miri, ignore = "Miri cannot spawn a process")]
 #[test]
 fn a_last_drop_on_another_thread_aborts_before_the_value_drops() {
-    let stderr = assert_aborts(|| {
+    let printed = assert_aborts(|| {
         let waker = holding(Loud);
         #[expect(
             clippy::disallowed_methods,
@@ -152,5 +154,5 @@ fn a_last_drop_on_another_thread_aborts_before_the_value_drops() {
             .join()
             .expect("the process aborts first");
     });
-    assert!(!stderr.contains(DROPPED), "{stderr}");
+    assert!(!printed.contains(DROPPED), "{printed}");
 }
