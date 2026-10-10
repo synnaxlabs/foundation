@@ -769,8 +769,8 @@ const CALLS: [&str; 3] = ["R_X86_64_PLT32", "R_AARCH64_CALL26", "R_AARCH64_JUMP2
 struct Reference {
     /// The section that holds it.
     section: String,
-    /// The function that holds it, with no suffix of a compiler clone such as
-    /// `.isra.0`, or `None` in a section that is not code.
+    /// The function symbol that labels it in `objdump -d`, whole, such as `parse.0`
+    /// for a nested function, or `None` when no function symbol labels it.
     function: Option<String>,
     /// Its type is one of [`CALLS`].
     call: bool,
@@ -811,7 +811,7 @@ fn references(
             line.strip_suffix(">:").and_then(|l| l.split_once(" <"))
         {
             // A section with no symbol at its start shows as `<.text>`.
-            function = name.1.split('.').next().filter(|name| !name.is_empty());
+            function = Some(name.1).filter(|name| !name.starts_with('.'));
         } else {
             add(section, function, line);
         }
@@ -1070,7 +1070,7 @@ Disassembly of section .text.setDefaultConfig:
 \t\t\t42: R_X86_64_PC32\tUA_DateTime_now_x+0x4
 \t\t\t43: R_X86_64_PLT32\tstrtod-0x4
 \t\t\t44: R_X86_64_PLT32\tUA_inside-0x4
-0000000000000080 <seed.isra.0>:
+0000000000000080 <seed.0>:
 \t\t\t81: R_AARCH64_CALL26\tUA_DateTime_nowMonotonic
 00000000000000c0 <log>:
 \t\t\tc1: R_X86_64_PLT32\tUA_DateTime_localTimeUtcOffset-0x4
@@ -1114,7 +1114,7 @@ RELOCATION RECORDS FOR [.data.rel.ro]:
                 reference(".text.setDefaultConfig", Some("other"), true, "strtod"),
                 reference(
                     ".text.setDefaultConfig",
-                    Some("seed"),
+                    Some("seed.0"),
                     true,
                     "UA_DateTime_nowMonotonic"
                 ),
@@ -2305,6 +2305,42 @@ End of search list.
                  outside a function, so a use through it escapes FUNCTION_SYMBOLS"
                     .to_owned(),
                 unlisted("deps/parse_num.c", "UA_lastError", "__errno_location"),
+            ])
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
+    fn check_finds_a_listed_symbol_in_a_nested_function_of_a_new_function() {
+        let (root, repo, result) = run_after("nested", |_| {}, &[]);
+        assert_eq!(result, Ok(()));
+        let copy = root.join("patches/open62541");
+        let append = |path: &str, text: &str| {
+            let old = std::fs::read_to_string(copy.join(path)).unwrap();
+            std::fs::write(copy.join(path), old + text).unwrap();
+        };
+        append(
+            "deps/parse_num.c",
+            "int UA_lastError(void) {\n\
+             int parseDouble(void) { return errno; }\n\
+             return parseDouble();\n}\n",
+        );
+        append(
+            "src/util/ua_util.c",
+            "void UA_report(int n) {\n\
+             void UA_rng_require(void) { fprintf(stderr, \"%d\", n); }\n\
+             UA_rng_require();\n}\n",
+        );
+        assert_eq!(
+            check(&root),
+            Err(vec![
+                unlisted("deps/parse_num.c", "parseDouble.0", "__errno_location"),
+                unlisted("src/util/ua_util.c", "UA_rng_require.0", "fprintf"),
+                unlisted("src/util/ua_util.c", "UA_rng_require.0", "stderr"),
             ])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
