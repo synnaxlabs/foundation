@@ -309,13 +309,13 @@ impl State {
     }
 
     /// Moves on the connection in `accepted`, then each connection in `again` and
-    /// each that those steps add, until none is left, and gives whether it moved one.
+    /// each that those steps add, until none is left, and gives whether it moved one
+    /// of `again`. An accept or a failed accept adds one to `again`.
     fn move_on_again(&self, cx: &mut Context<'_>) -> bool {
-        let mut moved = false;
         if let Some(id) = self.accepted.take() {
             self.move_on(id, cx);
-            moved = true;
         }
+        let mut moved = false;
         loop {
             let Some(id) = self.again.borrow_mut().pop() else {
                 return moved;
