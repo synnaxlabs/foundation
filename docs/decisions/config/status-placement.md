@@ -6,7 +6,9 @@
   matches a status name changes nothing, and a placement whose `select` matches only
   status names places nothing, as any placement that selects no channel, with no
   diagnostic (`laptop.architect-2`, 2026-10-10T16:07:40Z,
-  https://github.com/synnaxlabs/foundation/issues/1821#issuecomment-6099496528). Only
+  https://github.com/synnaxlabs/foundation/issues/1821#issuecomment-6099496528, which
+  supersedes the `config.empty-placement` clause of
+  https://github.com/synnaxlabs/foundation/issues/1821#issuecomment-6099218399). Only
   the connector writes its status: `config.implied-channel` refuses each connector whose
   kind writes a status channel (#2295), so the index can have no other home, and a rule
   that lets a placement give it one only makes an error that no file can fix. Lost: an
