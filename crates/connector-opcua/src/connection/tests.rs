@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::task::Poll;
 
 use env::clock::Clock;
-use env::net::{Tcp, tcp};
+use env::net::{self, Tcp, tcp};
 use env::rng::Rng;
 use sim::{Sim, node};
 use types::time::{Monotonic, Span};
@@ -2655,4 +2655,40 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
             })
             .expect("the run ends");
     }
+}
+
+/// The peer sends 64 KiB, the receive buffer of [`OPTIONS`], before the stream
+/// reads, so the first read takes it all.
+#[test]
+fn an_accepted_stream_has_the_options_of_the_manager() {
+    let mut network = Network::new();
+    network.dial(Span::ZERO, &vec![7; OPTIONS.recv_buffer_bytes]);
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, local(&node));
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::from_nanos(100_000_000)).await;
+            side.calls()
+        })
+        .expect("the run ends");
+    let lengths: Vec<usize> = calls.iter().map(|(_, _, bytes)| bytes.len()).collect();
+    assert_eq!(lengths, [0, 0, OPTIONS.recv_buffer_bytes]);
+}
+
+#[test]
+fn a_manager_that_listens_at_a_taken_address_fails() {
+    let mut network = Network::new();
+    let failed = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let local = local(&node);
+            let _side = Side::listening(&node, local);
+            let rng = &mut Rng::from_seed(0);
+            let second = Manager::listening(node.clock(), node.net(), local, 4, rng);
+            (second.err(), local)
+        })
+        .expect("the run ends");
+    let (error, local) = failed;
+    assert_eq!(error, Some(net::Error::AddressInUse { local }));
 }
