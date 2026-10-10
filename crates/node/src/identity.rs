@@ -202,7 +202,7 @@ mod tests {
             include_bytes!("../../../oracles/fuzz/node_identity/valid-body-2");
         let mut summed = [0; LEN];
         summed[..BODY].copy_from_slice(body);
-        summed[BODY..].copy_from_slice(&crc32c::crc32c(body).to_le_bytes());
+        sector::checksum(&mut summed);
         for bytes in [valid, &summed] {
             let identity = decode(bytes).expect("decodes");
             assert_eq!(
