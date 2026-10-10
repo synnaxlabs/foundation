@@ -353,8 +353,9 @@
   `Error::Files`, and a pool with no block for it gives `Error::Pool`, not `Error::Log`,
   which names a part that did not fail (`laptop.architect`, 2026-10-08T16:10:01Z:
   https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6064069802). This
-  supersedes `Error::Voters` of the rules of #1209 and the digest form `Error::Founding
-  { stored: Digest, given: Digest }` of
+  supersedes `Error::Voters` of the rules of
+  https://github.com/synnaxlabs/foundation/issues/1209 and the digest form
+  `Error::Founding { stored: Digest, given: Digest }` of
   https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6056362876, because
   the whole value is the unit of the check (`laptop.architect`, 2026-10-08T10:34:50Z:
   https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6057978189).
