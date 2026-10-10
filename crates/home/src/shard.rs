@@ -2777,21 +2777,29 @@ mod tests {
         .expect("the run after the cut ends");
     }
 
-    /// It reads the private gate: with no mesh time, no writer opens, so no public
-    /// call shows the holder.
     #[test]
     fn restores_control_with_no_mesh_time_after_a_power_cut() {
         let (mut sim, node) = cut_after(176, false);
         sim.run_on(&node, |node, tasks| async move {
             let test = Test::new(node, tasks);
-            let mut shard = test.unsynced().await;
+            let set = two_indexes();
+            let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
+            let (clock, reader) = clock::Clock::new(test.clock.clone());
+            let mut shard = Test::with(0, buffer, reader).await;
             assert_eq!(shard.now(), None);
+            let wall = test.node.wall();
+            test.tasks.spawn(async move { clock.run(wall).await });
             shard.carry(Slot::new(0));
-            let a = control::Writer {
-                subject: "a".parse().expect("a valid name"),
-                authority: Authority(1),
-            };
-            assert_eq!(shard.indexes[0].gate.holder(), Some(&a));
+            shard.carry(Slot::new(2));
+            while shard.now().is_none() {
+                test.clock.sleep(Span::from_nanos(1)).await;
+            }
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[refused(0, Refusal::Reserved), refused(2, Refusal::Reserved)][..])
+            );
         })
         .expect("the run after the cut ends");
     }
