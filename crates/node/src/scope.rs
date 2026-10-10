@@ -42,6 +42,12 @@ impl Scope {
         self.next += 1;
         self.tasks.spawn(poll_fn(move |cx| run.poll(cx)));
     }
+
+    /// The count of futures that have not completed.
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.running.borrow().len()
+    }
 }
 
 impl Drop for Scope {

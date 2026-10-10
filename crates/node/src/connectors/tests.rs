@@ -108,6 +108,8 @@ struct Recorded {
     cancels: Events,
     /// The names that the runs hold after each step.
     held: Vec<Vec<String>>,
+    /// The futures of the runs at each step, before its apply.
+    futures: Vec<usize>,
 }
 
 /// Applies each step at its time, with the kind `hold`, whose task ends `linger` after
@@ -141,9 +143,10 @@ fn record(linger: Option<Span>, steps: Vec<Step>, dropped: Option<i64>) -> Recor
         let clock = node.clock();
         let start = clock.now();
         let mut runs = Runs::new(config, name(NODE));
-        let mut names = Vec::new();
+        let (mut names, mut futures) = (Vec::new(), Vec::new());
         for (at, spec) in steps {
             clock.sleep_until(start + at).await;
+            futures.push(runs.scope.len());
             let definitions = definitions(&spec);
             hub.set_definitions(&definitions);
             runs.apply(&definitions);
@@ -165,6 +168,7 @@ fn record(linger: Option<Span>, steps: Vec<Step>, dropped: Option<i64>) -> Recor
             starts: since(&starts),
             cancels: since(&cancels),
             held: names,
+            futures,
         }
     });
     run.expect("the run ends")
@@ -313,6 +317,33 @@ fn an_apply_drops_each_removed_run_that_ended() {
     let held = record(Some(ms(2_000)), steps, None).held;
     let held_a = vec!["plant.a"];
     assert_eq!(held, [held_a.clone(), held_a.clone(), held_a, vec![]]);
+}
+
+/// A change after the second run started waits for that run, not the first.
+#[test]
+fn a_third_change_starts_after_the_second_run_ended() {
+    let spec = |version| vec![("plant.a", "hold", NODE, version)];
+    let steps = vec![on(0, spec(0)), on(1_000, spec(1)), on(4_000, spec(2))];
+    let starts = starts(Some(ms(2_000)), steps);
+    let second = start("plant.a", 3_000, 1);
+    assert_eq!(
+        starts,
+        [start("plant.a", 0, 0), second, start("plant.a", 6_000, 2)]
+    );
+}
+
+/// A run cancelled while it waits for a run that never ends ends at once.
+#[test]
+fn many_changes_while_the_old_run_holds_keep_two_futures() {
+    let steps = (0..100_usize)
+        .zip((0..).step_by(50))
+        .map(|(version, at)| on(at, vec![("plant.a", "hold", NODE, version)]))
+        .collect();
+    let recorded = record(None, steps, None);
+    let mut futures = vec![0, 1];
+    futures.resize(100, 2);
+    assert_eq!(recorded.futures, futures);
+    assert_eq!(recorded.starts, [start("plant.a", 0, 0)]);
 }
 
 #[test]

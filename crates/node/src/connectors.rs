@@ -1,7 +1,6 @@
 //! Runs the connectors that the spec in use places on this node.
 
 use std::collections::BTreeMap;
-use std::rc::Rc;
 
 use connector::cancel;
 use connector::supervisor::{self, Supervisor};
@@ -14,9 +13,10 @@ use crate::scope::Scope;
 /// The runs of the connectors that the spec in use places on one node, on one
 /// supervisor. Dropped, it drops each run. It holds one run for each connector of the
 /// spec on the node, and one for each name whose run was cancelled and had not ended
-/// at the last apply.
+/// at the last apply. Each name has at most two futures: a run that has not returned,
+/// and the last run, which waits for it.
 pub(crate) struct Runs {
-    supervisor: Rc<Supervisor>,
+    supervisor: Supervisor,
     /// The name of the node in the region.
     node: Name,
     scope: Scope,
@@ -29,8 +29,21 @@ struct Run {
     /// The connector it runs, or `None` once the spec removed or changed it.
     connector: Option<Connector>,
     cancel: cancel::Token,
+    /// Cancelled once each earlier run of the name ended, or `None` for the first.
+    after: Option<cancel::Token>,
     /// Cancelled once the run returned, or once it was cancelled before it started.
-    ended: cancel::Token,
+    returned: cancel::Token,
+}
+
+impl Run {
+    /// Cancelled once this run and each earlier run of its name ended, when this run
+    /// is cancelled. A run cancelled before `after` never starts.
+    fn ended(&self) -> &cancel::Token {
+        match &self.after {
+            Some(after) if !after.cancelled() => after,
+            _ => &self.returned,
+        }
+    }
 }
 
 impl Runs {
@@ -39,7 +52,7 @@ impl Runs {
     pub(crate) fn new(supervisor: supervisor::Config, node: Name) -> Self {
         Self {
             scope: Scope::new(supervisor.tasks.clone()),
-            supervisor: Rc::new(Supervisor::new(supervisor)),
+            supervisor: Supervisor::new(supervisor),
             node,
             last: BTreeMap::new(),
         }
@@ -65,26 +78,27 @@ impl Runs {
                 run.connector = None;
                 run.cancel.cancel();
             }
-            run.connector.is_some() || !run.ended.cancelled()
+            run.connector.is_some() || !run.ended().cancelled()
         });
         for (name, connector) in wanted {
             let after = match self.last.get(name) {
                 Some(run) if run.connector.is_some() => continue,
-                Some(run) => Some(run.ended.clone()),
+                Some(run) => Some(run.ended().clone()),
                 None => None,
             };
             let run = Run {
                 connector: Some(connector.clone()),
                 cancel: cancel::Token::new(),
-                ended: cancel::Token::new(),
+                after: after.clone(),
+                returned: cancel::Token::new(),
             };
-            let supervisor = Rc::clone(&self.supervisor);
-            let (cancel, ended) = (run.cancel.clone(), run.ended.clone());
+            let supervisor = self.supervisor.clone();
+            let (cancel, returned) = (run.cancel.clone(), run.returned.clone());
             self.last.insert(name.clone(), run);
             let (name, connector) = (name.clone(), connector.clone());
             self.scope.spawn(Box::pin(async move {
                 if let Some(after) = after {
-                    after.wait().await;
+                    cancel.race(after.wait()).await;
                 }
                 // A run cancelled before it starts writes no status.
                 if !cancel.cancelled() {
@@ -101,7 +115,7 @@ impl Runs {
                         }
                     }
                 }
-                ended.cancel();
+                returned.cancel();
             }));
         }
     }
