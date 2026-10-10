@@ -2902,6 +2902,35 @@ fn each_read_is_in_the_one_buffer_of_the_manager() {
     );
 }
 
+/// The drain of a closing stream reads the bytes that the peer writes after the close
+/// into the read buffer of the manager, over the bytes of the last read of C. It reads
+/// the private `State.read` for the reason that
+/// `each_read_is_in_the_one_buffer_of_the_manager` gives.
+#[test]
+fn a_drain_reads_into_the_one_buffer_of_the_manager() {
+    let mut network = Network::new();
+    network.accept(|mut stream, clock| async move {
+        write(&mut stream, b"one, longer").await;
+        read_all(&mut stream, &clock, &Mutex::default(), Span::ZERO).await;
+        write(&mut stream, b"XY").await;
+        drop(poll_fn(|cx| stream.poll_close(cx)).await);
+    });
+    let remote = network.remote();
+    let start = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            let read = side.manager.state().read.borrow();
+            read.iter().take(11).copied().collect::<Vec<u8>>()
+        })
+        .expect("the run ends");
+    assert_eq!(start, b"XYe, longer");
+}
+
 /// A read gives C at most 64 KiB, the size of the read buffer and of the stream
 /// buffers of `OPTIONS`, so 70,000 bytes take two reads or more.
 #[test]
