@@ -21,7 +21,7 @@ mod tests;
 mod used;
 
 use error::Error;
-pub use front_end::FrontEnd;
+pub use front_end::{FrontEnd, FrontEnds};
 pub use node::Node;
 use operation::Parsed;
 pub use start::{Failure, Start};

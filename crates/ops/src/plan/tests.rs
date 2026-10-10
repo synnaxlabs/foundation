@@ -17,7 +17,7 @@ use types::sample;
 use super::{Output, plan};
 use crate::common::{PLANT, Reader, SITE, files, front_ends, hcl, name, placed_site};
 use crate::error::Error;
-use crate::front_end::{self, File, FrontEnd};
+use crate::front_end::{self, File, FrontEnd, FrontEnds};
 
 fn empty() -> spec::Pointer {
     spec::Pointer {
@@ -197,11 +197,10 @@ fix: Use a file that ends in `.hcl`
 
 #[test]
 fn names_each_extension_of_the_table_in_the_fix() {
-    let mut front_ends = front_ends();
-    front_ends.insert("toml", FrontEnd { read: hcl });
+    let front_ends = front_ends().with("toml", FrontEnd { read: hcl });
     let two = front_end::unknown(Source(0), &front_ends);
     assert_eq!(two.fix, "Use a file that ends in `.hcl` or `.toml`");
-    front_ends.insert("yaml", FrontEnd { read: hcl });
+    let front_ends = front_ends.with("yaml", FrontEnd { read: hcl });
     let diagnostic = front_end::unknown(Source(0), &front_ends);
     assert_eq!(
         diagnostic.fix,
@@ -258,12 +257,12 @@ fn reads_a_file_named_only_by_its_extension() {
 #[test]
 #[should_panic(expected = "invariant: a front end gives a problem with each error")]
 fn refuses_a_front_end_error_with_no_problem() {
-    let front_ends = BTreeMap::from([(
+    let front_ends = FrontEnds::new(
         "hcl",
         FrontEnd {
             read: |_, _| Err(Vec::new()),
         },
-    )]);
+    );
     let applied = BTreeMap::from([(name("a.time"), channel(1, INDEX))]);
     drop(plan(
         &files(&[("a.hcl", "")]),
@@ -387,7 +386,7 @@ fn names_one_problem_or_the_count_and_exits_with_2() {
 
 #[test]
 fn escapes_a_control_character_in_the_text_of_a_problem() {
-    let front_ends = BTreeMap::from([(
+    let front_ends = FrontEnds::new(
         "hcl",
         FrontEnd {
             read: |source, _| {
@@ -409,7 +408,7 @@ fn escapes_a_control_character_in_the_text_of_a_problem() {
                 Err(vec![diagnostic])
             },
         },
-    )]);
+    );
     let error = plan(
         &files(&[("a\u{1b}\\.hcl", "")]),
         empty(),

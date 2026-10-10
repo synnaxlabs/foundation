@@ -5724,6 +5724,45 @@ mod port {
             );
         }
 
+        /// A plan through `operate` takes each connector kind of the node, and gives
+        /// `connector.unknown-kind` for another kind.
+        #[test]
+        fn a_plan_knows_the_connector_kinds_of_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let node = start(&host, region(&[member(OWN, &KEY, &host)]));
+            let planned = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&planned);
+            node.operate(move |ops| async move {
+                for kind in ["influx", "modbus"] {
+                    let files = vec![(PathBuf::from("plant.hcl"), connector(kind))];
+                    let plan = ops.plan(files).await;
+                    let plan = plan.map(|_| ()).map_err(|error| error.to_string());
+                    out.lock().unwrap().push(plan);
+                }
+            });
+            assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let unknown = concat!(
+                r#"{"errors":[{"code":"connector.unknown-kind","#,
+                r#""fix":"Use one of [\"influx\"]","#,
+                r#""message":"this build has no connector kind \"modbus\"","#,
+                r#""notes":[],"place":{"column":10,"file":"plant.hcl","line":2}}]}"#,
+            );
+            assert_eq!(*planned.lock().unwrap(), [Ok(()), Err(unknown.to_owned())]);
+        }
+
+        /// The text of a spec with the connector `plant.influx` of `kind` on [`OWN`].
+        fn connector(kind: &str) -> String {
+            format!(
+                "connector \"plant.influx\" {{\n  kind = \"{kind}\"\n  \
+                 node = \"plant.node{OWN}\"\n  address = \"http://influx:8086\"\n  \
+                 select = \"plant.*\"\n  reader {{\n    mode = \"complete\"\n  }}\n}}\n"
+            )
+        }
+
         /// `operate` refuses a node with no region, which has no mesh to operate on.
         #[test]
         #[should_panic(expected = "`operate` on a node with no region")]

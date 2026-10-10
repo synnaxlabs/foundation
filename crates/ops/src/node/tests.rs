@@ -1,6 +1,6 @@
 use std::cell::Cell;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use connector::kind::Table;
 use document::Source;
@@ -23,7 +23,7 @@ fn create_node(mesh: Mesh) -> Node {
         made.set(made.get() + 1);
         Key::from_u128(made.get())
     };
-    Node::new(mesh, key, front_ends(), kinds())
+    Node::new(mesh, key, front_ends(), Arc::new(kinds()))
 }
 
 fn kinds() -> Table {
@@ -54,19 +54,6 @@ async fn planned(mesh: &Mesh, files: Vec<(PathBuf, String)>) -> Value {
 
 fn site() -> Vec<(PathBuf, String)> {
     vec![(PathBuf::from("site.hcl"), placed_site())]
-}
-
-#[test]
-#[should_panic(expected = "`ops::Node` needs a front end")]
-fn refuses_an_empty_table_of_front_ends() {
-    solo(|_, mesh| async move {
-        drop(Node::new(
-            mesh,
-            || Key::from_u128(1),
-            BTreeMap::new(),
-            Table::new(),
-        ));
-    });
 }
 
 #[test]

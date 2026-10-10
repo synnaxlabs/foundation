@@ -26,3 +26,7 @@
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6082035824;
   `laptop.architect-2`, 2026-10-09T13:58:16Z:
   https://github.com/synnaxlabs/foundation/pull/2150#issuecomment-6082402451).
+  `node` builds the table once, in `kinds`, and `ops::Node` and the supervisor share it
+  as one `Arc<kind::Table>`, so each kind is one value for the life of the process
+  (`box2.builder-7`, the plan of #1156:
+  https://github.com/synnaxlabs/foundation/issues/1156#issuecomment-6094418070).

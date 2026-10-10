@@ -20,6 +20,32 @@ pub struct FrontEnd {
     pub read: fn(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>>,
 }
 
+/// The front end of each file extension that a node reads. It holds at least one.
+#[derive(Clone, Debug)]
+pub struct FrontEnds(BTreeMap<&'static str, FrontEnd>);
+
+impl FrontEnds {
+    /// Reads each file whose name ends in `.<extension>` with `front_end`.
+    /// `extension` has no dot.
+    #[must_use]
+    pub fn new(extension: &'static str, front_end: FrontEnd) -> Self {
+        Self(BTreeMap::from([(extension, front_end)]))
+    }
+
+    /// Adds `extension` with `front_end`, in place of the front end that
+    /// `extension` had.
+    #[must_use]
+    pub fn with(mut self, extension: &'static str, front_end: FrontEnd) -> Self {
+        self.0.insert(extension, front_end);
+        self
+    }
+
+    /// Each extension, in order.
+    pub(crate) fn extensions(&self) -> impl Iterator<Item = &'static str> {
+        self.0.keys().copied()
+    }
+}
+
 /// One config file: its path, as the user or a directory listing gave it, and its text.
 pub(crate) struct File {
     pub(crate) path: PathBuf,
@@ -40,7 +66,7 @@ pub(crate) struct File {
 /// When a front end gives an error with no problem.
 pub(crate) fn read(
     files: &[File],
-    front_ends: &BTreeMap<&'static str, FrontEnd>,
+    front_ends: &FrontEnds,
 ) -> Result<Vec<Document>, Vec<Diagnostic>> {
     let mut documents = Vec::new();
     let mut diagnostics = Vec::new();
@@ -56,7 +82,7 @@ pub(crate) fn read(
                     .expect("invariant: a part of a UTF-8 path is UTF-8")
             })
             .and_then(|name| name.rsplit_once('.'))
-            .and_then(|(_, extension)| front_ends.get(extension));
+            .and_then(|(_, extension)| front_ends.0.get(extension));
         let Some(front_end) = front_end else {
             diagnostics.push(unknown(Source(source), front_ends));
             continue;
@@ -94,19 +120,16 @@ pub(crate) fn not_utf8(path: &Path) -> Diagnostic {
 }
 
 /// The `ops.unknown-extension` diagnostic, at the empty span at the start of `source`.
-pub(crate) fn unknown(
-    source: Source,
-    front_ends: &BTreeMap<&'static str, FrontEnd>,
-) -> Diagnostic {
+pub(crate) fn unknown(source: Source, front_ends: &FrontEnds) -> Diagnostic {
     let extensions: Vec<String> = front_ends
-        .keys()
+        .extensions()
         .map(|extension| format!("`.{extension}`"))
         .collect();
     let extensions = match extensions.as_slice() {
         [one] => one.clone(),
         [first, second] => format!("{first} or {second}"),
         [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
-        [] => unreachable!("invariant: `Node::new` checks the table"),
+        [] => unreachable!("invariant: `FrontEnds` holds a front end"),
     };
     let start = Position {
         offset: 0,

@@ -26,7 +26,7 @@ use types::name::{Name, Prefix};
 use types::node::{self, SealKey};
 use types::time::Span;
 
-use crate::front_end::{File, FrontEnd};
+use crate::front_end::{File, FrontEnd, FrontEnds};
 
 pub(crate) const PLANT: &str =
     include_str!("../../acceptance/tests/it/fixtures/plant.hcl");
@@ -78,8 +78,8 @@ pub(crate) fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic
         .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
-pub(crate) fn front_ends() -> BTreeMap<&'static str, FrontEnd> {
-    BTreeMap::from([("hcl", FrontEnd { read: hcl })])
+pub(crate) fn front_ends() -> FrontEnds {
+    FrontEnds::new("hcl", FrontEnd { read: hcl })
 }
 
 pub(crate) fn name(text: &str) -> Name {
