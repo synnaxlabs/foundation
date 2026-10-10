@@ -192,6 +192,16 @@ run "auto-merge waits" 0 "#7 merged" 2 \
   "$merged"
 run "left the merge queue" 1 "#7 left the merge queue" 1 \
   "$(pr OPEN | with '{"isInMergeQueue":false}')"
+removed() {
+  printf '{"isInMergeQueue":false,"timelineItems":{"nodes":[{"reason":"%s"}]}}' "$1"
+}
+run "removal by the merge waits" 0 "#7 merged" 2 \
+  "$(pr OPEN | with "$(removed merged)")" "$merged"
+run "removal by the merge with a failed check waits" 0 "#7 merged" 2 \
+  "$(pr OPEN "$(job Review 1 gate 3 '"FAILURE"' false)" | with "$(removed merged)")" \
+  "$merged"
+run "removal for another reason" 1 "#7 left the merge queue" 1 \
+  "$(pr OPEN | with "$(removed manual)")"
 run offline 0 "#7 merged" 2 offline "$merged"
 run "not JSON" 0 "#7 merged" 2 "http <html>" "$merged"
 run "HTTP error" 0 "#7 merged" 2 'http {"message":"Bad credentials"}' "$merged"
@@ -271,6 +281,7 @@ check "#1428 ends with a canceled gate" 0 "$premise" 1 0 true 1
 fields=$(jq '.data.repository.pullRequest | . as $pr
   | all("mergeable", "reviewDecision", "isInMergeQueue", "autoMergeRequest";
     . as $f | $pr | has($f))
+  and (.timelineItems.nodes[0].reason | type) == "string"
   and (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes
   | any(.[]; .__typename == "CheckRun")
   and all(.[]; .__typename != "CheckRun" or ((.name | type) == "string"
