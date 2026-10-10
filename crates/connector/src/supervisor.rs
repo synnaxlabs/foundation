@@ -869,7 +869,7 @@ mod tests {
         let (run, again, _) = &statuses[6];
         assert_eq!(again[0], 0, "the next run: {statuses:?}");
         // `backoff` is the wait by the node's clock. After the step, the hub's time
-        // slews toward the wall at 500 ppm.
+        // slews toward the wall at the 500 ppm of MESH SLEW.
         let (backoff, wait) = (samples[3], between(*at, *run).nanos());
         assert_eq!(wait - backoff, backoff / 2_000, "{statuses:?}");
     }
