@@ -349,7 +349,7 @@ mod tests {
 
     #[test]
     fn a_pool_over_it_allocates_returns_and_keeps_its_budget() {
-        let config = Config { budget: 1 << 16 };
+        let config = Config::new(1 << 16).expect("the budget fits");
         let pool =
             Pool::new(config.clone(), Memory::new(config.reservation()).unwrap());
         let largest = pool.largest();
@@ -418,7 +418,7 @@ mod tests {
     #[test]
     fn a_pool_purge_gives_back_the_pages_of_an_idle_block() {
         let page = page_size();
-        let config = Config { budget: 1 << 20 };
+        let config = Config::new(1 << 20).expect("the budget fits");
         let memory = Memory::new(config.reservation()).unwrap();
         let base = memory.base();
         let pool = Pool::new(config, memory);

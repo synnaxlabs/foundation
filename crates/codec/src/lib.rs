@@ -1127,7 +1127,7 @@ mod tests {
             index: channel::Key::from_u128(1),
             data: &[],
         }]);
-        let config = block::Config { budget: 1 << 16 };
+        let config = block::Config::new(1 << 16).expect("the budget fits");
         let memory = block::Heap::new(config.reservation());
         let pool = block::Pool::new(config, memory);
         let mut draft = Draft::new(&pool, &set, form, &[(0, bytes.len())])

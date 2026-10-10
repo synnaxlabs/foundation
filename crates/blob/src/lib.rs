@@ -467,11 +467,11 @@ mod tests {
 
     /// The pool budget of the tests. A pool reserves address space of up to 96 times
     /// its budget, and the tests of one process share a limit on it.
-    const BUDGET: usize = 1 << 20;
+    const BUDGET: u64 = 1 << 20;
 
     /// A pool of `budget` bytes.
-    fn create_pool(budget: usize) -> Rc<Pool> {
-        let config = block::Config { budget };
+    fn create_pool(budget: u64) -> Rc<Pool> {
+        let config = block::Config::new(budget).expect("the budget fits");
         let memory = block::Heap::new(config.reservation());
         Rc::new(Pool::new(config, memory))
     }

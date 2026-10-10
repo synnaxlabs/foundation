@@ -148,7 +148,9 @@ impl Lens {
             .expect("invariant: a frame holds the range of each group");
         Position {
             index: self.index,
-            live: range.seq + u64::from(range.count),
+            live: range
+                .end()
+                .expect("invariant: the home gives no range past u64::MAX"),
         }
     }
 }

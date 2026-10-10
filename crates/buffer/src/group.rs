@@ -329,7 +329,8 @@ mod tests {
     const CHAIN: u32 = 0x5EED_0001;
 
     fn pool(budget: usize) -> Pool {
-        let config = Config { budget };
+        let budget = u64::try_from(budget).expect("a usize fits in a u64");
+        let config = Config::new(budget).expect("the budget fits");
         Pool::new(config.clone(), Heap::new(config.reservation()))
     }
 

@@ -99,7 +99,8 @@ mod tests {
 
     /// A pool with `budget` bytes. A 100-byte block takes 192 of them.
     fn pool(budget: usize) -> Rc<Pool> {
-        let config = block::Config { budget };
+        let budget = u64::try_from(budget).expect("a usize fits in a u64");
+        let config = block::Config::new(budget).expect("the budget fits");
         let memory = Heap::new(config.reservation());
         Rc::new(Pool::new(config, memory))
     }

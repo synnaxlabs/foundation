@@ -182,7 +182,7 @@ impl Reader {
         if seq < self.end {
             return Err(Error::Seq { seq, end: self.end });
         }
-        match super::end(head.range) {
+        match head.range.end() {
             Some(end) => Ok(end),
             None => past_max(head.range),
         }

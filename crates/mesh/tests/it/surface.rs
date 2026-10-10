@@ -97,7 +97,7 @@ fn create_member(id: u8, addresses: Vec<Address>) -> Member {
 }
 
 fn create_pool() -> Rc<block::Pool> {
-    let budget = block::Config { budget: 1 << 20 };
+    let budget = block::Config::new(1 << 20).expect("the budget fits");
     let memory = block::Heap::new(budget.reservation());
     Rc::new(block::Pool::new(budget, memory))
 }

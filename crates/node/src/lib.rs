@@ -182,8 +182,9 @@ impl Node {
     ///
     /// # Panics
     ///
-    /// If a shard's part of the budget needs more address space than a `usize` holds,
-    /// or if the disk budget holds a ring on each of more than `u32::MAX` cores.
+    /// If the disk budget holds a ring on each shard, the port binds, and a shard's
+    /// part of the pool budget gives a reservation of more than `usize::MAX` bytes, or
+    /// if the disk budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let cores = config.shards.cores().get();
@@ -220,6 +221,15 @@ impl Node {
             entropy: config.entropy.clone(),
             net: config.net.clone(),
         };
+        let parts = parts
+            .into_iter()
+            .enumerate()
+            .map(|(core, (budget, layout))| {
+                let pool = block::Config::new(budget)
+                    .unwrap_or_else(|unfit| panic!("shard-{core}: {unfit}"));
+                (pool, layout)
+            })
+            .collect::<Vec<_>>();
         Self::launch(config, endpoint, parts.into_iter().zip(0..count))
     }
 
@@ -540,24 +550,18 @@ impl Role {
     }
 }
 
-/// The pool of each shard from its part of `budget`, and the layout of its ring from
-/// its part of `disk`, in order of core, else the first part that holds no ring.
+/// The part of `budget` of each shard, and the layout of its ring from its part of
+/// `disk`, in order of core, else the first part that holds no ring.
 fn parts(
     budget: types::byte::Size,
     disk: types::byte::Size,
     cores: usize,
-) -> Result<Vec<(block::Config, buffer::Layout)>, buffer::Small> {
+) -> Result<Vec<(u64, buffer::Layout)>, buffer::Small> {
     (0..cores)
         .map(|core| {
-            let budget = part(budget.bytes(), cores, core);
-            let Ok(budget) = usize::try_from(budget) else {
-                panic!(
-                    "pool budget {budget} of shard-{core} is past the address space"
-                );
-            };
             let layout =
                 buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX)?;
-            Ok((block::Config { budget }, layout))
+            Ok((part(budget.bytes(), cores, core), layout))
         })
         .collect()
 }
@@ -818,11 +822,11 @@ impl Serve {
     /// hub, `home`, `guard`, the runs of the connectors, each session and stream
     /// future, the operations on the mesh, the mesh, and the transport, and waits for
     /// each task of the mesh to end, with a mesh, and for the transport to free the
-    /// port. Unless the socket broke, the port is freed only after each task of a
-    /// remote reader of the hub, and each task that a connector's run spawned, has
-    /// ended. Runs no task and takes no session when a shard did not open, or when the
-    /// budgets were not kept, the identity did not load, or the mesh did not open,
-    /// which goes into `failed`.
+    /// port. Unless the socket broke, the port is freed only after the hub lets go of
+    /// the region, as [`hub::Hub::new`] states, and after each task that a connector's
+    /// run spawned has ended. Runs no task and takes no session when a shard did not
+    /// open, or when the budgets were not kept, the identity did not load, or the mesh
+    /// did not open, which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -857,8 +861,8 @@ impl Serve {
         let freed = transport.ended();
         let (inbox, time) = (self.inbox, self.time);
         // Each part that holds the transport or the node's stop drops as this block
-        // ends, on each path, or is a task that ends at its next poll after its owner
-        // drops: a hub task of a remote reader, or a task that a connector's run
+        // ends, on each path, or is a task of the mesh, awaited below, a task of the
+        // hub, which ends as `hub::Hub::new` states, or a task that a connector's run
         // spawned, which its kind ends at the cancel. So the port is freed before
         // `lock` drops.
         let served = async move {

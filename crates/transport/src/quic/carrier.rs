@@ -1365,7 +1365,7 @@ mod tests {
                 },
                 id: StreamId::new(Side::Client, Dir::Uni, 0),
             };
-            let config = Config { budget: 300 };
+            let config = Config::new(300).expect("the budget fits");
             let memory = Heap::new(config.reservation());
             let pool = Pool::new(config, memory);
             // A 100-byte block takes 192 bytes of the budget.

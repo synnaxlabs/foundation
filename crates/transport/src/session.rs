@@ -802,9 +802,11 @@ mod tests {
         let (mut sim, client, server) = testing::nodes(0);
         let at = [Address::Udp(testing::address(&server))];
         testing::shard(&server, SERVER, |config, node| async move {
-            let memory = block::Config {
-                budget: 3 * block::footprint(LEN),
-            };
+            let memory = block::Config::new(
+                u64::try_from(3 * block::footprint(LEN))
+                    .expect("a usize fits in a u64"),
+            )
+            .expect("the budget fits");
             let heap = block::Heap::new(memory.reservation());
             let pool = Rc::new(block::Pool::new(memory, heap));
             // The receive budget is the window plus the largest message: 150_000.

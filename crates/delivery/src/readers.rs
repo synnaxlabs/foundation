@@ -867,9 +867,8 @@ pub(super) mod tests {
     impl Frames {
         /// Room for `count` frames at once.
         pub(super) fn new(count: usize) -> Self {
-            let config = block::Config {
-                budget: count * 128,
-            };
+            let budget = u64::try_from(count * 128).expect("a usize fits in a u64");
+            let config = block::Config::new(budget).expect("the budget fits");
             let memory = block::Heap::new(config.reservation());
             let index = Group {
                 index: channel::Key::from_u128(1),
@@ -2846,7 +2845,7 @@ pub(super) mod tests {
 
         impl Sets {
             fn new() -> Self {
-                let config = block::Config { budget: 1 << 20 };
+                let config = block::Config::new(1 << 20).expect("the budget fits");
                 let memory = block::Heap::new(config.reservation());
                 let keys: Vec<_> = (2..=10)
                     .map(|n| (channel::Key::from_u128(n), F64))

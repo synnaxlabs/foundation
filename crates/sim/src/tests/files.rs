@@ -42,7 +42,7 @@ where
 }
 
 pub(super) fn pool() -> Pool {
-    let config = block::Config { budget: 64 << 10 };
+    let config = block::Config::new(64 << 10).expect("the budget fits");
     let memory = block::Heap::new(config.reservation());
     Pool::new(config, memory)
 }

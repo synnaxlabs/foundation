@@ -511,7 +511,7 @@ mod tests {
     #[test]
     fn new_names_the_pool_when_its_largest_block_is_below_the_floor() {
         testing::run(0, |shard| {
-            let budget = block::Config { budget: 1 << 10 };
+            let budget = block::Config::new(1 << 10).expect("the budget fits");
             let memory = Heap::new(budget.reservation());
             let pool = Rc::new(Pool::new(budget, memory));
             let largest = pool.largest();

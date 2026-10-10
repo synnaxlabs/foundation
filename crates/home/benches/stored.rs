@@ -44,7 +44,10 @@ const MIXED: [Type; 10] = [
 ];
 
 /// The pool of each bench.
-const POOL: block::Config = block::Config { budget: 1 << 24 };
+const POOL: block::Config = match block::Config::new(1 << 24) {
+    Ok(config) => config,
+    Err(_) => panic!("the budget fits"),
+};
 
 /// Bytes of one sample of a type that has no width.
 const VARIABLE: usize = 16;

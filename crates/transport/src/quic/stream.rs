@@ -2435,9 +2435,11 @@ mod tests {
         testing::run(1, |shard| {
             let mut pair = Pair::new(shard, Span::SECOND, DELAY);
             // A 100-byte block takes 192 bytes of the budget, and `_filled` leaves 300.
-            let config = block::Config {
-                budget: block::footprint(1_472) + 300,
-            };
+            let config = block::Config::new(
+                u64::try_from(block::footprint(1_472) + 300)
+                    .expect("a usize fits in a u64"),
+            )
+            .expect("the budget fits");
             let memory = Heap::new(config.reservation());
             let pool = Rc::new(Pool::new(config, memory));
             let _filled = pool.alloc(1_472).expect("room");
@@ -2766,9 +2768,11 @@ mod tests {
     fn a_whole_message_that_finds_the_pool_full_keeps_its_room() {
         testing::run(1, |shard| {
             let mut pair = narrow(shard);
-            let config = block::Config {
-                budget: block::footprint(MESSAGE_MAX),
-            };
+            let config = block::Config::new(
+                u64::try_from(block::footprint(MESSAGE_MAX))
+                    .expect("a usize fits in a u64"),
+            )
+            .expect("the budget fits");
             let memory = Heap::new(config.reservation());
             let pool = Rc::new(Pool::new(config, memory));
             let held = pool.alloc(MESSAGE_MAX).expect("room");
@@ -3981,7 +3985,7 @@ mod tests {
             // noq-proto copies a write of 1452 bytes or less, and holds a larger one
             // until the peer acknowledges it. A 2000-byte block takes 2112 bytes of
             // the budget.
-            let config = block::Config { budget: 3000 };
+            let config = block::Config::new(3000).expect("the budget fits");
             let memory = Heap::new(config.reservation());
             let pool = Pool::new(config, memory);
             let mut sender = open_sender(&mut pair, Class::Complete);
