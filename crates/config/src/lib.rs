@@ -497,13 +497,70 @@ mod tests {
 
     #[test]
     fn gives_the_kind_of_each_definition() {
-        let settings = entry(&["a"], Some(gib(1)), None, None).definition;
+        use definition::{Definition as Stored, Kind as Of};
+        use spec::{compression, connector, placement, region, retention, time};
+
+        let admin =
+            spec::founding::create(types::ed25519::PrivateKey([7; 32]).public());
+        let stored = |at: &str| admin[&key(at)].clone();
+        let select = || selector(&["a.**"]);
+        let nodes = placement::Nodes {
+            home: Some(key("a")),
+            ..placement::Nodes::default()
+        };
+        let channel = spec::channel::Channel {
+            key: types::channel::Key::from_u128(1),
+            kind: spec::channel::Kind::Index {
+                error: None,
+                control: None,
+            },
+        };
+        let config = document::encoding::Checked::new(document::Document::default());
+        let connector = connector::Connector::new(key("k"), key("a"), config.unwrap());
+        let keep = types::time::Span::ZERO;
+        let specs = [
+            (stored("@admin.@access"), Of::Access),
+            (Stored::Connector(connector), Of::Connector),
+            (Stored::Channel(channel), Of::Channel),
+            (
+                Stored::Region(region::Delegation::new(1, [key("a")]).unwrap()),
+                Of::Region,
+            ),
+            (
+                Stored::NodeSettings(
+                    Policy::new(select(), Some(gib(1)), None).unwrap(),
+                ),
+                Of::NodeSettings,
+            ),
+            (
+                Stored::Compression(compression::Policy {
+                    select: select(),
+                    mode: compression::Mode::Auto,
+                }),
+                Of::Compression,
+            ),
+            (
+                Stored::Placement(placement::Policy::new(select(), nodes).unwrap()),
+                Of::Placement,
+            ),
+            (
+                Stored::Time(time::Policy::new(select(), time::Peers::Voters)),
+                Of::Time,
+            ),
+            (
+                Stored::Retention(retention::Policy::new(select(), keep).unwrap()),
+                Of::Retention,
+            ),
+            (stored("@admin.@subject"), Of::Subject),
+        ];
+        for (definition, kind) in specs {
+            assert_eq!(Definition::Spec(definition).kind(), kind);
+        }
         let index = spec::channel::Kind::Index {
             error: None,
             control: None,
         };
-        assert_eq!(settings.kind(), definition::Kind::NodeSettings);
-        assert_eq!(Definition::Channel(index).kind(), definition::Kind::Channel);
+        assert_eq!(Definition::Channel(index).kind(), Of::Channel);
     }
 
     #[test]
