@@ -189,10 +189,12 @@ impl Change {
         paths: &[PathBuf],
     ) -> (Order, Self) {
         let (action, kind, span, definition) = if let Some(entry) = &change.new {
-            let definition = match &entry.definition {
-                config::Definition::Spec(definition) => Some(definition),
-                _ => None,
-            };
+            let definition =
+                if let config::Definition::Spec(definition) = &entry.definition {
+                    Some(definition)
+                } else {
+                    None
+                };
             let kind = entry.definition.kind();
             (Action::of(change), kind, entry.label_span, definition)
         } else {

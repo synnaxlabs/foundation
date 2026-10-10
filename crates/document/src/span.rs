@@ -4,7 +4,7 @@
 pub struct Source(pub u32);
 
 /// A place in a file. Lines and columns count from 0. Positions order by offset, then
-/// by line, then by column.
+/// by line and column.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position {
     /// Bytes from the start of the file.
@@ -16,7 +16,7 @@ pub struct Position {
 }
 
 /// The part of a file that holds an item, from `start` up to `end`. Spans order by
-/// source, then by start, then by end: in file order within one source.
+/// source, then by start, then by end.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Span {
     source: Source,
