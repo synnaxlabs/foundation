@@ -24,10 +24,13 @@
   `Number`, and `From<&Error> for Diagnostic` are private, and `Refusal::Text` holds
   `Vec<Diagnostic>`. Each front end gives the neutral model at the boundary, and no
   caller read an `Error` variant. `node` and the `ops` tests use `FrontEnd { read:
-  config_hcl::read }`, with no adapter. The crate's tests keep exact `Error` values
+  config_hcl::read }`, with no adapter. `write` and `update` keep `Unwritable` and
+  `Refusal` until #2223. The crate's tests keep exact `Error` values
   through the private type. Lost: a second public `read` that gives diagnostics next
   to the one that gives `Error` (two reads that differ only in the error type).
-  Supersedes "`read` gives a list of `Error`" of HCL ERRORS. Decided by
+  Supersedes "`read` gives a list of `Error`" and "Nesting past the depth limit is
+  `Error::TooDeep` from `read`" of HCL ERRORS: `read` gives `document`'s diagnostic
+  for it. Decided by
   `laptop.architect-2` (2026-10-10T02:51:42Z,
   https://github.com/synnaxlabs/foundation/issues/2079#issuecomment-6093002544); the
   oracle edit approved by the person (2026-10-10T02:58:30Z,
