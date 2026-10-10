@@ -493,8 +493,8 @@ fn panics_on_the_ack_of_a_position_of_another_index() {
 }
 
 #[test]
-#[should_panic(expected = "the position is past the last frame that this reader gave")]
-fn panics_on_the_ack_of_a_position_past_the_last_frame_it_gave() {
+#[should_panic(expected = "the position is past each position that this reader gave")]
+fn panics_on_the_ack_of_a_position_past_each_position_it_gave() {
     run(40, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);
         let mut reader = test.hub.reader(open).await.expect("opens");
@@ -508,13 +508,14 @@ fn panics_on_the_ack_of_a_position_past_the_last_frame_it_gave() {
         for _ in 0..3 {
             ahead = Some(other.next().await.expect("a frame").position());
         }
-        reader.next().await.expect("a frame");
+        let own = reader.next().await.expect("a frame").position();
+        reader.ack(own);
         reader.ack(ahead.expect("a frame"));
     });
 }
 
 #[test]
-#[should_panic(expected = "the position is past the last frame that this reader gave")]
+#[should_panic(expected = "the position is past each position that this reader gave")]
 fn panics_on_an_ack_past_the_samples_that_it_received() {
     run(41, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);
@@ -525,18 +526,20 @@ fn panics_on_an_ack_past_the_samples_that_it_received() {
         for n in 0..3 {
             write(&mut writer, &[now + n], &[n]);
         }
-        let mut ahead = None;
-        for _ in 0..3 {
-            ahead = Some(other.next().await.expect("a frame").position());
+        let first = other.next().await.expect("a frame").position();
+        let mut ahead = first;
+        for _ in 1..3 {
+            ahead = other.next().await.expect("a frame").position();
         }
         let received = slow.next().await.expect("a frame");
         assert_eq!(samples(&received, 2), [0]);
-        slow.ack(ahead.expect("a frame"));
+        assert_eq!(received.position(), first);
+        slow.ack(ahead);
     });
 }
 
 #[test]
-#[should_panic(expected = "the position is past the last frame that this reader gave")]
+#[should_panic(expected = "the position is past each position that this reader gave")]
 fn panics_on_an_ack_before_it_gave_a_frame() {
     run(33, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);
@@ -550,8 +553,9 @@ fn panics_on_an_ack_before_it_gave_a_frame() {
 }
 
 #[test]
-fn resumes_at_the_ack_of_a_position_of_another_reader_at_or_below_its_own() {
-    run(34, |test| async move {
+#[should_panic(expected = "the position is past each position that this reader gave")]
+fn panics_on_an_ack_past_each_position_it_gave_but_not_past_each_frame_it_received() {
+    run(43, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);
         let mut reader = test.hub.reader(open).await.expect("opens");
         let mut other = test.reader(&["value"], Mode::Complete).await;
@@ -559,13 +563,36 @@ fn resumes_at_the_ack_of_a_position_of_another_reader_at_or_below_its_own() {
         let now = test.now();
         for n in 0..3 {
             write(&mut writer, &[now + n], &[n]);
-            reader.next().await.expect("a frame");
+        }
+        let own = reader.next().await.expect("a frame").position();
+        reader.next().await.expect("a frame");
+        reader.next().await.expect("a frame");
+        other.next().await.expect("a frame");
+        let second = other.next().await.expect("a frame").position();
+        reader.ack(own);
+        reader.ack(second);
+    });
+}
+
+#[test]
+fn resumes_at_the_ack_of_a_position_of_another_reader_at_or_below_its_own() {
+    run(34, |test| async move {
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        let mut other = test.reader(&["value"], Mode::Complete).await;
+        let mut writer = test.writer("w", &["value"]).await;
+        let now = test.now();
+        let mut own = None;
+        for n in 0..3 {
+            write(&mut writer, &[now + n], &[n]);
+            own = Some(reader.next().await.expect("a frame").position());
         }
         let first = other.next().await.expect("a frame").position();
         let mut last = first;
         for _ in 1..3 {
             last = other.next().await.expect("a frame").position();
         }
+        assert_eq!(own, Some(last));
         reader.ack(first);
         reader.ack(last);
         drop(reader);

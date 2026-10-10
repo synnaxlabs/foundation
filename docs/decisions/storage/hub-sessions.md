@@ -344,10 +344,14 @@
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091530673, and
   the test "An ack that moves back gives the exact error of `delivery` (`Error::Ack`)"
   of #1742.
-  `Reader::ack` panics on a position past that of the last `Received` that `next`
-  gave, and on each position before `next` gave one. A position that another reader on
-  the index gave, at or below the reader's own, is a true ack (`laptop.architect`,
-  2026-10-10T01:01:30Z:
+  `Reader::ack` panics on a position of another index than the reader's, or past each
+  position that `Received::position` gave for the reader. Before it gave one, each
+  position panics (`laptop.architect`, 2026-10-10T01:40:23Z:
+  https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6092284036).
+  Supersedes item 1 of
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091931740. A
+  position that another reader on the index gave, at or below the reader's own, is a
+  true ack (`laptop.architect`, 2026-10-10T01:01:30Z:
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091931740).
   Supersedes the test "An ack of another reader's `Position` panics" of
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091357396.

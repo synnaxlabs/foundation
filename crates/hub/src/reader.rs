@@ -2,7 +2,7 @@
 
 pub(crate) mod remote;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::fmt;
 use std::future::poll_fn;
 use std::rc::Rc;
@@ -12,7 +12,7 @@ use std::task::{Context, Poll, ready};
 use ::home::reader::Next;
 use types::channel;
 use types::frame::key_set::KeySet;
-use types::frame::{Frame, Mask, View};
+use types::frame::{Frame, Mask, Range, View};
 use types::name::{Name, Selector};
 use types::sample::Type;
 use types::time::Span;
@@ -73,7 +73,12 @@ pub struct Config {
 pub struct Received<'a> {
     view: View<'a>,
     set: &'a Arc<KeySet>,
-    position: Position,
+    /// The group of the reader's index in `set`.
+    group: u32,
+    /// The slot of the reader's index.
+    index: channel::Slot,
+    /// The `given` of the reader.
+    given: &'a Cell<u64>,
 }
 
 impl<'a> Received<'a> {
@@ -93,7 +98,9 @@ impl<'a> Received<'a> {
     /// frame is safe at its target.
     #[must_use]
     pub fn position(&self) -> Position {
-        self.position
+        let position = Position::after(self.view.range(self.group), self.index);
+        self.given.set(self.given.get().max(position.live));
+        position
     }
 }
 
@@ -107,12 +114,10 @@ pub struct Position {
 }
 
 impl Position {
-    /// The position of a reader on the index at `index` after `frame`, whose key set
-    /// `lens` holds.
-    fn after(frame: &Frame, lens: &Lens, index: channel::Slot) -> Self {
-        let range = frame
-            .range(lens.group)
-            .expect("invariant: a frame holds the range of each group");
+    /// The position of a reader on the index at `index` after a frame whose range on
+    /// that index is `range`.
+    fn after(range: Option<Range>, index: channel::Slot) -> Self {
+        let range = range.expect("invariant: a frame holds the range of each group");
         Self {
             index,
             live: range.seq + u64::from(range.count),
@@ -309,8 +314,8 @@ pub struct Reader {
     source: Source,
     /// The slot of the reader's index.
     index: channel::Slot,
-    /// The `live` of the position of the last [`Received`] that `next` gave, or 0.
-    given: u64,
+    /// The highest `live` of each position that [`Received::position`] gave, or 0.
+    given: Cell<u64>,
     /// The frame that the last [`Received`] lends.
     frame: Option<Frame>,
 }
@@ -436,7 +441,7 @@ impl Reader {
                 return Ok(Self {
                     index: slot,
                     source: Source::Remote(Box::new(remote)),
-                    given: 0,
+                    given: Cell::new(0),
                     frame: None,
                 });
             }
@@ -456,7 +461,7 @@ impl Reader {
         Ok(Self {
             source: Source::Local(local),
             index: slot,
-            given: 0,
+            given: Cell::new(0),
             frame: None,
         })
     }
@@ -489,13 +494,12 @@ impl Reader {
                 Source::Local(local) => local.session.take().await?,
                 Source::Remote(remote) => remote.take().await?,
             };
-            let frame = self.frame.insert(frame);
-            let position = Position::after(frame, lens, self.index);
-            self.given = position.live;
             Ok(Received {
-                position,
-                view: View::new(frame, &lens.mask),
+                view: View::new(self.frame.insert(frame), &lens.mask),
                 set: &lens.set,
+                group: lens.group,
+                index: self.index,
+                given: &self.given,
             })
         }
     }
@@ -509,8 +513,8 @@ impl Reader {
     ///
     /// # Panics
     ///
-    /// If `position` is of another index than the reader's, or is past the position
-    /// of the last [`Received`] that `next` gave. Before `next` gave one, each
+    /// If `position` is of another index than the reader's, or is past each position
+    /// that [`Received::position`] gave for this reader. Before it gave one, each
     /// `position` panics.
     pub fn ack(&mut self, position: Position) {
         assert!(
@@ -518,10 +522,10 @@ impl Reader {
             "the position is of another index than the reader's"
         );
         assert!(
-            position.live <= self.given,
-            "the position is past the last frame that this reader gave: live {} past {}",
+            position.live <= self.given.get(),
+            "the position is past each position that this reader gave: live {} past {}",
             position.live,
-            self.given
+            self.given.get()
         );
         match &self.source {
             Source::Local(Local {
