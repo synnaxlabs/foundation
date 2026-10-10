@@ -232,14 +232,13 @@ fn a_kept_pool_budget_that_gives_a_shard_too_little_fails() {
 }
 
 /// A file `budget` with a checksum that matches and the largest pool budget. On one
-/// core, the part of shard 0 is the whole budget. Linux only: the test pins the node
-/// with `taskset`.
-#[cfg(target_os = "linux")]
+/// core, the part of shard 0 is the whole budget.
+#[cfg_attr(not(target_os = "linux"), ignore = "needs taskset and prlimit")]
 #[test]
 fn a_kept_pool_budget_too_large_for_the_host_fails_with_no_panic() {
     let rig = Rig::new();
     rig.keep(u64::MAX, rig.disk);
-    let output = rig.run_on_one_core(&["start", "--name", "edge"], b"");
+    let output = rig.run_on_one_core(None, &["start", "--name", "edge"], b"");
     let (status, out, errors) = ended(&output);
     assert_eq!((status, out), (Some(1), ""), "{errors}");
     assert_eq!(
@@ -249,6 +248,57 @@ fn a_kept_pool_budget_too_large_for_the_host_fails_with_no_panic() {
          that needs more address space than this host has\n\
          fix: Remove the file `budget` in foundation-data, and the next start \
          computes the budgets again from the free memory and disk\n"
+    );
+}
+
+/// A kept pool budget of 1 PiB, whose part on one core is under `usize::MAX` bytes and
+/// more than the address space of the host.
+#[cfg_attr(not(target_os = "linux"), ignore = "needs taskset and prlimit")]
+#[test]
+fn a_kept_pool_budget_that_the_system_cannot_reserve_fails() {
+    let rig = Rig::new();
+    rig.keep(1 << 50, rig.disk);
+    let output = rig.run_on_one_core(None, &["start", "--name", "edge"], b"");
+    let (status, out, errors) = ended(&output);
+    assert_eq!((status, out), (Some(1), ""), "{errors}");
+    assert_eq!(
+        errors,
+        "error[node.memory]: the pool budget 1024TiB, which foundation-data keeps \
+         from its first start, needs more address space for shard-0 than the system \
+         gives: a reserve of 108086391056891968 bytes of address space failed: Cannot \
+         allocate memory (os error 12); lower the memory budget\n\
+         fix: Remove the file `budget` in foundation-data, and the next start \
+         computes the budgets again from the free memory and disk\n"
+    );
+}
+
+/// A first start under an address space of 1 GiB, which its pool budget does not fit.
+#[cfg_attr(not(target_os = "linux"), ignore = "needs taskset and prlimit")]
+#[test]
+fn a_first_pool_budget_that_the_system_cannot_reserve_fails() {
+    let rig = Rig::new();
+    std::fs::remove_file(rig.budget()).expect("remove the budget file");
+    let output = rig.run_on_one_core(Some(1 << 30), &["start", "--name", "edge"], b"");
+    let (status, out, errors) = ended(&output);
+    assert_eq!((status, out), (Some(1), ""), "{errors}");
+    // The size of the reserve depends on the free memory of the host.
+    let (message, fix) = errors.split_once('\n').expect("two lines");
+    let size = (message.strip_prefix(
+        "error[node.failed]: no memory for the pool of shard-0: a reserve of ",
+    ))
+    .and_then(|rest| {
+        rest.strip_suffix(
+            " bytes of address space failed: Cannot allocate memory (os error 12); \
+             lower the memory budget",
+        )
+    });
+    assert!(
+        size.is_some_and(|size| size.parse::<u64>().is_ok()),
+        "{errors}"
+    );
+    assert_eq!(
+        fix,
+        "fix: Fix the cause that the message states, then start the node again\n"
     );
 }
 
