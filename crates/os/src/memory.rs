@@ -11,6 +11,8 @@ use rustix::mm::{self, MapFlags, MprotectFlags, ProtFlags};
 mod available;
 
 pub use available::available;
+#[cfg(all(target_os = "linux", feature = "sim"))]
+pub use available::available_under;
 
 /// The protection of reserved pages.
 const RESERVED: ProtFlags = ProtFlags::empty();
