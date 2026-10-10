@@ -1,3 +1,7 @@
+//! Tests of `Runs` on a supervisor with test kinds. `Node` runs only the kinds of
+//! `node::kinds`, so a test of a spec change through `Node` cannot hold a run or
+//! end one at a chosen time.
+
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
@@ -22,16 +26,19 @@ const NODE: &str = "plant.cloud";
 /// channels.
 const NAMES: [&str; 3] = ["plant.a", "plant.b", "plant.c"];
 
-/// Each start of a run: its connector, its time, and the version of its config.
+/// Each start of a run, or each cancel: its connector, its time, and the version of
+/// its config.
 type Starts = Arc<Mutex<Vec<(String, Monotonic, usize)>>>;
 
-/// A kind whose run records its start, spawns a task that ends `linger` after the
-/// cancel, or never with `None`, and returns at the cancel, or at once when `brief`.
-/// Its config is a version: the count of the attributes of the document.
+/// A kind whose run records its start, spawns a task that records the cancel and
+/// ends `linger` after it, or never with `None`, and returns at the cancel, or at
+/// once when `brief`. Its config is a version: the count of the attributes of the
+/// document.
 struct Hold {
     linger: Option<Span>,
     brief: bool,
     starts: Starts,
+    cancels: Starts,
 }
 
 impl Kind for Hold {
@@ -54,14 +61,17 @@ impl Kind for Hold {
 
     async fn run(&self, ctx: Context<usize>) -> Result<(), Error> {
         let start = (ctx.name().to_string(), ctx.clock().now(), *ctx.config());
-        self.starts.lock().expect("no panic").push(start);
+        self.starts.lock().expect("no panic").push(start.clone());
         if self.brief {
             return Ok(());
         }
         let (cancel, clock, linger) =
             (ctx.cancel().clone(), ctx.clock().clone(), self.linger);
+        let (cancels, mut at) = (Arc::clone(&self.cancels), start);
         ctx.tasks().spawn(async move {
             cancel.wait().await;
+            at.1 = clock.now();
+            cancels.lock().expect("no panic").push(at);
             match linger {
                 Some(linger) => clock.sleep(linger).await,
                 None => std::future::pending().await,
@@ -84,19 +94,32 @@ fn on(at: i64, spec: Vec<Placed>) -> Step {
     (ms(at), spec)
 }
 
+/// Each start of a run, or each cancel, with its time from the time the hub opened.
+type Events = Vec<(String, Span, usize)>;
+
+/// Each start of a run until 10 s, as [`record`] gives it.
+fn starts(linger: Option<Span>, steps: Vec<Step>) -> Events {
+    record(linger, steps, None).0
+}
+
 /// Applies each step at its time, with the kind `hold`, whose task ends `linger` after
 /// the cancel, the kind `quick`, whose task ends at the cancel, and the kind `brief`,
-/// whose run returns at once. Gives each start of a run until 10 s, from the time the
-/// hub opened.
-fn starts(linger: Option<Span>, steps: Vec<Step>) -> Vec<(String, Span, usize)> {
+/// whose run returns at once, and drops the runs at `dropped`, if given. Gives each
+/// start of a run and each cancel until 10 s, from the time the hub opened.
+fn record(
+    linger: Option<Span>,
+    steps: Vec<Step>,
+    dropped: Option<i64>,
+) -> (Events, Events) {
     let mut sim = ::sim::Sim::new(::sim::Config::default());
     let node = sim.node(::sim::node::Config::default());
     let run = sim.run_on(&node, move |node, tasks| async move {
-        let starts = Starts::default();
+        let (starts, cancels) = (Starts::default(), Starts::default());
         let hold = |linger, brief| Hold {
             linger,
             brief,
             starts: Arc::clone(&starts),
+            cancels: Arc::clone(&cancels),
         };
         let kinds = Table::new()
             .with("hold", hold(linger, false))
@@ -120,12 +143,19 @@ fn starts(linger: Option<Span>, steps: Vec<Step>) -> Vec<(String, Span, usize)> 
             hub.set_definitions(&definitions);
             runs.apply(&definitions);
         }
+        if let Some(dropped) = dropped {
+            clock.sleep_until(start + ms(dropped)).await;
+            drop(runs);
+        }
         clock.sleep_until(start + ms(10_000)).await;
-        let starts = starts.lock().expect("no panic");
         let since = |(connector, at, version): &(String, Monotonic, usize)| {
             (connector.clone(), *at - start, *version)
         };
-        starts.iter().map(since).collect()
+        let since = |events: &Starts| {
+            let events = events.lock().expect("no panic");
+            events.iter().map(since).collect()
+        };
+        (since(&starts), since(&cancels))
     });
     run.expect("the run ends")
 }
@@ -244,6 +274,23 @@ fn a_connector_on_another_node_starts_no_run() {
 }
 
 #[test]
+fn a_change_before_the_old_run_ended_then_a_removal_starts_no_run() {
+    let spec = |version| vec![("plant.a", "hold", NODE, version)];
+    let specs = vec![on(0, spec(0)), on(1_000, spec(1)), on(1_500, Vec::new())];
+    assert_eq!(starts(Some(ms(2_000)), specs), [start("plant.a", 0, 0)]);
+}
+
+#[test]
+fn a_drop_cancels_each_run() {
+    let spec = vec![("plant.a", "hold", NODE, 0), ("plant.b", "quick", NODE, 0)];
+    let (_, cancels) = record(None, vec![on(0, spec)], Some(1_000));
+    assert_eq!(
+        cancels,
+        [start("plant.a", 1_000, 0), start("plant.b", 1_000, 0)]
+    );
+}
+
+#[test]
 fn a_connector_whose_run_returned_starts_no_run_until_it_changes() {
     let spec = |version| vec![("plant.a", "brief", NODE, version)];
     let steps = vec![on(0, spec(0)), on(1_000, spec(0)), on(2_000, spec(1))];
@@ -265,6 +312,7 @@ fn a_removal_as_the_mesh_time_arrives_ends_the_run_that_waits_for_it() {
                 linger: Some(Span::ZERO),
                 brief: false,
                 starts: Arc::clone(&starts),
+                cancels: Starts::default(),
             },
         );
         let env = hub::testing::Env {

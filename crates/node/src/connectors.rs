@@ -12,7 +12,9 @@ use types::name::Name;
 use crate::scope::Scope;
 
 /// The runs of the connectors that the spec in use places on one node, on one
-/// supervisor. Dropped, it drops each run.
+/// supervisor. Dropped, it drops each run. It holds one run for each connector of the
+/// spec on the node, and one for each name whose run was cancelled and has not
+/// ended.
 pub(crate) struct Runs {
     supervisor: Rc<Supervisor>,
     /// The name of the node in the region.

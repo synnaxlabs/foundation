@@ -5777,13 +5777,53 @@ mod port {
         /// how the run ended: `influx` ends with a config error, and does not restart.
         #[test]
         fn a_node_runs_a_connector_that_an_apply_places_on_it() {
-            use super::super::hub::bytes;
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let founding = region(&[member(OWN, &KEY, &host)]);
             let (node, definitions) = applied(&mut sim, &host, founding, status());
+            let read = read_status(&node, &definitions);
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            node.operate(|ops| async move {
+                apply(&ops, format!("{}{}", status(), connector("influx"))).await;
+            });
+            assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            // `state` running, ending, then stopped; `class` none, then config.
+            assert_eq!(*read.lock().unwrap(), [(0, 0), (3, 1), (2, 1)]);
+        }
+
+        /// A node that starts on a spec that places a connector on it runs the
+        /// connector.
+        #[test]
+        fn a_node_runs_a_connector_of_the_spec_it_starts_on() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let founding = region(&[member(OWN, &KEY, &host)]);
+            let text = format!("{}{}", status(), connector("influx"));
+            let (node, definitions) = applied(&mut sim, &host, founding.clone(), text);
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let node = start(&host, founding);
+            let read = read_status(&node, &definitions);
+            assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            assert_eq!(*read.lock().unwrap(), [(0, 0), (3, 1), (2, 1)]);
+        }
+
+        /// Reads each `state` and `class` of `plant.influx` that `node` writes, from a
+        /// task on `node`, by the keys of `definitions`.
+        fn read_status(
+            node: &Node,
+            definitions: &BTreeMap<Name, Definition>,
+        ) -> Arc<Mutex<Vec<(u8, u8)>>> {
+            use super::super::hub::bytes;
             let [state, class] = ["state", "class"]
-                .map(|name| key_of(&definitions, &format!("influx.status.{name}")));
+                .map(|name| key_of(definitions, &format!("influx.status.{name}")));
             let read = Arc::new(Mutex::new(Vec::new()));
             let out = Arc::clone(&read);
             node.spawn(move |hub| async move {
@@ -5802,16 +5842,7 @@ mod port {
                     out.lock().unwrap().extend(state.into_iter().zip(class));
                 }
             });
-            assert_eq!(sim.run_for(TEN), Ok(()));
-            node.operate(|ops| async move {
-                apply(&ops, format!("{}{}", status(), connector("influx"))).await;
-            });
-            assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
-            node.stop();
-            assert_eq!(sim.run(), Ok(()));
-            assert_eq!(node.join(), Ok(()));
-            // `state` running, ending, then stopped; `class` none, then config.
-            assert_eq!(*read.lock().unwrap(), [(0, 0), (3, 1), (2, 1)]);
+            read
         }
 
         /// The text of a spec with the status channels of `plant.influx`, homed on
