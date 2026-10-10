@@ -27,6 +27,7 @@
   `laptop.architect-2`, 2026-10-09T13:58:16Z:
   https://github.com/synnaxlabs/foundation/pull/2150#issuecomment-6082402451).
   `node` builds the table once, in `kinds`, and gives it to `ops::Node` as an
-  `Arc<kind::Table>`. The table goes to both the supervisors and `ops::Node`, from
-  the one wiring site (`laptop.director`, 2026-10-09T05:05:48Z:
+  `Arc<kind::Table>`. Trigger: when `node` runs connectors (PR 2 of #1156), the
+  supervisors get the same table, from the one wiring site (`laptop.director`,
+  2026-10-09T05:05:48Z:
   https://github.com/synnaxlabs/foundation/issues/1156#issuecomment-6074666909).
