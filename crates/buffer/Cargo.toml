@@ -22,6 +22,7 @@ counting = { path = "../counting" }
 divan = { workspace = true }
 proptest = { workspace = true }
 sim = { path = "../sim" }
+waker = { path = "../waker" }
 
 [[test]]
 name = "alloc"

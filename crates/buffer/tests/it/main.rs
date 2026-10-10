@@ -3669,6 +3669,62 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
     .expect("the buffer ends");
 }
 
+/// A `Commit` or an `End` drops a waker after the borrow of the state ends: in a
+/// poll that replaces it, and in its own drop. The waker holds an `End`, whose drop
+/// borrows the state.
+#[test]
+fn a_waker_drops_after_the_borrow_of_the_state() {
+    let (mut sim, node) = create_node(143);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let noop = Waker::noop();
+        let mut commit = Box::pin(buffer.committed());
+        let waker = waker::holding(buffer.ended());
+        assert_eq!(
+            commit.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Pending
+        );
+        drop(waker);
+        assert_eq!(
+            commit.as_mut().poll(&mut Context::from_waker(noop)),
+            Poll::Pending
+        );
+        let waker = waker::holding(buffer.ended());
+        assert_eq!(
+            commit.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Pending
+        );
+        drop(waker);
+        drop(commit);
+        let mut end = Box::pin(buffer.ended());
+        let waker = waker::holding(buffer.ended());
+        assert_eq!(
+            end.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Pending
+        );
+        drop(waker);
+        assert_eq!(
+            end.as_mut().poll(&mut Context::from_waker(noop)),
+            Poll::Pending
+        );
+        let waker = waker::holding(buffer.ended());
+        assert_eq!(
+            end.as_mut().poll(&mut Context::from_waker(&waker)),
+            Poll::Pending
+        );
+        drop(waker);
+        drop(end);
+        assert_eq!(buffer.committed().await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
 /// `End`s polled from other tasks and dropped while the buffer is held keep no
 /// waker.
 #[test]
