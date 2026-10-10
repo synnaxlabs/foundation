@@ -3031,9 +3031,30 @@ mod tests {
     }
 
     #[test]
+    fn gives_a_kind_a_reader_in_the_mode_of_its_settings() {
+        let writes = vec![(ms(100), 1), (ms(101), 2), (ms(102), 3)];
+        let got = read_through(
+            |ctx, got| async move {
+                let latest = reader::Settings {
+                    mode: Mode::Latest,
+                    ..settings(Span::ZERO)
+                };
+                let mut reader = ctx.reader(&latest).await.expect("the reader opens");
+                ctx.clock().sleep(ms(200)).await;
+                let received = reader.next().await.expect("a frame");
+                got.lock().expect("no panic").extend(values(&received));
+                Ok(())
+            },
+            |hub, clock| write_at(hub, clock, writes),
+        );
+        assert_eq!(got, [3]);
+    }
+
+    #[test]
     fn holds_the_reader_of_a_kind_for_the_hold_of_its_settings() {
         for (hold, want) in [
             (Span::SECOND, Err(hub::reader::Ended::Behind)),
+            (ms(50), Ok(vec![8])),
             (Span::ZERO, Ok(vec![8])),
         ] {
             let writes = vec![(ms(100), 7), (ms(300), 8)];
