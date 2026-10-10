@@ -2935,14 +2935,15 @@ mod tests {
         }
     }
 
-    /// Runs `kind` once as `plant.write`, while a hub writer as `plant.other` writes
-    /// each `(at, value)` of `writes` at `at` from the start. Gives what the kind
-    /// put in `got`.
-    fn read_through<F, R, T>(kind: F, writes: Vec<(Span, i64)>) -> Vec<T>
+    /// Runs `kind` once as `plant.write`, while a task runs `beside` with the hub and
+    /// the clock. Gives what the kind put in `got`.
+    fn read_through<F, R, T, B, S>(kind: F, beside: B) -> Vec<T>
     where
         F: Fn(Context<()>, Arc<Mutex<Vec<T>>>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<(), Error>> + 'static,
         T: Clone + Send + 'static,
+        B: FnOnce(hub::Hub, Clock) -> S + Send + 'static,
+        S: Future<Output = ()> + 'static,
     {
         run_on(move |node, tasks| async move {
             let got = Arc::new(Mutex::new(Vec::new()));
@@ -2952,25 +2953,7 @@ mod tests {
             let inputs =
                 create_config(&node, tasks.clone(), kinds, "plant.write").await;
             define(&inputs.hub);
-            let open = hub::writer::Config {
-                subject: name("plant.other"),
-                authority: Authority(1),
-                lease: None,
-                channels: vec![name("plant.value")],
-            };
-            let mut other = inputs.hub.writer(open).await.expect("opens");
-            let (clock, start) = (node.clock(), node.clock().now());
-            tasks.spawn(async move {
-                for (at, value) in writes {
-                    clock.sleep_until(start + at).await;
-                    let stamp = other.now().nanos();
-                    let outcome = write_value(&mut other, stamp, value);
-                    assert!(
-                        matches!(outcome, hub::home::Outcome::Applied { .. }),
-                        "{outcome:?}"
-                    );
-                }
-            });
+            tasks.spawn(beside(inputs.hub.clone(), node.clock()));
             let supervisor = Supervisor::new(inputs);
             let result = supervisor
                 .run("read", name("plant.write"), &config(), &Token::new())
@@ -2978,6 +2961,28 @@ mod tests {
             result.expect("the run returns ok");
             got.lock().expect("no panic").clone()
         })
+    }
+
+    /// Writes each `(at, value)` of `samples` at `at` from the call, through a hub
+    /// writer as `plant.other`.
+    async fn write_at(hub: hub::Hub, clock: Clock, samples: Vec<(Span, i64)>) {
+        let open = hub::writer::Config {
+            subject: name("plant.other"),
+            authority: Authority(1),
+            lease: None,
+            channels: vec![name("plant.value")],
+        };
+        let mut writer = hub.writer(open).await.expect("opens");
+        let start = clock.now();
+        for (at, value) in samples {
+            clock.sleep_until(start + at).await;
+            let stamp = writer.now().nanos();
+            let outcome = write_value(&mut writer, stamp, value);
+            assert!(
+                matches!(outcome, hub::home::Outcome::Applied { .. }),
+                "{outcome:?}"
+            );
+        }
     }
 
     #[test]
@@ -2993,32 +2998,22 @@ mod tests {
                 }
                 Ok(())
             },
-            writes,
+            |hub, clock| write_at(hub, clock, writes),
         );
         assert_eq!(got, [30, 10, 20]);
     }
 
     #[test]
     fn gives_a_kind_a_reader_that_an_open_of_the_connector_name_takes_over() {
-        let got = run_on(|node, tasks| async move {
-            let got: Arc<Mutex<Option<hub::reader::Ended>>> = Arc::default();
-            let into = Arc::clone(&got);
-            let kind = plain(move |ctx: Context<()>| {
-                let into = Arc::clone(&into);
-                async move {
-                    let reader = ctx.reader(&settings(Span::ZERO)).await;
-                    let mut reader = reader.expect("the reader opens");
-                    let ended = reader.next().await.expect_err("the session ends");
-                    *into.lock().expect("no panic") = Some(ended);
-                    Ok(())
-                }
-            });
-            let kinds = Table::new().with("read", kind);
-            let inputs =
-                create_config(&node, tasks.clone(), kinds, "plant.write").await;
-            define(&inputs.hub);
-            let (hub, clock) = (inputs.hub.clone(), node.clock());
-            tasks.spawn(async move {
+        let got = read_through(
+            |ctx, got| async move {
+                let reader = ctx.reader(&settings(Span::ZERO)).await;
+                let mut reader = reader.expect("the reader opens");
+                let ended = reader.next().await.expect_err("the session ends");
+                got.lock().expect("no panic").push(ended);
+                Ok(())
+            },
+            |hub, clock| async move {
                 clock.sleep(ms(100)).await;
                 let open = hub::reader::Config {
                     select: Selector::new(["plant.value"]).expect("a selector"),
@@ -3030,15 +3025,9 @@ mod tests {
                 let reader = hub.reader(open).await.expect("the reader opens");
                 clock.sleep(Span::SECOND).await;
                 drop(reader);
-            });
-            let supervisor = Supervisor::new(inputs);
-            let result = supervisor
-                .run("read", name("plant.write"), &config(), &Token::new())
-                .await;
-            result.expect("the run returns ok");
-            got.lock().expect("no panic").take()
-        });
-        assert_eq!(got, Some(hub::reader::Ended::Replaced));
+            },
+        );
+        assert_eq!(got, [hub::reader::Ended::Replaced]);
     }
 
     #[test]
@@ -3061,7 +3050,7 @@ mod tests {
                     got.lock().expect("no panic").push(next);
                     Ok(())
                 },
-                writes,
+                |hub, clock| write_at(hub, clock, writes),
             );
             assert_eq!(got, [want], "hold {hold:?}");
         }
