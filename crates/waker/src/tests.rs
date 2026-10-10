@@ -1,4 +1,5 @@
 use std::cell::Cell;
+use std::mem::ManuallyDrop;
 
 use super::*;
 
@@ -100,7 +101,12 @@ fn on_another_thread(call: fn(Waker)) {
 #[cfg_attr(miri, ignore = "Miri cannot spawn a process")]
 #[test]
 fn a_clone_on_another_thread_aborts() {
-    assert_aborts(|| on_another_thread(|waker| drop(waker.clone())));
+    assert_aborts(|| {
+        on_another_thread(|waker| {
+            let waker = ManuallyDrop::new(waker);
+            let _clone = ManuallyDrop::new(Waker::clone(&waker));
+        });
+    });
 }
 
 #[cfg(unix)]
@@ -114,7 +120,9 @@ fn a_wake_on_another_thread_aborts() {
 #[cfg_attr(miri, ignore = "Miri cannot spawn a process")]
 #[test]
 fn a_wake_by_reference_on_another_thread_aborts() {
-    assert_aborts(|| on_another_thread(|waker| waker.wake_by_ref()));
+    assert_aborts(|| {
+        on_another_thread(|waker| ManuallyDrop::new(waker).wake_by_ref());
+    });
 }
 
 #[cfg(unix)]
