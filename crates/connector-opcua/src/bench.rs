@@ -6,10 +6,10 @@
 
 use std::cell::Cell;
 use std::ffi::{CString, c_void};
-use std::future::Future as _;
+use std::future::{Future as _, poll_fn};
 use std::mem::ManuallyDrop;
 use std::net::{IpAddr, SocketAddr};
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::ptr::{self, NonNull};
 use std::task::{Context, Poll, Waker};
 
@@ -109,7 +109,7 @@ const PORT: u16 = 4840;
 
 /// The time that a [`Manager`] gives its clients to connect. A connect has a timeout
 /// only while a request waits: before its first request, it can wait forever.
-const CONNECT: Span = Span::from_nanos(60_000_000_000);
+const CONNECT_TIMEOUT: Span = Span::from_nanos(60_000_000_000);
 
 /// A connection manager over `env::net` with a test server of open62541 and `idle + 1`
 /// clients, each with an activated session and the namespaces of the server, on its
@@ -158,7 +158,6 @@ impl Manager {
         let sessions =
             u16::try_from(idle + 1).expect("open62541 counts sessions in 16 bits");
         let local = SocketAddr::new(address, PORT);
-        let deadline = clock.now() + CONNECT;
         let rng = &mut Rng::from_seed(0);
         let manager = connection::Manager::listening(
             Clock::clone(&clock),
@@ -206,22 +205,38 @@ impl Manager {
             answers: Box::default(),
             connections: ManuallyDrop::new(manager),
         };
-        this.connections
-            .drive(|_| {
-                this.connections.events().run();
-                let connected = this.connected();
-                if connected == this.clients.len() {
-                    return Poll::Ready(());
-                }
-                let clients = this.clients.len();
-                assert!(
-                    clock.now() < deadline,
-                    "{connected} of {clients} clients connected in {CONNECT}"
-                );
-                Poll::Pending
-            })
-            .await;
+        this.connect(&clock).await;
         this
+    }
+
+    /// Drives the manager until each client is connected.
+    ///
+    /// # Panics
+    ///
+    /// If a connect fails or does not end in [`CONNECT_TIMEOUT`] of `clock`.
+    async fn connect(&self, clock: &Clock) {
+        let clients = self.clients.len();
+        let mut deadline = clock.sleep(CONNECT_TIMEOUT);
+        let mut connect = pin!(self.connections.drive(|_| {
+            self.connections.events().run();
+            if self.connected() == clients {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }));
+        poll_fn(|cx| {
+            if connect.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(());
+            }
+            let connected = self.connected();
+            assert!(
+                Pin::new(&mut deadline).poll(cx).is_pending(),
+                "{connected} of {clients} clients connected in {CONNECT_TIMEOUT}"
+            );
+            Poll::Pending
+        })
+        .await;
     }
 
     /// Drives the manager once: a pass, one run of the loop, and the moves after it.
