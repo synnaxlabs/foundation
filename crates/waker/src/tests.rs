@@ -1,4 +1,5 @@
 use std::cell::Cell;
+#[cfg(unix)]
 use std::mem::ManuallyDrop;
 
 use super::*;
