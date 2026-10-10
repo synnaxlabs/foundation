@@ -141,9 +141,14 @@ pub(crate) fn writes(
 
 /// Adds each channel that each connector implies to the entries, with the span of the
 /// connector's label. Reports `config.implied-channel` at each block whose key is, in
-/// any ASCII case, an implied channel.
+/// any ASCII case, an implied channel. A connector whose name repeats implies nothing,
+/// as `found` holds only its last block, which depends on the order of the files.
 pub(crate) fn imply(found: &mut Found<'_>) {
     for (connector, writes) in &found.writes {
+        let lower = connector.as_str().to_ascii_lowercase();
+        if found.labels[lower.as_str()].len() > 1 {
+            continue;
+        }
         let at = found.entries[connector].label_span;
         for (name, kind) in &writes.implied {
             let lower = name.as_str().to_ascii_lowercase();

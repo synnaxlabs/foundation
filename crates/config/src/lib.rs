@@ -100,7 +100,8 @@ pub struct Entry {
 /// deeper than `document::encoding::Checked` takes.
 /// `config.long-name` at the label of a connector with a status name longer than
 /// [`Name::MAX_BYTES`]. `config.implied-channel` at the label of each block whose key
-/// in the map is, in any ASCII case, a status channel, with a note at the connector.
+/// in the map is, in any ASCII case, a status channel, with a note at the connector. A
+/// connector whose name repeats hides the problems of its status channels.
 pub fn check(
     documents: &[Document],
     kinds: &Table,
