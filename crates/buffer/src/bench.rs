@@ -1,7 +1,5 @@
 //! `wal::Writer` and `log::Logs`, for the bench targets only. Not a stable surface.
 
-use std::num::NonZeroU8;
-
 use types::channel::{self, Slot};
 use types::frame::Path;
 use types::time::Stamp;
@@ -81,12 +79,10 @@ pub struct Logs {
 }
 
 impl Logs {
-    /// The logs of `indexes` indexes on the live path. With `tag`, each log first
-    /// holds a durable entry with that tag.
+    /// The logs of `indexes` indexes on the live path.
     #[must_use]
-    pub fn new(indexes: u32, tag: Option<NonZeroU8>) -> Self {
-        let mut logs = crate::log::Logs::default();
-        let headers: Vec<_> = (0..indexes)
+    pub fn new(indexes: u32) -> Self {
+        let headers = (0..indexes)
             .map(|n| {
                 let header = Header {
                     index: channel::Key::from_u128(u128::from(n) + 1),
@@ -101,23 +97,10 @@ impl Logs {
                 (Slot::new(n), header)
             })
             .collect();
-        let mut offset = BLOCK;
-        if let Some(tag) = tag {
-            for (slot, header) in &headers {
-                let tagged = Header {
-                    len: 0,
-                    last: None,
-                    tag: tag.get(),
-                    ..*header
-                };
-                logs.sync(*slot, &tagged, offset).expect("entries in order");
-            }
-            offset += BLOCK;
-        }
         Self {
-            inner: logs,
+            inner: crate::log::Logs::default(),
             headers,
-            offset,
+            offset: BLOCK,
         }
     }
 
@@ -167,16 +150,13 @@ mod tests {
     /// Each commit moves the durable tail of each index past one more entry.
     #[test]
     fn each_commit_of_the_logs_syncs_one_entry_of_each_index() {
-        let mut logs = Logs::new(2, NonZeroU8::new(1));
+        let mut logs = Logs::new(2);
         for _ in 0..3 {
             logs.commit();
         }
         for n in 0..2 {
-            assert_eq!(
-                logs.inner.durable(Slot::new(n), Path::Live).seq,
-                3,
-                "index {n}"
-            );
+            let slot = Slot::new(n);
+            assert_eq!(logs.inner.durable(slot, Path::Live).seq, 3, "index {n}");
         }
     }
 }
