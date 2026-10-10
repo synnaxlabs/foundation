@@ -22,7 +22,6 @@ clock = { path = "../clock" }
 config-hcl = { path = "../config-hcl" }
 connector = { path = "../connector" }
 crc32c = { workspace = true }
-document = { path = "../document" }
 env = { path = "../env" }
 estimate = { path = "../estimate" }
 home = { path = "../home" }
