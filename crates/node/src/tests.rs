@@ -5795,20 +5795,33 @@ mod port {
         }
 
         /// A node that starts on a spec that places a connector on it runs the
-        /// connector.
+        /// connector: a later apply that keeps the connector starts no run, and one
+        /// that changes it starts one. The reader opens after the run of the start,
+        /// because a status written before the open is lost to it.
         #[test]
         fn a_node_runs_a_connector_of_the_spec_it_starts_on() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = keyed(&mut sim, 2);
             let founding = region(&[member(OWN, &KEY, &host)]);
             let text = format!("{}{}", status(), connector("influx"));
-            let (node, definitions) = applied(&mut sim, &host, founding.clone(), text);
+            let (node, definitions) =
+                applied(&mut sim, &host, founding.clone(), text.clone());
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
             let node = start(&host, founding);
+            assert_eq!(sim.run_for(TEN), Ok(()));
             let read = read_status(&node, &definitions);
-            assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            let other = "channel \"plant.other\" { kind = \"index\" }\n";
+            let kept = format!("{text}{other}");
+            let changed = kept.replace("influx:8086", "influx:8087");
+            for text in [kept, changed] {
+                node.operate(|ops| async move {
+                    apply(&ops, text).await;
+                });
+                assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
+            }
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
