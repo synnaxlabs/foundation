@@ -632,6 +632,62 @@ fn a_sync_after_a_write_succeeds() {
     });
 }
 
+/// A RAM disk of 64 MiB with an HFS+ volume, which no other process writes. It
+/// detaches when it drops, except while the thread panics.
+#[cfg(target_os = "macos")]
+struct Ram {
+    device: String,
+    mount: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl Ram {
+    fn new() -> Self {
+        // The size is in sectors of 512 bytes.
+        let attach = ["attach", "-nomount", "ram://131072"];
+        let device = stdout(std::process::Command::new("hdiutil").args(attach));
+        let device = device.trim().to_owned();
+        let name = format!("foundation-os-{}", std::process::id());
+        let erase = ["erasevolume", "HFS+", &name, &device];
+        stdout(std::process::Command::new("diskutil").args(erase));
+        let mount = Path::new("/Volumes").join(name);
+        Self { device, mount }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for Ram {
+    fn drop(&mut self) {
+        // While the thread panics, a second panic aborts the test binary.
+        if !std::thread::panicking() {
+            let detach = ["detach", self.device.as_str()];
+            stdout(std::process::Command::new("hdiutil").args(detach));
+        }
+    }
+}
+
+/// Runs `command`, and gives its output. Panics with its error output when it fails.
+#[cfg(target_os = "macos")]
+fn stdout(command: &mut std::process::Command) -> String {
+    let output = command.output().unwrap();
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{command:?}: {error}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// The root tests check this on Linux, on a filesystem of their own.
+#[cfg(target_os = "macos")]
+#[test]
+fn free_drops_by_the_bytes_of_a_created_file() {
+    let ram = Ram::new();
+    let (files, thread) = files(&ram.mount, "files");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async move { crate::free::check(&files).await });
+    thread.join().unwrap();
+}
+
 /// The error of `os::files` on `dir`.
 #[test]
 fn a_disk_shows_as_disk() {

@@ -11,6 +11,8 @@ use std::process::Command;
 
 use env::files::{Error, Files, Mode};
 
+#[path = "../it/free.rs"]
+mod free;
 #[path = "../it/kept.rs"]
 mod kept;
 #[path = "../common/sockets.rs"]
@@ -108,22 +110,9 @@ fn a_disk_that_drops_while_the_test_panics_stays_mounted() {
     assert!(mounted, "{} is not mounted", mount.display());
 }
 
-/// No other process writes the filesystem, so the drop is exact.
 #[test]
 fn free_drops_by_the_bytes_of_a_created_file() {
-    const LEN: u64 = 8 << 20;
-    run(|files, _| async move {
-        let before = files.free().await.unwrap();
-        let mode = Mode::Create { len: LEN };
-        let file = files.open(Path::new("a"), mode).await.unwrap();
-        let after = files.free().await.unwrap();
-        file.close().await;
-        assert_eq!(
-            before - after,
-            LEN,
-            "{before} bytes free before, {after} after"
-        );
-    });
+    run(|files, _| async move { free::check(&files).await });
 }
 
 #[test]
