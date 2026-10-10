@@ -548,6 +548,8 @@ mod tests {
         }
 
         /// The set keeps the number of a shed index only until it carries it again.
+        /// No caller sees a kept number: a slot is carried again only after a `shed`,
+        /// which writes over it.
         #[test]
         fn drops_the_number_of_a_shed_index_that_it_carries_again() {
             let mut set = carried(2);
