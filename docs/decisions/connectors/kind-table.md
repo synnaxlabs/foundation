@@ -27,6 +27,6 @@
   `laptop.architect-2`, 2026-10-09T13:58:16Z:
   https://github.com/synnaxlabs/foundation/pull/2150#issuecomment-6082402451).
   `node` builds the table once, in `kinds`, and gives it to `ops::Node` as an
-  `Arc<kind::Table>`, so the connector supervisor of #1156 can share the same value
-  (`box2.builder-7`, the plan of #1156, 2026-10-10T05:56:46Z:
-  https://github.com/synnaxlabs/foundation/issues/1156#issuecomment-6094418070).
+  `Arc<kind::Table>`. The table goes to both the supervisors and `ops::Node`, from
+  the one wiring site (`laptop.director`, 2026-10-09T05:05:48Z:
+  https://github.com/synnaxlabs/foundation/issues/1156#issuecomment-6074666909).
