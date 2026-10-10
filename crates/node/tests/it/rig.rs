@@ -35,8 +35,8 @@ impl Rig {
     /// Makes a temporary directory for the test on this thread, with a name that no
     /// directory has: a run that was killed keeps its directory, and a later run can
     /// get the same PID. Its data directory keeps a pool budget of 1 GiB and a disk
-    /// budget of 256 MiB ([`Rig::keep`]), so a first start does not take a quarter of
-    /// the host's free disk.
+    /// budget of 8 MiB for each core ([`Rig::keep`]), so a first start does not take
+    /// a quarter of the host's free disk, and each shard's ring fits.
     pub(crate) fn new() -> Self {
         let thread = std::thread::current();
         let test = thread.name().expect("invariant: libtest names the thread");
@@ -56,8 +56,15 @@ impl Rig {
             clock: os::clock(),
             node: None,
         };
-        rig.keep(1 << 30, 256 << 20);
+        rig.keep(1 << 30, Rig::disk());
         rig
+    }
+
+    /// A disk budget that holds a ring on each shard of this host: 8 MiB for each
+    /// core.
+    pub(crate) fn disk() -> u64 {
+        let cores = os::shards().expect("read the cores").cores().get();
+        u64::try_from(cores).expect("invariant: a core count fits u64") * (8 << 20)
     }
 
     /// The path of the file `budget` of the data directory `foundation-data`.
