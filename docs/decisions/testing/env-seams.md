@@ -6,6 +6,14 @@
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6073808019).
   Supersedes the ENV SEAMS and `Driver` texts of item 4 of
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072358016.
+  Amended (2026-10-10, #2064): `tasks::Group` is the one counting driver of `env`. It
+  counts each task spawned through it until the task's future has dropped, and
+  `Group::ended` gives an `Ended` that resolves only then, with many waiters. A crate
+  that waits for its tasks uses it and keeps no count of its own. `laptop.architect-2`
+  (2026-10-09T21:02:50Z):
+  https://github.com/synnaxlabs/foundation/issues/2064#issuecomment-6089208454.
+  Supersedes "no change to `env`" in
+  https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6067043337.
   `clock::Clock`: monotonic time as `types::time::Monotonic`, and a `Sleep` future that
   resets without an allocation.
   `wall::Wall`: the OS wall clock, which only `clock` reads (a lint).
