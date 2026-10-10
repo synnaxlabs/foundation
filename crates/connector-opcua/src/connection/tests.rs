@@ -2116,7 +2116,7 @@ fn the_delete_of_a_server_that_is_not_stopped_panics() {
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, local(&node));
-            // SAFETY: the loop outlives the server, which the test deletes.
+            // SAFETY: the loop outlives the server, which the panic leaks.
             let server = unsafe {
                 ffi::test::shim_server_new(
                     side.events().raw(),
