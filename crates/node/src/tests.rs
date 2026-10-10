@@ -5983,19 +5983,15 @@ mod port {
         /// [`OWN`].
         fn status() -> String {
             use std::fmt::Write as _;
-            let index = "plant.influx.status.time";
+            let connector = "plant.influx".parse().expect("a name");
+            let (index, channels) =
+                connector::status::channels(&connector, &[]).expect("the names fit");
             let mut text = format!("channel \"{index}\" {{ kind = \"index\" }}\n");
             writeln!(text, "placement \"plant\" {{").unwrap();
             writeln!(text, "  select = \"plant.**\"").unwrap();
             writeln!(text, "  home = \"plant.node{OWN}\"\n}}").unwrap();
-            for (name, data_type) in [
-                ("state", "u8"),
-                ("class", "u8"),
-                ("restarts", "u64"),
-                ("backoff", "duration"),
-                ("error", "string"),
-            ] {
-                writeln!(text, "channel \"plant.influx.status.{name}\" {{").unwrap();
+            for (name, data_type) in channels {
+                writeln!(text, "channel \"{name}\" {{").unwrap();
                 writeln!(text, "  data_type = \"{data_type}\"").unwrap();
                 writeln!(text, "  index = \"{index}\"\n}}").unwrap();
             }
