@@ -472,7 +472,19 @@ mod tests {
         ]
     }
 
+    fn cases() -> ProptestConfig {
+        let mut config = ProptestConfig::default();
+        if cfg!(miri) {
+            // Miri has no file access for the failure files.
+            config.cases = 16;
+            config.failure_persistence = None;
+        }
+        config
+    }
+
     proptest! {
+        #![proptest_config(cases())]
+
         #[test]
         fn ended_is_ready_exactly_when_no_task_is_left(
             steps in proptest::collection::vec(step(), 0..64),
