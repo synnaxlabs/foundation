@@ -5,7 +5,7 @@ use env::files::{self, Mode};
 
 use super::*;
 
-use crate::driver::founding::FILE;
+use crate::driver::founding::{FILE, keep};
 
 /// The founding of node 1 with the members and voters `IDS`.
 async fn create_region(node: &sim::node::Node, tasks: &Tasks) -> region::Founding {
@@ -618,13 +618,16 @@ fn a_power_cut_in_the_first_open_leaves_a_first_open() {
     assert_ne!(cut_after, 0, "no cut came after the founding was kept");
 }
 
-/// A process crash in a first open after the rename of the founding file and before
-/// the sync of the mesh directory, then a reopen with the same founding, which writes
-/// nothing, leaves that founding durable. The mesh directory is not the root, which
-/// the blob store syncs.
-#[test]
-fn a_reopen_after_a_crash_before_the_founding_is_durable_makes_it_durable() {
-    const MESH: &str = "mesh";
+/// The mesh directory of the tests of a founding that is not durable. It is not the
+/// root, which the blob store syncs.
+const MESH: &str = "mesh";
+
+/// Runs `then` with the step after each process crash in a first open in [`MESH`]
+/// that is after the rename of the founding file and before the sync of [`MESH`], with
+/// the founding of that open.
+fn after_each_crash_before_the_founding_is_durable(
+    mut then: impl FnMut(u64, &mut Sim, &sim::node::Node, region::Founding),
+) {
     let mut unsynced = 0_usize;
     for step in 0..960 {
         let span = Span::from_nanos(i64::try_from(step).unwrap().saturating_mul(5_000));
@@ -652,9 +655,19 @@ fn a_reopen_after_a_crash_before_the_founding_is_durable_makes_it_durable() {
             continue;
         }
         unsynced = unsynced.saturating_add(1);
-        let (mut sim, node, mut region, _) = create();
+        let (mut sim, node, region, _) = create();
+        then(step, &mut sim, &node, region);
+    }
+    assert_ne!(unsynced, 0, "no crash came between the rename and the sync");
+}
+
+/// A reopen with the same founding after such a crash writes nothing, and leaves that
+/// founding durable.
+#[test]
+fn a_reopen_after_a_crash_before_the_founding_is_durable_makes_it_durable() {
+    after_each_crash_before_the_founding_is_durable(|step, sim, node, mut region| {
         let founding = region.clone();
-        sim.run_on(&node, |node, tasks| async move {
+        sim.run_on(node, |node, tasks| async move {
             let config = Config {
                 founding,
                 dir: MESH.into(),
@@ -663,11 +676,29 @@ fn a_reopen_after_a_crash_before_the_founding_is_durable_makes_it_durable() {
             Mesh::start(config).await.unwrap();
         })
         .unwrap();
-        sim.crash(&node, Crash::Power);
+        sim.crash(node, Crash::Power);
         region.members.sort_by_key(|member| member.card.key());
-        assert_eq!(read(&mut sim, &node, MESH), Some(region), "step {step}");
-    }
-    assert_ne!(unsynced, 0, "no crash came between the rename and the sync");
+        assert_eq!(read(sim, node, MESH), Some(region), "step {step}");
+    });
+}
+
+/// `keep` alone, with no open of the log, makes the same founding durable.
+#[test]
+fn keep_makes_a_founding_that_it_does_not_write_durable() {
+    after_each_crash_before_the_founding_is_durable(|step, sim, node, mut region| {
+        let founding = region.clone();
+        sim.run_on(node, |node, _| async move {
+            let blocks = Blocks::new(create_pool()).unwrap();
+            let dir = Path::new(MESH);
+            keep(&node.files(), dir, &blocks, &founding, false)
+                .await
+                .unwrap();
+        })
+        .unwrap();
+        sim.crash(node, Crash::Power);
+        region.members.sort_by_key(|member| member.card.key());
+        assert_eq!(read(sim, node, MESH), Some(region), "step {step}");
+    });
 }
 
 #[test]
