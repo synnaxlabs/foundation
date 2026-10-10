@@ -175,7 +175,9 @@ fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, 
 /// Decodes `bytes`, an encoded series of `count` samples of `data_type`, into `out`,
 /// in place of what it held. It checks what [`validate`] checks, and it writes the
 /// padding of a variable series as zeros. It allocates only when `out` has less
-/// capacity than the raw length, and it then reads `bytes` twice, so reuse `out`.
+/// capacity than the raw length, and it then reads `bytes` twice, so reuse `out`. The
+/// raw length of a variable series is not bounded by the length of `bytes`, and
+/// [`validate`] gives it before any allocation.
 ///
 /// # Errors
 ///
