@@ -215,15 +215,19 @@ impl Future for Ended {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        // A waker's clone and drop can drop a task or an `Ended` of this group. So the
-        // clone comes before the check, and the old waker drops after the borrow.
-        let waker = cx.waker().clone();
-        if self.count.live.get() == 0 {
-            return Poll::Ready(());
+        // A waker's clone and drop can spawn into this group, or drop a task or an
+        // `Ended` of it. So the count is read again after each, and the old waker
+        // drops after the borrow.
+        while self.count.live.get() > 0 {
+            let waker = cx.waker().clone();
+            if self.count.live.get() > 0 {
+                let replaced = self.count.waiting.borrow_mut().insert(self.slot, waker);
+                drop(replaced);
+                return Poll::Pending;
+            }
+            drop(waker);
         }
-        let replaced = self.count.waiting.borrow_mut().insert(self.slot, waker);
-        drop(replaced);
-        Poll::Pending
+        Poll::Ready(())
     }
 }
 
@@ -633,6 +637,25 @@ mod tests {
         hooks.clone.set(Some(Box::new(move || drop(task))));
         let mut ended = group.ended();
         assert_eq!(poll(&mut ended, &hooked::waker(&hooks)), Poll::Ready(()));
+    }
+
+    #[test]
+    fn a_waker_whose_clone_drops_the_last_task_and_drop_spawns_gives_pending() {
+        let hooks = hooked::Hooks::default();
+        let (kept, group) = group();
+        group.tasks().spawn(std::future::pending());
+        let task = kept.0.borrow_mut()[0].take().expect("a live task");
+        hooks.clone.set(Some(Box::new(move || drop(task))));
+        let spawner = group.clone();
+        hooks.drop.set(Some(Box::new(move || {
+            spawner.tasks().spawn(std::future::pending());
+        })));
+        let mut ended = group.ended();
+        assert_eq!(poll(&mut ended, &hooked::waker(&hooks)), Poll::Pending);
+        assert_eq!(kept.0.borrow().len(), 2);
+        kept.drop_task(1);
+        assert!(hooks.woken.get());
+        assert_eq!(noop(&mut ended), Poll::Ready(()));
     }
 
     #[test]
