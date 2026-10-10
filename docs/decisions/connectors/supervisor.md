@@ -17,9 +17,10 @@
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072411231. A
   connector that a change adds starts at once, unless the last run of its name has
   not returned: then it starts after that run returned, so no two runs write one set
-  of status channels. This departs from "A connector that the change adds: start its
-  run at once" of 6074718616, item 3, and waits on the ruling of item 2 of
-  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098630382. After a
+  of status channels. A run that a change cancels before it starts ends at once, so a
+  name has at most one run that waits. This departs from "A connector that the change
+  adds: start its run at once" of 6074718616, item 3, and waits on the ruling of item 2
+  of https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098749526. After a
   run returns, the supervisor waits, with no timeout, until each task that the run
   spawned through `Context::tasks` ended, and only then starts its backoff. A task
   that does not end at the cancel is a defect of its kind (`laptop.architect-2`,
@@ -34,9 +35,10 @@
   entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
   2026-10-08T03:05:58Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). Only
-  a shard that has a hub runs one, so today only shard 0 (`box2.builder-7`, the plan
-  of #1156, 2026-10-10T05:56:46Z:
-  https://github.com/synnaxlabs/foundation/issues/1156#issuecomment-6094418070). The
+  a shard that has a hub runs one, so today only shard 0 (`laptop.architect`,
+  2026-10-10T14:41:53Z:
+  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098661378; it waits
+  on the ruling of `laptop.architect-2` on item 1 of 6098749526). The
   tests of `connector` and of each kind build that config with
   `connector::testing::create_config`, behind `sim`, which opens the hub through
   `hub::testing::open`. It gives no mesh time, since a task gets it from its writer
@@ -51,8 +53,10 @@
   connector (R12-4) (`laptop.architect-2`, 2026-10-09T05:10:43Z:
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616).
   Supersedes "`Config` returns to the caller, which starts a new supervisor when the
-  spec changes (R12-4)" of the plan on #338. The class of each restart error reaches
-  the connector's status (CONNECTOR STATUS), and its text with #420.
+  spec changes (R12-4)" of the plan on #338
+  (https://github.com/synnaxlabs/foundation/issues/338#issuecomment-5994872059). The
+  class of each restart error reaches the connector's status (CONNECTOR STATUS), and
+  its text with #420.
   Decided by the `connector` builder in the plan on #338, after `/eb-review`; approved
   by the coordinator (#338), with the reset after a long run approved on #338 later.
 - **CONNECTOR STATUS** `Supervisor::run` writes the status channels of its connector,
@@ -152,7 +156,7 @@
   unknown channel after the cancel of the call also gives `Ok`, since `node` removes
   the status channels of a connector before it cancels its run. This departs from item
   2 of 6087144669, and waits on the ruling of item 4 of
-  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098630382.
+  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098749526.
   `status::channels` replaces the public `status::TIME` and `status::CHANNELS`, so one
   call gives each name and type (same ruling). The tests define the status channels with
   `connector::testing::create_status`, behind `sim`, which gives their definitions with

@@ -3,12 +3,14 @@
   the `Document` and parses again, so callers see one concrete type with no `Any` and
   no downcast. An unknown kind is the diagnostic `connector.unknown-kind`, since the
   name comes from a file. A run or a discovery fails with one of three classes:
-  `Config` (stop until a spec change changes the connector, `laptop.architect-2`,
-  2026-10-09T05:10:43Z:
-  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616),
-  `Device`, and `Retry`
-  (restart with backoff). Decided by the `connector` builder in the plan on #338, after
-  `/eb-review`; approved by the coordinator (#338). `Table::check` takes where the file
+  `Config`, `Device`, and `Retry` (restart with backoff). Decided by the `connector`
+  builder in the plan on #338, after `/eb-review`; approved by the coordinator
+  (#338). After `Config`, the connector stops
+  until a spec change changes it (`laptop.architect-2`, 2026-10-09T05:10:43Z:
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616).
+  Supersedes "stop until the spec changes" of the plan on #338
+  (https://github.com/synnaxlabs/foundation/issues/338#issuecomment-5994872059).
+  `Table::check` takes where the file
   names the kind and puts `connector.unknown-kind` there; `discover` and `run` take
   their kind from the spec, which has no spans (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,

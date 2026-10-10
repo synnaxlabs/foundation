@@ -121,8 +121,9 @@
   must keep a repeat of an older `Join` from admitting the node again, and needs a
   ruling before it lands (decided by `laptop.architect`, 2026-10-07T12:55:06Z:
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6038355946). That
-  change also makes `node::runs` read the name of its node again, since today it reads
-  it once when the mesh opens (#2261). A later
+  change, and the change that lets a node join a running mesh (#1157), also make
+  `node::runs` read the name of its node at each spec: today it reads it once when
+  the mesh opens, and a node that joins opens as no member (#2261). A later
   `Change` kind that is not safe to repeat needs a ruling before a member forwards it
   (decided by the architect, 2026-10-07T08:15:18Z:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
