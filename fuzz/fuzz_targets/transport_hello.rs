@@ -2,6 +2,7 @@
 //! reader gives, and a hello it reads decodes from its own encoding.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use libfuzzer_sys::fuzz_target;
 use transport::fuzzing::Hello;
@@ -12,7 +13,9 @@ fn varint(bytes: &[u8]) -> Option<(u64, &[u8])> {
     let (head, rest) = bytes.split_at_checked(len)?;
     let value = head[1..]
         .iter()
-        .fold(u64::from(head[0] & 0x3f), |value, &byte| value << 8 | u64::from(byte));
+        .fold(u64::from(head[0] & 0x3f), |value, &byte| {
+            value << 8 | u64::from(byte)
+        });
     Some((value, rest))
 }
 
@@ -37,7 +40,10 @@ fn read(bytes: &[u8]) -> Option<Hello> {
             _ => {}
         }
     }
-    let hello = Hello { window_bytes: window?, message_bytes_max: message? };
+    let hello = Hello {
+        window_bytes: window?,
+        message_bytes_max: message?,
+    };
     let limits = hello.window_bytes / 2 >= hello.message_bytes_max
         && hello.message_bytes_max >= 1472;
     limits.then_some(hello)
@@ -47,6 +53,10 @@ fuzz_target!(|bytes: &[u8]| {
     let hello = Hello::decode(bytes).ok();
     assert_eq!(hello, read(bytes), "the readers disagree");
     if let Some(hello) = hello {
-        assert_eq!(Hello::decode(&hello.encode()), Ok(hello), "the hello changed");
+        assert_eq!(
+            Hello::decode(&hello.encode()),
+            Ok(hello),
+            "the hello changed"
+        );
     }
 });

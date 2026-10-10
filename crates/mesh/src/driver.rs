@@ -22,6 +22,7 @@ use transport::{Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::{PrivateKey, PublicKey};
+use types::name::Name;
 use types::node;
 use types::time::{Span, Stamp};
 use wire::Protocol;
@@ -43,11 +44,12 @@ use used::{Opening, Used};
 
 mod apply;
 mod end;
+mod founding;
 mod home;
 mod propose;
 mod send;
 mod stream;
-mod used;
+pub(crate) mod used;
 
 /// The time of one `raft` tick.
 const TICK: Span = Span::from_nanos(100 * Span::MILLISECOND.nanos());
@@ -75,12 +77,15 @@ pub struct Config {
     pub key: node::Key,
     /// This node's private key. It signs the node's claims.
     pub private_key: PrivateKey,
-    /// The region before the first entry of its log, the same at each open.
+    /// The region before the first entry of its log, the same at each open. An open
+    /// whose log holds no record keeps it in `dir`, and an open whose log holds a
+    /// record checks it.
     pub founding: region::Founding,
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
     /// The mesh's directory, relative to the data directory. The mesh makes it, and
-    /// the log goes in `log` in it. Its parent must be there and durable.
+    /// the log goes in `log` in it and the founding in `founding`. Its parent must be
+    /// there and durable.
     pub dir: PathBuf,
     /// Times the ticks of the group.
     pub clock: Clock,
@@ -157,13 +162,17 @@ impl Mesh {
     ///   or the node of a home.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.founding.members`.
-    /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
-    ///   when a call of the store fails.
+    /// - [`Error::Pool`] when the pool has no block for a chunk or the founding file,
+    ///   and [`Error::Blob`] when a call of the store fails.
+    /// - [`Error::Founding`] when the log holds a record and `config.dir` holds another
+    ///   founding, with the members of each in key order.
+    /// - [`Error::Unfounded`] when the log holds a record, and `config.dir` holds no
+    ///   founding that reads back whole.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
-    /// - [`Error::Files`] when a call on `<config.dir>/spec` or its files fails, and
-    ///   [`Error::Stray`] when that directory holds a file that does not name a
-    ///   pointer.
+    /// - [`Error::Files`] when a call on the founding file, on `<config.dir>/spec`, or
+    ///   on its files fails, and [`Error::Stray`] when that directory holds a file
+    ///   that does not name a pointer.
     ///
     /// # Panics
     ///
@@ -198,7 +207,7 @@ impl Mesh {
             voters,
             definitions,
             homes,
-        } = config.founding;
+        } = config.founding.clone();
         let tree = spec::region::tree(&mut chunks, &definitions);
         let state =
             region::State::new(prefix, members, tree.root, voters.clone(), homes)
@@ -209,6 +218,9 @@ impl Mesh {
         let pool = Rc::clone(&config.pool);
         let files = config.files.clone();
         let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
+        let logged = stored != log::Stored::default();
+        let blocks = log.blocks();
+        founding::keep(&files, &config.dir, blocks, &config.founding, logged).await?;
         let used = used::open(Opening {
             files: &files,
             dir: &config.dir,
@@ -261,15 +273,9 @@ impl Mesh {
     /// A watch of the home of `index`.
     #[must_use]
     pub fn watch(&self, index: channel::Key) -> Watch {
-        let mut group = self.group.borrow_mut();
-        let slot = group.slot();
         Watch {
-            group: Rc::downgrade(&self.group),
-            stopped: Rc::clone(&group.stopped),
-            slot,
+            slot: Slot::new(&self.group),
             index,
-            given: None,
-            called: false,
         }
     }
 
@@ -279,6 +285,13 @@ impl Mesh {
     #[must_use]
     pub fn member(&self, key: node::Key) -> Option<Member> {
         self.group.borrow().state.member(key).cloned()
+    }
+
+    /// The name of each member in this node's view of the region. No two members share a
+    /// name. It answers also after the group stops, from the view at the stop.
+    #[must_use]
+    pub fn names(&self) -> BTreeSet<Name> {
+        self.group.borrow().state.names()
     }
 
     /// The key of the member whose card holds `public_key` in this node's view of the
@@ -568,16 +581,8 @@ impl std::error::Error for Unstamped {}
 
 /// A watch of the home of one index.
 pub struct Watch {
-    group: Weak<RefCell<Group>>,
-    // The cause of the group's stop, which this watch gives after the group drops.
-    stopped: Rc<OnceCell<Stopped>>,
-    // The key of this watch's waker in the group.
-    slot: u64,
+    slot: Slot<Option<node::Key>>,
     index: channel::Key,
-    // What the last call of `next` gave.
-    given: Option<node::Key>,
-    // Whether `next` returned before.
-    called: bool,
 }
 
 impl fmt::Debug for Watch {
@@ -601,6 +606,42 @@ impl Watch {
     /// [`Mesh`] of it drops. A group that stopped keeps its cause when each [`Mesh`]
     /// drops.
     pub async fn next(&mut self) -> Result<Option<node::Key>, Stopped> {
+        let index = self.index;
+        self.slot
+            .next(|group| {
+                let home = group.state.home(index);
+                (home, home)
+            })
+            .await
+    }
+}
+
+// The state of a watch that gives a value each time its key `K` changes: its waker's
+// place in `Group::watches`, which it frees when it drops, and the last key given.
+struct Slot<K> {
+    group: Weak<RefCell<Group>>,
+    // The cause of the group's stop, which the watch gives after the group drops.
+    stopped: Rc<OnceCell<Stopped>>,
+    key: u64,
+    // `None` until the first call of `next` returns.
+    given: Option<K>,
+}
+
+impl<K: PartialEq> Slot<K> {
+    fn new(group: &Rc<RefCell<Group>>) -> Self {
+        let mut held = group.borrow_mut();
+        Self {
+            group: Rc::downgrade(group),
+            stopped: Rc::clone(&held.stopped),
+            key: held.slot(),
+            given: None,
+        }
+    }
+
+    // The value that `read` gives at once on the first call, and after it, at the
+    // first wake of watches where its key differs from the last one given. The cause
+    // of the stop once the group stopped or dropped.
+    async fn next<T>(&mut self, read: impl Fn(&Group) -> (K, T)) -> Result<T, Stopped> {
         poll_fn(|cx| {
             if let Some(stopped) = self.stopped.get() {
                 return Poll::Ready(Err(stopped.clone()));
@@ -609,22 +650,22 @@ impl Watch {
                 return Poll::Ready(Err(Stopped::Dropped));
             };
             let mut group = group.borrow_mut();
-            let home = group.state.home(self.index);
-            if self.called && self.given == home {
-                group.watches.insert(self.slot, cx.waker().clone());
-                return Poll::Pending;
+            let (key, value) = read(&group);
+            if self.given.as_ref() != Some(&key) {
+                self.given = Some(key);
+                return Poll::Ready(Ok(value));
             }
-            (self.given, self.called) = (home, true);
-            Poll::Ready(Ok(home))
+            group.watches.insert(self.key, cx.waker().clone());
+            Poll::Pending
         })
         .await
     }
 }
 
-impl Drop for Watch {
+impl<K> Drop for Slot<K> {
     fn drop(&mut self) {
         if let Some(group) = self.group.upgrade() {
-            group.borrow_mut().watches.remove(&self.slot);
+            group.borrow_mut().watches.remove(&self.key);
         }
     }
 }
@@ -640,7 +681,8 @@ struct Group {
     stopped: Rc<OnceCell<Stopped>>,
     // The task of `run`, while it waits for an input.
     task: Option<Waker>,
-    // The task of each watch that waits in `Watch::next`.
+    // The task of each watch that waits, of a home or of the spec in use. Each
+    // polls again at any wake of watches.
     watches: BTreeMap<u64, Waker>,
     // Each proposal since the task last took a `Ready`. The next `Ready` holds the
     // entry of each, unless a new leader replaced the entry.
@@ -830,7 +872,7 @@ impl Group {
         waiting.chain(self.starter.take()).for_each(Waker::wake);
     }
 
-    // Applies each change in `committed`, and wakes the watches when a home moves.
+    // Applies each change in `committed`, and wakes each watch when a home moves.
     fn apply(&mut self, committed: Vec<Entry>) -> Result<(), Stopped> {
         if let Some(last) = committed.last() {
             let last = last.at.index;
@@ -1216,6 +1258,7 @@ mod tests {
     use crate::card;
     use crate::change::{CHUNKS_MAX, Unknown};
     use crate::common::{self, create_pool, key, message, private, proven, public};
+    use crate::file::Blocks;
     use crate::region::Unfit;
     use crate::status::Many;
     use crate::ticket::Options;
@@ -1294,6 +1337,8 @@ mod tests {
         puts: BTreeMap<u8, BTreeMap<Name, Definition>>,
         /// What the spec in use of each node was at its last read.
         specs: BTreeMap<u8, Seen>,
+        /// The pointer of each spec that the spec watch of each node gave, in order.
+        watched: BTreeMap<u8, Vec<Option<Pointer>>>,
     }
 
     /// The spec in use of a node at a read, and what the task of the spec held.
@@ -1833,6 +1878,13 @@ mod tests {
         tasks.spawn(async move {
             read(reading, clock, id, specs).await;
         });
+        let (mut watch, watched) = (mesh.watch_spec(), Arc::clone(board));
+        tasks.spawn(async move {
+            while let Ok(spec) = watch.next().await {
+                let mut board = watched.lock().unwrap();
+                board.watched.entry(id).or_default().push(spec.pointer);
+            }
+        });
     }
 
     async fn voter(
@@ -2102,6 +2154,18 @@ mod tests {
 
     #[test]
     fn a_leader_with_no_quorum_commits_nothing_and_takes_the_home_of_the_next() {
+        cut_leader(5);
+    }
+
+    #[test]
+    fn a_leader_cut_off_for_36_s_takes_the_home_of_the_next_5_s_after_the_heal() {
+        cut_leader(36);
+    }
+
+    /// Cuts the leader off for `cut` seconds while the others commit the home of the
+    /// next leader, heals the links, and checks that the old leader has that home 5 s
+    /// later.
+    fn cut_leader(cut: i64) {
         let mut cluster = Cluster::new(2);
         cluster.script(home);
         cluster.start();
@@ -2111,22 +2175,23 @@ mod tests {
         for other in IDS.into_iter().filter(|&id| id != old) {
             cluster.link(old, other, 1.0);
         }
-        cluster.script(|id| home(10 + id));
-        cluster.run(seconds(5));
+        cluster.script(|id| home(id.checked_add(10).unwrap()));
+        cluster.run(seconds(cut));
         let (led, homes) = cluster.take();
         let &[first, new] = led.as_slice() else {
             panic!("the group took a proposal from each of {led:?}");
         };
         assert_eq!(first, old);
         assert_ne!(new, old);
-        let mut expected = each(&[Some(key(10 + new))]);
+        let next = new.checked_add(10).unwrap();
+        let mut expected = each(&[Some(key(next))]);
         expected.remove(&old);
         assert_eq!(homes, expected);
         for other in IDS.into_iter().filter(|&id| id != old) {
             cluster.link(old, other, 0.0);
         }
         cluster.run(seconds(5));
-        let healed = BTreeMap::from([(old, vec![Some(key(10 + new))])]);
+        let healed = BTreeMap::from([(old, vec![Some(key(next))])]);
         assert_eq!(cluster.take(), (Vec::new(), healed));
     }
 
@@ -2161,25 +2226,45 @@ mod tests {
         healed.expect("the follower has no home 100 s after the heal")
     }
 
-    // The bound is the 5 s that the leader of the test above gets after its heal. The
-    // measured wait is at most 1 s, and a longer cut can give a longer wait (#1415).
-    #[test]
-    fn a_follower_cut_off_for_5_s_has_the_home_5_s_after_the_links_heal() {
+    /// Checks that a follower cut off for `cut` seconds has the home 5 s after the
+    /// links heal, the bound that the leader of the test above gets, in 4 runs.
+    fn follower_heals(cut: i64) {
         for run in 0..4 {
-            let waited = follower_heal_ms(run, 5);
+            let waited = follower_heal_ms(run, cut);
             assert!(waited <= 5000, "run {run}: {waited} ms after the heal");
         }
     }
 
-    // The cut is longer than the idle time of a session, 60 s, so each session of
-    // the follower timed out, and the dial that follows is 2 s old at the heal. The
-    // measured wait is at most 1.5 s, and an older dial can wait longer (#1415).
+    #[test]
+    fn a_follower_cut_off_for_5_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(5);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_46_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(46);
+    }
+
+    // A cut longer than the idle time of a session, 60 s, times out each session of
+    // the follower, so a dial in the cut carries the heal.
     #[test]
     fn a_follower_cut_off_for_62_s_has_the_home_5_s_after_the_links_heal() {
-        for run in 0..4 {
-            let waited = follower_heal_ms(run, 62);
-            assert!(waited <= 5000, "run {run}: {waited} ms after the heal");
-        }
+        follower_heals(62);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_68_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(68);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_104_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(104);
+    }
+
+    #[test]
+    fn a_follower_cut_off_for_110_s_has_the_home_5_s_after_the_links_heal() {
+        follower_heals(110);
     }
 
     /// Runs `body` on the one node of a run.
@@ -2422,6 +2507,15 @@ mod tests {
         });
     }
 
+    #[test]
+    fn names_gives_the_name_of_each_founding_member() {
+        solo(|node, tasks| async move {
+            let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+            let names = IDS.map(|id| format!("plant.node{id}").parse().unwrap());
+            assert_eq!(mesh.names(), BTreeSet::from(names));
+        });
+    }
+
     // One `Ready` holds the entry of the second proposal and commits the first home.
     // Its write is in a disk call when voter 2 stops the group, as a sender task does
     // on a code 17. The write ends, and the group sends and applies none of it.
@@ -2531,6 +2625,7 @@ mod tests {
     }
 
     mod apply;
+    mod founding;
     mod home;
     mod in_use;
     mod send;
@@ -5566,8 +5661,19 @@ mod tests {
         (sim, node)
     }
 
-    /// Writes one record that fills `log-0`, so the next write starts `log-1`.
-    async fn fill_first_file(node: &sim::node::Node) {
+    /// Writes the founding of `config` to its directory, as a first open does.
+    async fn found(config: &Config) {
+        let (files, dir) = (&config.files, &config.dir);
+        let blocks = Blocks::new(Rc::clone(&config.pool)).unwrap();
+        super::founding::keep(files, dir, &blocks, &config.founding, false)
+            .await
+            .unwrap();
+    }
+
+    /// Writes one record that fills `log-0` of node 1, so the next write starts
+    /// `log-1`.
+    async fn fill_first_file(node: &sim::node::Node, tasks: &Tasks) {
+        found(&config(node, tasks, 1, &[1], &[1]).await).await;
         let opened = Log::open(node.files(), LOG.into(), create_pool()).await;
         let (mut log, _) = opened.unwrap();
         let entries: Vec<Entry> = (1..=20_000)
@@ -5591,7 +5697,7 @@ mod tests {
             let (mut sim, node) = create_sim(run);
             let opens = sim.run_on(&node, move |node, tasks| async move {
                 if full {
-                    fill_first_file(&node).await;
+                    fill_first_file(&node, &tasks).await;
                 }
                 let first = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
                 let clock = node.clock();
@@ -5686,6 +5792,7 @@ mod tests {
     #[test]
     fn open_gives_the_error_of_raft() {
         solo(|node, tasks| async move {
+            found(&config(&node, &tasks, 1, &[1], &[1]).await).await;
             let (mut log, _) = Log::open(node.files(), LOG.into(), create_pool())
                 .await
                 .unwrap();
@@ -5811,7 +5918,7 @@ mod tests {
     }
 
     #[test]
-    fn a_power_cut_right_after_the_open_keeps_the_directory_and_its_log() {
+    fn a_power_cut_right_after_the_open_keeps_the_founding_and_the_log() {
         let names = |names: &[&str]| Ok(names.iter().map(PathBuf::from).collect());
         for seed in 0..32 {
             let mut sim = Sim::new(sim::Config {
@@ -5837,7 +5944,10 @@ mod tests {
                     )
                 })
                 .unwrap();
-            let kept = (names(&[BLOB, "region"]), names(&[LOG, used::SPEC]));
+            let kept = (
+                names(&[BLOB, "region"]),
+                names(&[super::founding::FILE, LOG, used::SPEC]),
+            );
             assert_eq!(listed, kept, "seed {seed}");
         }
     }

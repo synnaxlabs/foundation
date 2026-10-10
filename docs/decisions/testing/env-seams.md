@@ -1,6 +1,13 @@
 - **ENV SEAMS (2026-10-04)** Each `env` seam is a concrete handle over a small driver
-  trait that only `os` and `sim` implement. `clock::Clock`: monotonic time as
-  `types::time::Monotonic`, and a `Sleep` future that resets without an allocation.
+  trait that only `os` and `sim` implement. Amended (2026-10-09, #2063): a driver of
+  `tasks` that counts tasks passes each task to one of theirs, and a driver of a test or
+  a benchmark may keep each task for its caller to poll (`laptop.architect-2`,
+  2026-10-09T03:42:09Z:
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6073808019).
+  Supersedes the ENV SEAMS and `Driver` texts of item 4 of
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072358016.
+  `clock::Clock`: monotonic time as `types::time::Monotonic`, and a `Sleep` future that
+  resets without an allocation.
   `wall::Wall`: the OS wall clock, which only `clock` reads (a lint).
   `entropy::Entropy`: random bytes from the OS, or from the run's seed in simulation.
   `rng::Rng` is concrete (xoshiro256++ seeded from `Entropy`), so simulation replays it.
@@ -66,12 +73,42 @@
   the local address, and don't-fragment. `os` binds with `rustix`, with `IPV6_V6ONLY`
   off on an IPv6 socket, and routes as `sim` does: a socket on `::` sends IPv4 as
   `::ffff:a.b.c.d`, and any other socket that gets a destination of the other family
-  gives `Unreachable`. A `Transmit` goes out in one `sendmsg`, with GSO; there is no
-  `sendmmsg`. After `EIO` or `EINVAL` on a GSO send, `noq-udp` stores 1 as its
-  `max_gso_segments`, and from then on each datagram goes out alone; that is the only
-  GSO flag. Each half has its own `dup` of the socket. The receiver registers for
-  readable at its first poll, in a field of its driver (`laptop.architect-2`,
-  2026-10-08 19:12 UTC,
+  gives `Unreachable`. A `Transmit` goes out in one `sendmsg`, with GSO, or one per
+  datagram after the kernel refuses GSO; there is no `sendmmsg`. A `Transmit` holds at
+  most `TRANSMIT_BYTES_MAX`, so a GSO batch gets `EMSGSIZE` only when its segment is
+  over the path MTU. Then each full segment is lost, and `os` sends the short last
+  datagram alone (`laptop.architect-2`, 2026-10-09 22:36 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2193#issuecomment-6090406742).
+  After `EIO` or `EINVAL` on a GSO send, `noq-udp` sends the first datagram alone. Only
+  when it goes out does `noq-udp` store 1 as its `max_gso_segments`, and from then on
+  each datagram goes out alone; that is the only GSO flag (`laptop.architect-2`,
+  2026-10-08 21:15 UTC,
+  https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130).
+  Supersedes the store of 1 on `EIO` or `EINVAL` of item 1 of
+  https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541. After
+  `Pending` partway through a transmit sent one datagram at a time, the `os` sender
+  keeps the index of the next datagram, so the retry with the same transmit sends only
+  the datagrams that did not go out (`laptop.architect-2`, 2026-10-09 07:15 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6076288463). A
+  transmit in flight when GSO turns off is the exception: its retry can send again
+  datagrams that went out. A different transmit in place of the one that got
+  `Pending` can lose its first datagrams (`laptop.architect-2`, 2026-10-09 13:18 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081691897).
+  Supersedes the counts of
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081443711
+  (2026-10-09 13:03 UTC) and
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081528612
+  (2026-10-09 13:09 UTC), the count of
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6081197695
+  (2026-10-09 12:48 UTC), and "at most once for each socket" of
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6076288463
+  (2026-10-09 07:15 UTC) and
+  https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130
+  (2026-10-08 21:15 UTC) (`laptop.architect-2`, 2026-10-09 13:43 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2142#issuecomment-6082138285).
+  Each half has its own `dup` of the socket. The receiver registers for readable
+  at its first poll, in a field of its driver (`laptop.architect-2`, 2026-10-08
+  19:12 UTC,
   https://github.com/synnaxlabs/foundation/issues/1974#issuecomment-6067190077). The
   `os` receiver's driver has no `Mutex` of its own (item 2 of `laptop.architect-2`,
   2026-10-08 18:27 UTC,
@@ -104,30 +141,44 @@
   `dup` or registration gives `Io` for that poll alone, and the next poll tries again;
   nothing stores a failure. For a source that is not local or is of the other family,
   `os` gives the kernel's answer (on Linux, `Unreachable` or `Io { code: 22 }`), and
-  `sim` gives `Io { code: 99 }`. For port 0, `os` gives the kernel's answer. Until
-  #1972 patches `noq-udp`, such a transmit can turn GSO and the IPv4 ECN mark off for
-  the life of the socket. Decided by `laptop.architect-2` (2026-10-08 18:56 and 19:02
-  UTC, #1965,
+  `sim` gives `Io { code: 99 }`. For port 0, `os` gives the kernel's answer. Such a
+  transmit changes no state of the socket (`laptop.architect-2`, 2026-10-08 21:15 UTC,
+  https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130).
+  Decided by `laptop.architect-2` (2026-10-08 18:56 and 19:02 UTC, #1965,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6066909518,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6067014743).
   Supersedes "or the errno" of item 2 of
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541: a
   failure is not stored. One exception: `os` gives `Io { code: 22 }` for each IPv6
-  source on an IPv4 socket, mapped too, or an unspecified source in any form. Linux
-  skips the `IPV6_PKTINFO` of the first and reads the second as no source, and sends
-  each from an address of its choice. Decided by `laptop.architect-2` (2026-10-08 20:06
-  and 20:38 UTC, #1965,
+  source on an IPv4 socket, mapped too, for an IPv6 source that is not mapped with an
+  IPv4 destination, and for an unspecified source in any form. Linux skips the
+  `IPV6_PKTINFO` of the first, macOS skips that of the second, and Linux reads the
+  third as no source; each then sends from an address of its choice. Decided by
+  `laptop.architect-2` (2026-10-08 20:06 and 20:38 UTC, #1965,
   https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068090235,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068606545).
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068606545; the
+  second case 2026-10-09 04:36 UTC, #2097,
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074356047).
   Supersedes https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6068520601,
   which refused only `0.0.0.0`. On macOS, `os` has no GSO, so `batch_max` is 1, and the
   loopback, with an MTU of 16,384 bytes, loses a larger datagram. Decided by
   `laptop.architect-2` (2026-10-08 22:35 UTC, #1965,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767). Until
-  #1972 patches noq-udp to send an IPv4 source as `IP_PKTINFO` on Apple, macOS ignores
-  each IPv4 source and sends from an address of its choice, with no error. Decided by
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070425767). On Apple,
+  the `noq-udp` patch sends an IPv4 source to an IPv4 destination as `IP_PKTINFO`, and
+  `os` refuses no IPv4 source beyond the exception above. Decided by
   `laptop.architect-2` (2026-10-08 22:51 UTC, #1965,
-  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958).
+  https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6070627958). This
+  holds unless a caller turns on the fast path with
+  `UdpSocketState::set_apple_fast_path`, which no crate here calls outside the copy's
+  own test `apple_fast_datapath`. Its trigger is in the `noq-udp` row of "Local patches"
+  in `docs/dependencies.md`. The limit: `laptop.architect-2` (2026-10-09 05:03 UTC,
+  #2097, https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074645099).
+  The rule, the limit, and the pointer as they are now: `laptop.architect-2` (2026-10-09
+  05:26 UTC, #2097,
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074891760).
+  Supersedes the `fast-apple-datapath` condition of
+  https://github.com/synnaxlabs/foundation/pull/2097#issuecomment-6074544404
+  (04:55 UTC).
   `os::net()` is behind the `os` cargo feature `net`, off by default, because Tokio has
   no `net` under `--cfg loom`. Decided by `laptop.architect-2` (2026-10-08 23:42 UTC,
   #1965, https://github.com/synnaxlabs/foundation/pull/1965#issuecomment-6071230415).
@@ -239,6 +290,38 @@
   (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6050977855). The
   `Poisoned` sentence: `laptop.architect-2`, 2026-10-08T02:41:37Z
   (https://github.com/synnaxlabs/foundation/pull/1745#issuecomment-6051075955).
+  Amended (2026-10-08T00:45:03Z, #1524): a write open (`Mode::Write` or `Mode::Create`),
+  a `Files::remove`, and a `File::rename` to a path first wait for each call on the path
+  that a dropped future or a dropped handle of the same `Files` and its clones left to
+  run. `Busy` stays for a live handle, and for a handle in another process or another
+  `Files`. `Mode::Read` does not change. This supersedes the `Busy` after a drop in the
+  #392 sentence above (https://github.com/synnaxlabs/foundation/issues/392) and in the
+  #1604 amendment
+  (https://github.com/synnaxlabs/foundation/issues/1604#issuecomment-6046168932).
+  Decided by `laptop.architect-2`, #1524, 2026-10-08T00:45:03Z
+  (https://github.com/synnaxlabs/foundation/issues/1524#issuecomment-6049807436). The
+  `File::remove` text: `laptop.architect-2`, 2026-10-08T01:03:54Z
+  (https://github.com/synnaxlabs/foundation/issues/1524#issuecomment-6050016336). The
+  texts on another `Files`, and that `sim` gives each `Files` of a node as clones of
+  one: `laptop.architect-2`, 2026-10-09T14:36:39Z
+  (https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6083081272). Each
+  rule that a call waits has one test of the same name on `os` and on `sim`, and a rule
+  that a call does not wait has its test on `sim` only, as `os` runs the calls of a
+  `Files` in queue order: `laptop.architect-2`, 2026-10-09T14:41:42Z and
+  2026-10-09T15:35:53Z
+  (https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6083166443 and
+  https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6084098381). Built in
+  #2156, where each driver gives the wait: `os` by the order of its I/O queue, `sim` by
+  an end time no earlier than the end of each such call and of a remove through a
+  handle, where a later call with the same end time ends after it: `laptop.architect-2`,
+  2026-10-09T16:10:14Z
+  (https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6084674649). In
+  `sim`, a call through a handle is on each path that has named its file and on the
+  path of each dropped rename of the file, so `sim` can wait longer than the rule needs,
+  never less: `laptop.architect-2`, 2026-10-09T17:41:15Z
+  (https://github.com/synnaxlabs/foundation/pull/2156#issuecomment-6086107940). `sim`
+  gives each `Files` of a node as clones of one. Lost there: the wait in `Files`, which
+  cannot see the end of a dropped call without a change to `Driver`.
   Amended (2026-10-08T17:19:48Z, #1921): on macOS, an accepted socket does not keep
   the receive buffer of its listener, so `os` sets the options of the listener again
   on each accepted socket, on every OS. The listener still sets them before `listen`:
@@ -291,22 +374,54 @@
   `laptop.director`, 2026-10-09T01:51:29Z
   (https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072622027).
   Amended (2026-10-08T21:01:28Z, #2000): each socket that `os` opens is closed on exec.
-  On Linux, the call that opens the socket sets that and non-blocking, so a child that
-  another thread spawns never holds it. macOS has no such flag, and Tokio sets it in a
-  second call on an accepted stream too, so on macOS that child may hold the socket and
-  its port, as the doc of `os::net()` says. A Foundation node spawns no process, so only
-  tests see it, and CI runs on Linux. Lost: `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn
-  side, which std does not set, and which needs a spawn seam and `unsafe` for tests
-  only. Decided by `laptop.architect-2` (2026-10-08T21:01:28Z:
-  https://github.com/synnaxlabs/foundation/issues/2000). On macOS, a child that another
-  thread spawns during a lookup may also hold the sockets that the C library opens for
-  it, and a child spawned after a lookup may hold a socket that the C library keeps
-  open. `os` keeps this gap for the same reason. It cannot set the flags of the sockets
-  of a lookup, because the C library opens them, and it cannot open them another way
-  without its own resolver. Lost: a resolver in `os`, which changes what each lookup
-  gives on macOS. Trigger: the first change that makes a node spawn a process closes
-  each macOS gap of this amendment on the spawn side. Decided by `laptop.architect`
-  (2026-10-09T02:37:32Z:
+  On Linux, the call that opens or accepts the socket sets that, so a child that
+  another thread spawns holds it only from its fork to its exec (the window,
+  `laptop.architect-2`, 2026-10-09T05:02:07Z:
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074628714). macOS has
+  no such flag, and std sets it in a second call on an accepted stream too, so on
+  macOS that child may hold the socket and its port, as the doc of `os::net()` says. A
+  Foundation node spawns no process, so only tests see it, and CI runs on Linux. Lost:
+  `POSIX_SPAWN_CLOEXEC_DEFAULT` on the spawn side, which std does not set, and which
+  needs a spawn seam and `unsafe` for tests only. Decided by `laptop.architect-2`
+  (2026-10-08T21:01:28Z: https://github.com/synnaxlabs/foundation/issues/2000). On
+  macOS, a child that another thread spawns during a lookup may also hold the sockets
+  that the C library opens for it, and a child spawned after a lookup may hold a socket
+  that the C library keeps open. `os` keeps this gap for the same reason. It cannot set
+  the flags of the sockets of a lookup, because the C library opens them, and it cannot
+  open them another way without its own resolver. Lost: a resolver in `os`, which
+  changes what each lookup gives on macOS. Trigger: the first change that makes a node
+  spawn a process closes each macOS gap of this amendment on the spawn side. Decided by
+  `laptop.architect` (2026-10-09T02:37:32Z:
   https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073119953; the socket
   that the C library keeps open, 2026-10-09T02:42:31Z:
-  https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073170413).
+  https://github.com/synnaxlabs/foundation/pull/2072#issuecomment-6073170413). Amended
+  (2026-10-09, #2108): an `os` listener stops its listen at once on Linux when it drops
+  or its registration fails, also while a child holds a copy of the socket, from its
+  fork to its exec. macOS has no call that stops the listen of a copy, so there a
+  connect in that window succeeds and resets at the exec (`laptop.architect-2`,
+  2026-10-09T04:57:56Z:
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074581669; the failed
+  registration, 2026-10-09T05:02:07Z:
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074628714; the
+  registration that gives the socket back, 2026-10-09T05:25:55Z:
+  https://github.com/synnaxlabs/foundation/pull/2109#issuecomment-6074885496).
+  Amended (2026-10-09, #1732): `os::interrupt` holds SIGINT and SIGTERM. A thread of the
+  module `os::signal` takes them with `sigwait` and completes a future at the first, and
+  then takes them as with no hold, so a second one ends the process and a stop that
+  hangs can still be ended. `main` is to call it before it starts any other thread
+  (#1732), since the mask passes to each thread that starts after it. `pthread_sigmask`,
+  not `sigprocmask`, which POSIX does not specify in a process with threads. Like the
+  `resolve` thread of `os::net`, the signal thread has no handle. It lives until the
+  process ends, to take the second signal. Tokio's `signal` lost: its handler stays for
+  the life of the process and never gives back the default action, so a second signal
+  cannot end the process. A handler of our own lost: it reaches its pipe only through a
+  global. `os::files` makes `dir` and `dir/data` when they are not there, but not the
+  parents of `dir`, and syncs the holder of each at each call, so `main` is to make no
+  file call of its own and each failure of the data directory is `os::Error::Dir`
+  (`laptop.architect-2`, 2026-10-09T18:30:45Z:
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545; the sync
+  at each call, the thread with no handle, and the lost options: `laptop.architect-2`,
+  2026-10-09T18:40:55Z:
+  https://github.com/synnaxlabs/foundation/pull/2169#issuecomment-6087061440; the text
+  of the thread with no handle: `laptop.architect-2`, 2026-10-09T19:05:37Z:
+  https://github.com/synnaxlabs/foundation/pull/2169#issuecomment-6087447005).

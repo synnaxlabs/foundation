@@ -3,6 +3,7 @@
 //! ends. `frame::check` refuses exactly the ends that do not fit a body.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use std::sync::Arc;
 
@@ -42,16 +43,21 @@ fn narrow(interner: &mut Interner) -> Arc<KeySet> {
 
 /// The group of `narrow` with its first data channel at entry 0, before its index.
 fn late(interner: &mut Interner) -> Arc<KeySet> {
-    interner.slots().assign(key(1));
-    narrow(interner)
+    interner.slots().data(key(1), F64);
+    let set = narrow(interner);
+    assert_eq!(set.entries()[0].key, key(1), "the data is before its index");
+    set
 }
 
 /// `GROUPS` groups of two data channels. The indexes are the first entries. The first
 /// data channel of each group follows, then the second of each, so the data of the
 /// groups alternate.
 fn wide(interner: &mut Interner) -> Arc<KeySet> {
-    for n in 0..3 * GROUPS {
-        interner.slots().assign(key(n));
+    for n in 0..GROUPS {
+        interner.slots().index(key(n));
+    }
+    for n in GROUPS..3 * GROUPS {
+        interner.slots().data(key(n), F64);
     }
     let data: Vec<_> = (0..GROUPS)
         .map(|group| [(key(GROUPS + group), F64), (key(2 * GROUPS + group), F64)])
@@ -63,7 +69,11 @@ fn wide(interner: &mut Interner) -> Arc<KeySet> {
             data,
         })
         .collect();
-    interner.intern(&groups)
+    let set = interner.intern(&groups);
+    let keys: Vec<_> = set.entries().iter().map(|entry| entry.key).collect();
+    let alternate: Vec<_> = (0..3 * GROUPS).map(key).collect();
+    assert_eq!(keys, alternate, "the data of the groups alternate");
+    set
 }
 
 /// Where a series starts when the series bytes before it end at `last`.

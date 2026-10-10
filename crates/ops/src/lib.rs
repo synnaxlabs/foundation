@@ -6,41 +6,39 @@ use std::io::{self, BufRead, Write};
 
 use serde_json::{Value, json};
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the table entries of #1744 call it")
-)]
 mod apply;
 #[cfg(test)]
 mod common;
 mod error;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the table entries of #1744 call it")
-)]
 mod front_end;
 mod mcp;
+mod node;
 mod operation;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the table entries of #1744 call it")
-)]
 mod plan;
+mod start;
 #[cfg(test)]
 mod tests;
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the table entries of #1744 call it")
-)]
 mod used;
 
 use error::Error;
 pub use front_end::FrontEnd;
+pub use node::Node;
 use operation::Parsed;
+pub use start::{Failure, Start};
+
+/// What the process does once [`cli`] returns.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Run {
+    /// Exit with this status.
+    Exit(u8),
+    /// Start a node with these arguments. `cli` wrote nothing for it.
+    Start(Start),
+}
 
 /// Runs one command line, such as `["foundation", "version", "--json"]`, and returns
 /// the exit status: 0 on success, 1 when a stream fails, and 2 for a bad argument or
-/// an unknown operation.
+/// an unknown operation. For `foundation start`, it gives the arguments to start a
+/// node with.
 ///
 /// An operation or help writes its output to `output`, and an error goes to `errors`
 /// with its code and fix. With `--json`, each is one line of JSON, and help is
@@ -52,8 +50,8 @@ pub fn cli(
     args: impl IntoIterator<Item = OsString>,
     input: impl BufRead,
     mut output: impl Write,
-    mut errors: impl Write,
-) -> u8 {
+    errors: impl Write,
+) -> Run {
     let args: Vec<OsString> = args.into_iter().collect();
     // Read before parsing, so an argument error also honors `--json`.
     let json = args
@@ -64,23 +62,32 @@ pub fn cli(
     let render = |value: Value, text: String| {
         if json { format!("{value}\n") } else { text }
     };
-    let done = operation::parse(&args)
-        .map_err(Stop::Failed)
-        .and_then(|parsed| match parsed {
-            Parsed::Run(request) => {
-                let response = request.run();
-                write(&mut output, &render(response.json(), response.text()))
-            }
-            Parsed::Help(text) => {
-                write(&mut output, &render(json!({ "help": text }), text.clone()))
-            }
-            Parsed::Mcp => mcp::serve(input, &mut output),
-        });
-    let error = match done {
-        Ok(()) | Err(Stop::Closed) => return 0,
-        Err(Stop::Failed(error)) => error,
+    let done = match operation::parse(&args) {
+        Ok(Parsed::Start(start)) => return Run::Start(start),
+        Ok(Parsed::Run(request)) => {
+            let response = request.run();
+            write(&mut output, &render(response.json(), response.text()))
+        }
+        Ok(Parsed::Help(text)) => {
+            write(&mut output, &render(json!({ "help": text }), text.clone()))
+        }
+        Ok(Parsed::Mcp) => mcp::serve(input, &mut output),
+        Err(error) => Err(Stop::Failed(error)),
     };
-    match errors.write_all(render(error.json(), error.text()).as_bytes()) {
+    match done {
+        Ok(()) | Err(Stop::Closed) => Run::Exit(0),
+        Err(Stop::Failed(error)) => Run::Exit(report(&error, json, errors)),
+    }
+}
+
+/// Writes `error` to `errors`, as JSON when `json`, and gives its exit status.
+fn report(error: &Error, json: bool, mut errors: impl Write) -> u8 {
+    let text = if json {
+        format!("{}\n", error.json())
+    } else {
+        error.text()
+    };
+    match errors.write_all(text.as_bytes()) {
         // With `errors` closed too, the status is the only report left.
         Ok(()) | Err(_) => error.status(),
     }

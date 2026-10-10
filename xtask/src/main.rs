@@ -6,12 +6,16 @@ mod build;
 mod cfg;
 mod field;
 mod files;
+mod fuzz;
 mod globals;
+mod libtest;
 mod map;
 mod miri;
+mod nightly;
 mod open62541;
 mod oracles;
 mod review;
+mod sanitizers;
 mod select;
 
 use std::collections::BTreeSet;
@@ -33,12 +37,19 @@ fn main() -> ExitCode {
         ["oracles"] => oracles::check(root),
         [name @ ("loom" | "shuttle")] => cfg::test(root, name),
         ["miri"] => miri::run(root),
+        ["sanitizers"] => sanitizers::run(root),
+        ["fuzz"] => fuzz::run(root, fuzz::SECONDS),
+        ["fuzz", seconds] => fuzz::seconds(seconds)
+            .map_err(|e| vec![e])
+            .and_then(|seconds| fuzz::run(root, seconds)),
         ["open62541"] => open62541::check(root),
         ["open62541", tag] => open62541::run(root, open62541::URL, tag),
         ["review", pr, head] => return review::run(root, pr, head),
         _ => {
             eprintln!(
-                "usage: cargo xtask <layers|globals|oracles|loom|shuttle|miri>\n       \
+                "usage: cargo xtask <layers|globals|oracles|loom>\n       \
+                 cargo xtask <shuttle|miri|sanitizers>\n       \
+                 cargo xtask fuzz [seconds]\n       \
                  cargo xtask open62541 [tag]\n       \
                  cargo xtask review <pr> <head sha>"
             );
@@ -122,11 +133,23 @@ fn violation(entry: &map::Crate, dep: &str) -> String {
     )
 }
 
-/// Runs `cargo metadata` on the workspace at `root`.
+/// Runs `cargo metadata` on the members of the workspace at `root`.
 fn metadata(root: &Path) -> Result<Value, String> {
+    metadata_with(root, &["--no-deps"])
+}
+
+/// The resolved dependency graph of the workspace at `dir`. It fails when the lock of
+/// the workspace is stale.
+fn graph(dir: &Path) -> Result<Value, String> {
+    metadata_with(dir, &["--locked"])
+}
+
+/// Runs `cargo metadata` with `flags` on the workspace at `dir`.
+fn metadata_with(dir: &Path, flags: &[&str]) -> Result<Value, String> {
     let output = cargo()
-        .current_dir(root)
-        .args(["metadata", "--format-version", "1", "--no-deps"])
+        .current_dir(dir)
+        .args(["metadata", "--format-version", "1"])
+        .args(flags)
         .output()
         .map_err(|e| format!("cargo metadata: {e}"))?;
     if !output.status.success() {
@@ -146,6 +169,40 @@ fn cargo() -> Command {
 #[cfg(test)]
 fn fixture() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("fixture")
+}
+
+#[cfg(test)]
+mod common {
+    use std::os::unix::process::ExitStatusExt;
+    use std::path::{Path, PathBuf};
+    use std::process::{ExitStatus, Output};
+
+    /// A new folder named `name` in the temp folder whose `rust-toolchain-nightly`
+    /// pins the installed toolchain of `rust-toolchain.toml`. The caller removes it.
+    pub(crate) fn create_stable_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let toolchain = std::fs::read_to_string(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../rust-toolchain.toml"),
+        )
+        .unwrap();
+        let channel = toolchain
+            .lines()
+            .find_map(|line| line.strip_prefix("channel = "))
+            .unwrap()
+            .trim_matches('"');
+        std::fs::write(root.join("rust-toolchain-nightly"), channel).unwrap();
+        root
+    }
+
+    /// An output of a process that exits with `code`.
+    pub(crate) fn output(code: i32, stdout: &str, stderr: &str) -> Output {
+        Output {
+            status: ExitStatus::from_raw(code << 8),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
 }
 
 #[cfg(test)]

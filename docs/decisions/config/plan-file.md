@@ -74,18 +74,30 @@
   `laptop.architect-2` (2026-10-08T23:51:37Z, items 3 and 4 of
   https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071339913).
   `config::plan::check(definitions, members, kinds)` checks the definitions after the
-  plan, with no span. It holds: the kind table accepts the kind and the config of each
-  connector, then `config.unplaced`, `config.connector-home`, `config.split-placement`,
-  `config.writer-nodes`, and `config.unknown-node`. #2013 PR 2 makes
-  `spec::access::Policy::new` refuse an empty `allow`, so `Plan::decode` refuses it, and
-  adds `config.duplicate-name`, `config.subject-is-connector`, and `config.private-key`
-  to `check`. #2013 PR 3 makes apply call it after `definitions` and before
-  `Mesh::apply`, with the members and the kind table of the node that applies, as both
-  can change after `plan`. Decided by `laptop.architect-2`, 2026-10-08T21:36:36Z
+  plan, with no span or note. It gives the first stage with problems:
+  `config.private-key` for each string of a definition; then, together, what the kind
+  table refuses in the kind and config of each connector, `config.duplicate-name`, and
+  `config.subject-is-connector`; then `config.unplaced`, `config.connector-home`,
+  `config.split-placement`, `config.writer-nodes`, and `config.unknown-node`.
+  `spec::access::Policy::new` refuses an empty `allow`, so `Plan::decode` refuses it.
+  The `ops` apply calls `check` after `definitions` and before `Mesh::apply`, with the
+  members and the kind table of the node that applies, as both can change after `plan`.
+  Decided by `laptop.architect-2`, 2026-10-08T21:36:36Z
   (https://github.com/synnaxlabs/foundation/issues/2013). The rules are in `config`
   once, on one model of the definitions that `plan` builds with spans, and both take the
   connectors of an index in name order, so each gives the same problems. Name order, and
   an empty `allow` refused in `spec`: `laptop.architect-2`, 2026-10-09T00:48:39Z
   (https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
   This changes the first-writer order of
-  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143.
+  https://github.com/synnaxlabs/foundation/pull/1886#issuecomment-6061802143. A message
+  of a later stage can quote a string of a definition, so no later stage runs on a key.
+  The problems of the second stage each read one definition or one name, and none needs
+  another to pass. The plan rules read the kind of each connector and each name, so an
+  unknown kind or a duplicate name gives false problems there. Lost: one stage with all
+  problems. The stages: decided by `laptop.architect-2`, 2026-10-09T01:57:07Z
+  (https://github.com/synnaxlabs/foundation/pull/2067#issuecomment-6072680913).
+  `check` gives `config.duplicate-name` in name order, as the definitions of a plan hold
+  no file order; `config::check` gives it in file order, at the later block. Lost: name
+  order in both, which puts the span on the first block, where a person does not look.
+  Decided by `laptop.architect-2`, 2026-10-09T03:19:32Z, item 2 of
+  https://github.com/synnaxlabs/foundation/pull/2067#issuecomment-6073571855.

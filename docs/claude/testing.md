@@ -34,8 +34,8 @@ thread, so `connector-opcua` sets its start value on each thread that calls open
 | 1 | Unit and property tests (`proptest`) | Every commit |
 | 2 | Coverage-guided fuzzing (`cargo-fuzz`) of every decoder of outside input: wire, config, codecs, protocol parsers | Short run per merge, continuous nightly |
 | 3 | Deterministic simulation of a whole mesh: drops, partitions, crashes mid-write, clock jumps. A recorded random value replays a run | Thousands of runs per merge, millions nightly |
-| 4 | Unit benchmarks, per function | Every merge, 5% check (P1) |
-| 5 | Component benchmarks | Every merge, 5% check (P1) |
+| 4 | Unit benchmarks, per function | Every merge, cost check (P1) |
+| 5 | Component benchmarks | Every merge, cost check (P1) |
 | 6 | End-to-end performance against P1 on shared machines | Nightly and release |
 | 7 | Protocol simulators per connector | Every merge |
 | 8 | Hardware in the loop with real devices | Nightly and release |
@@ -96,7 +96,9 @@ logic that a simulated test can reach.
   adds or changes an arm that a target reaches adds an input that reaches it, and never
   defers it: a fuzz input needs no approval.
 - Each PR runs every target for 60 seconds. A nightly schedule runs them longer on
-  the ARM runner, which is idle at night.
+  the ARM runner.
+- `cargo xtask fuzz [seconds]` runs every target on the pinned nightly, with its
+  inputs in `oracles/fuzz/`.
 
 Simulation checks liveness as well as safety: after faults stop, the mesh converges
 within a bound (r16 60). A failed run prints its replay value, and CI runs that value
@@ -157,7 +159,15 @@ again once to prove that the failure replays (r16 59).
   yet. The PR that closes such an issue removes it from each reason, and removes the
   `#[ignore]` when no issue is left. A test that needs a tool of one OS, and that CI
   runs on that OS, is `#[cfg_attr(not(target_os = "<os>"), ignore = "needs <tool>")]`,
-  never `#[cfg(target_os = ...)]`, which hides it on another OS with no reason.
+  never `#[cfg(target_os = ...)]`, which hides it on another OS with no reason. A test
+  of a behavior that differs by OS checks it on each OS that the crate builds for: with
+  `#[cfg(target_os = ...)]` on its expected value, as `UNLINK_DIRECTORY` in
+  `crates/os/tests/it/files.rs` does, or with one test for each OS. A behavior has no
+  test on another OS only when that OS does not have it, when no test can fix its value
+  there (a count that a kernel buffer sets), or when its test needs an item that exists
+  on one OS to cause the case, such as a seccomp filter. A test whose code calls such an
+  item does not compile on another OS, so it is `#[cfg(target_os = ...)]`, not the
+  `cfg_attr` form above.
 - **One `check` helper per feature under test.** Inputs and expected output are data,
   so a signature change edits one helper (r16 50).
 - **A fixture helper is `create_*`.** A helper that builds the state a test runs
@@ -169,12 +179,13 @@ again once to prove that the failure replays (r16 59).
   `Display`) and **coverage marks** that prove a test reached a branch. Both need a
   dependency approval in `docs/dependencies.md` first (r16 51, 52).
 - **Wake protocols and lock-free code** get loom for small models and shuttle (PCT)
-  for larger ones. Only `ring` gates std types behind `cfg(loom)`. Code with `unsafe`
-  runs under Miri (r16 61). `cargo xtask loom` builds the tests in release mode with
-  `--cfg loom`. Then it runs, with `LOOM_MAX_PREEMPTIONS=3`, each test target that
-  compiles a file that names `loom` in a `cfg`, oracles included. `cargo xtask
-  shuttle` does the same with `--cfg shuttle`. `cargo xtask miri` runs Miri on each
-  crate whose source names `unsafe_code`, and fails when such a crate runs no tests.
+  for larger ones. A crate gates std types behind `cfg(loom)` only in code that a loom
+  model runs, and the gate swaps them for the `loom` types of the same name. Code with
+  `unsafe` runs under Miri (r16 61). `cargo xtask loom` builds the tests in release mode
+  with `--cfg loom`. Then it runs, with `LOOM_MAX_PREEMPTIONS=3`, each test target that
+  compiles a file that names `loom` in a `cfg`, oracles included. `cargo xtask shuttle`
+  does the same with `--cfg shuttle`. `cargo xtask miri` runs Miri on each crate whose
+  source names `unsafe_code`, and fails when such a crate runs no tests.
 - **Hot paths** of product code (`docs/claude/performance.md`) run under a counting
   allocator that fails on any allocation.
 - **Unit tests are co-located** in a `#[cfg(test)] mod tests` block. Group by subject
@@ -189,7 +200,8 @@ again once to prove that the failure replays (r16 59).
   process (the descriptor table, the thread count, a resource limit, a seccomp filter,
   the first-lookup state of the C library) gets a binary of its own with that one test,
   as a counting allocator does. Its module doc names that state. Helpers that binaries
-  share go in `tests/common/mod.rs`.
+  share go in `tests/common/`: `mod.rs`, and a file for a helper that only some binaries
+  use, which each of them mounts with `#[path]`.
 
 ## Oracles
 

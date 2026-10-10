@@ -11,6 +11,7 @@ use delivery::{Reader, Readers, Start};
 use types::channel::Slot;
 use types::frame::key_set::KeySet;
 use types::frame::{Frame, Path};
+use types::hash;
 use types::time::Stamp;
 
 /// An open reader on its shard, in either mode.
@@ -88,9 +89,10 @@ pub(crate) struct Set {
     keys: Vec<Key>,
     /// The commits the buffer had ended at the last [`Set::woken`].
     commits: u64,
-    /// The number of the first reader key of each index the set carries next: above
-    /// each key of an index it shed, so that a key never names two readers.
-    first: u64,
+    /// The number of the first reader key of each index that the set shed and does
+    /// not carry now: above each key that the index had, so that a key never names two
+    /// readers. An index with no number starts at 0.
+    first: hash::Map<Slot, u64>,
 }
 
 /// The readers of one carried index.
@@ -113,7 +115,7 @@ impl Set {
         assert_eq!(place, self.entries.len(), "{place} is not the next place");
         self.entries.push(Entry {
             slot,
-            readers: Readers::after(live, self.first),
+            readers: Readers::after(live, self.first.remove(&slot).unwrap_or(0)),
             listed: false,
         });
         // Room for every index, so that `applied` never grows the list.
@@ -129,7 +131,7 @@ impl Set {
     pub(crate) fn shed(&mut self, place: usize) {
         let last = self.entries.len() - 1;
         let entry = self.entries.swap_remove(place);
-        self.first = self.first.max(entry.readers.end());
+        self.first.insert(entry.slot, entry.readers.end());
         self.listed.retain(|&listed| listed != place);
         if let Some(listed) = self.listed.iter_mut().find(|listed| **listed == last) {
             *listed = place;
@@ -496,7 +498,8 @@ mod tests {
             let frames = Frames::new();
             let mut set = carried(1);
             let latest = set.open_latest(0);
-            let _ = set.open_complete(0, 0, u64::MAX, complete::Charge::Whole);
+            let _: complete::Key =
+                set.open_complete(0, 0, u64::MAX, complete::Charge::Whole);
             set.applied(0, frames.frame(Path::Backfill, 0..2), &frames.set, 0..2);
             assert_eq!(woken(&mut set), []);
             assert_eq!(set.listed(), []);
@@ -542,6 +545,16 @@ mod tests {
         fn panics_when_the_place_is_not_the_next() {
             let mut set = carried(1);
             set.carry(2, Slot::new(1), 0);
+        }
+
+        /// The set keeps the number of a shed index only until it carries it again.
+        #[test]
+        fn drops_the_number_of_a_shed_index_that_it_carries_again() {
+            let mut set = carried(2);
+            set.shed(0);
+            assert_eq!(set.first.len(), 1);
+            set.carry(1, Slot::new(0), 0);
+            assert!(set.first.is_empty());
         }
     }
 

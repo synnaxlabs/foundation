@@ -710,10 +710,11 @@ impl Readers {
     /// The open complete session `key`, or `None` when it closed. Panics on a key
     /// never given.
     fn find(&self, key: complete::Key) -> Option<usize> {
-        if key.0 >= self.next_complete {
-            never_open(key.into());
+        match self.complete.binary_search_by_key(&key, |s| s.key) {
+            Ok(i) => Some(i),
+            Err(_) if key.0 >= self.next_complete => never_open(key.into()),
+            Err(_) => None,
         }
-        self.complete.binary_search_by_key(&key, |s| s.key).ok()
     }
 
     fn remove(&mut self, i: usize) -> Session {
@@ -1492,7 +1493,8 @@ pub(super) mod tests {
         #[should_panic(expected = "complete session 1 was never open")]
         fn take_panics_on_a_session_never_open() {
             let mut readers = Readers::new(0);
-            let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
+            let _: complete::Opened =
+                readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
             drop(readers.take(complete::Key(1).into()));
         }
 
@@ -1500,7 +1502,8 @@ pub(super) mod tests {
         #[should_panic(expected = "complete session 1 was never open")]
         fn close_panics_on_a_session_never_open() {
             let mut readers = Readers::new(0);
-            let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
+            let _: complete::Opened =
+                readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
             readers.close(complete::Key(1).into(), None);
         }
 
@@ -1508,7 +1511,8 @@ pub(super) mod tests {
         #[should_panic(expected = "complete session 1 was never open")]
         fn close_with_a_mesh_time_panics_on_a_session_never_open() {
             let mut readers = Readers::new(0);
-            let _ = readers.open(named("a", 10), Start::At(live(0)), 0, Charge::Whole);
+            let _: complete::Opened =
+                readers.open(named("a", 10), Start::At(live(0)), 0, Charge::Whole);
             readers.close(complete::Key(1).into(), Some(at(0)));
         }
     }
@@ -1605,7 +1609,8 @@ pub(super) mod tests {
         #[should_panic(expected = "complete session 6 was never open")]
         fn panics_on_a_complete_key_after_first_that_it_never_gave() {
             let mut readers = Readers::after(0, 5);
-            let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
+            let _: complete::Opened =
+                readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
             readers.grant(complete::Key(6), 1);
         }
 
@@ -2004,7 +2009,8 @@ pub(super) mod tests {
         #[should_panic(expected = "complete session 1 was never open")]
         fn grant_panics_on_a_session_never_open() {
             let mut readers = Readers::new(0);
-            let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
+            let _: complete::Opened =
+                readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
             readers.grant(complete::Key(1), 10);
         }
 
@@ -2012,7 +2018,8 @@ pub(super) mod tests {
         #[should_panic(expected = "complete session 2 was never open")]
         fn grant_panics_on_a_key_past_the_next() {
             let mut readers = Readers::new(0);
-            let _ = readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
+            let _: complete::Opened =
+                readers.open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole);
             readers.grant(complete::Key(2), 10);
         }
     }

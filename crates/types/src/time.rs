@@ -623,24 +623,6 @@ const fn gcd(mut a: u64, mut b: u64) -> u64 {
     a
 }
 
-impl fmt::Display for Rate {
-    /// Writes the rate in hertz: `1kHz`, `100Hz`, `1/3Hz`.
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let _ = f;
-        todo!()
-    }
-}
-
-impl FromStr for Rate {
-    type Err = Error;
-
-    /// Reads a rate in hertz, with an optional `k` or `M` prefix or a fraction.
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let _ = s;
-        todo!()
-    }
-}
-
 /// A time value that could not be read or made. `Display` gives the message: a
 /// lower-case clause with no final period. [`Error::fix`] gives what to do instead.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -964,19 +946,19 @@ mod tests {
             #[test]
             #[should_panic(expected = "stamp overflow: 9223372036854775807 ns + 1 ns")]
             fn adding_past_the_limit_panics() {
-                let _ = Stamp::from_nanos(i64::MAX) + Span::NANOSECOND;
+                let _: Stamp = Stamp::from_nanos(i64::MAX) + Span::NANOSECOND;
             }
 
             #[test]
             #[should_panic(expected = "stamp overflow: -9223372036854775808 ns - 1 ns")]
             fn subtracting_past_the_limit_panics() {
-                let _ = Stamp::from_nanos(i64::MIN) - Span::NANOSECOND;
+                let _: Stamp = Stamp::from_nanos(i64::MIN) - Span::NANOSECOND;
             }
 
             #[test]
             #[should_panic(expected = "span overflow: 9223372036854775807 ns - -1 ns")]
             fn a_difference_past_the_limit_panics() {
-                let _ = Stamp::from_nanos(i64::MAX) - Stamp::from_nanos(-1);
+                let _: Span = Stamp::from_nanos(i64::MAX) - Stamp::from_nanos(-1);
             }
         }
     }

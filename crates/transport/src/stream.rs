@@ -565,8 +565,8 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::ops::Range;
     use std::pin::pin;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicI64, AtomicU32, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
     use std::task::{Context, Waker};
 
     use std::future::poll_fn;
@@ -972,6 +972,86 @@ mod tests {
             (sim.run(), sim.digest())
         };
         assert_eq!(trace(2), trace(2));
+    }
+
+    /// Two nodes with an idle of 1 s, on links of 600 ms and 1.2 s RTT. A cut drops the
+    /// server's first flight, with its hello at 0.5-RTT: its datagrams leave within
+    /// 27 ms of the client's Initial, which takes one delay to arrive. So the server's
+    /// hello reaches the client after `idle`, and on the slower link after twice
+    /// `idle`, but within the idle timeout of 3 PTO. The session stays.
+    #[test]
+    fn keep_a_session_whose_hello_a_short_cut_delays() {
+        for (delay, after) in [(300, 1), (600, 2)] {
+            let link = sim::link::Config {
+                delay: spans(Span::MILLISECOND, delay),
+                ..sim::link::Config::default()
+            };
+            let waited = Arc::new(AtomicI64::new(0));
+            let wait = Arc::clone(&waited);
+            let (mut sim, client, server) = testing::sessions(
+                1,
+                |config| Config {
+                    idle: Span::SECOND,
+                    ..config
+                },
+                move |side| async move {
+                    let connected = side.node.clock().now();
+                    let opened = side.session.open_sender(Class::Command).await;
+                    let mut sender = opened.expect("a stream");
+                    let late = side.node.clock().now() - connected;
+                    wait.store(late.nanos(), Ordering::Relaxed);
+                    sender.send(side.block(b"a")).await.expect("sent");
+                    sender.finish().expect("finished");
+                    side.node.clock().sleep(spans(Span::SECOND, 5)).await;
+                    side.session.close(Code(0));
+                },
+                |side| async move {
+                    let mut incoming = side.session.accept().await.expect("a stream");
+                    let read = bytes(incoming.receiver.recv().await);
+                    assert_eq!(read, Ok(Some(b"a".to_vec())));
+                    let closed = Error::PeerClosed { code: Code(0) };
+                    assert_eq!(side.session.closed().await, closed);
+                },
+            );
+            let cut = sim::link::Config { loss: 1.0, ..link };
+            sim.link(&client, &server, link);
+            sim.link(&server, &client, cut);
+            let healed = spans(Span::MILLISECOND, delay + 27);
+            assert_eq!(sim.run_for(healed), Ok(()));
+            sim.link(&server, &client, link);
+            assert_eq!(sim.run(), Ok(()));
+            let late = Span::from_nanos(waited.load(Ordering::Relaxed));
+            assert!(late > spans(Span::SECOND, after), "{delay}: {late:?}");
+        }
+    }
+
+    /// Two honest nodes, on a link that loses 70% of the server's datagrams. The
+    /// server's hello and each resend of it are lost until the bound, while enough
+    /// keep-alives arrive that the idle timeout never ends the session. The client
+    /// ends it as a peer with no hello.
+    #[test]
+    fn end_a_session_whose_hello_a_lossy_link_loses_until_the_bound() {
+        let closed = Arc::new(Mutex::new(None));
+        let close = Arc::clone(&closed);
+        let (mut sim, client, server) = testing::sessions(
+            39,
+            |config| config,
+            move |side| async move {
+                *close.lock().expect("a lock") = Some(side.session.closed().await);
+            },
+            |side| async move {
+                side.session.closed().await;
+            },
+        );
+        let lossy = sim::link::Config {
+            loss: 0.7,
+            ..sim::link::Config::default()
+        };
+        sim.link(&server, &client, lossy);
+        assert_eq!(sim.run_for(spans(Span::SECOND, 10)), Ok(()));
+        let reason = "a peer with no hello".to_owned();
+        let closed = closed.lock().expect("a lock").take();
+        assert_eq!(closed, Some(Error::Broken { reason }));
     }
 
     #[test]
@@ -3046,6 +3126,149 @@ mod tests {
             counts.each_ref().map(|count| count.load(Ordering::Relaxed))
         };
         got.iter().map(count).collect()
+    }
+
+    mod heal {
+        use super::*;
+
+        /// The idle of both nodes in these runs.
+        const IDLE: Span = Span::from_nanos(60 * Span::SECOND.nanos());
+
+        fn cut(sim: &mut Sim, a: &Node, b: &Node, loss: f64) {
+            let config = sim::link::Config {
+                loss,
+                ..sim::link::Config::default()
+            };
+            sim.link(a, b, config);
+            sim.link(b, a, config);
+        }
+
+        /// Runs `sim` in steps of 10 ms until `count` grows, and gives the time that
+        /// took in ms, or `None` when it does not grow within `limit` ms.
+        fn grows(sim: &mut Sim, count: &AtomicU32, limit: i64) -> Option<i64> {
+            let before = count.load(Ordering::Relaxed);
+            (1..=limit / 10).find_map(|step| {
+                assert_eq!(sim.run_for(spans(Span::MILLISECOND, 10)), Ok(()));
+                (count.load(Ordering::Relaxed) > before).then_some(step * 10)
+            })
+        }
+
+        /// The milliseconds until the server reads a message after a cut of `secs`
+        /// seconds heals, on a stream that carries one message of 1,000 bytes each
+        /// 250 ms. Such messages fill the congestion window in the cut, so that only
+        /// a probe can send.
+        fn stream_heal_ms(secs: i64) -> Option<i64> {
+            let (mut sim, client, server) = testing::nodes(1);
+            let at = [Address::Udp(testing::address(&server))];
+            let read = Arc::new(AtomicU32::new(0));
+            let counter = Arc::clone(&read);
+            testing::shard(&server, testing::SERVER, move |config, node| async move {
+                let config = Config {
+                    idle: IDLE,
+                    ..config
+                };
+                let part = testing::part(&node.net(), testing::address(&node));
+                let transport = Transport::new(config, part).expect("a transport");
+                let session = transport.accept().await.expect("a session");
+                let mut incoming = session.accept().await.expect("a stream");
+                while incoming.receiver.recv().await.expect("a message").is_some() {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            testing::shard(&client, testing::CLIENT, move |config, node| async move {
+                let config = Config {
+                    idle: IDLE,
+                    ..config
+                };
+                let pool = Rc::clone(&config.pool);
+                let part = testing::part(&node.net(), testing::address(&node));
+                let transport = Transport::new(config, part).expect("a transport");
+                let server = testing::SERVER.public();
+                let session = transport.dial(server, &at).await.expect("a session");
+                let opened = session.open_sender(Class::Complete).await;
+                let mut sender = opened.expect("a stream");
+                let clock = node.clock();
+                for n in 0..u32::MAX {
+                    let mut message = vec![0; 1_000];
+                    message[..4].copy_from_slice(&n.to_le_bytes());
+                    let block = testing::block(&pool, &message);
+                    sender.send(block).await.expect("sent");
+                    clock.sleep(spans(Span::MILLISECOND, 250)).await;
+                }
+            });
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            assert!(
+                read.load(Ordering::Relaxed) > 0,
+                "no message before the cut"
+            );
+            cut(&mut sim, &client, &server, 1.0);
+            assert_eq!(sim.run_for(spans(Span::SECOND, secs)), Ok(()));
+            cut(&mut sim, &client, &server, 0.0);
+            grows(&mut sim, &read, 30_000)
+        }
+
+        /// The milliseconds until a dial that starts in a cut of `secs` seconds
+        /// gives its session after the cut heals.
+        fn dial_heal_ms(secs: i64) -> Option<i64> {
+            let (mut sim, client, server) = testing::nodes(1);
+            let at = [Address::Udp(testing::address(&server))];
+            let dialed = Arc::new(AtomicU32::new(0));
+            let counter = Arc::clone(&dialed);
+            testing::shard(&server, testing::SERVER, move |config, node| async move {
+                let config = Config {
+                    idle: IDLE,
+                    ..config
+                };
+                let part = testing::part(&node.net(), testing::address(&node));
+                let transport = Transport::new(config, part).expect("a transport");
+                let session = transport.accept().await.expect("a session");
+                std::future::pending::<()>().await;
+                drop((transport, session));
+            });
+            testing::shard(&client, testing::CLIENT, move |config, node| async move {
+                let config = Config {
+                    idle: IDLE,
+                    ..config
+                };
+                let part = testing::part(&node.net(), testing::address(&node));
+                let transport = Transport::new(config, part).expect("a transport");
+                let server = testing::SERVER.public();
+                let session = transport.dial(server, &at).await.expect("a session");
+                counter.store(1, Ordering::Relaxed);
+                std::future::pending::<()>().await;
+                drop((transport, session));
+            });
+            cut(&mut sim, &client, &server, 1.0);
+            assert_eq!(sim.run_for(spans(Span::SECOND, secs)), Ok(()));
+            assert_eq!(dialed.load(Ordering::Relaxed), 0, "a dial through the cut");
+            cut(&mut sim, &client, &server, 0.0);
+            grows(&mut sim, &dialed, 30_000)
+        }
+
+        /// The most time after a cut heals until the stream or the dial moves again.
+        const HEAL_MS: i64 = 3_000;
+
+        #[test]
+        fn a_stream_with_a_full_window_moves_within_3_s_after_a_cut_heals() {
+            for secs in [8, 15, 46, 59] {
+                let heal = stream_heal_ms(secs);
+                assert!(
+                    heal.is_some_and(|ms| ms <= HEAL_MS),
+                    "cut {secs} s: {heal:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn a_dial_in_a_cut_gives_its_session_within_3_s_after_the_cut_heals() {
+            for secs in [8, 15, 50] {
+                let heal = dial_heal_ms(secs);
+                assert!(
+                    heal.is_some_and(|ms| ms <= HEAL_MS),
+                    "cut {secs} s: {heal:?}"
+                );
+            }
+        }
     }
 }
 

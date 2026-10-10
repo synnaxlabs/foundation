@@ -987,6 +987,62 @@ fn two_equal_calls_with_a_kept_home_give_ok() {
     });
 }
 
+// `INDEX` has a home, so the change leaves the pointer, and a later apply on it
+// applies.
+#[test]
+fn an_apply_of_the_tree_of_its_base_with_each_index_homed_gives_the_base() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let a = create_indexes(1);
+        let moved = pointer(1, &a);
+        let first = create_homes(1, "plant.node1");
+        assert_eq!(mesh.apply(base(), a.clone(), first).await, Ok(moved));
+        let other = create_homes(1, "plant.node2");
+        assert_eq!(mesh.apply(moved, a, other).await, Ok(moved));
+        assert_eq!(mesh.pointer(), moved);
+        assert_eq!(mesh.spec().await.unwrap().pointer, Some(moved));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+        let b = create_indexes(2);
+        let next = pointer(2, &b);
+        assert_eq!(mesh.apply(moved, b, BTreeMap::new()).await, Ok(next));
+    });
+}
+
+// The second call gives `INDEX` a home, so the pointer moves to the root of `moved`
+// at the next version, and the third call, which leaves the pointer, finds it.
+#[test]
+fn an_apply_of_the_tree_of_a_replaced_base_gives_stale() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let a = create_indexes(1);
+        let moved = pointer(1, &a);
+        let applied = mesh.apply(base(), a.clone(), BTreeMap::new()).await;
+        assert_eq!(applied, Ok(moved));
+        let homes = create_homes(1, "plant.node1");
+        let next = pointer(2, &a);
+        assert_eq!(mesh.apply(moved, a.clone(), homes).await, Ok(next));
+        let stale = Error::Stale {
+            base: moved,
+            pointer: next,
+        };
+        assert_eq!(mesh.apply(moved, a, BTreeMap::new()).await, Err(stale));
+    });
+}
+
+#[test]
+fn an_apply_at_the_root_of_its_base_that_gives_a_home_moves_the_pointer() {
+    solo(|node, tasks| async move {
+        let mesh = open_founded(&node, &tasks, 1).await;
+        let definitions = create_indexes(2);
+        let founded = pointer(0, &definitions);
+        let moved = pointer(1, &definitions);
+        let homes = create_homes(2, "plant.node2");
+        assert_eq!(mesh.apply(founded, definitions, homes).await, Ok(moved));
+        assert_eq!(mesh.watch(INDEX).next().await, Ok(Some(key(1))));
+        assert_eq!(mesh.watch(SECOND).next().await, Ok(Some(key(2))));
+    });
+}
+
 #[test]
 fn apply_gives_ok_when_a_listed_index_keeps_the_home_it_had() {
     solo(|node, tasks| async move {
@@ -1034,7 +1090,7 @@ fn a_lost_answer_gives_the_result_of_a_call_with_a_home_kept() {
 }
 
 /// A waker that counts its wakes.
-struct Counted(AtomicUsize);
+pub(super) struct Counted(pub(super) AtomicUsize);
 
 impl Wake for Counted {
     fn wake(self: Arc<Self>) {

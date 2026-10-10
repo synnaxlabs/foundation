@@ -4,6 +4,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::hash;
+use crate::sample::Type;
 
 /// A channel's identity: a UUIDv7 made with the channel. It never changes and is never
 /// reused. Files never hold it; the stored spec maps each name to its key.
@@ -76,10 +77,17 @@ impl Slot {
     }
 }
 
-/// The node's table of channel slots. The node's
+/// The node's table of channel slots. A key holds one slot as an index, and one slot
+/// as a data channel for each sample type. No slot changes or goes to a second key,
+/// role, or type. Slots count from 0. Give it only keys and types from the spec or the
+/// node's disk, which limit what it holds: it hashes with no key. The node's
 /// [`Interner`](crate::frame::key_set::Interner) owns it.
 #[derive(Debug, Default)]
-pub struct Slots(hash::Map<Key, Slot>);
+pub struct Slots {
+    indexes: hash::Map<Key, Slot>,
+    data: hash::Map<(Key, Type), Slot>,
+    given: u64,
+}
 
 impl Slots {
     /// A table with no slots.
@@ -88,24 +96,47 @@ impl Slots {
         Self::default()
     }
 
-    /// The slot of `key`. The first call for a key assigns the next slot, from 0. A
-    /// slot is never reused. Give it only keys from the spec or the node's disk, which
-    /// limit the keys that the table holds: it hashes with no key.
+    /// The slot of `key` as an index. The first call for `key` assigns the next slot,
+    /// and each later call gives the same slot, also after `key` was a data channel.
+    /// The buffer keys the tails of an index by this slot.
     ///
     /// # Panics
     ///
-    /// If the table already holds 2^32 channels.
-    pub fn assign(&mut self, key: Key) -> Slot {
-        let next = self.0.len();
-        *self.0.entry(key).or_insert_with(|| {
-            Slot(u32::try_from(next).expect("a node holds at most 2^32 channels"))
-        })
+    /// If the table already assigned 2^32 slots.
+    pub fn index(&mut self, key: Key) -> Slot {
+        *self
+            .indexes
+            .entry(key)
+            .or_insert_with(|| next(&mut self.given))
     }
+
+    /// The slot of `key` as a data channel of `data_type`. The first call for the pair
+    /// assigns the next slot, and each later call gives the same slot. So a reader that
+    /// wants this slot takes no series of `key` of another type. It is never the slot
+    /// of `key` as an index.
+    ///
+    /// # Panics
+    ///
+    /// If the table already assigned 2^32 slots.
+    pub fn data(&mut self, key: Key, data_type: Type) -> Slot {
+        *self
+            .data
+            .entry((key, data_type))
+            .or_insert_with(|| next(&mut self.given))
+    }
+}
+
+/// The slot after the `given` slots, which it counts.
+fn next(given: &mut u64) -> Slot {
+    let slot = u32::try_from(*given).expect("a node assigns at most 2^32 slots");
+    *given += 1;
+    Slot(slot)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sample::Scalar;
     use crate::time::{Span, Stamp};
     use proptest::prelude::*;
 
@@ -227,14 +258,62 @@ mod tests {
         }
     }
 
+    const I64: Type = Type::Scalar(Scalar::I64);
+    const I32: Type = Type::Scalar(Scalar::I32);
+
     #[test]
-    fn assigns_dense_slots_once_per_key() {
+    fn assigns_dense_slots_once_per_key_and_role() {
+        let mut slots = Slots::new();
+        let (a, b) = (Key::from_u128(7), Key::from_u128(3));
+        assert_eq!(slots.index(a), Slot::new(0));
+        assert_eq!(slots.data(b, I64), Slot::new(1));
+        assert_eq!(slots.index(a), Slot::new(0));
+        assert_eq!(slots.data(b, I64), Slot::new(1));
+        assert_eq!(slots.data(a, I64), Slot::new(2));
+        assert_eq!(slots.index(b), Slot::new(3));
+        assert_eq!(slots.index(Key::from_u128(9)), Slot::new(4));
+    }
+
+    #[test]
+    fn assigns_one_data_slot_per_key_and_sample_type() {
         let mut slots = Slots::new();
         let a = Key::from_u128(7);
-        let b = Key::from_u128(3);
-        assert_eq!(slots.assign(a), Slot::new(0));
-        assert_eq!(slots.assign(b), Slot::new(1));
-        assert_eq!(slots.assign(a), Slot::new(0));
-        assert_eq!(slots.assign(Key::from_u128(9)), Slot::new(2));
+        assert_eq!(slots.data(a, I64), Slot::new(0));
+        assert_eq!(slots.data(a, I64), Slot::new(0));
+        assert_eq!(slots.data(a, I32), Slot::new(1));
+        assert_eq!(slots.data(a, I64), Slot::new(0));
+        assert_eq!(slots.index(a), Slot::new(2));
+        assert_eq!(slots.data(a, I32), Slot::new(1));
+    }
+
+    #[test]
+    fn assigns_a_data_slot_per_type_with_each_parameter() {
+        let mut slots = Slots::new();
+        let a = Key::from_u128(7);
+        let array = |len| Type::Array {
+            element: Scalar::F32,
+            len,
+        };
+        assert_eq!(slots.data(a, array(8)), Slot::new(0));
+        assert_eq!(slots.data(a, array(16)), Slot::new(1));
+        assert_eq!(slots.data(a, array(8)), Slot::new(0));
+    }
+
+    /// It sets the private count, as no test can make 2^32 calls.
+    #[test]
+    #[should_panic(expected = "a node assigns at most 2^32 slots")]
+    fn panics_at_the_index_after_2_32_slots() {
+        let mut slots = Slots::new();
+        slots.given = 1 << 32;
+        slots.index(Key::from_u128(7));
+    }
+
+    /// It sets the private count, as no test can make 2^32 calls.
+    #[test]
+    #[should_panic(expected = "a node assigns at most 2^32 slots")]
+    fn panics_at_the_data_slot_after_2_32_slots() {
+        let mut slots = Slots::new();
+        slots.given = 1 << 32;
+        slots.data(Key::from_u128(7), I64);
     }
 }

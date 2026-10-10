@@ -38,6 +38,10 @@ tokio = { workspace = true, features = ["net", "rt", "time"] }
 name = "alloc"
 harness = false
 
+[[test]]
+name = "interrupt"
+harness = false
+
 # Needs `sudo`: only one CI step on a GitHub-hosted runner runs it.
 [[test]]
 name = "root"
@@ -50,6 +54,10 @@ harness = false
 
 [[bench]]
 name = "now"
+harness = false
+
+[[bench]]
+name = "sleep"
 harness = false
 
 [[bench]]

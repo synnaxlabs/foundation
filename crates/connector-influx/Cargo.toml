@@ -24,8 +24,10 @@ types = { path = "../types" }
 unicode-properties.workspace = true
 
 [dev-dependencies]
+connector = { path = "../connector", features = ["sim"] }
 counting = { path = "../counting" }
 env = { path = "../env" }
+hub = { path = "../hub", features = ["sim"] }
 proptest.workspace = true
 sim = { path = "../sim" }
 

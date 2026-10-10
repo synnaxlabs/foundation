@@ -383,6 +383,7 @@ impl<T> Slab<T> {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use std::sync::atomic::AtomicU64;
     use std::sync::atomic::Ordering::SeqCst;

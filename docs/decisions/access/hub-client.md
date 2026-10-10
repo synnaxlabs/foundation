@@ -5,11 +5,14 @@
   challenge came on the monotonic clock, plus `client::LIFE` (10 minutes), or at the end
   of mesh time when the sum passes it, as mesh time is the node's. Lost: an error of
   `connect` for a challenge near the end of mesh time, a second guard of the node's own
-  checks of the expiry (`EXPIRED`, `CAPPED`). A task renews the hello at half of `LIFE`
+  checks of the expiry (`EXPIRED`). A task renews the hello at half of `LIFE`
   after each admission, on the hello stream, until the session ends. A renewal waits for
-  a block as each message does, and the node closes the session if the hello expires
+  a block as each message does, and the node closes the session if the hello ends
   first. A challenge that `wire` refuses ends the renewal and closes the session with
-  `MALFORMED`. Each later request gives the error that ended the renewal.
+  `MALFORMED`. From then on, each request that fails gives the error that ended the
+  renewal, also a request that was in flight, in place of the error of the close
+  (`laptop.architect`, 2026-10-09 01:14 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2009#issuecomment-6072238837).
   `request(body)` signs the body, sends it on its own stream, and gives the body of the
   response. Requests of one client go one at a time, in the order they began, by a turn
   in the client, as a link holds one open request (HUB LINK). A request dropped before

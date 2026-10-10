@@ -43,6 +43,11 @@ impl Session {
         Weak(Rc::downgrade(&self.0))
     }
 
+    /// The carrier's session under this one.
+    pub(crate) fn quic(&self) -> &quic::Session {
+        &self.0
+    }
+
     /// Who is on the other end.
     ///
     /// ```
@@ -127,7 +132,7 @@ impl Session {
     /// async fn serve(session: &Session) -> Result<(), Error> {
     ///     loop {
     ///         let incoming = session.accept().await?;
-    ///         let _ = incoming.class;
+    ///         let _: transport::Class = incoming.class;
     ///     }
     /// }
     /// ```
@@ -145,6 +150,7 @@ impl Session {
     ///     session.datagrams()
     /// }
     /// ```
+    #[expect(clippy::todo, reason = "a stub until #68")]
     #[must_use]
     pub fn datagrams(&self) -> (datagram::Sender, datagram::Receiver) {
         todo!("#68")
@@ -199,6 +205,11 @@ impl Weak {
             .upgrade()
             .filter(|session| session.live())
             .map(Session)
+    }
+
+    /// Whether this is a handle to `session`.
+    pub(crate) fn is(&self, session: &Session) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Rc::as_ptr(&session.0))
     }
 }
 

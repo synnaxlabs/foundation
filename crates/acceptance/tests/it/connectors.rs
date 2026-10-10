@@ -7,6 +7,7 @@ use crate::lab::{Lab, Protocol};
 fn check(protocol: Protocol, hcl: &str) {
     let mut lab = Lab::new(1);
     let edge = lab.start("edge");
+    lab.mesh(&[edge]);
     lab.device(edge, protocol, "dev");
     lab.set_point("dev", "p", 21.5);
     lab.apply(edge, hcl);
@@ -27,31 +28,31 @@ fn check(protocol: Protocol, hcl: &str) {
 }
 
 #[test]
-#[ignore = "waits on #435"]
+#[ignore = "waits on #274, #435, #1957, #2145"]
 fn opc_ua_reads_and_commands() {
     check(Protocol::OpcUa, include_str!("fixtures/opcua.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #432"]
+#[ignore = "waits on #274, #432, #1957, #2145"]
 fn modbus_tcp_reads_and_commands() {
     check(Protocol::ModbusTcp, include_str!("fixtures/modbus_tcp.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #434"]
+#[ignore = "waits on #274, #434, #1957, #2145"]
 fn modbus_rtu_reads_and_commands() {
     check(Protocol::ModbusRtu, include_str!("fixtures/modbus_rtu.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #436"]
+#[ignore = "waits on #274, #436, #1957, #2145"]
 fn ni_daqmx_reads_and_commands() {
     check(Protocol::Ni, include_str!("fixtures/ni.hcl"));
 }
 
 #[test]
-#[ignore = "waits on #341"]
+#[ignore = "waits on #336, #341, #1229, #1231, #1232, #1957, #2145"]
 fn influx_receives_every_sample_the_edge_writes() {
     let mut lab = Lab::new(1);
     let cloud = lab.start("cloud");
@@ -59,8 +60,13 @@ fn influx_receives_every_sample_the_edge_writes() {
     let ticket = lab.ticket(cloud);
     lab.join(edge, ticket);
     lab.influx(cloud, "influx");
-    lab.apply(cloud, include_str!("fixtures/edge.hcl"));
-    lab.apply(cloud, include_str!("fixtures/influx.hcl"));
+    lab.apply(
+        cloud,
+        concat!(
+            include_str!("fixtures/edge.hcl"),
+            include_str!("fixtures/influx.hcl")
+        ),
+    );
     lab.write(edge, "edge.value", 1000, 5000);
     lab.run(Duration::from_secs(10));
     let stored = lab.stored("influx", "edge.value");

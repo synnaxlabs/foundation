@@ -1,7 +1,7 @@
 //! The cost of UDP over the loopback through `os::net`: one datagram against a plain
 //! Tokio socket, and a batch sent in one call against the same datagrams sent one by
-//! one. Each sample sends and then receives all the bytes, except in `register`.
-
+//! one, also on a socket that cannot use GSO and with a segment over the path MTU.
+//! Each sample sends and then receives all the bytes that arrive, except in `register`.
 use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -14,6 +14,10 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 use tokio::net::UdpSocket;
 use tokio::runtime::{Builder, Runtime};
+
+#[cfg(target_os = "linux")]
+#[path = "../tests/common/gso.rs"]
+mod gso;
 
 /// The size of each datagram of a batch: a QUIC packet on a 1,280-byte path.
 const SEGMENT: usize = 1_200;
@@ -79,13 +83,13 @@ async fn receive(
 /// sample.
 fn bench_os(
     bencher: Bencher<'_, '_>,
+    (mut sender, mut receiver): (Sender, Receiver),
     contents: &[u8],
     segment: usize,
     calls: usize,
     source: Option<IpAddr>,
 ) {
     let runtime = runtime();
-    let (mut sender, mut receiver) = pair();
     let mut storage = vec![vec![0; SEGMENT * receiver.batch_max().get()]; 4];
     let mut buffers: Vec<_> = storage.iter_mut().map(|b| IoSliceMut::new(b)).collect();
     let mut meta = [Meta::default(); 4];
@@ -107,13 +111,20 @@ fn bench_os(
 /// One 64-byte datagram through `os::net`.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_datagram(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &[7; 64], 0, 1, None);
+    bench_os(bencher, pair(), &[7; 64], 0, 1, None);
 }
 
 /// The same datagram from a given source address.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_datagram_source(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &[7; 64], 0, 1, Some(Ipv4Addr::LOCALHOST.into()));
+    bench_os(
+        bencher,
+        pair(),
+        &[7; 64],
+        0,
+        1,
+        Some(Ipv4Addr::LOCALHOST.into()),
+    );
 }
 
 /// The same datagram through a plain Tokio socket, for comparison.
@@ -141,13 +152,58 @@ fn tokio_datagram(bencher: Bencher<'_, '_>) {
 /// A batch of `DATAGRAMS` datagrams of `SEGMENT` bytes, sent in one call.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_batch(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &vec![7; SEGMENT * DATAGRAMS], SEGMENT, 1, None);
+    bench_os(
+        bencher,
+        pair(),
+        &vec![7; SEGMENT * DATAGRAMS],
+        SEGMENT,
+        1,
+        None,
+    );
+}
+
+/// The batch of [`os_batch`] on a socket whose kernel refuses GSO, so that it goes
+/// out a datagram at a time.
+#[cfg(target_os = "linux")]
+#[divan::bench(sample_count = SAMPLES)]
+fn os_batch_without_gso(bencher: Bencher<'_, '_>) {
+    let (sender, receiver) = pair();
+    gso::refuse(sender.local());
+    let contents = vec![7; SEGMENT * DATAGRAMS];
+    bench_os(bencher, (sender, receiver), &contents, SEGMENT, 1, None);
+}
+
+/// A transmit of `TRANSMIT_BYTES_MAX` bytes on the IPv6 loopback, in segments of
+/// 65,500 bytes. With its headers, the full segment is over the 65,536-byte MTU of the
+/// Linux loopback, so it is lost, and only the 7-byte last datagram arrives.
+#[cfg(target_os = "linux")]
+#[divan::bench(sample_count = SAMPLES)]
+fn os_batch_over_mtu(bencher: Bencher<'_, '_>) {
+    let net = os::net();
+    let config = udp::Config {
+        local: SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), 0),
+        send_buffer_bytes: 1 << 20,
+        recv_buffer_bytes: 1 << 22,
+    };
+    let (mut sender, _) = net.udp(&config).expect("the loopback has a free port");
+    let (_, mut receiver) = net.udp(&config).expect("the loopback has a free port");
+    let runtime = runtime();
+    let contents = vec![7; udp::TRANSMIT_BYTES_MAX];
+    let mut storage = [0; 64];
+    let mut buffers = [IoSliceMut::new(&mut storage)];
+    let mut meta = [Meta::default()];
+    bencher.bench_local(|| {
+        runtime.block_on(async {
+            send(&mut sender, &transmit(receiver.local(), &contents, 65_500)).await;
+            receive(&mut receiver, &mut buffers, &mut meta, 7).await;
+        });
+    });
 }
 
 /// The datagrams of [`os_batch`], sent one per call.
 #[divan::bench(sample_count = SAMPLES)]
 fn os_one_by_one(bencher: Bencher<'_, '_>) {
-    bench_os(bencher, &[7; SEGMENT], 0, DATAGRAMS, None);
+    bench_os(bencher, pair(), &[7; SEGMENT], 0, DATAGRAMS, None);
 }
 
 /// The registration that a sender makes at the first `EAGAIN` of a send: a write

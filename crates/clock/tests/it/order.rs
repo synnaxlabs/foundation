@@ -256,7 +256,7 @@ fn a_status_read_during_a_push_never_goes_back() {
 fn a_push_that_changes_nothing_does_not_make_a_read_run_again() {
     let (paused, mut clock, reader, source) = clock();
     clock.push(source, exact(SECOND, 0));
-    let _ = clock.add();
+    let _: clock::source::Key = clock.add();
     let before = paused.reads.load(SeqCst);
     let (status, ()) = overlap(
         &paused,

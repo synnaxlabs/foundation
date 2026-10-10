@@ -16,6 +16,7 @@ blake3 = "1.8.7"
 bytes = { version = "1.12.1", default-features = false, features = ["std"] }
 cc = "1.6.0"
 clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
+comrak = { version = "0.56.0", default-features = false }
 core_affinity = "0.8.3"
 crc32c = "0.6.8"
 divan = "0.1.21"
@@ -98,11 +99,13 @@ missing_assert_message = "warn"
 assertions_on_result_states = "deny"
 unused_result_ok = "deny"
 let_underscore_must_use = "deny"
+let_underscore_untyped = "deny"
 map_err_ignore = "deny"
 unwrap_in_result = "warn"
 get_unwrap = "deny"
 fallible_impl_from = "warn"
 unimplemented = "deny"
+todo = "deny"
 exit = "deny"
 
 iter_over_hash_type = "deny"

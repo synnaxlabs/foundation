@@ -12,7 +12,8 @@
 #   filter  a divan filter, given to the benches as one argument
 #
 # It runs base, head, base, head, so a drift of the host shows as a difference
-# between the two runs of one commit.
+# between the two runs of one commit. Both commits build with the aligned `RUSTFLAGS`
+# of BENCH BASELINES, and the report names them.
 #
 # Runs from any machine with `aws` (credentials for the account of the test budget),
 # `gh`, `ssh`, `curl`, and bash 3.2 or later. It needs no clone. It posts on the
@@ -35,6 +36,9 @@ type=c7i.metal-24xl
 # The person's limits for #1139.
 day_cap=15
 minutes_max=120
+# BENCH BASELINES. They replace the `rustflags` of `.cargo/config.toml`, so they keep
+# its CPU target.
+rustflags='-C target-cpu=x86-64-v2 -C llvm-args=-align-all-functions=6'
 
 usage() {
     sed -n '5,12p' "$0" | sed 's/^# \{0,1\}//' >&2
@@ -241,9 +245,11 @@ for _ in $(seq 60); do
 done
 [[ -n $reached ]] || fail "no SSH to $instance after 5 min"
 
+# Every remote `cargo` gets the same flags, or a run rebuilds beside a benchmark.
+flags=$(printf 'RUSTFLAGS=%q' "$rustflags")
 # The host builds both commits before the first run, so no build runs beside a
 # benchmark.
-remote bash -s -- "$repo" "$base" "$head" "$crate" <<'SETUP' ||
+remote "$flags" bash -s -- "$repo" "$base" "$head" "$crate" <<'SETUP' ||
 set -euo pipefail
 repo=$1 base=$2 head=$3 crate=$4
 sudo apt-get -qq update >/dev/null
@@ -275,7 +281,8 @@ report=$work/report.md
     echo "## Benchmarks on a quiet host"
     echo
     echo "\`cargo bench -p $crate${quoted:+ -- $quoted}\` on AWS $type spot"
-    echo "($instance, $region): $host. The host runs nothing else."
+    echo "($instance, $region): $host. The host runs nothing else. Both commits"
+    echo "build with \`RUSTFLAGS=\"$rustflags\"\`."
     echo
     echo "Base $base, head $head. The runs go base, head, base, head."
 } >"$report"
@@ -286,9 +293,9 @@ for run in 1 2 3 4; do
     ((run % 2 == 0)) && commit=$head label=head
     load=$(remote cat /proc/loadavg | cut -d' ' -f1-3)
     out=$work/run$run.txt
-    # `commit` and `crate` are checked, so only the filters need quotes.
-    if ! remote "cd $commit && ~/.cargo/bin/cargo bench -q -p $crate -- $quoted" \
-        >"$out" 2>&1; then
+    # `commit` and `crate` are checked; `flags` and the filters are quoted.
+    command="cd $commit && $flags ~/.cargo/bin/cargo bench -q -p $crate -- $quoted"
+    if ! remote "$command" >"$out" 2>&1; then
         failed=$run
         result=", failed"
     fi

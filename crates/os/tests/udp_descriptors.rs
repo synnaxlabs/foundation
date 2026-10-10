@@ -1,24 +1,22 @@
 //! The first poll of each UDP half with no free descriptor, which binds the half to
-//! its thread and leaves it usable. It takes each descriptor of the process, so it
-//! runs in a test binary of its own, with this one test only: the harness runs the
-//! tests of a binary on threads of one process.
+//! its thread and leaves it usable.
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 #![cfg(target_os = "linux")]
 
+#[path = "common/descriptors.rs"]
+mod descriptors;
+
 use std::future::poll_fn;
 use std::io::IoSliceMut;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::os::fd::OwnedFd;
 use std::task::{Context, Poll, Waker};
 
 use env::net::Error;
 use env::net::udp::{self, Meta, Receiver, Sender, Transmit};
 use env::thread::Panicked;
-use rustix::fs::{Mode, OFlags, open};
 use rustix::io::Errno;
-use rustix::process::{self, Resource};
 
 fn send(sender: &mut Sender, destination: SocketAddr) -> Poll<Result<(), Error>> {
     let transmit = Transmit {
@@ -47,20 +45,9 @@ fn emfile<T>() -> Poll<Result<T, Error>> {
     }))
 }
 
-/// Takes each free descriptor of the process until the result drops.
-fn take_each() -> Vec<OwnedFd> {
-    let mut held = Vec::new();
-    while let Ok(fd) = open("/dev/null", OFlags::RDONLY, Mode::empty()) {
-        held.push(fd);
-    }
-    held
-}
-
 #[test]
 fn a_first_poll_with_no_free_descriptor_binds_the_half_and_leaves_it_usable() {
-    let mut limit = process::getrlimit(Resource::Nofile);
-    limit.current = Some(128);
-    process::setrlimit(Resource::Nofile, limit).unwrap();
+    descriptors::limit();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()
@@ -75,7 +62,7 @@ fn a_first_poll_with_no_free_descriptor_binds_the_half_and_leaves_it_usable() {
     let (mut moved, mut moved_receiver) = os::net().udp(&config).unwrap();
     let destination = receiver.local();
     let mut cx = Context::from_waker(Waker::noop());
-    let mut held = take_each();
+    let mut held = descriptors::take_each();
     assert_eq!(send(&mut sender, destination), emfile());
     assert_eq!(send(&mut moved, destination), emfile());
     assert_eq!(receive(&mut receiver, &mut cx), emfile());

@@ -56,11 +56,9 @@ pub const STALE: u32 = 22;
 /// Stop code: the hello names another node as `via` than the node that carried it.
 pub const VIA: u32 = 23;
 
-/// Stop code: the hello expired.
+/// Stop code: the hello ended, at its `expires` or earlier, at the cap of the node on
+/// the life of a hello.
 pub const EXPIRED: u32 = 24;
-
-/// Stop code: the hello expires later than the cap past the earliest mesh time.
-pub const CAPPED: u32 = 25;
 
 /// Stop code: a renewal names another subject, key, `via`, or connection than the
 /// hello it renews.
@@ -72,7 +70,7 @@ pub enum Refusal {
     /// [`MALFORMED`]: a message of the program does not decode, or breaks a rule of
     /// the client wire.
     Malformed,
-    /// [`BUSY`]: the node had no memory for a response.
+    /// [`BUSY`]: the node had no memory for a response or a request body.
     Busy,
     /// [`REFUSED`].
     Refused,
@@ -84,14 +82,12 @@ pub enum Refusal {
     Via,
     /// [`EXPIRED`].
     Expired,
-    /// [`CAPPED`].
-    Capped,
     /// [`CHANGED`].
     Changed,
 }
 
 impl Refusal {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 8] = [
         Self::Malformed,
         Self::Busy,
         Self::Refused,
@@ -99,7 +95,6 @@ impl Refusal {
         Self::Stale,
         Self::Via,
         Self::Expired,
-        Self::Capped,
         Self::Changed,
     ];
 
@@ -120,7 +115,6 @@ impl Refusal {
             Self::Stale => STALE,
             Self::Via => VIA,
             Self::Expired => EXPIRED,
-            Self::Capped => CAPPED,
             Self::Changed => CHANGED,
         }
     }
@@ -130,7 +124,7 @@ impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Malformed => "a message of the program broke the client wire",
-            Self::Busy => "the node had no memory for a response",
+            Self::Busy => "the node had no memory for a response or a request body",
             Self::Refused => {
                 "the spec has no such subject, does not list the key for it, or the \
                  signature is not valid"
@@ -141,11 +135,7 @@ impl fmt::Display for Refusal {
                  challenge"
             }
             Self::Via => "the hello names another node as via",
-            Self::Expired => "the hello expired",
-            Self::Capped => {
-                "the hello expires later than the cap past the earliest mesh \
-                 time"
-            }
+            Self::Expired => "the hello ended",
             Self::Changed => {
                 "a renewal names another subject, key, via, or connection than \
                  the hello it renews"

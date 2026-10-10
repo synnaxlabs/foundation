@@ -156,3 +156,22 @@
   https://github.com/synnaxlabs/foundation/pull/2021#issuecomment-6070861987). Trigger
   for a map by public key: a caller of `holder` for each message, or a measured
   `State::new` over 10 ms.
+  Amended (2026-10-09, #1756): `Mesh::names() -> BTreeSet<Name>` gives the name of
+  each member in this node's view of the region, also after the group stops, so
+  `ops::Node` gives `config::plan::plan` its exact input. Lost: `members() ->
+  Vec<Member>`, which clones each card and status map for a caller that reads only the
+  name; `keys()` with `member(key)`, which puts the loop in each caller. Decided by
+  `laptop.architect` (2026-10-09T01:46:26Z:
+  https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6072570741).
+  Amended (2026-10-09, #2179): `Mesh::watch_spec() -> used::Watch` watches the spec
+  that this node uses, so `node` gives the hub the definitions of each new spec in use,
+  also of a change that another node proposed. The first `next` gives the spec in use at
+  once. Each later `next` waits until the pointer in use differs from the one it last
+  gave, and gives the newest spec, so two changes between calls give one result. A
+  change of only `behind` wakes no watch. The wake comes where the pointer of the spec
+  in use changes, in the same call. After a stop, `next` gives `Stopped` as
+  `Mesh::watch` does. Its `Debug` gives its last pointer, and its `Drop` frees its slot.
+  Lost: `Mesh::spec_after(pointer)`, a call with no state that waits for a pointer other
+  than the one given: one type less, but the caller keeps the last pointer, and the two
+  watches of `Mesh` have two forms. Decided by `laptop.architect` (2026-10-09T20:43:17Z:
+  https://github.com/synnaxlabs/foundation/issues/2179#issuecomment-6088928607).

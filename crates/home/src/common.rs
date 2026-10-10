@@ -1,10 +1,11 @@
 //! Test helpers that the modules of `home` reuse.
 
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 use proptest::prelude::*;
 use types::channel::{self, Slot};
-use types::frame::key_set::Interner;
+use types::frame::key_set::{Group, Interner, KeySet};
 use types::sample::{Scalar, Sides, Type};
 
 /// Each scalar.
@@ -126,11 +127,32 @@ pub(crate) fn key(slot: Slot) -> channel::Key {
     channel::Key::from_u128(bits << 120 | bits)
 }
 
-/// An interner where `key(slot)` has `slot`, for each slot below 64.
-pub(crate) fn create_interner() -> Interner {
+/// An interner where `key(slot)` has `slot`, for each slot below 64: as an index for
+/// each slot in `indexes`, else as a data channel of the type that `groups` gives its
+/// key, or `I64`.
+pub(crate) fn create_interner(indexes: &[u32], groups: &[Group<'_>]) -> Interner {
     let mut interner = Interner::new();
     for n in 0..64 {
-        interner.slots().assign(key(Slot::new(n)));
+        let key = key(Slot::new(n));
+        if indexes.contains(&n) {
+            interner.slots().index(key);
+        } else {
+            let data_type = groups
+                .iter()
+                .flat_map(|group| group.data)
+                .find_map(|&(at, data_type)| (at == key).then_some(data_type));
+            let data_type = data_type.unwrap_or(Type::Scalar(Scalar::I64));
+            interner.slots().data(key, data_type);
+        }
     }
     interner
+}
+
+/// The key set of `groups` from an interner where `key(slot)` has `slot`, for each
+/// slot below 64, in its role in `groups`.
+pub(crate) fn intern(groups: &[Group<'_>]) -> Arc<KeySet> {
+    let indexes: Vec<u32> = (0..64)
+        .filter(|&n| groups.iter().any(|group| group.index == key(Slot::new(n))))
+        .collect();
+    create_interner(&indexes, groups).intern(groups)
 }

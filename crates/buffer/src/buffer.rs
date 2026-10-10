@@ -368,9 +368,7 @@ impl Buffer {
     /// durable. It reads the header and the records from the ring's tail and writes
     /// them again, so its time grows with the records. Open one directory at most one
     /// time at once. Opens at once can fail with `Busy`, `Files(Length)`, or
-    /// `Files(Full)`. Dropping this future before it ends and then opening the same
-    /// directory again in this process can lose the commits of the second open, because
-    /// a remove of the first can still run (#1310).
+    /// `Files(Full)`.
     ///
     /// # Errors
     ///
@@ -800,7 +798,7 @@ fn recover(
         if requested > largest {
             return Err(Error::Pool(block::Error::TooLarge { requested, largest }));
         }
-        let slot = slots.assign(header.index);
+        let slot = slots.index(header.index);
         logs.append(slot, &header).map_err(misplaced)?;
         logs.sync(slot, &header, offset).map_err(misplaced)?;
     }
@@ -1083,8 +1081,8 @@ mod tests {
             &node,
             "write",
             |buffer, mut slots, pool| async move {
-                let one = slots.assign(channel::Key::from_u128(1));
-                let two = slots.assign(channel::Key::from_u128(2));
+                let one = slots.index(channel::Key::from_u128(1));
+                let two = slots.index(channel::Key::from_u128(2));
                 let part = pool.alloc(100).expect("a block").freeze();
                 for commit in 0..3 {
                     let seq = 6 * commit;
@@ -1135,7 +1133,7 @@ mod tests {
             &node,
             "write",
             |buffer, mut slots, pool| async move {
-                let one = slots.assign(channel::Key::from_u128(1));
+                let one = slots.index(channel::Key::from_u128(1));
                 let part = pool.alloc(100).expect("a block").freeze();
                 for commit in 0..60 {
                     let batch = [entry(1, one, Path::Live, 3 * commit, &part)];
@@ -1160,7 +1158,7 @@ mod tests {
         slots: &mut Slots,
         pool: &Pool,
     ) -> Slot {
-        let one = slots.assign(channel::Key::from_u128(1));
+        let one = slots.index(channel::Key::from_u128(1));
         let part = pool.alloc(100).expect("a block").freeze();
         for commit in 0..3 {
             let batch = [entry(1, one, Path::Live, 3 * commit, &part)];
@@ -1237,7 +1235,7 @@ mod tests {
             &node,
             "write",
             |buffer, mut slots, pool| async move {
-                let one = slots.assign(channel::Key::from_u128(1));
+                let one = slots.index(channel::Key::from_u128(1));
                 let part = pool.alloc(100).expect("a block").freeze();
                 let empty = || Entry {
                     len: 0,

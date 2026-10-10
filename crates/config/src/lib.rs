@@ -4,6 +4,7 @@
 mod access;
 mod channel;
 mod connector;
+mod duplicate;
 mod node_settings;
 pub mod openssh;
 mod placement;
@@ -15,14 +16,13 @@ mod subject;
 use std::collections::{BTreeMap, BTreeSet};
 
 use ::connector::kind::Table;
-use document::diagnostic::{Code, Diagnostic, Note};
+use document::diagnostic::{Code, Diagnostic};
 use document::value::Value;
 use document::{Block, Document, Label, Span, read};
 use spec::definition::Kind;
 use spec::key;
 use types::name::{Name, Selector};
 
-const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 const RESERVED_NAME: Code = Code::new("config.reserved-name");
 const LONG_NAME: Code = Code::new("config.long-name");
 
@@ -50,6 +50,17 @@ pub enum Definition {
     Spec(spec::definition::Definition),
     /// A channel, with each edge as the name of the channel that it points at.
     Channel(spec::channel::Kind<Name>),
+}
+
+impl Definition {
+    /// The kind of the definition.
+    #[must_use]
+    pub const fn kind(&self) -> Kind {
+        match self {
+            Self::Spec(definition) => definition.kind(),
+            Self::Channel(_) => Kind::Channel,
+        }
+    }
 }
 
 /// A checked definition and the label that names it.
@@ -115,7 +126,7 @@ fn checked<'a>(
         writes: BTreeMap::new(),
     };
     let mut connectors: Vec<_> = names(documents, Kind::Connector).collect();
-    connectors.sort_by_key(|(_, label)| order(label.span));
+    connectors.sort_by_key(|(_, label)| label.span);
     for (name, label) in connectors {
         let lower = name.as_str().to_ascii_lowercase().into();
         found.connectors.entry(lower).or_insert(label);
@@ -146,7 +157,8 @@ fn checked<'a>(
             }
         }
     }
-    found.repeats();
+    let repeats = duplicate::in_labels(&mut found.labels);
+    found.diagnostics.extend(repeats);
     if found.diagnostics.is_empty() {
         Ok(found)
     } else {
@@ -155,15 +167,15 @@ fn checked<'a>(
     }
 }
 
-/// Sorts `diagnostics` by the [`order`] of each span.
-fn sort(diagnostics: &mut [Diagnostic]) {
-    diagnostics.sort_by_key(|diagnostic| order(diagnostic.span));
+/// The label of the definition of `kind` at tree key `key`, or `key` when it has no
+/// label form.
+pub(crate) fn label(kind: Kind, key: &Name) -> Name {
+    kind.label(key).unwrap_or_else(|| key.clone())
 }
 
-/// The key that orders `span` by its [`document::Source`], then in source order. No
-/// span comes first.
-fn order(span: Option<Span>) -> Option<(document::Source, u32)> {
-    span.map(|span| (span.source(), span.start().offset))
+/// Sorts `diagnostics` by span, no span first.
+fn sort(diagnostics: &mut [Diagnostic]) {
+    diagnostics.sort_by_key(|diagnostic| diagnostic.span);
 }
 
 /// The name and the label of each block of `kind` in `documents` whose one label
@@ -184,13 +196,13 @@ fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Lab
 struct Found<'a> {
     entries: BTreeMap<Name, Entry>,
     diagnostics: Vec<Diagnostic>,
-    /// Each label of each tree key so far, with the kind of its block, by the key in
-    /// lowercase, so that keys that differ only in case collide.
-    labels: BTreeMap<Box<str>, Vec<(&'a Label, Kind)>>,
+    /// Each label of each tree key so far.
+    labels: duplicate::Labels<'a>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
-    /// The label of the first connector in [`order`] that a `connector` block in any
-    /// Document defines at each name, by the name in lowercase.
+    /// The label of the first connector in span order, no span first, that a
+    /// `connector` block in any Document defines at each name, by the name in
+    /// lowercase.
     connectors: BTreeMap<Box<str>, &'a Label>,
     /// The kinds that check each `connector` block's config.
     kinds: &'a Table,
@@ -207,7 +219,7 @@ struct Reported;
 
 impl<'a> Found<'a> {
     /// Reads the one label of a block of `kind` as its name, and gives the tree key and
-    /// the label's span. [`Found::repeats`] reports a key that repeats.
+    /// the label's span. [`duplicate::in_labels`] reports a key that repeats.
     fn key(&mut self, block: &'a Block, kind: Kind) -> Option<(Name, Option<Span>)> {
         let keyword = kind.as_str();
         let fix = "Give the block one label, its name, such as \"site_a.budget\"";
@@ -245,43 +257,8 @@ impl<'a> Found<'a> {
                 return None;
             }
         };
-        self.labels
-            .entry(key.as_str().to_ascii_lowercase().into())
-            .or_default()
-            .push((label, kind));
+        duplicate::add(&mut self.labels, &key, label, kind);
         Some((key, label.span))
-    }
-
-    /// Reports each label of a tree key after the first in [`order`].
-    fn repeats(&mut self) {
-        for labels in self.labels.values_mut() {
-            labels.sort_by_key(|(label, _)| order(label.span));
-            let (first, earlier) = labels[0];
-            for &(label, later) in &labels[1..] {
-                let (earlier, keyword) = (earlier.as_str(), later.as_str());
-                let blocks = if earlier == keyword {
-                    format!("`{keyword}`")
-                } else {
-                    format!("`{earlier}` and `{keyword}`")
-                };
-                let mut diagnostic = Diagnostic::new(
-                    DUPLICATE_NAME,
-                    label.span,
-                    format!(
-                        "the name {:?} repeats the earlier `{earlier}` name {:?}",
-                        label.text, first.text
-                    ),
-                    format!(
-                        "Give each {blocks} block a name that differs by more than case"
-                    ),
-                );
-                diagnostic.notes.extend(first.span.map(|span| Note {
-                    span,
-                    text: "the earlier name".into(),
-                }));
-                self.diagnostics.push(diagnostic);
-            }
-        }
     }
 
     /// The value that a reader gives, or `Reported` after it reports the reader's
@@ -368,6 +345,7 @@ fn span(block: &Block, key: &str) -> Option<Span> {
 
 #[cfg(test)]
 mod tests {
+    use document::diagnostic::Note;
     use document::value::Kind;
     use document::{Attribute, Map, Position, Source};
     use proptest::prelude::*;
@@ -516,6 +494,169 @@ mod tests {
 
     fn key(text: &str) -> Name {
         text.parse().unwrap()
+    }
+
+    /// A `keyword` block labeled `label`, from a Document with no spans.
+    fn spanless(keyword: &str, label: &str) -> Document {
+        document(vec![Block {
+            keyword: keyword.into(),
+            keyword_span: None,
+            labels: vec![Label {
+                text: label.into(),
+                span: None,
+            }],
+            body: Document::default(),
+            span: None,
+        }])
+    }
+
+    #[test]
+    fn orders_problems_with_no_span_first_then_at_one_start_by_their_end() {
+        let short = settings(0, 0, "a", &[]);
+        let mut long = settings(0, 0, "b", &[]);
+        let wide = Span::new(Source(0), position(0), position(5));
+        long.keyword_span = wide;
+        let documents = [
+            document(vec![long]),
+            document(vec![short]),
+            spanless("node_settings", "c"),
+        ];
+        let diagnostics = check(&documents).unwrap_err();
+        let spans: Vec<_> = diagnostics.iter().map(|problem| problem.span).collect();
+        assert_eq!(spans, [None, at(0, 0), wide]);
+    }
+
+    #[test]
+    fn gives_the_repeat_at_the_label_with_a_span_after_one_with_none() {
+        let documents = [
+            document(vec![settings(0, 0, "A", &[])]),
+            spanless("node_settings", "a"),
+        ];
+        let diagnostics = check(&documents).unwrap_err();
+        let spans: Vec<_> = diagnostics
+            .iter()
+            .filter(|problem| problem.code.as_str() == "config.duplicate-name")
+            .map(|problem| problem.span)
+            .collect();
+        assert_eq!(spans, [at(0, 1)]);
+    }
+
+    /// `block` with its label at bytes 1 to 3, one byte wider than the label of a
+    /// block at 0.
+    fn wide(mut block: Block) -> (Block, Option<Span>) {
+        let span = Span::new(Source(0), position(1), position(3));
+        block.labels[0].span = span;
+        (block, span)
+    }
+
+    #[test]
+    fn gives_the_repeat_at_the_label_that_ends_later_at_one_start() {
+        let (first, span) = wide(settings(0, 0, "A", &[]));
+        let documents = [
+            document(vec![first]),
+            document(vec![settings(0, 0, "a", &[])]),
+        ];
+        let diagnostics = check(&documents).unwrap_err();
+        let spans: Vec<_> = diagnostics
+            .iter()
+            .filter(|problem| problem.code.as_str() == "config.duplicate-name")
+            .map(|problem| problem.span)
+            .collect();
+        assert_eq!(spans, [span]);
+    }
+
+    #[test]
+    fn notes_the_connector_that_ends_first_at_one_start() {
+        let (first, _) = wide(block(0, 0, "connector", &["PLC"], &[]));
+        let documents = [
+            document(vec![first]),
+            document(vec![
+                block(0, 0, "connector", &["plc"], &[]),
+                block(0, 100, "subject", &["Plc"], &[]),
+            ]),
+        ];
+        let diagnostics = check(&documents).unwrap_err();
+        let notes: Vec<_> = diagnostics
+            .iter()
+            .filter(|problem| problem.code.as_str() == "config.subject-is-connector")
+            .flat_map(|problem| problem.notes.iter().map(|note| Some(note.span)))
+            .collect();
+        assert_eq!(notes, [at(0, 1)]);
+    }
+
+    #[test]
+    fn notes_no_connector_when_the_first_of_a_name_has_no_span() {
+        let spanned = document(vec![
+            block(0, 0, "connector", &["PLC"], &[]),
+            block(0, 100, "subject", &["plc"], &[]),
+        ]);
+        let diagnostics = check(&[spanned, spanless("connector", "plc")]).unwrap_err();
+        let notes: Vec<_> = diagnostics
+            .iter()
+            .filter(|problem| problem.code.as_str() == "config.subject-is-connector")
+            .map(|problem| problem.notes.clone())
+            .collect();
+        assert_eq!(notes, [Vec::new()]);
+    }
+
+    #[test]
+    fn gives_the_kind_of_each_definition() {
+        use definition::{Definition as Stored, Kind as Of};
+        use spec::{compression, connector, placement, region, retention, time};
+
+        let admin =
+            spec::founding::create(types::ed25519::PrivateKey([7; 32]).public());
+        let stored = |at: &str| admin[&key(at)].clone();
+        let select = || selector(&["a.**"]);
+        let nodes = placement::Nodes {
+            home: Some(key("a")),
+            ..placement::Nodes::default()
+        };
+        let config = document::encoding::Checked::new(document::Document::default());
+        let connector = connector::Connector::new(key("k"), key("a"), config.unwrap());
+        let keep = types::time::Span::ZERO;
+        let specs = [
+            (stored("@admin.@access"), Of::Access),
+            (Stored::Connector(connector), Of::Connector),
+            (
+                Stored::Region(region::Delegation::new(1, [key("a")]).unwrap()),
+                Of::Region,
+            ),
+            (
+                Stored::NodeSettings(
+                    Policy::new(select(), Some(gib(1)), None).unwrap(),
+                ),
+                Of::NodeSettings,
+            ),
+            (
+                Stored::Compression(compression::Policy {
+                    select: select(),
+                    mode: compression::Mode::Auto,
+                }),
+                Of::Compression,
+            ),
+            (
+                Stored::Placement(placement::Policy::new(select(), nodes).unwrap()),
+                Of::Placement,
+            ),
+            (
+                Stored::Time(time::Policy::new(select(), time::Peers::Voters)),
+                Of::Time,
+            ),
+            (
+                Stored::Retention(retention::Policy::new(select(), keep).unwrap()),
+                Of::Retention,
+            ),
+            (stored("@admin.@subject"), Of::Subject),
+        ];
+        for (definition, kind) in specs {
+            assert_eq!(Definition::Spec(definition).kind(), kind);
+        }
+        let index = spec::channel::Kind::Index {
+            error: None,
+            control: None,
+        };
+        assert_eq!(Definition::Channel(index).kind(), Of::Channel);
     }
 
     #[test]
@@ -1623,7 +1764,8 @@ mod tests {
                 selector(&["edge.**"]),
                 actions.iter().copied().collect(),
                 Authority(authority),
-            );
+            )
+            .unwrap();
             let entry = Entry {
                 definition: Definition::Spec(definition::Definition::Access(policy)),
                 label_span: at(0, 1),
@@ -1805,15 +1947,38 @@ mod tests {
 
         #[test]
         fn refuses_an_empty_allow() {
-            assert_eq!(
-                check(&access(&attributes(list(vec![]), None))),
-                Err(vec![refused(
-                    "config.empty-allow",
-                    at(0, 15),
-                    "the `allow` list holds no action",
-                    "Add one or more actions, such as \"read\"",
-                )])
-            );
+            for authority in [None, Some(3)] {
+                assert_eq!(
+                    check(&access(&attributes(list(vec![]), authority))),
+                    Err(vec![refused(
+                        "config.empty-allow",
+                        at(0, 15),
+                        "the `allow` list holds no action",
+                        "Add one or more actions, such as \"read\"",
+                    )]),
+                    "{authority:?}"
+                );
+            }
+        }
+
+        #[test]
+        fn refuses_an_empty_allow_only_when_each_other_attribute_reads() {
+            let mut attributes = attributes(list(vec![]), None);
+            attributes[0].1 = Kind::Integer(5);
+            let codes = check(&access(&attributes)).map_err(|found| {
+                found.iter().map(|d| d.code.as_str()).collect::<Vec<_>>()
+            });
+            assert_eq!(codes, Err(vec!["document.bad-selector"]));
+        }
+
+        #[test]
+        fn refuses_an_empty_allow_only_when_each_attribute_is_known() {
+            let mut attributes = attributes(list(vec![]), None);
+            attributes.push(("deny", string("write")));
+            let codes = check(&access(&attributes)).map_err(|found| {
+                found.iter().map(|d| d.code.as_str()).collect::<Vec<_>>()
+            });
+            assert_eq!(codes, Err(vec!["document.unknown-attribute"]));
         }
 
         #[test]
