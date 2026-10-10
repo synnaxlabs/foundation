@@ -44,8 +44,11 @@ Channel unit names live in `spec::unit`, name syntax in `types::name`. Front end
 
 **X22. Where a connector runs: the connector's `node` vs placement.**
 Conflict: C3 and C5 SHAPE give each connector a `node` attribute. BQ10 says a placement
-covers a connector and every index under its name. B7 gives indexes a default home on
-the connector's node. A placement selecting the same connector could name another node.
+covers a connector and every index that it writes to the mesh (`laptop.director`,
+2026-10-08T18:36:00Z,
+https://github.com/synnaxlabs/foundation/pull/1901#issuecomment-6066565970). B7 gives
+indexes a default home on the connector's node. A placement selecting the same connector
+could name another node.
 Resolution: the connector's `node` is its required primary node (it is
 attached to a device, and `discover` writes it). A placement that selects a connector
 may add `standby` and `copies`, and may name only the connector's `node` as `home`;
