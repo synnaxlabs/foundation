@@ -3217,10 +3217,10 @@ mod port {
             proves(&own(), &KEY);
         }
 
-        /// Each input of the fuzz corpus in this form is a key that a node proves and
-        /// keeps, as its old form was.
+        /// Each input of the fuzz corpus that decoded in the form `foundation/key/1`
+        /// is, in the new form, a key that a node proves and keeps.
         #[test]
-        fn a_node_proves_the_key_of_each_input_of_the_corpus() {
+        fn a_node_proves_the_key_of_each_valid_input_of_the_corpus() {
             let valid: &[u8; LEN] =
                 include_bytes!("../../../oracles/fuzz/node_identity/valid-2");
             let body =
