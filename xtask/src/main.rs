@@ -250,7 +250,8 @@ mod tests {
 
     /// The paths of the `models` filter in `jobs`.
     fn models(jobs: &str) -> Vec<&str> {
-        (jobs.split("models:\n").nth(1))
+        // The filter is a key of the `filters` text of the `changes` job.
+        (jobs.split("\n            models:\n").nth(1))
             .expect("ci.yaml has a models filter")
             .lines()
             .map_while(|line| line.trim().strip_prefix("- "))
@@ -258,11 +259,18 @@ mod tests {
     }
 
     #[test]
+    fn models_reads_only_the_filter_named_models() {
+        let jobs = "\n            old_models:\n              - 'crates/types/**'\n            \
+                    models:\n              - 'crates/env/**'\n";
+        assert_eq!(models(jobs), ["'crates/env/**'"]);
+    }
+
+    #[test]
     fn models_filter_names_each_crate_that_a_model_task_selects() {
         let root = fixture().join("../..");
         let ci = ci_jobs(&root);
         let models = models(&ci);
-        let output = (ci.split("      models: >-\n").nth(1))
+        let output = (ci.split("\n      models: >-\n").nth(1))
             .and_then(|rest| rest.lines().next())
             .expect("the changes job has a models output");
         assert_eq!(
