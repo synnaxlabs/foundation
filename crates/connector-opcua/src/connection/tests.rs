@@ -2783,8 +2783,8 @@ unsafe extern "C" fn created(
 /// The close of a channel purges its session that is not activated, and the removal
 /// waits in the loop when the server becomes `STOPPED`.
 #[test]
-fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
-    // On and off the 100 ns grid of the loop.
+fn a_stopped_server_is_deleted_when_no_delayed_callback_waits() {
+    // A close that starts on and off the 100 ns grid of the loop.
     for offset in [0, 50] {
         let mut network = Network::new();
         network
