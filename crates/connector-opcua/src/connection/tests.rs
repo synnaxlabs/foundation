@@ -2634,29 +2634,51 @@ fn drives_of_one_run_hold_no_more_than_the_most_secure_channels() {
 /// holds no waker for it.
 #[test]
 fn a_drive_that_gives_a_value_after_an_accept_wakes_its_task() {
-    assert_eq!(poll_once(3, Poll::Ready(())), (Poll::Ready(()), 1, 2));
+    assert_eq!(
+        poll_once(3, &hel(URL), Poll::Ready(())),
+        (Poll::Ready(()), 1, 2, 1)
+    );
 }
 
 #[test]
 fn a_drive_that_gives_a_value_with_no_accept_does_not_wake_its_task() {
-    assert_eq!(poll_once(0, Poll::Ready(())), (Poll::Ready(()), 0, 0));
+    assert_eq!(
+        poll_once(0, &hel(URL), Poll::Ready(())),
+        (Poll::Ready(()), 0, 0, 1)
+    );
 }
 
-/// One poll of a drive accepts each stream of a burst, one for each run, and needs
-/// no wake to go on.
+/// One poll of a drive accepts and answers each stream of a burst, one for each run,
+/// and needs no wake to go on.
 #[test]
 fn one_poll_of_a_drive_accepts_a_burst_with_no_wake() {
-    assert_eq!(poll_once(150, Poll::Pending), (Poll::Pending, 0, 150));
+    assert_eq!(
+        poll_once(150, &hel(URL), Poll::Pending),
+        (Poll::Pending, 0, 150, 151)
+    );
 }
 
-/// Dials `dials` streams to the minimal server, then polls once a drive whose `run`
-/// runs the loop and gives `give`. Gives the poll, the count of wakes of its task, and
-/// the count of accepted connections in the table.
-fn poll_once(dials: usize, give: Poll<()>) -> (Poll<()>, usize, usize) {
+/// A run that accepts no stream and moves no connection ends the poll.
+#[test]
+fn one_poll_of_a_drive_runs_the_loop_once_for_each_accept() {
+    assert_eq!(poll_once(3, b"", Poll::Pending), (Poll::Pending, 0, 0, 3));
+}
+
+const URL: &str = "opc.tcp://10.0.0.1:4840";
+
+/// Dials `dials` streams that each send `say` to the minimal server, then polls once
+/// a drive whose `run` runs the loop and gives `give`. Gives the poll, the count of
+/// wakes of its task, the count of dials that the poll answered with `ACK`, and the
+/// count of runs.
+fn poll_once(
+    dials: usize,
+    say: &[u8],
+    give: Poll<()>,
+) -> (Poll<()>, usize, usize, usize) {
     let mut network = Network::new();
-    for _ in 0..dials {
-        network.dial(Span::MILLISECOND, b"");
-    }
+    let dials: Vec<_> = (0..dials)
+        .map(|_| network.dial(Span::MILLISECOND, say))
+        .collect();
     network
         .sim
         .run_on(&network.local.clone(), move |node, _| async move {
@@ -2665,16 +2687,21 @@ fn poll_once(dials: usize, give: Poll<()>) -> (Poll<()>, usize, usize) {
             side.clock.sleep(Span::from_nanos(2_000_000)).await;
             let count = Arc::new(Wakes::default());
             let waker = Waker::from(Arc::clone(&count));
+            let mut runs = 0;
             let poll = pin!(side.manager.drive(|_| {
+                runs += 1;
                 side.run();
                 give
             }))
             .poll(&mut Context::from_waker(&waker));
             let woken = count.0.load(Ordering::Relaxed);
-            // Less the listen connection.
-            let connections = side.connections() - 1;
+            side.clock.sleep(Span::from_nanos(10_000_000)).await;
+            let acks = dials
+                .iter()
+                .filter(|r| r.lock().expect("no panic").bytes().starts_with(b"ACKF"))
+                .count();
             side.stop(server).await;
-            (poll, woken, connections)
+            (poll, woken, acks, runs)
         })
         .expect("the run ends")
 }
