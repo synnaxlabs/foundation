@@ -365,18 +365,25 @@ impl Writer {
     /// when its call drops it.
     async fn flush(&self) -> Infallible {
         let values = &self.values;
-        while !self.session.borrow().closed {
-            poll_fn(|cx| {
+        loop {
+            // A close can come in the poll that took the waker, so no waker is kept
+            // after it.
+            let closed = poll_fn(|cx| {
+                if self.session.borrow().closed {
+                    return Poll::Ready(true);
+                }
                 if values.staged.get() {
-                    return Poll::Ready(());
+                    return Poll::Ready(false);
                 }
                 values.waker.set(Some(cx.waker().clone()));
                 Poll::Pending
             })
             .await;
+            if closed {
+                return pending().await;
+            }
             self.write_staged().await;
         }
-        pending().await
     }
 
     /// Waits until [`PERIOD`] after the last write, or the session closed, then writes

@@ -905,6 +905,39 @@ mod tests {
     }
 
     #[test]
+    fn wakes_nothing_after_a_close_in_the_poll_that_staged_a_count() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (counted, started) = (Arc::clone(&polls), Arc::clone(&runs));
+        let run = move |ctx: Context<()>| {
+            let polls = Arc::clone(&counted);
+            let first = started.fetch_add(1, Ordering::Relaxed) == 0;
+            async move {
+                if first {
+                    ctx.clock().sleep(ms(900)).await;
+                    ctx.count("samples").set(1);
+                    return Err(Error::Retry("busy".into()));
+                }
+                ctx.count("samples").set(2);
+                let mut sleep = pin!(ctx.clock().sleep(ms(3_000)));
+                poll_fn(|cx| {
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    sleep.as_mut().poll(cx)
+                })
+                .await;
+                Ok(())
+            }
+        };
+        timed(run, |scene| async move {
+            scene.node.clock().sleep(ms(500)).await;
+            scene.remove("samples");
+        });
+        assert_eq!(runs.load(Ordering::Relaxed), 2, "one restart");
+        let polls = polls.load(Ordering::Relaxed);
+        assert_eq!(polls, 2, "a poll to start the sleep, and one at its end");
+    }
+
+    #[test]
     fn returns_at_once_when_the_pool_fills_after_a_removed_status_channel() {
         let run = |ctx: Context<()>| async move {
             ctx.count("samples").set(1);
