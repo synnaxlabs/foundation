@@ -962,8 +962,9 @@ impl Future for End {
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         self.waiter.poll(cx, |state| {
-            let ended = state.failed.clone().map_or(Ok(()), Err);
-            state.ended.then_some(ended)
+            state
+                .ended
+                .then(|| state.failed.clone().map_or(Ok(()), Err))
         })
     }
 }
@@ -987,7 +988,6 @@ impl Event {
 
 /// The part of a [`Commit`] or an [`End`] that keeps its waker in the set of its
 /// event. Its drop takes the waker out.
-#[derive(Debug)]
 struct Waiter {
     shared: Rc<Shared>,
     event: Event,
@@ -1018,6 +1018,16 @@ impl Waiter {
         drop(state);
         drop(replaced);
         Poll::Pending
+    }
+}
+
+/// Leaves out the shared state, which holds the wakers of other waiters.
+impl fmt::Debug for Waiter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Waiter")
+            .field("event", &self.event)
+            .field("key", &self.key)
+            .finish_non_exhaustive()
     }
 }
 

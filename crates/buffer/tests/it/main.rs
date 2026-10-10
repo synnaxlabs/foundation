@@ -3670,7 +3670,7 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
 }
 
 /// The `Debug` of a `Commit` and an `End` names what each waits for, and prints no
-/// pointer.
+/// waker of another waiter.
 #[test]
 fn the_debug_of_a_commit_and_an_end_names_its_event() {
     let (mut sim, node) = create_node(142);
@@ -3679,14 +3679,18 @@ fn the_debug_of_a_commit_and_an_end_names_its_event() {
         let buffer = Buffer::open(config, &mut Slots::new())
             .await
             .expect("opens");
+        let mut polled = pin!(buffer.ended());
+        let polled = polled
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        assert_eq!(polled, Poll::Pending);
         let commit = format!("{:?}", buffer.committed());
         let end = format!("{:?}", buffer.ended());
-        assert!(commit.contains("event: Commit"), "{commit}");
-        assert!(end.contains("event: End"), "{end}");
-        assert!(
-            !commit.contains("0x") && !end.contains("0x"),
-            "{commit}\n{end}"
+        assert_eq!(
+            commit,
+            "Commit { waiter: Waiter { event: Commit, key: 1, .. }, until: 0 }"
         );
+        assert_eq!(end, "End { waiter: Waiter { event: End, key: 2, .. } }");
     })
     .expect("the buffer ends");
 }
