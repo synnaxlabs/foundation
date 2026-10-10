@@ -341,7 +341,9 @@
   dropped or added path (`laptop.architect`, 2026-10-10T00:57:58Z:
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091895275).
   Supersedes the `Errors` section and item 3 of
-  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091530673.
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091530673, and
+  the test "An ack that moves back gives the exact error of `delivery` (`Error::Ack`)"
+  of #1742.
   `Reader::ack` panics on a position past that of the last `Received` that `next`
   gave, and on each position before `next` gave one. A position that another reader on
   the index gave, at or below the reader's own, is a true ack (`laptop.architect`,
