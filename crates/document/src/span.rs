@@ -3,8 +3,9 @@
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Source(pub u32);
 
-/// A place in a file. Lines and columns count from 0.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// A place in a file. Lines and columns count from 0. Positions order by offset, then
+/// by line, then by column.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Position {
     /// Bytes from the start of the file.
     pub offset: u32,
@@ -14,8 +15,9 @@ pub struct Position {
     pub column: u32,
 }
 
-/// The part of a file that holds an item, from `start` up to `end`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// The part of a file that holds an item, from `start` up to `end`. Spans order by
+/// source, then by start, then by end: in file order within one source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Span {
     source: Source,
     start: Position,
@@ -53,6 +55,8 @@ impl Span {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn at(offset: u32) -> Position {
@@ -97,6 +101,47 @@ mod tests {
                 column: 0,
             };
             assert_eq!(Span::new(Source(0), start, end), None);
+        }
+    }
+
+    mod order {
+        use super::*;
+
+        fn position() -> impl Strategy<Value = Position> {
+            (0..4u32, 0..4u32, 0..4u32).prop_map(|(offset, line, column)| Position {
+                offset,
+                line,
+                column,
+            })
+        }
+
+        fn span() -> impl Strategy<Value = Span> {
+            (0..3u32, position(), position()).prop_map(|(source, start, end)| Span {
+                source: Source(source),
+                start,
+                end,
+            })
+        }
+
+        fn key(span: Span) -> (u32, [u32; 6]) {
+            let (s, e) = (span.start, span.end);
+            let fields = [s.offset, s.line, s.column, e.offset, e.line, e.column];
+            (span.source.0, fields)
+        }
+
+        proptest! {
+            #[test]
+            fn orders_by_source_then_start_then_end(x in span(), y in span()) {
+                prop_assert_eq!(x.cmp(&y), key(x).cmp(&key(y)));
+                prop_assert_eq!(x.cmp(&y).is_eq(), x == y);
+            }
+        }
+
+        #[test]
+        fn orders_a_later_source_after_an_earlier_offset() {
+            let first = Span::new(Source(0), at(9), at(9)).unwrap();
+            let second = Span::new(Source(1), at(0), at(0)).unwrap();
+            assert!(first < second);
         }
     }
 }
