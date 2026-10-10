@@ -15,8 +15,10 @@
   (`docs/claude/testing.md`, "Oracles":
   https://github.com/synnaxlabs/foundation/issues/1582#issuecomment-6045551500).
   Trigger: the PR of #1744 that adds `admin.key` adds its form to the target, by its
-  length, with its inputs. Lost: property
-  tests only, with a sentence in `docs/security.md` that the decode needs no target.
+  length, with its inputs (moved from PR 1b-1 by `laptop.architect`, 2026-10-10 04:15
+  UTC: https://github.com/synnaxlabs/foundation/pull/2229#issuecomment-6093666647).
+  Lost: property tests only, with a sentence in `docs/security.md` that the decode
+  needs no target.
   It breaks T1. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1994#issuecomment-6071757310,
   2026-10-09 00:28 UTC); the surface, in
