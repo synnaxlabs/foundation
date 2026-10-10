@@ -137,8 +137,9 @@ impl Manager {
     ///
     /// # Panics
     ///
-    /// If `idle` is 100 or more, as the server takes 100 sessions, if open62541 refuses
-    /// the server, a client, or a step of the close, or if the port is taken.
+    /// If `idle` is 100 or more, as the server takes 100 sessions, if a connect fails,
+    /// if open62541 refuses the server, a client, or a step of the close, or if the
+    /// port is taken.
     pub async fn scope<T>(
         clock: Clock,
         net: Net,
@@ -283,18 +284,24 @@ impl Manager {
     }
 
     /// Gives the count of clients with an activated session.
+    ///
+    /// # Panics
+    ///
+    /// If the connect of a client failed, as a client does not try it again.
     fn activated(&self) -> usize {
         let activated = |client: &&NonNull<ffi::Client>| {
             let mut session = Session(0);
+            let mut status = Status::GOOD;
             // SAFETY: the client lives.
             unsafe {
                 ffi::test::UA_Client_getState(
                     client.as_ptr(),
                     ptr::null_mut(),
                     &raw mut session,
-                    ptr::null_mut(),
+                    &raw mut status.0,
                 );
             }
+            assert!(status == Status::GOOD, "a connect failed: {status:?}");
             session == Session::ACTIVATED
         };
         self.clients.iter().filter(activated).count()
@@ -426,6 +433,27 @@ mod tests {
     #[should_panic(expected = "the server takes 100 sessions")]
     fn a_scope_with_more_clients_than_sessions_panics() {
         check(100, async |_, _| ());
+    }
+
+    /// A client tries a connect once, so its timeout must end the scope.
+    #[test]
+    #[should_panic(expected = "a connect failed: BadTimeout")]
+    fn a_scope_whose_connect_times_out_panics_with_its_status() {
+        let link = sim::link::Config {
+            delay: Span::from_nanos(3_000_000_000),
+            ..sim::link::Config::default()
+        };
+        let mut sim = Sim::new(sim::Config {
+            link,
+            ..sim::Config::default()
+        });
+        let node = sim.node(node::Config::default());
+        sim.run_on(&node, move |node, _| async move {
+            let address = node.addresses()[0];
+            let body = async |_: &Manager| ();
+            Manager::scope(node.clock(), node.net(), address, 0, body).await;
+        })
+        .expect("the run ends");
     }
 
     #[test]
