@@ -8,7 +8,7 @@ use std::rc::{Rc, Weak};
 use std::task::Poll;
 
 use block::Pool;
-use env::tasks::{self, Driver};
+use env::tasks;
 use transport::stream::Sender;
 use transport::{Class, Session, Transport};
 use types::node;
@@ -67,7 +67,7 @@ impl Senders {
             });
             let Some(fresh) = fresh.await else { return };
             for to in fresh {
-                self.tasks.spawn(Box::pin(self.clone().send(to)));
+                self.tasks.tasks().spawn(self.clone().send(to));
             }
         }
     }

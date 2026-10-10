@@ -90,7 +90,7 @@ impl Supervisor {
                 name.clone(),
                 (),
                 token.0.clone(),
-                Tasks::new(group.clone()),
+                group.tasks().clone(),
                 Rc::clone(&self.0),
             );
             let start = clock.now();

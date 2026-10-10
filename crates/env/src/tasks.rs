@@ -85,15 +85,15 @@ pub trait Driver {
 }
 
 /// Counts each task spawned through it until the task's future has dropped. Clones
-/// share the count, and spawn on the shard of the [`Tasks`] that made it. Wrap a
-/// clone with [`Tasks::new`] to spawn through it.
+/// share the count, and spawn on the shard of the [`Tasks`] that made it. Spawn
+/// through [`Group::tasks`].
 ///
 /// ```
 /// use env::tasks::{Group, Tasks};
 ///
 /// async fn run(tasks: Tasks) {
 ///     let group = Group::new(tasks);
-///     Tasks::new(group.clone()).spawn(async {});
+///     group.tasks().spawn(async {});
 ///     group.ended().await;
 /// }
 /// ```
@@ -107,10 +107,22 @@ impl Group {
     /// A group with no task, which spawns on `tasks`.
     #[must_use]
     pub fn new(tasks: Tasks) -> Self {
+        let count = Rc::<Count>::default();
         Self {
-            tasks,
-            count: Rc::default(),
+            tasks: Tasks::new(Counting {
+                tasks,
+                count: Rc::clone(&count),
+            }),
+            count,
         }
+    }
+
+    /// The handle that spawns each task through the group, on the shard of the
+    /// [`Tasks`] that made the group, so that the group counts the task. Clone it to
+    /// give a callee.
+    #[must_use]
+    pub fn tasks(&self) -> &Tasks {
+        &self.tasks
     }
 
     /// A future that is ready when it is polled while the group has no task: each
@@ -134,7 +146,13 @@ impl fmt::Debug for Group {
     }
 }
 
-impl Driver for Group {
+// Spawns each task on the shard's `Tasks` with the group's count.
+struct Counting {
+    tasks: Tasks,
+    count: Rc<Count>,
+}
+
+impl Driver for Counting {
     fn spawn(&self, task: Task) {
         self.count.live.set(self.count.live.get().strict_add(1));
         self.tasks.spawn(Counted {
@@ -309,7 +327,7 @@ mod tests {
         let (kept, group) = group();
         let ran = Rc::new(Cell::new(false));
         let mark = Rc::clone(&ran);
-        Tasks::new(group).spawn(async move { mark.set(true) });
+        group.tasks().spawn(async move { mark.set(true) });
         kept.poll(0);
         assert!(ran.get());
     }
@@ -335,7 +353,7 @@ mod tests {
         let done = Rc::clone(done);
         // A `poll_fn` keeps the probe until the future drops, not only until it
         // completes.
-        Tasks::new(group.clone()).spawn(std::future::poll_fn(move |_| {
+        group.tasks().spawn(std::future::poll_fn(move |_| {
             let _ = &probe;
             if done.get() {
                 Poll::Ready(())
@@ -375,7 +393,7 @@ mod tests {
     fn each_waiting_ended_is_woken() {
         let (kept, group) = group();
         let done = Rc::new(Cell::new(false));
-        Tasks::new(group.clone()).spawn(until(&done));
+        group.tasks().spawn(until(&done));
         let flags = [Arc::new(Flag::default()), Arc::new(Flag::default())];
         let mut waits = [group.ended(), group.ended()];
         for (ended, flag) in waits.iter_mut().zip(&flags) {
@@ -392,7 +410,7 @@ mod tests {
     #[test]
     fn a_dropped_ended_holds_no_waker() {
         let (_kept, group) = group();
-        Tasks::new(group.clone()).spawn(std::future::pending());
+        group.tasks().spawn(std::future::pending());
         let flag = Arc::new(Flag::default());
         let mut ended = group.ended();
         assert_eq!(
@@ -406,7 +424,7 @@ mod tests {
     #[test]
     fn an_ended_polled_twice_holds_one_waker() {
         let (_kept, group) = group();
-        Tasks::new(group.clone()).spawn(std::future::pending());
+        group.tasks().spawn(std::future::pending());
         let flag = Arc::new(Flag::default());
         let waker = Waker::from(Arc::clone(&flag));
         let mut ended = group.ended();
@@ -462,7 +480,7 @@ mod tests {
                 match step {
                     Step::Spawn => {
                         let done = Rc::new(Cell::new(false));
-                        Tasks::new(group.clone()).spawn(until(&done));
+                        group.tasks().spawn(until(&done));
                         live.push((kept.0.borrow().len() - 1, done));
                     }
                     Step::Complete(i) if !live.is_empty() => {
@@ -499,12 +517,12 @@ mod tests {
         struct Spawns(Group);
         impl Drop for Spawns {
             fn drop(&mut self) {
-                Tasks::new(self.0.clone()).spawn(std::future::pending());
+                self.0.tasks().spawn(std::future::pending());
             }
         }
         let (kept, group) = group();
         let spawns = Spawns(group.clone());
-        Tasks::new(group.clone()).spawn(async move {
+        group.tasks().spawn(async move {
             let _spawns = spawns;
             std::future::pending::<()>().await;
         });

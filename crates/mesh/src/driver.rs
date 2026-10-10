@@ -14,7 +14,7 @@ use block::{Block, Pool};
 use env::clock::{Clock, Sleep};
 use env::entropy::Entropy;
 use env::files::Files;
-use env::tasks::{self, Driver, Tasks};
+use env::tasks::{self, Tasks};
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use spec::Pointer;
 use spec::tree::Chunks;
@@ -183,7 +183,7 @@ impl Mesh {
             pool: Rc::clone(&mesh.pool),
             tasks: mesh.tasks.clone(),
         };
-        mesh.tasks.spawn(Box::pin(senders.run()));
+        mesh.tasks.tasks().spawn(senders.run());
         Ok(mesh)
     }
 
@@ -223,20 +223,20 @@ impl Mesh {
         let group = Rc::new(RefCell::new(group));
         let weak = Rc::downgrade(&group);
         let tasks = tasks::Group::new(config.tasks);
-        tasks.spawn(Box::pin(used::keep(
+        tasks.tasks().spawn(used::keep(
             Weak::clone(&weak),
             Rc::clone(&config.store),
             files,
             config.dir,
             config.clock.clone(),
-        )));
-        tasks.spawn(Box::pin(run(
+        ));
+        tasks.tasks().spawn(run(
             weak,
             log,
             signer,
             config.clock.clone(),
             config.entropy.clone(),
-        )));
+        ));
         Ok(Self {
             group,
             tasks,
