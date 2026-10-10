@@ -264,8 +264,8 @@ state on `main`.
   `document_encoding`. Fixed: #446 (`update` put a new block after a kept block
   it must come before); the `block_before_kept` inputs hold it. `config::check`
   reads the documents into definitions, and the influx kind reads the config of each
-  `connector` block of kind `influx`. Fuzzed: `config_check`, which only the input
-  `influx_connector` takes to the influx kind (#1817).
+  `connector` block of kind `influx`. Fuzzed: `config_check`, which only the inputs
+  `influx_*` take to the influx kind (#1817).
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
