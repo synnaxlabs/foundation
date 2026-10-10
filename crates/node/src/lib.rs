@@ -379,13 +379,13 @@ impl Node {
     /// shard that could not start or pin, or [`Error::Memory`] for a shard with no
     /// memory, else [`Error::Shards`] or [`Error::Directory`] for a data directory that
     /// shard 0 could not claim, else [`Error::Buffer`] for the first shard by core
-    /// whose buffer did not open, [`Error::Budget`] or [`Error::Directory`] for a file
-    /// `budget` that shard 0 could not read or write, [`Error::Key`] or
-    /// [`Error::Directory`] for a key file that shard 0 could not read or write,
-    /// [`Error::Blob`] for a chunk store or [`Error::Mesh`] for a mesh that did not
-    /// open, or [`Error::Transport`] or [`Error::Group`], whichever the node sees stop
-    /// first, else [`Error::Panicked`] for the first shard by core that panicked. Any
-    /// failed shard stops the node.
+    /// whose buffer, or the home over it, did not open, [`Error::Budget`] or
+    /// [`Error::Directory`] for a file `budget` that shard 0 could not read or write,
+    /// [`Error::Key`] or [`Error::Directory`] for a key file that shard 0 could not
+    /// read or write, [`Error::Blob`] for a chunk store or [`Error::Mesh`] for a mesh
+    /// that did not open, or [`Error::Transport`] or [`Error::Group`], whichever the
+    /// node sees stop first, else [`Error::Panicked`] for the first shard by core that
+    /// panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
             // The shard sets `failed` on its own thread, so read it after the join.
@@ -1007,7 +1007,7 @@ pub enum Error {
         /// Why the OS gave none.
         error: os::memory::Error,
     },
-    /// The buffer of the shard on `core` did not open.
+    /// The buffer of the shard on `core`, or the home over it, did not open.
     Buffer {
         /// The core of the shard.
         core: usize,
