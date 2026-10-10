@@ -6,6 +6,7 @@
 #[doc(hidden)]
 pub mod bench;
 mod budget;
+mod connectors;
 mod directory;
 #[cfg(feature = "sim")]
 #[doc(hidden)]
@@ -219,6 +220,7 @@ impl Node {
             region: config.region.clone(),
             clock: config.clock.clone(),
             entropy: config.entropy.clone(),
+            net: config.net.clone(),
         };
         Self::launch(config, endpoint, parts.into_iter().zip(0..count))
     }
@@ -731,6 +733,8 @@ struct Endpoint {
     region: Option<mesh::region::Founding>,
     clock: env::clock::Clock,
     entropy: env::entropy::Entropy,
+    /// The network, which the node's connectors reach their devices and stores on.
+    net: env::net::Net,
 }
 
 impl Endpoint {
@@ -793,12 +797,13 @@ impl Serve {
     /// Keeps the budgets ([`budget::keep`]), loads the node's identity
     /// ([`identity::load`]), and opens the endpoint, then runs each task given with a
     /// hub over `home` that knows each channel of the spec that the mesh uses, and of
-    /// each spec that takes effect later, and serves the node's port, until `guard`
-    /// completes, the transport stops, or the mesh's group stops, by the rank of
-    /// [`end`]. A transport or a group that ends it goes into `failed` before it drops
-    /// the tasks given that still run. Before it returns, it drops the tasks, the hub,
-    /// `home`, `guard`, each session and stream future, the operations on the mesh,
-    /// the mesh, and the transport, and waits for each task of the mesh to end, with a
+    /// each spec that takes effect later, runs each connector that the spec in use
+    /// places on this node ([`connectors::Runs`]), and serves the node's port, until
+    /// `guard` completes, the transport stops, or the mesh's group stops, by the rank
+    /// of [`end`]. A transport or a group that ends it goes into `failed` before it
+    /// drops the tasks given that still run. Before it returns, it drops the tasks, the
+    /// hub, `home`, `guard`, the runs of the connectors, each session and stream
+    /// future, the operations on the mesh, the mesh, and the transport, and waits for each task of the mesh to end, with a
     /// mesh, and for the transport to free the port. Unless the socket broke, the port
     /// is freed only after each task of a remote reader of the hub has ended. Runs no
     /// task and takes no session when a shard did not open, or when the budgets were
@@ -832,7 +837,7 @@ impl Serve {
             Err(error) => return fail(error),
         };
         let (key, entropy) = (identity.key, self.endpoint.entropy.clone());
-        let clock = self.endpoint.clock.clone();
+        let (clock, net) = (self.endpoint.clock.clone(), self.endpoint.net.clone());
         let opened = self.endpoint.open(identity, files, pool, tasks.clone());
         let (transport, mesh) = opened.await;
         let freed = transport.ended();
@@ -841,32 +846,38 @@ impl Serve {
         // ends, on each path, or is a hub task of a remote reader, which ends at its
         // next poll after its reader drops. So the port is freed before `lock` drops.
         let served = async move {
-            let mesh = match mesh {
-                Ok(mesh) => mesh,
-                Err(error) => {
-                    fail(error);
-                    return None;
-                }
+            let Ok(mesh) = mesh.map_err(&fail) else {
+                return None;
             };
             let region = mesh.clone().map(|mesh| hub::Region {
                 mesh,
                 transport: Rc::clone(&transport),
             });
-            let ops = mesh.as_ref().map(|mesh| {
-                let (time, entropy) = (time.clone(), entropy.clone());
-                Rc::new(operations(mesh.clone(), time, entropy))
-            });
+            let kinds = mesh.as_ref().map(|_| Arc::new(kinds()));
+            let ops = mesh.as_ref().zip(kinds.clone());
+            let ops = ops.map(|(mesh, kinds)| operations(mesh, &time, &entropy, kinds));
             let hub = hub::Hub::new(hub::Config {
                 home,
                 interner,
                 tasks: tasks.clone(),
                 node: key,
                 time,
-                entropy,
+                entropy: entropy.clone(),
                 region,
             });
+            let runs = kinds.map(|kinds| {
+                let config = connector::supervisor::Config {
+                    kinds,
+                    clock: clock.clone(),
+                    entropy,
+                    net,
+                    tasks: tasks.clone(),
+                    hub: hub.clone(),
+                };
+                connectors::Runs::new(config)
+            });
             let ended = mesh.as_ref().map(mesh::Mesh::ended);
-            let group = follow(mesh.as_ref(), hub.clone()).await;
+            let group = follow(mesh.as_ref().zip(runs), hub.clone(), key).await;
             let port =
                 route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
             let stop = until(guard, port, group, fail);
@@ -901,16 +912,18 @@ fn channel_key(
     types::channel::Key::v7(at, u128::from_le_bytes(random))
 }
 
-/// The operations on `mesh` with the connector kinds of [`kinds`], whose keys
+/// The operations on `mesh` with the connector kinds `kinds`, whose keys
 /// [`channel_key`] makes.
 fn operations(
-    mesh: mesh::Mesh,
-    time: clock::Reader,
-    entropy: env::entropy::Entropy,
-) -> ops::Node {
+    mesh: &mesh::Mesh,
+    time: &clock::Reader,
+    entropy: &env::entropy::Entropy,
+    kinds: Arc<connector::kind::Table>,
+) -> Rc<ops::Node> {
+    let (time, entropy) = (time.clone(), entropy.clone());
     let key = move || channel_key(&time, &entropy);
     let front_ends = ops::FrontEnds::new("hcl", ops::FrontEnd { read: hcl });
-    ops::Node::new(mesh, key, front_ends, Arc::new(kinds()))
+    Rc::new(ops::Node::new(mesh.clone(), key, front_ends, kinds))
 }
 
 /// The connector kinds of this binary.
@@ -924,28 +937,42 @@ fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
         .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
-/// Gives `hub` what the spec that `mesh` uses defines, then returns a future that gives
-/// it that of each later spec in use and resolves with the stop of the group, or never
-/// resolves when the node has no mesh.
+/// Gives `hub` what the spec that `mesh` uses defines and makes `runs` match it for
+/// the node `key`, then returns a future that does so for each later spec in use and
+/// resolves with the stop of the group, or never resolves when the node has no mesh.
+/// The hub knows each spec before the runs do, so a run finds its status channels.
+/// The future holds the runs.
 async fn follow(
-    mesh: Option<&mesh::Mesh>,
+    mesh: Option<(&mesh::Mesh, connectors::Runs)>,
     hub: hub::Hub,
+    key: types::node::Key,
 ) -> impl Future<Output = mesh::Stopped> + use<> {
-    let define = move |spec: mesh::used::Spec| hub.set_definitions(&*spec.definitions);
-    let mut watch = mesh.map(mesh::Mesh::watch_spec);
-    let first = match &mut watch {
-        Some(watch) => watch.next().await.map(&define),
+    let define = move |spec: mesh::used::Spec,
+                       mesh: &mesh::Mesh,
+                       runs: &mut connectors::Runs| {
+        hub.set_definitions(&*spec.definitions);
+        let node = mesh
+            .member(key)
+            .map(|member| member.card.card().name.clone());
+        runs.apply(node.as_ref(), &spec.definitions);
+    };
+    let mut followed = mesh.map(|(mesh, runs)| (mesh.watch_spec(), mesh.clone(), runs));
+    let first = match &mut followed {
+        Some((watch, mesh, runs)) => {
+            watch.next().await.map(|spec| define(spec, mesh, runs))
+        }
         None => Ok(()),
     };
     async move {
-        let Some(mut watch) = watch else {
+        let Some((mut watch, mesh, mut runs)) = followed else {
             return std::future::pending().await;
         };
         if let Err(stopped) = first {
             return stopped;
         }
         loop {
-            if let Err(stopped) = watch.next().await.map(&define) {
+            let next = watch.next().await;
+            if let Err(stopped) = next.map(|spec| define(spec, &mesh, &mut runs)) {
                 return stopped;
             }
         }

@@ -2087,6 +2087,23 @@ mod hub {
         chunks.iter().map(|c| i64::from_le_bytes(*c)).collect()
     }
 
+    /// Each sample of the `u8` series of `key` in `received`.
+    pub(super) fn bytes(received: &Received<'_>, key: u128) -> Vec<u8> {
+        let entry = entry(received.set, key);
+        let entries = received.set.entries();
+        let range = received.view.range(entries[entry].group).expect("a range");
+        let count = usize::try_from(range.count).expect("a count");
+        let (_, bytes) = received
+            .view
+            .iter()
+            .find(|&(present, _)| present == entry)
+            .expect("the view holds the series");
+        let mut out = vec![0; count];
+        codec::decode(entries[entry].data_type, count, bytes, &mut out)
+            .expect("decodes");
+        out
+    }
+
     /// A node of `cores` shards on a new host, with the host.
     fn node(sim: &mut sim::Sim, cores: usize) -> (sim::node::Node, Node) {
         let host = host(sim, cores);
@@ -3925,6 +3942,7 @@ mod port {
                     region: Some(region(&members)),
                     clock: own.clock(),
                     entropy: own.entropy(),
+                    net: own.net(),
                 };
                 let pool = super::pool();
                 let stop = crate::stop::Stop::default();
@@ -5081,6 +5099,7 @@ mod port {
                     region: Some(founding),
                     clock: own.clock(),
                     entropy: own.entropy(),
+                    net: own.net(),
                 };
                 let pool = super::pool();
                 let stop = crate::stop::Stop::default();
@@ -5752,6 +5771,68 @@ mod port {
                 r#""notes":[],"place":{"column":10,"file":"plant.hcl","line":2}}]}"#,
             );
             assert_eq!(*planned.lock().unwrap(), [Ok(()), Err(unknown.to_owned())]);
+        }
+
+        /// The node runs a connector that an apply places on it, and its status gives
+        /// how the run ended: `influx` ends with a config error, and does not restart.
+        #[test]
+        fn a_node_runs_a_connector_that_an_apply_places_on_it() {
+            use super::super::hub::bytes;
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let founding = region(&[member(OWN, &KEY, &host)]);
+            let (node, definitions) = applied(&mut sim, &host, founding, status());
+            let [state, class] = ["state", "class"]
+                .map(|name| key_of(&definitions, &format!("influx.status.{name}")));
+            let read = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&read);
+            node.spawn(move |hub| async move {
+                let select = ["plant.influx.status.state", "plant.influx.status.class"];
+                let config = ::hub::reader::Config {
+                    select: types::name::Selector::new(select).expect("a selector"),
+                    ..unnamed(
+                        "plant.influx.status.state",
+                        ::hub::reader::Mode::Complete,
+                    )
+                };
+                let mut reader = hub.reader(config).await.expect("the reader opens");
+                while let Ok(received) = reader.next().await {
+                    let [state, class] =
+                        [state, class].map(|key| bytes(&received, key.as_u128()));
+                    out.lock().unwrap().extend(state.into_iter().zip(class));
+                }
+            });
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            node.operate(|ops| async move {
+                apply(&ops, format!("{}{}", status(), connector("influx"))).await;
+            });
+            assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            // `state` running, ending, then stopped; `class` none, then config.
+            assert_eq!(*read.lock().unwrap(), [(0, 0), (3, 1), (2, 1)]);
+        }
+
+        /// The text of a spec with the status channels of `plant.influx`, homed on
+        /// [`OWN`].
+        fn status() -> String {
+            use std::fmt::Write as _;
+            let index = "plant.influx.status.time";
+            let mut text = format!(
+                "channel \"{index}\" {{ kind = \"index\" }}\n\
+                 placement \"plant\" {{\n  select = \"plant.**\"\n  home = \"plant.node{OWN}\"\n}}\n"
+            );
+            for (name, data_type) in
+                [("state", "u8"), ("class", "u8"), ("restarts", "u64")]
+            {
+                writeln!(
+                    text,
+                    "channel \"plant.influx.status.{name}\" {{\n  data_type = \"{data_type}\"\n  index = \"{index}\"\n}}"
+                )
+                .unwrap();
+            }
+            text
         }
 
         /// The text of a spec with the connector `plant.influx` of `kind` on [`OWN`].
