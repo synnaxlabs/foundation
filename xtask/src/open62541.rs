@@ -90,25 +90,60 @@ const LEFT_OUT: [&str; 4] = [
     "-fno-fat-lto-objects",
 ];
 
-/// The system headers that a file of the copy may include: the C standard library and
-/// the POSIX headers of the plugins. A header that one of them includes is not checked.
-const SYSTEM_HEADERS: [&str; 16] = [
-    "ctype.h",
-    "errno.h",
-    "float.h",
-    "inttypes.h",
-    "limits.h",
-    "signal.h",
-    "stdarg.h",
-    "stdbool.h",
-    "stddef.h",
-    "stdint.h",
-    "stdio.h",
-    "stdlib.h",
-    "string.h",
-    "sys/socket.h",
-    "syslog.h",
-    "unistd.h",
+/// The symbols outside the copy that any file of it may reference. Each reads no
+/// clock, file, network, randomness, or process state. The functions of [`CLOCKS`]
+/// pass too: [`CLOCK_CALLS`] checks each call of one.
+const SYMBOLS: [&str; 20] = [
+    // The allocator of libc, since the check builds without `alloc.h`.
+    "calloc",
+    "free",
+    "malloc",
+    "realloc",
+    "memcmp",
+    "memcpy",
+    "memmove",
+    "memset",
+    "strcmp",
+    "strlen",
+    "strncmp",
+    // The `errno` of the thread.
+    "__errno_location",
+    // The stack protector, which GCC adds by default on some systems.
+    "__stack_chk_fail",
+    "__stack_chk_guard",
+    // The table of the linker, which position-independent code reads.
+    "_GLOBAL_OFFSET_TABLE_",
+    // `shim.c` defines each to print its name and abort.
+    "UA_ConnectionManager_new_POSIX_Ethernet",
+    "UA_ConnectionManager_new_POSIX_TCP",
+    "UA_ConnectionManager_new_POSIX_UDP",
+    "UA_EventLoop_new_POSIX",
+    "UA_InterruptManager_new_POSIX",
+];
+
+/// The only (file, symbol) pairs that may reference a symbol outside the copy that
+/// [`SYMBOLS`] does not list.
+const FILE_SYMBOLS: [(&str, &str); 12] = [
+    // `isdigit` and `isxdigit` read the locale, which stays C: nothing calls
+    // `setlocale`.
+    ("deps/musl_inet_pton.c", "__ctype_b_loc"),
+    // `strtod` reads the decimal point of the locale, which stays C.
+    ("deps/parse_num.c", "strtod"),
+    // The stdout logger, which we replace with our own.
+    ("plugins/ua_log_stdout.c", "fflush"),
+    ("plugins/ua_log_stdout.c", "printf"),
+    ("plugins/ua_log_stdout.c", "puts"),
+    ("plugins/ua_log_stdout.c", "stdout"),
+    // The syslog logger, which we never set.
+    ("plugins/ua_log_syslog.c", "syslog"),
+    // `UA_fileExists`, for the semaphore file of a discovery server, which no node
+    // runs.
+    ("src/server/ua_discovery.c", "access"),
+    ("src/server/ua_services_discovery.c", "access"),
+    // Our change: a draw on a thread with no start value prints its name and aborts.
+    ("src/util/ua_util.c", "abort"),
+    ("src/util/ua_util.c", "fprintf"),
+    ("src/util/ua_util.c", "stderr"),
 ];
 
 /// Clones `tag` of `url` into `target/open62541/`, builds it with [`OPTIONS`], and
@@ -117,7 +152,7 @@ const SYSTEM_HEADERS: [&str; 16] = [
 /// file), `flags.txt` (the `-D`, `-I`, and `-std` flags and the [`CODE_FLAGS`] of each
 /// compile), and `VERSION` (tag and commit).
 /// Then it gives what [`check`] gives for the new copy. Needs Linux, `git`, `cmake`,
-/// Python 3, GCC as `cc`, and GNU `objdump`.
+/// Python 3, GCC as `cc`, and GNU `objdump` and `nm`.
 ///
 /// # Errors
 ///
@@ -154,12 +189,13 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 ///
 /// A line of `flags.txt` other than a `-D`, `-I`, or `-std` flag with its value or one
 /// of [`CODE_FLAGS`], a build that fails, an `#include` or `#import` of a header
-/// outside the copy other than one of [`SYSTEM_HEADERS`] in a system directory, a
-/// call of a clock function from a pair that [`CLOCK_CALLS`] does not list, a listed
-/// pair with no call, any other reference to a clock function, such as its address in
-/// code or data, through which any code can call it, each inlined function, an
-/// `#include_next`, and a `#line` directive or line marker in a `.c` or `.h` file of
-/// the copy.
+/// outside both the copy and the system directories, a reference to a symbol outside
+/// the copy from a file that neither [`SYMBOLS`] nor [`FILE_SYMBOLS`] admits, a pair
+/// of [`FILE_SYMBOLS`] with no reference, a call of a clock function from a pair that
+/// [`CLOCK_CALLS`] does not list, a listed pair with no call, any other reference to a
+/// clock function, such as its address in code or data, through which any code can
+/// call it, each inlined function, an `#include_next`, and a `#line` directive or line
+/// marker in a `.c` or `.h` file of the copy.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     let out = root.join("target/open62541/check");
     inspect(&root.join(DEST), &out, Path::new("cc"))
@@ -427,6 +463,7 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
     gcc(&macros).map_err(|e| vec![e])?;
     let dirs = system_dirs(&verbose);
     let objects = build(copy, &sources, &flags, out, cc).map_err(|e| vec![e])?;
+    let references = unlisted(&objects).map_err(|e| vec![e])?;
     let mut calls = BTreeSet::new();
     let mut problems = line_directives(copy, Path::new("")).map_err(|e| vec![e])?;
     for (source, object, preprocessed) in objects {
@@ -454,12 +491,34 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
             problems.push(format!("{source}: {problem}"));
         }
     }
-    problems.extend(mismatches(&calls));
+    problems.extend(clock_mismatches(&calls));
+    problems.extend(symbol_mismatches(&references));
     if problems.is_empty() {
         Ok(())
     } else {
         Err(problems)
     }
+}
+
+/// Each (source, symbol) pair where the object of the source in `objects` references
+/// a symbol that no object defines and that neither [`SYMBOLS`] nor [`CLOCKS`] lists.
+fn unlisted(
+    objects: &[(&str, PathBuf, String)],
+) -> Result<BTreeSet<(String, String)>, String> {
+    let defined = symbols(
+        objects.iter().map(|(_, object, _)| object),
+        "--defined-only",
+    )?;
+    let mut references = BTreeSet::new();
+    for (source, object, _) in objects {
+        for symbol in symbols([object], "--undefined-only")?.difference(&defined) {
+            if !SYMBOLS.contains(&symbol.as_str()) && !CLOCKS.contains(&symbol.as_str())
+            {
+                references.insert(((*source).to_owned(), symbol.clone()));
+            }
+        }
+    }
+    Ok(references)
 }
 
 /// An error for each `#line` directive or line marker in a `.c` or `.h` file under
@@ -528,9 +587,8 @@ fn inside(path: &Path) -> bool {
 }
 
 /// An error for each `#include_next`, and each `#include` or `#import` in a file of
-/// the copy, as `preprocessed` (the output
-/// of `cc -E -dI` in `copy`) shows it, that finds a header outside the copy, other
-/// than one of [`SYSTEM_HEADERS`] in one of the system directories `dirs`. It finds
+/// the copy, as `preprocessed` (the output of `cc -E -dI` in `copy`) shows it, that
+/// finds a header outside both the copy and the system directories `dirs`. It finds
 /// the header as `cc` does, through the `-I` directories `flags` gives. Unlike
 /// `cc -H`, `-dI` also shows an `#include` of a header that the unit included before.
 fn includes(
@@ -584,11 +642,7 @@ fn includes(
             .chain(system)
             .find(|(path, _)| copy.join(path).is_file())
         {
-            Some((_, true)) if SYSTEM_HEADERS.contains(&name) => continue,
-            Some((_, true)) => format!(
-                "includes the system header `{name}`, which SYSTEM_HEADERS does not \
-                 list"
-            ),
+            Some((_, true)) => continue,
             Some((path, false)) if inside(&path) => continue,
             Some((path, false)) => {
                 format!("includes {}, which is outside the copy", path.display())
@@ -777,23 +831,73 @@ fn headers(depfile: &str) -> Vec<PathBuf> {
 
 /// An error for each call in `found` that [`CLOCK_CALLS`] does not list, and for each
 /// listed call that `found` does not hold.
-fn mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
-    let listed: BTreeSet<(String, String)> = CLOCK_CALLS
-        .iter()
-        .map(|&(file, function)| (file.to_owned(), function.to_owned()))
-        .collect();
-    let new = found.difference(&listed).map(|(file, function)| {
+fn clock_mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
+    let new = |file: &str, function: &str| {
         format!(
             "{file}: `{function}` calls a global clock function. Find whether a node \
              runs it; if not, add it to CLOCK_CALLS with the reason"
         )
-    });
-    let gone = listed.difference(found).map(|(file, function)| {
+    };
+    let gone = |file: &str, function: &str| {
         format!(
             "{file}: `{function}` no longer calls a clock. Remove it from CLOCK_CALLS"
         )
-    });
+    };
+    mismatches(found, &CLOCK_CALLS, new, gone)
+}
+
+/// An error for each (file, symbol) in `found` that [`FILE_SYMBOLS`] does not list,
+/// and for each listed pair that `found` does not hold.
+fn symbol_mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
+    let new = |file: &str, symbol: &str| {
+        format!(
+            "{file}: references `{symbol}`, which neither SYMBOLS nor FILE_SYMBOLS \
+             lists. Find whether a node runs it; if it reads no clock, file, network, \
+             randomness, or process state, add it with the reason"
+        )
+    };
+    let gone = |file: &str, symbol: &str| {
+        format!("{file}: no longer references `{symbol}`. Remove it from FILE_SYMBOLS")
+    };
+    mismatches(found, &FILE_SYMBOLS, new, gone)
+}
+
+/// An error from `new` for each (file, name) of `found` that `listed` does not hold,
+/// and one from `gone` for each listed pair that `found` does not hold.
+fn mismatches(
+    found: &BTreeSet<(String, String)>,
+    listed: &[(&str, &str)],
+    new: impl Fn(&str, &str) -> String,
+    gone: impl Fn(&str, &str) -> String,
+) -> Vec<String> {
+    let listed: BTreeSet<(String, String)> = listed
+        .iter()
+        .map(|&(file, name)| (file.to_owned(), name.to_owned()))
+        .collect();
+    let new = found
+        .difference(&listed)
+        .map(|(file, name)| new(file, name));
+    let gone = listed
+        .difference(found)
+        .map(|(file, name)| gone(file, name));
     new.chain(gone).collect()
+}
+
+/// The names of the symbols that `nm -P` with `flag` gives for `objects`.
+fn symbols<'a>(
+    objects: impl IntoIterator<Item = &'a PathBuf>,
+    flag: &str,
+) -> Result<BTreeSet<String>, String> {
+    let text = exec(Command::new("nm").args(["-P", flag]).args(objects))?;
+    // A line that names an object has one word.
+    Ok(text
+        .lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let name = words.next()?;
+            words.next().map(|_| name.to_owned())
+        })
+        .collect())
 }
 
 /// Writes the copy of `found` to `stage`, with `LICENSE` from `src`.
@@ -975,9 +1079,9 @@ OFFSET           TYPE              VALUE
 #include <sys/time.h>
 #include <openssl/ssl.h>
 #include UA_X
-#import <time.h>
+#import <none.h>
 #include_next <stdio.h>
-#includes <time.h>
+#includes <none.h>
 # 1 \"{sys}/stdio.h\" 1 3 4
 #include <sys/stat.h>
 # 9 \"src/a.c\" 2
@@ -990,22 +1094,13 @@ OFFSET           TYPE              VALUE
             out = out.display(),
         );
         let flags = "-DX\n-Iinclude\n-Ideps\n-std=c99\n";
-        let unlisted = |name| {
-            format!(
-                "includes the system header `{name}`, which SYSTEM_HEADERS does not \
-                 list"
-            )
-        };
         assert_eq!(
             includes(&preprocessed, &root.join("copy"), flags, &dirs),
             [
                 "includes <local.h>, which no include directory holds".to_owned(),
                 "includes src/../../out.h, which is outside the copy".to_owned(),
-                unlisted("time.h"),
-                unlisted("sys/time.h"),
-                unlisted("openssl/ssl.h"),
                 "includes UA_X, which is not a file name".to_owned(),
-                unlisted("time.h"),
+                "includes <none.h>, which no include directory holds".to_owned(),
                 "uses #include_next <stdio.h>, which the check cannot follow"
                     .to_owned(),
                 format!("includes {}, which is outside the copy", out.display()),
@@ -1070,7 +1165,10 @@ OFFSET           TYPE              VALUE
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn check_refuses_a_line_directive_in_the_copy() {
         let (root, repo, result) = run_after("line", |_| {}, &[]);
         assert_eq!(result, Ok(()));
@@ -1352,21 +1450,43 @@ End of search list.
     }
 
     #[test]
-    fn mismatches_names_a_new_call_and_a_listed_call_that_is_gone() {
+    fn clock_mismatches_names_a_new_call_and_a_listed_call_that_is_gone() {
         let mut found: BTreeSet<(String, String)> = CLOCK_CALLS
             .iter()
             .map(|&(file, function)| (file.to_owned(), function.to_owned()))
             .collect();
-        assert_eq!(mismatches(&found), Vec::<String>::new());
+        assert_eq!(clock_mismatches(&found), Vec::<String>::new());
         found.remove(&("src/util/ua_util.c".to_owned(), "UA_random_seed".to_owned()));
         found.insert(("src/ua_types.c".to_owned(), "UA_new".to_owned()));
         assert_eq!(
-            mismatches(&found),
+            clock_mismatches(&found),
             [
                 "src/ua_types.c: `UA_new` calls a global clock function. Find whether \
                  a node runs it; if not, add it to CLOCK_CALLS with the reason",
                 "src/util/ua_util.c: `UA_random_seed` no longer calls a clock. Remove \
                  it from CLOCK_CALLS",
+            ]
+        );
+    }
+
+    #[test]
+    fn symbol_mismatches_names_a_new_reference_and_a_listed_one_that_is_gone() {
+        let mut found: BTreeSet<(String, String)> = FILE_SYMBOLS
+            .iter()
+            .map(|&(file, symbol)| (file.to_owned(), symbol.to_owned()))
+            .collect();
+        assert_eq!(symbol_mismatches(&found), Vec::<String>::new());
+        found.remove(&("plugins/ua_log_syslog.c".to_owned(), "syslog".to_owned()));
+        found.insert(("src/ua_types.c".to_owned(), "socket".to_owned()));
+        assert_eq!(
+            symbol_mismatches(&found),
+            [
+                "src/ua_types.c: references `socket`, which neither SYMBOLS nor \
+                 FILE_SYMBOLS lists. Find whether a node runs it; if it reads no \
+                 clock, file, network, randomness, or process state, add it with the \
+                 reason",
+                "plugins/ua_log_syslog.c: no longer references `syslog`. Remove it from \
+                 FILE_SYMBOLS",
             ]
         );
     }
@@ -1417,14 +1537,47 @@ End of search list.
         text
     }
 
+    /// C text that references each symbol that [`FILE_SYMBOLS`] lists for `file`.
+    fn references(file: &str) -> &'static str {
+        match file {
+            "deps/musl_inet_pton.c" => {
+                "#include <ctype.h>\nint UA_digit(int c) { return isdigit(c); }\n"
+            }
+            "deps/parse_num.c" => {
+                "#include <stdlib.h>\n\
+                 double UA_parse(const char *s) { return strtod(s, 0); }\n"
+            }
+            "plugins/ua_log_stdout.c" => {
+                "#include <stdio.h>\nvoid UA_print(const char *s, int n) {\n\
+                 printf(\"%d\", n);\nputs(s);\nfflush(stdout);\n}\n"
+            }
+            "plugins/ua_log_syslog.c" => {
+                "#include <syslog.h>\nvoid UA_log(void) { syslog(LOG_INFO, \"x\"); }\n"
+            }
+            "src/server/ua_discovery.c" | "src/server/ua_services_discovery.c" => {
+                "#include <unistd.h>\n\
+                 int UA_exists(const char *path) { return access(path, 0) == 0; }\n"
+            }
+            "src/util/ua_util.c" => {
+                "#include <stdio.h>\n#include <stdlib.h>\n\
+                 void UA_refuse(int n) {\nfprintf(stderr, \"%d\", n);\nabort();\n}\n"
+            }
+            _ => panic!("FILE_SYMBOLS lists no symbol of {file}"),
+        }
+    }
+
     /// A project with the layout of open62541: the `open62541` library from two
     /// object libraries, with a call of a clock function at each place that
-    /// [`CLOCK_CALLS`] lists, a generated header, a header that is not UTF-8, and each
+    /// [`CLOCK_CALLS`] lists, a reference to each symbol at its place in
+    /// [`FILE_SYMBOLS`], a generated header, a header that is not UTF-8, and each
     /// file of [`EXTRA`], which the library does not compile.
     fn create_project(repo: &Path) {
         exec(Command::new("git").arg("init").arg("-q").arg(repo)).unwrap();
         let util = "#include \"open62541/config.h\"\n".to_owned()
-            + &calls(&["UA_random_seed"]);
+            + &calls(&["UA_random_seed"])
+            + references("src/util/ua_util.c");
+        let stdout =
+            calls(&["UA_Log_Stdout_log"]) + references("plugins/ua_log_stdout.c");
         create_files(
             repo,
             &[
@@ -1441,9 +1594,11 @@ End of search list.
                      -fno-fat-lto-objects)\n\
                      file(GLOB more src/more/*.c)\n\
                      add_library(open62541-object OBJECT src/util/ua_util.c \
-                     src/util/ua_encryptedsecret.c ${more})\n\
+                     src/util/ua_encryptedsecret.c deps/musl_inet_pton.c \
+                     deps/parse_num.c src/server/ua_discovery.c \
+                     src/server/ua_services_discovery.c ${more})\n\
                      add_library(open62541-plugins OBJECT plugins/ua_config_default.c \
-                     plugins/ua_log_stdout.c)\n\
+                     plugins/ua_log_stdout.c plugins/ua_log_syslog.c)\n\
                      add_library(open62541 STATIC $<TARGET_OBJECTS:open62541-object> \
                      $<TARGET_OBJECTS:open62541-plugins>)\n\
                      add_executable(tool tools/tool.c)\n",
@@ -1458,7 +1613,21 @@ End of search list.
                     "plugins/ua_config_default.c",
                     &calls(&["setDefaultConfig", "interruptServer"]),
                 ),
-                ("plugins/ua_log_stdout.c", &calls(&["UA_Log_Stdout_log"])),
+                ("plugins/ua_log_stdout.c", &stdout),
+                (
+                    "plugins/ua_log_syslog.c",
+                    references("plugins/ua_log_syslog.c"),
+                ),
+                ("deps/musl_inet_pton.c", references("deps/musl_inet_pton.c")),
+                ("deps/parse_num.c", references("deps/parse_num.c")),
+                (
+                    "src/server/ua_discovery.c",
+                    references("src/server/ua_discovery.c"),
+                ),
+                (
+                    "src/server/ua_services_discovery.c",
+                    references("src/server/ua_services_discovery.c"),
+                ),
                 ("tools/tool.c", "int main(void) { return 0; }\n"),
                 ("arch/common/timer.c", "#include \"timer.h\"\nint timer;\n"),
                 ("arch/common/timer.h", "#include <stdio.h>\n"),
@@ -1497,7 +1666,10 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn run_copies_each_compiled_source_and_its_headers() {
         let (root, repo, result) = run_on("copies", |_| {});
         assert_eq!(result, Ok(()));
@@ -1514,11 +1686,16 @@ End of search list.
                 "VERSION",
                 "arch/common/timer.c",
                 "arch/common/timer.h",
+                "deps/musl_inet_pton.c",
+                "deps/parse_num.c",
                 "flags.txt",
                 "include/clock.h",
                 "plugins/ua_config_default.c",
                 "plugins/ua_log_stdout.c",
+                "plugins/ua_log_syslog.c",
                 "sources.txt",
+                "src/server/ua_discovery.c",
+                "src/server/ua_services_discovery.c",
                 "src/util/ua_encryptedsecret.c",
                 "src/util/ua_util.c",
                 "src_generated/open62541/config.h",
@@ -1527,8 +1704,10 @@ End of search list.
         let read = |path| std::fs::read_to_string(dest.join(path)).unwrap();
         assert_eq!(
             read("sources.txt"),
-            "arch/common/timer.c\nplugins/ua_config_default.c\n\
-             plugins/ua_log_stdout.c\nsrc/util/ua_encryptedsecret.c\n\
+            "arch/common/timer.c\ndeps/musl_inet_pton.c\ndeps/parse_num.c\n\
+             plugins/ua_config_default.c\nplugins/ua_log_stdout.c\n\
+             plugins/ua_log_syslog.c\nsrc/server/ua_discovery.c\n\
+             src/server/ua_services_discovery.c\nsrc/util/ua_encryptedsecret.c\n\
              src/util/ua_util.c\n"
         );
         assert_eq!(
@@ -1555,7 +1734,10 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn run_refuses_a_release_with_no_file_of_extra() {
         let (root, repo, result) = run_on("extra", |repo| {
             std::fs::remove_file(repo.join("arch/common/timer.h")).unwrap();
@@ -1573,7 +1755,10 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn run_refuses_a_file_of_extra_that_the_library_holds() {
         let (root, repo, result) = run_on("stale", |repo| {
             let cmake = repo.join("CMakeLists.txt");
@@ -1593,7 +1778,10 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn run_refuses_each_problem_of_the_staged_copy() {
         let (root, repo, result) = run_on("refuses", |repo| {
             create_files(
@@ -1611,7 +1799,9 @@ End of search list.
                     (
                         "src/more/ua_types.c",
                         &("#include \"../../../build/other.h\"\n\
-                           #include <sys/stat.h>\n"
+                           #include <sys/stat.h>\n\
+                           int UA_stat(const char *path) {\n\
+                           struct stat s;\nreturn stat(path, &s);\n}\n"
                             .to_owned()
                             + &calls(&["UA_new"])),
                     ),
@@ -1648,11 +1838,13 @@ End of search list.
                 "src/more/ua_types.c: includes ./src/more/../../../build/other.h, \
                  which is outside the copy"
                     .to_owned(),
-                "src/more/ua_types.c: includes the system header `sys/stat.h`, which \
-                 SYSTEM_HEADERS does not list"
-                    .to_owned(),
                 "src/more/ua_types.c: `UA_new` calls a global clock function. Find \
                  whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
+                    .to_owned(),
+                "src/more/ua_types.c: references `stat`, which neither SYMBOLS nor \
+                 FILE_SYMBOLS lists. Find whether a node runs it; if it reads no \
+                 clock, file, network, randomness, or process state, add it with the \
+                 reason"
                     .to_owned(),
             ])
         );
@@ -1661,13 +1853,18 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn run_names_a_static_helper_that_calls_a_clock() {
         let (root, repo, result) = run_on("helper", |repo| {
             let log = "#include \"clock.h\"\n\
                        static long long helper(void) { return UA_DateTime_now(); }\n\
-                       long long UA_Log_Stdout_log(void) { return helper(); }\n";
-            create_files(repo, &[("plugins/ua_log_stdout.c", log)]);
+                       long long UA_Log_Stdout_log(void) { return helper(); }\n"
+                .to_owned()
+                + references("plugins/ua_log_stdout.c");
+            create_files(repo, &[("plugins/ua_log_stdout.c", &log)]);
         });
         assert_eq!(
             result,
@@ -1684,7 +1881,10 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn run_refuses_a_source_with_other_flags() {
         let (root, repo, result) = run_on("flags", |repo| {
             let cmake = repo.join("CMakeLists.txt");
@@ -1704,7 +1904,10 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn run_refuses_a_flag_in_no_list() {
         let (root, repo, result) = run_on("unsorted", |repo| {
             let cmake = repo.join("CMakeLists.txt");
@@ -1726,7 +1929,10 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn run_copies_a_source_whose_name_starts_with_a_dash() {
         let (root, repo, result) = run_on("dash-source", |repo| {
             create_files(repo, &[("-gen.c", "int gen;\n")]);
@@ -1741,7 +1947,10 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn run_names_a_clock_call_in_a_source_whose_name_starts_with_an_at_sign() {
         let (root, repo, result) = run_on("at-source", |repo| {
             let text = "long long UA_DateTime_now(void);\n\
@@ -1764,7 +1973,10 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn run_keeps_the_copy_when_a_file_is_missing() {
         let (root, repo, result) = run_on("license", |repo| {
             std::fs::remove_file(repo.join("LICENSE")).unwrap();
@@ -1782,7 +1994,10 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn check_finds_a_clock_call_added_to_the_copy() {
         let (root, repo, result) = run_after("check", |_| {}, &[]);
         assert_eq!(result, Ok(()));
@@ -1794,7 +2009,7 @@ End of search list.
         let flags = std::fs::read_to_string(copy.join("flags.txt")).unwrap();
         append(
             "flags.txt",
-            "-O2\n-include\nsys/stat.h\n-I-\n-D\n-save-temps\n",
+            "-O2\n-include\nsys/stat.h\n-I-\n-D\n-save-temps\n-pthread\n",
         );
         let refused = |flag: &str| {
             format!(
@@ -1804,11 +2019,17 @@ End of search list.
         };
         assert_eq!(
             check(&root),
-            Err(
-                ["-O2", "-include", "sys/stat.h", "-I-", "-D", "-save-temps"]
-                    .map(refused)
-                    .to_vec()
-            )
+            Err([
+                "-O2",
+                "-include",
+                "sys/stat.h",
+                "-I-",
+                "-D",
+                "-save-temps",
+                "-pthread"
+            ]
+            .map(refused)
+            .to_vec())
         );
         std::fs::write(copy.join("flags.txt"), flags).unwrap();
         append(
@@ -1828,36 +2049,49 @@ End of search list.
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
-    fn check_finds_an_unlisted_header_that_a_listed_header_included_first() {
-        let (root, repo, result) = run_after("order", |_| {}, &[]);
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
+    fn check_finds_an_os_call_through_a_header_that_includes_its_own() {
+        let (root, repo, result) = run_after("os", |_| {}, &[]);
         assert_eq!(result, Ok(()));
         let copy = root.join("patches/open62541");
         let append = |path: &str, text: &str| {
             let old = std::fs::read_to_string(copy.join(path)).unwrap();
             std::fs::write(copy.join(path), old + text).unwrap();
         };
-        append("src/util/ua_encryptedsecret.c", "#include <time.h>\n");
+        append(
+            "src/util/ua_encryptedsecret.c",
+            "#include <pthread.h>\nlong long UA_time(void) { return time(0); }\n",
+        );
         append(
             "src/util/ua_util.c",
-            "#include <sys/socket.h>\n#include <sys/types.h>\n",
+            "#include <pthread.h>\n\
+             int UA_lock(pthread_mutex_t *m) { return pthread_mutex_lock(m); }\n",
         );
+        let unlisted = |file: &str, symbol: &str| {
+            format!(
+                "{file}: references `{symbol}`, which neither SYMBOLS nor FILE_SYMBOLS \
+                 lists. Find whether a node runs it; if it reads no clock, file, \
+                 network, randomness, or process state, add it with the reason"
+            )
+        };
         assert_eq!(
             check(&root),
             Err(vec![
-                "src/util/ua_encryptedsecret.c: includes the system header `time.h`, \
-                 which SYSTEM_HEADERS does not list"
-                    .to_owned(),
-                "src/util/ua_util.c: includes the system header `sys/types.h`, which \
-                 SYSTEM_HEADERS does not list"
-                    .to_owned(),
+                unlisted("src/util/ua_encryptedsecret.c", "time"),
+                unlisted("src/util/ua_util.c", "pthread_mutex_lock"),
             ])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
     #[test]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn check_finds_a_clock_call_that_a_listed_function_inlines() {
         let (root, repo, result) = run_after("inline", |_| {}, &[]);
         assert_eq!(result, Ok(()));
@@ -1866,7 +2100,9 @@ End of search list.
             "#include \"clock.h\"\n\
              static inline __attribute__((always_inline)) long long helper(void) {\n\
              return UA_DateTime_now();\n}\n\
-             long long UA_Log_Stdout_log(void) { return helper(); }\n",
+             long long UA_Log_Stdout_log(void) { return helper(); }\n"
+                .to_owned()
+                + references("plugins/ua_log_stdout.c"),
         )
         .unwrap();
         assert_eq!(
@@ -1882,7 +2118,10 @@ End of search list.
 
     #[test]
     #[cfg(unix)]
-    #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
     fn check_passes_on_the_committed_copy() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         // A root of its own: `cargo xtask open62541 <tag>` removes `target/open62541/`.

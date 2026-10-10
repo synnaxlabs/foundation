@@ -24,10 +24,22 @@
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058025302,
   2026-10-08 10:37 UTC). #1860 makes CI run it on a PR that changes only `patches/`.
-  The C library and the POSIX headers of the plugins are a closed list of system
-  headers (`SYSTEM_HEADERS`) that the copy may include, each found in a system
-  directory as `cc` finds it. The list holds no clock header (`time.h`,
-  `sys/time.h`): a PR that adds one needs the OK of the `connector` architect. The
+  The check reads the undefined symbols of each object (`nm -u`) and fails on each
+  symbol outside the copy that is not on a closed list, with the file and the
+  symbol. `SYMBOLS` admits a symbol for any file, and `FILE_SYMBOLS` admits a (file,
+  symbol) pair, such as a call of the stdout logger, which we never run. Each entry
+  has its reason. A symbol goes in `SYMBOLS` only when it reads no clock, file,
+  network, randomness, or process state: memory and string functions, the
+  allocator, and the 5 constructors that `shim.c` defines to abort. A pair of
+  `FILE_SYMBOLS` with no reference fails, so a file that the build leaves out loses
+  its pairs. A header list is not a check: a listed header can include another
+  (`pthread.h` includes `time.h`). So the check refuses no system header, and each
+  header that the copy includes must be in the copy or in a system directory as
+  `cc` finds it. Lost: a header list, and a deny list of OS symbols, which passes a
+  call that it does not name. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/1884#issuecomment-6060989375,
+  2026-10-08 13:31 UTC). Supersedes the closed list of system headers of
+  https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715. The
   check fails on every reference to a clock function that is not a call, also one in
   code. A call relocation counts as a call only in a section that `objdump -d`
   disassembles. Decided by `laptop.architect-2`
