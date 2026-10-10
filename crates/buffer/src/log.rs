@@ -299,31 +299,20 @@ impl Logs {
         }
     }
 
-    /// The slot of each index with a durable entry on `path`, in no order.
-    pub(crate) fn indexes(&self, path: Path) -> Vec<Slot> {
-        self.paths
-            .iter()
-            .filter(|((_, on), log)| *on == path && !log.runs.is_empty())
-            .map(|((slot, _), _)| *slot)
-            .collect()
-    }
-
-    /// The newest record before the offset `before` that is not hidden and holds a
-    /// durable entry of `path` of the index at `slot`, with the index.
-    pub(crate) fn newest(
-        &self,
-        slot: Slot,
-        path: Path,
-        before: u64,
-    ) -> Option<(channel::Key, Run)> {
-        let log = self.paths.get(&(slot, path))?;
-        let at = log.runs.partition_point(|run| run.before(before));
-        let run = log.runs.get(at.checked_sub(1)?)?;
-        (!run.before(self.hidden)).then_some((log.index, *run))
+    /// The offset of each record that is not hidden and holds a durable entry of
+    /// `path`, with the slot and the index of the entry, in no order. A record that
+    /// holds the entries of n indexes on `path` comes n times.
+    pub(crate) fn records(&self, path: Path) -> Vec<(u64, Slot, channel::Key)> {
+        let logs = self.paths.iter().filter(|((_, on), _)| *on == path);
+        logs.flat_map(|(&(slot, _), log)| {
+            let runs = log.runs.iter().filter(|run| !run.before(self.hidden));
+            runs.map(move |run| (run.offset, slot, log.index))
+        })
+        .collect()
     }
 
     /// Hides the records before the offset `tail` from each later
-    /// [`find`](Self::find). A later record that adds a run to a path drops the
+    /// [`find`](Self::find) and [`records`](Self::records). A later record that adds a run to a path drops the
     /// path's hidden runs, so this call visits no path.
     ///
     /// # Panics

@@ -8,8 +8,9 @@ use std::ops::Range;
 
 use block::{Block, Pool, Unique};
 use env::files::File;
-use types::channel;
+use types::channel::{self, Slot};
 use types::frame::Path;
+use types::hash;
 use types::time::Stamp;
 
 use crate::buffer::Error;
@@ -162,14 +163,7 @@ impl<'a> Reading<'a> {
             let bytes =
                 bytes(self.file, self.pool, place, offset, header.bytes).await?;
             self.spent += block::footprint(bytes.len());
-            self.read.entries.push(Stored {
-                first: header.first,
-                len: header.len,
-                stored_at: header.stored_at,
-                last: header.last,
-                tag: header.tag,
-                bytes,
-            });
+            self.read.entries.push(stored(header, bytes));
             self.read.next = after;
         }
         self.wanted = wanted;
@@ -200,8 +194,8 @@ impl<'a> Reading<'a> {
     }
 }
 
-/// The last entry of `index` on `path` with `tag` in the record at `place` in the
-/// ring `file`, or `None` when the record holds no such entry.
+/// The last entry with `tag` on `path` of each index of `pending` in the record at
+/// `place` in the ring `file`, with its index, in no order.
 ///
 /// # Errors
 ///
@@ -211,28 +205,41 @@ pub(crate) async fn newest(
     file: &File,
     pool: &Pool,
     place: u64,
-    index: channel::Key,
-    path: Path,
-    tag: u8,
-) -> Result<Option<Stored>, Error> {
+    (path, tag): (Path, u8),
+    pending: &hash::Map<channel::Key, Slot>,
+) -> Result<Vec<(channel::Key, Stored)>, Error> {
     let table = table(file, pool, place).await?;
-    let found = headers(&table)
-        .filter(|(header, _)| {
-            (header.index, header.path, header.tag) == (index, path, tag)
-        })
-        .last();
+    let mut last: Vec<(Header, usize)> = Vec::new();
+    for (header, offset) in headers(&table) {
+        if (header.path, header.tag) != (path, tag)
+            || !pending.contains_key(&header.index)
+        {
+            continue;
+        }
+        match last.iter_mut().find(|(seen, _)| seen.index == header.index) {
+            Some(seen) => *seen = (header, offset),
+            None => last.push((header, offset)),
+        }
+    }
     drop(table);
-    let Some((header, offset)) = found else {
-        return Ok(None);
-    };
-    Ok(Some(Stored {
+    let mut found = Vec::with_capacity(last.len());
+    for (header, offset) in last {
+        let bytes = bytes(file, pool, place, offset, header.bytes).await?;
+        found.push((header.index, stored(header, bytes)));
+    }
+    Ok(found)
+}
+
+/// The stored entry of `header`, with the entry's `bytes`.
+fn stored(header: Header, bytes: Block) -> Stored {
+    Stored {
         first: header.first,
         len: header.len,
         stored_at: header.stored_at,
         last: header.last,
         tag: header.tag,
-        bytes: bytes(file, pool, place, offset, header.bytes).await?,
-    }))
+        bytes,
+    }
 }
 
 /// Each entry header of the record whose header and entry table are `table`, with

@@ -5,6 +5,7 @@
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
 use std::cell::RefCell;
+use std::cmp::Reverse;
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
@@ -19,8 +20,9 @@ use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::{self, File, Files, Mode};
 use env::tasks::Tasks;
-use types::channel::{Slot, Slots};
+use types::channel::{self, Slot, Slots};
 use types::frame::Path;
+use types::hash;
 use types::time::Span;
 
 use crate::entry::{self, ENTRIES_MAX, Entry};
@@ -490,10 +492,11 @@ impl Buffer {
         walked.map(|()| reading.finish())
     }
 
-    /// The newest durable entry with `tag` on `path` of each index that has one, by
-    /// the index's slot, in no order. It skips records that a trim hid. For each
-    /// index it reads the tables of its records from the newest back until one holds
-    /// the tag, then the entry's bytes.
+    /// The newest durable entry with `tag` on `path` of each index that has one, with
+    /// the index's slot, in no order. It skips records that a trim hid, and a trim
+    /// frees no record that the call reads. It reads the table of each record at most
+    /// once, from the newest record back, until each index has its entry or no record
+    /// is left, then the bytes of each entry it gives.
     ///
     /// # Errors
     ///
@@ -514,26 +517,37 @@ impl Buffer {
     }
 
     /// The newest durable entry with `tag` on `path` of each index, as
-    /// [`newest`](Self::newest) gives, with the error of the first failed read.
+    /// [`newest`](Self::newest) gives, with the error of the first failed read. It
+    /// takes the records when called, so a record made during the call is not read.
     async fn search(&self, path: Path, tag: u8) -> Result<Vec<(Slot, Stored)>, Error> {
         let Shared {
             file, pool, layout, ..
         } = &*self.shared;
-        let slots = self.shared.state.borrow().logs.indexes(path);
-        let mut found = Vec::new();
-        for slot in slots {
-            let mut before = u64::MAX;
-            loop {
-                let run = self.shared.state.borrow().logs.newest(slot, path, before);
-                let Some((index, run)) = run else { break };
-                let place = AREA_START + layout.place(run.offset);
-                if let Some(stored) =
-                    read::newest(file, pool, place, index, path, tag).await?
-                {
-                    found.push((slot, stored));
-                    break;
-                }
-                before = run.offset;
+        let mut records = self.shared.state.borrow().logs.records(path);
+        records.sort_unstable_by_key(|&(offset, ..)| Reverse(offset));
+        let mut pending: hash::Map<channel::Key, Slot> = records
+            .iter()
+            .map(|&(_, slot, index)| (index, slot))
+            .collect();
+        let mut found = Vec::with_capacity(pending.len());
+        for record in records.chunk_by(|a, b| a.0 == b.0) {
+            if pending.is_empty() {
+                break;
+            }
+            if !record
+                .iter()
+                .any(|(_, _, index)| pending.contains_key(index))
+            {
+                continue;
+            }
+            let [(offset, ..), ..] = *record else {
+                unreachable!("invariant: a chunk is not empty");
+            };
+            let place = AREA_START + layout.place(offset);
+            let stored = read::newest(file, pool, place, (path, tag), &pending).await?;
+            for (index, stored) in stored {
+                let slot = pending.remove(&index);
+                found.push((slot.expect("invariant: only a pending index"), stored));
             }
         }
         Ok(found)
@@ -1048,7 +1062,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use block::Heap;
-    use types::channel;
     use types::time::Stamp;
 
     use super::*;
