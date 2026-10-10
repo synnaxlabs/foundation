@@ -558,6 +558,7 @@ pub(crate) mod test {
             el: *mut EventLoop,
             port: u16,
             url: *const std::ffi::c_char,
+            sessions: u16,
         ) -> *mut Server;
         pub(crate) fn UA_Server_run_startup(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_run_shutdown(server: *mut Server) -> u32;

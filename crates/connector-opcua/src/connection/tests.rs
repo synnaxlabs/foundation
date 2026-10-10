@@ -2085,7 +2085,7 @@ fn a_server_with_a_host_in_its_url_has_that_url_alone_as_its_discovery_url() {
             let url = c"opc.tcp://plc.example:4840";
             // SAFETY: the loop outlives the server, which the test deletes.
             let server = unsafe {
-                ffi::test::shim_server_new(side.events().raw(), PORT, url.as_ptr())
+                ffi::test::shim_server_new(side.events().raw(), PORT, url.as_ptr(), 0)
             };
             assert!(!server.is_null());
             // SAFETY: the server lives.
@@ -2403,6 +2403,7 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
                     side.events().raw(),
                     PORT,
                     c"opc.tcp://:4840".as_ptr(),
+                    1,
                 )
             };
             assert!(!server.is_null());
@@ -2456,6 +2457,7 @@ fn a_stopped_server_with_a_session_is_deleted_with_its_session() {
                     side.events().raw(),
                     PORT,
                     c"opc.tcp://:4840".as_ptr(),
+                    1,
                 )
             };
             assert!(!server.is_null());
@@ -2502,6 +2504,7 @@ fn a_session_that_its_client_closes_is_removed_after_the_service() {
                     side.events().raw(),
                     PORT,
                     c"opc.tcp://:4840".as_ptr(),
+                    1,
                 )
             };
             assert!(!server.is_null());
@@ -2570,6 +2573,7 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
                         side.events().raw(),
                         PORT,
                         c"opc.tcp://:4840".as_ptr(),
+                        1,
                     )
                 };
                 assert!(!server.is_null());

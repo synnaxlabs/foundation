@@ -586,9 +586,10 @@ UA_Client *shim_client_new(UA_EventLoop *el) {
     return UA_Client_newWithConfig(&config);
 }
 
-/* Gives a server on `el` with the minimal config for `port` and the one server URL
- * `url`, or NULL on a failure. */
-UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port, const char *url) {
+/* Gives a server on `el` with the minimal config for `port`, the one server URL `url`,
+ * and room for `sessions` sessions and secure channels, or NULL on a failure. */
+UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port, const char *url,
+                           UA_UInt16 sessions) {
     UA_ServerConfig config;
     memset(&config, 0, sizeof(config));
     config.logging = &loop_of(el)->logger;
@@ -598,6 +599,8 @@ UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port, const char *url) {
         UA_ServerConfig_clear(&config);
         return NULL;
     }
+    config.maxSessions = sessions;
+    config.maxSecureChannels = sessions;
     UA_Array_delete(config.serverUrls, config.serverUrlsSize, &UA_TYPES[UA_TYPES_STRING]);
     config.serverUrlsSize = 0;
     UA_String text = UA_STRING((char *)(uintptr_t)url);

@@ -107,12 +107,9 @@ unsafe extern "C" fn idle(_: *mut c_void, _: *mut c_void) {}
 /// The port of the server of a [`Manager`].
 const PORT: u16 = 4840;
 
-/// The sessions that the server takes, from its minimal config.
-const SESSIONS: usize = 100;
-
 /// A connection manager over `env::net` with a test server of open62541 and `idle + 1`
-/// clients, at most 100, with an activated session on its loop. The first client
-/// reads; the others send nothing.
+/// clients, each with an activated session, on its loop. The first client reads; the
+/// others send nothing.
 pub struct Manager {
     clients: Vec<NonNull<ffi::Client>>,
     server: NonNull<ffi::test::Server>,
@@ -137,9 +134,9 @@ impl Manager {
     ///
     /// # Panics
     ///
-    /// If `idle` is 100 or more, as the server takes 100 sessions, if a connect fails,
-    /// if open62541 refuses the server, a client, or a step of the close, or if the
-    /// port is taken.
+    /// If `idle` is 65535 or more, as open62541 counts sessions in 16 bits, if a connect
+    /// fails, if open62541 refuses the server, a client, or a step of the close, or if
+    /// the port is taken.
     pub async fn scope<T>(
         clock: Clock,
         net: Net,
@@ -154,19 +151,25 @@ impl Manager {
     }
 
     async fn new(clock: Clock, net: Net, address: IpAddr, idle: usize) -> Self {
-        assert!(idle < SESSIONS, "the server takes {SESSIONS} sessions");
+        let sessions =
+            u16::try_from(idle + 1).expect("open62541 counts sessions in 16 bits");
         let local = SocketAddr::new(address, PORT);
-        let backlog = u32::try_from(idle + 1).expect("at most 100 clients");
         let rng = &mut Rng::from_seed(0);
-        let manager = connection::Manager::listening(clock, net, local, backlog, rng)
-            .expect("the port is free");
+        let manager =
+            connection::Manager::listening(clock, net, local, u32::from(sessions), rng)
+                .expect("the port is free");
         let events = manager.events();
         // SAFETY: the member takes its own loop.
         let status = Status(unsafe { (events.members().start)(events.raw()) });
         assert_eq!(status, Status::GOOD, "open62541 refused the loop");
         // SAFETY: the loop outlives the server, which `close` deletes.
         let server = unsafe {
-            ffi::test::shim_server_new(events.raw(), PORT, c"opc.tcp://:4840".as_ptr())
+            ffi::test::shim_server_new(
+                events.raw(),
+                PORT,
+                c"opc.tcp://:4840".as_ptr(),
+                sessions,
+            )
         };
         let server = NonNull::new(server).expect("open62541 refused the server");
         // SAFETY: the server lives.
@@ -426,12 +429,12 @@ mod tests {
         .expect("the run ends");
     }
 
-    /// The server takes 100 sessions, so a scope with more clients would wait for
-    /// ever.
     #[test]
-    #[should_panic(expected = "the server takes 100 sessions")]
-    fn a_scope_with_more_clients_than_sessions_panics() {
-        check(100, async |_, _| ());
+    #[should_panic(
+        expected = "open62541 counts sessions in 16 bits: TryFromIntError(PosOverflow)"
+    )]
+    fn a_scope_with_more_sessions_than_16_bits_count_panics() {
+        check(65_535, async |_, _| ());
     }
 
     /// A client tries a connect once, so its timeout must end the scope.
@@ -455,9 +458,10 @@ mod tests {
         .expect("the run ends");
     }
 
+    /// The minimal config of a server takes 100 sessions.
     #[test]
-    fn a_scope_takes_as_many_clients_as_sessions() {
-        check(99, async |manager, _| assert_eq!(manager.activated(), 100));
+    fn a_scope_takes_more_clients_than_the_sessions_of_a_minimal_server() {
+        check(100, async |manager, _| assert_eq!(manager.activated(), 101));
     }
 
     /// A read callback of open62541 gets `Good` also when the value has a bad status.
