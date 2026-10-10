@@ -852,10 +852,9 @@ impl Serve {
                 mesh,
                 transport: Rc::clone(&transport),
             });
-            let kinds = Arc::new(kinds());
             let ops = mesh.as_ref().map(|mesh| {
                 let (time, entropy) = (time.clone(), entropy.clone());
-                Rc::new(operations(mesh.clone(), time, entropy, kinds))
+                Rc::new(operations(mesh.clone(), time, entropy, Arc::new(kinds())))
             });
             let hub = hub::Hub::new(hub::Config {
                 home,
