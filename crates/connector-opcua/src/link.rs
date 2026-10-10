@@ -625,7 +625,7 @@ fn the_scan_refuses_a_path_module_outside_tests() {
     named_outside_tests(&src, |_| true);
 }
 
-/// A `path` inside `cfg_attr` is refused.
+/// A `path` inside `cfg_attr` over several lines is refused.
 #[test]
 #[should_panic(expected = "lib.rs:1: the scan does not follow `#[path]` outside tests")]
 fn the_scan_refuses_a_path_under_cfg_attr() {
@@ -633,7 +633,7 @@ fn the_scan_refuses_a_path_under_cfg_attr() {
         "cfg_attr",
         &[(
             "lib.rs",
-            "#[cfg_attr(not(test), path = \"../p.rs\")]\nmod p;\n",
+            "#[cfg_attr(\n    not(test),\n    path = \"../p.rs\"\n)]\nmod p;\n",
         )],
     );
     named_outside_tests(&src, |_| true);
@@ -672,6 +672,21 @@ fn the_scan_reads_the_module_that_a_test_mock_shadows() {
     let named = named_outside_tests(&src, |name| name == "named");
     let at = |file: &str| format!("{}: named", src.join(file).display());
     assert_eq!(named, [at("clock.rs"), at("mock.rs")]);
+}
+
+/// A `#[path]` alone on its line passes over a `#[cfg(test)]` below it, and its
+/// declaration cuts off nothing.
+#[test]
+fn the_scan_follows_a_path_above_cfg_test() {
+    let src = create_tree(
+        "path_above",
+        &[
+            ("lib.rs", "#[path = \"x.rs\"]\n#[cfg(test)]\nmod x;\n"),
+            ("x.rs", "named"),
+        ],
+    );
+    let named = named_outside_tests(&src, |name| name == "named");
+    assert_eq!(named, [format!("{}: named", src.join("x.rs").display())]);
 }
 
 /// A `#[cfg(test)]` declaration cuts off nothing when another declaration of its file
