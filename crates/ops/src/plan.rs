@@ -43,7 +43,7 @@ pub(crate) fn plan(
     let mut changes: Vec<(Order, Change)> = plan
         .changes
         .iter()
-        .map(|(name, change)| Change::of(name, change, applied, &paths))
+        .flat_map(|(name, change)| lines(name, change, applied, &paths))
         .collect();
     changes.sort_by(|(a, _), (b, _)| a.cmp(b));
     let changes: Vec<Change> = changes.into_iter().map(|(_, change)| change).collect();
@@ -181,27 +181,46 @@ pub(crate) struct Change {
 /// Adds and changes in file order, then removals in tree key order.
 type Order = (bool, Option<Span>, Name);
 
+/// The lines of `change` at `name`: a removal and an add when it replaces a stored
+/// definition of another kind, else one line.
+fn lines(
+    name: &Name,
+    change: &config::plan::Change,
+    applied: &BTreeMap<Name, Definition>,
+    paths: &[PathBuf],
+) -> Vec<(Order, Change)> {
+    let line = |action, new| Change::of(name, action, new, applied, paths);
+    match (applied.get(name), &change.new) {
+        (Some(stored), Some(new)) if stored.kind() != new.definition.kind() => {
+            vec![line(Action::Remove, None), line(Action::Add, Some(new))]
+        }
+        (_, new) => vec![line(Action::of(change), new.as_ref())],
+    }
+}
+
 impl Change {
+    /// The line of `action` on `new`, or on the stored definition at `name` when
+    /// `new` is `None`.
     fn of(
         name: &Name,
-        change: &config::plan::Change,
+        action: Action,
+        new: Option<&config::Entry>,
         applied: &BTreeMap<Name, Definition>,
         paths: &[PathBuf],
     ) -> (Order, Self) {
-        let (action, kind, span, definition) = if let Some(entry) = &change.new {
+        let (kind, span, definition) = if let Some(entry) = new {
             let definition =
                 if let config::Definition::Spec(definition) = &entry.definition {
                     Some(definition)
                 } else {
                     None
                 };
-            let kind = entry.definition.kind();
-            (Action::of(change), kind, entry.label_span, definition)
+            (entry.definition.kind(), entry.label_span, definition)
         } else {
             let stored = applied
                 .get(name)
                 .expect("invariant: a removal is of an applied definition");
-            (Action::of(change), stored.kind(), None, Some(stored))
+            (stored.kind(), None, Some(stored))
         };
         let fingerprints = match definition {
             Some(Definition::Subject(subject)) => subject

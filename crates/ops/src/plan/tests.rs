@@ -5,8 +5,10 @@ use std::path::PathBuf;
 
 use connector::kind::Table;
 use document::diagnostic::{Code, Diagnostic, Note};
-use document::{Position, Source, Span};
+use document::encoding::Checked;
+use document::{Document, Position, Source, Span};
 use spec::channel::{self, Channel, Data};
+use spec::connector::Connector;
 use spec::data_type::DataType;
 use spec::definition::Definition;
 use spec::subject::Subject;
@@ -635,5 +637,82 @@ fn gives_no_fingerprints_for_another_kind() {
         changes
             .iter()
             .all(|change| change.get("fingerprints").is_none())
+    );
+}
+
+#[test]
+fn breaker_names_the_applied_channel_that_a_connector_replaces() {
+    let applied = BTreeMap::from([(name("plc"), channel(9, INDEX))]);
+    let kinds = Table::new().with("influx", Reader).with("opcua", Reader);
+    let members = BTreeSet::from([name("edge")]);
+    let (output, planned) = plan(
+        &files(&[("plant.hcl", PLANT)]),
+        empty(),
+        &applied,
+        &members,
+        &front_ends(),
+        &kinds,
+    )
+    .expect("a plan");
+    let mut next = 100;
+    let definitions = planned
+        .definitions(&applied, || {
+            next += 1;
+            Key::from_u128(next)
+        })
+        .expect("the definitions of the apply");
+    assert!(
+        !matches!(definitions.get(&name("plc")), Some(Definition::Channel(_))),
+        "the apply keeps the channel"
+    );
+    let changes = &json(&output)["changes"];
+    let lines = changes.as_array().expect("changes");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line["kind"] == "channel" && line["name"] == "plc"),
+        "the apply drops channel plc, and the plan shows:\n{}",
+        output.text()
+    );
+}
+
+#[test]
+fn shows_a_kind_change_as_an_add_and_a_removal() {
+    let applied = BTreeMap::from([(name("plc"), channel(9, INDEX))]);
+    let planned = run(&[("plant.hcl", PLANT)], &applied).expect("a plan");
+    assert_eq!(
+        planned.text(),
+        "\
++ channel plant.time
++ channel plant.spike
++ channel plant.dip
++ channel plant.trend
++ connector plc
++ connector influx
+- channel plc
+6 to add, 0 to change, 1 to remove.
+"
+    );
+}
+
+#[test]
+fn shows_a_channel_that_replaces_a_connector_as_an_add_and_a_removal() {
+    let config = Checked::new(Document::default()).expect("a config");
+    let connector = Connector::new(name("opcua"), name("edge"), config);
+    let applied =
+        BTreeMap::from([(name("plant.time"), Definition::Connector(connector))]);
+    let planned = run(&[("plant.hcl", PLANT)], &applied).expect("a plan");
+    assert_eq!(
+        planned.text(),
+        "\
++ channel plant.time
++ channel plant.spike
++ channel plant.dip
++ channel plant.trend
++ connector plc
++ connector influx
+- connector plant.time
+6 to add, 0 to change, 1 to remove.
+"
     );
 }
