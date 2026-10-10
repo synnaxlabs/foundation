@@ -247,7 +247,6 @@ fn data(dir: &Path, error: os::Error) -> Failure {
 }
 
 /// The failure of a node that stopped with `error`, after a start that knew `known`.
-#[expect(clippy::too_many_lines, reason = "one arm for each error")]
 fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
     match error {
         node::Error::Disk { disk, cores, min } => {
@@ -261,19 +260,8 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
                 fix,
             }
         }
-        // A first start gives at most 1 GiB, so no process reaches the second arm.
         node::Error::Pool { pool, cores } => match known.from.pool {
-            Origin::Kept => {
-                let (from, fix) = kept(dir);
-                Failure {
-                    code: MEMORY,
-                    message: format!(
-                        "the pool budget {pool}, {from}, gives one of {cores} shards a \
-                         pool that needs more address space than this host has"
-                    ),
-                    fix,
-                }
-            }
+            Origin::Kept => kept_pool(dir, *pool, *cores),
             Origin::Most | Origin::Quarter => failed(error),
         },
         node::Error::Memory {
@@ -320,6 +308,20 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
             }
         }
         error => failure(dir, error),
+    }
+}
+
+/// The failure of a pool budget `pool`, kept in the data directory `dir`, that gives
+/// one of `cores` shards a pool past the address space of the host.
+fn kept_pool(dir: &Path, pool: types::byte::Size, cores: usize) -> Failure {
+    let (from, fix) = kept(dir);
+    Failure {
+        code: MEMORY,
+        message: format!(
+            "the pool budget {pool}, {from}, gives one of {cores} shards a pool that \
+             needs more address space than this host has"
+        ),
+        fix,
     }
 }
 
@@ -647,6 +649,8 @@ mod tests {
         );
     }
 
+    /// A first start gives at most 1 GiB, so no process makes `Error::Pool` from it,
+    /// and only this test sees the arm of `stopped` for a first start.
     #[test]
     fn a_pool_budget_past_the_address_space_from_a_first_start_fails_with_its_text() {
         let error = node::Error::Pool {
