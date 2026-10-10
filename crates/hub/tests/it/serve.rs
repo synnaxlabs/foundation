@@ -547,6 +547,54 @@ fn stops_an_open_without_the_index_of_its_channels_as_malformed() {
 }
 
 #[test]
+fn stops_an_open_that_names_a_channel_twice_as_malformed() {
+    let served = refused(92, &[2, 1, 2]);
+    let repeated = serve::Error::Repeated(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(repeated.clone())));
+    assert_eq!(
+        repeated.to_string(),
+        "the open names channel 00000000-0000-0000-0000-000000000002 more than once"
+    );
+}
+
+/// The index named twice, after its first listing set its position.
+#[test]
+fn stops_an_open_that_names_its_index_twice_as_malformed() {
+    let served = refused(94, &[2, 1, 1]);
+    let repeated = serve::Error::Repeated(channel::Key::from_u128(1));
+    assert_eq!(served, Some(Err(repeated)));
+}
+
+/// A channel that a later message of the keys run names again is refused too.
+#[test]
+fn stops_an_open_that_names_a_channel_again_in_a_later_message_as_malformed() {
+    let served = served(93, Class::Complete, false, |mut peer| async move {
+        let open = Open {
+            mode: Mode::Complete { limit_bytes: 0 },
+            channels: 3,
+        };
+        let mut out = vec![0; open.encoded_len()];
+        open.encode(&mut out);
+        peer.send(&out).await.expect("sends the open");
+        for run in [&[2][..], &[1, 2]] {
+            let run: Vec<_> = run.iter().map(|&k| channel::Key::from_u128(k)).collect();
+            let mut out = vec![0; run.len() * keys::LEN];
+            keys::encode(&run, &mut out);
+            peer.send(&out).await.expect("sends keys");
+        }
+        let code = Code(wire::header::MALFORMED);
+        assert_eq!(peer.recv().await, Err(transport::Error::Reset { code }));
+        assert_eq!(stopped(&mut peer).await, transport::Error::Stopped { code });
+    });
+    let repeated = serve::Error::Repeated(channel::Key::from_u128(2));
+    assert_eq!(served, Some(Err(repeated.clone())));
+    assert_eq!(
+        repeated.to_string(),
+        "the open names channel 00000000-0000-0000-0000-000000000002 more than once"
+    );
+}
+
+#[test]
 fn stops_a_one_way_stream_as_malformed() {
     let served = served(45, Class::Complete, true, |mut peer| async move {
         let code = Code(wire::header::MALFORMED);
@@ -998,8 +1046,31 @@ fn decoded(got: &Got, types: &[Type]) -> Vec<Vec<i64>> {
         .collect()
 }
 
-/// The open lists `value` twice: its series has the place of its first listing, and
-/// `time` has place 2.
+/// The open lists `other`, which the frame does not hold: `time` keeps place 2.
+#[test]
+fn sends_the_place_of_the_listing_past_a_channel_the_frame_lacks() {
+    let home = |test: Test, link: Link, incoming| async move {
+        test.define([(7, "other", DataType::Sample(I64), 1)]);
+        let mut writer = test.writer("a", &["value"]).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            write(&mut writer, &[now], &[10]);
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session(95, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[2, 7, 1], 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        assert_eq!(got.head.series, 2);
+        assert_eq!(places(&got), [0, 2]);
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
+/// Each series has the place of its listing in the open: `value` 0 and `time` 1.
 #[test]
 fn sends_each_frame_through_the_places_of_the_open() {
     let home = |test: Test, link: Link, incoming| async move {
@@ -1014,13 +1085,13 @@ fn sends_each_frame_through_the_places_of_the_open() {
         assert_eq!(serve(&link, incoming).await, Ok(()));
     };
     session(56, Class::Complete, false, home, |mut peer| async move {
-        let mut reader = open_complete(&mut peer, &[2, 2, 1], 1 << 20).await;
+        let mut reader = open_complete(&mut peer, &[2, 1], 1 << 20).await;
         let mut first = None;
         for (values, stamps) in [(&[10, 20][..], &[0, 1][..]), (&[30], &[2])] {
             let got = got(&mut peer, &mut reader).await.expect("a frame");
             assert_eq!(got.head.path, FramePath::Live);
             assert_eq!(got.head.series, 2);
-            assert_eq!(places(&got), [0, 2]);
+            assert_eq!(places(&got), [0, 1]);
             let [got_values, got_stamps] =
                 <[_; 2]>::try_from(decoded(&got, &[I64, STAMP])).expect("two series");
             let first = *first.get_or_insert(got_stamps[0]);

@@ -11,25 +11,33 @@
   `delivery::complete::Charge::Places` of the slots of its open (#1642, #1636; the
   architect, 2026-10-07T22:25:18Z,
   https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6048108229). A series
-  has the place of its first listing in the open, from 0. The reader's `hub` lists the
-  keys in the entry order of its own frame (its slot order), the index too, so a place
-  is an entry of the reader's frame and a session has `channels` places. An open whose
-  keys do not hold the index is not valid: the home's `hub` checks it and stops the
-  session with `MALFORMED` (lost: `UNKNOWN`; the architect, 2026-10-07,
+  has the place of its listing in the open, from 0 (`laptop.architect`,
+  2026-10-10T14:40:47Z,
+  https://github.com/synnaxlabs/foundation/issues/2273#issuecomment-6098651096;
+  supersedes "the place of its first listing" of
+  https://github.com/synnaxlabs/foundation/pull/1071). The reader's `hub` lists the keys
+  in the entry order of its own frame (its slot order), the index too, so a place is an
+  entry of the reader's frame and a session has `channels` places. An open whose keys do
+  not hold the index is not valid: the home's `hub` checks it and stops the session with
+  `MALFORMED` (lost: `UNKNOWN`; the architect, 2026-10-07,
   https://github.com/synnaxlabs/foundation/pull/1236#issuecomment-6032902101). An open
-  of no channel is not valid. Only the fixed part of `Open` and of `Head` is one
-  message. The rest is one run of bytes, in messages of at most the peer's
-  `message_bytes_max`, back to back with no prefix: after `Open`, the keys; after
-  `Head`, the place and end of each series in the body, then the body. A message never
-  splits a key or an end, so each side decodes each message as it arrives. The keys run
-  holds exactly `channels` keys and the ends run exactly the head's number of series, so
-  each side counts them to find where a run ends, and the body starts a new message. So
-  no count of channels or series has a cap, and the reader fills one block of its
-  frame's length: the header, the range, a descriptor for each series, and the body to
-  the last end. A run message with more keys or ends than remain is not valid. A head of
-  no series is not valid, since a frame holds its index. Nor is a head whose range ends
-  past `u64::MAX`, because the position after it does not fit (`laptop.architect`,
-  2026-10-10T03:45:10Z,
+  of no channel is not valid. Nor is an open that names a channel more than once: the
+  home stops it with `MALFORMED` at the second listing, so it holds memory only for
+  distinct channels of one index, each of which the peer sent (`laptop.architect`,
+  2026-10-10T14:40:47Z,
+  https://github.com/synnaxlabs/foundation/issues/2273#issuecomment-6098651096). Only
+  the fixed part of `Open` and of `Head` is one message. The rest is one run of bytes,
+  in messages of at most the peer's `message_bytes_max`, back to back with no prefix:
+  after `Open`, the keys; after `Head`, the place and end of each series in the body,
+  then the body. A message never splits a key or an end, so each side decodes each
+  message as it arrives. The keys run holds exactly `channels` keys and the ends run
+  exactly the head's number of series, so each side counts them to find where a run
+  ends, and the body starts a new message. So no count of channels or series has a cap,
+  and the reader fills one block of its frame's length: the header, the range, a
+  descriptor for each series, and the body to the last end. A run message with more keys
+  or ends than remain is not valid. A head of no series is not valid, since a frame
+  holds its index. Nor is a head whose range ends past `u64::MAX`, because the position
+  after it does not fit (`laptop.architect`, 2026-10-10T03:45:10Z,
   https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6093432445). Nor is a
   head of a reader session on the backfill path, since a session gets only live frames,
   or one that starts before the end of the head before it, since the heads of a session
