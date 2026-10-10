@@ -166,34 +166,43 @@ impl Rig {
     }
 
     /// [`Rig::run`] under `taskset`, on the first CPU of the test's affinity set, so
-    /// the node runs one shard on each host. With `space`, `prlimit` limits the address
-    /// space of the node to that many bytes. Linux only: it reads `/proc`.
-    pub(crate) fn run_on_one_core(
+    /// the node runs one shard on each host. Linux only: it reads `/proc`.
+    pub(crate) fn run_on_one_core(&self, args: &[&str], input: &[u8]) -> Output {
+        let command = self.on_one_core(Command::new("taskset"), args);
+        run(&self.clock, PATIENCE, command, input)
+    }
+
+    /// [`Rig::run_on_one_core`] under `prlimit`, which limits the address space of the
+    /// node to `space` bytes.
+    pub(crate) fn run_on_one_core_in(
         &self,
-        space: Option<u64>,
+        space: u64,
         args: &[&str],
         input: &[u8],
     ) -> Output {
+        let mut prlimit = Command::new("prlimit");
+        prlimit.args([&format!("--as={space}"), "--", "taskset"]);
+        run(
+            &self.clock,
+            PATIENCE,
+            self.on_one_core(prlimit, args),
+            input,
+        )
+    }
+
+    /// Gives `taskset` in `command` the first CPU of the test's affinity set,
+    /// `foundation`, and `args`.
+    fn on_one_core(&self, mut command: Command, args: &[&str]) -> Command {
         let status = std::fs::read_to_string("/proc/self/status").expect("read status");
         let cpus = (status.lines())
             .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
             .expect("a list of the allowed CPUs");
         let first = (cpus.trim().split([',', '-']).next()).expect("one CPU at least");
-        let mut command = Command::new("prlimit");
-        if let Some(space) = space {
-            command.arg(format!("--as={space}"));
-        }
         command
-            .args([
-                "--",
-                "taskset",
-                "-c",
-                first,
-                env!("CARGO_BIN_EXE_foundation"),
-            ])
+            .args(["-c", first, env!("CARGO_BIN_EXE_foundation")])
             .args(args)
             .current_dir(&self.dir);
-        run(&self.clock, PATIENCE, command, input)
+        command
     }
 
     /// Starts `foundation` with `args` in [`Rig::dir`], for a test that writes its
