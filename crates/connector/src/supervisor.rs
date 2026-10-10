@@ -3054,7 +3054,10 @@ mod tests {
     fn holds_the_reader_of_a_kind_for_the_hold_of_its_settings() {
         for (hold, want) in [
             (Span::SECOND, Err(hub::reader::Ended::Behind)),
-            (ms(101), Err(hub::reader::Ended::Behind)),
+            (
+                Span::from_nanos(ms(100).nanos() + 1),
+                Err(hub::reader::Ended::Behind),
+            ),
             (ms(100), Ok(vec![8])),
             (ms(99), Ok(vec![8])),
             (Span::ZERO, Ok(vec![8])),
@@ -3101,23 +3104,40 @@ mod tests {
     }
 
     #[test]
-    fn gives_a_kind_the_error_of_the_hub_for_a_reader_of_no_channel() {
-        let got = read_through(
-            |ctx, got| async move {
-                let none = reader::Settings {
-                    select: Selector::new(["plant.missing"]).expect("a selector"),
-                    ..settings(Span::ZERO)
-                };
-                let error = ctx.reader(&none).await.expect_err("no channel");
-                got.lock()
-                    .expect("no panic")
-                    .push((error.to_string(), error));
-                Ok(())
-            },
-            |_, _| async {},
-        );
-        let empty = hub::reader::Error::Empty;
-        assert_eq!(got, [("the selector matches no channel".to_owned(), empty)]);
+    fn gives_a_kind_the_errors_of_the_hub_as_they_are() {
+        let many = hub::reader::Error::ManyIndexes {
+            first: name("plant.time"),
+            other: name("plant.write.status.backoff"),
+        };
+        for (select, message, want) in [
+            (
+                "plant.missing",
+                "the selector matches no channel",
+                hub::reader::Error::Empty,
+            ),
+            (
+                "plant.**",
+                "the channels plant.time and plant.write.status.backoff are on \
+                 different indexes: open a reader per index",
+                many,
+            ),
+        ] {
+            let got = read_through(
+                move |ctx, got| async move {
+                    let settings = reader::Settings {
+                        select: Selector::new([select]).expect("a selector"),
+                        ..settings(Span::ZERO)
+                    };
+                    let error = ctx.reader(&settings).await.expect_err("an error");
+                    got.lock()
+                        .expect("no panic")
+                        .push((error.to_string(), error));
+                    Ok(())
+                },
+                |_, _| async {},
+            );
+            assert_eq!(got, [(message.to_owned(), want)], "select {select}");
+        }
     }
 
     /// Runs `write` as `plant.write` on a new shard, while a writer as
