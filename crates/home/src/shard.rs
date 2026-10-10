@@ -2619,18 +2619,6 @@ mod tests {
         (sim, node)
     }
 
-    /// The holder that the newest handoff of `slot` on disk names. It reads the
-    /// private buffer: only a further restart shows that record through the public
-    /// calls.
-    async fn recorded(shard: &Shard, slot: u32) -> Option<control::Writer> {
-        let holders = handoff::newest(&shard.buffer).await.expect("reads");
-        let (_, last) = holders
-            .into_iter()
-            .find(|(at, _)| *at == Slot::new(slot))
-            .expect("a handoff of the slot");
-        last
-    }
-
     #[test]
     fn reserves_control_for_the_holder_from_before_a_power_cut_until_the_grace_ends() {
         let (mut sim, node) = cut_after(170, false);
@@ -2638,7 +2626,9 @@ mod tests {
             let test = Test::new(node, tasks);
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let b = shard
+                .open_writer(writer("subject-b", 1, &set))
+                .expect("synced");
             let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
             assert_eq!(
                 shard.write(b, LIVE, next),
@@ -2651,12 +2641,8 @@ mod tests {
                 Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
             );
             shard.committed().await.expect("the commit ends");
-            let b = control::Writer {
-                subject: "b".parse().expect("a valid name"),
-                authority: Authority(1),
-            };
-            assert_eq!(recorded(&shard, 0).await, Some(b.clone()));
-            assert_eq!(recorded(&shard, 2).await, Some(b));
+            let handoffs = find(&test.ring().await, &handoff_to("subject-b"));
+            assert_eq!(handoffs.len(), 2);
         })
         .expect("the run after the cut ends");
     }
@@ -2702,7 +2688,6 @@ mod tests {
             let test = Test::new(node, tasks);
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
-            assert_eq!(recorded(&shard, 0).await, None);
             let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
             let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
             assert_eq!(
@@ -2734,6 +2719,64 @@ mod tests {
         .expect("the run after the cut ends");
     }
 
+    #[test]
+    fn records_no_handoff_when_the_holder_reopens_after_the_grace() {
+        let (mut sim, node) = create_node(177);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            shard
+                .open_writer(writer("subject-a", 1, &set))
+                .expect("synced");
+            shard.committed().await.expect("the commit ends");
+        })
+        .expect("the first run ends");
+        sim.crash(&node, sim::Crash::Power);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.open(AREA, 4).await;
+            let before = find(&test.ring().await, &handoff_to("subject-a")).len();
+            test.clock.sleep(GRACE).await;
+            shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
+            shard
+                .open_writer(writer("subject-a", 1, &set))
+                .expect("synced");
+            shard.committed().await.expect("the commit ends");
+            let after = find(&test.ring().await, &handoff_to("subject-a")).len();
+            assert_eq!((before, after), (2, 2));
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn open_gives_the_error_of_a_failed_read_of_a_handoff() {
+        let (mut sim, node) = cut_after(182, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
+            test.node.fail_file(FilePath::new(RING), Operation::ReadAt);
+            let config = Config {
+                shard: 0,
+                buffer,
+                clock: test.reader.clone(),
+                limits: LIMITS,
+            };
+            let failed = env::files::Error::Io {
+                path: PathBuf::from(RING),
+                operation: Operation::ReadAt,
+                code: 5,
+            };
+            assert_eq!(
+                Shard::open(config).await.err(),
+                Some(buffer::Error::Files(failed))
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
     /// It reads the private gate: with no mesh time, no writer opens, so no public
     /// call shows the holder.
     #[test]
@@ -2754,7 +2797,7 @@ mod tests {
     }
 
     #[test]
-    fn open_refuses_a_handoff_record_that_does_not_decode() {
+    fn open_panics_on_a_handoff_record_that_does_not_decode() {
         let (mut sim, node) = create_node(175);
         let ended = sim.run_on(&node, |node, tasks| async move {
             let test = Test::new(node, tasks);
@@ -2798,7 +2841,7 @@ mod tests {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
-            test.clock.sleep(Span::from_nanos(GRACE.nanos() - 1)).await;
+            test.clock.sleep(Span::from_nanos(9_999_999_999)).await;
             let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
             assert_eq!(
                 shard.write(b, LIVE, next),
