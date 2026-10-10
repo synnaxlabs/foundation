@@ -842,7 +842,8 @@ mod tests {
 
     proptest! {
         /// `cut` is pure, so this reaches each length and char width, which a run
-        /// through the supervisor does not.
+        /// through the supervisor does not. A spare capacity under the 63 bytes of room
+        /// in `tests/memory` passes that test, so only this one sees it.
         #[test]
         fn cuts_a_text_to_the_longest_prefix_that_fits(
             text in "(a|é|€|😀){0,1100}",
@@ -856,6 +857,8 @@ mod tests {
         }
     }
 
+    /// A spare capacity under the 63 bytes of room in `tests/memory` passes that test,
+    /// so only this one sees it.
     #[test]
     fn gives_the_text_of_an_error_with_no_spare_capacity() {
         let device = Err(kind::Error::Device("busy".into()));
@@ -865,7 +868,8 @@ mod tests {
     }
 
     /// A constant spare capacity of the value cancels in each difference of held bytes
-    /// that a caller can measure, so only this test sees it.
+    /// that a caller can measure, and one under the 63 bytes of room in `tests/memory`
+    /// passes that test, so only this one sees either.
     #[test]
     fn sets_a_text_with_no_spare_capacity() {
         let form = Variable::of(Type::String).expect("a `String` has a form");

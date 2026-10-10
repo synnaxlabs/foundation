@@ -1,10 +1,10 @@
-//! A run that ends with a device error of 1 MiB, or with one whose text comes in two
-//! pieces of 1023 and 1 bytes, and the end of its tasks and the wait after it, hold
-//! no more than 2.25 KiB over
-//! the same run in a twin sim, where it ends with an error of 1 byte: room for the cut
-//! text twice, plus 256 bytes. The twins add their larger steps of memory at the same
-//! runs, so the steps cancel. This binary has no test harness: the count covers each
-//! thread, and a harness allocates on its own thread at any time.
+//! At the start of the next run, and at each 10 ms of the sim clock from the start of
+//! a run that ends with a device or retry error of 1 MiB, or with a device error whose
+//! text comes in two pieces of 1023 and 1 bytes, the process holds less than the cut
+//! text twice over the same run in a twin sim, where it ends with an error of 1 byte.
+//! The run has a task that lives 2 s more. The twins add their larger steps of memory
+//! at the same runs, so the steps cancel. This binary has no test harness: the count
+//! covers each thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -34,7 +34,8 @@ const MIB: usize = 1 << 20;
 /// settle.
 const SHORT: usize = 3;
 
-/// The most bytes held while a count of runs had started, by that count.
+/// The most bytes held at each sample while a count of runs had started, by that
+/// count.
 type Peaks = [AtomicUsize; SHORT + 3];
 
 /// How run [`SHORT`] ends.
@@ -43,6 +44,7 @@ enum Last {
     Short,
     Large,
     Pieces,
+    Retry,
 }
 
 /// An error whose text comes in two pieces, of 1023 bytes then 1, so that the string
@@ -97,6 +99,7 @@ impl Kind for Large {
         let end = match (run, self.last) {
             (..SHORT, _) | (SHORT, Last::Short) => Err(Error::Device("a".into())),
             (SHORT, Last::Large) => Err(Error::Device("a".repeat(MIB).into())),
+            (SHORT, Last::Retry) => Err(Error::Retry("a".repeat(MIB).into())),
             (SHORT, Last::Pieces) => {
                 Err(Error::Device(Box::new(Pieces("a".repeat(1_023)))))
             }
@@ -106,8 +109,8 @@ impl Kind for Large {
     }
 }
 
-/// The most bytes held over run [`SHORT`], the end of its tasks, and the wait after
-/// it, less those held before the sim, when that run ends as `last` gives.
+/// The most bytes held at the samples from the start of run [`SHORT`] to the start of
+/// the next, less those held before the sim, when that run ends as `last` gives.
 fn held(last: Last) -> usize {
     let before = ALLOCATOR.held();
     let (runs, peaks) = (Arc::new(AtomicUsize::new(0)), Arc::new(Peaks::default()));
@@ -161,10 +164,10 @@ fn main() {
     // The first sim makes the allocations that a process makes once.
     held(Last::Short);
     let short = held(Last::Short);
-    for last in [Last::Large, Last::Pieces] {
+    for last in [Last::Large, Last::Pieces, Last::Retry] {
         let held = held(last);
         assert!(
-            held <= short + 2 * 1_024 + 256,
+            held < short + 2 * 1_024,
             "from run {SHORT} to the next, the sim holds {short} bytes after a short \
              error, {held} after {last:?}"
         );
