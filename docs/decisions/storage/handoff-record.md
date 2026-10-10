@@ -5,6 +5,10 @@
   control, else `[authority: u8]` then the holder's subject as UTF-8; the entry length
   gives the subject's length. A restart or a failover starts the gate from the last
   record (X18): `Gate::recover` with its holder, or `Gate::new` when it names none.
+  `Shard::open` restores each gate, with `GRACE` (10 s) from the open, and the gate
+  moves in at the first carry of its slot, also after the grace (`laptop.architect`,
+  #275, 2026-10-10T04:04:50Z:
+  https://github.com/synnaxlabs/foundation/issues/275#issuecomment-6093580361).
   Trimming must keep the last record of each index (#406). Until it does, a trim
   (STORE TRIM) can free that record, and a holder whose record a trim freed gets no
   grace after a restart. Retention deletes nothing (decided by `laptop.architect`,

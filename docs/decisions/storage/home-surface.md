@@ -1,5 +1,5 @@
 - **HOME SURFACE (#963)** The public surface of `home` names only `types`, `env`,
-  `codec`, and `home` items, apart from three. `Config`, which only `node` builds, names
+  `codec`, and `home` items, apart from four. `Config`, which only `node` builds, names
   `buffer` and `clock` types. `Shard::pool` gives a `block::Pool`, the pool of the
   shard's buffer. `block` is in the `hub` row. A writer's frames come from that pool, so
   `hub` takes no pool of its own and the two cannot differ (architect,
@@ -8,16 +8,22 @@
   `Position`, `Error`, `named::Key`, and `complete::Charge` (`laptop.architect`,
   2026-10-08T11:12:45Z:
   https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
+  `Shard::open` gives a `buffer::Error`: `node` puts it in `Error::Buffer`, as for
+  `Buffer::open`, and no caller matches its variants. Lost: `env::files::Error` with a
+  panic on `Error::Pool`, because the panic rests on how `buffer` reads; a `home` error
+  of `Files` and `Pool`, a third type that `node` puts in the same variant
+  (`laptop.architect`, #275, 2026-10-10T04:04:50Z:
+  https://github.com/synnaxlabs/foundation/issues/275#issuecomment-6093580361).
   Supersedes the clause "apart from `Config`" of
   https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116, which the
   `Shard::pool` ruling above made two. `Config` takes no pool: the shard uses
   `Buffer::pool()`. It takes one `clock: clock::Reader` for monotonic and mesh time. The
   shard is the only writer of the buffer in `Config`: the caller gives it with no entry
   that waits for a commit. The condition is stated, not checked: `node` appends nothing
-  before `Shard::new`, and `Config` takes the buffer by value, so no later append can
+  before `Shard::open`, and `Config` takes the buffer by value, so no later append can
   come from outside (architect,
   https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6033691871; lost: a
-  check in `Shard::new`). `replica` (X13) and copy mode (X43) are out of the MVP. Their
+  check in `Shard::open`). `replica` (X13) and copy mode (X43) are out of the MVP. Their
   PR decides how `replica` gets to the buffer of a shard and what `committed` waits for.
   Until then, the shard is the only writer (architect,
   https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6034204295).
