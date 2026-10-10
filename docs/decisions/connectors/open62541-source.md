@@ -307,11 +307,11 @@
   connection, about 63 to 107 ns each by the load of the host on the bench of #435 6b3,
   on box2, an Intel Xeon Platinum 8488C. Deferred by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6092329880,
-  2026-10-10 01:45 UTC). Lost: the manager binds its own listener with `Net::listen`
-  from the parameters. `address` is a host name and `Net::listen` takes a socket
-  address, so the open would resolve in a hook that must give `ESTABLISHED` before it
-  returns, and an owner that binds port 0 could not learn the port before it builds the
-  URL of its server. Also lost: one constructor with an
+  2026-10-10 01:45 UTC). Lost for the listener: the manager binds its own listener
+  with `Net::listen` from the parameters. `address` is a host name and `Net::listen`
+  takes a socket address, so the open would resolve in a hook that must give
+  `ESTABLISHED` before it returns, and an owner that binds port 0 could not learn the
+  port before it builds the URL of its server. Also lost: one constructor with an
   `Option<Listener>`, which a client gives as a literal `None` (`docs/claude/rust.md`;
   `laptop.director`,
   https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089322178,
