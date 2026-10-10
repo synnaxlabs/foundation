@@ -224,25 +224,44 @@ mod tests {
         );
     }
 
-    #[test]
-    fn models_filter_names_each_crate_that_a_model_task_selects() {
-        let root = fixture().join("../..");
+    /// The `jobs` of `.github/workflows/ci.yaml` in the workspace at `root`, from the
+    /// line break before the first job, with no blank or comment line, which YAML
+    /// skips.
+    fn ci_jobs(root: &Path) -> String {
         let text =
             std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
-        // YAML skips blank and comment lines, so the checks below never see them.
-        let ci = (text.lines())
+        let ci: Vec<&str> = (text.lines())
             .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            !ci.lines().any(|line| line.starts_with("defaults:")),
-            "ci.yaml sets defaults for each job"
+            .collect();
+        // A key such as `defaults`, `env`, or `run-name` can change what a job runs,
+        // or hold text that looks like a job.
+        let keys: Vec<&str> = (ci.iter().copied())
+            .filter(|line| !line.starts_with(' '))
+            .collect();
+        assert_eq!(
+            keys,
+            ["name: CI", "on:", "concurrency:", "jobs:"],
+            "ci.yaml has a top-level key that the checks do not read"
         );
-        let models: Vec<&str> = (ci.split("models:\n").nth(1))
+        let ci = ci.join("\n");
+        let (_, jobs) = ci.split_once("\njobs:").unwrap();
+        jobs.to_string()
+    }
+
+    /// The paths of the `models` filter in `jobs`.
+    fn models(jobs: &str) -> Vec<&str> {
+        (jobs.split("models:\n").nth(1))
             .expect("ci.yaml has a models filter")
             .lines()
             .map_while(|line| line.trim().strip_prefix("- "))
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn models_filter_names_each_crate_that_a_model_task_selects() {
+        let root = fixture().join("../..");
+        let ci = ci_jobs(&root);
+        let models = models(&ci);
         let output = (ci.split("      models: >-\n").nth(1))
             .and_then(|rest| rest.lines().next())
             .expect("the changes job has a models output");
@@ -295,23 +314,43 @@ mod tests {
                 );
             }
         }
-        // Miri also runs the code of each workspace crate that a selected crate builds.
+    }
+
+    #[test]
+    fn models_filter_names_each_workspace_crate_that_miri_runs() {
+        let root = fixture().join("../..");
+        let (ci, metadata) = (ci_jobs(&root), metadata(&root).unwrap());
+        let models = models(&ci);
         let workspace = metadata["packages"].as_array().unwrap();
-        for select::Package { name, .. } in miri::packages(&metadata).unwrap() {
+        // Each entry is a crate whose code Miri runs, and the crate that Miri tests.
+        let mut open: Vec<(String, String)> = (miri::packages(&metadata).unwrap())
+            .into_iter()
+            .map(|select::Package { name, .. }| (name.clone(), name))
+            .collect();
+        let mut seen = BTreeSet::new();
+        while let Some((name, tested)) = open.pop() {
             let package = (workspace.iter())
                 .find(|p| p["name"] == name.as_str())
                 .unwrap();
             for dep in package["dependencies"].as_array().unwrap() {
-                if dep["path"].is_null() || dep["kind"] == "build" {
+                let kind = dep["kind"].as_str();
+                // Only the tested crate builds its dev dependencies.
+                if dep["path"].is_null()
+                    || kind == Some("build")
+                    || (kind == Some("dev") && name != tested)
+                {
                     continue;
                 }
-                let dep = dep["name"].as_str().unwrap();
+                let dep = dep["name"].as_str().unwrap().to_string();
                 assert!(
                     models.contains(&format!("'crates/{dep}/**'").as_str()),
-                    "`cargo xtask miri` runs `{name}`, which builds `{dep}`, but the \
+                    "`cargo xtask miri` runs `{tested}`, which builds `{dep}`, but the \
                      `models` filter in .github/workflows/ci.yaml lacks \
                      'crates/{dep}/**'"
                 );
+                if seen.insert(dep.clone()) {
+                    open.push((dep, tested.clone()));
+                }
             }
         }
     }
