@@ -171,6 +171,7 @@ impl Manager {
             self.pass(cx);
             let poll = loop {
                 let poll = run(cx);
+                // Before `again`: an accept puts its new connection there.
                 state.resume(cx);
                 let moved = state.move_on_again(cx);
                 if poll.is_ready() {
