@@ -7,7 +7,7 @@
   property tests share: `decode` gives an identity exactly for bytes with the tag and
   the CRC32C, and that identity encodes to the same bytes. `check` tests the first
   part as the bytes that `encode` writes from the fields of the input. The inputs of
-  the form `foundation/key/1` stay, and reach only the length check since the form
+  the form `foundation/key/1` stay, and reach only the length check after the form
   `foundation/key/2` (NODE PORT). By `laptop.architect-2` (#1744, plan revision 3,
   item 6, 2026-10-10 03:30 UTC):
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093320483. Each

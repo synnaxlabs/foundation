@@ -3218,7 +3218,8 @@ mod port {
         }
 
         /// Each input of the fuzz corpus that decoded in the form `foundation/key/1`
-        /// is, in the new form, a key that a node proves and keeps.
+        /// has a copy in the new form: `valid-2`, which a node proves and keeps, and
+        /// `valid-body-2`, which with its CRC32C is `valid-2`.
         #[test]
         fn a_node_proves_the_key_of_each_valid_input_of_the_corpus() {
             let valid: &[u8; LEN] =
