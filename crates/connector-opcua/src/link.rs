@@ -445,11 +445,23 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the shim calls {drawn:?}");
 }
 
+/// The `src/` directory of the crate.
+fn src() -> std::path::PathBuf {
+    std::path::Path::new(ROOT).join("src")
+}
+
 /// Each identifier for which `named` holds, as `path: identifier`, in each `.rs`
-/// file under `src/` that a `#[cfg(test)]` module declaration does not cut off.
+/// file under `src` that a `#[cfg(test)]` module declaration does not cut off.
 /// Comments and inline modules count.
-fn named_outside_tests(named: impl Fn(&str) -> bool) -> Vec<String> {
-    let files = files_under("rs");
+///
+/// # Panics
+///
+/// When a `#[path]` attribute outside tests names a file that the scan may not read.
+fn named_outside_tests(
+    src: &std::path::Path,
+    named: impl Fn(&str) -> bool,
+) -> Vec<String> {
+    let files = files_under(src, "rs");
     let mut cut = Vec::new();
     for path in &files {
         let text = std::fs::read_to_string(path).unwrap();
@@ -459,6 +471,17 @@ fn named_outside_tests(named: impl Fn(&str) -> bool) -> Vec<String> {
         };
         let lines: Vec<_> = text.lines().collect();
         for (at, line) in lines.iter().enumerate() {
+            let item = at
+                + lines[at..]
+                    .iter()
+                    .take_while(|line| line.trim_start().starts_with("#["))
+                    .count();
+            assert!(
+                !line.trim_start().starts_with("#[path") || gated(&lines, item),
+                "{}:{}: the scan does not follow `#[path]` outside tests",
+                path.display(),
+                at + 1
+            );
             let Some(module) = line
                 .trim_start_matches("pub(crate) ")
                 .trim_start_matches("pub ")
@@ -467,16 +490,7 @@ fn named_outside_tests(named: impl Fn(&str) -> bool) -> Vec<String> {
             else {
                 continue;
             };
-            let gated = lines[..at]
-                .iter()
-                .rev()
-                .take_while(|line| {
-                    ["#[", "///", ")]", " "]
-                        .iter()
-                        .any(|start| line.starts_with(start))
-                })
-                .any(|line| *line == "#[cfg(test)]");
-            if gated {
+            if gated(&lines, at) {
                 cut.extend([dir.join(format!("{module}.rs")), dir.join(module)]);
             }
         }
@@ -487,9 +501,22 @@ fn named_outside_tests(named: impl Fn(&str) -> bool) -> Vec<String> {
     kept.flat_map(|path| named_in(path, &named)).collect()
 }
 
-/// Each file under `src/` with the extension `extension`, sorted.
-fn files_under(extension: &str) -> Vec<std::path::PathBuf> {
-    let mut dirs = vec![std::path::Path::new(ROOT).join("src")];
+/// Whether the attributes above the item at line `at` of `lines` hold `#[cfg(test)]`.
+fn gated(lines: &[&str], at: usize) -> bool {
+    lines[..at]
+        .iter()
+        .rev()
+        .take_while(|line| {
+            ["#[", "///", ")]", " "]
+                .iter()
+                .any(|start| line.starts_with(start))
+        })
+        .any(|line| *line == "#[cfg(test)]")
+}
+
+/// Each file under `dir` with the extension `extension`, sorted.
+fn files_under(dir: &std::path::Path, extension: &str) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![dir.to_path_buf()];
     let mut files = Vec::new();
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
@@ -519,17 +546,62 @@ fn named_in(path: &std::path::Path, named: impl Fn(&str) -> bool) -> Vec<String>
 /// no test file.
 #[test]
 fn the_scan_names_only_the_files_outside_tests() {
-    let src = std::path::Path::new(ROOT).join("src");
-    let named = named_outside_tests(|name| name == "shim_client_new");
+    let src = src();
+    let named = named_outside_tests(&src, |name| name == "shim_client_new");
     let at = |file: &str| format!("{}: shim_client_new", src.join(file).display());
     assert_eq!(named, [at("bench.rs"), at("ffi.rs")]);
+}
+
+/// A file under `#[cfg(test)]` is cut off, also with `#[path]`, and the file declared
+/// after it is scanned.
+#[test]
+fn the_scan_cuts_off_only_the_module_under_cfg_test() {
+    let src = create_tree(
+        "gated",
+        &[
+            (
+                "lib.rs",
+                "#[cfg(test)]\n#[path = \"t.rs\"]\nmod t;\nmod p;\n",
+            ),
+            ("t.rs", "named"),
+            ("p.rs", "named"),
+            ("t/u.rs", "named"),
+        ],
+    );
+    let named = named_outside_tests(&src, |name| name == "named");
+    assert_eq!(named, [format!("{}: named", src.join("p.rs").display())]);
+}
+
+/// The scan fails on a `#[path]` module outside tests, which can name a file outside
+/// `src/`.
+#[test]
+#[should_panic(expected = "lib.rs:1: the scan does not follow `#[path]` outside tests")]
+fn the_scan_refuses_a_path_module_outside_tests() {
+    let src = create_tree("path", &[("lib.rs", "#[path = \"../p.rs\"]\nmod p;\n")]);
+    named_outside_tests(&src, |_| true);
+}
+
+/// A directory under `OUT_DIR` named `name` that holds only `files`.
+fn create_tree(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("OUT_DIR"))
+        .join("scan")
+        .join(name);
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    for (path, text) in files {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    dir
 }
 
 /// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
 /// cannot bind or call one.
 #[test]
 fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
-    let drawn = named_outside_tests(|name| {
+    let drawn = named_outside_tests(&src(), |name| {
         ["UA_UInt32_random", "UA_Guid_random"].contains(&name)
     });
     assert!(drawn.is_empty(), "the Rust names {drawn:?}");
@@ -540,7 +612,7 @@ fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
 /// `cargo xtask open62541` lets call the global clock.
 #[test]
 fn the_rust_outside_tests_builds_no_server() {
-    let named = named_outside_tests(|name| {
+    let named = named_outside_tests(&src(), |name| {
         name.starts_with("UA_Server")
             || ["shim_server_new", "UA_random_seed"].contains(&name)
     });
@@ -553,7 +625,7 @@ fn the_rust_outside_tests_builds_no_server() {
 /// logger of its loop, and the stderr tests of `event` check that.
 #[test]
 fn the_rust_outside_tests_gives_no_client_the_stdout_logger() {
-    let named = named_outside_tests(|name| {
+    let named = named_outside_tests(&src(), |name| {
         name.starts_with("UA_Client_new") || name.starts_with("UA_Log_Stdout")
     });
     assert!(named.is_empty(), "the Rust outside tests names {named:?}");
@@ -600,8 +672,8 @@ fn the_rust_and_the_shim_give_a_client_no_security_policy() {
         name.starts_with("UA_SecurityPolicy")
             || ["securityPolicies", "authSecurityPolicies"].contains(&name)
     };
-    let mut named = named_outside_tests(policy);
-    for path in [files_under("c"), files_under("h")].concat() {
+    let mut named = named_outside_tests(&src(), policy);
+    for path in [files_under(&src(), "c"), files_under(&src(), "h")].concat() {
         named.extend(named_in(&path, policy));
     }
     assert!(named.is_empty(), "names {named:?}");
