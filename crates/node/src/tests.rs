@@ -1806,7 +1806,8 @@ mod home {
 
     /// A read of the ring that fails at a restart over a handoff record fails the
     /// node with its error, in the open of the buffer and in the open of the home
-    /// over it: the fault lands at each step of 25 us until the opens are done.
+    /// over it: the fault lands at each step of 25 us until the opens are done. Then
+    /// the node runs a task.
     #[test]
     fn a_failed_read_at_a_restart_over_a_handoff_fails_the_node() {
         use super::hub::{I64, data, define, index, write, writer};
@@ -1835,13 +1836,17 @@ mod home {
             sim.crash(&host, sim::Crash::Process);
             drop(node);
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            let probe = probe(&node);
             assert_eq!(sim.run_for(after), Ok(()), "{after:?}");
             host.fail_file(ring, env::files::Operation::ReadAt);
             assert_eq!(sim.run_for(Span::SECOND), Ok(()), "{after:?}");
             node.stop();
             assert_eq!(sim.run(), Ok(()), "{after:?}");
             match node.join() {
-                Ok(()) => break,
+                Ok(()) => {
+                    assert_eq!(fate(&probe), Fate::Ran, "{after:?}");
+                    break;
+                }
                 joined => assert_eq!(joined, Err(error.clone()), "{after:?}"),
             }
             assert!(after < Span::from_nanos(10_000_000), "the opens go on");
