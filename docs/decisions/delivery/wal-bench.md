@@ -22,3 +22,13 @@
   Supersedes "Its head numbers are the baseline of the `wal` benchmark" in
   https://github.com/synnaxlabs/foundation/pull/1698#issuecomment-6050306136. The
   #1698 numbers stay the record of the P1 judgment of #1698 only.
+  `bench` also has `Logs { new, commit }` over `log::Logs`, for the bench
+  `benches/logs.rs` (`test = true`). `commit` first hides the earlier records, as a
+  trim that keeps up, then syncs one data entry of each index, so a time holds the
+  cost of `Logs::sync` for each durable entry. Lost: a time of the commit on a
+  simulated file system, whose file writes hide the sync. Lost: a time after a
+  tagged entry in each log, as no sync of a data entry reads the tags. Decided by
+  `laptop.architect` (#2236, 2026-10-10T05:43:41Z):
+  https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094318889. The
+  time with no tag is decided by `laptop.architect` (#2236, 2026-10-10T05:58:44Z):
+  https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094432871.

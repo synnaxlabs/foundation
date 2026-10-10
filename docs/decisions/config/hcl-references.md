@@ -1,10 +1,10 @@
 - **HCL REFERENCES (2026-10-05)** The reader reads a reference part by part, as HCL
   reads a traversal: identifiers joined by `.`, with spaces around each `.` and new
   lines inside `[` and `(`. A first part `true`, `false`, or `null` is a value, so
-  `true.x` is an index. After a `.`, a number is an index (`site_a.1` is `Form::Index`),
+  `true.x` is an index. After a `.`, a number is an index (`site_a.1` is `hcl.index`),
   `*` is a splat, and any other token is a syntax error. An index that is a string with
   no template, quoted or heredoc, is one more segment: `plc["40001"]` is `plc.40001`,
-  `a["b"]` is `a.b`, and `plc["a.b"]` is `plc.a.b`. Any other index is `Form::Index`.
+  `a["b"]` is `a.b`, and `plc["a.b"]` is `plc.a.b`. Any other index is `hcl.index`.
   `write` gives each later segment that is not an identifier as a string index
   (`plc["40001"]`, `site_a["@changes"]`). A first segment that does not start with a
   letter or `_`, or that is `true`, `false`, or `null`, has no reference form, and

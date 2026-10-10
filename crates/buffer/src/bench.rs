@@ -1,5 +1,10 @@
-//! `wal::Writer`, for the bench target only. Not a stable surface.
+//! `wal::Writer` and `log::Logs`, for the bench targets only. Not a stable surface.
 
+use types::channel::{self, Slot};
+use types::frame::Path;
+use types::time::Stamp;
+
+use crate::entry::Header;
 use crate::record::{ALIGN, BLOCK};
 use crate::wal::{Ends, Layout, Position, Writer};
 
@@ -65,6 +70,55 @@ impl Ring {
     }
 }
 
+/// The durable logs of a shard, synced as each commit syncs them.
+#[derive(Debug)]
+pub struct Logs {
+    inner: crate::log::Logs,
+    headers: Vec<(Slot, Header)>,
+    offset: u64,
+}
+
+impl Logs {
+    /// The logs of `indexes` indexes on the live path.
+    #[must_use]
+    pub fn new(indexes: u32) -> Self {
+        let headers = (0..indexes)
+            .map(|n| {
+                let header = Header {
+                    index: channel::Key::from_u128(u128::from(n) + 1),
+                    path: Path::Live,
+                    first: 0,
+                    len: 1,
+                    stored_at: Stamp::from_nanos(1),
+                    last: Some(Stamp::from_nanos(1)),
+                    tag: 0,
+                    bytes: 8,
+                };
+                (Slot::new(n), header)
+            })
+            .collect();
+        Self {
+            inner: crate::log::Logs::default(),
+            headers,
+            offset: BLOCK,
+        }
+    }
+
+    /// One commit of one record that holds one data entry of each index. It first
+    /// hides the earlier records, as a trim that keeps up, so each log holds one run.
+    /// Then it syncs each entry.
+    pub fn commit(&mut self) {
+        self.inner.hide(self.offset);
+        for (slot, header) in &mut self.headers {
+            self.inner
+                .sync(*slot, header, self.offset)
+                .expect("entries in order");
+            header.first += 1;
+        }
+        self.offset += BLOCK;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -90,6 +144,23 @@ mod tests {
         let mut ring = Ring::new(64);
         for _ in 0..1000 {
             ring.commit(8);
+        }
+    }
+
+    /// Each commit moves the durable tail of each index past one more entry, and
+    /// each log keeps one run. It reads the private logs: `commit` gives nothing back,
+    /// and only the `logs` bench calls it, so no caller sees a commit that skips the
+    /// sync or the hide.
+    #[test]
+    fn each_commit_of_the_logs_syncs_one_entry_of_each_index() {
+        let mut logs = Logs::new(2);
+        for _ in 0..3 {
+            logs.commit();
+        }
+        for n in 0..2 {
+            let slot = Slot::new(n);
+            assert_eq!(logs.inner.durable(slot, Path::Live).seq, 3, "index {n}");
+            assert_eq!(logs.inner.runs(slot, Path::Live).count(), 1, "index {n}");
         }
     }
 }

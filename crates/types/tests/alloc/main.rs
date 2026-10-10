@@ -1,14 +1,18 @@
 //! Building and reading a frame or a view, and building a frame from the ends and
-//! series bytes that another node sends, make no heap allocation. This binary has
+//! series bytes that another node sends, make no heap allocation. Nor does a new
+//! `wait::Set`, or one that fills again after a drain. This binary has
 //! no test harness: the count covers each thread, and a harness allocates on its own
 //! thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::task::Waker;
+
 use types::channel::Key;
 use types::frame::key_set::{Group, Interner, KeySet};
 use types::frame::{self, Draft, Form, Layout, Mask, Path, Places, Range, View};
 use types::sample::{Scalar, Type};
+use types::wait;
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
@@ -42,6 +46,29 @@ fn main() {
     read_a_view(&pool, &set);
     receive_a_frame(&pool, &set);
     lay_places(&pool, &set, &other);
+    wait_again();
+}
+
+fn wait_again() {
+    let (mut set, allocations) = ALLOCATOR.count(wait::Set::new);
+    assert_eq!(allocations, 0, "a new set allocated");
+    let fill = |set: &mut wait::Set| {
+        for key in 0..4 {
+            assert!(set.insert(key, Waker::noop()).is_none(), "each key is new");
+        }
+    };
+    fill(&mut set);
+    let mut woken = Vec::with_capacity(4);
+    let ((), allocations) = ALLOCATOR.count(|| {
+        set.drain(&mut woken);
+        assert_eq!(woken.len(), 4, "the drain moves each waker");
+        woken.clear();
+        fill(&mut set);
+    });
+    assert_eq!(
+        allocations, 0,
+        "a set that fills again after a drain allocated"
+    );
 }
 
 const SERIES: [(usize, usize); 2] = [(0, 16), (2, 16)];

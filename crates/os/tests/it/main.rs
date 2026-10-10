@@ -12,6 +12,8 @@ mod disk;
 mod entropy;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod files;
+#[cfg(target_os = "macos")]
+mod free;
 #[cfg(target_os = "linux")]
 mod kept;
 #[cfg(target_os = "linux")]

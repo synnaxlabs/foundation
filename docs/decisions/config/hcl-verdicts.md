@@ -3,7 +3,7 @@
   small Go program next to the texts lists the diagnostic code that `read` gives for
   each form outside data in it, such as `hcl.null`. A test checks that `read` accepts
   exactly the accepted texts with no code, refuses each other accepted text only with
-  `Error::Form` of the codes listed for it, and refuses each refused text.
+  the codes listed for it, and refuses each refused text.
   `differences.txt` lists each text where `read` differs from HCL on purpose, with its
   outcome and the decision behind it, and the test checks that outcome instead. For
   each text that reads, `write` must give the bytes of a text in the directory that is

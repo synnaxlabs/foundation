@@ -361,7 +361,7 @@ state on `main`.
   `cargo deny check advisories bans licenses sources` runs in CI on each change to a
   manifest. aws-lc-rs is the only crypto provider, with one recorded exception.
 - `unsafe` is denied in the workspace. The crates that allow it (`block`, `ring`,
-  `counting`) run under Miri in CI.
+  `counting`, `waker`) run under Miri in CI.
 - The `fuzz/` crate has its own lock file. The `deny` job of `ci.yaml` checks it with
   `cargo deny` on each change to it.
 - A local patch of a Rust crate (`patches/`) is a path package, which `cargo deny`
@@ -396,7 +396,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
 | `codec_string` | `codec::Encoder`, `codec::validate`, `codec::decode` on a `String` series | Each refuses at the first sample that `str::from_utf8` refuses, and at no other |
-| `codec_shape` | `codec::validate`, `codec::decode` on an array, matrix, list, `String`, or `Bytes` series | Both give one result; an array or a matrix gives the result of the series of its elements; a `String` series gives the result of a `Bytes` series or the first sample that `str::from_utf8` refuses; a valid series decodes with zeros for the padding, and encodes and decodes unchanged |
+| `codec_shape` | `codec::validate`, `codec::decode`, `codec::Variable` on an array, matrix, list, `String`, or `Bytes` series | Both give one result; an array or a matrix gives the result of the series of its elements; a `String` series gives the result of a `Bytes` series or the first sample that `str::from_utf8` refuses; a valid series decodes with zeros for the padding, and encodes and decodes unchanged; `Variable` reads the samples of a valid variable series and writes them back to the same bytes |
 | `codec_shape_encoder` | `codec::Encoder` on an array, matrix, list, `String`, or `Bytes` series | Gives the refusal that a second reader of the raw form gives, or a valid series that decodes unchanged with zeros for the padding; an array or a matrix encodes as the series of its elements |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
@@ -422,7 +422,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `types_frame_ends` | `frame::Layout::from_ends`, `frame::check`, `frame::split` | Refuses exactly the ends that break a rule, with an error that names a broken rule; the layout is the one that `Layout::new` gives for the lengths; a frame drafted from the ends has them, and `split` cuts its series at them; `check` refuses exactly the ends that do not fit a body whose length the input gives, and `split` cuts a body that `check` took at them. Not reached: the panics of `split`, a body over 64 KiB |
 | `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
-| `node_identity` | `node::identity::decode` and `encode`, by `node::fuzz::identity` (feature `sim`), on 68 bytes, or on 64 bytes with their CRC32C | Gives an identity exactly for bytes with the tag and the CRC32C, and that identity encodes to the same bytes |
+| `node_identity` | `node::identity::decode` and `encode`, by `node::fuzz::identity` (feature `sim`), on 100 bytes, or on 96 bytes with their CRC32C | Gives an identity exactly for bytes with the tag and the CRC32C, and that identity encodes to the same bytes |
 
 No target yet, because the decoder is private, not built, not reached from a file, or
 not reached from the corpus: `transport::message` (#55), the QUIC hello
@@ -434,7 +434,8 @@ answer (`mesh::Member::decode` from a peer, #336 adds its target), the names in 
 directory of the spec in use (`mesh::driver::used::pointer`, #1746), each connector's
 protocol parser, the file `name` of the data directory (`node::name::decode`, #2174),
 the file `budget` of the data directory (`node::budget::decode`, #2174), the parsers of
-`/proc/self/mountinfo` and `/proc/self/cgroup` in `os::memory` (#2226), the chunk
+`/proc/self/mountinfo` and `/proc/self/cgroup` in `os::memory` (#2226), the newest
+handoff record of each index in the ring (`home::handoff::read`, #2278), the chunk
 processing of open62541 (`ua_securechannel.c`, #1990), and `connector::reader::read`,
 `connector::http::uri`, and `connector_influx::Kind::parse`, which `config_check`
 reaches only from an input with a `connector` block of kind `influx`, and no input holds
