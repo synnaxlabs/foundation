@@ -194,8 +194,8 @@ impl<'a> Reading<'a> {
     }
 }
 
-/// The last entry with `tag` on `path` of each index of `pending` in the record at
-/// `place` in the ring `file`, with its index, in no order.
+/// The last entry with `tag` on `path` of each index of `wanted` in the record at
+/// `place` in the ring `file`, with the index's slot from `wanted`, in no order.
 ///
 /// # Errors
 ///
@@ -206,26 +206,27 @@ pub(crate) async fn newest(
     pool: &Pool,
     place: u64,
     (path, tag): (Path, u8),
-    pending: &hash::Map<channel::Key, Slot>,
-) -> Result<Vec<(channel::Key, Stored)>, Error> {
+    wanted: &hash::Map<channel::Key, Slot>,
+) -> Result<Vec<(Slot, Stored)>, Error> {
     let table = table(file, pool, place).await?;
-    let mut last: Vec<(Header, usize)> = Vec::new();
+    let mut last: Vec<(Slot, Header, usize)> = Vec::new();
     for (header, offset) in headers(&table) {
-        if (header.path, header.tag) != (path, tag)
-            || !pending.contains_key(&header.index)
-        {
+        let Some(&slot) = wanted.get(&header.index) else {
+            continue;
+        };
+        if (header.path, header.tag) != (path, tag) {
             continue;
         }
-        match last.iter_mut().find(|(seen, _)| seen.index == header.index) {
-            Some(seen) => *seen = (header, offset),
-            None => last.push((header, offset)),
+        match last.iter_mut().find(|(seen, ..)| *seen == slot) {
+            Some(seen) => *seen = (slot, header, offset),
+            None => last.push((slot, header, offset)),
         }
     }
     drop(table);
     let mut found = Vec::with_capacity(last.len());
-    for (header, offset) in last {
+    for (slot, header, offset) in last {
         let bytes = bytes(file, pool, place, offset, header.bytes).await?;
-        found.push((header.index, stored(header, bytes)));
+        found.push((slot, stored(header, bytes)));
     }
     Ok(found)
 }

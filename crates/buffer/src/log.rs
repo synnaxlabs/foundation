@@ -182,6 +182,9 @@ struct Log {
     /// How many durable entries with no samples are at `durable.seq`.
     empty: u64,
     runs: VecDeque<Run>,
+    /// Each tag of a durable entry, with the offset of the newest record that
+    /// holds a durable entry of it.
+    tags: Vec<(u8, u64)>,
 }
 
 impl Log {
@@ -192,6 +195,7 @@ impl Log {
             durable: Tail::default(),
             empty: 0,
             runs: VecDeque::new(),
+            tags: Vec::new(),
         }
     }
 
@@ -214,6 +218,10 @@ impl Log {
         let start = self.end();
         self.durable.advance(header)?;
         self.empty = start.after(header.first, header.len).given;
+        match self.tags.iter_mut().find(|(tag, _)| *tag == header.tag) {
+            Some((_, newest)) => *newest = offset,
+            None => self.tags.push((header.tag, offset)),
+        }
         if let Some(newest) = self.runs.back() {
             assert!(
                 newest.offset <= offset,
@@ -299,21 +307,21 @@ impl Logs {
         }
     }
 
-    /// The offset of each record that is not hidden and holds a durable entry of
-    /// `path`, with the slot and the index of the entry, in no order. A record that
-    /// holds the entries of n indexes on `path` comes n times.
-    pub(crate) fn records(&self, path: Path) -> Vec<(u64, Slot, channel::Key)> {
+    /// The offset of the newest record that holds a durable entry with `tag` on
+    /// `path`, for each index whose record is not hidden, with its slot and index,
+    /// in no order.
+    pub(crate) fn tagged(&self, path: Path, tag: u8) -> Vec<(u64, Slot, channel::Key)> {
         let logs = self.paths.iter().filter(|((_, on), _)| *on == path);
-        logs.flat_map(|(&(slot, _), log)| {
-            let runs = log.runs.iter().filter(|run| !run.before(self.hidden));
-            runs.map(move |run| (run.offset, slot, log.index))
+        logs.filter_map(|(&(slot, _), log)| {
+            let &(_, offset) = log.tags.iter().find(|&&(of, _)| of == tag)?;
+            (offset >= self.hidden).then_some((offset, slot, log.index))
         })
         .collect()
     }
 
     /// Hides the records before the offset `tail` from each later
-    /// [`find`](Self::find) and [`records`](Self::records). A later record that adds a run to a path drops the
-    /// path's hidden runs, so this call visits no path.
+    /// [`find`](Self::find) and [`tagged`](Self::tagged). A later record that adds a
+    /// run to a path drops the path's hidden runs, so this call visits no path.
     ///
     /// # Panics
     ///

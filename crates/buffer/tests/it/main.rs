@@ -5672,11 +5672,11 @@ fn newest_with_no_block_for_the_entry_gives_the_pool_error() {
     });
 }
 
-/// `newest` reads the table of each record at most once for all indexes, then the
+/// `newest` reads the table of a record once for all indexes tagged in it, then the
 /// bytes of each entry it gives. Three indexes, each tagged in the first record and
-/// with data in the second: two tables and three entries make five reads.
+/// with data in the second: one table and three entries make four reads.
 #[test]
-fn newest_reads_each_record_table_at_most_once() {
+fn newest_reads_one_table_for_the_indexes_tagged_in_one_record() {
     run_on_memory(180, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
@@ -5714,15 +5714,15 @@ fn newest_reads_each_record_table_at_most_once() {
         let before = shard.memory().reads();
         let found = newest(&buffer, Path::Live, 1).await.expect("reads");
         assert_eq!(found.len(), 3);
-        assert_eq!(shard.memory().reads() - before, 5);
+        assert_eq!(shard.memory().reads() - before, 4);
     });
 }
 
-/// `newest` reads no table of a record whose indexes each have their entry. A is
-/// tagged in the first record and b in the third, so the second, which holds only
-/// b, is not read: three tables and two entries make five reads.
+/// `newest` reads no table of a record that holds no newest tagged entry. A is
+/// tagged in the first record and b in the third, so the second and the fourth are
+/// not read: two tables and two entries make four reads.
 #[test]
-fn newest_skips_a_record_whose_indexes_have_their_entry() {
+fn newest_reads_only_the_records_of_the_newest_tagged_entries() {
     run_on_memory(184, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
@@ -5756,15 +5756,15 @@ fn newest_skips_a_record_whose_indexes_have_their_entry() {
             (b, stored_tagged(1, 1, shard.block(2))),
         ];
         assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(expected));
-        assert_eq!(shard.memory().reads() - before, 5);
+        assert_eq!(shard.memory().reads() - before, 4);
     });
 }
 
-/// As above at scale: 64 indexes tagged in the first record, then 400 records that
-/// each hold data of all 64. The reads are one per table and one per entry given:
-/// 401 + 64.
+/// 64 indexes tagged in the first record, then 400 records that each hold data of
+/// all 64. The reads do not grow with the records after the tags: one table and one
+/// read for each entry given.
 #[test]
-fn newest_reads_scale_with_records_not_records_times_indexes() {
+fn newest_reads_no_record_after_the_tags() {
     run_on_memory(183, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
@@ -5799,7 +5799,7 @@ fn newest_reads_scale_with_records_not_records_times_indexes() {
         let before = shard.memory().reads();
         let found = newest(&buffer, Path::Live, 1).await.expect("reads");
         assert_eq!(found.len(), 64);
-        assert_eq!(shard.memory().reads() - before, 401 + 64);
+        assert_eq!(shard.memory().reads() - before, 1 + 64);
     });
 }
 

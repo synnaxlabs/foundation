@@ -5,7 +5,6 @@
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
 use std::cell::RefCell;
-use std::cmp::Reverse;
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
@@ -494,9 +493,8 @@ impl Buffer {
 
     /// The newest durable entry with `tag` on `path` of each index that has one, with
     /// the index's slot, in no order. It skips records that a trim hid, and a trim
-    /// frees no record that the call reads. It reads the table of each record at most
-    /// once, from the newest record back, until each index has its entry or no record
-    /// is left, then the bytes of each entry it gives.
+    /// frees no record that the call reads. It reads only the table of each record
+    /// that holds an entry it gives, once, then the bytes of each entry it gives.
     ///
     /// # Errors
     ///
@@ -523,32 +521,19 @@ impl Buffer {
         let Shared {
             file, pool, layout, ..
         } = &*self.shared;
-        let mut records = self.shared.state.borrow().logs.records(path);
-        records.sort_unstable_by_key(|&(offset, ..)| Reverse(offset));
-        let mut pending: hash::Map<channel::Key, Slot> = records
-            .iter()
-            .map(|&(_, slot, index)| (index, slot))
-            .collect();
-        let mut found = Vec::with_capacity(pending.len());
+        let mut records = self.shared.state.borrow().logs.tagged(path, tag);
+        records.sort_unstable_by_key(|&(offset, ..)| offset);
+        let mut found = Vec::with_capacity(records.len());
         for record in records.chunk_by(|a, b| a.0 == b.0) {
-            if pending.is_empty() {
-                break;
-            }
-            if !record
-                .iter()
-                .any(|(_, _, index)| pending.contains_key(index))
-            {
-                continue;
-            }
             let [(offset, ..), ..] = *record else {
                 unreachable!("invariant: a chunk is not empty");
             };
+            let wanted: hash::Map<channel::Key, Slot> = record
+                .iter()
+                .map(|&(_, slot, index)| (index, slot))
+                .collect();
             let place = AREA_START + layout.place(offset);
-            let stored = read::newest(file, pool, place, (path, tag), &pending).await?;
-            for (index, stored) in stored {
-                let slot = pending.remove(&index);
-                found.push((slot.expect("invariant: only a pending index"), stored));
-            }
+            found.extend(read::newest(file, pool, place, (path, tag), &wanted).await?);
         }
         Ok(found)
     }
