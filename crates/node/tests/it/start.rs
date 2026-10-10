@@ -211,7 +211,7 @@ fn a_budget_file_that_holds_no_budgets_fails() {
 #[test]
 fn a_kept_pool_budget_that_gives_a_shard_too_little_fails() {
     let rig = Rig::new();
-    rig.keep(1024, Rig::disk());
+    rig.keep(1024, rig.disk);
     let output = rig.run(&["start", "--name", "edge"], b"");
     let (status, out, errors) = ended(&output);
     assert_eq!((status, out), (Some(1), ""));
