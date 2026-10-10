@@ -335,18 +335,18 @@
   supersedes the later open of the plan
   (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063177321), which
   reads and compares `founding` at each open after the first. It also supersedes the
-  rule of #1209 that a crash before the log exists leaves a first open only for the
-  same set. Each open whose log holds a record compares `founding` with
-  `Config::founding`, its members in key order, before `raft` starts. Another value
-  gives `Error::Founding { stored, given }`, each a `Box<region::Founding>`. Its text
-  names the first field that differs: the prefix and the voters in the form "the mesh
-  was founded with voters {stored}, not {given}", and for the members, the definitions,
-  and the homes the first key in key order whose value differs or is in only one of the
-  two. A text of the homes names the index by the tree key of its `Definition::Channel`
-  in `stored`, or by its key when no definition has it: "the mesh was founded with
-  another home of index {name}", "... with a home of index {name}, which the config
-  lacks", and "... with no home of index {name}" (`laptop.architect`,
-  2026-10-09T23:18:27Z:
+  rule of https://github.com/synnaxlabs/foundation/issues/1209 that a crash before the
+  log exists leaves a first open only for the same set. Each open whose log holds a
+  record compares `founding` with `Config::founding`, its members in key order, before
+  `raft` starts. Another value gives `Error::Founding { stored, given }`, each a
+  `Box<region::Founding>`. Its text names the first field that differs: the prefix and
+  the voters in the form "the mesh was founded with voters {stored}, not {given}", and
+  for the members, the definitions, and the homes the first key in key order whose value
+  differs or is in only one of the two. A text of the homes names the index by the tree
+  key of its `Definition::Channel` in `stored`, or by its key when no definition has it:
+  "the mesh was founded with another home of index {name}", "... with a home of index
+  {name}, which the config lacks", and "... with no home of index {name}"
+  (`laptop.architect`, 2026-10-09T23:18:27Z:
   https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6090902577). A log
   with a record and no `founding`, or a `founding` that fails its check, its version, or
   its decode, gives `Error::Unfounded { path }`. A failed file call on `founding` gives
