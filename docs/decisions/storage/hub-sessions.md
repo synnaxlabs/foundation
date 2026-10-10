@@ -331,3 +331,18 @@
   (`laptop.architect`, 2026-10-09T19:33:23Z:
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6087879895).
   Trigger: #1155 removes `reader::Error::Remote` when a named reader opens across nodes.
+  Amended (#2185): `Hub::new` states when the hub lets go of the region, so `node` cites
+  the hub and not one of its tasks (`laptop.architect`, 2026-10-09T21:38:13Z:
+  https://github.com/synnaxlabs/foundation/issues/2185#issuecomment-6089685674). The hub
+  holds the home and `hub::Config::region` until the hub and each value and future that
+  it gave, directly or through another such value, drop (`laptop.architect`,
+  2026-10-09T23:21:55Z, the class in place of a list of holders:
+  https://github.com/synnaxlabs/foundation/pull/2197#issuecomment-6090938158). Each task
+  of the hub ends at its next poll after that, holding neither. The test
+  `remote::lets_go_of_the_transport_once_the_hub_each_session_and_each_link_drop` drops
+  a writer and a `Link` beside a remote reader, and asserts that the hub lets go of the
+  transport at the next poll of its tasks, and that the transport has no other holder
+  once the region drops. Lost: `Hub::ended`, because the event that `node` waits for is
+  the free port, which the transport gives, so a hub future adds a surface whose one
+  caller must still wait for the transport (`laptop.architect`, 2026-10-09T21:38:13Z:
+  https://github.com/synnaxlabs/foundation/issues/2185#issuecomment-6089685674).

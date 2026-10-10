@@ -12,16 +12,34 @@ mod children;
 #[path = "common/sockets.rs"]
 mod sockets;
 
+use std::os::fd::AsRawFd;
+
+use rustix::net::{AddressFamily, SocketType};
+
 #[test]
 fn no_child_holds_a_socket_that_os_holds() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()
         .expect("a current-thread runtime builds");
+    // Stands in for a socket that the parent of this process leaves open, as cargo
+    // leaves the socket of a download.
+    let _left_open = rustix::net::socket(AddressFamily::INET, SocketType::DGRAM, None)
+        .expect("a UDP socket opens");
+    let baseline = children::Baseline::list();
+    let opened = rustix::net::socket(AddressFamily::INET, SocketType::DGRAM, None)
+        .expect("a UDP socket opens");
+    let path = format!("/dev/fd/{}", opened.as_raw_fd());
+    assert_eq!(
+        baseline.added(),
+        vec![path],
+        "a socket opened after the baseline"
+    );
+    drop(opened);
     let net = os::net();
     let held = runtime.block_on(async {
         let _sockets = sockets::open(&net).await;
-        children::held()
+        baseline.added()
     });
     assert_eq!(held, Vec::<String>::new());
 }

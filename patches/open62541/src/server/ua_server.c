@@ -361,6 +361,18 @@ cmpServerComponent(const UA_UInt64 *a, const UA_UInt64 *b) {
     return (*a < *b) ? ZIP_CMP_LESS : ZIP_CMP_MORE;
 }
 
+static UA_Boolean
+testStoppedCondition(UA_Server *server);
+
+/* A server on an external EventLoop is STOPPED when its last component stops.
+ * A component stops only in UA_Server_run_shutdown, or in a failed
+ * UA_Server_run_startup, where the server is STOPPED already. */
+static void
+notifyServerComponentState(UA_ServerComponent *sc, UA_LifecycleState state) {
+    if(testStoppedCondition(sc->server))
+        setServerLifecycleState(sc->server, UA_LIFECYCLESTATE_STOPPED);
+}
+
 void
 addServerComponent(UA_Server *server, UA_ServerComponent *sc,
                    UA_UInt64 *identifier) {
@@ -368,6 +380,7 @@ addServerComponent(UA_Server *server, UA_ServerComponent *sc,
         return;
 
     sc->identifier = ++server->serverComponentIds;
+    sc->notifyState = notifyServerComponentState;
     ZIP_INSERT(UA_ServerComponentTree, &server->serverComponents, sc);
 
     /* Start the component if the server is started */

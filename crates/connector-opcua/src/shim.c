@@ -7,6 +7,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <open62541/client_config_default.h>
+#include <open62541/server_config_default.h>
 #include <open62541/plugin/eventloop.h>
 #include <open62541/types.h>
 #include <open62541/util.h>
@@ -379,6 +380,9 @@ void shim_loop_free(UA_EventLoop *el) {
 typedef struct {
     UA_StatusCode (*open)(void *state, UA_String host, UA_UInt16 port, void *application,
                           void *context, UA_ConnectionManager_connectionCallback callback);
+    UA_StatusCode (*listen)(void *state, UA_String host, UA_UInt16 port,
+                            void *application, void *context,
+                            UA_ConnectionManager_connectionCallback callback);
     UA_StatusCode (*send)(void *state, uintptr_t id, UA_ByteString *buffer);
     UA_StatusCode (*close)(void *state, uintptr_t id);
 } shim_hooks;
@@ -428,21 +432,37 @@ static UA_StatusCode cm_free(UA_EventSource *es) {
     return UA_STATUSCODE_BADINTERNALERROR;
 }
 
-/* Opens a client connection to the `address` and `port` of `params`. */
+/* Listens on the `port` of `params`, or opens a client connection to its `address`
+ * and `port`. The listener of the manager sets the address of a listen, which names
+ * its host in `address` as a string or an array of at most one, since the manager
+ * has one listener. */
 static UA_StatusCode cm_open(UA_ConnectionManager *cm, const UA_KeyValueMap *params,
                              void *application, void *context,
                              UA_ConnectionManager_connectionCallback callback) {
+    struct shim_cm *s = cm_of(cm);
     const UA_Boolean *listen = (const UA_Boolean *)UA_KeyValueMap_getScalar(
         params, UA_QUALIFIEDNAME(0, "listen"), &UA_TYPES[UA_TYPES_BOOLEAN]);
-    if(listen && *listen)
-        return UA_STATUSCODE_BADNOTSUPPORTED;
-    const UA_String *address = (const UA_String *)UA_KeyValueMap_getScalar(
-        params, UA_QUALIFIEDNAME(0, "address"), &UA_TYPES[UA_TYPES_STRING]);
     const UA_UInt16 *port = (const UA_UInt16 *)UA_KeyValueMap_getScalar(
         params, UA_QUALIFIEDNAME(0, "port"), &UA_TYPES[UA_TYPES_UINT16]);
-    if(!address || !port)
+    if(!port)
         return UA_STATUSCODE_BADINVALIDARGUMENT;
-    struct shim_cm *s = cm_of(cm);
+    if(listen && *listen) {
+        UA_String host = UA_STRING_NULL;
+        const UA_Variant *hosts =
+            UA_KeyValueMap_get(params, UA_QUALIFIEDNAME(0, "address"));
+        if(hosts) {
+            size_t size = UA_Variant_isScalar(hosts) ? 1 : hosts->arrayLength;
+            if(hosts->type != &UA_TYPES[UA_TYPES_STRING] || size > 1)
+                return UA_STATUSCODE_BADINVALIDARGUMENT;
+            if(size == 1)
+                host = *(const UA_String *)hosts->data;
+        }
+        return s->hooks->listen(s->state, host, *port, application, context, callback);
+    }
+    const UA_String *address = (const UA_String *)UA_KeyValueMap_getScalar(
+        params, UA_QUALIFIEDNAME(0, "address"), &UA_TYPES[UA_TYPES_STRING]);
+    if(!address)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
     return s->hooks->open(s->state, *address, *port, application, context, callback);
 }
 
@@ -523,6 +543,32 @@ void shim_cm_free(UA_ConnectionManager *cm) {
     UA_free(cm);
 }
 
+/* Calls `callback` with `ESTABLISHED`, no message, and the string of the `length`
+ * bytes at `address`: as `listen-address` with `port` as `listen-port` when `port`
+ * is not NULL, else as `remote-address`. A `length` of 0 gives no params. The params
+ * live on the stack. */
+void shim_establish(UA_ConnectionManager *cm, uintptr_t id, void *application,
+                    void **context, UA_ConnectionManager_connectionCallback callback,
+                    const UA_Byte *address, size_t length, const UA_UInt16 *port) {
+    UA_String text = {length, (UA_Byte *)(uintptr_t)address};
+    UA_KeyValuePair pairs[2];
+    UA_KeyValueMap params = {0, pairs};
+    if(length > 0) {
+        pairs[0].key = UA_QUALIFIEDNAME(0, port ? "listen-address" : "remote-address");
+        UA_Variant_setScalar(&pairs[0].value, &text, &UA_TYPES[UA_TYPES_STRING]);
+        params.mapSize = 1;
+        if(port) {
+            pairs[1].key = UA_QUALIFIEDNAME(0, "listen-port");
+            UA_Variant_setScalar(&pairs[1].value, (void *)(uintptr_t)port,
+                                 &UA_TYPES[UA_TYPES_UINT16]);
+            params.mapSize = 2;
+        }
+    }
+    UA_ByteString message = UA_BYTESTRING_NULL;
+    callback(cm, id, application, context, UA_CONNECTIONSTATE_ESTABLISHED, &params,
+             message);
+}
+
 /* Gives a client on `el`, or NULL on a failure. */
 UA_Client *shim_client_new(UA_EventLoop *el) {
     UA_ClientConfig config;
@@ -535,4 +581,58 @@ UA_Client *shim_client_new(UA_EventLoop *el) {
         return NULL;
     }
     return UA_Client_newWithConfig(&config);
+}
+
+/* Gives a server on `el` with the minimal config for `port` and the one server URL
+ * `url`, or NULL on a failure. */
+UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port, const char *url) {
+    UA_ServerConfig config;
+    memset(&config, 0, sizeof(config));
+    config.logging = &loop_of(el)->logger;
+    config.eventLoop = el;
+    config.externalEventLoop = true;
+    if(UA_ServerConfig_setMinimal(&config, port, NULL) != UA_STATUSCODE_GOOD) {
+        UA_ServerConfig_clear(&config);
+        return NULL;
+    }
+    UA_Array_delete(config.serverUrls, config.serverUrlsSize, &UA_TYPES[UA_TYPES_STRING]);
+    config.serverUrlsSize = 0;
+    UA_String text = UA_STRING((char *)(uintptr_t)url);
+    if(UA_Array_copy(&text, 1, (void **)&config.serverUrls, &UA_TYPES[UA_TYPES_STRING]) !=
+       UA_STATUSCODE_GOOD) {
+        config.serverUrls = NULL;
+        UA_ServerConfig_clear(&config);
+        return NULL;
+    }
+    config.serverUrlsSize = 1;
+    return UA_Server_newWithConfig(&config);
+}
+
+/* Sets `key` of `map` to an array of the `size` strings at `strings`, at most 4. */
+UA_StatusCode shim_map_set_strings(UA_KeyValueMap *map, const char *key,
+                                   const char *const *strings, size_t size) {
+    UA_String texts[4];
+    if(size > 4)
+        return UA_STATUSCODE_BADINVALIDARGUMENT;
+    for(size_t i = 0; i < size; i++)
+        texts[i] = UA_STRING((char *)(uintptr_t)strings[i]);
+    UA_Variant value;
+    /* An empty array points at the sentinel, else it reads as a scalar. */
+    UA_Variant_setArray(&value, size > 0 ? texts : UA_EMPTY_ARRAY_SENTINEL, size,
+                        &UA_TYPES[UA_TYPES_STRING]);
+    return UA_KeyValueMap_set(map, UA_QUALIFIEDNAME(0, (char *)(uintptr_t)key), &value);
+}
+
+/* Gives the service result of `response`, a response of a service. */
+UA_StatusCode shim_response_result(const void *response) {
+    return ((const UA_ResponseHeader *)response)->serviceResult;
+}
+
+/* Gives discovery URL `index` of `server`, or NULL past the last. */
+const UA_String *shim_server_discovery_url(UA_Server *server, size_t index) {
+    const UA_ApplicationDescription *description =
+        &UA_Server_getConfig(server)->applicationDescription;
+    if(index >= description->discoveryUrlsSize)
+        return NULL;
+    return &description->discoveryUrls[index];
 }

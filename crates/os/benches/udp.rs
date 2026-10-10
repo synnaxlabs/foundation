@@ -4,7 +4,7 @@
 //! Each sample sends and then receives all the bytes that arrive, except in `register`.
 use std::future::poll_fn;
 use std::io::IoSliceMut;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::os::fd::AsRawFd;
 
@@ -181,7 +181,7 @@ fn os_batch_without_gso(bencher: Bencher<'_, '_>) {
 fn os_batch_over_mtu(bencher: Bencher<'_, '_>) {
     let net = os::net();
     let config = udp::Config {
-        local: SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0),
+        local: SocketAddr::new(std::net::Ipv6Addr::LOCALHOST.into(), 0),
         send_buffer_bytes: 1 << 20,
         recv_buffer_bytes: 1 << 22,
     };
