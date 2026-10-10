@@ -50,12 +50,12 @@ mod linux {
         inactive: "inactive_file",
     };
 
-    /// A line of `mountinfo`, with each field as the kernel writes it.
+    /// A line of `mountinfo`.
     struct Mount<'a> {
-        root: &'a [u8],
-        point: &'a [u8],
+        root: PathBuf,
+        point: PathBuf,
         kind: &'a [u8],
-        options: &'a [u8],
+        super_options: &'a [u8],
     }
 
     impl<'a> Mount<'a> {
@@ -67,12 +67,12 @@ mod linux {
             // The mount options, then 0 or more optional fields up to `-`.
             let mut fields = fields.skip(1).skip_while(|field| *field != b"-").skip(1);
             let kind = fields.next()?;
-            let options = fields.nth(1)?;
+            let super_options = fields.nth(1)?;
             Some(Self {
-                root,
-                point,
+                root: unescape(root),
+                point: unescape(point),
                 kind,
-                options,
+                super_options,
             })
         }
     }
@@ -102,7 +102,7 @@ mod linux {
         let file = root.join("proc/meminfo");
         let mut least = mem_available(&file, &read(&file)?)?;
         let file = root.join("proc/self/cgroup");
-        let Some(cgroups) = optional(&file, bytes)? else {
+        let Some(cgroups) = optional(bytes(&file))? else {
             // A kernel with no cgroups.
             return Ok(least);
         };
@@ -118,8 +118,8 @@ mod linux {
             let Some((files, inside)) = hierarchy(&mount, &cgroups) else {
                 continue;
             };
-            let point = unescape(mount.point);
-            let top = root.join(point.strip_prefix("/").unwrap_or(&point));
+            let point = &mount.point;
+            let top = root.join(point.strip_prefix("/").unwrap_or(point));
             let mut dir = top.join(inside);
             loop {
                 if let Some(room) = room(&dir, &files)? {
@@ -141,7 +141,9 @@ mod linux {
     ) -> Option<(Files, PathBuf)> {
         let (files, controller) = match mount.kind {
             b"cgroup2" => (V2, None),
-            b"cgroup" if listed(mount.options, b"memory") => (V1, Some(b"memory")),
+            b"cgroup" if listed(mount.super_options, b"memory") => {
+                (V1, Some(b"memory"))
+            }
             _ => return None,
         };
         let cgroup = cgroups.iter().find(|cgroup| match controller {
@@ -149,7 +151,7 @@ mod linux {
             Some(controller) => listed(cgroup.controllers, controller),
         })?;
         let inside = Path::new(OsStr::from_bytes(cgroup.path))
-            .strip_prefix(unescape(mount.root))
+            .strip_prefix(&mount.root)
             .ok()?;
         // A cgroup outside the root of the cgroup namespace starts with `..`.
         let outside = inside.components().any(|c| c == Component::ParentDir);
@@ -193,7 +195,7 @@ mod linux {
 
     /// The room left in the cgroup `dir`, or `None` when it has no limit.
     fn room(dir: &Path, files: &Files) -> io::Result<Option<u64>> {
-        let Some(limit) = optional(&dir.join(files.limit), read)? else {
+        let Some(limit) = optional(read(&dir.join(files.limit)))? else {
             // The root cgroup, or one whose parent gives it no memory controller.
             return Ok(None);
         };
@@ -205,7 +207,7 @@ mod linux {
         let usage = dir.join(files.usage);
         let usage = number(&usage, read(&usage)?.trim())?;
         let stat = dir.join("memory.stat");
-        let Some(text) = optional(&stat, read)? else {
+        let Some(text) = optional(read(&stat))? else {
             // gVisor writes no `memory.stat`, so the working set is the usage.
             return Ok(Some(limit.saturating_sub(usage)));
         };
@@ -270,12 +272,9 @@ mod linux {
         io::Error::new(error.kind(), format!("{}: {error}", file.display()))
     }
 
-    /// What `read` gives for `file`, or `None` when it does not exist.
-    fn optional<T>(
-        file: &Path,
-        read: fn(&Path) -> io::Result<T>,
-    ) -> io::Result<Option<T>> {
-        match read(file) {
+    /// `read`, with a file that does not exist as `None`.
+    fn optional<T>(read: io::Result<T>) -> io::Result<Option<T>> {
+        match read {
             Ok(content) => Ok(Some(content)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
@@ -286,7 +285,8 @@ mod linux {
     mod tests {
         use super::*;
 
-        /// A file system root in a new temporary directory.
+        /// A file system root in a new temporary directory. The tests read through it,
+        /// not through the public call, which reads the live `/proc`.
         struct Root(PathBuf);
 
         impl Root {
@@ -387,6 +387,21 @@ mod linux {
             )
             .write("sys/fs/cgroup/a/memory.current", "0\n")
             .write("sys/fs/cgroup/a/memory.stat", "inactive_file 0\n");
+            assert_eq!(root.available().unwrap(), 8192 * MIB);
+        }
+
+        #[test]
+        fn a_named_hierarchy_whose_name_ends_in_memory_counts_for_nothing() {
+            let root = Root::new("v1-named");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "4:name=memory:/x\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "41 31 0:36 / /cg rw - cgroup cgroup rw,name=memory\n",
+                )
+                .write("cg/x/memory.limit_in_bytes", format!("{MIB}\n"))
+                .write("cg/x/memory.usage_in_bytes", "0\n")
+                .write("cg/x/memory.stat", "total_inactive_file 0\n");
             assert_eq!(root.available().unwrap(), 8192 * MIB);
         }
 
@@ -790,7 +805,8 @@ mod linux {
                 .write("proc/self/cgroup", "2:memory:/\n1:cpu:/\n")
                 .write(
                     "proc/self/mountinfo",
-                    "6 1 0:6 / /sys/fs/cgroup/memory rw,nosuid - cgroup none rw,memory\n",
+                    "6 1 0:6 / /sys/fs/cgroup/memory rw,nosuid - cgroup none \
+                     rw,memory\n",
                 )
                 .write("sys/fs/cgroup/memory/memory.limit_in_bytes", "1073741824\n")
                 .write("sys/fs/cgroup/memory/memory.usage_in_bytes", "104857600\n");
