@@ -51,13 +51,14 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 /// - `config.connector-home` at the `home` of a placement that wins for a connector and
 ///   names a node other than the connector's `node`.
 /// - `config.split-placement` at each index whose writers, the connectors that write
-///   it or a channel on it, are on one node, when the winner of a writer is not the
-///   winner of the index: once, naming each such writer, at the label of the index's
-///   placement, or of the first such writer's when no placement selects the index.
+///   or imply it or a channel on it, are on one node, when the winner of a writer is
+///   not the winner of the index: once, naming each such writer, at the label of the
+///   index's placement, or of the first such writer's when no placement selects the
+///   index.
 ///   Its fix is the one fix of the unit of the index: its writers, each connector
 ///   that writes another index of theirs, and so on.
 /// - `config.writer-nodes` at the `node` of the first connector, in name order, on a
-///   second node that writes an index or a channel on it.
+///   second node that writes or implies an index or a channel on it.
 /// - `config.unknown-node` at each node that a connector or a placement names and that
 ///   is not in `members`. The fix names a member that is equal to it without case.
 ///
