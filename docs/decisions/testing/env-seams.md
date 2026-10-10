@@ -13,8 +13,10 @@
   each is `Group { .. }` and `Ended { .. }`. `laptop.architect-2`
   (2026-10-09T21:02:50Z):
   https://github.com/synnaxlabs/foundation/issues/2064#issuecomment-6089208454, and
-  `Group::tasks` in place of the `Driver` impl:
-  https://github.com/synnaxlabs/foundation/pull/2218#issuecomment-6093107567. A crate
+  `Group::tasks` in place of the `Driver` impl (`laptop.architect-2`,
+  2026-10-10T03:02:51Z):
+  https://github.com/synnaxlabs/foundation/pull/2218#issuecomment-6093107567, which
+  supersedes `impl Driver for Group` in 6089208454. A crate
   that counts its tasks to wait until each has ended uses it, and keeps no count of its
   own. A future that gives the result of one task, such as `buffer::End`, counts
   nothing, so the rule does not cover it. `laptop.architect` (2026-10-10T03:02:58Z):

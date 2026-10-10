@@ -143,9 +143,11 @@
   `env::tasks::Ended` that `Group::ended` gives. `mesh::Ended` leaves the exports of
   `mesh`. The contract above holds. Decided by `laptop.architect`
   (2026-10-09T20:44:15Z):
-  https://github.com/synnaxlabs/foundation/issues/2064#issuecomment-6088942460. So
-  `Ended` is a type of another crate, under the rule above, and the `Debug` text of
-  `Ended` above is that of `env::tasks::Ended`, set in ENV SEAMS by
+  https://github.com/synnaxlabs/foundation/issues/2064#issuecomment-6088942460.
+  `Ended` is a type of another crate, under the rule above (`laptop.architect`,
+  2026-10-10T03:02:58Z:
+  https://github.com/synnaxlabs/foundation/pull/2218#issuecomment-6093108453), and the
+  `Debug` text of `Ended` above is that of `env::tasks::Ended`, set in ENV SEAMS by
   `laptop.architect-2` (2026-10-09T21:02:50Z):
   https://github.com/synnaxlabs/foundation/issues/2064#issuecomment-6089208454. This
   supersedes the `mesh::Ended` of
