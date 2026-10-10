@@ -60,16 +60,17 @@
   https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6053869186). The
   text of `error` is the text of the `Device` or `Retry` source, or the diagnostics of
   `Config` joined with `"; "`, cut to at most 1024 bytes at a char boundary, so a long
-  device error does not make a frame too large. `backoff` is the time of the next run
-  minus the time of the frame, so a frame written again later gives the wait that is
-  left. Decided by the `connector` builder in the plan on #420
+  device error does not make a frame too large. `backoff` is the time of the next run,
+  by the hub's clock, minus the time of the frame, so a frame written again later gives
+  the wait that is left, and a frame stamped after the hub's time (below) gives a wait
+  that ends at the next run. Decided by the `connector` builder in the plan on #420
   (https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074).
 
   Each write is one frame with the last value of every status channel. Each start of a
-  run writes the whole status. A change of `state`, `class`, or `restarts` is written as
-  soon as the home applied the state before it (below). A change of counts alone is
-  written at most once each second after the last write, timed with the clock of
-  `supervisor::Config` (`laptop.architect-2`, 2026-10-08T06:38:42Z:
+  run writes the whole status. A change of `state`, `class`, `restarts`, `backoff`, or
+  `error` is written as soon as the home applied the state before it (below). A change
+  of counts alone is written at most once each second after the last write, timed with
+  the clock of `supervisor::Config` (`laptop.architect-2`, 2026-10-08T06:38:42Z:
   https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6054035730, rules 1
   to 3). When a run returns, `state` 3 with the class of that end is written as soon as
   the home applied the state before it. When each task of the run ended, `state` 1, or 2
@@ -89,7 +90,7 @@
   `state` 3 and the next state stay two frames also when no task is left, because
   `state` 3 marks the end of the run (`laptop.architect-2`, 2026-10-09T19:51:38Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6088160535).
-  `status::Writer` holds the rules of `state`, `class`, and `restarts`, and the
+  `status::Writer` holds the rules of each channel but the counts, and the
   supervisor calls its `start`, `end`, `wait`, and `stop` (same ruling). A frame that
   the home does not apply (`Waiting`, `Reserved`, `Order`, or `Lost`), or for which the
   shard's pool has no block now (`block::Error::Exhausted` or `Refused` in
