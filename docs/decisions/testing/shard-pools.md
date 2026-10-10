@@ -9,4 +9,10 @@
   the shard's thread, which needs a second path for the error and a `Send + Sync`
   seam. The purge timer and `reclaim` on each loop turn land with the first PR that
   allocates from a pool, since no test can see either before then (#410). Proposed
-  by `ops` in #410; approved by the coordinator on #806.
+  by `ops` in #410; approved by the coordinator on #806. `block::Config::new` takes
+  the budget as a `u64` and gives `block::Unfit` when the pool's reservation does not
+  fit in the host's address space, so `node` passes each part as it is and keeps no
+  check of its own. Decided by `laptop.architect` (2026-10-07 10:27 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1317#issuecomment-6036013562, and
+  made `const fn` by `laptop.architect` (2026-10-10 06:37 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1317#issuecomment-6094721967.

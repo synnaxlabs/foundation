@@ -41,9 +41,8 @@ const CLASSES_MAX: usize = 96;
 /// Settings for one [`Pool`].
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// The most bytes the pool may commit at once. Resident memory can pass it by up
-    /// to two partial pages per size class, because a purge rounds in to page bounds.
-    pub budget: usize,
+    budget: usize,
+    reservation: usize,
 }
 
 impl Config {
@@ -73,26 +72,21 @@ impl Config {
         let Some(spans) = span.checked_mul(classes(budget)) else {
             return Err(unfit);
         };
-        if spans.checked_add(HEADER).is_none() {
+        let Some(reservation) = spans.checked_add(HEADER) else {
             return Err(unfit);
-        }
-        Ok(Self { budget })
+        };
+        Ok(Self {
+            budget,
+            reservation,
+        })
     }
 
     /// Bytes of address space that a pool with these settings needs from its
     /// [`Memory`]. Each size class can grow to the full budget, so this is up to 96
     /// times the budget.
-    ///
-    /// # Panics
-    ///
-    /// If the result does not fit in a `usize`.
     #[must_use]
-    pub fn reservation(&self) -> usize {
-        self.budget
-            .checked_next_multiple_of(ALIGN)
-            .and_then(|span| span.checked_mul(classes(self.budget)))
-            .and_then(|spans| spans.checked_add(HEADER))
-            .unwrap_or_else(|| panic!("pool budget {} is too large", self.budget))
+    pub const fn reservation(&self) -> usize {
+        self.reservation
     }
 }
 
@@ -263,8 +257,10 @@ impl Pool {
     #[must_use]
     #[expect(clippy::needless_pass_by_value, reason = "settings move into a pool")]
     pub fn new(config: Config, memory: impl Memory + 'static) -> Self {
-        let need = config.reservation();
-        let Config { budget } = config;
+        let Config {
+            budget,
+            reservation: need,
+        } = config;
         let have = memory.len();
         assert!(
             have >= need,
@@ -1104,12 +1100,6 @@ mod tests {
                 prop_assert_eq!(given, fits.ok_or(Unfit { budget }));
             }
         }
-
-        #[test]
-        #[should_panic(expected = "pool budget 18446744073709551615 is too large")]
-        fn panics_when_it_does_not_fit_in_a_usize() {
-            assert_eq!(Config { budget: usize::MAX }.reservation(), 0);
-        }
     }
 
     mod classes {
@@ -1283,12 +1273,6 @@ mod tests {
                 assert_eq!(pool.largest(), 0);
                 let error = pool.alloc(0).expect_err("no block fits");
                 assert_eq!(error, too_large(0, 0));
-            }
-
-            #[test]
-            #[should_panic(expected = "pool budget 18446744073709551615 is too large")]
-            fn panics_when_the_reservation_does_not_fit_in_a_usize() {
-                drop(Pool::heap(Config { budget: usize::MAX }));
             }
 
             #[test]

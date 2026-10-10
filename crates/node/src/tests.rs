@@ -416,7 +416,10 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
 }
 
 #[test]
-#[should_panic(expected = "pool budget 18446744073709551615 is too large")]
+#[should_panic(
+    expected = "shard-0: pool budget 18446744073709551615 bytes needs more address \
+                space than this host has"
+)]
 fn a_budget_past_the_address_space_panics_at_start() {
     drop(start_with(
         7,

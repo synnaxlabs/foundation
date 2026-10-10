@@ -184,8 +184,8 @@ impl Node {
     ///
     /// # Panics
     ///
-    /// If a shard's part of the budget needs more address space than a `usize` holds,
-    /// or if the disk budget holds a ring on each of more than `u32::MAX` cores.
+    /// If a shard's pool needs more address space than this host has, or if the disk
+    /// budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let cores = config.shards.cores().get();
@@ -540,15 +540,11 @@ fn parts(
 ) -> Result<Vec<(block::Config, buffer::Layout)>, buffer::Small> {
     (0..cores)
         .map(|core| {
-            let budget = part(budget.bytes(), cores, core);
-            let Ok(budget) = usize::try_from(budget) else {
-                panic!(
-                    "pool budget {budget} of shard-{core} is past the address space"
-                );
-            };
+            let pool = block::Config::new(part(budget.bytes(), cores, core))
+                .unwrap_or_else(|unfit| panic!("shard-{core}: {unfit}"));
             let layout =
                 buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX)?;
-            Ok((block::Config { budget }, layout))
+            Ok((pool, layout))
         })
         .collect()
 }
