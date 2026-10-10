@@ -140,7 +140,9 @@ impl Manager {
     ///
     /// If `idle` is 65535 or more, as open62541 counts sessions in 16 bits, if a
     /// connect fails or does not end in 60 s of `clock`, if open62541 refuses the
-    /// server, a client, or a step of the close, or if the port is taken.
+    /// server, a client, or a step of the close, if a channel of a client is not
+    /// closed after the close, or if the port is taken. A panic of the close replaces
+    /// a panic of the connect or `body`.
     pub async fn scope<T>(
         clock: Clock,
         net: Net,
