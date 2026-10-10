@@ -424,7 +424,9 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "connector",
+ "connector-influx",
  "counting",
+ "divan",
  "document",
  "env",
  "http",
