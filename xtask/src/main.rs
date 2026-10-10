@@ -259,9 +259,23 @@ mod tests {
             .collect()
     }
 
-    /// The paths of the `models` filter of the step `filter` of the job `changes` in
-    /// the lines `ci` of a workflow.
-    fn models<'a>(ci: &[&'a str]) -> Vec<&'a str> {
+    /// The lines of the step `filter` of `ci.yaml` up to the text of its filters.
+    const FILTER: [&str; 7] = [
+        "      - if: github.event_name != 'push'",
+        concat!(
+            "        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad",
+            " # v3.0.4",
+        ),
+        "        id: filter",
+        "        with:",
+        "          base: ${{ github.event.merge_group.base_sha }}",
+        "          ref: ${{ github.event.merge_group.head_sha }}",
+        "          filters: |",
+    ];
+
+    /// The lines of the step `filter` of the job `changes` in the lines `ci` of a
+    /// workflow.
+    fn filter_step<'a>(ci: &[&'a str]) -> Vec<&'a str> {
         let steps = under(&under(&under(ci, "jobs:"), "  changes:"), "    steps:");
         // Text under a key is indented past it, so a line at the indent of a step key
         // is one, and a line at the indent of the steps starts one.
@@ -271,26 +285,42 @@ mod tests {
             .rposition(|line| indent(line) == 6)
             .unwrap();
         let step = under(&steps[start..], steps[start]);
+        std::iter::once(steps[start]).chain(step).collect()
+    }
+
+    /// The paths of the `models` filter of the step `filter` of the job `changes` in
+    /// the lines `ci` of a workflow.
+    fn models<'a>(ci: &[&'a str]) -> Vec<&'a str> {
+        let step = filter_step(ci);
         let filters = under(&under(&step, "        with:"), "          filters: |");
-        // A deeper line, or a scalar on a line of the list, is part of one item, so
-        // each line must be one whole item.
-        (under(&filters, "            models:").iter())
-            .map(|line| {
-                (line.strip_prefix("              - "))
-                    .filter(|path| {
-                        path.len() > 2
-                            && path.starts_with('\'')
-                            && path.ends_with('\'')
-                            && path.matches('\'').count() == 2
-                    })
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "the models filter has a line that is not one quoted path: \
-                             `{line}`"
-                        )
-                    })
-            })
-            .collect()
+        let mut key = None;
+        let mut paths = Vec::new();
+        // Any other line continues a scalar, which can hold a key or a path that the
+        // filter does not have.
+        for line in filters {
+            let name = (line.strip_prefix("            "))
+                .and_then(|name| name.strip_suffix(':'))
+                .filter(|name| {
+                    name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                });
+            // A quote that does not close here, or a double quote, continues the
+            // scalar on the next lines.
+            let path = (line.strip_prefix("              - ")).filter(|path| {
+                (path.strip_prefix('\''))
+                    .and_then(|path| path.strip_suffix('\''))
+                    .is_some_and(|inner| !inner.is_empty() && !inner.contains('\''))
+            });
+            match (name, path) {
+                (Some(name), _) => key = Some(name),
+                (_, Some(path)) if key == Some("models") => paths.push(path),
+                (_, Some(_)) => {}
+                (None, None) => panic!(
+                    "the filters text has a line that is not a key or one quoted path: \
+                     `{line}`"
+                ),
+            }
+        }
+        paths
     }
 
     /// The lines of the value of the output `models` of the job `changes` in the
@@ -317,6 +347,12 @@ mod tests {
             "              - 'crates/types/**'\n",
             "  changes:\n",
             "    outputs:\n",
+            "      notes: >-\n",
+            "        id: filter\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
             "      models: >-\n",
             "        real\n",
             "    steps:\n",
@@ -340,7 +376,11 @@ mod tests {
             "              - 'crates/env/**'\n",
             "            wait:\n",
             "              - 'crates/types/**'\n",
-            "      - run: true\n",
+            "      - uses: actions/checkout@v4\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
         );
         let ci: Vec<&str> = ci.lines().collect();
         assert_eq!(models(&ci), ["'crates/env/**'"]);
@@ -348,23 +388,59 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "the models filter has a line that is not one quoted path: \
-                    `              - >-`"
-    )]
-    fn models_refuses_a_path_inside_a_scalar_of_the_filter() {
+    fn models_refuses_each_line_that_is_not_a_key_or_one_quoted_path() {
+        for line in [
+            "              - >-",
+            "              - \"crates/env/**",
+            "              - \"crates/env/**'",
+            "              - 'crates/env/**",
+            "              - ''",
+            "              - 'crates/env/**''",
+            "            note: \"",
+            "            note: \"models:",
+        ] {
+            let ci = [
+                "jobs:",
+                "  changes:",
+                "    steps:",
+                "      - uses: dorny/paths-filter",
+                "        id: filter",
+                "        with:",
+                "          filters: |",
+                "            models:",
+                line,
+                "            wait:",
+                "              - 'crates/env/**'",
+            ];
+            let panic = std::panic::catch_unwind(|| models(&ci)).expect_err(line);
+            assert_eq!(
+                panic.downcast_ref::<String>(),
+                Some(&format!(
+                    "the filters text has a line that is not a key or one quoted path: \
+                     `{line}`"
+                )),
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "ci.yaml has no `with:`")]
+    fn models_reads_the_inputs_only_of_the_step_filter() {
         let ci = concat!(
             "jobs:\n",
             "  changes:\n",
             "    steps:\n",
             "      - uses: dorny/paths-filter\n",
             "        id: filter\n",
+            "        env:\n",
+            "          INPUT_FILTERS: |\n",
+            "            models:\n",
+            "              - 'crates/env/**'\n",
+            "      - uses: actions/checkout@v4\n",
             "        with:\n",
             "          filters: |\n",
             "            models:\n",
-            "              - 'crates/env/**'\n",
-            "              - >-\n",
-            "                - 'crates/types/**'\n",
+            "              - 'crates/types/**'\n",
         );
         let ci: Vec<&str> = ci.lines().collect();
         models(&ci);
@@ -376,6 +452,20 @@ mod tests {
         let ci = workflow(&root);
         let ci: Vec<&str> = ci.lines().collect();
         let (models, jobs) = (models(&ci), under(&ci, "jobs:"));
+        // An input such as `predicate-quantifier` or `ref` can make the filter skip a
+        // change.
+        let step = filter_step(&ci);
+        assert_eq!(
+            step[..FILTER.len()],
+            FILTER,
+            "the step filter of .github/workflows/ci.yaml has inputs that the checks \
+             do not read"
+        );
+        assert_eq!(
+            step[FILTER.len()..],
+            under(&step, "          filters: |"),
+            "the step filter of .github/workflows/ci.yaml has a key after `filters`"
+        );
         assert_eq!(
             output(&ci),
             ["        ${{ github.event_name == 'push' && 'false' || \
