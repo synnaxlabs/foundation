@@ -863,7 +863,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_at_once_after_a_removed_status_channel_while_the_pool_is_full() {
+    fn returns_at_once_when_the_pool_fills_after_a_removed_status_channel() {
         let returned = run_on(|node, tasks| async move {
             let kind = Counted(|ctx: Context<()>| async move {
                 ctx.count("samples").set(1);
@@ -902,7 +902,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_at_once_after_a_failed_disk_while_the_pool_is_full() {
+    fn returns_at_once_when_the_pool_fills_after_a_failed_disk() {
         let returned = run_on(|node, tasks| async move {
             let kind = Counted(|ctx: Context<()>| async move {
                 ctx.count("samples").set(1);
@@ -938,6 +938,63 @@ mod tests {
             clock.now() - start
         });
         assert_eq!(returned, ms(2_500), "no change of state waits after 2 s");
+    }
+
+    /// A kind with `N` counts, whose run returns `Ok` at once.
+    struct Wide;
+
+    impl Wide {
+        // 16 bytes a count.
+        const N: usize = 500_000;
+
+        fn counts() -> Vec<Name> {
+            (0..Self::N).map(|i| name(&format!("c{i}"))).collect()
+        }
+    }
+
+    impl Kind for Wide {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Ok(Channels {
+                counts: Self::counts(),
+                ..Channels::default()
+            })
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        fn run(&self, _: Context<()>) -> impl Future<Output = Result<(), Error>> {
+            std::future::ready(Ok(()))
+        }
+    }
+
+    /// Matches only the start: the sizes come from `types` and `home`.
+    #[test]
+    #[should_panic(expected = "invariant: a status frame fits the largest block")]
+    fn panics_at_the_start_of_a_status_larger_than_the_largest_block() {
+        run_on(|node, tasks| async move {
+            let kinds = Table::new().with("wide", Wide);
+            let inputs = create_config(&node, tasks.clone(), kinds, "plant.wide").await;
+            let connector = name("plant.wide");
+            let status = testing::create_status(&connector, &Wide::counts(), STATUS);
+            inputs
+                .hub
+                .set_definitions(status.iter().map(|(name, def)| (name, def)));
+            let result = Supervisor::new(inputs)
+                .run("wide", connector, &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+        });
     }
 
     #[test]

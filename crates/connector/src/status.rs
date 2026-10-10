@@ -2,6 +2,7 @@
 //! their own, and their writes.
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeSet;
 use std::convert::Infallible;
 use std::fmt;
 use std::future::{pending, poll_fn};
@@ -70,7 +71,8 @@ pub fn channels(
 /// Panics when `kind` names a count of more than one segment, a count that the index
 /// or a channel of the supervisor names in any case, or one count twice in any case.
 pub(crate) fn check(kind: &str, counts: &[Name]) {
-    for (i, count) in counts.iter().enumerate() {
+    let mut seen = BTreeSet::new();
+    for count in counts {
         let same = |name: &str| name.eq_ignore_ascii_case(count.as_str());
         assert!(
             count.segments().nth(1).is_none(),
@@ -82,7 +84,7 @@ pub(crate) fn check(kind: &str, counts: &[Name]) {
              supervisor"
         );
         assert!(
-            !counts[..i].iter().any(|earlier| same(earlier.as_str())),
+            seen.insert(count.as_str().to_ascii_lowercase()),
             "the kind {kind:?} names the count `{count}` twice"
         );
     }
@@ -625,7 +627,6 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
 
     use super::*;
-    use crate::common::STATUS;
 
     /// A side of [`beside`] that counts its polls and keeps its last waker.
     fn side(
@@ -763,26 +764,6 @@ mod tests {
         check_pool(&block::Error::TooLarge {
             requested: 128,
             largest: 64,
-        });
-    }
-
-    /// Matches only the start: the sizes come from `types` and `home`. It calls
-    /// `Writer`, because `Supervisor::run` checks the counts in quadratic time.
-    #[test]
-    #[should_panic(expected = "invariant: a status frame fits the largest block")]
-    fn panics_at_the_start_of_a_status_larger_than_the_largest_block() {
-        // 16 bytes a count.
-        const N: usize = 500_000;
-        crate::common::run_on(|node, tasks| async move {
-            let (hub, _) = hub::testing::open(crate::common::env(&node, tasks)).await;
-            let connector = name("plant.wide");
-            let counts: Vec<_> = (0..N).map(|i| name(&format!("c{i}"))).collect();
-            let status = crate::testing::create_status(&connector, &counts, STATUS);
-            hub.set_definitions(status.iter().map(|(name, def)| (name, def)));
-            let (clock, cancel) = (node.clock(), cancel::Token::new());
-            let opened = Writer::open(&hub, &connector, counts, clock, cancel).await;
-            let (writer, _status) = opened.expect("the writer opens");
-            writer.start().await;
         });
     }
 }
