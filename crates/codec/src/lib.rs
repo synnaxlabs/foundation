@@ -69,9 +69,11 @@ impl Encoder {
     /// # Errors
     ///
     /// Returns [`Error::Overflow`] when `count` samples take more than `usize::MAX`
-    /// bytes, [`Error::Length`] when `values` does not hold them, [`Error::Ends`] or
-    /// [`Error::Long`] when their ends are not valid, and [`Error::Utf8`] when a
-    /// `String` sample is not UTF-8. It writes nothing then.
+    /// bytes, then [`Error::Length`] when `values` ends inside the ends of a `String`,
+    /// `Bytes`, or `List` series, then [`Error::Ends`] or [`Error::Long`] for the first
+    /// end that is not valid. After those, it returns [`Error::Length`] when `values`
+    /// does not hold the samples, then [`Error::Utf8`] for the first `String` sample
+    /// that is not UTF-8. It writes nothing then.
     ///
     /// # Panics
     ///
