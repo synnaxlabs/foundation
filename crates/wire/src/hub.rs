@@ -253,7 +253,7 @@ pub enum Reply {
 pub struct Head {
     /// How the frame reached the home.
     pub path: Path,
-    /// The samples of the frame. The range ends at or below `u64::MAX`.
+    /// The samples of the frame.
     pub range: Range,
     /// The count of the frame's series, which is the count of its ends. At least 1,
     /// since a frame holds its index. A head with more series than the session has
@@ -275,8 +275,7 @@ impl Reply {
     ///
     /// # Panics
     ///
-    /// When a head has no series or a range that ends past `u64::MAX`, or `out` is
-    /// not [`Reply::encoded_len`] bytes.
+    /// When a head has no series, or `out` is not [`Reply::encoded_len`] bytes.
     pub fn encode(&self, out: &mut [u8]) {
         let mut out = Writer::new(out, self.encoded_len());
         match self {
@@ -284,10 +283,6 @@ impl Reply {
             Self::Behind => out.put(&[BEHIND]),
             Self::Head(head) => {
                 assert!(head.series > 0, "a head names at least one series");
-                assert!(
-                    ends(head.range),
-                    "a head's range ends at or below the highest seq"
-                );
                 out.put(&[HEAD, path_byte(head.path)]);
                 out.put(&head.range.seq.to_le_bytes());
                 out.put(&head.range.count.to_le_bytes());
@@ -302,8 +297,8 @@ impl Reply {
     ///
     /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte
     /// names no reply, [`Error::Length`] when the length fits no reply of that kind,
-    /// [`Error::Path`] when a head names no path, [`Error::Series`] when it names no
-    /// series, and [`Error::Range`] when its range ends past `u64::MAX`.
+    /// [`Error::Path`] when a head names no path, and [`Error::Series`] when it names
+    /// no series.
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         let mut fields = Fields::new(rest, Error::Length { len: bytes.len() });
@@ -326,13 +321,9 @@ impl Reply {
                 if series == 0 {
                     return Err(Error::Series);
                 }
-                let range = Range { seq, count };
-                if !ends(range) {
-                    return Err(Error::Range { seq, count });
-                }
                 Ok(Self::Head(Head {
                     path,
-                    range,
+                    range: Range { seq, count },
                     series,
                 }))
             }
@@ -506,13 +497,6 @@ pub enum Error {
     Channels,
     /// A head names no series.
     Series,
-    /// A head's range ends past the highest seq.
-    Range {
-        /// The seq of the range.
-        seq: u64,
-        /// The count of the range.
-        count: u32,
-    },
     /// A head names no path.
     Path {
         /// The path byte.
@@ -535,6 +519,24 @@ pub enum Error {
         series: u32,
         /// The places of the session.
         places: u32,
+    },
+    /// A head of a reader session is on the backfill path. A session gets only live
+    /// frames.
+    Backfill,
+    /// A head's range ends past `u64::MAX`.
+    Range {
+        /// The seq of the head.
+        seq: u64,
+        /// The count of the head.
+        count: u32,
+    },
+    /// A head starts before the end of the head before it. The heads of a session
+    /// rise.
+    Seq {
+        /// The seq of the head.
+        seq: u64,
+        /// The seq plus the count of the head before it.
+        end: u64,
     },
     /// A message of a run has more keys or ends than remain in the run.
     Run {
@@ -579,6 +581,7 @@ pub enum Error {
 }
 
 impl fmt::Display for Error {
+    #[expect(clippy::too_many_lines, reason = "one arm for each error")]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("the hub message is empty"),
@@ -592,11 +595,6 @@ impl fmt::Display for Error {
             ),
             Self::Channels => f.write_str("the hub open names no channel"),
             Self::Series => f.write_str("the frame head names no series"),
-            Self::Range { seq, count } => write!(
-                f,
-                "the frame head has {count} samples from seq {seq}, which end past the \
-                 highest seq"
-            ),
             Self::Path { byte } => write!(
                 f,
                 "the frame head names path {byte}, which this node does not know"
@@ -614,6 +612,19 @@ impl fmt::Display for Error {
                 f,
                 "the frame head names {series} series, and the session has {places} \
                  places"
+            ),
+            Self::Backfill => {
+                f.write_str("the frame head of a reader session is on backfill")
+            }
+            Self::Range { seq, count } => write!(
+                f,
+                "the frame head has {count} samples from seq {seq}, which end past the \
+                 highest seq"
+            ),
+            Self::Seq { seq, end } => write!(
+                f,
+                "the frame head starts at seq {seq}, before the end {end} of the head \
+                 before it"
             ),
             Self::Run { items, remain } => write!(
                 f,
@@ -702,11 +713,6 @@ fn run<const N: usize>(message: &[u8]) -> Result<&[[u8; N]], Error> {
     } else {
         Ok(items)
     }
-}
-
-/// Whether `range` ends at or below `u64::MAX`.
-fn ends(range: Range) -> bool {
-    range.seq.checked_add(u64::from(range.count)).is_some()
 }
 
 fn path_byte(path: Path) -> u8 {
@@ -977,23 +983,6 @@ mod tests {
         }
 
         #[test]
-        fn refuses_a_head_whose_range_ends_past_the_highest_seq() {
-            let mut bytes = encode_reply(head(Path::Live, u64::MAX - 1, 1, 1));
-            assert_eq!(
-                Reply::decode(&bytes),
-                Ok(head(Path::Live, u64::MAX - 1, 1, 1))
-            );
-            bytes[10] = 2;
-            assert_eq!(
-                Reply::decode(&bytes),
-                Err(Error::Range {
-                    seq: u64::MAX - 1,
-                    count: 2
-                })
-            );
-        }
-
-        #[test]
         fn decodes_a_head_of_one_series() {
             let mut bytes = zeros(2, 18);
             bytes[14] = 1;
@@ -1004,12 +993,6 @@ mod tests {
         #[should_panic(expected = "a head names at least one series")]
         fn panics_on_a_head_of_no_series() {
             head(Path::Live, 0, 0, 0).encode(&mut [0; 18]);
-        }
-
-        #[test]
-        #[should_panic(expected = "a head's range ends at or below the highest seq")]
-        fn panics_on_a_head_whose_range_ends_past_the_highest_seq() {
-            head(Path::Live, u64::MAX, 1, 1).encode(&mut [0; 18]);
         }
 
         #[test]
@@ -1274,10 +1257,6 @@ mod tests {
             (Error::Channels, "the hub open names no channel"),
             (Error::Series, "the frame head names no series"),
             (
-                Error::Range { seq: 7, count: 2 },
-                "the frame head has 2 samples from seq 7, which end past the highest seq",
-            ),
-            (
                 Error::Path { byte: 2 },
                 "the frame head names path 2, which this node does not know",
             ),
@@ -1296,6 +1275,18 @@ mod tests {
                     places: 3,
                 },
                 "the frame head names 4 series, and the session has 3 places",
+            ),
+            (
+                Error::Backfill,
+                "the frame head of a reader session is on backfill",
+            ),
+            (
+                Error::Range { seq: 7, count: 2 },
+                "the frame head has 2 samples from seq 7, which end past the highest seq",
+            ),
+            (
+                Error::Seq { seq: 3, end: 11 },
+                "the frame head starts at seq 3, before the end 11 of the head before it",
             ),
             (
                 Error::Run {
@@ -1364,16 +1355,8 @@ mod tests {
         prop_oneof![
             Just(Reply::Opened),
             Just(Reply::Behind),
-            (path, any::<u64>(), any::<u32>(), 1..=u32::MAX).prop_map(
-                |(path, seq, count, series)| {
-                    head(
-                        path,
-                        seq.min(u64::MAX.saturating_sub(u64::from(count))),
-                        count,
-                        series,
-                    )
-                }
-            ),
+            (path, any::<u64>(), any::<u32>(), 1..=u32::MAX)
+                .prop_map(|(path, seq, count, series)| head(path, seq, count, series)),
         ]
     }
 

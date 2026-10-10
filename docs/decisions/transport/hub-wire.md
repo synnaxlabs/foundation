@@ -27,9 +27,15 @@
   no count of channels or series has a cap, and the reader fills one block of its
   frame's length: the header, the range, a descriptor for each series, and the body to
   the last end. A run message with more keys or ends than remain is not valid. A head of
-  no series is not valid, since a frame holds its index. Nor is a head whose range ends
-  past `u64::MAX`, since the position after it does not fit (`laptop.architect`,
-  approval owed). The home checks each key as it
+  no series is not valid, since a frame holds its index. Nor is a head on the backfill
+  path, since a reader session gets only live frames, a head whose range ends past
+  `u64::MAX`, or a head that starts before the end of the head before it, since the
+  heads of a session rise. `wire::hub::Reader` checks these three after the places, in
+  that order, so `hub` takes the frames of a session in seq order (the architect,
+  2026-10-10T03:41:52Z,
+  https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6093407122; lost: a
+  `max` and a saturating add in `hub`, which let such a frame reach the user). The
+  home checks each key as it
   arrives and never allocates by the peer's count. A head with more series than places,
   or an end with a place the session does not have or that is not above the place before
   it, is not valid; `wire::hub::Reader` checks the head as it arrives and `types` checks
