@@ -570,6 +570,7 @@ fn read_by_rustc(
         .args(["--emit", "dep-info=-,metadata", "--out-dir"])
         .arg(out)
         .args(checked.iter().flat_map(|cfg| ["--check-cfg", cfg]))
+        .args(["--force-warn", "unexpected_cfgs"])
         .args(flags)
         .arg(root.join("src/lib.rs"))
         .output()
@@ -585,24 +586,34 @@ fn read_by_rustc(
     (files, unknown_cfgs(&errors))
 }
 
-/// Each cfg that the warnings of rustc in `errors` give as unknown.
+/// Each cfg that the warnings of rustc in `errors` give as unknown. Only the head and
+/// the notes of a warning count, since the source lines that it quotes may hold any
+/// text.
 ///
 /// # Panics
 ///
 /// On an unknown value of a cfg other than `feature`.
 fn unknown_cfgs(errors: &str) -> Vec<String> {
-    let quoted = |line: &str, before: &str| {
-        let (_, rest) = line.split_once(before)?;
+    let quoted = |line: &str, start: &str, before: &str| {
+        let rest = line.trim_start().strip_prefix(start)?;
+        let (_, rest) = rest.split_once(before)?;
         Some(rest.split_once('`')?.0.to_owned())
+    };
+    let head = |line: &str, kind: &str| {
+        quoted(
+            line,
+            "warning: unexpected `cfg` condition ",
+            &format!("{kind}: `"),
+        )
     };
     let lines: Vec<_> = errors.lines().collect();
     let mut cfgs = Vec::new();
     for (at, line) in lines.iter().enumerate() {
-        if let Some(name) = quoted(line, "unexpected `cfg` condition name: `") {
+        if let Some(name) = head(line, "name") {
             cfgs.push(name);
-        } else if let Some(value) = quoted(line, "unexpected `cfg` condition value: `")
-        {
-            let of = lines[at..].iter().find_map(|line| quoted(line, " for `"));
+        } else if let Some(value) = head(line, "value") {
+            let mut notes = lines[at..].iter();
+            let of = notes.find_map(|line| quoted(line, "= note: ", " for `"));
             let of = of.unwrap_or_else(|| panic!("rustc names no cfg: {errors}"));
             assert!(
                 of == "feature",
@@ -800,6 +811,51 @@ fn the_scan_refuses_a_cfg_value_that_it_cannot_build() {
         );
         assert_eq!(message, expected);
     }
+}
+
+/// The scan finds a cfg of the crate under an `allow(unexpected_cfgs)` of the crate or
+/// of an item.
+#[test]
+fn the_scan_finds_a_cfg_that_an_allow_hides() {
+    for (case, lib) in [
+        ("crate", "#![allow(unexpected_cfgs)]\nmod m;\n"),
+        ("item", "#[allow(unexpected_cfgs)]\nmod m;\n"),
+    ] {
+        let root = create_tree(
+            case,
+            &[
+                ("src/lib.rs", lib),
+                ("src/m.rs", "#[cfg(any(test, outer))]\nmod a;\n"),
+                ("src/m/a.rs", "fn named() {}"),
+            ],
+        );
+        let named = named_outside_tests(&root, |name| name == "named");
+        assert_eq!(named, [at(&root, "src/m/a.rs")], "{case}");
+    }
+}
+
+/// The scan reads the cfg of a warning from its head and its notes, not from the
+/// source lines that it quotes.
+#[test]
+fn the_scan_reads_no_cfg_from_a_quoted_comment() {
+    let lib = concat!(
+        "#[cfg(any(test, feature = \"foo\"))] // A stand-in for `Clock`, ",
+        "not warning: unexpected `cfg` condition name: `ghost`.\nmod o;\n",
+    );
+    let root = create_tree(
+        "quoted",
+        &[("src/lib.rs", lib), ("src/o.rs", "fn named() {}")],
+    );
+    let named = named_outside_tests(&root, |name| name == "named");
+    assert_eq!(named, [at(&root, "src/o.rs")]);
+    assert_eq!(built(&root).1, ["feature=\"foo\""]);
+    let lib = "#[cfg(target_os = \"nope\")] // as for `feature` x\nmod f;\n";
+    let root = create_tree("hidden", &[("src/lib.rs", lib), ("src/f.rs", "")]);
+    let refused = std::panic::catch_unwind(|| named_outside_tests(&root, |_| false));
+    let message = *refused.unwrap_err().downcast::<String>().unwrap();
+    let expected =
+        "the scan cannot build each value of the cfg `target_os`, such as `nope`";
+    assert_eq!(message, expected);
 }
 
 /// The builds of the library set each cfg that the crate tests and the host does not
