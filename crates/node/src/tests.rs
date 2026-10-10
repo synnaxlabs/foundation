@@ -572,6 +572,17 @@ fn join_gives_a_later_shard_error_over_an_earlier_panic() {
     assert_eq!(crate::error(None, all), Err(shards));
 }
 
+/// An unnamed reader on the channel named `channel`.
+fn unnamed(channel: &str, mode: ::hub::reader::Mode) -> ::hub::reader::Config {
+    ::hub::reader::Config {
+        select: types::name::Selector::new([channel]).expect("a selector"),
+        mode,
+        subject: "test".parse().expect("a name"),
+        name: None,
+        hold: Span::ZERO,
+    }
+}
+
 mod buffer {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -1984,7 +1995,7 @@ mod hub {
         let probe = probe(&node);
         node.spawn(move |hub| async move {
             define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
-            let reader = hub.reader(&[name("value")], Mode::Complete).await;
+            let reader = hub.reader(unnamed("value", Mode::Complete)).await;
             let mut reader = reader.expect("the reader opens");
             let mut writer = writer(&hub, &["value"]).await;
             let stamp = writer.now().nanos();
@@ -2149,7 +2160,7 @@ mod hub {
         node.spawn(move |hub| async move {
             let _task = task;
             define(&hub, &[("time", index(1))]);
-            let reader = hub.reader(&[name("time")], Mode::Complete).await;
+            let reader = hub.reader(unnamed("time", Mode::Complete)).await;
             let mut reader = reader.expect("the reader opens");
             drop(reader.next().await);
             unreachable!("no frame comes");
@@ -3639,8 +3650,9 @@ mod port {
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let reader = hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await;
                 let mut reader = reader.expect("the reader opens");
                 let mut writer = writer(&hub, &["plant.value"]).await;
                 write(&mut writer, stamp, 7);
@@ -3678,8 +3690,8 @@ mod port {
             let channel = Definition::Channel(data(2, I64, 1));
             founding.definitions.insert(value.clone(), channel);
             let node = start(&host, founding);
-            let unknown = ::hub::reader::Error::Unknown(value);
-            assert_eq!(readers(&mut sim, &node, &["plant.value"]), [Some(unknown)]);
+            let empty = ::hub::reader::Error::Empty;
+            assert_eq!(readers(&mut sim, &node, &["plant.value"]), [Some(empty)]);
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
@@ -3692,14 +3704,13 @@ mod port {
             node: &Node,
             names: &[&str],
         ) -> Vec<Option<::hub::reader::Error>> {
-            let names: Vec<Name> =
-                names.iter().map(|name| name.parse().unwrap()).collect();
+            let names: Vec<String> = names.iter().map(|name| (*name).into()).collect();
             let errors = Arc::new(Mutex::new(Vec::new()));
             let out = Arc::clone(&errors);
             node.spawn(move |hub| async move {
                 for name in names {
-                    let reader =
-                        hub.reader(&[name], ::hub::reader::Mode::Complete).await;
+                    let mode = ::hub::reader::Mode::Complete;
+                    let reader = hub.reader(unnamed(&name, mode)).await;
                     out.lock().unwrap().push(reader.err());
                 }
             });
@@ -3740,8 +3751,9 @@ mod port {
             let opened = Arc::new(Mutex::new(None));
             let out = Arc::clone(&opened);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let reader = hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await;
                 *out.lock().unwrap() = Some(reader.err());
             });
             assert_eq!(sim.run_for(TEN), Ok(()));
@@ -4971,8 +4983,9 @@ mod port {
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let reader = hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await;
                 let mut reader = match reader {
                     Ok(reader) => reader,
                     Err(error) => {
@@ -5019,9 +5032,9 @@ mod port {
                 let read = Arc::new(Mutex::new(Vec::new()));
                 let out = Arc::clone(&read);
                 node.spawn(move |hub| async move {
-                    let value = "plant.value".parse().unwrap();
-                    let reader =
-                        hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                    let reader = hub
+                        .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                        .await;
                     out.lock().unwrap().push(reader.is_ok());
                     let mut reader = reader.expect("the reader opens");
                     let next = reader.next().await.is_ok();
@@ -5087,9 +5100,8 @@ mod port {
                 host.clock().sleep(Span::SECOND).await;
                 let mut readers = Vec::new();
                 for _ in 0..count {
-                    let value = "plant.value".parse().unwrap();
                     let mode = ::hub::reader::Mode::Latest;
-                    let reader = hub.reader(&[value], mode).await;
+                    let reader = hub.reader(unnamed("plant.value", mode)).await;
                     readers.push(reader.expect("the reader opens"));
                     out.lock().unwrap().0 += 1;
                 }
@@ -5133,8 +5145,9 @@ mod port {
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
             peer_hub(&hosts[1], founding, move |hub, _, _| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let reader = hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await;
                 let mut reader = match reader {
                     Ok(reader) => reader,
                     Err(error) => {
@@ -5436,8 +5449,8 @@ mod port {
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let mode = ::hub::reader::Mode::Complete;
+                let reader = hub.reader(unnamed("plant.value", mode)).await;
                 let mut reader = reader.expect("the reader opens");
                 let mut writer = writer(&hub, &["plant.value"]).await;
                 write_at(&mut writer, keys, WALL, 7);
@@ -5463,8 +5476,8 @@ mod port {
             let ended = Arc::new(Mutex::new(None));
             let out = Arc::clone(&ended);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let mode = ::hub::reader::Mode::Complete;
+                let reader = hub.reader(unnamed("plant.value", mode)).await;
                 let mut reader = reader.expect("the reader opens");
                 *out.lock().unwrap() = Some(reader.next().await.map(|_| ()));
             });
@@ -5493,9 +5506,9 @@ mod port {
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
             let node = start(&host, founded(&host));
-            let unknown = ::hub::reader::Error::Unknown("plant.value".parse().unwrap());
+            let empty = ::hub::reader::Error::Empty;
             let readers = readers(&mut sim, &node, &["plant.value", "plant.flow"]);
-            assert_eq!(readers, [Some(unknown), None]);
+            assert_eq!(readers, [Some(empty), None]);
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));

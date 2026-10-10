@@ -710,10 +710,11 @@ impl Readers {
     /// The open complete session `key`, or `None` when it closed. Panics on a key
     /// never given.
     fn find(&self, key: complete::Key) -> Option<usize> {
-        if key.0 >= self.next_complete {
-            never_open(key.into());
+        match self.complete.binary_search_by_key(&key, |s| s.key) {
+            Ok(i) => Some(i),
+            Err(_) if key.0 >= self.next_complete => never_open(key.into()),
+            Err(_) => None,
         }
-        self.complete.binary_search_by_key(&key, |s| s.key).ok()
     }
 
     fn remove(&mut self, i: usize) -> Session {

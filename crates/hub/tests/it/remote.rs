@@ -25,8 +25,8 @@ use wire::hub::{Credit, Head, Refusal, Reply, ends};
 
 use super::region::OTHER;
 use super::{
-    AREA, BODY_MAX, I64, POOL, TIME, Test, VALUE, fill, name, samples, without, write,
-    write_series, write_wide,
+    AREA, BODY_MAX, I64, POOL, TIME, Test, VALUE, fill, samples, unnamed, without,
+    write, write_series, write_wide,
 };
 use crate::net::{HOME, PEER, PORT, own_pool, public_key, transport_sized};
 
@@ -295,10 +295,10 @@ fn a_reader_of_a_channel_that_the_home_does_not_know_is_refused_with_unknown() {
         },
         |test, _| async move {
             test.define([(9, "extra", DataType::Sample(I64), 1)]);
-            let names = [name("extra")];
+            let names = ["extra"];
             let error = test
                 .hub
-                .reader(&names, Mode::Latest)
+                .reader(unnamed(&names, Mode::Latest))
                 .await
                 .expect_err("the home refuses");
             assert_eq!(error, reader::Error::Refused(Refusal::Unknown));
@@ -742,10 +742,10 @@ fn a_reader_whose_pool_has_no_room_for_its_open_gets_pool() {
         },
         |test, _| async move {
             let blocks = fill(&test.pool);
-            let names = [name("value")];
+            let names = ["value"];
             let error = test
                 .hub
-                .reader(&names, Mode::Latest)
+                .reader(unnamed(&names, Mode::Latest))
                 .await
                 .expect_err("the pool has no room");
             let header = wire::header::encode(Protocol::Hub).len();
@@ -920,7 +920,7 @@ fn a_reader_stops_the_stream_as_malformed_when_a_body_message_is_longer_than_the
 
 /// Defines `count` more data channels on `time` at `test`'s hub, and gives their
 /// names.
-fn define_many(test: &Test, count: u128) -> Vec<types::name::Name> {
+fn define_many(test: &Test, count: u128) -> Vec<String> {
     let names: Vec<_> = (100..100 + count)
         .map(|key| format!("extra-{key}"))
         .collect();
@@ -929,7 +929,7 @@ fn define_many(test: &Test, count: u128) -> Vec<types::name::Name> {
             .zip(&names)
             .map(|(key, channel)| (key, channel.as_str(), DataType::Sample(I64), 1)),
     );
-    names.iter().map(|channel| name(channel)).collect()
+    names
 }
 
 #[test]
@@ -954,14 +954,14 @@ fn a_reader_whose_keys_and_frames_each_take_many_messages_gets_each_frame() {
         },
         |test, steps| async move {
             let mut names = define_many(&test, 100);
-            names.push(name("value"));
+            names.push("value".to_owned());
             assert!(
                 (names.len() + 1) * 16 > MESSAGE_MIN,
                 "the keys take two messages"
             );
             let mut reader = test
                 .hub
-                .reader(&names, Mode::Complete)
+                .reader(unnamed(&names, Mode::Complete))
                 .await
                 .expect("opens");
             steps.open();
@@ -1040,10 +1040,10 @@ fn a_reader_whose_stream_the_home_resets_with_a_code_outside_hub_wire_gets_trans
             until(&node.clock(), &steps.done).await;
         },
         |test, _| async move {
-            let names = [name("value")];
+            let names = ["value"];
             let error = test
                 .hub
-                .reader(&names, Mode::Latest)
+                .reader(unnamed(&names, Mode::Latest))
                 .await
                 .expect_err("the home reset the stream");
             let reset = transport::Error::Reset { code: Code(7) };
@@ -1178,10 +1178,10 @@ fn a_reader_after_the_home_closed_the_held_session_dials_again() {
             .await;
         },
         |test, steps| async move {
-            let names = [name("value")];
+            let names = ["value"];
             let error = test
                 .hub
-                .reader(&names, Mode::Latest)
+                .reader(unnamed(&names, Mode::Latest))
                 .await
                 .expect_err("the home closed the session");
             let closed = transport::Error::PeerClosed { code: Code(1) };
@@ -1227,10 +1227,10 @@ fn a_reader_whose_home_closes_three_sessions_with_code_0_gets_transport() {
             until(&node.clock(), &steps.done).await;
         },
         |test, _| async move {
-            let names = [name("value")];
+            let names = ["value"];
             let error = test
                 .hub
-                .reader(&names, Mode::Latest)
+                .reader(unnamed(&names, Mode::Latest))
                 .await
                 .expect_err("the home closed each session");
             let closed = transport::Error::PeerClosed { code: Code(0) };
@@ -1353,7 +1353,7 @@ fn a_complete_reader_whose_credit_finds_no_room_gets_each_frame() {
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
             test.tasks.spawn(async move {
-                drop(hub.reader(&names, Mode::Complete).await);
+                drop(hub.reader(unnamed(&names, Mode::Complete)).await);
             });
             for _ in 0..FRAMES {
                 reader.next().await.expect("a frame");
@@ -1385,7 +1385,7 @@ fn a_reader_whose_pool_has_room_for_its_open_and_not_its_keys_gets_pool() {
             drop(blocks.swap_remove(small));
             let error = test
                 .hub
-                .reader(&names, Mode::Latest)
+                .reader(unnamed(&names, Mode::Latest))
                 .await
                 .expect_err("the pool has no room for the keys");
             let keys = 201 * wire::hub::keys::LEN;
@@ -1418,10 +1418,10 @@ fn a_reader_whose_home_replies_with_a_head_before_opened_stops_the_stream_as_mal
             until(&node.clock(), &steps.done).await;
         },
         |test, steps| async move {
-            let names = [name("value")];
+            let names = ["value"];
             let error = test
                 .hub
-                .reader(&names, Mode::Latest)
+                .reader(unnamed(&names, Mode::Latest))
                 .await
                 .expect_err("the home did not open the session");
             let expected = wire::hub::Error::Unopened { kind: 2 };
@@ -1685,7 +1685,7 @@ fn a_reader_whose_pool_has_no_room_for_a_message_of_keys_stops_the_stream_with_b
                 blocks
             };
             let (opened, blocks) =
-                both(test.hub.reader(&names, Mode::Latest), full).await;
+                both(test.hub.reader(unnamed(&names, Mode::Latest)), full).await;
             let error = opened.expect_err("the pool has no room for the keys");
             let reader::Error::Pool(block::Error::Exhausted { requested, .. }) = error
             else {
@@ -1943,7 +1943,7 @@ fn a_complete_reader_raises_its_grant_once_a_credit_that_waited_for_room_is_sent
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
             test.tasks.spawn(async move {
-                drop(hub.reader(&names, Mode::Complete).await);
+                drop(hub.reader(unnamed(&names, Mode::Complete)).await);
             });
             for _ in 0..FIRST + MORE {
                 reader.next().await.expect("a frame");
@@ -1972,10 +1972,10 @@ fn a_reader_whose_home_finishes_the_stream_before_opened_stops_it_as_malformed()
             until(&node.clock(), &steps.done).await;
         },
         |test, steps| async move {
-            let names = [name("value")];
+            let names = ["value"];
             let error = test
                 .hub
-                .reader(&names, Mode::Latest)
+                .reader(unnamed(&names, Mode::Latest))
                 .await
                 .expect_err("the home did not open the session");
             let expected = wire::hub::Error::Finished;
@@ -2056,7 +2056,7 @@ fn a_complete_reader_whose_waiting_credit_fails_to_send_sends_no_later_credit() 
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
             test.tasks.spawn(async move {
-                drop(hub.reader(&names, Mode::Complete).await);
+                drop(hub.reader(unnamed(&names, Mode::Complete)).await);
             });
             for _ in 0..ALL {
                 reader.next().await.expect("a frame");
@@ -2104,7 +2104,7 @@ fn a_complete_reader_ends_at_a_frame_past_the_grant_while_its_credit_waits() {
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
             test.tasks.spawn(async move {
-                drop(hub.reader(&names, Mode::Complete).await);
+                drop(hub.reader(unnamed(&names, Mode::Complete)).await);
             });
             let (charges, ended) = super::take_all(&mut reader).await;
             let window = u64::try_from(WINDOW).expect("a u64");
@@ -2158,7 +2158,7 @@ fn a_reader_whose_credit_waits_when_the_home_finishes_sends_no_later_credit() {
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
             test.tasks.spawn(async move {
-                drop(hub.reader(&names, Mode::Complete).await);
+                drop(hub.reader(unnamed(&names, Mode::Complete)).await);
             });
             for _ in 0..33 {
                 reader.next().await.expect("a frame");
@@ -2221,7 +2221,7 @@ fn a_reader_whose_credit_waits_when_the_session_ends_sends_no_later_credit() {
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
             test.tasks.spawn(async move {
-                drop(hub.reader(&names, Mode::Complete).await);
+                drop(hub.reader(unnamed(&names, Mode::Complete)).await);
             });
             // The 33rd take puts the credit on its way, and it waits for room.
             for _ in 0..33 {
@@ -2278,7 +2278,7 @@ fn a_complete_reader_whose_waiting_credit_fails_to_send_ends_at_a_frame_past_the
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
             test.tasks.spawn(async move {
-                drop(hub.reader(&names, Mode::Complete).await);
+                drop(hub.reader(unnamed(&names, Mode::Complete)).await);
             });
             let (charges, ended) = super::take_all(&mut reader).await;
             let window = u64::try_from(WINDOW).expect("a u64");
@@ -2403,7 +2403,7 @@ fn a_complete_reader_whose_pool_has_no_room_for_a_frame_while_a_credit_waits_res
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
             test.tasks.spawn(async move {
-                drop(hub.reader(&names, Mode::Complete).await);
+                drop(hub.reader(unnamed(&names, Mode::Complete)).await);
             });
             for _ in 0..TAKEN {
                 reader.next().await.expect("a frame");
@@ -2518,7 +2518,7 @@ fn a_credit_that_waits_at_the_end_holds_back_no_other_reader_of_the_session() {
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
             test.tasks.spawn(async move {
-                drop(hub.reader(&names, Mode::Complete).await);
+                drop(hub.reader(unnamed(&names, Mode::Complete)).await);
             });
             for _ in 0..33 {
                 reader.next().await.expect("a frame");
@@ -2527,8 +2527,7 @@ fn a_credit_that_waits_at_the_end_holds_back_no_other_reader_of_the_session() {
             let hub = test.hub.clone();
             let opened = Arc::clone(&steps);
             test.tasks.spawn(async move {
-                let value = [name("value")];
-                let third = hub.reader(&value, Mode::Complete).await;
+                let third = hub.reader(unnamed(&["value"], Mode::Complete)).await;
                 assert!(third.is_ok(), "the third reader opens");
                 opened.open();
             });
@@ -2579,7 +2578,7 @@ fn a_credit_that_waits_for_an_idle_caller_holds_back_no_other_reader_of_the_sess
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
             test.tasks.spawn(async move {
-                drop(hub.reader(&names, Mode::Complete).await);
+                drop(hub.reader(unnamed(&names, Mode::Complete)).await);
             });
             for _ in 0..33 {
                 reader.next().await.expect("a frame");
@@ -2588,8 +2587,7 @@ fn a_credit_that_waits_for_an_idle_caller_holds_back_no_other_reader_of_the_sess
             let hub = test.hub.clone();
             let opened = Arc::clone(&steps);
             test.tasks.spawn(async move {
-                let value = [name("value")];
-                let third = hub.reader(&value, Mode::Complete).await;
+                let third = hub.reader(unnamed(&["value"], Mode::Complete)).await;
                 assert!(third.is_ok(), "the third reader opens");
                 opened.open();
             });
@@ -2730,7 +2728,7 @@ fn a_removal_of_a_channel_while_a_remote_reader_opens_ends_it_at_its_first_take(
             remove_value(&test, Span::from_nanos(100_000_000), &steps);
             let mut reader = test
                 .hub
-                .reader(&[name("value")], Mode::Complete)
+                .reader(unnamed(&["value"], Mode::Complete))
                 .await
                 .expect("opens");
             let ended = reader.next().await.map(|_| ());
@@ -2772,7 +2770,7 @@ fn a_credit_waits_for_no_idle_caller_of_another_open() {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
             let names = define_many(&test, 1000);
             let hub = test.hub.clone();
-            let mut second = Box::pin(hub.reader(&names, Mode::Complete));
+            let mut second = Box::pin(hub.reader(unnamed(&names, Mode::Complete)));
             let polled = race(
                 second.as_mut(),
                 test.clock.sleep(Span::from_nanos(300_000_000)),
@@ -2822,8 +2820,8 @@ fn a_removal_ends_a_remote_reader_that_waits_for_a_stream() {
             for _ in 0..STREAMS {
                 readers.push(test.reader(&["value-c"], Mode::Complete).await);
             }
-            let names = [name("value")];
-            let mut opening = pin!(test.hub.reader(&names, Mode::Complete));
+            let names = ["value"];
+            let mut opening = pin!(test.hub.reader(unnamed(&names, Mode::Complete)));
             let wait = test.clock.sleep(Span::from_nanos(1_000_000_000));
             assert!(race(opening.as_mut(), wait).await.is_err(), "no stream");
             test.hub.set_definitions(&without(&["value"]));
