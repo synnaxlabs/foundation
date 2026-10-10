@@ -22,12 +22,13 @@ pub(crate) struct Runs {
     /// The name of the node in the region.
     node: Name,
     scope: Scope,
-    /// The loop of each name, also one whose connector is gone, until it ended.
-    loops: BTreeMap<Name, Rc<RefCell<Next>>>,
+    /// The loop of each name, also one whose connector is gone, until the first apply
+    /// after it ended.
+    loops: BTreeMap<Name, Rc<RefCell<Loop>>>,
 }
 
-/// What the loop of one name runs next.
-struct Next {
+/// The state that `apply` and the loop of one name share.
+struct Loop {
     /// `None` once the spec removed the connector.
     connector: Option<Connector>,
     /// Cancelled when `connector` changes. It cancels the run in progress.
@@ -50,9 +51,8 @@ impl Runs {
 
     /// Makes the runs match the connectors of `definitions` on the node. Cancels the
     /// run of each connector that is gone or changed, and starts a run of each one
-    /// that is new or changed. A run starts only after the last run of its name
-    /// returned, so no two runs of one name overlap, also across a removal and an
-    /// addition. Each other connector keeps its run.
+    /// that is new or changed, after the last run of its name returned. Each other
+    /// connector keeps its run.
     pub(crate) fn apply(&mut self, definitions: &BTreeMap<Name, Definition>) {
         let wanted: BTreeMap<&Name, &Connector> = definitions
             .iter()
@@ -63,16 +63,16 @@ impl Runs {
                 _ => None,
             })
             .collect();
-        self.loops.retain(|name, next| {
-            let mut next = next.borrow_mut();
-            if next.ended {
+        self.loops.retain(|name, state| {
+            let mut state = state.borrow_mut();
+            if state.ended {
                 return false;
             }
             let wanted = wanted.get(name).copied();
-            if next.connector.as_ref() != wanted {
-                next.connector = wanted.cloned();
-                next.changed.cancel();
-                next.changed = cancel::Token::new();
+            if state.connector.as_ref() != wanted {
+                state.connector = wanted.cloned();
+                state.changed.cancel();
+                state.changed = cancel::Token::new();
             }
             true
         });
@@ -80,23 +80,23 @@ impl Runs {
             if self.loops.contains_key(name) {
                 continue;
             }
-            let next = Rc::new(RefCell::new(Next {
+            let state = Rc::new(RefCell::new(Loop {
                 connector: Some(connector.clone()),
                 changed: cancel::Token::new(),
                 ended: false,
             }));
-            self.loops.insert(name.clone(), Rc::clone(&next));
+            self.loops.insert(name.clone(), Rc::clone(&state));
             let supervisor = self.supervisor.clone();
             let name = name.clone();
             self.scope.spawn(Box::pin(async move {
                 loop {
                     let (connector, changed) = {
-                        let mut next = next.borrow_mut();
-                        let Some(connector) = next.connector.clone() else {
-                            next.ended = true;
+                        let mut state = state.borrow_mut();
+                        let Some(connector) = state.connector.clone() else {
+                            state.ended = true;
                             return;
                         };
-                        (connector, next.changed.clone())
+                        (connector, state.changed.clone())
                     };
                     let kind = connector.kind().as_str();
                     let config = connector.config().document();
