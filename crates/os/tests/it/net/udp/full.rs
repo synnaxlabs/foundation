@@ -127,6 +127,64 @@ fn a_retry_skips_a_datagram_lost_over_the_path_mtu() {
     });
 }
 
+#[test]
+fn a_batch_over_the_path_mtu_sends_its_short_last_datagram_alone() {
+    on_thread(|| async {
+        let (mut sender, _) = os::net().udp(&config()).unwrap();
+        let (_, mut receiver) = os::net().udp(&config()).unwrap();
+        answer_calls(|nr, k| {
+            (nr == libc::SYS_sendmsg && k == 0).then_some(libc::EMSGSIZE)
+        });
+        send(&mut sender, &batch(&receiver, b"abcde")).await;
+        assert_eq!(receive(&mut receiver).await, [b"e"]);
+    });
+}
+
+#[test]
+fn a_batch_of_full_segments_over_the_path_mtu_is_lost() {
+    on_thread(|| async {
+        let (mut sender, _) = os::net().udp(&config()).unwrap();
+        let (_, mut receiver) = os::net().udp(&config()).unwrap();
+        answer_calls(|nr, k| {
+            (nr == libc::SYS_sendmsg && k == 0).then_some(libc::EMSGSIZE)
+        });
+        send(&mut sender, &batch(&receiver, b"abcd")).await;
+        assert!(receive(&mut receiver).await.is_empty());
+    });
+}
+
+#[test]
+fn a_retry_of_a_batch_over_the_path_mtu_sends_its_last_datagram_once() {
+    on_thread(|| async {
+        let (mut sender, _) = os::net().udp(&config()).unwrap();
+        let (_, mut receiver) = os::net().udp(&config()).unwrap();
+        answer_calls(|nr, k| match (nr, k) {
+            (libc::SYS_sendmsg, 0) => Some(libc::EMSGSIZE),
+            (libc::SYS_sendmsg, 1) => Some(libc::EAGAIN),
+            _ => None,
+        });
+        send(&mut sender, &batch(&receiver, b"abcde")).await;
+        assert_eq!(receive(&mut receiver).await, [b"e"]);
+    });
+}
+
+#[test]
+fn a_failure_of_the_last_datagram_of_a_batch_over_the_path_mtu_is_the_outcome() {
+    on_thread(|| async {
+        let (mut sender, _) = os::net().udp(&config()).unwrap();
+        let (_, receiver) = os::net().udp(&config()).unwrap();
+        answer_calls(|nr, k| match (nr, k) {
+            (libc::SYS_sendmsg, 0) => Some(libc::EMSGSIZE),
+            (libc::SYS_sendmsg, 1) => Some(libc::ENETUNREACH),
+            _ => None,
+        });
+        let to = batch(&receiver, b"abcde");
+        let sent = poll_fn(|cx| sender.poll_send(cx, &to)).await;
+        let remote = receiver.local();
+        assert_eq!(sent, Err(Error::Unreachable { remote }));
+    });
+}
+
 /// Polls `transmit` until the send buffer is full at its third datagram, and empties
 /// the buffer.
 fn fill(sender: &mut Sender, transmit: &Transmit<'_>) {

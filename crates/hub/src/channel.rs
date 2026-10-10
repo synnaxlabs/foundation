@@ -98,6 +98,13 @@ impl Table {
         Some(self.known(key))
     }
 
+    /// Each defined channel and its name, in no set order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Name, &Channel)> {
+        self.names
+            .iter()
+            .map(|(name, &key)| (name, self.known(key)))
+    }
+
     /// The channel `key`, if it is defined.
     pub(crate) fn get(&self, key: channel::Key) -> Option<&Channel> {
         self.defined.get(&key)

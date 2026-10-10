@@ -284,6 +284,7 @@ mod tests {
     use types::authority::Authority;
     use types::channel;
     use types::frame::{self, Form, Label, Path};
+    use types::name::Selector;
     use types::sample::{Scalar, Type};
 
     const BAD: Code = Code::new("test.bad");
@@ -441,7 +442,14 @@ mod tests {
         let (_, channels) = names;
         let names: Vec<_> = channels.into_iter().map(|(name, _)| name).collect();
         let keys = 1..=u128::try_from(names.len()).expect("a few channels");
-        let reader = hub.reader(&names, Mode::Complete).await;
+        let open = hub::reader::Config {
+            select: Selector::new(names.iter().map(Name::as_str)).expect("a selector"),
+            mode: Mode::Complete,
+            subject: name("test"),
+            name: None,
+            hold: Span::ZERO,
+        };
+        let reader = hub.reader(open).await;
         let mut reader = reader.expect("the reader opens");
         let statuses = Rc::new(RefCell::new(Vec::new()));
         let into = Rc::clone(&statuses);
@@ -2394,11 +2402,14 @@ mod tests {
             let write = Write::new(vec![30, 10, 20]);
             let refusals = Arc::clone(&write.refusals);
             inputs.kinds = Arc::new(Table::new().with("write", write));
-            let mut reader = inputs
-                .hub
-                .reader(&[name("plant.value")], Mode::Complete)
-                .await
-                .expect("the reader opens");
+            let open = hub::reader::Config {
+                select: Selector::new(["plant.value"]).expect("a selector"),
+                mode: Mode::Complete,
+                subject: name("test"),
+                name: None,
+                hold: Span::ZERO,
+            };
+            let mut reader = inputs.hub.reader(open).await.expect("the reader opens");
             let supervisor = Supervisor::new(inputs);
             let result = supervisor
                 .run("write", name("plant.write"), &config(), &Token::new())

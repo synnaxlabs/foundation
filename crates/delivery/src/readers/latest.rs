@@ -135,10 +135,11 @@ impl Readers {
     /// The open latest session `key`, or `None` when it closed. Panics on a key never
     /// given.
     fn find_latest(&self, key: Key) -> Option<usize> {
-        if key.0 >= self.next_latest {
-            never_open(key.into());
+        match self.latest.binary_search_by_key(&key, |s| s.key) {
+            Ok(i) => Some(i),
+            Err(_) if key.0 >= self.next_latest => never_open(key.into()),
+            Err(_) => None,
         }
-        self.latest.binary_search_by_key(&key, |s| s.key).ok()
     }
 }
 
@@ -589,6 +590,29 @@ mod tests {
             readers.close(key.into(), None);
             dropped(&mut readers, key.into());
             assert_eq!(put(&mut readers, frames.frame(1)), [other]);
+        }
+
+        #[test]
+        #[should_panic(expected = "live frame at seq 1..2 queued after seq 2")]
+        fn of_a_closed_session_keeps_the_end_of_the_queued_frames() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let key = unnamed(&mut readers);
+            readers.queue(&frames.frame(1), &frames.set, 0..2);
+            readers.close(key.into(), None);
+            dropped(&mut readers, key.into());
+            readers.queue(&frames.frame(2), &frames.set, 1..2);
+        }
+
+        #[test]
+        fn of_a_closed_session_lets_a_frame_queue_at_the_end() {
+            let frames = Frames::new(2);
+            let mut readers = Readers::new(0);
+            let key = unnamed(&mut readers);
+            readers.queue(&frames.frame(1), &frames.set, 0..2);
+            readers.close(key.into(), None);
+            dropped(&mut readers, key.into());
+            readers.queue(&frames.frame(2), &frames.set, 2..3);
         }
 
         #[test]

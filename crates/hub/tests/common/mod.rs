@@ -4,13 +4,14 @@
 use env::tasks::Tasks;
 use hub::Hub;
 use hub::home::Outcome;
+use hub::reader;
 use hub::writer::Writer;
 use spec::channel::{Channel, Data, Kind};
 use spec::data_type::DataType;
 use spec::definition::Definition;
 use types::channel;
 use types::frame::{Draft, Form, Label, Path};
-use types::name::Name;
+use types::name::{Name, Selector};
 use types::sample::{Scalar, Type};
 use types::time::Span;
 
@@ -42,6 +43,17 @@ pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
 
 pub(crate) fn name(name: &str) -> Name {
     name.parse().expect("a valid name")
+}
+
+/// An unnamed reader on the channels named `channels`.
+pub(crate) fn unnamed(channels: &[&str], mode: reader::Mode) -> reader::Config {
+    reader::Config {
+        select: Selector::new(channels.iter().copied()).expect("a selector"),
+        mode,
+        subject: name("reader"),
+        name: None,
+        hold: Span::ZERO,
+    }
 }
 
 /// A frame of one sample at `stamp` on `time` and `value`.

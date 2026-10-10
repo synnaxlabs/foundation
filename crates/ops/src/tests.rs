@@ -458,6 +458,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
             pointer,
         },
         Error::Apply(mesh::Error::NoVote),
+        Error::Stopped(mesh::Stopped::Dropped),
     ];
     for error in &every {
         // A new variant fails this match, so it joins `every` and the golden file.
@@ -471,6 +472,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
             | Error::Behind(_)
             | Error::Stale { .. }
             | Error::Apply(_)
+            | Error::Stopped(_)
             | Error::Config(_) => {}
         }
     }
@@ -490,6 +492,8 @@ fn error_codes_and_fixes_match_the_golden_file() {
     for diagnostic in [unknown, not_utf8] {
         lines.push(format!("{}\t{}\n", diagnostic.code, diagnostic.fix));
     }
+    let codes: BTreeSet<_> = lines.iter().map(|line| line.split('\t').next()).collect();
+    assert_eq!(codes.len(), lines.len(), "a code has one cause");
     assert_eq!(lines.concat(), include_str!("codes.golden"));
 }
 

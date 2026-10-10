@@ -283,10 +283,11 @@ impl sender::Driver for Sender {
 }
 
 /// Sends each datagram of `transmit` from `bound` with `send`. Gives `Pending` when
-/// the OS send buffer is full, with no waker kept. With GSO off and more than one
-/// datagram, it starts at index `next` and moves `next` past each datagram that it sent
-/// or lost over the path MTU; else it gives the whole transmit to `send` in one call
-/// and leaves `next`.
+/// the OS send buffer is full, with no waker kept. The datagrams before index `next`
+/// are sent or lost over the path MTU. With GSO on and `next` at 0, it gives the whole
+/// transmit to `send` in one call, and when that call is over the path MTU, it moves
+/// `next` past the full segments. Then, with more than one datagram, it sends each
+/// datagram from `next` alone and moves `next` past it.
 fn send_all(
     bound: &Bound,
     transmit: &Transmit<'_>,
@@ -311,8 +312,13 @@ fn send_all(
     };
     // When the kernel or the card cannot segment, `noq-udp` sends the batch a
     // datagram at a time and turns GSO off for the socket.
-    if bound.state.max_gso_segments().get() > 1 {
-        return sent(send(&datagram(contents, Some(segment))), remote);
+    if *next == 0 && bound.state.max_gso_segments().get() > 1 {
+        match send(&datagram(contents, Some(segment))) {
+            // A transmit holds at most `TRANSMIT_BYTES_MAX`, so each full segment is
+            // over the path MTU; a short last one can fit.
+            Err(e) if errno(&e) == Errno::MSGSIZE => *next = contents.len() / segment,
+            outcome => return sent(outcome, remote),
+        }
     }
     for contents in contents.chunks(segment).skip(*next) {
         ready!(sent(send(&datagram(contents, None)), remote))?;

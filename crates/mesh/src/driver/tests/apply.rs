@@ -1090,7 +1090,7 @@ fn a_lost_answer_gives_the_result_of_a_call_with_a_home_kept() {
 }
 
 /// A waker that counts its wakes.
-struct Counted(AtomicUsize);
+pub(super) struct Counted(pub(super) AtomicUsize);
 
 impl Wake for Counted {
     fn wake(self: Arc<Self>) {
