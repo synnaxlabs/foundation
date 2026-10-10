@@ -349,7 +349,8 @@
   run of the loop would read the freed server. The drive: approved by
   `laptop.architect-2` at `5ebf60ae2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6091519998,
-  2026-10-10 00:19 UTC). The delete and the calls between: approved at `1816b9c85`
+  2026-10-10 00:19 UTC). The delete and the calls between: approved by
+  `laptop.architect-2` at `1816b9c85`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6090016795,
   2026-10-09 22:04 UTC). The panic in place of a drive until `STOPPED`: decided by
   `laptop.architect-2`

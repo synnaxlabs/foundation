@@ -133,8 +133,8 @@ struct Answers {
 impl Manager {
     /// Makes the manager on `clock` and `net`, with its listener on `address` and port
     /// 4840, and drives it until each client is connected. Then it runs `body` on the
-    /// manager, and closes the channel of each client and deletes the server and the
-    /// clients, also after a panic in the connect or in `body`, which it then resumes.
+    /// manager, and deletes the server and the clients, also after a panic in the
+    /// connect or in `body`, which it then resumes.
     ///
     /// # Panics
     ///
