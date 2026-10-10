@@ -457,33 +457,16 @@ fn src() -> std::path::PathBuf {
 
 /// Each identifier for which `named` holds, as `path: identifier`, in the Rust
 /// outside tests of the crate at `root`: each `.rs` file outside `tests/` and each
-/// file that a build of the library reads, less each file that a test build reads and
-/// no build of the library reads. The builds are those on this host with each set of
-/// the features of `Cargo.toml`, with and without debug assertions. Comments and inline
-/// modules count.
+/// file that a build of the library reads ([`built`]), less each file that a test
+/// build reads and no build of the library reads. Comments and inline modules count.
 fn named_outside_tests(
     root: &std::path::Path,
     named: impl Fn(&str) -> bool,
 ) -> Vec<String> {
-    let features = features(root);
-    let on = |set: usize| -> Vec<String> {
-        let features = features.iter().enumerate();
-        features
-            .filter(|(bit, _)| set >> bit & 1 == 1)
-            .flat_map(|(_, feature)| {
-                ["--cfg".to_owned(), format!("feature=\"{feature}\"")]
-            })
-            .collect()
-    };
-    let mut built = Vec::new();
-    for set in 0..1 << features.len() {
-        for assertions in ["on", "off"] {
-            let flag = format!("-Cdebug-assertions={assertions}");
-            built.extend(read_by_rustc(root, &[on(set), vec![flag]].concat()));
-        }
-    }
-    let every = on((1 << features.len()) - 1);
-    let tested = read_by_rustc(root, &[every, vec!["--test".to_owned()]].concat());
+    let (built, cfgs) = built(root);
+    let mut flags = on(&cfgs);
+    flags.push("--test".to_owned());
+    let (tested, _) = read_by_rustc(root, &cfgs, &flags);
     let tests = root.join("tests");
     let mut files = files_under(root, "rs");
     files.retain(|path| !path.starts_with(&tests));
@@ -497,61 +480,138 @@ fn named_outside_tests(
         .collect()
 }
 
-/// The features of the `Cargo.toml` of `root`.
+/// Each file that a build of the library of the crate at `root` reads, and the cfgs
+/// that the builds set, sorted. The builds are those on this host with each set of
+/// the cfgs that the crate tests and the host does not set (features among them), each
+/// with debug assertions on and off and with each panic strategy. rustc names each
+/// such cfg in a build that reads the file that tests it.
 ///
 /// # Panics
 ///
-/// On a line of its `[features]` table that is not blank, a comment, or
-/// `<name> = [...]`, so that no feature is left out.
-fn features(root: &std::path::Path) -> Vec<String> {
-    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
-    let table = manifest
-        .lines()
-        .skip_while(|line| *line != "[features]")
-        .skip(1)
-        .take_while(|line| !line.starts_with('['));
-    table
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .map(|line| {
-            let feature = line.split_once(" = [").filter(|(name, rest)| {
-                let named = |c: char| c.is_ascii_alphanumeric() || "_-".contains(c);
-                rest.ends_with(']') && name.chars().all(named)
-            });
-            let (name, _) = feature.unwrap_or_else(|| {
-                panic!("the scan cannot read the line `{line}` of [features]")
-            });
-            name.to_owned()
-        })
+/// On a cfg with a value, other than a feature, that the host does not set, since the
+/// scan cannot know which values a build gives it.
+fn built(root: &std::path::Path) -> (Vec<std::path::PathBuf>, Vec<String>) {
+    let mut cfgs: Vec<String> = Vec::new();
+    let mut runs = std::collections::BTreeSet::new();
+    let mut files = Vec::new();
+    loop {
+        let mut found = Vec::new();
+        for set in 0..1usize << cfgs.len() {
+            let set: Vec<_> = (0..cfgs.len())
+                .filter(|bit| set >> bit & 1 == 1)
+                .map(|bit| cfgs[bit].clone())
+                .collect();
+            for assertions in ["on", "off"] {
+                for panic in ["unwind", "abort"] {
+                    let mut flags = on(&set);
+                    flags.push(format!("-Cdebug-assertions={assertions}"));
+                    flags.push(format!("-Cpanic={panic}"));
+                    if runs.insert(flags.clone()) {
+                        let (read, unknown) = read_by_rustc(root, &cfgs, &flags);
+                        files.extend(read);
+                        found.extend(unknown);
+                    }
+                }
+            }
+        }
+        if found.is_empty() {
+            files.sort();
+            files.dedup();
+            return (files, cfgs);
+        }
+        cfgs.extend(found);
+        cfgs.sort();
+        cfgs.dedup();
+    }
+}
+
+/// The flags of rustc that set each cfg of `cfgs`.
+fn on(cfgs: &[String]) -> Vec<String> {
+    cfgs.iter()
+        .flat_map(|cfg| ["--cfg".to_owned(), cfg.clone()])
         .collect()
 }
 
 /// Each file that rustc reads to expand the library of the crate at `root`, at
-/// `src/lib.rs`, with `flags`. No other crate is given, so its names fail to resolve,
-/// but rustc lists the files of the crate still.
-fn read_by_rustc(root: &std::path::Path, flags: &[String]) -> Vec<std::path::PathBuf> {
+/// `src/lib.rs`, with `flags`, and each cfg that the crate tests, the host does not
+/// set, and `known` does not hold, as `name` or `feature="name"`. No other crate is
+/// given, so its names fail to resolve, but rustc lists the files of the crate still.
+///
+/// # Panics
+///
+/// On a cfg with a value, other than a feature, that the host does not set.
+fn read_by_rustc(
+    root: &std::path::Path,
+    known: &[String],
+    flags: &[String],
+) -> (Vec<std::path::PathBuf>, Vec<String>) {
+    let (features, names): (Vec<_>, Vec<_>) =
+        known.iter().partition(|cfg| cfg.starts_with("feature="));
+    let values: Vec<_> = features
+        .iter()
+        .map(|feature| &feature["feature=".len()..])
+        .collect();
+    let mut checked = vec![
+        "cfg(test)".to_owned(),
+        format!("cfg(feature, values({}))", values.join(",")),
+    ];
+    checked.extend(names.iter().map(|name| format!("cfg({name})")));
+    // rustc checks cfgs only when it emits more than dep-info, and each thread needs a
+    // directory of its own for the metadata.
+    let out = std::path::Path::new(env!("OUT_DIR"))
+        .join("scan-out")
+        .join(format!(
+            "{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
     let output = std::process::Command::new("rustc")
-        .args([
-            "--edition",
-            "2024",
-            "--crate-type",
-            "lib",
-            "--emit",
-            "dep-info=-",
-        ])
+        .args(["--edition", "2024", "--crate-type", "lib"])
+        .args(["--emit", "dep-info=-,metadata", "--out-dir"])
+        .arg(out)
+        .args(checked.iter().flat_map(|cfg| ["--check-cfg", cfg]))
         .args(flags)
         .arg(root.join("src/lib.rs"))
         .output()
         .unwrap();
     let deps = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        !deps.is_empty(),
-        "rustc gives no files: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    deps.lines()
+    let errors = String::from_utf8(output.stderr).unwrap();
+    assert!(!deps.is_empty(), "rustc gives no files: {errors}");
+    let files = deps
+        .lines()
         .filter_map(|line| line.strip_suffix(':'))
         .map(|path| std::fs::canonicalize(path.replace("\\ ", " ")).unwrap())
-        .collect()
+        .collect();
+    (files, unknown_cfgs(&errors))
+}
+
+/// Each cfg that the warnings of rustc in `errors` give as unknown.
+///
+/// # Panics
+///
+/// On an unknown value of a cfg other than `feature`.
+fn unknown_cfgs(errors: &str) -> Vec<String> {
+    let quoted = |line: &str, before: &str| {
+        let (_, rest) = line.split_once(before)?;
+        Some(rest.split_once('`')?.0.to_owned())
+    };
+    let lines: Vec<_> = errors.lines().collect();
+    let mut cfgs = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        if let Some(name) = quoted(line, "unexpected `cfg` condition name: `") {
+            cfgs.push(name);
+        } else if let Some(value) = quoted(line, "unexpected `cfg` condition value: `")
+        {
+            let of = lines[at..].iter().find_map(|line| quoted(line, " for `"));
+            let of = of.unwrap_or_else(|| panic!("rustc names no cfg: {errors}"));
+            assert!(
+                of == "feature",
+                "the scan cannot build each value of the cfg `{of}`, such as `{value}`"
+            );
+            cfgs.push(format!("feature=\"{value}\""));
+        }
+    }
+    cfgs
 }
 
 /// Each file under `dir` with the extension `extension`, sorted.
@@ -607,7 +667,6 @@ fn the_scan_cuts_off_only_the_files_of_a_test_build() {
     let root = create_tree(
         "gated",
         &[
-            MANIFEST,
             (
                 "src/lib.rs",
                 "#[cfg(test)]\n#[allow(unused)]\nmod t;\nmod p;\n",
@@ -622,24 +681,32 @@ fn the_scan_cuts_off_only_the_files_of_a_test_build() {
 }
 
 /// A file that a build of the library reads is not cut off when a test build reads it
-/// too: with a feature off, or with no debug assertions.
+/// too: with a feature off or on, no debug assertions, panics that abort, or a cfg of
+/// the crate, also one that only such a build tests.
 #[test]
 fn the_scan_cuts_off_no_file_of_a_build_of_the_library() {
     let root = create_tree(
         "built",
         &[
-            MANIFEST,
             (
                 "src/lib.rs",
                 "#[cfg(any(test, not(feature = \"sim\")))]\nmod f;\n\
-                 #[cfg(any(test, not(debug_assertions)))]\nmod d;\n",
+                 #[cfg(any(test, not(debug_assertions)))]\nmod d;\n\
+                 #[cfg(any(test, panic = \"abort\"))]\nmod p;\n\
+                 #[cfg(any(test, feature = \"foo\"))]\nmod o;\n\
+                 #[cfg(any(test, outer))]\nmod a;\n",
             ),
             ("src/f.rs", "fn named() {}"),
             ("src/d.rs", "fn named() {}"),
+            ("src/p.rs", "fn named() {}"),
+            ("src/o.rs", "fn named() {}"),
+            ("src/a.rs", "#[cfg(any(test, inner))]\nmod i;\n"),
+            ("src/a/i.rs", "fn named() {}"),
         ],
     );
     let named = named_outside_tests(&root, |name| name == "named");
-    assert_eq!(named, [at(&root, "src/d.rs"), at(&root, "src/f.rs")]);
+    let files = ["src/a/i.rs", "src/d.rs", "src/f.rs", "src/o.rs", "src/p.rs"];
+    assert_eq!(named, files.map(|file| at(&root, file)));
 }
 
 /// The scan reads a file outside `src/` that a `path` attribute, also under
@@ -650,7 +717,6 @@ fn the_scan_reads_each_file_that_the_crate_includes() {
     let root = create_tree(
         "path",
         &[
-            MANIFEST,
             (
                 "src/lib.rs",
                 "#[path = \"../p.rs\"]\nmod p;\n\
@@ -686,7 +752,6 @@ fn the_scan_reads_each_file_that_a_build_on_another_host_may_read() {
     let root = create_tree(
         "other",
         &[
-            MANIFEST,
             ("src/lib.rs", &lib),
             ("src/x.rs", ""),
             ("off.rs", "fn named() {}"),
@@ -707,37 +772,42 @@ fn the_scan_reads_each_file_that_a_build_on_another_host_may_read() {
 fn the_scan_reads_a_file_that_is_not_utf_8() {
     let root = create_tree(
         "bytes",
-        &[
-            MANIFEST,
-            (
-                "src/lib.rs",
-                "pub static B: &[u8] = include_bytes!(\"../b.der\");\n",
-            ),
-        ],
+        &[(
+            "src/lib.rs",
+            "pub static B: &[u8] = include_bytes!(\"../b.der\");\n",
+        )],
     );
     std::fs::write(root.join("b.der"), b"\xffnamed\xfe").unwrap();
     let named = named_outside_tests(&root, |name| name == "named");
     assert_eq!(named, [at(&root, "b.der")]);
 }
 
-/// The scan refuses a line of `[features]` that it cannot read, so it leaves out no
-/// feature: each form of TOML other than `<name> = [...]` on one line.
+/// The scan refuses a cfg with a value, other than a feature, that the host does not
+/// set: it cannot know which values a build gives it.
 #[test]
-fn the_scan_refuses_a_line_of_features_that_it_cannot_read() {
-    for (line, table) in [
-        ("sim=[]", "sim=[]\n"),
-        ("\"sim\" = []", "\"sim\" = []\n"),
-        ("sim = [", "sim = [\n  \"a\",\n]\n"),
+fn the_scan_refuses_a_cfg_value_that_it_cannot_build() {
+    for (cfg, of, value) in [
+        ("foo = \"bar\"", "foo", "bar"),
+        ("target_os = \"nope\"", "target_os", "nope"),
     ] {
-        let manifest = format!("[features]\n{table}");
-        let root =
-            create_tree("features", &[("Cargo.toml", &manifest), ("src/lib.rs", "")]);
+        let lib = format!("#[cfg({cfg})]\nmod f;\n");
+        let root = create_tree("value", &[("src/lib.rs", &lib), ("src/f.rs", "")]);
         let refused =
             std::panic::catch_unwind(|| named_outside_tests(&root, |_| false));
         let message = *refused.unwrap_err().downcast::<String>().unwrap();
-        let expected = format!("the scan cannot read the line `{line}` of [features]");
+        let expected = format!(
+            "the scan cannot build each value of the cfg `{of}`, such as `{value}`"
+        );
         assert_eq!(message, expected);
     }
+}
+
+/// The builds of the library set each cfg that the crate tests and the host does not
+/// set.
+#[test]
+fn the_scan_builds_each_cfg_of_the_crate() {
+    let (_, cfgs) = built(&root());
+    assert_eq!(cfgs, ["asan", "feature=\"open62541\"", "feature=\"sim\""]);
 }
 
 /// A test mock that a `path` attribute gives in place of a module is cut off, and
@@ -747,7 +817,6 @@ fn the_scan_reads_the_module_that_a_test_mock_shadows() {
     let root = create_tree(
         "mock",
         &[
-            MANIFEST,
             (
                 "src/lib.rs",
                 "#[cfg(test)]\n#[path = \"mock.rs\"]\nmod clock;\n\
@@ -760,9 +829,6 @@ fn the_scan_reads_the_module_that_a_test_mock_shadows() {
     let named = named_outside_tests(&root, |name| name == "named");
     assert_eq!(named, [at(&root, "src/clock.rs")]);
 }
-
-/// The `Cargo.toml` of a tree, with one feature.
-const MANIFEST: (&str, &str) = ("Cargo.toml", "[features]\nsim = []\n");
 
 /// How [`named_outside_tests`] gives the name `named` in `file` of `root`.
 fn at(root: &std::path::Path, file: &str) -> String {
