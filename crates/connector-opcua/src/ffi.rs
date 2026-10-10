@@ -572,6 +572,7 @@ pub(crate) mod test {
             data: *mut c_void,
         ) -> u32;
         pub(crate) fn shim_value_status(value: *const c_void) -> u32;
+        pub(crate) fn shim_client_namespaced(client: *mut super::Client) -> bool;
         pub(crate) fn UA_Client_getState(
             client: *mut super::Client,
             channel: *mut c_int,

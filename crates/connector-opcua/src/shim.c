@@ -661,3 +661,13 @@ UA_StatusCode shim_value_status(const void *value) {
     return answer->hasValue ? UA_STATUSCODE_GOOD : UA_STATUSCODE_BADNODATA;
 }
 
+/* Gives whether `client` has the URI of namespace 1 from its server, which it reads
+ * after its session activates. */
+UA_Boolean shim_client_namespaced(UA_Client *client) {
+    UA_String uri = UA_STRING_NULL;
+    UA_StatusCode status = UA_Client_getNamespaceUri(client, 1, &uri);
+    UA_Boolean namespaced = status == UA_STATUSCODE_GOOD && uri.length > 0;
+    UA_String_clear(&uri);
+    return namespaced;
+}
+

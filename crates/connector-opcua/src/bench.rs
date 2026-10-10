@@ -16,7 +16,7 @@ use std::task::{Context, Poll, Waker};
 use env::clock::Clock;
 use env::net::Net;
 use env::rng::Rng;
-use types::time::Monotonic;
+use types::time::{Monotonic, Span};
 
 use crate::connection;
 use crate::event::Loop;
@@ -107,9 +107,13 @@ unsafe extern "C" fn idle(_: *mut c_void, _: *mut c_void) {}
 /// The port of the server of a [`Manager`].
 const PORT: u16 = 4840;
 
+/// The time that a [`Manager`] gives its clients to connect. A connect has a timeout
+/// only while a request waits: before its first request, it can wait forever.
+const CONNECT: Span = Span::from_nanos(60_000_000_000);
+
 /// A connection manager over `env::net` with a test server of open62541 and `idle + 1`
-/// clients, each with an activated session, on its loop. The first client reads; the
-/// others send nothing.
+/// clients, each with an activated session and the namespaces of the server, on its
+/// loop. The first client reads; the others send nothing.
 pub struct Manager {
     clients: Vec<NonNull<ffi::Client>>,
     server: NonNull<ffi::test::Server>,
@@ -128,15 +132,15 @@ struct Answers {
 
 impl Manager {
     /// Makes the manager on `clock` and `net`, with its listener on `address` and port
-    /// 4840, and drives it until each session is activated. Then it runs `body` on the
+    /// 4840, and drives it until each client is connected. Then it runs `body` on the
     /// manager, and closes each session and deletes the server and the clients. A
     /// panic in `body` leaks them.
     ///
     /// # Panics
     ///
-    /// If `idle` is 65535 or more, as open62541 counts sessions in 16 bits, if a connect
-    /// fails, if open62541 refuses the server, a client, or a step of the close, or if
-    /// the port is taken.
+    /// If `idle` is 65535 or more, as open62541 counts sessions in 16 bits, if a
+    /// connect fails or does not end in 60 s of `clock`, if open62541 refuses the
+    /// server, a client, or a step of the close, or if the port is taken.
     pub async fn scope<T>(
         clock: Clock,
         net: Net,
@@ -154,10 +158,16 @@ impl Manager {
         let sessions =
             u16::try_from(idle + 1).expect("open62541 counts sessions in 16 bits");
         let local = SocketAddr::new(address, PORT);
+        let deadline = clock.now() + CONNECT;
         let rng = &mut Rng::from_seed(0);
-        let manager =
-            connection::Manager::listening(clock, net, local, u32::from(sessions), rng)
-                .expect("the port is free");
+        let manager = connection::Manager::listening(
+            Clock::clone(&clock),
+            net,
+            local,
+            u32::from(sessions),
+            rng,
+        )
+        .expect("the port is free");
         let events = manager.events();
         // SAFETY: the member takes its own loop.
         let status = Status(unsafe { (events.members().start)(events.raw()) });
@@ -199,11 +209,16 @@ impl Manager {
         this.connections
             .drive(|_| {
                 this.connections.events().run();
-                if this.activated() == this.clients.len() {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
+                let connected = this.connected();
+                if connected == this.clients.len() {
+                    return Poll::Ready(());
                 }
+                let clients = this.clients.len();
+                assert!(
+                    clock.now() < deadline,
+                    "{connected} of {clients} clients connected in {CONNECT}"
+                );
+                Poll::Pending
             })
             .await;
         this
@@ -285,13 +300,14 @@ impl Manager {
         assert!(ready.is_ready(), "a drive whose run is ready ends");
     }
 
-    /// Gives the count of clients with an activated session.
+    /// Gives the count of clients with an activated session and the namespaces of the
+    /// server.
     ///
     /// # Panics
     ///
     /// If the connect of a client failed, as a client does not try it again.
-    fn activated(&self) -> usize {
-        let activated = |client: &&NonNull<ffi::Client>| {
+    fn connected(&self) -> usize {
+        let connected = |client: &&NonNull<ffi::Client>| {
             let mut session = Session(0);
             let mut status = Status::GOOD;
             // SAFETY: the client lives.
@@ -304,9 +320,11 @@ impl Manager {
                 );
             }
             assert!(status == Status::GOOD, "a connect failed: {status:?}");
+            // SAFETY: the client lives.
             session == Session::ACTIVATED
+                && unsafe { ffi::test::shim_client_namespaced(client.as_ptr()) }
         };
-        self.clients.iter().filter(activated).count()
+        self.clients.iter().filter(connected).count()
     }
 }
 
@@ -354,6 +372,7 @@ mod tests {
     use types::time::Span;
 
     use super::{Client, Manager};
+    use crate::ffi;
 
     /// The delay of the default link.
     fn delay() -> Span {
@@ -445,6 +464,16 @@ mod tests {
             delay: Span::from_nanos(3_000_000_000),
             ..sim::link::Config::default()
         };
+        check_on(link, 0, async |_| ());
+    }
+
+    /// Runs `body` in the scope of a manager with `idle` idle clients, on links of
+    /// `link`.
+    fn check_on(
+        link: sim::link::Config,
+        idle: usize,
+        body: impl AsyncFnOnce(&Manager) + Send + 'static,
+    ) {
         let mut sim = Sim::new(sim::Config {
             link,
             ..sim::Config::default()
@@ -452,16 +481,52 @@ mod tests {
         let node = sim.node(node::Config::default());
         sim.run_on(&node, move |node, _| async move {
             let address = node.addresses()[0];
-            let body = async |_: &Manager| ();
-            Manager::scope(node.clock(), node.net(), address, 0, body).await;
+            Manager::scope(node.clock(), node.net(), address, idle, body).await;
         })
         .expect("the run ends");
+    }
+
+    /// With jitter, the sessions of a scope activate in different drives.
+    #[test]
+    fn a_scope_on_a_link_with_jitter_connects_each_client() {
+        let link = sim::link::Config {
+            jitter: Span::from_nanos(1_000_000),
+            ..sim::link::Config::default()
+        };
+        check_on(link, 15, async |manager| {
+            assert_eq!(manager.connected(), 16);
+        });
+    }
+
+    /// A client reads the namespaces after its session activates, and a scope waits for
+    /// them, so that its close cancels no read.
+    #[test]
+    fn a_scope_waits_for_the_namespaces_of_each_client() {
+        check(3, async |manager, _| {
+            for client in &manager.clients {
+                // SAFETY: the client lives.
+                let namespaced =
+                    unsafe { ffi::test::shim_client_namespaced(client.as_ptr()) };
+                assert!(namespaced, "{manager:?}");
+            }
+        });
+    }
+
+    /// The stream of the connect opens after 200 s, and no request waits until then.
+    #[test]
+    #[should_panic(expected = "0 of 1 clients connected in 1m")]
+    fn a_scope_whose_connect_does_not_end_panics_at_its_deadline() {
+        let link = sim::link::Config {
+            delay: Span::from_nanos(100_000_000_000),
+            ..sim::link::Config::default()
+        };
+        check_on(link, 0, async |_| ());
     }
 
     /// The minimal config of a server takes 100 sessions.
     #[test]
     fn a_scope_takes_more_clients_than_the_sessions_of_a_minimal_server() {
-        check(100, async |manager, _| assert_eq!(manager.activated(), 101));
+        check(100, async |manager, _| assert_eq!(manager.connected(), 101));
     }
 
     /// A read callback of open62541 gets `Good` also when the value has a bad status.
@@ -477,14 +542,16 @@ mod tests {
                 .expect_err("the read failed");
             let message = failed.downcast_ref::<String>().expect("a formatted panic");
             assert_eq!(message, "a read failed: BadNodeIdUnknown");
-            assert_eq!(manager.answers.count.get(), 1);
+            assert_eq!(
+                format!("{manager:?}"),
+                "Manager { clients: 1, answers: 1, .. }"
+            );
         });
     }
 
     #[test]
     fn the_debug_of_a_manager_gives_its_clients_and_answers() {
         check(2, async |manager, _| {
-            assert_eq!(manager.activated(), 3);
             assert_eq!(
                 format!("{manager:?}"),
                 "Manager { clients: 3, answers: 0, .. }"
