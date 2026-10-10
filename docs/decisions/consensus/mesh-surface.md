@@ -140,12 +140,15 @@
   moves `buffer` and `mesh` together.
   Amended (2026-10-10, #2064): the mesh spawns each task through one
   `env::tasks::Group` made from its `Tasks`, and `Mesh::ended` returns the
-  `env::tasks::Ended` that `Group::ended` gives. It is a type of another crate, under
-  the rule above: ENV SEAMS sets its `Debug` text, `Ended { .. }`, which the text of
-  `Ended` above now names. `mesh::Ended` leaves the exports of `mesh`. The contract
-  above holds. Decided by `laptop.architect` (2026-10-09T20:44:15Z):
-  https://github.com/synnaxlabs/foundation/issues/2064#issuecomment-6088942460.
-  Supersedes the `mesh::Ended` of
+  `env::tasks::Ended` that `Group::ended` gives. `mesh::Ended` leaves the exports of
+  `mesh`. The contract above holds. Decided by `laptop.architect`
+  (2026-10-09T20:44:15Z):
+  https://github.com/synnaxlabs/foundation/issues/2064#issuecomment-6088942460. So
+  `Ended` is a type of another crate, under the rule above, and the `Debug` text of
+  `Ended` above is that of `env::tasks::Ended`, set in ENV SEAMS by
+  `laptop.architect-2` (2026-10-09T21:02:50Z):
+  https://github.com/synnaxlabs/foundation/issues/2064#issuecomment-6089208454. This
+  supersedes the `mesh::Ended` of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6051912643.
   `Mesh::holder(PublicKey) -> Option<node::Key>` gives the member whose card holds a
   public key, by a scan of the members, so a caller such as `node` serves a `Hub` stream
