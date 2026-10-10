@@ -4108,9 +4108,9 @@ mod port {
         }
 
         /// A task's reader of a channel whose home is the peer holds a session to the
-        /// peer when the node stops. The stop drops the reader, and the hub's task of
-        /// that session then drops its part of the transport, so the port is free
-        /// within the drain bound of 3 s.
+        /// peer when the node stops. The stop drops the hub and the reader, and each
+        /// task of the hub then lets go of the transport (`hub::Hub::new`), so the
+        /// port is free within the drain bound of 3 s.
         #[test]
         fn a_stop_frees_the_port_while_a_reader_holds_a_session_to_a_home() {
             let mut sim = sim::Sim::new(sim::Config::default());

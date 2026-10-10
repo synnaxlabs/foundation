@@ -814,10 +814,10 @@ impl Serve {
     /// `home`, `guard`, each session and stream future, the operations on the mesh,
     /// the mesh, and the transport, and waits for each task of the mesh to end, with a
     /// mesh, and for the transport to free the port. Unless the socket broke, the port
-    /// is freed only after each task of a remote reader of the hub has ended. Runs no
-    /// task and takes no session when a shard did not open, or when the budgets were
-    /// not kept, the identity did not load, or the mesh did not open, which goes into
-    /// `failed`.
+    /// is freed only after the hub lets go of the region, as [`hub::Hub::new`] states.
+    /// Runs no task and takes no session when a shard did not open, or when the
+    /// budgets were not kept, the identity did not load, or the mesh did not open,
+    /// which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -852,8 +852,9 @@ impl Serve {
         let freed = transport.ended();
         let (inbox, time) = (self.inbox, self.time);
         // Each part that holds the transport or the node's stop drops as this block
-        // ends, on each path, or is a hub task of a remote reader, which ends at its
-        // next poll after its reader drops. So the port is freed before `lock` drops.
+        // ends, on each path, or is a task of the mesh, awaited below, or of the hub,
+        // which ends as `hub::Hub::new` states. So the port is freed before `lock`
+        // drops.
         let served = async move {
             let mesh = match mesh {
                 Ok(mesh) => mesh,
