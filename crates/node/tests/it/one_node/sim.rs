@@ -1,8 +1,6 @@
 //! The simulated servers of ONE NODE, served by the test process over `os` on
 //! loopback. Each method with a `todo!` waits on the issue it names.
 
-#![expect(clippy::todo, reason = "methods that wait on their issues")]
-
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;
@@ -58,17 +56,20 @@ impl Opcua {
     /// Serves on a free loopback port, and gives the address: `ns=3;s=SpikeData`,
     /// `ns=3;s=DipData`, and `ns=3;s=PositiveTrendData`, each at a first value until
     /// [`Opcua::change`].
+    #[expect(clippy::todo, reason = "waits on #435")]
     pub(super) fn serve(&mut self) -> SocketAddr {
         todo!("waits on #435")
     }
 
     /// Changes each variable `ticks` times at 10 Hz, each change with the status
     /// `quality`, and returns after the last change.
+    #[expect(clippy::todo, reason = "waits on #435")]
     pub(super) fn change(&self, _ticks: usize, _quality: Quality) {
         todo!("waits on #435")
     }
 
     /// Each sample served, by node id, in order: the first value, then each change.
+    #[expect(clippy::todo, reason = "waits on #435")]
     pub(super) fn served(&self) -> BTreeMap<String, Vec<Sample>> {
         todo!("waits on #435")
     }
@@ -119,6 +120,7 @@ impl Influx {
     }
 
     /// Each sample stored, by data channel, in time order.
+    #[expect(clippy::todo, reason = "waits on #1734")]
     pub(super) fn stored(&self) -> BTreeMap<String, Vec<Sample>> {
         todo!("waits on #1734")
     }

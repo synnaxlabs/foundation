@@ -1,8 +1,6 @@
 //! A bench for process tests: one `foundation` node in a temporary directory. Each
 //! method with a `todo!` waits on the issue it names.
 
-#![expect(clippy::todo, reason = "methods that wait on their issues")]
-
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
@@ -63,6 +61,7 @@ impl Rig {
 
     /// Starts `foundation start --name edge`, with each listener of the node on port 0
     /// of loopback, and waits until it prints that the node runs.
+    #[expect(clippy::todo, reason = "waits on #1732")]
     pub(crate) fn start(&mut self) {
         todo!("waits on #1732")
     }
@@ -88,11 +87,13 @@ impl Rig {
 
     /// Plans `plant.hcl` into `plant.plan`, and applies that plan. Panics when either
     /// command does not exit 0.
+    #[expect(clippy::todo, reason = "waits on #337, #1744")]
     pub(crate) fn apply(&self) {
         todo!("waits on #337, #1744")
     }
 
     /// The connectors of `foundation status --json`, by name.
+    #[expect(clippy::todo, reason = "waits on #1735")]
     pub(crate) fn status(&self) -> BTreeMap<String, Connector> {
         todo!("waits on #1735")
     }

@@ -70,9 +70,7 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   - Layer 1 decision crates (`raft`, `control`, `delivery`, `access`, `estimate`)
     deny `wildcard_enum_match_arm`, so a new variant breaks every match.
 - `clippy::todo` and `let_underscore_untyped` are denied for the workspace. A stub
-  expects `clippy::todo` on its function, with the issue that builds it as the reason. A
-  test module whose methods wait on their issues (No `#[ignore]` in
-  `docs/claude/testing.md`) expects it at the top of that module.
+  expects `clippy::todo` on its function, with the issue that builds it as the reason.
 
 ## Style and API
 
