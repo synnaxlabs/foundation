@@ -943,30 +943,30 @@ mod buffer {
         }
     }
 
+    /// With two least rings less one byte, shard 0's part of the disk fits, and its
+    /// part of the pool does not.
     #[test]
     fn a_disk_budget_that_holds_no_ring_wins_over_a_pool_budget_past_the_address_space()
     {
-        let mut sim = sim::Sim::new(sim::Config::default());
-        let host = host(&mut sim, 2);
-        let disk = Size::from_bytes(1);
-        let node = Node::start(Config {
-            budget: Budget {
-                pool: Size::from_bytes(u64::MAX),
-                disk,
-            },
-            ..config(&host, Size::MEBIBYTE, Box::new(heap))
-        });
-        assert_eq!(host.shard_starts(), []);
-        assert_eq!(sim.run(), Ok(()));
-        let min = Size::from_bytes(8_437_760);
-        assert_eq!(
-            node.join(),
-            Err(Error::Disk {
-                disk,
-                cores: 2,
-                min
-            })
-        );
+        let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
+        for (cores, bytes, min) in
+            [(1, 1, smallest), (2, 2 * smallest - 1, 2 * smallest)]
+        {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, cores);
+            let disk = Size::from_bytes(bytes);
+            let node = Node::start(Config {
+                budget: Budget {
+                    pool: Size::from_bytes(u64::MAX),
+                    disk,
+                },
+                ..config(&host, Size::MEBIBYTE, Box::new(heap))
+            });
+            assert_eq!(host.shard_starts(), [], "{cores} cores");
+            assert_eq!(sim.run(), Ok(()));
+            let min = Size::from_bytes(min);
+            assert_eq!(node.join(), Err(Error::Disk { disk, cores, min }));
+        }
     }
 
     /// `node` calls the maker on the start thread just before it starts each shard,
