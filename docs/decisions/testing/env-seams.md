@@ -8,8 +8,9 @@
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072358016.
   Amended (2026-10-10, #2064): `tasks::Group` is the one counting driver of `env`. It
   counts each task spawned through it until the task's future has dropped, and
-  `Group::ended` gives an `Ended` that resolves only then, with many waiters. A crate
-  that waits for its tasks uses it and keeps no count of its own. `laptop.architect-2`
+  `Group::ended` gives an `Ended` that resolves only then, with many waiters. The
+  `Debug` text of each is `Group { .. }` and `Ended { .. }`. A crate that waits for its
+  tasks uses it and keeps no count of its own. `laptop.architect-2`
   (2026-10-09T21:02:50Z):
   https://github.com/synnaxlabs/foundation/issues/2064#issuecomment-6089208454.
   Supersedes "no change to `env`" in
