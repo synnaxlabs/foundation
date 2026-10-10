@@ -102,6 +102,7 @@ fn start_node(
         net: os::net(),
         listen,
         region: None,
+        name: "edge".parse().expect("a name"),
     })
 }
 

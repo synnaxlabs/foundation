@@ -11,8 +11,10 @@ mod directory;
 pub mod fuzz;
 mod handoff;
 mod identity;
+mod name;
 mod route;
 mod scope;
+mod sector;
 #[cfg_attr(
     not(test),
     expect(dead_code, reason = "the publish task waits on hub writer sessions")
@@ -38,7 +40,6 @@ use std::task::Poll;
 use document::diagnostic::Diagnostic;
 use document::{Document, Source};
 use env::thread::Handle;
-use types::ed25519::PrivateKey;
 use types::frame::key_set::Interner;
 use types::time::{Span, Stamp};
 
@@ -86,7 +87,7 @@ pub struct Config<M> {
     /// key, both from the file `node.key` in the data directory. Only `node` reads that
     /// file, so until the node founds its region itself (#1744), only the tests of
     /// `node`, and the `acceptance` lab, which writes the file first with
-    /// [`create_key`], give `Some`. Give the same value at each start: the node keeps
+    /// `create_key`, give `Some`. Give the same value at each start: the node keeps
     /// no copy of it, and until the mesh stores it (#1209), a log opened with another
     /// value checks proofs against the wrong voters and starts at another spec. A patch
     /// until the node keeps its region in its data directory when it founds or joins
@@ -95,6 +96,10 @@ pub struct Config<M> {
     /// effect. At the first start, that is the founding's `definitions`, or no channel
     /// when `spec::region::check` gives them problems.
     pub region: Option<mesh::region::Founding>,
+    /// The node's name. The first start on a data directory keeps it in the file
+    /// `name`; a later start with another name stops with [`Error::Renamed`]. Get it
+    /// with [`name`] before the start.
+    pub name: types::name::Name,
 }
 
 impl<M> fmt::Debug for Config<M> {
@@ -108,6 +113,7 @@ impl<M> fmt::Debug for Config<M> {
             .field("disk", &self.disk)
             .field("listen", &self.listen)
             .field("region", &self.region)
+            .field("name", &self.name)
             .finish_non_exhaustive()
     }
 }
@@ -160,21 +166,22 @@ impl Node {
     /// the disk budget; shard 0 also takes each remainder. Unless the node stops first,
     /// shard 0 locks the data directory with the file `lock`, which it holds until each
     /// shard has closed its ring, each task of the mesh has ended, and the transport
-    /// has freed the port, then records the shard count in the data directory, or
-    /// checks the one there, and each shard opens its buffer in directory `shard-<i>`
-    /// of its files, and makes it there when it is not there. The shards open their
-    /// buffers one after another, in order of core. Once each buffer has opened,
-    /// shard 0 reads the node's key and private key from the file `node.key` in the
-    /// data directory, and makes the file at the first start once it has mesh time,
-    /// unless [`create_key`] made it, then opens the mesh of [`Config::region`] when it
-    /// has one, then serves the port, admits each member of the region and at most 256
-    /// sessions of other peers at once, until its transport or the mesh's group stops,
-    /// which stops the node. Returns once each shard runs or one has failed to start.
-    /// When the disk budget holds no ring on each shard, no shard starts, and
-    /// [`Node::join`] gives [`Error::Disk`] with the budget, the shard count, and the
-    /// least budget. A failed start, a shard with no memory, a data directory that
-    /// another node holds or that was made for another shard count, a key file that is
-    /// not valid, or a buffer or a mesh that does not open stops the node, and
+    /// has freed the port, then records the shard count and [`Config::name`] in the
+    /// data directory, or checks the ones there, and each shard opens its buffer in
+    /// directory `shard-<i>` of its files, and makes it there when it is not there. The
+    /// shards open their buffers one after another, in order of core. Once each buffer
+    /// has opened, shard 0 reads the node's key and private key from the file
+    /// `node.key` in the data directory, and makes the file at the first start once it
+    /// has mesh time, unless `create_key` made it, then opens the mesh of
+    /// [`Config::region`] when it has one, then serves the port, admits each member of
+    /// the region and at most 256 sessions of other peers at once, until its transport
+    /// or the mesh's group stops, which stops the node. Returns once each shard runs or
+    /// one has failed to start. When the disk budget holds no ring on each shard, no
+    /// shard starts, and [`Node::join`] gives [`Error::Disk`] with the budget, the
+    /// shard count, and the least budget. A failed start, a shard with no memory, a
+    /// data directory that another node holds or that was made for another shard count,
+    /// a key file that is not valid, a file `name` that holds another name or that no
+    /// node wrote, or a buffer or a mesh that does not open stops the node, and
     /// [`Node::join`] returns its error.
     ///
     /// # Panics
@@ -259,7 +266,7 @@ impl Node {
             endpoint,
             time: clock.clone(),
         };
-        let roles = Role::all(mesh, wall, first, serve, cores);
+        let roles = Role::all(mesh, wall, first, serve, config.name, cores);
         let mut started = Vec::new();
         let mut error = None;
         let pinnable = shards.pinnable();
@@ -385,20 +392,41 @@ impl Node {
 
 /// Makes the file `node.key` in `files`, the data directory of a node that has not
 /// started, with `key` and `private_key`, and makes it durable. Each start of the node
-/// then uses them. For tests and tools that must know a node's key before its first
-/// start; a node that starts with no file makes its own key.
+/// then uses them. For tests that must know a node's key before its first start; a
+/// node that starts with no file makes its own key.
 ///
 /// # Errors
 ///
 /// [`Error::Directory`] with [`env::files::Error::Exists`] when the file is there and
 /// holds a key, and [`Error::Directory`] for a file call that fails. It writes nothing
 /// over a key.
+#[cfg(feature = "sim")]
 pub async fn create_key(
     files: &env::files::Files,
     key: types::node::Key,
-    private_key: PrivateKey,
+    private_key: types::ed25519::PrivateKey,
 ) -> Result<(), Error> {
     identity::store(files, &identity::Identity { key, private_key }).await
+}
+
+/// The name of the node of the data directory `files`: `given`, else the one that the
+/// file `name` holds. Reads the file only when `given` is `None`, writes nothing, and
+/// reads also while another node runs on `files`. A `given` that is not the stored
+/// name stops the start with [`Error::Renamed`].
+///
+/// # Errors
+///
+/// When `given` is `None`: [`Error::Unnamed`] when the file holds no name,
+/// [`Error::Name`] for a file `name` that a node did not write, and
+/// [`Error::Directory`] for a file call that fails.
+pub async fn name(
+    files: &env::files::Files,
+    given: Option<types::name::Name>,
+) -> Result<types::name::Name, Error> {
+    match given {
+        Some(given) => Ok(given),
+        None => name::read(files).await?.ok_or(Error::Unnamed),
+    }
 }
 
 /// The error of [`Node::join`]: `failed`, else the first shard error by core, else
@@ -443,6 +471,8 @@ struct Open {
 /// claimed the data directory for the node's shards, and serves the node's tasks.
 struct First {
     mesh: clock::Clock,
+    /// The node's name, which the claim keeps in the data directory.
+    name: types::name::Name,
     wall: env::wall::Wall,
     give: Give<Interner>,
     serve: Serve,
@@ -466,12 +496,14 @@ impl Role {
         wall: env::wall::Wall,
         give: Give<Interner>,
         serve: Serve,
+        name: types::name::Name,
         cores: usize,
     ) -> impl Iterator<Item = Self> {
         let (ends, closed): (Vec<_>, Vec<_>) =
             (1..cores).map(|_| handoff::pair()).unzip();
         let first = First {
             mesh,
+            name,
             wall,
             give,
             serve,
@@ -526,13 +558,14 @@ impl Open {
             Role::First(first) => {
                 let First {
                     mesh,
+                    name,
                     wall,
                     give,
                     serve,
                     closed,
                 } = *first;
                 tasks.spawn(async { mesh.run(wall).await });
-                let lock = self.claim(&files, closed.len() + 1, give).await;
+                let lock = self.claim(&files, closed.len() + 1, &name, give).await;
                 let (shard, pool) = (tasks.clone(), Rc::new(pool));
                 let (own, mesh_files) = (Rc::clone(&pool), files.clone());
                 let failed = Arc::clone(&self.failed);
@@ -582,20 +615,26 @@ impl Open {
         drop(commit.await);
     }
 
-    /// Claims the data directory for `cores` shards, gives the node's first interner,
-    /// and gives the lock of the data directory. A failed claim goes into `failed`
-    /// and gives no interner, so no ring opens. So does a stop raised before the
-    /// claim, but it is not a failure.
+    /// Claims the data directory for `cores` shards and `name`, gives the node's first
+    /// interner, and gives the lock of the data directory. A failed claim goes into
+    /// `failed` and gives no interner, so no ring opens. So does a stop raised before
+    /// the claim, but it is not a failure.
     async fn claim(
         &self,
         files: &env::files::Files,
         cores: usize,
+        name: &types::name::Name,
         give: Give<Interner>,
     ) -> Option<env::files::File> {
         if self.stop.raised() {
             return None;
         }
-        match directory::claim(files, cores).await {
+        let claimed = async {
+            let lock = directory::claim(files, cores).await?;
+            name::keep(files, name).await?;
+            Ok::<_, Error>(lock)
+        };
+        match claimed.await {
             Ok(lock) => {
                 give.give(Interner::new());
                 Some(lock)
@@ -923,7 +962,7 @@ fn end(
     group.map(|stopped| Some(Error::Group(stopped)))
 }
 
-/// Why a node failed.
+/// Why a node failed, or why [`name`] gave no name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
     /// A shard could not start or pin.
@@ -952,9 +991,10 @@ pub enum Error {
         /// The shard count of this start.
         cores: usize,
     },
-    /// A file call that locks the data directory, reads or records its shard count, or
-    /// reads or writes the node's key, failed. [`env::files::Error::Busy`] on `lock` is
-    /// another node that runs on the data directory.
+    /// A file call that locks the data directory, reads or records its shard count or
+    /// the node's name, or reads or writes the node's key, failed.
+    /// [`env::files::Error::Busy`] on `lock` is another node that runs on the data
+    /// directory.
     Directory(env::files::Error),
     /// The disk budget holds no ring on each of `cores` shards.
     Disk {
@@ -988,6 +1028,18 @@ pub enum Error {
         /// Why it did not bind.
         error: env::net::Error,
     },
+    /// The file `name` in the data directory is not a name that a node wrote. The node
+    /// does not write over it.
+    Name,
+    /// The data directory holds the node `stored`, and the start gave `given`.
+    Renamed {
+        /// The name in the data directory.
+        stored: types::name::Name,
+        /// The name the start gave.
+        given: types::name::Name,
+    },
+    /// The data directory holds no node name, and the start gave none.
+    Unnamed,
 }
 
 impl fmt::Display for Error {
@@ -1007,7 +1059,7 @@ impl fmt::Display for Error {
                  {cores}; start it on {stored} cores"
             ),
             Self::Directory(error) => {
-                write!(f, "cannot claim the data directory: {error}")
+                write!(f, "cannot use the data directory: {error}")
             }
             Self::Disk { disk, cores, min } => write!(
                 f,
@@ -1025,12 +1077,24 @@ impl fmt::Display for Error {
                 write!(f, "cannot open the node's chunk store: {error}")
             }
             Self::Key => f.write_str(
-                "the file node.key in the data directory is not a node key; restore it \
+                "the file `node.key` in the data directory is not a node key; restore it \
                  from a backup of this node",
             ),
             Self::Port { listen, error } => {
                 write!(f, "cannot bind the node's port at {listen}: {error}")
             }
+            Self::Name => f.write_str(
+                "the file `name` in the data directory is not a node name; remove it, and \
+                 start the node with its name",
+            ),
+            Self::Renamed { stored, given } => write!(
+                f,
+                "the data directory holds the node {stored}, not {given}; give \
+                 {stored}, or another data directory"
+            ),
+            Self::Unnamed => f.write_str(
+                "the data directory holds no node name; give the node a name",
+            ),
         }
     }
 }
