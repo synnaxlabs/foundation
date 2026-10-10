@@ -843,7 +843,7 @@ fn memory_that_the_system_refuses_for_the_read_gives_the_pool_error() {
     let (mut sim, node, _) = founded(0);
     let read = sim
         .run_on(&node, |node, _| async move {
-            let budget = block::Config { budget: 4 << 20 };
+            let budget = block::Config::new(4 << 20).expect("the budget fits");
             let (memory, switch) = Scarce::new(budget.reservation());
             let pool = Rc::new(Pool::new(budget, memory));
             switch.refuse();

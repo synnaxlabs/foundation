@@ -71,7 +71,7 @@ fn holds_no_more_bytes_for_an_open_that_names_one_channel_many_times() {
     let peer = move |node: sim::node::Node, tasks: env::tasks::Tasks, at| async move {
         let transport =
             net::transport(&node, &tasks, &net::own_pool(), net::PEER, 1 << 16);
-        let config = block::Config { budget: 8 << 20 };
+        let config = block::Config::new(8 << 20).expect("the budget fits");
         let pool =
             block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
         let session = transport
