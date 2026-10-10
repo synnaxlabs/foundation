@@ -1021,7 +1021,7 @@ impl Waiter {
     }
 }
 
-/// Leaves out the shared state, which holds the wakers of other waiters.
+/// Prints what the waiter waits for, not the state of the buffer.
 impl fmt::Debug for Waiter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Waiter")

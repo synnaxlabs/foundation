@@ -3669,10 +3669,10 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
     .expect("the buffer ends");
 }
 
-/// The test of the hand-written `Debug` of the private `Waiter`: a `Commit` and an
-/// `End` name what each waits for, and print no waker of another waiter.
+/// The test of the hand-written `Debug` of the private `Waiter` that a `Commit` and an
+/// `End` hold: it prints only its event and its key.
 #[test]
-fn the_debug_of_a_commit_and_an_end_names_its_event() {
+fn a_waiter_prints_only_its_event_and_key() {
     let (mut sim, node) = create_node(142);
     sim.run_on(&node, |node, tasks| async move {
         let config = node_config(&node, tasks, DIR);
