@@ -1,5 +1,6 @@
 //! A run that ends with a device error of 1 MiB, or with one whose text comes in two
-//! pieces of 1023 and 1 bytes, and the wait after it, hold no more than 2.25 KiB over
+//! pieces of 1023 and 1 bytes, and the end of its tasks and the wait after it, hold
+//! no more than 2.25 KiB over
 //! the same run in a twin sim, where it ends with an error of 1 byte: room for the cut
 //! text twice, plus 256 bytes. The twins add their larger steps of memory at the same
 //! runs, so the steps cancel. This binary has no test harness: the count covers each
@@ -59,7 +60,7 @@ impl fmt::Display for Pieces {
 impl std::error::Error for Pieces {}
 
 /// A kind whose first [`SHORT`] runs end with a device error of 1 byte, whose next run
-/// ends as `last` gives, and whose last run ends `Ok`.
+/// ends as `last` gives with a task that lives 2 s more, and whose last run ends `Ok`.
 struct Large {
     last: Last,
     runs: Arc<AtomicUsize>,
@@ -84,9 +85,15 @@ impl Kind for Large {
         std::future::ready(Ok(Vec::new()))
     }
 
-    fn run(&self, _: Context<()>) -> impl Future<Output = Result<(), Error>> {
+    fn run(&self, ctx: Context<()>) -> impl Future<Output = Result<(), Error>> {
         let run = self.runs.fetch_add(1, Relaxed);
         self.peaks[run].fetch_max(ALLOCATOR.held(), Relaxed);
+        if run == SHORT {
+            let clock = ctx.clock().clone();
+            ctx.tasks().spawn(async move {
+                clock.sleep(Span::from_nanos(2_000_000_000)).await;
+            });
+        }
         let end = match (run, self.last) {
             (..SHORT, _) | (SHORT, Last::Short) => Err(Error::Device("a".into())),
             (SHORT, Last::Large) => Err(Error::Device("a".repeat(MIB).into())),
@@ -99,8 +106,8 @@ impl Kind for Large {
     }
 }
 
-/// The most bytes held over run [`SHORT`] and the wait after it, less those held
-/// before the sim, when that run ends as `last` gives.
+/// The most bytes held over run [`SHORT`], the end of its tasks, and the wait after
+/// it, less those held before the sim, when that run ends as `last` gives.
 fn held(last: Last) -> usize {
     let before = ALLOCATOR.held();
     let (runs, peaks) = (Arc::new(AtomicUsize::new(0)), Arc::new(Peaks::default()));
@@ -158,8 +165,8 @@ fn main() {
         let held = held(last);
         assert!(
             held <= short + 2 * 1_024 + 256,
-            "run {SHORT} and its wait hold {short} bytes after a short error, {held} \
-             after {last:?}"
+            "from run {SHORT} to the next, the sim holds {short} bytes after a short \
+             error, {held} after {last:?}"
         );
     }
 }

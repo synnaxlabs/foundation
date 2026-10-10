@@ -170,14 +170,12 @@ impl Supervisor {
             let lasted = clock.now() - start;
             drop(token);
             writer.end(&end).await;
+            // A device error can be large, and nothing after this needs it.
+            let last = matches!(end, Ok(()) | Err(Error::Config(_))).then_some(end);
             live.ended().await;
-            match end {
-                Ok(()) | Err(Error::Config(_)) => {
-                    writer.stop().await;
-                    return end;
-                }
-                // The error can be large, and the wait does not need it.
-                Err(Error::Device(_) | Error::Retry(_)) => drop(end),
+            if let Some(end) = last {
+                writer.stop().await;
+                return end;
             }
             if cancel.cancelled() {
                 break;
