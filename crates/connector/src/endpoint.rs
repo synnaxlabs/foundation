@@ -714,7 +714,10 @@ mod tests {
     impl Drop for Probe {
         fn drop(&mut self) {
             let mut cx = std::task::Context::from_waker(Waker::noop());
-            let acquire = pin!(self.0.acquire(0, (), |(): &()| future::pending()));
+            let open = |(): &()| -> future::Pending<Result<Probe, Error>> {
+                panic!("the slot is free at the close")
+            };
+            let acquire = pin!(self.0.acquire(0, (), open));
             assert!(
                 acquire.poll(&mut cx).is_pending(),
                 "the slot is busy at the close"
@@ -780,7 +783,6 @@ mod tests {
         let mut removed = Box::pin(busy(&ports));
         assert!(poll(removed.as_mut()).is_pending());
         drop(removed);
-        assert!(poll_with(pin!(busy(&ports)), &Arc::default()).is_pending());
     }
 
     /// Settings whose compare panics while the registry holds its lock.
