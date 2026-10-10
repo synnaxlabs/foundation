@@ -424,9 +424,9 @@ mod tests {
             let scope = Manager::scope(node.clock(), node.net(), address, 0, body);
             let panic = caught(scope).await.expect_err("the body panics");
             assert_eq!(panic.downcast_ref(), Some(&"the body panics"));
-            let body = async |manager: &Manager| manager.connected();
+            let body = async |manager: &Manager| manager.answers();
             let scope = Manager::scope(node.clock(), node.net(), address, 0, body);
-            assert_eq!(scope.await, 1);
+            assert_eq!(scope.await, 0);
         })
         .expect("the run ends");
     }
