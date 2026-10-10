@@ -51,10 +51,14 @@
   One `Readers::close(key, now)` ends each session: `now` is `None` before the home
   first has mesh time, and a close with `None` of an open named complete session panics.
   `Readers::open_named_latest` takes a stamp, and no other open does, so the home opens
-  unnamed readers before the first estimate. A named complete session has a
-  `complete::Key` (#1024). One close replaces `Readers::close_named`, so the caller
-  never picks a close by the mode of the session (`laptop.architect`,
-  2026-10-08T11:12:45Z:
+  unnamed readers before the first estimate. `Readers::open_latest` returns the
+  `latest::Key` alone: an unnamed latest open takes over no session, so only
+  `Readers::open_named_latest` returns `latest::Opened` with `replaced`
+  (`laptop.architect`, 2026-10-07T16:30:34Z:
+  https://github.com/synnaxlabs/foundation/issues/1479#issuecomment-6042237695). A named
+  complete session has a `complete::Key` (#1024). One close replaces
+  `Readers::close_named`, so the caller never picks a close by the mode of the session
+  (`laptop.architect`, 2026-10-08T11:12:45Z:
   https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367). One
   `delivery::named::Key { subject, name }` keys a named reader in `Reader::Named`,
   `Record`, and `Readers::open_named_latest`, in place of two `Name` values (the

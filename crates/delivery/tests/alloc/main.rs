@@ -49,7 +49,7 @@ fn main() {
 
 fn latest(frame: &impl Fn() -> Frame) {
     let mut readers = Readers::new(0);
-    let open = |readers: &mut Readers| readers.open_latest().key;
+    let open = |readers: &mut Readers| readers.open_latest();
     let mut keys: Vec<_> = (0..SESSIONS).map(|_| open(&mut readers)).collect();
     assert_eq!(
         readers.put(frame()).len(),

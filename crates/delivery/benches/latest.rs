@@ -24,7 +24,7 @@ fn opened(sessions: usize) -> (Frame, Readers, Vec<Key>) {
         .expect("the pool holds the frame")
         .freeze(Path::Live);
     let mut readers = Readers::new(0);
-    let keys = (0..sessions).map(|_| readers.open_latest().key).collect();
+    let keys = (0..sessions).map(|_| readers.open_latest()).collect();
     (frame, readers, keys)
 }
 

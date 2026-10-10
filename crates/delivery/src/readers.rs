@@ -1475,7 +1475,7 @@ pub(super) mod tests {
                 .open(Reader::Unnamed, Start::At(live(0)), 0, Charge::Whole)
                 .key;
             assert_eq!(next, complete::Key(2));
-            assert_eq!(readers.open_latest().key, latest::Key(0));
+            assert_eq!(readers.open_latest(), latest::Key(0));
         }
 
         #[test]
@@ -1567,7 +1567,7 @@ pub(super) mod tests {
                 .key;
             readers.close(key.into(), None);
             for _ in 0..3 {
-                let key = readers.open_latest().key;
+                let key = readers.open_latest();
                 readers.close(key.into(), None);
             }
             assert_eq!(readers.end(), 3);
@@ -1579,7 +1579,7 @@ pub(super) mod tests {
             let unnamed = Reader::Unnamed;
             let complete = readers.open(unnamed, Start::At(live(0)), 0, Charge::Whole);
             assert_eq!(complete.key, complete::Key(3));
-            assert_eq!(readers.open_latest().key, latest::Key(3));
+            assert_eq!(readers.open_latest(), latest::Key(3));
         }
 
         #[test]
@@ -2651,7 +2651,7 @@ pub(super) mod tests {
         fn keeps_nothing_with_no_complete_session() {
             let frames = Frames::new(1);
             let mut readers = Readers::new(0);
-            let latest = readers.open_latest().key;
+            let latest = readers.open_latest();
             readers.queue(&frames.frame(1), &frames.set, 0..1);
             assert!(frames.spare());
             assert_eq!(taken(&mut readers, latest), []);

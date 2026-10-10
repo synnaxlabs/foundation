@@ -15,13 +15,13 @@ use crate::named;
 ///
 /// ```compile_fail,E0308
 /// let mut readers = delivery::Readers::new(0);
-/// let key = readers.open_latest().key;
+/// let key = readers.open_latest();
 /// readers.grant(key, 10);
 /// ```
 ///
 /// ```compile_fail,E0308
 /// let mut readers = delivery::Readers::new(0);
-/// let key = readers.open_latest().key;
+/// let key = readers.open_latest();
 /// let position = delivery::Position { live: 1, backfill: None };
 /// readers.ack(key, position).unwrap();
 /// ```
@@ -34,8 +34,7 @@ impl fmt::Display for Key {
     }
 }
 
-/// A latest session that [`Readers::open_latest`] or [`Readers::open_named_latest`]
-/// started.
+/// A named latest session that [`Readers::open_named_latest`] started.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[must_use]
 pub struct Opened {
@@ -59,7 +58,14 @@ pub(super) struct Session {
 impl Readers {
     /// Starts an unnamed latest session, which gets the index's newest live frame, if
     /// any, at once. A latest session holds nothing and writes no record.
-    pub fn open_latest(&mut self) -> Opened {
+    ///
+    /// ```compile_fail
+    /// #![deny(unused_must_use)]
+    /// let mut readers = delivery::Readers::new(0);
+    /// readers.open_latest();
+    /// ```
+    #[must_use]
+    pub fn open_latest(&mut self) -> Key {
         self.push_latest(None)
     }
 
@@ -69,12 +75,12 @@ impl Readers {
     pub fn open_named_latest(&mut self, reader: named::Key, now: Stamp) -> Opened {
         let replaced = self.replace(&reader, now);
         Opened {
+            key: self.push_latest(Some(Box::new(reader))),
             replaced,
-            ..self.push_latest(Some(Box::new(reader)))
         }
     }
 
-    fn push_latest(&mut self, named: Option<Box<named::Key>>) -> Opened {
+    fn push_latest(&mut self, named: Option<Box<named::Key>>) -> Key {
         let key = Key(self.next_latest);
         self.next_latest += 1;
         self.latest.push(Session {
@@ -84,10 +90,7 @@ impl Readers {
         });
         self.woken_latest.clear();
         self.woken_latest.reserve(self.latest.len());
-        Opened {
-            key,
-            replaced: None,
-        }
+        key
     }
 
     /// Makes `frame`, which landed on the live path, the newest frame and the waiting
@@ -183,7 +186,7 @@ mod tests {
     }
 
     fn unnamed(readers: &mut Readers) -> Key {
-        readers.open_latest().key
+        readers.open_latest()
     }
 
     fn taken(readers: &mut Readers, key: Key) -> Option<u64> {
@@ -208,15 +211,15 @@ mod tests {
             assert_eq!(put(&mut readers, frames.frame(1)), []);
             assert_eq!(put(&mut readers, frames.frame(2)), []);
             let latest = readers.open_latest();
-            assert_eq!(taken(&mut readers, latest.key), Some(2));
-            assert_eq!(taken(&mut readers, latest.key), None);
+            assert_eq!(taken(&mut readers, latest), Some(2));
+            assert_eq!(taken(&mut readers, latest), None);
         }
 
         #[test]
         fn gets_nothing_before_the_first_frame() {
             let mut readers = Readers::new(0);
             let latest = readers.open_latest();
-            assert_eq!(taken(&mut readers, latest.key), None);
+            assert_eq!(taken(&mut readers, latest), None);
         }
 
         #[test]
@@ -387,7 +390,7 @@ mod tests {
             assert_eq!(readers.release(3), []);
             assert_eq!(complete_taken(&mut readers, new), [1, 2]);
             dropped(&mut readers, old.into());
-            assert_eq!(readers.open_latest().key, Key(1));
+            assert_eq!(readers.open_latest(), Key(1));
             let next = complete(&mut readers, "c", live(3));
             assert_eq!(next, complete::Key(2));
             assert!(matches!(readers.take(next.into()), Next::Empty));
@@ -682,12 +685,8 @@ mod tests {
                 match input {
                     Input::Open => {
                         let latest = readers.open_latest();
-                        assert!(
-                            model.latest.insert(latest.key),
-                            "{} is new",
-                            latest.key
-                        );
-                        model.mailboxes.insert(latest.key, model.newest);
+                        assert!(model.latest.insert(latest), "{latest} is new");
+                        model.mailboxes.insert(latest, model.newest);
                     }
                     Input::Complete => {
                         let key = readers
