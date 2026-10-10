@@ -2619,7 +2619,9 @@ mod tests {
         (sim, node)
     }
 
-    /// The holder that the newest handoff of `slot` on disk names.
+    /// The holder that the newest handoff of `slot` on disk names. It reads the
+    /// private buffer: only a further restart shows that record through the public
+    /// calls.
     async fn recorded(shard: &Shard, slot: u32) -> Option<control::Writer> {
         let holders = handoff::newest(&shard.buffer).await.expect("reads");
         let (_, last) = holders
@@ -2732,6 +2734,8 @@ mod tests {
         .expect("the run after the cut ends");
     }
 
+    /// It reads the private gate: with no mesh time, no writer opens, so no public
+    /// call shows the holder.
     #[test]
     fn restores_control_with_no_mesh_time_after_a_power_cut() {
         let (mut sim, node) = cut_after(176, false);
