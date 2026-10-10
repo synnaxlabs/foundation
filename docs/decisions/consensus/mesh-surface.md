@@ -179,7 +179,9 @@
   gives the founding that a mesh directory holds, or `None` when the directory is not
   there or holds no founding file, so a node opens its region again at each start
   with no copy of its own. It reads no log: a first open whose log holds no record
-  and whose directory holds the same founding writes nothing (MESH DRIVER). A
+  and whose directory holds the same founding writes nothing (MESH DRIVER; approved
+  by `laptop.architect`, 2026-10-10T04:24:20Z:
+  https://github.com/synnaxlabs/foundation/pull/2234#issuecomment-6093736250). A
   founding file that does not read back whole gives `Error::Unfounded`, whose text is
   "{path} does not read back whole, or is not there while the log of the mesh
   directory holds a record". Lost: `Mesh::founding`, an
