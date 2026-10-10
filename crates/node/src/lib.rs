@@ -37,8 +37,6 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
-use document::diagnostic::Diagnostic;
-use document::{Document, Source};
 use env::thread::Handle;
 use types::frame::key_set::Interner;
 use types::time::{Span, Stamp};
@@ -167,9 +165,9 @@ impl Node {
     /// data directory, or checks the ones there, and each shard opens its buffer in
     /// directory `shard-<i>` of its files, and makes it there when it is not there. The
     /// shards open their buffers one after another, in order of core. Once each buffer
-    /// has opened, shard 0 reads the node's key and private key from the file
-    /// `node.key` in the data directory, and makes the file at the first start once it
-    /// has mesh time, unless `create_key` made it, then opens the mesh of
+    /// has opened, shard 0 reads the node's key, private key, and seal key from the
+    /// file `node.key` in the data directory, and makes the file at the first start
+    /// once it has mesh time, unless `create_key` made it, then opens the mesh of
     /// [`Config::region`] when it has one, then serves the port, admits each member of
     /// the region and at most 256 sessions of other peers at once, until its transport
     /// or the mesh's group stops, which stops the node. Returns once each shard runs or
@@ -408,9 +406,10 @@ impl Stopper {
 }
 
 /// Makes the file `node.key` in `files`, the data directory of a node that has not
-/// started, with `key` and `private_key`, and makes it durable. Each start of the node
-/// then uses them. For tests that must know a node's key before its first start; a
-/// node that starts with no file makes its own key.
+/// started, with `key`, `private_key`, and a new seal key from `entropy`, and makes it
+/// durable. Each start of the node then uses them. Gives the public seal key, for the
+/// node's card. For tests that must know a node's keys before its first start; a node
+/// that starts with no file makes its own keys.
 ///
 /// # Errors
 ///
@@ -420,10 +419,19 @@ impl Stopper {
 #[cfg(feature = "sim")]
 pub async fn create_key(
     files: &env::files::Files,
+    entropy: &env::entropy::Entropy,
     key: types::node::Key,
     private_key: types::ed25519::PrivateKey,
-) -> Result<(), Error> {
-    identity::store(files, &identity::Identity { key, private_key }).await
+) -> Result<types::node::SealKey, Error> {
+    let opener = secret::seal::Opener::generate(entropy);
+    let seal_key = opener.public();
+    let identity = identity::Identity {
+        key,
+        private_key,
+        opener,
+    };
+    identity::store(files, &identity).await?;
+    Ok(seal_key)
 }
 
 /// The name of the node of the data directory `files`: `given`, else the one that the
@@ -909,19 +917,18 @@ fn operations(
     entropy: env::entropy::Entropy,
 ) -> ops::Node {
     let key = move || channel_key(&time, &entropy);
-    let front_ends = ops::FrontEnds::new("hcl", ops::FrontEnd { read: hcl });
+    let front_ends = ops::FrontEnds::new(
+        "hcl",
+        ops::FrontEnd {
+            read: config_hcl::read,
+        },
+    );
     ops::Node::new(mesh, key, front_ends, Arc::new(kinds()))
 }
 
 /// The connector kinds of this binary.
 fn kinds() -> connector::kind::Table {
     connector::kind::Table::new().with("influx", connector_influx::Kind::default())
-}
-
-/// The HCL front end.
-fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
-    config_hcl::read(source, text)
-        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
 /// Gives `hub` what the spec that `mesh` uses defines, then returns a future that gives

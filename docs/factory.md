@@ -52,7 +52,7 @@ budget. One issue is in progress per crate. The coordinator keeps this table cur
 | Machine | Host | Crates |
 | --- | --- | --- |
 | laptop | the laptop, 16 cores | `node`, `config`, `config-hcl`, `document`, `ops`, `acceptance` |
-| box1 | `foundation-factory`, 64 vCPU | `hub`, `control`, `delivery`, `home`, `mesh`, `raft`, `spec`, `access`, `blob`, `buffer`, `replica`, `block`, `ring`, `types`, `codec`, `wire`, `counting` |
+| box1 | `foundation-factory`, 64 vCPU | `hub`, `control`, `delivery`, `home`, `mesh`, `raft`, `spec`, `access`, `blob`, `buffer`, `replica`, `block`, `ring`, `types`, `codec`, `wire`, `counting`, `waker` |
 | box2 | `foundation-factory-2`, 32 vCPU | `transport`, `clock`, `estimate`, `sim`, `env`, `os`, `secret`, `connector`, `connector-<kind>`, `daqmx-stub` |
 
 The risk crates are `raft`, `buffer`, `delivery`, `block`, `ring`, `codec`, `wire`,
@@ -66,7 +66,7 @@ between crates of the two lists, and each ruling that holds for all crates.
 
 | Architect | Crates |
 | --- | --- |
-| `laptop.architect` | `types`, `hub`, `control`, `delivery`, `home`, `mesh`, `raft`, `access`, `blob`, `buffer`, `replica`, `block`, `ring`, `codec`, `wire`, `counting` |
+| `laptop.architect` | `types`, `hub`, `control`, `delivery`, `home`, `mesh`, `raft`, `access`, `blob`, `buffer`, `replica`, `block`, `ring`, `codec`, `wire`, `counting`, `waker` |
 | `laptop.architect-2` | `spec`, `node`, `config`, `config-hcl`, `document`, `ops`, `acceptance`, `transport`, `clock`, `estimate`, `sim`, `env`, `os`, `secret`, `connector`, `connector-<kind>`, `daqmx-stub` |
 
 ## Milestones

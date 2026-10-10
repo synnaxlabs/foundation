@@ -105,15 +105,16 @@
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312 that no
   test sees the drop of the transport.
   Amended (2026-10-08, #1660, by `laptop.architect-2`, 19:52 UTC): `Config` has no key.
-  Once each buffer has opened, shard 0 reads the node's key and private key from the
-  file `node.key` in the data directory, before the hub, the transport, and the mesh
-  open. The file is 68 bytes: the tag `foundation/key/1`, the node key (big-endian;
-  UUIDv7 when shard 0 makes it), the Ed25519 private key, and the CRC32C of those 64
-  bytes (little-endian). It is one sector, which a crash keeps whole or old. At the
-  first start, shard 0 makes the file with `Mode::Create`, unless `node::create_key`
-  made it first (NODE MESH); a file with no bytes or with 68 zero bytes is a key not yet
+  Once each buffer has opened, shard 0 reads the node's key, private key, and seal key
+  from the file `node.key` in the data directory, before the hub, the transport, and the
+  mesh open. The file is 100 bytes: the tag `foundation/key/2`, the node key
+  (big-endian; UUIDv7 when shard 0 makes it), the Ed25519 private key, the X25519 seal
+  private key of `secret::seal::Opener` (S8), and the CRC32C of those 96 bytes
+  (little-endian). It is one sector, which a crash keeps whole or old. At the first
+  start, shard 0 makes the file with `Mode::Create`, unless `node::create_key` made it
+  first (NODE MESH); a file with no bytes or with 100 zero bytes is a key not yet
   written, so shard 0 makes a key (`types::node::Key::v7` at mesh time, once it has one,
-  from `Config::entropy`, and 32 random bytes). At each start, shard 0 writes the key
+  from `Config::entropy`, and 64 random bytes). At each start, shard 0 writes the key
   back and syncs the file and the directory before the transport proves it, because a
   failed sync of an earlier start can leave a key that a read sees but a power cut
   loses. A node that joins by ticket (#336) makes its key the same way at its first
@@ -124,11 +125,21 @@
   (01:08 UTC):
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6072179320. Each other
   file error on `node.key` gives `Error::Directory`. The form is not a contract: only
-  `node` reads it. The seal key goes into `node.key` with its first caller, as the tag
-  `foundation/key/2` with 32 more bytes. `admin.key` (#1744 PR 1b) shares this code when
-  it lands. `os` gives each new file the mode `0600` and each new directory `0700`, and
-  on Linux a new directory takes the setgid bit of its parent; the umask can clear more
-  bits. It does not change the mode of one that is there (#1988):
+  `node` reads it. The seal key is in `node.key`, not in a file of its own, because S8
+  rotates it with the Ed25519 key, and a restore of `node.key` alone must not give a
+  card whose seal key the node does not hold. The file `foundation/key/1`, with no seal
+  key, gives `Error::Key`: no node ran outside a test. `create_key` makes the seal key
+  from its `entropy` argument and gives its public half for the card. By
+  `laptop.architect-2` (#1744, plan revision 3, 2026-10-10 03:30 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093320483, with
+  the `create_key` shape of 03:42 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093413533, and
+  approved by `laptop.architect` (03:57 UTC):
+  https://github.com/synnaxlabs/foundation/pull/2229#issuecomment-6093523453.
+  `admin.key` (#1744 PR 1b) shares this code when it lands. `os` gives each new file
+  the mode `0600` and each new directory `0700`, and on Linux a new directory takes
+  the setgid bit of its parent; the umask can clear more bits. It does not change the
+  mode of one that is there (#1988):
   https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067866831, on the
   plan https://github.com/synnaxlabs/foundation/issues/1660#issuecomment-6067848563. The
   umask, the setgid bit, and a file that is there, by `laptop.architect-2` (23:24 UTC):
