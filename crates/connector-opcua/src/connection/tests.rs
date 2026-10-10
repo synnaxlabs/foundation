@@ -16,7 +16,7 @@ use env::rng::Rng;
 use sim::{Sim, node};
 use types::time::{Monotonic, Span};
 
-use super::{LINGER, Manager, OPTIONS, READ_BYTES, SENDS};
+use super::{CLOSES, LINGER, Manager, OPTIONS, READ_BYTES, SENDS};
 use crate::child;
 use crate::event::Loop;
 use crate::ffi::test::{
@@ -245,11 +245,14 @@ impl Side {
         self.manager.state().table.borrow().len()
     }
 
-    /// The length of the read buffer of each connection in the table. No call of
-    /// open62541 shows it, and `tests/memory.rs` cannot reach the private manager.
-    fn buffers(&self) -> Vec<(usize, usize)> {
+    /// The keys of the connections in the table whose streams close.
+    fn closing(&self) -> Vec<usize> {
         let table = self.manager.state().table.borrow();
-        table.iter().map(|(id, c)| (*id, c.buffer.len())).collect()
+        table
+            .iter()
+            .filter(|(_, c)| matches!(c.stream, super::Stream::Closing { .. }))
+            .map(|(id, _)| *id)
+            .collect()
     }
 
     fn states(&self) -> Vec<ConnectionState> {
@@ -283,6 +286,28 @@ impl Side {
         // SAFETY: the member takes its own loop.
         let status = Status(unsafe { (events.members().run)(events.raw(), 0) });
         assert_eq!(status, Status::GOOD);
+    }
+
+    /// Makes a server on the loop of the side with the minimal config and the discovery
+    /// URL `url`, and starts it.
+    fn start(&self, url: &CStr) -> *mut ffi::test::Server {
+        // SAFETY: the loop outlives the server, which `stop` deletes.
+        let server = unsafe {
+            ffi::test::shim_server_new(self.events().raw(), PORT, url.as_ptr())
+        };
+        assert!(!server.is_null());
+        // SAFETY: the server lives.
+        let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+        assert_eq!(status, Status::GOOD);
+        server
+    }
+
+    /// Shuts `server` down and deletes it.
+    async fn stop(&self, server: *mut ffi::test::Server) {
+        // SAFETY: the server lives.
+        let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+        assert_eq!(status, Status::GOOD);
+        self.delete(server).await;
     }
 
     /// Drives until `server` is `STOPPED` and nothing is due on the loop, then deletes
@@ -468,6 +493,28 @@ impl Network {
         });
         drop(handle.expect("the shard starts"));
         reads
+    }
+
+    /// Dials the listener after `delay`, and holds the stream for 60 s with no read,
+    /// write, or close.
+    fn hold(&self, delay: Span) {
+        let net = self.peer.net();
+        let clock = self.peer.clock();
+        let config = tcp::Config {
+            remote: self.listening(),
+            options: OPTIONS,
+        };
+        let shard = env::shards::Config {
+            name: "hold".into(),
+            core: None,
+        };
+        let handle = self.peer.shards().start(shard, move |_| async move {
+            clock.sleep(delay).await;
+            let stream = net.connect(&config).await.expect("the listener accepts");
+            clock.sleep(Span::from_nanos(60_000_000_000)).await;
+            drop(stream);
+        });
+        drop(handle.expect("the shard starts"));
     }
 
     /// Accepts one stream on the peer, and runs `peer` on it with the clock of the
@@ -2003,30 +2050,6 @@ fn notes(
         .collect()
 }
 
-/// A read buffer for each listen and connecting connection costs 64 KiB each, which no
-/// call of open62541 shows, so the test reads the table.
-#[test]
-fn only_a_stream_that_reads_holds_a_read_buffer() {
-    let mut network = Network::new();
-    network.dial(Span::MILLISECOND, b"");
-    let peer = SocketAddr::new(network.peer.addresses()[0], PORT);
-    let buffers = network
-        .sim
-        .run_on(&network.local.clone(), move |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
-            assert_eq!(side.listen(PORT), Status::GOOD);
-            assert_eq!(side.connect(peer), Status::GOOD);
-            let opened = side.buffers();
-            side.drive(Span::from_nanos(100_000_000)).await;
-            (opened, side.buffers())
-        })
-        .expect("the run ends");
-    assert_eq!(
-        buffers,
-        (vec![(1, 0), (2, 0)], vec![(1, 0), (3, READ_BYTES)])
-    );
-}
-
 #[test]
 fn a_listen_gives_its_address_and_port_and_an_accept_the_address_of_the_peer() {
     let network = Network::new();
@@ -2655,4 +2678,331 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
             })
             .expect("the run ends");
     }
+}
+
+/// Each purged stream of a peer that neither reads nor closes stays in the table for
+/// `LINGER`. The table must hold no more than the 100 secure channels of the minimal
+/// config and [`CLOSES`] closing streams.
+#[test]
+fn streams_that_a_purge_closes_are_no_more_than_the_bound() {
+    let mut network = Network::new();
+    for i in 0..1000 {
+        network.hold(Span::from_nanos((i + 1) * 1_000_000));
+    }
+    let held = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            let server = side.start(c"opc.tcp://:4840");
+            side.drive(Span::from_nanos(2_000_000_000)).await;
+            // Less the listen connection.
+            let held = (side.connections() - 1, side.closing().len());
+            side.stop(server).await;
+            held
+        })
+        .expect("the run ends");
+    assert_eq!(held, (100 + CLOSES, CLOSES));
+}
+
+/// One more peer than the server holds channels and [`CLOSES`] closing streams
+/// together, each of which neither reads nor closes, when `child::running()`. The
+/// server purges the oldest channel at each accept past 100.
+#[test]
+fn closes_past_the_bound() {
+    if !child::running() {
+        return;
+    }
+    let mut network = Network::new();
+    for i in 0..=100 + CLOSES {
+        let i = i64::try_from(i).expect("a small count");
+        network.hold(Span::from_nanos((i + 1) * 1_000_000));
+    }
+    let held = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            let server = side.start(c"opc.tcp://:4840");
+            side.drive(Span::SECOND).await;
+            let held = (side.connections(), side.closing());
+            side.stop(server).await;
+            held
+        })
+        .expect("the run ends");
+    let closing: Vec<usize> = (3..=102).collect();
+    assert_eq!(held, (1 + 100 + CLOSES, closing));
+}
+/// A close past [`CLOSES`] drops the stream that started to close first, with a
+/// warning: stream 2 at the last accept, then 3 to 102 as the shutdown closes each
+/// channel.
+#[test]
+fn a_close_past_the_bound_drops_the_oldest_closing_stream() {
+    let stderr = stderr("closes_past_the_bound");
+    let dropped: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("streams close"))
+        .collect();
+    let expected: Vec<String> = (2..=102)
+        .map(|id| {
+            format!(
+                "connector-opcua: open62541 warning: connection {id}: more than 100 \
+                 streams close, so it drops the oldest"
+            )
+        })
+        .collect();
+    assert_eq!(dropped, expected);
+}
+
+/// A close past [`CLOSES`] from inside a run of the loop drops a stream that leaves
+/// the table in the same drive.
+#[test]
+fn a_stream_that_a_close_past_the_bound_drops_leaves_in_the_same_drive() {
+    let mut network = Network::new();
+    for i in 0..=CLOSES {
+        let i = i64::try_from(i).expect("a small count");
+        network.hold(Span::from_nanos((i + 1) * 1_000_000));
+    }
+    let counts = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            let accepted = side.connections();
+            for id in 2..=101 {
+                assert_eq!(side.close(id), Status::GOOD);
+            }
+            side.drive(Span::from_nanos(10_000_000)).await;
+            let closing = side.connections();
+            let first = Cell::new(true);
+            side.manager
+                .drive(|_| {
+                    if first.replace(false) {
+                        assert_eq!(side.close(102), Status::GOOD);
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
+            (accepted, closing, side.connections())
+        })
+        .expect("the run ends");
+    assert_eq!(counts, (102, 102, 101));
+}
+
+/// Closes 102 down to 2 at one instant, when `child::running()`.
+#[test]
+fn closes_at_one_instant() {
+    if !child::running() {
+        return;
+    }
+    let mut network = Network::new();
+    for i in 0..=CLOSES {
+        let i = i64::try_from(i).expect("a small count");
+        network.hold(Span::from_nanos((i + 1) * 1_000_000));
+    }
+    network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            for id in (2..=102).rev() {
+                assert_eq!(side.close(id), Status::GOOD);
+            }
+        })
+        .expect("the run ends");
+}
+
+/// Of the streams that start to close at one instant, a close past [`CLOSES`] drops
+/// the first to close, not the one with the lowest key.
+#[test]
+fn a_close_past_the_bound_drops_the_first_to_close_at_one_instant() {
+    let stderr = stderr("closes_at_one_instant");
+    let dropped: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("streams close"))
+        .collect();
+    assert_eq!(
+        dropped,
+        [
+            "connector-opcua: open62541 warning: connection 102: more than 100 streams \
+             close, so it drops the oldest"
+        ]
+    );
+}
+
+/// Records a call as [`record`] does, with the address of the bytes of a read in
+/// place of the bytes.
+unsafe extern "C" fn address(
+    _: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    _: *mut *mut c_void,
+    state: ConnectionState,
+    _: *const KeyValueMap,
+    message: Bytes,
+) {
+    // SAFETY: `open` passes the calls of a live side.
+    let calls = unsafe { &*application.cast::<RefCell<Vec<Call>>>() };
+    let at = if message.length == 0 {
+        Vec::new()
+    } else {
+        message.data.addr().to_le_bytes().to_vec()
+    };
+    calls.borrow_mut().push((id, state, at));
+}
+
+/// Each read gives C its bytes in the one read buffer of the manager, which the manager
+/// makes only when a stream opens, at 64 KiB, and never clears: a short read, or the
+/// drain of a closing stream, leaves the bytes of a longer read past its end. It reads
+/// the private `State.read`: C sees only the bytes of a read, which the 64 KiB stream
+/// buffers of `OPTIONS` also cap, no warning names it, and the counting-allocator tests
+/// make no manager.
+#[test]
+fn each_read_is_in_the_one_buffer_of_the_manager() {
+    let mut network = Network::new();
+    network.dial(Span::from_nanos(100_000_000), b"one, longer");
+    network.dial(Span::from_nanos(200_000_000), b"two");
+    let (buffers, calls) = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let mut side = Side::listening(&node, listener(&node));
+            side.callback = address;
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            let buffer = |side: &Side| {
+                let read = side.manager.state().read.borrow();
+                let start: Vec<u8> = read.iter().take(11).copied().collect();
+                (read.len(), read.capacity(), start)
+            };
+            side.drive(Span::from_nanos(50_000_000)).await;
+            let before = buffer(&side);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.close(3), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            ((before, buffer(&side)), side.calls())
+        })
+        .expect("the run ends");
+    let reads: Vec<(usize, Vec<u8>)> = calls
+        .into_iter()
+        .filter(|(_, _, at)| !at.is_empty())
+        .map(|(id, _, at)| (id, at))
+        .collect();
+    let first = reads.first().map(|(_, at)| at.clone());
+    let same: Vec<(usize, bool)> = reads
+        .into_iter()
+        .map(|(id, at)| (id, Some(at) == first))
+        .collect();
+    assert_eq!(
+        (buffers, same),
+        (
+            ((0, 0, vec![]), (1 << 16, 1 << 16, b"two, longer".to_vec())),
+            vec![(2, true), (3, true)]
+        )
+    );
+}
+
+/// The drain of a closing stream reads the bytes that the peer writes after the close
+/// into the read buffer of the manager, over the bytes of the last read of C. It reads
+/// the private `State.read` for the reason that
+/// `each_read_is_in_the_one_buffer_of_the_manager` gives.
+#[test]
+fn a_drain_reads_into_the_one_buffer_of_the_manager() {
+    let mut network = Network::new();
+    network.accept(|mut stream, clock| async move {
+        write(&mut stream, b"one, longer").await;
+        read_all(&mut stream, &clock, &Mutex::default(), Span::ZERO).await;
+        write(&mut stream, b"XY").await;
+        drop(poll_fn(|cx| stream.poll_close(cx)).await);
+    });
+    let remote = network.remote();
+    let start = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.close(1), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            let read = side.manager.state().read.borrow();
+            read.iter().take(11).copied().collect::<Vec<u8>>()
+        })
+        .expect("the run ends");
+    assert_eq!(start, b"XYe, longer");
+}
+
+/// A read gives C at most 64 KiB, the size of the read buffer and of the stream
+/// buffers of `OPTIONS`, so 70,000 bytes take two reads or more.
+#[test]
+fn a_read_fills_the_read_buffer_of_64_kib() {
+    let mut network = Network::new();
+    network.dial(Span::from_nanos(100_000_000), &vec![7; 70_000]);
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            side.calls()
+        })
+        .expect("the run ends");
+    let reads: Vec<usize> = calls
+        .iter()
+        .filter(|(id, _, bytes)| *id == 2 && !bytes.is_empty())
+        .map(|(_, _, bytes)| bytes.len())
+        .collect();
+    assert_eq!(
+        (reads.iter().max(), reads.iter().sum::<usize>()),
+        (Some(&(1 << 16)), 70_000)
+    );
+}
+
+/// Records a call as [`record`] does, and closes a connection at the `ESTABLISHED`
+/// that opens it.
+unsafe extern "C" fn close_at_open(
+    cm: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    context: *mut *mut c_void,
+    state: ConnectionState,
+    params: *const KeyValueMap,
+    message: Bytes,
+) {
+    let opened = state == ffi::ESTABLISHED && message.length == 0;
+    // SAFETY: the manager gives the arguments that it gives `record`.
+    unsafe { record(cm, id, application, context, state, params, message) };
+    if opened {
+        // SAFETY: the manager is live for the call.
+        let members = unsafe { &*cm.cast::<Members>() };
+        // SAFETY: the member takes its own manager.
+        assert_eq!(Status(unsafe { (members.close)(cm, id) }), Status::GOOD);
+    }
+}
+
+/// A stream that closes before its first read still drains to the end of the peer,
+/// which closes 100 ms after the end of the stream.
+#[test]
+fn a_close_before_the_first_read_waits_for_the_end_of_the_peer() {
+    let mut network = Network::new();
+    network.accept(|mut stream, clock| async move {
+        write(&mut stream, b"unread").await;
+        let reads = Mutex::new(Reads::default());
+        read_all(&mut stream, &clock, &reads, Span::ZERO).await;
+        clock.sleep(Span::from_nanos(100_000_000)).await;
+        drop(poll_fn(|cx| stream.poll_close(cx)).await);
+    });
+    let remote = network.remote();
+    let connections = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let mut side = Side::new(&node);
+            side.callback = close_at_open;
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::from_nanos(50_000_000)).await;
+            let closing = side.connections();
+            side.drive(Span::SECOND).await;
+            (closing, side.connections())
+        })
+        .expect("the run ends");
+    assert_eq!(connections, (1, 0));
 }
