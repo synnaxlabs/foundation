@@ -71,7 +71,8 @@ fn body(
 }
 
 /// The holder that the newest durable handoff of each index in `buffer` names, with
-/// the index's slot, or `None` for a handoff that names no holder, in no order.
+/// the index's slot, in no order. An index whose newest handoff names no holder is
+/// absent.
 ///
 /// # Errors
 ///
@@ -82,11 +83,11 @@ fn body(
 /// When a handoff does not decode, as [`read`] says.
 pub(crate) async fn newest(
     buffer: &Buffer,
-) -> Result<Vec<(Slot, Option<Writer>)>, buffer::Error> {
+) -> Result<Vec<(Slot, Writer)>, buffer::Error> {
     let found = buffer.newest(Path::Live, TAG).await?;
     let holders = found
         .into_iter()
-        .map(|(slot, stored)| (slot, read(&stored.bytes)));
+        .filter_map(|(slot, stored)| Some((slot, read(&stored.bytes)?)));
     Ok(holders.collect())
 }
 

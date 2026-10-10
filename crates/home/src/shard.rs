@@ -313,7 +313,7 @@ impl Shard {
         let grace = Lease::new(GRACE).expect("invariant: the grace is positive");
         let recovered = holders
             .into_iter()
-            .filter_map(|(slot, last)| Some((slot, Gate::recover(last?, now, grace))))
+            .map(|(slot, last)| (slot, Gate::recover(last, now, grace)))
             .collect();
         Ok(Self {
             number: shard,
