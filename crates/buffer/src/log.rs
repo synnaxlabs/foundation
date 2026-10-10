@@ -333,7 +333,10 @@ impl Logs {
     /// # Panics
     ///
     /// When `tail` is before the tail of an earlier call.
-    #[cfg_attr(not(test), expect(dead_code, reason = "a commit calls it"))]
+    #[cfg_attr(
+        not(any(test, feature = "sim")),
+        expect(dead_code, reason = "a commit calls it")
+    )]
     pub(crate) fn hide(&mut self, tail: u64) {
         assert!(
             self.hidden <= tail,

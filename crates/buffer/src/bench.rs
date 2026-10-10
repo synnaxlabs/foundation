@@ -1,5 +1,12 @@
-//! `wal::Writer`, for the bench target only. Not a stable surface.
+//! `wal::Writer` and `log::Logs`, for the bench targets only. Not a stable surface.
 
+use std::num::NonZeroU8;
+
+use types::channel::{self, Slot};
+use types::frame::Path;
+use types::time::Stamp;
+
+use crate::entry::Header;
 use crate::record::{ALIGN, BLOCK};
 use crate::wal::{Ends, Layout, Position, Writer};
 
@@ -62,6 +69,69 @@ impl Ring {
         if let Some(tail) = tail {
             self.writer.release(tail.offset());
         }
+    }
+}
+
+/// The durable logs of a shard, synced as each commit syncs them.
+#[derive(Debug)]
+pub struct Logs {
+    inner: crate::log::Logs,
+    headers: Vec<(Slot, Header)>,
+    offset: u64,
+}
+
+impl Logs {
+    /// The logs of `indexes` indexes on the live path. With `tag`, each log first
+    /// holds a durable entry with that tag.
+    #[must_use]
+    pub fn new(indexes: u32, tag: Option<NonZeroU8>) -> Self {
+        let mut logs = crate::log::Logs::default();
+        let headers: Vec<_> = (0..indexes)
+            .map(|n| {
+                let header = Header {
+                    index: channel::Key::from_u128(u128::from(n) + 1),
+                    path: Path::Live,
+                    first: 0,
+                    len: 1,
+                    stored_at: Stamp::from_nanos(1),
+                    last: Some(Stamp::from_nanos(1)),
+                    tag: 0,
+                    bytes: 8,
+                };
+                (Slot::new(n), header)
+            })
+            .collect();
+        let mut offset = BLOCK;
+        if let Some(tag) = tag {
+            for (slot, header) in &headers {
+                let tagged = Header {
+                    len: 0,
+                    last: None,
+                    tag: tag.get(),
+                    ..*header
+                };
+                logs.sync(*slot, &tagged, offset).expect("entries in order");
+            }
+            offset += BLOCK;
+        }
+        Self {
+            inner: logs,
+            headers,
+            offset,
+        }
+    }
+
+    /// One commit of one record that holds one data entry of each index: `hide` to
+    /// the record, then `sync` for each entry.
+    pub fn commit(&mut self) {
+        self.inner.hide(self.offset);
+        for (slot, header) in &mut self.headers {
+            self.inner
+                .sync(*slot, header, self.offset)
+                .expect("entries in order");
+            header.first += 1;
+        }
+        self.offset += BLOCK;
     }
 }
 
