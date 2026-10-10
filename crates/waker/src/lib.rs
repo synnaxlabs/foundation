@@ -61,6 +61,11 @@ unsafe extern "C" fn check<T>(data: *const ()) {
     );
 }
 
+/// A clone.
+///
+/// # Safety
+///
+/// `data` is the data of a live waker of [`holding`] of `T`.
 unsafe fn clone<T: 'static>(data: *const ()) -> RawWaker {
     // SAFETY: the vtable gets `data` from a live waker.
     unsafe { check::<T>(data) };
@@ -70,12 +75,20 @@ unsafe fn clone<T: 'static>(data: *const ()) -> RawWaker {
 }
 
 /// A wake by reference, which does nothing.
+///
+/// # Safety
+///
+/// `data` is the data of a live waker of [`holding`] of `T`.
 unsafe fn wake_by_ref<T>(data: *const ()) {
     // SAFETY: the vtable gets `data` from a live waker.
     unsafe { check::<T>(data) };
 }
 
 /// A drop, or a wake by value.
+///
+/// # Safety
+///
+/// `data` is the data of a live waker of [`holding`] of `T`.
 unsafe fn release<T>(data: *const ()) {
     // SAFETY: the vtable gets `data` from a live waker.
     unsafe { check::<T>(data) };
