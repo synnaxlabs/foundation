@@ -96,7 +96,7 @@
   and puts it in the founding (amended by `laptop.architect-2`, #1744, 2026-10-10
   03:42 UTC:
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093413533, and
-  approved by `laptop.architect`, 2026-10-10T03:57:36Z:
+  approved by `laptop.architect`, 2026-10-10 03:57 UTC:
   https://github.com/synnaxlabs/foundation/pull/2229#issuecomment-6093523453). This
   supersedes the signature and the 68-byte file of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6071015421. It
