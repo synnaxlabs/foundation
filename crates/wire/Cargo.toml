@@ -16,6 +16,7 @@ proptest = { workspace = true }
 [[bench]]
 name = "hub"
 harness = false
+test = true
 
 [[test]]
 name = "alloc"

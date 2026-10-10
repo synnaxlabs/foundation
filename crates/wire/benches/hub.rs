@@ -23,10 +23,11 @@ fn run_of(series: u32) -> Vec<u8> {
     run
 }
 
+/// A head of no samples, so one reader takes it again on each iteration.
 fn head(series: u32) -> Reply {
     Reply::Head(Head {
         path: Path::Live,
-        range: Range { seq: 7, count: 1 },
+        range: Range { seq: 7, count: 0 },
         series,
     })
 }
