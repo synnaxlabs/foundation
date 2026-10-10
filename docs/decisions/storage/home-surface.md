@@ -23,7 +23,7 @@
   before `Shard::open`, and `Config` takes the buffer by value, so no later append can
   come from outside (architect,
   https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6033691871; lost: a
-  check in `Shard::open`). `replica` (X13) and copy mode (X43) are out of the MVP. Their
+  check in `Shard::new`). `replica` (X13) and copy mode (X43) are out of the MVP. Their
   PR decides how `replica` gets to the buffer of a shard and what `committed` waits for.
   Until then, the shard is the only writer (architect,
   https://github.com/synnaxlabs/foundation/pull/1130#issuecomment-6034204295).

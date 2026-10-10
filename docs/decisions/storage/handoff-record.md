@@ -8,11 +8,13 @@
   `Shard::open` restores each gate, with `GRACE` (10 s) from the open, and the gate
   moves in at the first carry of its slot, also after the grace (`laptop.architect`,
   #275, 2026-10-10T04:04:50Z:
-  https://github.com/synnaxlabs/foundation/issues/275#issuecomment-6093580361).
-  Trimming must keep the last record of each index (#406). Until it does, a trim
-  (STORE TRIM) can free that record, and a holder whose record a trim freed gets no
-  grace after a restart. Retention deletes nothing (decided by `laptop.architect`,
-  2026-10-07T12:30:53Z and 2026-10-07T12:59:37Z:
+  https://github.com/synnaxlabs/foundation/issues/275#issuecomment-6093580361). The
+  experiment that sets the gate grace (`docs/decisions/open/parameters.md`), or a test
+  that needs another value, makes `GRACE` a `Config` field (`laptop.architect`, #275,
+  2026-10-10T04:04:50Z, item 4). Trimming must keep the last record of each index
+  (#406). Until it does, a trim (STORE TRIM) can free that record, and a holder whose
+  record a trim freed gets no grace after a restart. Retention deletes nothing
+  (decided by `laptop.architect`, 2026-10-07T12:30:53Z and 2026-10-07T12:59:37Z:
   https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6037946637 and
   https://github.com/synnaxlabs/foundation/issues/1377#issuecomment-6038431739).
   Supersedes https://github.com/synnaxlabs/foundation/pull/402 in its clause that
