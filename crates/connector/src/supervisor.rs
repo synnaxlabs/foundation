@@ -176,7 +176,8 @@ impl Supervisor {
                     writer.stop().await;
                     return end;
                 }
-                Err(Error::Device(_) | Error::Retry(_)) => {}
+                // The error can be large, and the wait does not need it.
+                Err(Error::Device(_) | Error::Retry(_)) => drop(end),
             }
             if cancel.cancelled() {
                 break;

@@ -1,11 +1,13 @@
-//! After a device error of 1 MiB, a run adds no more than 32 KiB over what it adds
-//! after a short one. A run adds about 16 KiB more every few runs, so the test cannot
-//! see a smaller excess; the unit tests of `status` pin the capacity of the text.
-//! This binary has no test harness: the count covers each thread, and a harness
-//! allocates on its own thread at any time.
+//! After a device error of 1 MiB, the run and the wait after it hold no more than 32
+//! KiB over what they hold after a short one. A run adds about 16 KiB more every few
+//! runs, so the test cannot see a smaller excess; the unit tests of `status` pin the
+//! capacity of the text. This binary has no test harness: the count covers each
+//! thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::future::poll_fn;
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering::Relaxed;
@@ -18,6 +20,7 @@ use document::Document;
 use document::diagnostic::Diagnostic;
 use types::channel;
 use types::name::Name;
+use types::time::Span;
 
 #[global_allocator]
 static ALLOCATOR: counting::Bytes = counting::Bytes::new();
@@ -27,12 +30,14 @@ const MIB: usize = 1 << 20;
 /// The runs that end with a short error, so that the bytes a run adds settle.
 const SHORT: usize = 3;
 
+/// The most bytes held while a count of runs had started, by that count.
+type Peaks = [AtomicUsize; SHORT + 3];
+
 /// A kind whose first [`SHORT`] runs end with a device error of 1 byte, whose next run
-/// ends with one of 1 MiB, and whose last run ends `Ok`. Each run records the bytes
-/// held at its start.
+/// ends with one of 1 MiB, and whose last run ends `Ok`.
 struct Large {
-    runs: AtomicUsize,
-    held: Arc<[AtomicUsize; SHORT + 2]>,
+    runs: Arc<AtomicUsize>,
+    peaks: Arc<Peaks>,
 }
 
 impl Kind for Large {
@@ -55,7 +60,7 @@ impl Kind for Large {
 
     fn run(&self, _: Context<()>) -> impl Future<Output = Result<(), Error>> {
         let run = self.runs.fetch_add(1, Relaxed);
-        self.held[run].store(ALLOCATOR.held(), Relaxed);
+        self.peaks[run].fetch_max(ALLOCATOR.held(), Relaxed);
         let end = match run {
             ..SHORT => Err(Error::Device("a".into())),
             SHORT => Err(Error::Device("a".repeat(MIB).into())),
@@ -66,14 +71,16 @@ impl Kind for Large {
 }
 
 fn main() {
-    let held = Arc::new(std::array::from_fn(|_| AtomicUsize::new(0)));
+    let (runs, peaks) = (Arc::new(AtomicUsize::new(0)), Arc::new(Peaks::default()));
     let kind = Large {
-        runs: AtomicUsize::new(0),
-        held: Arc::clone(&held),
+        runs: Arc::clone(&runs),
+        peaks: Arc::clone(&peaks),
     };
+    let seen = Arc::clone(&peaks);
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     let result = sim.run_on(&node, |node, tasks| async move {
+        let clock = node.clock();
         let env = hub::testing::Env {
             files: node.files(),
             clock: node.clock(),
@@ -91,16 +98,28 @@ fn main() {
             .set_definitions(status.iter().map(|(name, def)| (name, def)));
         let supervisor = Supervisor::new(config);
         let (token, config) = (Token::new(), Document::default());
-        supervisor.run("large", connector, &config, &token).await
+        let run = pin!(supervisor.run("large", connector, &config, &token));
+        let sample = pin!(async {
+            loop {
+                clock.sleep(Span::from_nanos(10_000_000)).await;
+                seen[runs.load(Relaxed)].fetch_max(ALLOCATOR.held(), Relaxed);
+            }
+        });
+        let (mut run, mut sample) = (run, sample);
+        poll_fn(|cx| {
+            assert!(sample.as_mut().poll(cx).is_pending(), "the sample loops");
+            run.as_mut().poll(cx)
+        })
+        .await
     });
     result
         .expect("the run ends")
         .expect("the connector ends ok");
-    let at = |run: usize| held[run].load(Relaxed);
-    let short = at(SHORT).saturating_sub(at(SHORT - 1));
-    let long = at(SHORT + 1).saturating_sub(at(SHORT));
+    let at = |runs: usize| peaks[runs].load(Relaxed);
+    let (short, long) = (at(SHORT), at(SHORT + 1));
     assert!(
         long <= short + 32 * 1_024,
-        "a run adds {short} bytes after a short error, {long} after one of 1 MiB"
+        "a run and its wait hold {short} bytes after a short error, {long} after one \
+         of 1 MiB"
     );
 }
