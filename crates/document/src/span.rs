@@ -116,17 +116,16 @@ mod tests {
         }
 
         fn span() -> impl Strategy<Value = Span> {
-            (0..3u32, position(), position()).prop_map(|(source, start, end)| Span {
-                source: Source(source),
-                start,
-                end,
-            })
+            (0..3u32, position(), position()).prop_filter_map(
+                "a span ends at or after its start",
+                |(source, start, end)| Span::new(Source(source), start, end),
+            )
         }
 
         fn key(span: Span) -> (u32, [u32; 6]) {
-            let (s, e) = (span.start, span.end);
+            let (s, e) = (span.start(), span.end());
             let fields = [s.offset, s.line, s.column, e.offset, e.line, e.column];
-            (span.source.0, fields)
+            (span.source().0, fields)
         }
 
         proptest! {
