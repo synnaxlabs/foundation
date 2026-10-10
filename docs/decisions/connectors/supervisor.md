@@ -4,10 +4,17 @@
   drops, so each task that the run spawned to wait on it ends with the run
   (`laptop.architect-2`, 2026-10-08T17:58:15Z:
   https://github.com/synnaxlabs/foundation/pull/1944#issuecomment-6065930789). A drop of
-  the future of `run` cancels the run and does not wait for its tasks. At a spec
-  change, `node` cancels each run and awaits it before it starts the new supervisor
+  the future of `run` cancels the run and does not wait for its tasks
   (`laptop.architect-2`, 2026-10-09T01:30:51Z:
-  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072411231). After a
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072411231). At a
+  spec change, `node` cancels the run of each connector that the change removes or
+  changes, and starts the new run of a changed connector only after its old `run`
+  returned. Each other connector keeps its run, and the shard keeps its supervisor
+  (`laptop.architect-2`, 2026-10-09T05:10:43Z:
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616).
+  Supersedes "At a spec change, `node` cancels each run and awaits it before it starts
+  the new supervisor" of
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072411231. After a
   run returns, the supervisor waits, with no timeout, until each task that the run
   spawned through `Context::tasks` ended, and only then starts its backoff. A task
   that does not end at the cancel is a defect of its kind (`laptop.architect-2`,
@@ -21,7 +28,10 @@
   supervisor runs on each shard, made from `supervisor::Config` (the kinds, clock,
   entropy, network, tasks, and the shard's hub) (`laptop.architect-2`,
   2026-10-08T03:05:58Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). The
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538). Only
+  a shard that has a hub runs one, so today only shard 0 (`box2.builder-7`, the plan
+  of #1156, 2026-10-10T05:56:46Z:
+  https://github.com/synnaxlabs/foundation/issues/1156#issuecomment-6094418070). The
   tests of `connector` and of each kind build that config with
   `connector::testing::create_config`, behind `sim`, which opens the hub through
   `hub::testing::open`. It gives no mesh time, since a task gets it from its writer
@@ -32,8 +42,9 @@
   `Device` or `Retry` it restarts with full jitter backoff (1 s first, 60 s cap,
   constants). The waits start again from 1 s after a run that lasted at least 60 s.
   `Ok` from `run` ends the connector.
-  `Config` returns to the caller, which starts a new supervisor when the spec
-  changes (R12-4). The class of each restart error reaches the connector's status
+  `Config` returns to the caller, which calls `run` again when the spec changes the
+  connector (R12-4) (`laptop.architect-2`, 2026-10-09T05:10:43Z:
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616). The class of each restart error reaches the connector's status
   (CONNECTOR STATUS), and its text with #420.
   Decided by the `connector` builder in the plan on #338, after `/eb-review`; approved
   by the coordinator (#338), with the reset after a long run approved on #338 later.
