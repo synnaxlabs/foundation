@@ -3683,46 +3683,40 @@ fn a_waker_drops_after_the_borrow_of_the_state() {
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
-        let noop = Waker::noop();
-        let mut commit = Box::pin(buffer.committed());
-        let waker = waker::holding(buffer.ended());
-        assert_eq!(
-            commit.as_mut().poll(&mut Context::from_waker(&waker)),
-            Poll::Pending
-        );
-        drop(waker);
-        assert_eq!(
-            commit.as_mut().poll(&mut Context::from_waker(noop)),
-            Poll::Pending
-        );
-        let waker = waker::holding(buffer.ended());
-        assert_eq!(
-            commit.as_mut().poll(&mut Context::from_waker(&waker)),
-            Poll::Pending
-        );
-        drop(waker);
-        drop(commit);
-        let mut end = Box::pin(buffer.ended());
-        let waker = waker::holding(buffer.ended());
-        assert_eq!(
-            end.as_mut().poll(&mut Context::from_waker(&waker)),
-            Poll::Pending
-        );
-        drop(waker);
-        assert_eq!(
-            end.as_mut().poll(&mut Context::from_waker(noop)),
-            Poll::Pending
-        );
-        let waker = waker::holding(buffer.ended());
-        assert_eq!(
-            end.as_mut().poll(&mut Context::from_waker(&waker)),
-            Poll::Pending
-        );
-        drop(waker);
-        drop(end);
+        drop_wakers(&buffer, buffer.committed());
+        drop_wakers(&buffer, buffer.ended());
         assert_eq!(buffer.committed().await, Ok(()));
     })
     .expect("the buffer ends");
+}
+
+/// Polls `waiter` with a waker that holds an `End` of `buffer`, so that a poll with
+/// another waker replaces it, then polls with one more and drops `waiter` with it.
+fn drop_wakers<F: Future>(buffer: &Buffer, waiter: F) {
+    let mut waiter = pin!(waiter);
+    let waker = waker::holding(buffer.ended());
+    assert!(
+        waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    drop(waker);
+    let noop = Waker::noop();
+    assert!(
+        waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(noop))
+            .is_pending()
+    );
+    let waker = waker::holding(buffer.ended());
+    assert!(
+        waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    drop(waker);
 }
 
 /// `End`s polled from other tasks and dropped while the buffer is held keep no
