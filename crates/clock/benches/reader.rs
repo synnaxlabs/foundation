@@ -86,7 +86,7 @@ fn now_in_holdover(bencher: Bencher<'_, '_>) {
     let (mut clock, reader) = Clock::new(monotonic.clone());
     let source = clock.add();
     push(&mut clock, source, &monotonic);
-    let _ = clock.add();
+    let _: clock::source::Key = clock.add();
     bencher
         .counter(divan::counter::ItemsCount::new(READS))
         .bench_local(|| read_all(&reader));

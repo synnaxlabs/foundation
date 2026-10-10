@@ -835,7 +835,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "invariant: the tail checked the entry")]
     fn a_mark_past_the_last_seq_is_a_broken_invariant() {
-        let _ = mark(0, 0).after(u64::MAX, 1);
+        let _: Mark = mark(0, 0).after(u64::MAX, 1);
     }
 
     /// Record 1 holds [2, 5) and an entry with no samples at 5; record 2 starts at

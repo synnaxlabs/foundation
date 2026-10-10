@@ -159,11 +159,13 @@ impl Rig {
 
     /// Plans `plant.hcl` into `plant.plan`, and applies that plan. Panics when either
     /// command does not exit 0.
+    #[expect(clippy::todo, reason = "waits on #337, #1744")]
     pub(crate) fn apply(&self) {
         todo!("waits on #337, #1744")
     }
 
     /// The connectors of `foundation status --json`, by name.
+    #[expect(clippy::todo, reason = "waits on #1735")]
     pub(crate) fn status(&self) -> BTreeMap<String, Connector> {
         todo!("waits on #1735")
     }

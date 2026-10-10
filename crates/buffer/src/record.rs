@@ -277,7 +277,8 @@ mod tests {
         #[should_panic(expected = "a record holds at most u32::MAX bytes")]
         fn panics_on_a_body_over_u32_max() {
             let part = vec![0; 1 << 20];
-            let _ = header(7, Kind::Data, vec![part.as_slice(); 1 << 12]);
+            let _: ([u8; 9], u32) =
+                header(7, Kind::Data, vec![part.as_slice(); 1 << 12]);
         }
 
         /// The CRC values come from another CRC32C implementation.

@@ -221,7 +221,7 @@ mod tests {
     #[should_panic(expected = "the OS error bound -1ns is negative")]
     fn panics_on_a_negative_os_bound() {
         let (_sim, node) = node(Some(Span::from_nanos(-1)));
-        let _ = measure(&node);
+        let _: Measurement = measure(&node);
     }
 
     /// A monotonic clock that gives its readings in order, one per call.
@@ -298,7 +298,7 @@ mod tests {
         expected = "the monotonic clock went from Monotonic(2) to Monotonic(1)"
     )]
     fn panics_when_the_monotonic_clock_goes_back() {
-        let _ = measure_between(2, 1, 0, None);
+        let _: Measurement = measure_between(2, 1, 0, None);
     }
 
     proptest! {
