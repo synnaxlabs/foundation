@@ -54,7 +54,7 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use common::{SETTLE, name, unnamed};
 use hub::home::Outcome;
-use hub::reader::{Mode, Position, Reader, Received};
+use hub::reader::{Mode, Reader, Received};
 use hub::writer::{self, Writer};
 use table::Line;
 use types::authority::Authority;
@@ -80,9 +80,8 @@ fn main() {
     let title = format!("ns per call over {ROUNDS} rounds of {FRAMES} frames");
     table::print(&title, &timer, &lines);
     println!(
-        "bytes: Received {}, Position {}, View {}",
+        "bytes: Received {}, View {}",
         size_of::<Received<'_>>(),
-        size_of::<Position>(),
         size_of::<View<'_>>()
     );
 }
@@ -132,12 +131,11 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
         Line::new("write wake", 1),
         Line::new("latest next", FRAMES),
         Line::new("complete next", FRAMES),
-        Line::new("complete ack", FRAMES),
         Line::new("complete grant", 1),
         Line::new("complete wait", FRAMES - 1),
     ];
     for round in 0..WARMUP + ROUNDS {
-        let [now, first, write, wake, latest, complete, ack, grant, wait] = &mut lines;
+        let [now, first, write, wake, latest, complete, grant, wait] = &mut lines;
         for frame in 0..FRAMES {
             let draft = common::draft(&writer, stamp);
             stamp += 1;
@@ -160,7 +158,7 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
         assert_eq!(woken, round + 1, "each round's last write wakes the reader");
         node.clock().sleep(SETTLE).await;
         for _ in 0..FRAMES {
-            take_and_ack(&mut complete_reader, complete, ack);
+            complete.add(take(&mut complete_reader, |_| ()).0);
         }
         grant.add(table::timed(&ALLOCATOR, || pending(&mut complete_reader)).1);
         for _ in 1..FRAMES {
@@ -243,18 +241,6 @@ fn take<T>(
         }
     }
     panic!("a frame waits for the reader");
-}
-
-/// Takes the frame that waits for `reader` as [`take`] does, adds the figures of its
-/// poll to `next`, and adds to `ack` those of its position and of the ack of it.
-fn take_and_ack(reader: &mut Reader, next: &mut Line, ack: &mut Line) {
-    let (figures, position) = take(reader, |received| {
-        let (position, figures) = table::timed(&ALLOCATOR, || received.position());
-        ack.add(figures);
-        position
-    });
-    next.add(figures);
-    ack.add(table::timed(&ALLOCATOR, || reader.ack(position)).1);
 }
 
 /// Polls `reader`, which has no frame waiting.
