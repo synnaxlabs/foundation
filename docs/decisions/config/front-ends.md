@@ -6,7 +6,7 @@
   front end, keyed by the extension with no dot (`"hcl"`) (`laptop.architect-2`,
   2026-10-09T05:10:54Z,
   https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6074720909).
-  Supersedes "The table is a `BTreeMap<&'static str, FrontEnd>`" of
+  Supersedes "gets `front_ends: BTreeMap<&'static str, FrontEnd>`" of
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054035444. The
   text after the last `.` of a file name picks the front end. A file with no front end
   gives `ops.unknown-extension` at the empty span at the start of the file, as

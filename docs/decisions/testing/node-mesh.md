@@ -126,7 +126,7 @@
   maker, the front ends, and the connector kinds. `new` takes `ops::FrontEnds`, which
   holds at least one front end (`laptop.architect-2`, 2026-10-09T05:10:54Z,
   https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6074720909).
-  Supersedes "`new` refuses an empty table of front ends" of
+  Supersedes "`new` refuses an empty front-end table once" of
   https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6072660664. `node`
   may take `config-hcl`, as the composition root. Trigger: when the
   lab reaches the node through the CLI, remove `Node::operate` if nothing else calls it.
