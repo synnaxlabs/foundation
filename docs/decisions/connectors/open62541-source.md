@@ -336,3 +336,6 @@
   server. Approved by `laptop.architect-2` at `5ebf60ae2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6091519998,
   2026-10-10 00:19 UTC).
+  `connection::Manager::delete_server` does that drive and the delete with no call
+  between. It is behind `cfg(any(test, feature = "sim"))` until a server that serves
+  users calls it (#2212).
