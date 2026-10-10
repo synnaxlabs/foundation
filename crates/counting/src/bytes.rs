@@ -2,12 +2,17 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fmt;
-use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::Ordering::Relaxed;
+use std::hint;
+use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 /// A global allocator that counts the bytes it holds, so a test can bound the memory
 /// of a structure. It counts no allocations: to assert that code does not allocate,
 /// use [`Allocator`](crate::Allocator).
+///
+/// Each allocation that grows the count, [`Self::peak`], and [`Self::reset_peak`] take
+/// one spin lock that every thread shares, so allocations on many threads wait for each
+/// other.
 ///
 /// ```
 /// #[global_allocator]
@@ -22,9 +27,10 @@ use std::sync::atomic::Ordering::Relaxed;
 /// ```
 pub struct Bytes {
     held: AtomicUsize,
-    /// The most bytes held since the last [`Bytes::reset_peak`]. It can lag `held`
-    /// while another thread allocates.
+    /// The most bytes held since the last [`Bytes::reset_peak`]. Only a holder of
+    /// `locked` reads or writes it, so it is never under a `held` that a growth set.
     peak: AtomicUsize,
+    locked: AtomicBool,
 }
 
 impl Bytes {
@@ -34,6 +40,7 @@ impl Bytes {
         Self {
             held: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
+            locked: AtomicBool::new(false),
         }
     }
 
@@ -51,15 +58,12 @@ impl Bytes {
     /// read it in a binary with no test harness, like [`Self::held`].
     #[must_use]
     pub fn peak(&self) -> usize {
-        self.peak.load(Relaxed).max(self.held())
+        self.locked(|| self.peak.load(Relaxed))
     }
 
     /// Starts a new window of [`Self::peak`] at the bytes held now.
     pub fn reset_peak(&self) {
-        // Not a store of `held`: an allocation between its load and the store would
-        // be lost from the new window.
-        self.peak.swap(0, Relaxed);
-        self.peak.fetch_max(self.held(), Relaxed);
+        self.locked(|| self.peak.store(self.held(), Relaxed));
     }
 
     /// Counts `size` bytes for `ptr` unless it is null, and returns it.
@@ -71,8 +75,25 @@ impl Bytes {
     }
 
     fn grow(&self, size: usize) {
-        let held = self.held.fetch_add(size, Relaxed) + size;
-        self.peak.fetch_max(held, Relaxed);
+        self.locked(|| {
+            let held = self.held.fetch_add(size, Relaxed) + size;
+            self.peak.fetch_max(held, Relaxed);
+        });
+    }
+
+    /// Runs `f` while no other thread grows `held` or uses `peak`. A spin lock, as a
+    /// `Mutex` can allocate on some targets.
+    fn locked<T>(&self, f: impl FnOnce() -> T) -> T {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Acquire, Relaxed)
+            .is_err()
+        {
+            hint::spin_loop();
+        }
+        let value = f();
+        self.locked.store(false, Release);
+        value
     }
 }
 
@@ -130,7 +151,7 @@ unsafe impl GlobalAlloc for Bytes {
 
 #[cfg(test)]
 mod tests {
-    use std::slice;
+    use std::{slice, thread};
 
     use super::*;
 
@@ -290,6 +311,34 @@ mod tests {
         bytes.reset_peak();
         assert_eq!(bytes.peak(), 8);
         free(&bytes, ptr, sized(8));
+    }
+
+    #[test]
+    fn peaks_at_or_over_each_count_held_in_the_window_while_threads_allocate() {
+        const TRIES: usize = if cfg!(miri) { 20 } else { 20_000 };
+        let bytes = Bytes::new();
+        let stopped = AtomicBool::new(false);
+        let under = thread::scope(|scope| {
+            for _ in 0..8 {
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "a test owns its threads"
+                )]
+                scope.spawn(|| {
+                    while !stopped.load(Relaxed) {
+                        free(&bytes, filled(&bytes), LAYOUT);
+                    }
+                });
+            }
+            let under = (0..TRIES).find_map(|_| {
+                bytes.reset_peak();
+                let (held, peak) = (bytes.held(), bytes.peak());
+                (peak < held).then_some((held, peak))
+            });
+            stopped.store(true, Relaxed);
+            under
+        });
+        assert_eq!(under, None, "(held, peak) with the peak under a count held");
     }
 
     #[test]
