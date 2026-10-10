@@ -29,8 +29,6 @@
 //! }
 //! ```
 
-#![expect(clippy::todo, reason = "stubs until #68")]
-
 mod address;
 mod class;
 pub mod client;

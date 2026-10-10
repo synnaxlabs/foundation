@@ -150,6 +150,7 @@ impl Session {
     ///     session.datagrams()
     /// }
     /// ```
+    #[expect(clippy::todo, reason = "a stub until #68")]
     #[must_use]
     pub fn datagrams(&self) -> (datagram::Sender, datagram::Receiver) {
         todo!("#68")
