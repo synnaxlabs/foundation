@@ -38,8 +38,6 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
-use document::diagnostic::Diagnostic;
-use document::{Document, Source};
 use env::thread::Handle;
 use types::frame::key_set::Interner;
 use types::time::{Span, Stamp};
@@ -918,14 +916,13 @@ fn operations(
     entropy: env::entropy::Entropy,
 ) -> ops::Node {
     let key = move || channel_key(&time, &entropy);
-    let front_ends = BTreeMap::from([("hcl", ops::FrontEnd { read: hcl })]);
+    let front_ends = BTreeMap::from([(
+        "hcl",
+        ops::FrontEnd {
+            read: config_hcl::read,
+        },
+    )]);
     ops::Node::new(mesh, key, front_ends, connector::kind::Table::new())
-}
-
-/// The HCL front end.
-fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
-    config_hcl::read(source, text)
-        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
 /// Gives `hub` what the spec that `mesh` uses defines, then returns a future that gives
