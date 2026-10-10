@@ -12,15 +12,18 @@ const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 /// order that they are added.
 pub(crate) type Labels<'a> = BTreeMap<Box<str>, Vec<(&'a Label, Kind)>>;
 
-/// Adds `key`, whose label is `label`, to `labels`.
+/// Adds `key`, whose label is `label`, to `labels`. Gives whether `labels` held no
+/// key equal to it in ASCII case.
 pub(crate) fn add<'a>(
     labels: &mut Labels<'a>,
     key: &Name,
     label: &'a Label,
     kind: Kind,
-) {
+) -> bool {
     let lower = key.as_str().to_ascii_lowercase().into();
-    labels.entry(lower).or_default().push((label, kind));
+    let labels = labels.entry(lower).or_default();
+    labels.push((label, kind));
+    labels.len() == 1
 }
 
 /// `config.duplicate-name` at each label of a tree key of `labels` after its first.

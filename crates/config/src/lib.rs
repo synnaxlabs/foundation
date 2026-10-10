@@ -151,7 +151,6 @@ fn checked<'a>(
             .diagnostics
             .extend(read::unknown(document, "a file", &[], &keywords));
     }
-    let mut keys = BTreeSet::new();
     for block in blocks {
         let Some((kind, check_block)) = KINDS
             .iter()
@@ -161,7 +160,6 @@ fn checked<'a>(
             continue;
         };
         let key = found.key(block, *kind);
-        let key = key.filter(|(key, _)| keys.insert(key.as_str().to_ascii_lowercase()));
         let name = key.as_ref().map(|(name, _)| name);
         let definition = check_block(&mut found, block, name);
         if let (Some((key, label_span)), Some(definition)) = (key, definition) {
@@ -238,7 +236,8 @@ struct Reported;
 
 impl<'a> Found<'a> {
     /// Reads the one label of a block of `kind` as its name, and gives the tree key and
-    /// the label's span. [`duplicate::in_labels`] reports a key that repeats.
+    /// the label's span, only for the first block at the key in any ASCII case.
+    /// [`duplicate::in_labels`] reports a key that repeats.
     fn key(&mut self, block: &'a Block, kind: Kind) -> Option<(Name, Option<Span>)> {
         let keyword = kind.as_str();
         let fix = "Give the block one label, its name, such as \"site_a.budget\"";
@@ -276,8 +275,8 @@ impl<'a> Found<'a> {
                 return None;
             }
         };
-        duplicate::add(&mut self.labels, &key, label, kind);
-        Some((key, label.span))
+        let first = duplicate::add(&mut self.labels, &key, label, kind);
+        first.then_some((key, label.span))
     }
 
     /// The value that a reader gives, or `Reported` after it reports the reader's
