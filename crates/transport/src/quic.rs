@@ -4,6 +4,7 @@ mod carrier;
 mod cid;
 pub(crate) mod connection;
 mod datagram;
+mod end;
 #[cfg_attr(
     not(feature = "fuzzing"),
     expect(unreachable_pub, reason = "only the fuzzing feature exports it")
@@ -43,6 +44,7 @@ use crate::stream::Part;
 use crate::{Class, Code, Error, Peer};
 
 pub(crate) use self::carrier::{Carrier, Handle, Session};
+pub use self::end::Ended;
 #[cfg(feature = "fuzzing")]
 pub use self::hello::Hello;
 pub(crate) use self::settings::{Role, Setup};
@@ -250,10 +252,21 @@ impl Endpoint {
         }
     }
 
-    /// Refuses each connection that a peer dials from now on. The peer's dial ends
-    /// at once.
-    pub(crate) fn refuse(&mut self) {
+    /// Shuts the endpoint to new connections: refuses each one that a peer dials from
+    /// now on, and closes with code 0 each one whose handshake is in flight, in either
+    /// direction. The peer's dial ends at once, and each dial of the caller gets its
+    /// [`Event::Closed`].
+    pub(crate) fn shut(&mut self, now: Monotonic) {
         self.refusing = true;
+        let now = self.instant(now);
+        for handle in (0..self.connections.len()).map(ConnectionHandle) {
+            let entry = self.connections[handle.0].as_mut();
+            let Some(connection) = entry.filter(|c| c.handshaking()) else {
+                continue;
+            };
+            self.events.extend(connection.abort(now));
+            self.drive(handle, now);
+        }
     }
 
     /// The messages that waited for room in the send budget of their connection, over
@@ -266,6 +279,12 @@ impl Endpoint {
     /// `true` when each connection drained, so none sends again.
     pub(crate) fn drained(&self) -> bool {
         self.connections.iter().all(Option::is_none)
+    }
+
+    /// `true` when each connection ended. One that ended may still drain its close.
+    pub(crate) fn ended(&self) -> bool {
+        let mut connections = self.connections.iter().flatten();
+        connections.all(|connection| !connection.live())
     }
 
     /// Ends each connection after the socket broke, and queues the
