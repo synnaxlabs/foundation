@@ -11,11 +11,11 @@ mod shards;
 mod tcp;
 
 use std::collections::BTreeSet;
-use std::future::{Ready, pending};
+use std::future::{Ready, pending, poll_fn};
 use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -1413,16 +1413,26 @@ fn run_for_runs_a_negative_span_as_zero() {
     assert_eq!(node.clock().now(), node::Config::default().monotonic);
 }
 
-/// Counts the polls of its future.
-struct Counted<F>(Pin<Box<F>>, Arc<AtomicUsize>);
-
-impl<F: Future> Future for Counted<F> {
-    type Output = F::Output;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
-        self.1.fetch_add(1, Ordering::Relaxed);
-        self.0.as_mut().poll(cx)
-    }
+/// Starts a shard named `name` on `node` that sleeps for `span`. Gives its handle and
+/// the time from the start of the sleep at each of its polls.
+fn timed_sleep(
+    node: &node::Node,
+    name: &str,
+    span: Span,
+) -> (env::thread::Handle, Arc<Mutex<Vec<Span>>>) {
+    let clock = node.clock();
+    let polls = Arc::new(Mutex::new(Vec::new()));
+    let times = Arc::clone(&polls);
+    let handle = node.shards().start(shard(name), move |_| async move {
+        let start = clock.now();
+        let mut sleep = Box::pin(clock.sleep(span));
+        poll_fn(|cx| {
+            times.lock().unwrap().push(clock.now() - start);
+            sleep.as_mut().poll(cx)
+        })
+        .await;
+    });
+    (handle.unwrap(), polls)
 }
 
 #[test]
@@ -1432,20 +1442,15 @@ fn a_timer_wakes_its_task_only_when_due() {
         arm_max: None,
         ..node::Config::default()
     });
-    let (early, late) = (node.clock(), node.clock());
-    let polls = Arc::new(AtomicUsize::new(0));
-    let count = Arc::clone(&polls);
+    let early = node.clock();
     let a = node.shards().start(shard("early"), move |_| async move {
         early.sleep(Span::SECOND).await;
     });
-    let b = node.shards().start(shard("late"), move |_| {
-        let sleep = async move { late.sleep(Span::from_nanos(2_000_000_000)).await };
-        Counted(Box::pin(sleep), count)
-    });
+    let (b, polls) = timed_sleep(&node, "late", millis(2_000));
     sim.run().unwrap();
     a.unwrap().join().unwrap();
-    b.unwrap().join().unwrap();
-    assert_eq!(polls.load(Ordering::Relaxed), 2);
+    b.join().unwrap();
+    assert_eq!(*polls.lock().unwrap(), [millis(0), millis(2_000)]);
 }
 
 /// As on `os`, a timer whose deadline is past the node's `arm_max` wakes its task
@@ -1454,36 +1459,14 @@ fn a_timer_wakes_its_task_only_when_due() {
 fn a_timer_wakes_its_task_at_each_arm_max_until_due() {
     let mut sim = sim(0);
     let node = sim.node(node::Config {
-        arm_max: Some(Span::SECOND),
+        arm_max: Some(millis(700)),
         ..node::Config::default()
     });
-    let clock = node.clock();
-    let polls = Arc::new(AtomicUsize::new(0));
-    let count = Arc::clone(&polls);
-    let handle = node.shards().start(shard("sleep"), move |_| {
-        let sleep = async move {
-            let start = clock.now();
-            clock.sleep(millis(2_500)).await;
-            assert_eq!(clock.now(), start + millis(2_500));
-        };
-        Counted(Box::pin(sleep), count)
-    });
+    let (handle, polls) = timed_sleep(&node, "sleep", millis(2_500));
     sim.run().unwrap();
-    handle.unwrap().join().unwrap();
-    assert_eq!(polls.load(Ordering::Relaxed), 4);
-}
-
-/// Records the monotonic reading at each poll of its future.
-struct Timed<F>(Pin<Box<F>>, env::clock::Clock, Arc<Mutex<Vec<Monotonic>>>);
-
-impl<F: Future> Future for Timed<F> {
-    type Output = F::Output;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
-        let now = self.1.now();
-        self.2.lock().unwrap().push(now);
-        self.0.as_mut().poll(cx)
-    }
+    handle.join().unwrap();
+    let wakes = [0, 700, 1_400, 2_100, 2_500].map(millis);
+    assert_eq!(*polls.lock().unwrap(), wakes);
 }
 
 /// A node of the default config wakes a timer each second until it is due, as `os`
@@ -1492,22 +1475,11 @@ impl<F: Future> Future for Timed<F> {
 fn a_timer_of_a_default_node_wakes_its_task_each_second_until_due() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
-    let clock = node.clock();
-    let start = clock.now();
-    let polls = Arc::new(Mutex::new(Vec::new()));
-    let times = Arc::clone(&polls);
-    let handle = node.shards().start(shard("sleep"), move |_| {
-        let sleeper = clock.clone();
-        let sleep = async move { sleeper.sleep(millis(2_500)).await };
-        Timed(Box::pin(sleep), clock, times)
-    });
+    let (handle, polls) = timed_sleep(&node, "sleep", millis(2_500));
     sim.run().unwrap();
-    handle.unwrap().join().unwrap();
-    let offsets: Vec<Span> = polls.lock().unwrap().iter().map(|&t| t - start).collect();
-    assert_eq!(
-        offsets,
-        [millis(0), millis(1_000), millis(2_000), millis(2_500)]
-    );
+    handle.join().unwrap();
+    let wakes = [0, 1_000, 2_000, 2_500].map(millis);
+    assert_eq!(*polls.lock().unwrap(), wakes);
 }
 
 #[test]
@@ -1684,13 +1656,7 @@ fn a_timer_past_the_end_after_a_wall_step_waits() {
 fn a_timer_past_the_end_of_true_time_does_not_wake_early() {
     let mut sim = sim(0);
     let node = ending(&mut sim);
-    let clock = node.clock();
-    let polls = Arc::new(AtomicUsize::new(0));
-    let count = Arc::clone(&polls);
-    let _handle = node.shards().start(shard("shard-0"), move |_| {
-        let sleep = async move { clock.sleep(millis(2_500)).await };
-        Counted(Box::pin(sleep), count)
-    });
+    let (_handle, polls) = timed_sleep(&node, "shard-0", millis(2_500));
     assert_eq!(
         sim.run(),
         Err(Error::Stuck {
@@ -1698,7 +1664,7 @@ fn a_timer_past_the_end_of_true_time_does_not_wake_early() {
             seed: 0,
         })
     );
-    assert_eq!(polls.load(Ordering::Relaxed), 1);
+    assert_eq!(*polls.lock().unwrap(), [millis(0)]);
 }
 
 /// Starts a shard on `node` that sleeps for `span`, then logs its name and the time.
