@@ -267,9 +267,9 @@ struct State {
     /// The connections that a hook asks to move on again during a drive, once the
     /// running pass has gone past them.
     again: RefCell<Vec<usize>>,
-    /// The listen connection that accepted a stream, which moves on only after the
-    /// next run of the loop, so that run gives the `CLOSING` of a channel that the
-    /// accept purged.
+    /// The listen connection that accepted a stream, which is paused until the next
+    /// run of the loop, so that run gives the `CLOSING` of a channel that the accept
+    /// purged.
     accepted: Cell<Option<usize>>,
     /// The calls of `move_on`, for tests of the work of a drive.
     #[cfg(feature = "sim")]
@@ -308,11 +308,19 @@ impl State {
         }
     }
 
-    /// Moves on the connection in `accepted`, then each connection in `again` and
-    /// each that those steps add, until none is left, and gives whether it moved one
-    /// of `again`. An accept or a failed accept adds one to `again`.
+    /// Resumes and moves on the connection in `accepted`, then moves on each
+    /// connection in `again` and each that those steps add, until none is left, and
+    /// gives whether it moved one of `again`. An accept or a failed accept adds one to
+    /// `again`.
     fn move_on_again(&self, cx: &mut Context<'_>) -> bool {
         if let Some(id) = self.accepted.take() {
+            if let Some(Connection {
+                stream: Stream::Listening { paused, .. },
+                ..
+            }) = self.table.borrow_mut().get_mut(&id)
+            {
+                *paused = false;
+            }
             self.move_on(id, cx);
         }
         let mut moved = false;
@@ -341,7 +349,7 @@ impl State {
             };
             connection.stream =
                 match std::mem::replace(&mut connection.stream, Stream::Closed) {
-                    Stream::Connecting(_) | Stream::Listening(_) => Stream::Closed,
+                    Stream::Connecting(_) | Stream::Listening { .. } => Stream::Closed,
                     Stream::Open(tcp) => Stream::Closing {
                         tcp,
                         linger: self.clock.sleep_until(self.clock.now() + LINGER),
@@ -368,7 +376,7 @@ impl State {
             .expect("invariant: only `Step::Gone` of this id removes it")
             .take_stream();
         match stream {
-            Stream::Connecting(_) | Stream::Listening(_) | Stream::Open(_) => {
+            Stream::Connecting(_) | Stream::Listening { .. } | Stream::Open(_) => {
                 self.queue_closing(id);
             }
             Stream::Closing { .. } | Stream::Closed => {}
@@ -386,13 +394,10 @@ impl State {
     }
 
     /// Moves connection `id` on until it waits or accepts a stream, and calls C with no
-    /// borrow held. A connection in `accepted` does not move.
+    /// borrow held.
     fn move_on(&self, id: usize, cx: &mut Context<'_>) {
         #[cfg(feature = "sim")]
         self.moves.set(self.moves.get() + 1);
-        if self.accepted.get() == Some(id) {
-            return;
-        }
         loop {
             let step = match self.table.borrow_mut().get_mut(&id) {
                 Some(connection) => connection.step(cx),
@@ -606,7 +611,11 @@ fn ip_text(ip: IpAddr, text: &mut [u8; ADDRESS_BYTES]) -> &[u8] {
 
 enum Stream {
     Connecting(Pin<Box<dyn Future<Output = Result<Tcp, net::Error>>>>),
-    Listening(Listener),
+    Listening {
+        listener: Listener,
+        /// It accepted a stream, and accepts no more until the next run of the loop.
+        paused: bool,
+    },
     Open(Tcp),
     /// It gives no more reads, drops what the peer sends while it writes what waits,
     /// closes its side, then reads until the peer closes its side, so the drop sends
@@ -679,9 +688,13 @@ impl Connection {
                 }
                 Poll::Ready(Err(e)) => Err(Failure::Net("connect", e)),
             },
-            Stream::Listening(listener) => match listener.poll_accept(cx) {
+            Stream::Listening { paused: true, .. } => Ok(Step::Waiting),
+            Stream::Listening { listener, paused } => match listener.poll_accept(cx) {
                 Poll::Pending => Ok(Step::Waiting),
-                Poll::Ready(Ok(tcp)) => Ok(Step::Accepted(tcp)),
+                Poll::Ready(Ok(tcp)) => {
+                    *paused = true;
+                    Ok(Step::Accepted(tcp))
+                }
                 Poll::Ready(Err(e)) => Err(Failure::Net("accept", e)),
             },
             Stream::Open(tcp) => {
@@ -908,7 +921,13 @@ unsafe extern "C" fn listen(
         context: Rc::new(Cell::new(context)),
         function: callback,
     };
-    let id = state.insert(callback, Stream::Listening(listener));
+    let id = state.insert(
+        callback,
+        Stream::Listening {
+            listener,
+            paused: false,
+        },
+    );
     let mut text = [0; ADDRESS_BYTES];
     let host = if host.length == 0 {
         ip_text(local.ip(), &mut text)
