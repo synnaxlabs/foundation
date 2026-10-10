@@ -307,13 +307,12 @@ enum Source {
     Remote(Box<Remote>),
 }
 
-/// A reader session at this node's home, with the grant and ack of a complete one
-/// until it gave an end, and the charge of each frame it gave back.
+/// A reader session at this node's home, with the grant and ack of a complete one, and
+/// the charge of each frame it gave back.
 #[derive(Debug)]
 struct Local {
     session: Session,
-    /// `None` for a latest reader, and once `next` gave an end, so no later ack moves
-    /// the home position.
+    /// `None` for a latest reader.
     complete: Option<(Complete, u64)>,
 }
 
@@ -470,13 +469,7 @@ impl Reader {
         }
         async move {
             let (frame, lens) = match &mut self.source {
-                Source::Local(local) => match local.session.take().await {
-                    Ok(taken) => taken,
-                    Err(stop) => {
-                        local.complete = None;
-                        return Err(stop.into());
-                    }
-                },
+                Source::Local(local) => local.session.take().await?,
                 Source::Remote(remote) => remote.take().await?,
             };
             let frame = self.frame.insert(frame);
@@ -509,7 +502,9 @@ impl Reader {
         );
         assert!(
             position.live <= self.given,
-            "the position is past the last frame that this reader gave"
+            "the position is past the last frame that this reader gave: live {} past {}",
+            position.live,
+            self.given
         );
         match &self.source {
             Source::Local(Local {

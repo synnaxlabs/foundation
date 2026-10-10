@@ -1,16 +1,18 @@
 //! Named reader sessions: one session for each subject and name.
 
+use std::path::Path as FilePath;
 use std::pin::pin;
 use std::sync::atomic::Ordering;
 use std::task::Poll;
 
+use env::files::Operation;
 use hub::reader::{self, Ended, Mode};
 use types::channel::Key;
 use types::name::Selector;
 use types::time::Span;
 
 use super::{
-    SETTLE, name, poll_flagged, run, samples, unnamed, unsynced, without, write,
+    RING, SETTLE, name, poll_flagged, run, samples, unnamed, unsynced, without, write,
     write_series, write_wide,
 };
 
@@ -405,6 +407,36 @@ fn changes_nothing_on_the_ack_of_a_latest_reader() {
         let second = reader.next().await.expect("a frame").position;
         reader.ack(second);
         reader.ack(first);
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        write(&mut writer, &[now + 2], &[9]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(samples(&received, 2), [9]);
+    });
+}
+
+#[test]
+fn changes_nothing_on_the_ack_of_a_reader_that_ended_on_a_failed_sync() {
+    run(42, |test| async move {
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        let mut writer = test.writer("w", &["value"]).await;
+        let now = test.now();
+        write(&mut writer, &[now], &[7]);
+        write(&mut writer, &[now + 1], &[8]);
+        test.clock.sleep(SETTLE).await;
+        let first = reader.next().await.expect("a frame").position;
+        reader.next().await.expect("a frame");
+        test.node.fail_file(FilePath::new(RING), Operation::Sync);
+        write(&mut writer, &[now + 2], &[9]);
+        test.clock.sleep(SETTLE).await;
+        let ended = reader.next().await.expect_err("the sync failed");
+        assert!(matches!(ended, Ended::Buffer(_)), "{ended:?}");
+        reader.ack(first);
+        drop(reader);
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        assert_eq!(reader.next().await.expect_err("behind"), Ended::Behind);
     });
 }
 
