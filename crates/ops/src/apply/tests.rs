@@ -1010,3 +1010,38 @@ fn refuses_a_plan_on_a_node_that_uses_an_old_spec_as_behind() {
         .await;
     });
 }
+
+#[test]
+fn breaker_counts_a_kind_change_as_the_plan_counts_it() {
+    solo(|_, mesh| async move {
+        let channel = format!(
+            "{}channel \"site.plc\" {{\n  data_type = \"f64\"\n  \
+             index = \"site.time\"\n}}\n",
+            placed_site()
+        );
+        let (_, planned) = plan_on(&mesh, &[("site.hcl", &channel)]).await;
+        apply(path(), &planned.encode(), &mesh, &kinds(), keys(0))
+            .await
+            .expect("an apply");
+        let connector = format!(
+            "{}connector \"site.plc\" {{\n  kind = \"opcua\"\n  node = \"edge\"\n}}\n",
+            placed_site()
+        );
+        let (output, planned) = plan_on(&mesh, &[("site.hcl", &connector)]).await;
+        assert_eq!(
+            output.text(),
+            "+ connector site.plc\n- channel site.plc\n\
+             1 to add, 0 to change, 1 to remove.\n"
+        );
+        let applied = apply(path(), &planned.encode(), &mesh, &kinds(), keys(10))
+            .await
+            .expect("an apply");
+        assert_eq!(
+            applied.text(),
+            "Applied site.plan: 1 added, 1 removed, 1 home listed.\n",
+            "the plan showed:\n{}",
+            output.text()
+        );
+        assert_eq!(applied.counts, output.counts);
+    });
+}

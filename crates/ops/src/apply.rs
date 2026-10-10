@@ -9,7 +9,7 @@ use types::channel;
 
 use crate::error::{self, Error};
 use crate::front_end;
-use crate::plan::{self, Action, Counts};
+use crate::plan::{self, Counts};
 use crate::used;
 
 #[cfg(test)]
@@ -55,7 +55,7 @@ pub(crate) async fn apply(
             pointer,
         });
     }
-    let counts = Counts::of(planned.changes.values().map(Action::of));
+    let counts = Counts::of(&planned, &applied);
     let homes = planned.homes.len();
     let pointer = if planned.changes.is_empty() && planned.homes.is_empty() {
         pointer
