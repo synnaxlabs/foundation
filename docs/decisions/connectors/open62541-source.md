@@ -342,15 +342,19 @@
   A server on the loop of a manager is `STOPPED` when its last connection closes after
   `UA_Server_run_shutdown`. That close can queue a delayed callback on the server, such
   as the removal of a session that is not activated, so its owner drives the loop until
-  nothing is due, and panics if the server is then not `STOPPED`. `event::Loop::due`
-  gives whether something is due. `UA_Server_delete` then frees the server and each
-  session at once. Between that drive and the delete, the owner calls nothing that
-  queues a delayed callback on the server, such as `UA_Server_addCertificates`: the next
-  run of the loop would read the freed server. The drive: approved by
-  `laptop.architect-2` at `5ebf60ae2`
+  no delayed callback waits, and panics if the server is then not `STOPPED`.
+  `event::Loop::delayed` gives whether one waits. `UA_Server_delete` then frees the
+  server and each session at once. Between that drive and the delete, the owner calls
+  nothing that queues a delayed callback on the server, such as
+  `UA_Server_addCertificates`: the next run of the loop would read the freed server. The
+  drive: approved by `laptop.architect-2` at `5ebf60ae2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6091519998,
-  2026-10-10 00:19 UTC). The delete and the calls between: approved by
-  `laptop.architect-2` at `1816b9c85`
+  2026-10-10 00:19 UTC). The drive until no delayed callback waits: approved by
+  `laptop.architect-2` at `c04ad0db3`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6099448516,
+  2026-10-10 16:03 UTC). Supersedes the drive until nothing is due of
+  https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6091519998. The delete
+  and the calls between: approved by `laptop.architect-2` at `1816b9c85`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6090016795,
   2026-10-09 22:04 UTC). The panic in place of a drive until `STOPPED`: decided by
   `laptop.architect-2`
@@ -367,4 +371,8 @@
   (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338,
   2026-10-10 03:05 UTC). The one function: asked by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089865399,
-  2026-10-09 21:51 UTC).
+  2026-10-09 21:51 UTC). The test of the `ua_server.c` patch stops and deletes its
+  server itself, because it checks `STOPPING` between the stop and the drive. That
+  exception: approved by `laptop.architect-2` at `c04ad0db3`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6099448516,
+  2026-10-10 16:03 UTC).
