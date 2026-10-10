@@ -291,8 +291,9 @@
   close or an error before it: approved by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086768731,
   2026-10-09 18:21 UTC).
-  A server listens on the listener that its owner gives the manager at
-  `Manager::listening`. Each accepted stream is a new connection that gets
+  A server listens on the listener that `Manager::listening` binds on the socket address
+  that its owner gives, with the options of each stream of the manager. Each accepted
+  stream is a new connection that gets
   `ESTABLISHED`, with the context of the listen connection at the accept. As the POSIX
   manager does, the first `ESTABLISHED` of the listen gives `listen-address`, the host
   of its `address` param, and `listen-port`, from which the server makes its discovery
@@ -312,11 +313,14 @@
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6092329880,
   2026-10-10 01:45 UTC), with these words approved at `3b508e494`
   (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338,
-  2026-10-10 03:05 UTC). Lost for the listener: the manager binds its own listener with
-  `Net::listen` from the parameters. `address` is a host name and `Net::listen` takes a
-  socket address, so the open would resolve in a hook that must give `ESTABLISHED`
-  before it returns, and an owner that binds port 0 could not learn the port before it
-  builds the URL of its server. Also lost: one constructor with an `Option<Listener>`,
+  2026-10-10 03:05 UTC). Lost for the listener: the open of the listen binds it from
+  its parameters. `address` is a host name and `Net::listen` takes a socket address, so
+  the open would resolve in a hook that must give `ESTABLISHED` before it returns. Also
+  lost: the owner binds the listener and gives it to `Manager::listening`, so the
+  stream options hold only when the owner binds with the options of the manager. An
+  owner that binds port 0 needs the port before it builds the URL of its server: with
+  the first such owner, `Manager::listening` also gives the address of its listener.
+  Also lost: one constructor with an `Option<Listener>`,
   which a client gives as a literal `None` (`docs/claude/rust.md`;
   `laptop.director`,
   https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089322178,
@@ -327,8 +331,12 @@
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089351505,
   2026-10-09 21:12 UTC), after the ruling of `laptop.director`. Supersedes the one
   constructor of
-  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286. The
-  parameters of the first callbacks: approved by `laptop.architect-2` at `feb6c21a4`
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286. The bind
+  in `Manager::listening`: decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093207582,
+  2026-10-10 03:15 UTC). That supersedes "the listener that its owner gives" of
+  6088685286 and 6089351505. The parameters of the first callbacks: approved by
+  `laptop.architect-2` at `feb6c21a4`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089521550,
   2026-10-09 21:25 UTC).
   A server on the loop of a manager is `STOPPED` when its last connection closes after
