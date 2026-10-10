@@ -854,7 +854,7 @@ impl Serve {
             });
             let ops = mesh.as_ref().map(|mesh| {
                 let (time, entropy) = (time.clone(), entropy.clone());
-                Rc::new(operations(mesh.clone(), time, entropy, Arc::new(kinds())))
+                Rc::new(operations(mesh.clone(), time, entropy))
             });
             let hub = hub::Hub::new(hub::Config {
                 home,
@@ -901,17 +901,16 @@ fn channel_key(
     types::channel::Key::v7(at, u128::from_le_bytes(random))
 }
 
-/// The operations on `mesh` with the connector kinds `kinds`, whose keys
+/// The operations on `mesh` with the connector kinds of [`kinds`], whose keys
 /// [`channel_key`] makes.
 fn operations(
     mesh: mesh::Mesh,
     time: clock::Reader,
     entropy: env::entropy::Entropy,
-    kinds: Arc<connector::kind::Table>,
 ) -> ops::Node {
     let key = move || channel_key(&time, &entropy);
     let front_ends = ops::FrontEnds::new("hcl", ops::FrontEnd { read: hcl });
-    ops::Node::new(mesh, key, front_ends, kinds)
+    ops::Node::new(mesh, key, front_ends, Arc::new(kinds()))
 }
 
 /// The connector kinds of this binary.
