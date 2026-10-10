@@ -2854,8 +2854,8 @@ unsafe extern "C" fn address(
 }
 
 /// Each read gives C its bytes in the one read buffer of the manager, which the
-/// manager makes only when a stream opens, at 64 KiB. It reads the private
-/// `State.read` for the size of the buffer: C sees only the bytes of a read, which
+/// manager makes only when a stream opens, at 64 KiB. It reads the capacity of the
+/// private `State.read`: C sees only the bytes of a read, which
 /// the 64 KiB stream buffers of `OPTIONS` also cap, no warning names it, and the
 /// counting-allocator tests make no manager.
 #[test]
@@ -2870,9 +2870,9 @@ fn each_read_is_in_the_one_buffer_of_the_manager() {
             side.callback = address;
             assert_eq!(side.listen(PORT), Status::GOOD);
             side.drive(Span::from_nanos(50_000_000)).await;
-            let before = side.manager.state().read.borrow().len();
+            let before = side.manager.state().read.borrow().capacity();
             side.drive(Span::SECOND).await;
-            let after = side.manager.state().read.borrow().len();
+            let after = side.manager.state().read.borrow().capacity();
             ((before, after), side.calls())
         })
         .expect("the run ends");
