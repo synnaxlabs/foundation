@@ -434,7 +434,8 @@ answer (`mesh::Member::decode` from a peer, #336 adds its target), the names in 
 directory of the spec in use (`mesh::driver::used::pointer`, #1746), each connector's
 protocol parser, the file `name` of the data directory (`node::name::decode`, #2174),
 the file `budget` of the data directory (`node::budget::decode`, #2174), the parsers of
-`/proc/self/mountinfo` and `/proc/self/cgroup` in `os::memory` (#2226), the chunk
+`/proc/self/mountinfo` and `/proc/self/cgroup` in `os::memory` (#2226), the newest
+handoff record of each index in the ring (`home::handoff::read`, #2278), the chunk
 processing of open62541 (`ua_securechannel.c`, #1990), and `connector::reader::read`,
 `connector::http::uri`, and `connector_influx::Kind::parse`, which `config_check`
 reaches only from an input with a `connector` block of kind `influx`, and no input holds

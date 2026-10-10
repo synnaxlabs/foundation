@@ -1808,6 +1808,55 @@ mod home {
             ]
         );
     }
+
+    /// A read of the ring that fails at a restart over a handoff record fails the
+    /// node with its error, in the open of the buffer and in the open of the home
+    /// over it: the fault lands at each step of 25 us until the opens are done. Then
+    /// the node runs a task.
+    #[test]
+    fn a_failed_read_at_a_restart_over_a_handoff_fails_the_node() {
+        use super::hub::{I64, data, define, index, write, writer};
+
+        let ring = Path::new("shard-0/ring");
+        let error = Error::Buffer {
+            core: 0,
+            error: ::buffer::Error::Files(env::files::Error::Io {
+                path: ring.to_owned(),
+                operation: env::files::Operation::ReadAt,
+                code: 5,
+            }),
+        };
+        for after in (0..).step_by(25_000).map(Span::from_nanos) {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 1);
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            node.spawn(move |hub| async move {
+                define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
+                let mut writer = writer(&hub, &["value"]).await;
+                let stamp = writer.now().nanos();
+                write(&mut writer, stamp, 7);
+                std::future::pending::<()>().await;
+            });
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            sim.crash(&host, sim::Crash::Process);
+            drop(node);
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            let probe = probe(&node);
+            assert_eq!(sim.run_for(after), Ok(()), "{after:?}");
+            host.fail_file(ring, env::files::Operation::ReadAt);
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()), "{after:?}");
+            node.stop();
+            assert_eq!(sim.run(), Ok(()), "{after:?}");
+            match node.join() {
+                Ok(()) => {
+                    assert_eq!(fate(&probe), Fate::Ran, "{after:?}");
+                    break;
+                }
+                joined => assert_eq!(joined, Err(error.clone()), "{after:?}"),
+            }
+            assert!(after < Span::from_nanos(10_000_000), "the opens go on");
+        }
+    }
 }
 
 mod lock {
@@ -3770,7 +3819,7 @@ mod port {
         const OPEN: Span = Span::from_nanos(10_000_000);
         /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
         /// fails from [`OPEN`] stops the group in the sim.
-        const WRITE: i64 = 1_793_836_019;
+        const WRITE: i64 = 1_793_874_296;
 
         /// Why the group stops when a write of [`LOG`] fails.
         fn write_failed() -> ::mesh::Stopped {
@@ -4724,8 +4773,9 @@ mod port {
         }
 
         /// A task that panics after the group stops, before the node sees the stop:
-        /// `join` gives the panic. At [`WRITE`], three idle tasks that wake at that
-        /// instant make the sim run the group's stop first.
+        /// `join` gives the panic. At [`WRITE`], four idle tasks that wake at that
+        /// instant make the sim run the group's stop, then this task, before the node
+        /// sees the stop. The task asserts that the group stopped before it panics.
         #[test]
         fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -4733,7 +4783,7 @@ mod port {
             let node = start_alone(&host);
             let at =
                 sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let own = host.clone();
                 node.spawn(move |_| async move {
                     own.clock().sleep_until(at).await;
@@ -4741,8 +4791,12 @@ mod port {
                 });
             }
             let own = host.clone();
-            node.spawn(move |_| async move {
+            node.operate(move |ops| async move {
+                let mut watch = ops.mesh().watch(INDEX);
                 own.clock().sleep_until(at).await;
+                let mut next = pin!(watch.next());
+                let polled = poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx))).await;
+                assert_eq!(polled, Poll::Ready(Err(write_failed())));
                 panic!("a task panics");
             });
             assert_eq!(sim.run_for(OPEN), Ok(()));
@@ -5934,9 +5988,13 @@ mod port {
             writeln!(text, "placement \"plant\" {{").unwrap();
             writeln!(text, "  select = \"plant.**\"").unwrap();
             writeln!(text, "  home = \"plant.node{OWN}\"\n}}").unwrap();
-            for (name, data_type) in
-                [("state", "u8"), ("class", "u8"), ("restarts", "u64")]
-            {
+            for (name, data_type) in [
+                ("state", "u8"),
+                ("class", "u8"),
+                ("restarts", "u64"),
+                ("backoff", "duration"),
+                ("error", "string"),
+            ] {
                 writeln!(text, "channel \"plant.influx.status.{name}\" {{").unwrap();
                 writeln!(text, "  data_type = \"{data_type}\"").unwrap();
                 writeln!(text, "  index = \"{index}\"\n}}").unwrap();

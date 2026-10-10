@@ -14,6 +14,7 @@ http.workspace = true
 http-body.workspace = true
 hyper.workspace = true
 block = { path = "../block" }
+codec = { path = "../codec" }
 env = { path = "../env" }
 hub = { path = "../hub" }
 document = { path = "../document" }
@@ -24,7 +25,6 @@ types = { path = "../types" }
 loom = { workspace = true }
 
 [dev-dependencies]
-codec = { path = "../codec" }
 # Turns on `sim`, because the bench host runs no features.
 connector = { path = ".", features = ["sim"] }
 counting = { path = "../counting" }
@@ -35,6 +35,10 @@ spec = { path = "../spec" }
 
 [[test]]
 name = "alloc"
+harness = false
+
+[[test]]
+name = "memory"
 harness = false
 
 [[bench]]
