@@ -346,13 +346,15 @@
   gives whether something is due. `UA_Server_delete` then frees the server and each
   session at once. Between that drive and the delete, the owner calls nothing that
   queues a delayed callback on the server, such as `UA_Server_addCertificates`: the next
-  run of the loop would read the freed server. Approved by `laptop.architect-2` at
-  `5ebf60ae2`
+  run of the loop would read the freed server. The drive, the delete, and the calls
+  between: approved by `laptop.architect-2` at `5ebf60ae2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6091519998,
   2026-10-10 00:19 UTC). The panic in place of a drive until `STOPPED`: decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093544897,
-  2026-10-10 04:00 UTC). `connection::Manager::delete_server` does that drive and the
+  2026-10-10 04:00 UTC). Supersedes the drive until `STOPPED` of
+  https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6091519998.
+  `connection::Manager::delete_server` does that drive and the
   delete with no call between. It is behind `cfg(any(test, feature = "sim"))` until a
   server that serves users calls it. The one function: asked by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089865399,
