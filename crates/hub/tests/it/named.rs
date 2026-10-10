@@ -706,6 +706,37 @@ fn opens_a_named_reader_of_each_subject_and_name_on_its_own() {
     });
 }
 
+/// An open of B at A's position would end `Behind`, and an ack of B that moved A's
+/// position would let A's later open take the next frame.
+#[test]
+fn leaves_the_session_and_position_of_a_named_reader_to_its_own_subject() {
+    run(45, |test| async move {
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut a = test.hub.reader(open).await.expect("opens");
+        let mut writer = test.writer("w", &["value"]).await;
+        let now = test.now();
+        write(&mut writer, &[now], &[7]);
+        let position = a.next().await.expect("a frame").position();
+        a.ack(position);
+        write(&mut writer, &[now + 1], &[8]);
+        a.next().await.expect("a frame");
+        let open = named("b", "r", Mode::Complete, Span::SECOND);
+        let mut b = test.hub.reader(open).await.expect("opens");
+        write(&mut writer, &[now + 2], &[9]);
+        let received = b.next().await.expect("a frame");
+        assert_eq!(samples(&received, 2), [9]);
+        let position = received.position();
+        b.ack(position);
+        let received = a.next().await.expect("a frame");
+        assert_eq!(samples(&received, 2), [9]);
+        drop((a, b));
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        write(&mut writer, &[now + 3], &[10]);
+        assert_eq!(reader.next().await.expect_err("behind"), Ended::Behind);
+    });
+}
+
 #[test]
 fn opens_no_named_reader_before_mesh_time() {
     unsynced(6, |test| async move {
