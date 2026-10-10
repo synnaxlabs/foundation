@@ -271,8 +271,8 @@ struct State {
     again: RefCell<Vec<usize>>,
     /// The listen connection that accepted a stream, which is paused until the next
     /// run of the loop, so that run gives the `CLOSING` of a channel that the accept
-    /// purged. It holds a connection exactly while that connection is paused or no
-    /// longer listens.
+    /// purged. It holds the listen connection from an accept until the next run of the
+    /// loop, also when the loop closes it in between.
     accepted: Cell<Option<usize>>,
     /// The calls of `move_on`, for tests of the work of a drive.
     #[cfg(feature = "sim")]
