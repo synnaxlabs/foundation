@@ -870,6 +870,7 @@ mod tests {
         assert_eq!(returned, ms(3_000), "returns once the home applied state 2");
     }
 
+    /// It states one wake at the deadline, so its timers wake only when due.
     #[test]
     fn wakes_nothing_after_a_change_of_state_closed_the_writer_while_the_flush_slept() {
         let polls = Arc::new(AtomicUsize::new(0));
@@ -904,6 +905,7 @@ mod tests {
         assert_eq!(polls, 2, "a poll to start the sleep, and one at its end");
     }
 
+    /// It states one wake at the deadline, so its timers wake only when due.
     #[test]
     fn wakes_nothing_after_a_close_in_the_poll_that_staged_a_count() {
         let polls = Arc::new(AtomicUsize::new(0));
@@ -1061,7 +1063,7 @@ mod tests {
                 Ok(())
             }
         };
-        timed_due(run, |scene| async move {
+        timed(run, |scene| async move {
             scene.node.clock().sleep(ms(500)).await;
             scene.remove("samples");
         });
@@ -1069,6 +1071,7 @@ mod tests {
         assert_eq!(polls, 2, "a poll to start the sleep, and one at its end");
     }
 
+    /// It states one wake at the deadline, so its timers wake only when due.
     #[test]
     fn wakes_nothing_at_a_count_set_after_a_change_of_state_closed_the_writer() {
         let polls = Arc::new(AtomicUsize::new(0));
