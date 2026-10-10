@@ -24,12 +24,12 @@
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058025302,
   2026-10-08 10:37 UTC). #1860 makes CI run it on a PR that changes only `patches/`.
-  The check reads the undefined symbols of each object that a relocation names (`nm -u`
-  and `objdump -r`) and fails on each symbol outside the copy that is not on a closed
-  list, with the file and the symbol. `SYMBOLS` admits a symbol for any file, and
-  `FILE_SYMBOLS` admits a (file, symbol) pair, such as a call of the stdout logger,
-  which we never run. Each entry has its reason. A symbol goes in `SYMBOLS` only when it
-  reads no clock, file, network, randomness, or process state: memory and string
+  The check reads each undefined symbol of an object that a relocation in that object
+  names (`nm -u` and `objdump -r`) and fails on each symbol outside the copy that is not
+  on a closed list, with the file and the symbol. `SYMBOLS` admits a symbol for any
+  file, and `FILE_SYMBOLS` admits a (file, symbol) pair, such as a call of the stdout
+  logger, which we never run. Each entry has its reason. A symbol goes in `SYMBOLS` only
+  when it reads no clock, file, network, randomness, or process state: memory and string
   functions, and the 5 constructors that `shim.c` defines to abort. One exception reads
   process state: the allocator, whose addresses the OS places at random, so no result of
   the copy may depend on an address. On x86-64 the assembler makes
@@ -49,7 +49,11 @@
   Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1884#issuecomment-6060989375,
   2026-10-08 13:31 UTC). Supersedes the closed list of system headers of
-  https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715. The
+  https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715. A
+  reference is an undefined symbol that a relocation names, and it is outside the copy
+  when no object exports it: approved by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093780083,
+  2026-10-10 04:30 UTC). The
   check fails on every reference to a clock function that is not a call, also one in
   code. A call relocation counts as a call only in a section that `objdump -d`
   disassembles. Decided by `laptop.architect-2`
