@@ -201,14 +201,18 @@ impl Future for Ended {
             return Poll::Ready(());
         }
         let waker = cx.waker().clone();
-        self.count.waiting.borrow_mut().insert(self.slot, waker);
+        // The old waker drops after the borrow: its drop can drop a task or an
+        // `Ended` of this group.
+        let replaced = self.count.waiting.borrow_mut().insert(self.slot, waker);
+        drop(replaced);
         Poll::Pending
     }
 }
 
 impl Drop for Ended {
     fn drop(&mut self) {
-        self.count.waiting.borrow_mut().remove(&self.slot);
+        let removed = self.count.waiting.borrow_mut().remove(&self.slot);
+        drop(removed);
     }
 }
 
@@ -488,5 +492,37 @@ mod tests {
                 prop_assert_eq!(noop(&mut group.ended()).is_ready(), live.is_empty());
             }
         }
+    }
+
+    #[test]
+    fn a_task_whose_drop_spawns_keeps_the_group_live() {
+        struct Spawns(Group);
+        impl Drop for Spawns {
+            fn drop(&mut self) {
+                Tasks::new(self.0.clone()).spawn(std::future::pending());
+            }
+        }
+        let (kept, group) = group();
+        let spawns = Spawns(group.clone());
+        Tasks::new(group.clone()).spawn(async move {
+            let _spawns = spawns;
+            std::future::pending::<()>().await;
+        });
+        let flag = Arc::new(Flag::default());
+        let mut ended = group.ended();
+        assert_eq!(
+            poll(&mut ended, &Waker::from(Arc::clone(&flag))),
+            Poll::Pending
+        );
+        kept.poll(0);
+        kept.drop_task(0);
+        assert!(!flag.woken());
+        assert_eq!(
+            poll(&mut ended, &Waker::from(Arc::clone(&flag))),
+            Poll::Pending
+        );
+        kept.drop_task(1);
+        assert!(flag.woken());
+        assert_eq!(noop(&mut ended), Poll::Ready(()));
     }
 }
