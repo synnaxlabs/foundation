@@ -632,11 +632,10 @@ struct Linked<'f> {
     indexes: Vec<&'f Name>,
 }
 
-/// Places each connector, with its `node` as the writer. Reports
-/// `config.connector-home` at the `home` of a winner that names another node,
-/// `config.unplaced` at each connector that [`place`] gives a tie or no home for, and
-/// `config.split-placement` at each index whose writers are on one node and do not
-/// all have its winner.
+/// Reports, for each connector of `located`, `config.connector-home` at the `home` of
+/// a winner that names another node, `config.unplaced` at each connector that [`place`]
+/// gives a tie or no home for, and `config.split-placement` at each index whose writers
+/// are on one node and do not all have its winner.
 fn connectors<'f>(
     model: &'f Model<'f>,
     located: &BTreeMap<&'f Name, Located<'f>>,
