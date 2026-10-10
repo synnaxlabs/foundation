@@ -533,20 +533,24 @@ impl Role {
 
 /// The pool of each shard from its part of `budget`, and the layout of its ring from
 /// its part of `disk`, in order of core, else the first part that holds no ring.
+///
+/// # Panics
+///
+/// If a part of `budget` needs more address space than this host has, and each part
+/// of `disk` holds a ring.
 fn parts(
     budget: types::byte::Size,
     disk: types::byte::Size,
     cores: usize,
 ) -> Result<Vec<(block::Config, buffer::Layout)>, buffer::Small> {
-    (0..cores)
-        .map(|core| {
-            let pool = block::Config::new(part(budget.bytes(), cores, core))
-                .unwrap_or_else(|unfit| panic!("shard-{core}: {unfit}"));
-            let layout =
-                buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX)?;
-            Ok((pool, layout))
-        })
-        .collect()
+    let layouts = (0..cores)
+        .map(|core| buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX))
+        .collect::<Result<Vec<_>, _>>()?;
+    let pools = (0..cores).map(|core| {
+        block::Config::new(part(budget.bytes(), cores, core))
+            .unwrap_or_else(|unfit| panic!("shard-{core}: {unfit}"))
+    });
+    Ok(pools.zip(layouts).collect())
 }
 
 /// The part of `total` of the shard on `core` of `cores`: an even part, and the

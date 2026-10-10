@@ -943,6 +943,32 @@ mod buffer {
         }
     }
 
+    #[test]
+    fn a_disk_budget_that_holds_no_ring_wins_over_a_pool_budget_past_the_address_space()
+    {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let disk = Size::from_bytes(1);
+        let node = Node::start(Config {
+            budget: Budget {
+                pool: Size::from_bytes(u64::MAX),
+                disk,
+            },
+            ..config(&host, Size::MEBIBYTE, Box::new(heap))
+        });
+        assert_eq!(host.shard_starts(), []);
+        assert_eq!(sim.run(), Ok(()));
+        let min = Size::from_bytes(8_437_760);
+        assert_eq!(
+            node.join(),
+            Err(Error::Disk {
+                disk,
+                cores: 2,
+                min
+            })
+        );
+    }
+
     /// `node` calls the maker on the start thread just before it starts each shard,
     /// so call `k` is for shard `k`, and each shard runs the function it gets once.
     #[test]
