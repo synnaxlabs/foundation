@@ -444,6 +444,48 @@ mod tests {
     /// of `error`.
     type Written = (Span, Vec<i64>, String);
 
+    /// Writes one status frame of `plant.script` from another writer, stamped `lead`
+    /// after the hub's time, with an empty `error` and 9 in each other sample.
+    async fn write_ahead(hub: &hub::Hub, lead: Span) {
+        let channels = ["state", "class", "restarts", "backoff", "error"];
+        let other = hub::writer::Config {
+            subject: name("plant.other"),
+            authority: Authority::ABSOLUTE,
+            lease: None,
+            channels: channels
+                .map(|c| name(&format!("plant.script.status.{c}")))
+                .into(),
+        };
+        let mut other = hub.writer(other).await.expect("opens");
+        let entries = other.set().entries();
+        let text = codec::Variable::of(Type::String).expect("a variable type");
+        let series: Vec<_> = (entries.iter().enumerate())
+            .map(|(i, entry)| {
+                let width = entry.data_type.width();
+                (
+                    i,
+                    width.unwrap_or_else(|| text.len(&[""]).expect("a length")),
+                )
+            })
+            .collect();
+        let mut draft = other.draft(Form::Raw, &series).expect("a frame");
+        let stamp = other.now().nanos() + lead.nanos();
+        for (i, entry) in entries.iter().enumerate() {
+            let bytes = draft.series_mut(i).expect("a series");
+            if entry.data_type == Type::String {
+                text.write(&[""], bytes);
+                continue;
+            }
+            let value = if entry.key == STATUS { stamp } else { 9 };
+            let len = bytes.len();
+            bytes.copy_from_slice(&value.to_le_bytes()[..len]);
+        }
+        draft.set_count(entries[0].group, 1);
+        let outcomes = other.write(Label::Path(Path::Live), draft);
+        let applied = matches!(outcomes, Ok([hub::home::Outcome::Applied { .. }]));
+        assert!(applied, "the frame ahead applies: {outcomes:?}");
+    }
+
     /// Reads the status frames of `connector` with `counts`, whose status channels
     /// have keys from [`STATUS`] on, into the vector it gives, in a task on `tasks`.
     async fn read_status(
@@ -959,38 +1001,7 @@ mod tests {
             let inputs =
                 create_config(&node, tasks.clone(), kinds, "plant.script").await;
             let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
-            let channels = ["state", "class", "restarts", "backoff", "error"];
-            let other = hub::writer::Config {
-                subject: name("plant.other"),
-                authority: Authority::ABSOLUTE,
-                lease: None,
-                channels: channels
-                    .map(|c| name(&format!("plant.script.status.{c}")))
-                    .into(),
-            };
-            let mut other = inputs.hub.writer(other).await.expect("opens");
-            let entries = other.set().entries();
-            // An empty text is its end alone, 0 as a `u32`.
-            let series: Vec<_> = (entries.iter().enumerate())
-                .map(|(i, entry)| (i, entry.data_type.width().unwrap_or(4)))
-                .collect();
-            let mut draft = other.draft(Form::Raw, &series).expect("a frame");
-            let stamp = other.now().nanos() + Span::SECOND.nanos();
-            for (i, entry) in entries.iter().enumerate() {
-                let bytes = draft.series_mut(i).expect("a series");
-                let value = match entry.data_type {
-                    _ if entry.key == STATUS => stamp,
-                    Type::String => 0,
-                    _ => 9,
-                };
-                let len = bytes.len();
-                bytes.copy_from_slice(&value.to_le_bytes()[..len]);
-            }
-            draft.set_count(entries[0].group, 1);
-            let outcomes = other.write(Label::Path(Path::Live), draft);
-            let applied = matches!(outcomes, Ok([hub::home::Outcome::Applied { .. }]));
-            assert!(applied, "the frame 1 s ahead applies: {outcomes:?}");
-            drop(other);
+            write_ahead(&inputs.hub, Span::SECOND).await;
             let (clock, token) = (node.clock(), Token::new());
             let (supervisor, start) = (Supervisor::new(inputs), clock.now());
             let result = supervisor
@@ -2671,7 +2682,6 @@ mod tests {
         series(received, 2)
     }
 
-    /// The samples of the channel of `key` in `received`, each widened to `i64`.
     /// The texts of the `String` series of `key` in `received`.
     fn texts(received: &Received<'_>, key: u128) -> Vec<String> {
         let (data_type, count, bytes) = encoded(received, key);
@@ -2702,6 +2712,7 @@ mod tests {
         (set.entries()[entry].data_type, count, bytes)
     }
 
+    /// The samples of the channel of `key` in `received`, each widened to `i64`.
     fn series(received: &Received<'_>, key: u128) -> Vec<i64> {
         let (data_type, count, bytes) = encoded(received, key);
         let width = data_type.width().expect("a fixed width");
@@ -2729,37 +2740,7 @@ mod tests {
             let inputs =
                 create_config(&node, tasks.clone(), kinds, "plant.script").await;
             let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
-            let channels = ["state", "class", "restarts", "backoff", "error"];
-            let other = hub::writer::Config {
-                subject: name("plant.other"),
-                authority: Authority::ABSOLUTE,
-                lease: None,
-                channels: channels
-                    .map(|c| name(&format!("plant.script.status.{c}")))
-                    .into(),
-            };
-            let mut other = inputs.hub.writer(other).await.expect("opens");
-            let entries = other.set().entries();
-            let series: Vec<_> = (entries.iter().enumerate())
-                .map(|(i, entry)| (i, entry.data_type.width().unwrap_or(4)))
-                .collect();
-            let mut draft = other.draft(Form::Raw, &series).expect("a frame");
-            let stamp = other.now().nanos() + lead.nanos();
-            for (i, entry) in entries.iter().enumerate() {
-                let bytes = draft.series_mut(i).expect("a series");
-                let value = match entry.data_type {
-                    _ if entry.key == STATUS => stamp,
-                    Type::String => 0,
-                    _ => 9,
-                };
-                let len = bytes.len();
-                bytes.copy_from_slice(&value.to_le_bytes()[..len]);
-            }
-            draft.set_count(entries[0].group, 1);
-            let outcomes = other.write(Label::Path(Path::Live), draft);
-            let applied = matches!(outcomes, Ok([hub::home::Outcome::Applied { .. }]));
-            assert!(applied, "the frame 500 ms ahead applies: {outcomes:?}");
-            drop(other);
+            write_ahead(&inputs.hub, lead).await;
             let (clock, token) = (node.clock(), Token::new());
             let (canceller, sleeper) = (token.clone(), clock.clone());
             tasks.spawn(async move {
