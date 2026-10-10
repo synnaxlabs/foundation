@@ -399,8 +399,7 @@ impl<'a> Model<'a> {
                     name,
                     node: connector.node(),
                     at: block.and_then(|block| span(block, "node")),
-                    writes: &writes.channels,
-                    status: writes.index(),
+                    writes,
                 });
             }
             _ => {}
@@ -426,7 +425,7 @@ impl<'a> Model<'a> {
 
     /// Reports whether `connector` writes `index` or a channel on it.
     fn feeds(&self, connector: &Connector<'_>, index: &Name) -> bool {
-        connector.writes.iter().any(|name| {
+        connector.writes.names().any(|name| {
             name == index || self.index_of.get(name).copied() == Some(index)
         })
     }
@@ -445,10 +444,8 @@ struct Connector<'a> {
     node: &'a Name,
     /// Where the block names the node.
     at: Option<Span>,
-    /// The channels that it writes to the mesh.
-    writes: &'a [Name],
-    /// The index of its status channels.
-    status: &'a Name,
+    /// What it writes to the mesh.
+    writes: &'a connector::Writes,
 }
 
 /// What each connector of `definitions` writes to the mesh, its status channels with
@@ -488,8 +485,9 @@ fn rules<'a>(
     members: &BTreeSet<Name>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> BTreeMap<&'a Name, Index<'a>> {
-    let indexes = indexes(model, diagnostics);
-    connectors(model, &indexes, diagnostics);
+    let located = locate(model);
+    let indexes = indexes(model, &located, diagnostics);
+    connectors(model, &located, &indexes, diagnostics);
     unknown(model, members, diagnostics);
     indexes
 }
@@ -535,17 +533,23 @@ impl<'f> Index<'f> {
     }
 }
 
-/// Places each index. The status index of a connector takes the connector's
-/// placement, and the connector reports when it has none. Reports each index that two
-/// writer nodes or [`place`] leave with no home.
+/// Places each index. An index that a connector implies takes the connector's place
+/// in `located`, so only the connector reports when it has none. Reports each index
+/// that two writer nodes or [`place`] leave with no home.
 fn indexes<'f>(
     model: &'f Model<'f>,
+    located: &BTreeMap<&'f Name, Located<'f>>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> BTreeMap<&'f Name, Index<'f>> {
-    let statuses: BTreeMap<_, _> = model
+    let implied: BTreeMap<_, _> = model
         .connectors
         .iter()
-        .map(|connector| (connector.status, connector))
+        .flat_map(|connector| {
+            connector
+                .writes
+                .indexes()
+                .map(move |index| (index, connector))
+        })
         .collect();
     let mut indexes = BTreeMap::new();
     for &name in &model.indexes {
@@ -554,13 +558,12 @@ fn indexes<'f>(
             .iter()
             .filter(|writer| model.feeds(writer, name))
             .collect();
-        let placements = model.placements.iter().copied();
-        let index = if let Some(connector) = statuses.get(name) {
-            let placed = place(connector.name, placements, Some(connector.node));
+        let index = if let Some(connector) = implied.get(name) {
+            let placed = located[connector.name].placed.clone();
             Index { writers, placed }
         } else {
             let node = writers.first().map(|writer| writer.node);
-            let placed = place(name, placements, node);
+            let placed = place(name, model.placements.iter().copied(), node);
             let index = Index { writers, placed };
             diagnostics.extend(unplaced(model.label(name), &index.placed));
             index
@@ -577,6 +580,20 @@ fn homes(indexes: BTreeMap<&Name, Index<'_>>) -> BTreeMap<Name, Name> {
         .into_iter()
         .filter_map(|(index, Index { placed, .. })| {
             Some((index.clone(), placed.ok()?.home.ok()?.clone()))
+        })
+        .collect()
+}
+
+/// Where [`place`] puts each connector of `model`, with its `node` as the writer.
+fn locate<'f>(model: &'f Model<'f>) -> BTreeMap<&'f Name, Located<'f>> {
+    let placements = &model.placements;
+    model
+        .connectors
+        .iter()
+        .map(|connector| {
+            let Connector { name, node, .. } = *connector;
+            let placed = place(name, placements.iter().copied(), Some(node));
+            (name, Located { connector, placed })
         })
         .collect()
 }
@@ -621,20 +638,11 @@ struct Linked<'f> {
 /// all have its winner.
 fn connectors<'f>(
     model: &'f Model<'f>,
+    located: &BTreeMap<&'f Name, Located<'f>>,
     indexes: &BTreeMap<&'f Name, Index<'f>>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let placements = &model.placements;
-    let located: BTreeMap<_, _> = model
-        .connectors
-        .iter()
-        .map(|connector| {
-            let Connector { name, node, .. } = *connector;
-            let placed = place(name, placements.iter().copied(), Some(node));
-            (name, Located { connector, placed })
-        })
-        .collect();
-    let (units, of) = units(&located, indexes, placements);
+    let (units, of) = units(located, indexes, &model.placements);
     for Located { connector, placed } in located.values() {
         let Connector { name, node, .. } = **connector;
         if let Ok(Placed {

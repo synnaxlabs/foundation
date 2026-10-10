@@ -76,16 +76,25 @@ fn config(block: &Block) -> Document {
 /// What a connector writes to the mesh.
 #[derive(Debug)]
 pub(crate) struct Writes {
-    /// Each channel that it writes: those of its kind, then its status channels.
-    pub(crate) channels: Vec<Name>,
-    /// Its status channels by name: the index, then each data channel on it.
-    pub(crate) status: Vec<(Name, Kind<Name>)>,
+    /// The channels that its kind writes.
+    channels: Vec<Name>,
+    /// The channels that it implies, by name. Only it writes them.
+    implied: Vec<(Name, Kind<Name>)>,
 }
 
 impl Writes {
-    /// The index of its status channels.
-    pub(crate) fn index(&self) -> &Name {
-        &self.status[0].0
+    /// Each channel that it writes: those of its kind, then those it implies.
+    pub(crate) fn names(&self) -> impl Iterator<Item = &Name> {
+        let implied = self.implied.iter().map(|(name, _)| name);
+        self.channels.iter().chain(implied)
+    }
+
+    /// Each index that it implies.
+    pub(crate) fn indexes(&self) -> impl Iterator<Item = &Name> {
+        self.implied.iter().filter_map(|(name, kind)| match kind {
+            Kind::Index { .. } => Some(name),
+            Kind::Data(_) => None,
+        })
     }
 }
 
@@ -124,22 +133,20 @@ pub(crate) fn writes(
         let data = data.expect("invariant: a status channel has no unit");
         (name, Kind::Data(data))
     });
-    let status: Vec<_> = std::iter::once((time.clone(), index)).chain(data).collect();
-    let mut writes = channels.writes;
-    writes.extend(status.iter().map(|(name, _)| name.clone()));
+    let implied = std::iter::once((time.clone(), index)).chain(data).collect();
     Ok(Writes {
-        channels: writes,
-        status,
+        channels: channels.writes,
+        implied,
     })
 }
 
-/// Adds each status channel of each connector to the entries, with the span of the
+/// Adds each channel that each connector implies to the entries, with the span of the
 /// connector's label. Reports `config.implied-channel` at each block whose name is,
-/// in any ASCII case, the name of a status channel.
+/// in any ASCII case, the name of an implied channel.
 pub(crate) fn imply(found: &mut Found<'_>) {
     for (connector, writes) in &found.writes {
         let at = found.entries[connector].label_span;
-        for (name, kind) in &writes.status {
+        for (name, kind) in &writes.implied {
             let lower = name.as_str().to_ascii_lowercase();
             let Some(labels) = found.labels.get(lower.as_str()) else {
                 let definition = Definition::Channel(kind.clone());
