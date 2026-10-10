@@ -150,6 +150,7 @@ fn checked<'a>(
             .diagnostics
             .extend(read::unknown(document, "a file", &[], &keywords));
     }
+    let mut keys = BTreeSet::new();
     for block in blocks {
         let Some((kind, check_block)) = KINDS
             .iter()
@@ -159,7 +160,7 @@ fn checked<'a>(
             continue;
         };
         let key = found.key(block, *kind);
-        let key = key.filter(|(key, _)| !found.entries.contains_key(key));
+        let key = key.filter(|(key, _)| keys.insert(key.clone()));
         let name = key.as_ref().map(|(name, _)| name);
         let definition = check_block(&mut found, block, name);
         if let (Some((key, label_span)), Some(definition)) = (key, definition) {
