@@ -1,16 +1,26 @@
 - **ENTRY TAGS (#191)** Each entry of an index log has a tag (S4) that says what its
   bytes hold: `DATA` 0 (STORED BODY), `HANDOFF` 1 (HANDOFF RECORD). A new kind of
-  record takes the next free value here. The buffer gives a tag no meaning: only
-  `Buffer::newest` compares it, with the tag its caller gives. That sentence supersedes
-  "The buffer does not read the tag." (`laptop.architect`, #275,
+  record takes the next free value here. The buffer gives only tag 0 a meaning:
+  `Buffer::newest` takes a `NonZeroU8` and never gives an entry of tag 0. It compares
+  each other tag with the tag its caller gives. That text supersedes "The buffer does
+  not read the tag." (`laptop.architect`, #275,
   https://github.com/synnaxlabs/foundation/issues/275#issuecomment-6093580361,
-  2026-10-10T04:04:50Z).
+  2026-10-10T04:04:50Z, and #2236,
+  https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094205375,
+  2026-10-10T05:27:21Z).
   Decided by the `write-path` builder; approved by the coordinator (#191).
-  Each index log keeps the offset of the newest record that holds a durable entry of
-  each tag, so `Buffer::newest` reads one table for each record it gives. Lost: one
-  walk of the record tables from the newest record, 300 to 425 ms on a full ring of
-  the node's layout
-  (https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6093821909).
-  Decided by `laptop.architect` (#2236,
+  The buffer keeps, beside the logs, the offset of the newest record that holds a
+  durable entry of each nonzero tag, only for a log that has one, so `Buffer::newest`
+  reads one table for each record it gives. The offsets of a log go with the log: a
+  change that drops a log drops them in the same place. Lost: one walk of the record
+  tables from the newest record, 300 to 425 ms on a full ring of the node's layout
+  (https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6093821909). Lost:
+  the offsets of each tag in each log, +2.5 ns for each durable entry on the commit
+  path and +93 B for each log
+  (https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094187306); the
+  offsets from the recovery walk only, which give a later call of `newest` a stale
+  record. Decided by `laptop.architect` (#2236,
   https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6093837946,
-  2026-10-10T04:37:55Z).
+  2026-10-10T04:37:55Z, and
+  https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094205375,
+  2026-10-10T05:27:21Z).
