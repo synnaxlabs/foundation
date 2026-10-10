@@ -445,15 +445,12 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the shim calls {drawn:?}");
 }
 
-/// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
-/// cannot bind or call one. The scan skips only the paths in `skipped`, which hold only
-/// tests.
-#[test]
-fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
+/// Each `.rs` file of this crate but the paths in `skipped`, with its text.
+fn rust_files(skipped: &[&str]) -> Vec<(std::path::PathBuf, String)> {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let skipped = ["src/link.rs", "src/event/tests.rs"].map(|path| root.join(path));
+    let skipped: Vec<_> = skipped.iter().map(|path| root.join(path)).collect();
     let mut dirs = vec![root.to_path_buf()];
-    let mut drawn = Vec::new();
+    let mut files = Vec::new();
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
@@ -462,16 +459,24 @@ fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
             }
             if path.is_dir() {
                 dirs.push(path);
-                continue;
+            } else if path.extension() == Some("rs".as_ref()) {
+                let text = std::fs::read_to_string(&path).unwrap();
+                files.push((path, text));
             }
-            if path.extension() != Some("rs".as_ref()) {
-                continue;
-            }
-            let text = std::fs::read_to_string(&path).unwrap();
-            for draw in ["UA_UInt32_random", "UA_Guid_random"] {
-                if text.contains(draw) {
-                    drawn.push(format!("{}: {draw}", path.display()));
-                }
+        }
+    }
+    files
+}
+
+/// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
+/// cannot bind or call one. The scan skips only the paths that hold only tests.
+#[test]
+fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
+    let mut drawn = Vec::new();
+    for (path, text) in rust_files(&["src/link.rs", "src/event/tests.rs"]) {
+        for draw in ["UA_UInt32_random", "UA_Guid_random"] {
+            if text.contains(draw) {
+                drawn.push(format!("{}: {draw}", path.display()));
             }
         }
     }
