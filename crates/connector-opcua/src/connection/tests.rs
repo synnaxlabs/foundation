@@ -2263,7 +2263,7 @@ fn a_listen_from_a_run_accepts_and_reads_in_that_drive() {
 }
 
 #[test]
-fn a_pass_accepts_each_stream_that_waits() {
+fn a_drive_accepts_each_stream_that_waits() {
     let mut network = Network::new();
     for say in [b"a", b"b", b"c", b"d"] {
         network.dial(Span::ZERO, say);
@@ -2655,4 +2655,48 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
             })
             .expect("the run ends");
     }
+}
+
+/// The minimal config holds at most 100 secure channels. A burst of accepts must not
+/// hold more.
+#[test]
+fn a_burst_of_accepts_holds_no_more_than_the_most_secure_channels() {
+    const DIALS: usize = 150;
+    let mut network = Network::new();
+    for _ in 0..DIALS {
+        network.dial(Span::MILLISECOND, b"");
+    }
+    let open = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let listen = tcp::Listen {
+                local: SocketAddr::new(node.addresses()[0], PORT),
+                backlog: 512,
+                options: OPTIONS,
+            };
+            let listener = node.net().listen(&listen).expect("the port is free");
+            let side = Side::listening(&node, listener);
+            // SAFETY: the loop outlives the server, which the test deletes.
+            let server = unsafe {
+                ffi::test::shim_server_new(
+                    side.events().raw(),
+                    PORT,
+                    c"opc.tcp://:4840".as_ptr(),
+                )
+            };
+            assert!(!server.is_null());
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            // Less the listen connection.
+            let open = side.connections() - 1;
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+            assert_eq!(status, Status::GOOD);
+            side.delete(server).await;
+            open
+        })
+        .expect("the run ends");
+    assert_eq!(open, 100);
 }

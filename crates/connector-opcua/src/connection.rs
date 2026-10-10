@@ -395,7 +395,13 @@ impl State {
                     return;
                 }
                 Step::Established => self.call(id, ffi::ESTABLISHED, &mut []),
-                Step::Accepted(tcp) => self.accept(id, tcp),
+                Step::Accepted(tcp) => {
+                    self.accept(id, tcp);
+                    // One accept for each pass, so the run between gives open62541
+                    // the `CLOSING` of a channel that the accept purged.
+                    cx.waker().wake_by_ref();
+                    return;
+                }
                 Step::Read(mut buffer, n) => {
                     self.call(id, ffi::ESTABLISHED, &mut buffer[..n]);
                     self.table
