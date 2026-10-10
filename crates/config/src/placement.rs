@@ -96,7 +96,7 @@ fn refuse(found: &mut Found<'_>, block: &Block, nodes: &Nodes, error: &Error) {
                 .into_iter()
                 .filter(|(_, named)| *named)
                 .filter_map(|(role, _)| span(block, role))
-                .max_by_key(|span| span.start().offset);
+                .max();
             Diagnostic::new(
                 ROLE_OVERLAP,
                 last,
