@@ -14,7 +14,7 @@ connector-influx = { path = "../connector-influx", features = ["sim"] }
 env = { path = "../env" }
 hub = { path = "../hub" }
 mesh = { path = "../mesh" }
-node = { path = "../node" }
+node = { path = "../node", features = ["sim"] }
 ops = { path = "../ops" }
 proptest.workspace = true
 serde_json.workspace = true
