@@ -8,8 +8,9 @@ use std::panic::{self, AssertUnwindSafe};
 use std::pin::{Pin, pin};
 use std::ptr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Context, Poll, Wake, Waker};
 
 use env::clock::Clock;
 use env::net::{self, Tcp, tcp};
@@ -1669,6 +1670,47 @@ fn a_second_drive_of_a_manager_panics() {
             .await;
         })
         .expect("the run ends");
+}
+
+/// Counts the wakes of a task.
+#[derive(Default)]
+struct Wakes(AtomicUsize);
+
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// A drive whose `run` panics ends as a dropped drive does, so a send after it wakes
+/// the task of the drive.
+#[test]
+fn a_send_after_a_drive_that_panics_wakes_its_task() {
+    let mut network = Network::new();
+    network.serve(None);
+    let remote = network.remote();
+    let woken = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::new(&node);
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            let count = Arc::new(Wakes::default());
+            let waker = Waker::from(Arc::clone(&count));
+            let mut drive = pin!(
+                side.manager
+                    .drive(|_| -> Poll<()> { panic!("the run panics") })
+            );
+            let poll = panic::catch_unwind(AssertUnwindSafe(|| {
+                drive.as_mut().poll(&mut Context::from_waker(&waker))
+            }));
+            let panic = poll.expect_err("the drive panics");
+            assert_eq!(panic.downcast_ref::<&str>(), Some(&"the run panics"));
+            assert_eq!(side.send(1, b"one"), Status::GOOD);
+            count.0.load(Ordering::Relaxed)
+        })
+        .expect("the run ends");
+    assert_eq!(woken, 1);
 }
 
 /// Runs the test `name` of this module in a child process, asserts that it passes,

@@ -177,8 +177,9 @@ impl Manager {
         let mut sleep: Option<Sleep> = None;
         poll_fn(|cx| {
             state.driving.set(true);
+            let _driving = Held(&state.driving);
             self.pass(cx);
-            let poll = loop {
+            loop {
                 let poll = run(cx);
                 let moved = state.move_on_again(cx);
                 if poll.is_ready() {
@@ -195,9 +196,7 @@ impl Manager {
                 if Pin::new(timer).poll(cx).is_pending() {
                     break Poll::Pending;
                 }
-            };
-            state.driving.set(false);
-            poll
+            }
         })
         .await
     }
@@ -518,7 +517,7 @@ impl State {
     }
 }
 
-/// Clears the flag of a drive when the drive drops.
+/// Clears a flag of a drive when it drops, also in a panic.
 struct Held<'a>(&'a Cell<bool>);
 
 impl Drop for Held<'_> {
