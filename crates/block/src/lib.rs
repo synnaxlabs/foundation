@@ -42,6 +42,8 @@ const CLASSES_MAX: usize = 96;
 #[derive(Clone, Debug)]
 pub struct Config {
     budget: usize,
+    span: usize,
+    classes: usize,
     reservation: usize,
 }
 
@@ -52,8 +54,9 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// [`Unfit`] when the pool's reservation, up to 96 times the budget, does not fit
-    /// in this host's address space.
+    /// [`Unfit`] when the pool's reservation, up to 96 times the budget, is more than
+    /// `usize::MAX` bytes. A smaller reservation can still be more than the OS gives,
+    /// which the [`Memory`] refuses.
     pub const fn new(budget_bytes: u64) -> Result<Self, Unfit> {
         let unfit = Unfit {
             budget: budget_bytes,
@@ -69,7 +72,8 @@ impl Config {
         let Some(span) = budget.checked_next_multiple_of(ALIGN) else {
             return Err(unfit);
         };
-        let Some(spans) = span.checked_mul(classes(budget)) else {
+        let classes = classes(budget);
+        let Some(spans) = span.checked_mul(classes) else {
             return Err(unfit);
         };
         let Some(reservation) = spans.checked_add(HEADER) else {
@@ -77,6 +81,8 @@ impl Config {
         };
         Ok(Self {
             budget,
+            span,
+            classes,
             reservation,
         })
     }
@@ -90,7 +96,7 @@ impl Config {
     }
 }
 
-/// A pool budget whose reservation does not fit in this host's address space.
+/// A pool budget whose reservation is more than `usize::MAX` bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Unfit {
     /// The budget, in bytes.
@@ -259,6 +265,8 @@ impl Pool {
     pub fn new(config: Config, memory: impl Memory + 'static) -> Self {
         let Config {
             budget,
+            span,
+            classes,
             reservation: need,
         } = config;
         let have = memory.len();
@@ -283,10 +291,10 @@ impl Pool {
         Self {
             region,
             budget,
-            span: budget.next_multiple_of(ALIGN),
+            span,
             committed: Cell::new(0),
             purges: Cell::new(0),
-            classes: (0..classes(budget)).map(|_| Class::default()).collect(),
+            classes: (0..classes).map(|_| Class::default()).collect(),
         }
     }
 
@@ -294,7 +302,7 @@ impl Pool {
     ///
     /// # Panics
     ///
-    /// If [`Config::reservation`] panics, or the heap cannot allocate that many bytes.
+    /// If the heap cannot allocate [`Config::reservation`] bytes.
     #[must_use]
     pub fn heap(config: Config) -> Self {
         let heap = Heap::new(config.reservation());
