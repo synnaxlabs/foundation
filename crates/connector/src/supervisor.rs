@@ -169,9 +169,10 @@ impl Supervisor {
             let end = kinds.run(kind, config, ctx).map_err(Error::Config)?.await;
             let lasted = clock.now() - start;
             drop(token);
-            writer.end(&end).await;
+            let ended = writer.end(&end);
             // A device error can be large, and nothing after this needs it.
             let last = matches!(end, Ok(()) | Err(Error::Config(_))).then_some(end);
+            ended.await;
             live.ended().await;
             if let Some(end) = last {
                 writer.stop().await;

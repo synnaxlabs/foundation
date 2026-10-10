@@ -338,15 +338,18 @@ impl Writer {
         true
     }
 
-    /// Writes `state` 3 with the class and the text of a run that ended with `end`.
-    pub(crate) async fn end(&self, end: &Result<(), kind::Error>) {
+    /// Writes `state` 3 with the class and the text of a run that ended with `end`. It
+    /// takes them at the call, so the caller can drop `end` before it awaits.
+    pub(crate) fn end(
+        &self,
+        end: &Result<(), kind::Error>,
+    ) -> impl Future<Output = ()> + use<'_> {
         let (class, error) = Class::with_text(end);
-        self.set(|session| {
+        self.set(move |session| {
             session.class = class;
             session.error.set(&mut session.series, error);
             session.state = State::Ending;
         })
-        .await;
     }
 
     /// Writes `state` 1 with the next run `span` after the write, and returns the
