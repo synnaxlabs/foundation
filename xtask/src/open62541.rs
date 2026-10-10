@@ -1717,8 +1717,8 @@ End of search list.
         );
     }
 
-    /// [`Uses::add`] reads a clock only as a key of [`FUNCTION_SYMBOLS`]. `check` needs
-    /// GCC and GNU binutils, so this test also runs the rule on macOS.
+    /// No clock is in [`SYMBOLS`] or [`FILE_SYMBOLS`], so only a key of
+    /// [`FUNCTION_SYMBOLS`] admits a clock call.
     #[test]
     fn no_list_but_function_symbols_admits_a_clock() {
         for clock in CLOCKS {
