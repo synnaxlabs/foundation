@@ -445,25 +445,48 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the shim calls {drawn:?}");
 }
 
+/// The directory of the crate.
+fn root() -> std::path::PathBuf {
+    std::path::Path::new(ROOT).canonicalize().unwrap()
+}
+
 /// The `src/` directory of the crate.
 fn src() -> std::path::PathBuf {
-    std::path::Path::new(ROOT)
-        .join("src")
-        .canonicalize()
-        .unwrap()
+    root().join("src")
 }
 
 /// Each identifier for which `named` holds, as `path: identifier`, in the Rust
-/// outside tests: each `.rs` file under `src` and each file that rustc reads for the
-/// crate at `src/lib.rs` with every feature, less each file that rustc reads only for
-/// a test build on this host. Comments and inline modules count.
+/// outside tests of the crate at `root`: each `.rs` file outside `tests/` and each
+/// file that a build of the library reads, less each file that a test build reads and
+/// no build of the library reads. The builds are those on this host with each set of
+/// the features of `Cargo.toml`, with and without debug assertions. Comments and inline
+/// modules count.
 fn named_outside_tests(
-    src: &std::path::Path,
+    root: &std::path::Path,
     named: impl Fn(&str) -> bool,
 ) -> Vec<String> {
-    let built = read_by_rustc(src, &[]);
-    let tested = read_by_rustc(src, &["--test"]);
-    let mut files = files_under(src, "rs");
+    let features = features(root);
+    let on = |set: usize| -> Vec<String> {
+        let features = features.iter().enumerate();
+        features
+            .filter(|(bit, _)| set >> bit & 1 == 1)
+            .flat_map(|(_, feature)| {
+                ["--cfg".to_owned(), format!("feature=\"{feature}\"")]
+            })
+            .collect()
+    };
+    let mut built = Vec::new();
+    for set in 0..1 << features.len() {
+        for assertions in ["on", "off"] {
+            let flag = format!("-Cdebug-assertions={assertions}");
+            built.extend(read_by_rustc(root, &[on(set), vec![flag]].concat()));
+        }
+    }
+    let every = on((1 << features.len()) - 1);
+    let tested = read_by_rustc(root, &[every, vec!["--test".to_owned()]].concat());
+    let tests = root.join("tests");
+    let mut files = files_under(root, "rs");
+    files.retain(|path| !path.starts_with(&tests));
     files.extend(built.iter().cloned());
     files.sort();
     files.dedup();
@@ -474,21 +497,38 @@ fn named_outside_tests(
         .collect()
 }
 
-/// Each file that rustc reads to expand the crate at `src/lib.rs` with every feature
-/// of `Cargo.toml` and `flags`. No other crate is given, so its names fail to resolve,
-/// but rustc lists the files of the crate still.
-fn read_by_rustc(src: &std::path::Path, flags: &[&str]) -> Vec<std::path::PathBuf> {
-    let manifest =
-        std::fs::read_to_string(std::path::Path::new(ROOT).join("Cargo.toml")).unwrap();
-    let features = manifest
+/// The features of the `Cargo.toml` of `root`.
+///
+/// # Panics
+///
+/// On a line of its `[features]` table that is not blank, a comment, or
+/// `<name> = [...]`, so that no feature is left out.
+fn features(root: &std::path::Path) -> Vec<String> {
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let table = manifest
         .lines()
         .skip_while(|line| *line != "[features]")
         .skip(1)
-        .take_while(|line| !line.starts_with('['))
-        .filter_map(|line| line.split_once(" = "))
-        .flat_map(|(feature, _)| {
-            ["--cfg".to_owned(), format!("feature=\"{feature}\"")]
-        });
+        .take_while(|line| !line.starts_with('['));
+    table
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let feature = line.split_once(" = [").filter(|(name, rest)| {
+                let named = |c: char| c.is_ascii_alphanumeric() || "_-".contains(c);
+                rest.ends_with(']') && name.chars().all(named)
+            });
+            let (name, _) = feature.unwrap_or_else(|| {
+                panic!("the scan cannot read the line `{line}` of [features]")
+            });
+            name.to_owned()
+        })
+        .collect()
+}
+
+/// Each file that rustc reads to expand the library of the crate at `root`, at
+/// `src/lib.rs`, with `flags`. No other crate is given, so its names fail to resolve,
+/// but rustc lists the files of the crate still.
+fn read_by_rustc(root: &std::path::Path, flags: &[String]) -> Vec<std::path::PathBuf> {
     let output = std::process::Command::new("rustc")
         .args([
             "--edition",
@@ -498,9 +538,8 @@ fn read_by_rustc(src: &std::path::Path, flags: &[&str]) -> Vec<std::path::PathBu
             "--emit",
             "dep-info=-",
         ])
-        .args(features)
         .args(flags)
-        .arg(src.join("lib.rs"))
+        .arg(root.join("src/lib.rs"))
         .output()
         .unwrap();
     let deps = String::from_utf8(output.stdout).unwrap();
@@ -538,9 +577,14 @@ fn words(text: &str) -> impl Iterator<Item = &str> {
     text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
 }
 
-/// Each identifier of `path` for which `named` holds, as `path: identifier`.
+/// Each identifier of `path` for which `named` holds, as `path: identifier`. A byte
+/// that is not UTF-8 splits identifiers.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a test reads the files of the crate"
+)]
 fn named_in(path: &std::path::Path, named: impl Fn(&str) -> bool) -> Vec<String> {
-    let text = std::fs::read_to_string(path).unwrap();
+    let text = String::from_utf8_lossy(&std::fs::read(path).unwrap()).into_owned();
     let found = words(&text).filter(|word| named(word));
     found
         .map(|word| format!("{}: {word}", path.display()))
@@ -552,7 +596,7 @@ fn named_in(path: &std::path::Path, named: impl Fn(&str) -> bool) -> Vec<String>
 #[test]
 fn the_scan_names_only_the_files_outside_tests() {
     let src = src();
-    let named = named_outside_tests(&src, |name| name == "shim_client_new");
+    let named = named_outside_tests(&root(), |name| name == "shim_client_new");
     let at = |file: &str| format!("{}: shim_client_new", src.join(file).display());
     assert_eq!(named, [at("bench.rs"), at("ffi.rs")]);
 }
@@ -563,6 +607,7 @@ fn the_scan_cuts_off_only_the_files_of_a_test_build() {
     let root = create_tree(
         "gated",
         &[
+            MANIFEST,
             (
                 "src/lib.rs",
                 "#[cfg(test)]\n#[allow(unused)]\nmod t;\nmod p;\n",
@@ -572,8 +617,29 @@ fn the_scan_cuts_off_only_the_files_of_a_test_build() {
             ("src/p.rs", "fn named() {}"),
         ],
     );
-    let named = named_outside_tests(&root.join("src"), |name| name == "named");
+    let named = named_outside_tests(&root, |name| name == "named");
     assert_eq!(named, [at(&root, "src/p.rs")]);
+}
+
+/// A file that a build of the library reads is not cut off when a test build reads it
+/// too: with a feature off, or with no debug assertions.
+#[test]
+fn the_scan_cuts_off_no_file_of_a_build_of_the_library() {
+    let root = create_tree(
+        "built",
+        &[
+            MANIFEST,
+            (
+                "src/lib.rs",
+                "#[cfg(any(test, not(feature = \"sim\")))]\nmod f;\n\
+                 #[cfg(any(test, not(debug_assertions)))]\nmod d;\n",
+            ),
+            ("src/f.rs", "fn named() {}"),
+            ("src/d.rs", "fn named() {}"),
+        ],
+    );
+    let named = named_outside_tests(&root, |name| name == "named");
+    assert_eq!(named, [at(&root, "src/d.rs"), at(&root, "src/f.rs")]);
 }
 
 /// The scan reads a file outside `src/` that a `path` attribute, also under
@@ -584,6 +650,7 @@ fn the_scan_reads_each_file_that_the_crate_includes() {
     let root = create_tree(
         "path",
         &[
+            MANIFEST,
             (
                 "src/lib.rs",
                 "#[path = \"../p.rs\"]\nmod p;\n\
@@ -596,11 +663,81 @@ fn the_scan_reads_each_file_that_the_crate_includes() {
             ("src/q.rs", "fn named() {}"),
         ],
     );
-    let named = named_outside_tests(&root.join("src"), |name| name == "named");
+    let named = named_outside_tests(&root, |name| name == "named");
     assert_eq!(
         named,
         [at(&root, "i.rs"), at(&root, "p.rs"), at(&root, "q.rs")]
     );
+}
+
+/// The scan reads each `.rs` file of the crate outside `tests/`, also one that no
+/// build on this host reads: under a feature that is off, another target, a macro of
+/// another crate, or no build at all.
+#[test]
+fn the_scan_reads_each_file_that_a_build_on_another_host_may_read() {
+    let lib = format!(
+        "#[cfg(not(feature = \"sim\"))]\n#[path = \"../off.rs\"]\nmod off;\n\
+         #[cfg_attr(not(feature = \"sim\"), path = \"../real.rs\")]\nmod x;\n\
+         #[cfg(not(target_os = \"{}\"))]\n#[path = \"../other.rs\"]\nmod other;\n\
+         cfg_if::cfg_if! {{ if #[cfg(unix)] {{ #[path = \"../u.rs\"] mod u; }} }}\n\
+         #[cfg(any())]\nmod n;\n",
+        std::env::consts::OS
+    );
+    let root = create_tree(
+        "other",
+        &[
+            MANIFEST,
+            ("src/lib.rs", &lib),
+            ("src/x.rs", ""),
+            ("off.rs", "fn named() {}"),
+            ("real.rs", "fn named() {}"),
+            ("other.rs", "fn named() {}"),
+            ("u.rs", "fn named() {}"),
+            ("src/n.rs", "fn named() {}"),
+            ("tests/t.rs", "fn named() {}"),
+        ],
+    );
+    let named = named_outside_tests(&root, |name| name == "named");
+    let files = ["off.rs", "other.rs", "real.rs", "src/n.rs", "u.rs"];
+    assert_eq!(named, files.map(|file| at(&root, file)));
+}
+
+/// The scan reads a file that the crate includes as bytes that are not UTF-8.
+#[test]
+fn the_scan_reads_a_file_that_is_not_utf_8() {
+    let root = create_tree(
+        "bytes",
+        &[
+            MANIFEST,
+            (
+                "src/lib.rs",
+                "pub static B: &[u8] = include_bytes!(\"../b.der\");\n",
+            ),
+        ],
+    );
+    std::fs::write(root.join("b.der"), b"\xffnamed\xfe").unwrap();
+    let named = named_outside_tests(&root, |name| name == "named");
+    assert_eq!(named, [at(&root, "b.der")]);
+}
+
+/// The scan refuses a line of `[features]` that it cannot read, so it leaves out no
+/// feature: each form of TOML other than `<name> = [...]` on one line.
+#[test]
+fn the_scan_refuses_a_line_of_features_that_it_cannot_read() {
+    for (line, table) in [
+        ("sim=[]", "sim=[]\n"),
+        ("\"sim\" = []", "\"sim\" = []\n"),
+        ("sim = [", "sim = [\n  \"a\",\n]\n"),
+    ] {
+        let manifest = format!("[features]\n{table}");
+        let root =
+            create_tree("features", &[("Cargo.toml", &manifest), ("src/lib.rs", "")]);
+        let refused =
+            std::panic::catch_unwind(|| named_outside_tests(&root, |_| false));
+        let message = *refused.unwrap_err().downcast::<String>().unwrap();
+        let expected = format!("the scan cannot read the line `{line}` of [features]");
+        assert_eq!(message, expected);
+    }
 }
 
 /// A test mock that a `path` attribute gives in place of a module is cut off, and
@@ -610,6 +747,7 @@ fn the_scan_reads_the_module_that_a_test_mock_shadows() {
     let root = create_tree(
         "mock",
         &[
+            MANIFEST,
             (
                 "src/lib.rs",
                 "#[cfg(test)]\n#[path = \"mock.rs\"]\nmod clock;\n\
@@ -619,9 +757,12 @@ fn the_scan_reads_the_module_that_a_test_mock_shadows() {
             ("src/clock.rs", "fn named() {}"),
         ],
     );
-    let named = named_outside_tests(&root.join("src"), |name| name == "named");
+    let named = named_outside_tests(&root, |name| name == "named");
     assert_eq!(named, [at(&root, "src/clock.rs")]);
 }
+
+/// The `Cargo.toml` of a tree, with one feature.
+const MANIFEST: (&str, &str) = ("Cargo.toml", "[features]\nsim = []\n");
 
 /// How [`named_outside_tests`] gives the name `named` in `file` of `root`.
 fn at(root: &std::path::Path, file: &str) -> String {
@@ -648,7 +789,7 @@ fn create_tree(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
 /// cannot bind or call one.
 #[test]
 fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
-    let drawn = named_outside_tests(&src(), |name| {
+    let drawn = named_outside_tests(&root(), |name| {
         ["UA_UInt32_random", "UA_Guid_random"].contains(&name)
     });
     assert!(drawn.is_empty(), "the Rust names {drawn:?}");
@@ -659,7 +800,7 @@ fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
 /// `cargo xtask open62541` lets call the global clock.
 #[test]
 fn the_rust_outside_tests_builds_no_server() {
-    let named = named_outside_tests(&src(), |name| {
+    let named = named_outside_tests(&root(), |name| {
         name.starts_with("UA_Server")
             || ["shim_server_new", "UA_random_seed"].contains(&name)
     });
@@ -672,7 +813,7 @@ fn the_rust_outside_tests_builds_no_server() {
 /// logger of its loop, and the stderr tests of `event` check that.
 #[test]
 fn the_rust_outside_tests_gives_no_client_the_stdout_logger() {
-    let named = named_outside_tests(&src(), |name| {
+    let named = named_outside_tests(&root(), |name| {
         name.starts_with("UA_Client_new") || name.starts_with("UA_Log_Stdout")
     });
     assert!(named.is_empty(), "the Rust outside tests names {named:?}");
@@ -719,7 +860,7 @@ fn the_rust_and_the_shim_give_a_client_no_security_policy() {
         name.starts_with("UA_SecurityPolicy")
             || ["securityPolicies", "authSecurityPolicies"].contains(&name)
     };
-    let mut named = named_outside_tests(&src(), policy);
+    let mut named = named_outside_tests(&root(), policy);
     for path in [files_under(&src(), "c"), files_under(&src(), "h")].concat() {
         named.extend(named_in(&path, policy));
     }
