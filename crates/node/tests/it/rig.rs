@@ -27,7 +27,7 @@ const POLL: Duration = Duration::from_millis(100);
 pub(crate) struct Rig {
     /// The working directory of each command. It holds `plant.hcl`.
     pub(crate) dir: PathBuf,
-    /// The disk budget that the data directory keeps.
+    /// The disk budget that [`Rig::new`] keeps: 8 MiB for each core.
     pub(crate) disk: u64,
     clock: Clock,
     node: Option<Running>,
