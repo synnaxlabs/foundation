@@ -90,13 +90,15 @@ const LEFT_OUT: [&str; 4] = [
     "-fno-fat-lto-objects",
 ];
 
-/// The symbols outside the copy that any file of it may reference: no value that one
-/// reads from a clock, file, network, randomness, or the OS reaches a result of the
-/// copy. The functions of [`CLOCKS`] pass too: [`CLOCK_CALLS`] checks each call of
-/// one. `OUTSIDE` in `connector-opcua` lists the symbols of the production build, so a
+/// The symbols outside the copy that any file of it may reference. Each reads no clock,
+/// file, network, randomness, or process state, except the allocator, `errno`, and the
+/// table of the linker, each with its reason. The functions of [`CLOCKS`] pass too:
+/// [`CLOCK_CALLS`] checks each call of one. `OUTSIDE` in `connector-opcua` lists the symbols of the production build, so a
 /// new symbol outside the copy changes both lists.
 const SYMBOLS: [&str; 18] = [
-    // The allocator of libc, since the check builds without `alloc.h`.
+    // The allocator of libc, since the check builds without `alloc.h`. It returns
+    // addresses that the OS places at random, so no result of the copy may depend on
+    // an address.
     "calloc",
     "free",
     "malloc",
@@ -109,7 +111,8 @@ const SYMBOLS: [&str; 18] = [
     "strcmp",
     "strlen",
     "strncmp",
-    // The `errno` of the thread, which holds only the error of a call of the copy.
+    // The `errno` of the thread, which the copy reads only for the error of its own
+    // call.
     "__errno_location",
     // The table of the linker, which position-independent code reads for addresses.
     "_GLOBAL_OFFSET_TABLE_",
@@ -182,8 +185,9 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 }
 
 /// Builds each file of `sources.txt` in `patches/open62541/` from the copy alone,
-/// with its `flags.txt` and then `-g -O0`, so a call stays in the function that holds
-/// it in the source, except in a function that the compiler inlines.
+/// with its `flags.txt` and then `-g -O0 -fno-stack-protector`, so a call stays in the
+/// function that holds it in the source, except in a function that the compiler
+/// inlines, and the compiler adds no reference to the canary of the stack.
 ///
 /// # Errors
 ///
@@ -859,9 +863,8 @@ fn symbol_mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
     let new = |file: &str, symbol: &str| {
         format!(
             "{file}: references `{symbol}`, which neither SYMBOLS nor FILE_SYMBOLS \
-             lists. Find whether a node runs it; if no value it reads from a clock, \
-             file, network, randomness, or the OS reaches a result of the copy, add it \
-             with the reason"
+             lists. Find whether a node runs it; if it reads no clock, file, network, \
+             randomness, or process state, add it with the reason"
         )
     };
     let gone = |file: &str, symbol: &str| {
@@ -1492,9 +1495,8 @@ End of search list.
     fn unlisted(file: &str, symbol: &str) -> String {
         format!(
             "{file}: references `{symbol}`, which neither SYMBOLS nor FILE_SYMBOLS \
-             lists. Find whether a node runs it; if no value it reads from a clock, \
-             file, network, randomness, or the OS reaches a result of the copy, add it \
-             with the reason"
+             lists. Find whether a node runs it; if it reads no clock, file, network, \
+             randomness, or process state, add it with the reason"
         )
     }
 

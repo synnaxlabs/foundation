@@ -25,24 +25,26 @@
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058025302,
   2026-10-08 10:37 UTC). #1860 makes CI run it on a PR that changes only `patches/`.
   The check reads the undefined symbols of each object (`nm -u`) and fails on each
-  symbol outside the copy that is not on a closed list, with the file and the
-  symbol. `SYMBOLS` admits a symbol for any file, and `FILE_SYMBOLS` admits a (file,
-  symbol) pair, such as a call of the stdout logger, which we never run. Each entry
-  has its reason. A symbol goes in `SYMBOLS` only when no value that it reads from a
-  clock, file, network, randomness, or the OS reaches a result of the copy. Its
-  classes: memory, string, and math functions; the allocator; `errno`; the table of
-  the linker; and the 5 constructors that `shim.c` defines to abort. The check builds
-  with no stack protector, so a reference to its random canary is one that the C
-  makes. A symbol is
-  outside the copy when no object exports it: a `static` function of one file does
-  not hide a call of the OS function of its name from another. A pair of
-  `FILE_SYMBOLS` with no reference fails, so a file that the build leaves out loses
-  its pairs. `OUTSIDE` in `connector-opcua` lists the outside symbols of the
-  production build, so a new outside symbol changes both lists. A header list is not a check: a listed header can include another
-  (`pthread.h` includes `time.h`). So the check refuses no system header, and each
-  header that the copy includes must be in the copy or in a system directory as
-  `cc` finds it. Lost: a header list, and a deny list of OS symbols, which passes a
-  call that it does not name. Decided by `laptop.architect-2`
+  symbol outside the copy that is not on a closed list, with the file and the symbol.
+  `SYMBOLS` admits a symbol for any file, and `FILE_SYMBOLS` admits a (file, symbol)
+  pair, such as a call of the stdout logger, which we never run. Each entry has its
+  reason. A symbol goes in `SYMBOLS` only when it reads no clock, file, network,
+  randomness, or process state: memory and string functions, and the 5 constructors that
+  `shim.c` defines to abort. Three exceptions read process state: the allocator, whose
+  addresses the OS places at random, so no result of the copy may depend on an address;
+  `errno`, which the copy reads only for the error of its own call; and the table of the
+  linker. The 3 clock functions pass this check, because the clock check reads each
+  reference to one. The check builds with no stack protector, so the compiler adds no
+  reference to its random canary, and a reference that the C makes fails. A symbol is
+  outside the copy when no object exports it: a `static` function of one file does not
+  hide a call of the OS function of its name from another. A pair of `FILE_SYMBOLS` with
+  no reference fails, so a file that the build leaves out loses its pairs. `OUTSIDE` in
+  `connector-opcua` lists the outside symbols of the production build, so a new outside
+  symbol changes both lists. A header list is not a check: a listed header can include
+  another (`pthread.h` includes `time.h`). So the check refuses no system header, and
+  each header that the copy includes must be in the copy or in a system directory as
+  `cc` finds it. Lost: a header list, and a deny list of OS symbols, which passes a call
+  that it does not name. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1884#issuecomment-6060989375,
   2026-10-08 13:31 UTC). Supersedes the closed list of system headers of
   https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715. The
@@ -68,12 +70,11 @@
   flag. `build.rs` and the check both read `flags.txt`, so the check reads objects
   compiled with the flags of the connector. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849,
-  2026-10-08 13:31 UTC). The `UA_ARCH_HEADER` of the allocator below and the
-  sanitizer flags below are the only flags of `build.rs` outside `flags.txt`, so the
-  objects of the check do not have them. A
-  `-W` flag with no `,` is a warning, which changes no code, so `collect` leaves it
-  out by that pattern, not by name. Decided by
-  `laptop.architect-2`
+  2026-10-08 13:31 UTC). The `UA_ARCH_HEADER` of the allocator below and the sanitizer
+  flags below are the only flags of `build.rs` outside `flags.txt`, so the objects of
+  the check do not have them. The check adds only `-g -O0` and `-fno-stack-protector`
+  (above). A `-W` flag with no `,` is a warning, which changes no code, so `collect`
+  leaves it out by that pattern, not by name. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061473044,
   2026-10-08 13:57 UTC) and `laptop.director`
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061540779,
