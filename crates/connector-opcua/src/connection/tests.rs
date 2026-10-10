@@ -19,6 +19,7 @@ use sim::{Sim, node};
 use types::time::{Monotonic, Span};
 
 use super::{LINGER, Manager, OPTIONS, READ_BYTES, SENDS};
+use crate::bench::caught;
 use crate::child;
 use crate::event::Loop;
 use crate::ffi::test::{
@@ -2229,19 +2230,9 @@ fn the_delete_of_a_server_that_is_not_stopped_panics() {
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
             assert_eq!(status, Status::GOOD);
-            // SAFETY: the server lives on the loop. The missing shutdown breaks the
-            // contract, to reach the panic.
+            // SAFETY: the server lives on the loop, and the test deletes it after.
             let delete = unsafe { side.manager.delete_server(server) };
-            let mut delete = pin!(delete);
-            let panic = poll_fn(|cx| {
-                match panic::catch_unwind(AssertUnwindSafe(|| delete.as_mut().poll(cx)))
-                {
-                    Ok(poll) => poll.map(|()| None),
-                    Err(panic) => Poll::Ready(Some(panic)),
-                }
-            })
-            .await
-            .expect("the delete panics");
+            let panic = caught(delete).await.expect_err("the delete panics");
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
             assert_eq!(status, Status::GOOD);

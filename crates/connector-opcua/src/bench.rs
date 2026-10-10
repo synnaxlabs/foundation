@@ -374,7 +374,7 @@ unsafe extern "C" fn answer(
 }
 
 /// Runs `future` to its end, and gives the panic of a poll in place of a value.
-async fn caught<F: Future>(future: F) -> std::thread::Result<F::Output> {
+pub(crate) async fn caught<F: Future>(future: F) -> std::thread::Result<F::Output> {
     let mut future = pin!(future);
     poll_fn(|cx| {
         match panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {

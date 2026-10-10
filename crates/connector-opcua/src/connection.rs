@@ -201,18 +201,19 @@ impl Manager {
         .await
     }
 
-    /// Drives the manager until nothing is due on the loop, then deletes `server`. It
-    /// checks after each run of the loop, so a busy loop only makes the delete later.
+    /// Drives the manager until nothing is due on the loop, then deletes `server`. Call
+    /// it after `UA_Server_run_shutdown`. It checks after each run of the loop, so a
+    /// busy loop only makes the delete later.
     ///
     /// # Safety
     ///
-    /// `server` lives on the loop of the manager, `UA_Server_run_shutdown` was its last
-    /// call, and nothing uses it after the call.
+    /// `server` lives on the loop of the manager, and nothing uses it after the call.
     ///
     /// # Panics
     ///
     /// If open62541 fails a run of the loop or refuses the delete, or if the server is
-    /// not stopped when nothing is due.
+    /// not stopped when nothing is due: with no `UA_Server_run_shutdown` before the
+    /// call, or after a close that does not queue its `CLOSING`.
     #[cfg(any(test, feature = "sim"))]
     pub(crate) async unsafe fn delete_server(&self, server: *mut ffi::test::Server) {
         let events = &self.events;
