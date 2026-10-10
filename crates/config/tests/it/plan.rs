@@ -945,6 +945,31 @@ fn check_refuses_each_connector_that_the_kinds_refuse() {
     assert_eq!(problems(found.map(|()| unreachable())), expected);
 }
 
+/// Only an index that a connector implies takes the connector's place. A plan can
+/// define a status data name as an index, and it is placed on its own.
+#[test]
+fn check_places_an_index_at_a_status_data_name_on_its_own() {
+    let text = format!("{COUNTED}{}", placement("c", "\"c\"", "n"));
+    let entries = config::check(&documents(&[&text]), &kinds()).expect("entries");
+    let mut definitions = made(&entries);
+    let index = definitions
+        .remove(&name("c.status.time"))
+        .expect("the status index");
+    definitions.retain(|key, _| !key.as_str().starts_with("c.status."));
+    definitions.insert(name("c.status.state"), index);
+    let members = BTreeSet::from([name("n")]);
+    let found = config::plan::check(&definitions, &members, &kinds());
+    let expected = (
+        "config.unplaced",
+        None,
+        "no placement selects the index, and no connector writes it".into(),
+        "Select the index with a placement that names a `home`, or write it with a \
+         connector"
+            .into(),
+    );
+    assert_eq!(problems(found.map(|()| unreachable())), [expected]);
+}
+
 /// A plan for `problems` to refuse, which a `check` that refuses never gives.
 fn unreachable() -> Plan {
     unreachable!("check refuses")
