@@ -213,9 +213,8 @@ fn decode_shape(
         }
         Shape::Variable { element, max, utf8 } => {
             let front = element.front(count)?;
-            if out.len() < front.start {
-                resize(out, front.start, data_type, count, bytes)?;
-            }
+            let held = out.len().max(front.start);
+            resize(out, held, data_type, count, bytes)?;
             let (ends_out, padding) =
                 out.split_at_mut(front.start).0.split_at_mut(front.ends);
             padding.fill(0);
