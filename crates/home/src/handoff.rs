@@ -1,6 +1,7 @@
 //! The handoff entry of an index. Its body names the writer that holds control of the
 //! index from the entry's place in the index log.
 
+use std::num::NonZeroU8;
 use std::str;
 
 use block::Block;
@@ -12,7 +13,7 @@ use types::name::Name;
 use types::time::Stamp;
 
 /// The buffer tag of a handoff entry.
-const TAG: u8 = 1;
+pub(crate) const TAG: NonZeroU8 = NonZeroU8::MIN;
 
 /// The most bytes in the body of a handoff: the authority and the longest subject.
 pub(crate) const MAX_BYTES: usize = 1 + Name::MAX_BYTES;
@@ -43,7 +44,7 @@ pub(crate) fn entry(
         len: 0,
         stored_at,
         last: None,
-        tag: TAG,
+        tag: TAG.get(),
         parts: body(pool, handoff)?.into(),
     })
 }
@@ -75,10 +76,6 @@ fn body(
 ///
 /// If the subject is not a valid name. Bytes from another node must be checked before
 /// they reach `read`.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "recovery (#275) is the first user")
-)]
 pub(crate) fn read(body: &[u8]) -> Option<Writer> {
     let (&authority, subject) = body.split_first()?;
     let subject = str::from_utf8(subject)

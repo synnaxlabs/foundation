@@ -666,11 +666,11 @@ impl Open {
         }
     }
 
-    /// Waits for the interner, opens the shard's buffer on the shard's thread, gives
-    /// the interner to the next shard, and gives the shard's home over the buffer. A
-    /// failed open is kept for [`Node::join`], keeps the interner from the shards
-    /// after it, and gives `None`. So does a stop raised before the open, but it is
-    /// not a failure.
+    /// Waits for the interner, opens the shard's buffer and its home on the shard's
+    /// thread, gives the interner to the next shard, and gives the home. A failed
+    /// open is kept for [`Node::join`], keeps the interner from the shards after it,
+    /// and gives `None`. So does a stop raised before the open, but it is not a
+    /// failure.
     async fn run(
         self,
         files: env::files::Files,
@@ -692,15 +692,20 @@ impl Open {
             layout: self.layout,
             commit: COMMIT,
         };
-        match buffer::Buffer::open(config, interner.slots()).await {
-            Ok(buffer) => {
+        let opened = async {
+            let buffer = buffer::Buffer::open(config, interner.slots()).await?;
+            let config = home::Config {
+                shard: self.shard,
+                buffer,
+                clock: self.clock,
+                limits: LIMITS,
+            };
+            home::Shard::open(config).await
+        };
+        match opened.await {
+            Ok(shard) => {
                 self.give.give(interner);
-                Some(home::Shard::new(home::Config {
-                    shard: self.shard,
-                    buffer,
-                    clock: self.clock,
-                    limits: LIMITS,
-                }))
+                Some(shard)
             }
             Err(error) => {
                 let error = Error::Buffer { core, error };

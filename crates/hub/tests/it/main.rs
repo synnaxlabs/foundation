@@ -142,12 +142,14 @@ impl Test {
         let buffer = buffer::Buffer::open(config, interner.slots())
             .await
             .expect("opens");
-        let home = home::Shard::new(home::Config {
+        let home = home::Shard::open(home::Config {
             shard: 0,
             buffer,
             clock: mesh.clone(),
             limits: LIMITS,
-        });
+        })
+        .await
+        .expect("opens");
         let commit = home.committed();
         let (ended, polls) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
         let paused = Rc::new(Pause::default());
