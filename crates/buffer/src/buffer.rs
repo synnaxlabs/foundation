@@ -268,7 +268,6 @@ impl Shared {
     }
 }
 
-#[derive(Debug)]
 struct State {
     writer: Writer,
     /// The group that takes the next batch.
@@ -298,6 +297,44 @@ struct State {
     ended: bool,
     /// The error that ended the task.
     failed: Option<files::Error>,
+}
+
+/// Prints whether the task idles in place of its waker, whose `Debug` prints pointers.
+impl fmt::Debug for State {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            writer,
+            open,
+            spares,
+            queue,
+            logs,
+            taken,
+            commits,
+            committing,
+            ending,
+            next_key,
+            parked,
+            closed,
+            ended,
+            failed,
+        } = self;
+        f.debug_struct("State")
+            .field("writer", writer)
+            .field("open", open)
+            .field("spares", spares)
+            .field("queue", queue)
+            .field("logs", logs)
+            .field("taken", taken)
+            .field("commits", commits)
+            .field("committing", committing)
+            .field("ending", ending)
+            .field("next_key", next_key)
+            .field("parked", &parked.is_some())
+            .field("closed", closed)
+            .field("ended", ended)
+            .field("failed", failed)
+            .finish()
+    }
 }
 
 impl State {
