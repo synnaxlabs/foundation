@@ -219,8 +219,8 @@ struct Implied<'a> {
 }
 
 impl Implied<'_> {
-    /// The `config.implied-channel` diagnostic at `at`, which states that `refused`, with
-    /// a note at the connector.
+    /// The `config.implied-channel` diagnostic at `at`, which states that `refused`,
+    /// with a note at the connector.
     fn refuse(&self, at: Option<Span>, refused: &str, fix: String) -> Diagnostic {
         let Implied {
             connector,
@@ -231,7 +231,8 @@ impl Implied<'_> {
             IMPLIED_CHANNEL,
             at,
             format!(
-                "the connector `{connector}` implies the channel `{channel}`, so {refused}"
+                "the connector `{connector}` implies the channel `{channel}`, so \
+                 {refused}"
             ),
             fix,
         );
