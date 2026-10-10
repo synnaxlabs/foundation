@@ -296,11 +296,6 @@ impl Chunk {
         *self.times.last().expect("a chunk holds a point")
     }
 
-    fn column(&self, key: &str) -> Option<&Column> {
-        let i = self.search(key).ok()?;
-        self.columns.get(i)
-    }
-
     fn search(&self, key: &str) -> Result<usize, usize> {
         self.columns
             .binary_search_by(|column| (*column.key).cmp(key))
@@ -502,13 +497,6 @@ pub struct Fields<'a> {
 }
 
 impl<'a> Fields<'a> {
-    /// The value of `key`, or `None` when the point does not set it. A string value is
-    /// a copy.
-    #[must_use]
-    pub fn get(&self, key: &str) -> Option<Field> {
-        self.chunk.column(key)?.get(self.at)
-    }
-
     /// Each field that the point sets, in key order. Each string value is a copy.
     pub fn iter(&self) -> impl Iterator<Item = (&'a str, Field)> + 'a {
         let at = self.at;

@@ -1,5 +1,7 @@
 //! `wire::hub::Reader` never panics, each event encodes to its message and comes in the
-//! order of a session, each refusal is one that the order or the mode gives, the body
+//! order of a session, each head is live, ends at or below `u64::MAX`, and starts at or
+//! after the end of the head before it, each refusal is one that the order, the mode,
+//! or the heads before it give, the body
 //! starts after the ends run and ends at its last end, the stream may end only after
 //! `Behind`, and each valid message that the home writes reads back. A latest and a
 //! complete session each read the input.
@@ -49,15 +51,56 @@ fn reader(places: u32, mode: Mode) -> Reader {
 
 /// The reply in `message`, read where its kind is in order: an opened by a reader that
 /// decoded nothing, and a head or a behind by a complete reader that has a place for
-/// each series.
+/// each series and took no head. A head that it refuses for its path reads from its
+/// bytes.
 fn reply(message: &[u8]) -> Result<Reply, Error> {
     if let Ok(FromHome::Opened) = reader(u32::MAX, COMPLETE).decode(message) {
         return Ok(Reply::Opened);
     }
-    match opened(u32::MAX).decode(message)? {
-        FromHome::Head(head) => Ok(Reply::Head(head)),
-        FromHome::Behind => Ok(Reply::Behind),
-        event => panic!("{event:?} came where only a head or a behind is in order"),
+    match opened(u32::MAX).decode(message) {
+        Ok(FromHome::Head(head)) => Ok(Reply::Head(head)),
+        Ok(FromHome::Behind) => Ok(Reply::Behind),
+        Err(Error::Backfill) => Ok(Reply::Head(head(message))),
+        Err(error) => Err(error),
+        Ok(event) => panic!("{event:?} came where only a head or a behind is in order"),
+    }
+}
+
+/// The head in `message`, a head message of 18 bytes, read field by field.
+fn head(message: &[u8]) -> Head {
+    let head = Head {
+        path: if message[1] == 0 {
+            Path::Live
+        } else {
+            Path::Backfill
+        },
+        range: Range {
+            seq: u64::from_le_bytes(message[2..10].try_into().expect("8 bytes")),
+            count: u32::from_le_bytes(message[10..14].try_into().expect("4 bytes")),
+        },
+        series: u32::from_le_bytes(message[14..18].try_into().expect("4 bytes")),
+    };
+    let mut out = vec![0; Reply::Head(head).encoded_len()];
+    Reply::Head(head).encode(&mut out);
+    assert_eq!(out, message, "the head did not read from its bytes");
+    head
+}
+
+/// The refusal of `head` by a session of `places` places whose last head ended at
+/// `end`, or `None` when the session takes it.
+fn refusal(head: Head, places: u32, end: u64) -> Option<Error> {
+    let seq = head.range.seq;
+    if head.series > places {
+        Some(Error::Places {
+            series: head.series,
+            places,
+        })
+    } else if head.path == Path::Backfill {
+        Some(Error::Backfill)
+    } else if seq < end {
+        Some(Error::Seq { seq, end })
+    } else {
+        None
     }
 }
 
@@ -76,13 +119,21 @@ fn malformed(error: Error) -> bool {
             | Error::Kind { .. }
             | Error::Length { .. }
             | Error::Series
+            | Error::Range { .. }
             | Error::Path { .. }
     )
 }
 
-/// Whether a reader of `places` places in `mode` that must take `next` refuses
-/// `message` with `error`. Only one error is correct.
-fn refused(next: Next, places: u32, mode: Mode, message: &[u8], error: Error) -> bool {
+/// Whether a reader of `places` places in `mode` that must take `next`, and whose last
+/// head ended at `end`, refuses `message` with `error`. Only one error is correct.
+fn refused(
+    next: Next,
+    places: u32,
+    mode: Mode,
+    end: u64,
+    message: &[u8],
+    error: Error,
+) -> bool {
     let len = message.len();
     match next {
         Next::Opened => match reply(message) {
@@ -95,9 +146,7 @@ fn refused(next: Next, places: u32, mode: Mode, message: &[u8], error: Error) ->
                 let kind = kind(Reply::Opened);
                 error == Error::Reopen { kind }
             }
-            Ok(Reply::Head(Head { series, .. })) => {
-                series > places && error == Error::Places { series, places }
-            }
+            Ok(Reply::Head(head)) => refusal(head, places, end) == Some(error),
             Ok(Reply::Behind) => {
                 let kind = kind(Reply::Behind);
                 mode == Mode::Latest && error == Error::Latest { kind }
@@ -131,6 +180,7 @@ fn read(bytes: &[u8]) {
 fn read_session(places: u32, mode: Mode, rest: &[u8]) {
     let mut reader = reader(places, mode);
     let mut next = Next::Opened;
+    let mut end = 0;
     for message in fuzz::messages(rest) {
         next = match (next, reader.decode(message)) {
             (Next::Opened, Ok(FromHome::Opened)) => {
@@ -141,7 +191,12 @@ fn read_session(places: u32, mode: Mode, rest: &[u8]) {
                 let mut out = vec![0; Reply::Head(head).encoded_len()];
                 Reply::Head(head).encode(&mut out);
                 assert_eq!(out, message, "the head changed");
-                assert!(head.series <= places, "a head has more series than places");
+                assert_eq!(
+                    refusal(head, places, end),
+                    None,
+                    "a head that it must refuse"
+                );
+                end = head.range.seq + u64::from(head.range.count);
                 Next::Ends(Run::new(ends::LEN, head.series))
             }
             (Next::Head, Ok(FromHome::Behind)) => {
@@ -180,7 +235,7 @@ fn read_session(places: u32, mode: Mode, rest: &[u8]) {
             }
             (next, Err(error)) => {
                 assert!(
-                    refused(next, places, mode, message, error),
+                    refused(next, places, mode, end, message, error),
                     "{error:?} is not the refusal of {message:?} for {next:?}"
                 );
                 next
@@ -213,11 +268,14 @@ fn opened(places: u32) -> Reader {
 }
 
 /// Each valid message made from `input` must decode to itself. A count of 0 is not
-/// valid, so it becomes 1: an input that ends early writes the smallest messages.
+/// valid, so it becomes 1, and a seq that would end the range past `u64::MAX` becomes
+/// the highest that does not: an input that ends early writes the smallest messages.
 fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
+    let seq: u64 = input.arbitrary()?;
+    let count: u32 = input.arbitrary()?;
     let range = Range {
-        seq: input.arbitrary()?,
-        count: input.arbitrary()?,
+        seq: seq.min(u64::MAX - u64::from(count)),
+        count,
     };
     let mut out = vec![0; Reply::Behind.encoded_len()];
     Reply::Behind.encode(&mut out);
@@ -227,20 +285,16 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
     }
 
     let series = input.arbitrary::<u32>()?.max(1);
-    for path in [Path::Live, Path::Backfill] {
-        let head = Head {
-            path,
-            range,
-            series,
-        };
-        let mut out = vec![0; Reply::Head(head).encoded_len()];
-        Reply::Head(head).encode(&mut out);
-        match opened(series).decode(&out) {
-            Ok(FromHome::Head(decoded)) => {
-                assert_eq!(decoded, head, "the head changed")
-            }
-            other => panic!("a head did not read back: {other:?}"),
-        }
+    let head = Head {
+        path: Path::Live,
+        range,
+        series,
+    };
+    let mut out = vec![0; Reply::Head(head).encoded_len()];
+    Reply::Head(head).encode(&mut out);
+    match opened(series).decode(&out) {
+        Ok(FromHome::Head(decoded)) => assert_eq!(decoded, head, "the head changed"),
+        other => panic!("a head did not read back: {other:?}"),
     }
 
     let series = input.int_in_range(1..=RUN_MAX)?;

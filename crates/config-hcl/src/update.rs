@@ -7,7 +7,7 @@ use document::{Attribute, Block, Document, Label, Position, Source, Span};
 
 use crate::lex::{self, Tokens};
 use crate::write::{After, INDENT, Writer};
-use crate::{Error, Unwritable, read, write};
+use crate::{Unwritable, read, write};
 
 /// Changes `text` so that [`read`] reads it as `document`, and returns the new text.
 /// Each attribute and block that keeps its value and its place keeps its bytes, with
@@ -47,7 +47,7 @@ pub fn update(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// The problems in the text, as [`read`] gives them.
-    Text(Vec<Error>),
+    Text(Vec<Diagnostic>),
     /// The parts of the Document that HCL text cannot hold, as [`write()`] gives them.
     Document(Vec<Unwritable>),
 }
@@ -56,7 +56,7 @@ pub enum Refusal {
 impl From<&Refusal> for Vec<Diagnostic> {
     fn from(refusal: &Refusal) -> Self {
         match refusal {
-            Refusal::Text(errors) => errors.iter().map(Diagnostic::from).collect(),
+            Refusal::Text(diagnostics) => diagnostics.clone(),
             Refusal::Document(parts) => parts.iter().map(Diagnostic::from).collect(),
         }
     }
@@ -567,8 +567,8 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
-    use crate::Expected;
     use crate::arbitrary::{checked, document};
+    use crate::{Error, Expected};
 
     fn parsed(text: &str) -> Document {
         read(Source(0), text).unwrap()
@@ -1137,10 +1137,10 @@ mod tests {
         };
         assert_eq!(
             update(Source(0), "a = \n", &checked(&document)),
-            Err(Refusal::Text(vec![Error::Syntax {
+            Err(Refusal::Text(vec![Diagnostic::from(&Error::Syntax {
                 span: Span::new(Source(0), at(4, 0, 4), at(5, 1, 0)).unwrap(),
                 expected: Expected::Value,
-            }]))
+            })]))
         );
         assert_eq!(
             update(Source(0), "a = 1\n", &checked(&document)),
@@ -1155,12 +1155,14 @@ mod tests {
             line: 0,
             column: offset,
         };
-        let errors = [3, 1].map(|offset| Error::TooDeep {
-            span: Span::new(Source(0), at(offset), at(offset)).unwrap(),
+        let diagnostics = [3, 1].map(|offset| {
+            Diagnostic::from(&Error::TooDeep {
+                span: Span::new(Source(0), at(offset), at(offset)).unwrap(),
+            })
         });
         assert_eq!(
-            Vec::<Diagnostic>::from(&Refusal::Text(errors.to_vec())),
-            errors.iter().map(Diagnostic::from).collect::<Vec<_>>()
+            Vec::<Diagnostic>::from(&Refusal::Text(diagnostics.to_vec())),
+            diagnostics
         );
         let parts = [
             Unwritable::For { span: None },

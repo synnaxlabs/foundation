@@ -12,7 +12,6 @@ use std::iter::once;
 use std::path::PathBuf;
 
 use config_hcl::{read, write};
-use document::diagnostic::Diagnostic;
 use document::encoding::Checked;
 use document::value::{Kind, Value};
 use document::{Attribute, Document, Map, Source};
@@ -132,7 +131,7 @@ fn outcome(text: &str) -> Outcome {
     read(Source(0), text).map(drop).map_err(|errors| {
         errors
             .iter()
-            .map(|error| Diagnostic::from(error).code.as_str().to_owned())
+            .map(|diagnostic| diagnostic.code.as_str().to_owned())
             .collect()
     })
 }

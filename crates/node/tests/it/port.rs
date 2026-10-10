@@ -32,7 +32,9 @@ fn the_port_binds_at_once_when_the_lock_is_free() {
     run(&shards, "key", move |_| async move {
         let files = env::files::Files::new(disk);
         let own = types::node::Key::from_u128(1);
-        node::create_key(&files, own, KEY).await.unwrap();
+        node::create_key(&files, &os::entropy(), own, KEY)
+            .await
+            .unwrap();
     });
     let listen = free();
     let node = start_node(&rig, &shards, &threads, &io, listen);
@@ -91,14 +93,16 @@ fn start_node(
         shards: shards.clone(),
         clock: os::clock(),
         wall: os::wall().unwrap(),
-        budget: Size::from_bytes(cores * (512 << 10)),
+        budget: node::Budget {
+            pool: Size::from_bytes(cores * (512 << 10)),
+            disk: Size::from_bytes(cores * (8 << 20)),
+        },
         memory: Box::new(|len| Ok(block::Heap::new(len))),
         files: Box::new(move || {
             let disk = files(&dir, &threads, &io);
             Box::new(move || env::files::Files::new(disk))
         }),
         entropy: os::entropy(),
-        disk: Size::from_bytes(cores * (8 << 20)),
         net: os::net(),
         listen,
         region: None,

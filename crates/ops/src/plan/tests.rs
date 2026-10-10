@@ -15,7 +15,7 @@ use types::name::Name;
 use types::sample;
 
 use super::{Output, plan};
-use crate::common::{PLANT, Reader, SITE, files, front_ends, hcl, name, placed_site};
+use crate::common::{PLANT, Reader, SITE, files, front_ends, name, placed_site};
 use crate::error::Error;
 use crate::front_end::{self, File, FrontEnd};
 
@@ -198,10 +198,20 @@ fix: Use a file that ends in `.hcl`
 #[test]
 fn names_each_extension_of_the_table_in_the_fix() {
     let mut front_ends = front_ends();
-    front_ends.insert("toml", FrontEnd { read: hcl });
+    front_ends.insert(
+        "toml",
+        FrontEnd {
+            read: config_hcl::read,
+        },
+    );
     let two = front_end::unknown(Source(0), &front_ends);
     assert_eq!(two.fix, "Use a file that ends in `.hcl` or `.toml`");
-    front_ends.insert("yaml", FrontEnd { read: hcl });
+    front_ends.insert(
+        "yaml",
+        FrontEnd {
+            read: config_hcl::read,
+        },
+    );
     let diagnostic = front_end::unknown(Source(0), &front_ends);
     assert_eq!(
         diagnostic.fix,

@@ -725,13 +725,15 @@ fn a_time_inside_a_full_chunk_splits_it() {
 }
 
 #[test]
-fn gets_only_the_fields_that_the_point_sets() {
+fn gives_only_the_fields_that_the_point_sets() {
     let store = stored("m v=1,s=\"a\" 10\nm w=2i 20\n");
     let point = store.points("m", &[]).next().unwrap();
-    assert_eq!(point.fields.get("v"), Some(Field::Float(1.0)));
-    assert_eq!(point.fields.get("s"), Some(Field::String("a".into())));
-    assert_eq!(point.fields.get("w"), None, "set by another point only");
-    assert_eq!(point.fields.get("x"), None);
+    let fields: Vec<_> = point.fields.iter().collect();
+    // `w` is set by another point only.
+    assert_eq!(
+        fields,
+        [("s", Field::String("a".into())), ("v", Field::Float(1.0))]
+    );
 }
 
 #[test]
