@@ -1699,7 +1699,8 @@ End of search list.
     }
 
     /// A listed function that takes the address of a symbol that it calls lets other
-    /// code call the symbol through that address.
+    /// code call the symbol through that address. `check` needs GCC and GNU binutils,
+    /// so this test also runs the rule on macOS.
     #[test]
     fn uses_names_the_address_of_a_symbol_that_its_function_may_only_call() {
         let mut uses = listed(&[]);
@@ -1716,7 +1717,8 @@ End of search list.
         );
     }
 
-    /// [`Uses::add`] reads a clock only as a key of [`FUNCTION_SYMBOLS`].
+    /// [`Uses::add`] reads a clock only as a key of [`FUNCTION_SYMBOLS`]. `check` needs
+    /// GCC and GNU binutils, so this test also runs the rule on macOS.
     #[test]
     fn no_list_but_function_symbols_admits_a_clock() {
         for clock in CLOCKS {
