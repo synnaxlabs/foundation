@@ -128,7 +128,7 @@ mod linux {
                     b @ b'0'..=b'7',
                     c @ b'0'..=b'7',
                     after @ ..,
-                ] => ((a - b'0') << 6 | (b - b'0') << 3 | (c - b'0'), after),
+                ] => ((a - b'0') * 64 + (b - b'0') * 8 + (c - b'0'), after),
                 [byte, after @ ..] => (*byte, after),
                 [] => break,
             };
