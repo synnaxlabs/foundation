@@ -22,6 +22,9 @@ use std::sync::atomic::Ordering::Relaxed;
 /// ```
 pub struct Bytes {
     held: AtomicUsize,
+    /// The most bytes held since the last [`Bytes::reset_peak`]. It can lag `held`
+    /// while another thread allocates.
+    peak: AtomicUsize,
 }
 
 impl Bytes {
@@ -30,6 +33,7 @@ impl Bytes {
     pub const fn new() -> Self {
         Self {
             held: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
         }
     }
 
@@ -42,12 +46,33 @@ impl Bytes {
         self.held.load(Relaxed)
     }
 
+    /// The most bytes held at once, on every thread, after the last
+    /// [`Self::reset_peak`], or after the allocator started. As the global allocator,
+    /// read it in a binary with no test harness, like [`Self::held`].
+    #[must_use]
+    pub fn peak(&self) -> usize {
+        self.peak.load(Relaxed).max(self.held())
+    }
+
+    /// Starts a new window of [`Self::peak`] at the bytes held now.
+    pub fn reset_peak(&self) {
+        // Not a store of `held`: an allocation between its load and the store would
+        // be lost from the new window.
+        self.peak.swap(0, Relaxed);
+        self.peak.fetch_max(self.held(), Relaxed);
+    }
+
     /// Counts `size` bytes for `ptr` unless it is null, and returns it.
     fn counted(&self, ptr: *mut u8, size: usize) -> *mut u8 {
         if !ptr.is_null() {
-            self.held.fetch_add(size, Relaxed);
+            self.grow(size);
         }
         ptr
+    }
+
+    fn grow(&self, size: usize) {
+        let held = self.held.fetch_add(size, Relaxed) + size;
+        self.peak.fetch_max(held, Relaxed);
     }
 }
 
@@ -59,7 +84,10 @@ impl Default for Bytes {
 
 impl fmt::Debug for Bytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Bytes").field("held", &self.held).finish()
+        f.debug_struct("Bytes")
+            .field("held", &self.held)
+            .field("peak", &self.peak)
+            .finish()
     }
 }
 
@@ -83,9 +111,11 @@ unsafe impl GlobalAlloc for Bytes {
         // One change, so no thread reads a count that no state of the blocks had.
         if !new.is_null() {
             match new_size.checked_sub(layout.size()) {
-                Some(grown) => self.held.fetch_add(grown, Relaxed),
-                None => self.held.fetch_sub(layout.size() - new_size, Relaxed),
-            };
+                Some(grown) => self.grow(grown),
+                None => {
+                    self.held.fetch_sub(layout.size() - new_size, Relaxed);
+                }
+            }
         }
         new
     }
@@ -231,10 +261,42 @@ mod tests {
     }
 
     #[test]
+    fn peaks_at_the_most_bytes_held_in_the_window() {
+        let bytes = Bytes::new();
+        let a = filled(&bytes);
+        let b = filled(&bytes);
+        free(&bytes, a, LAYOUT);
+        assert_eq!((bytes.peak(), bytes.peak()), (128, 128));
+        bytes.reset_peak();
+        assert_eq!(bytes.peak(), 64);
+        free(&bytes, b, LAYOUT);
+        assert_eq!(bytes.peak(), 64);
+        bytes.reset_peak();
+        assert_eq!(bytes.peak(), 0);
+    }
+
+    #[test]
+    fn peaks_at_a_reallocation_that_grows_and_not_one_that_shrinks() {
+        let bytes = Bytes::new();
+        let ptr = filled(&bytes);
+        // SAFETY: `bytes` returned `ptr` for `LAYOUT`, and 200 rounded up to the
+        // alignment does not pass `isize::MAX`.
+        let ptr = unsafe { bytes.realloc(ptr, LAYOUT, 200) };
+        assert!(!ptr.is_null(), "the system has no memory for 200 bytes");
+        // SAFETY: `bytes` returned `ptr` for 200 bytes, and 8 is not zero.
+        let ptr = unsafe { bytes.realloc(ptr, sized(200), 8) };
+        assert!(!ptr.is_null(), "the system has no memory for 8 bytes");
+        assert_eq!(bytes.peak(), 200);
+        bytes.reset_peak();
+        assert_eq!(bytes.peak(), 8);
+        free(&bytes, ptr, sized(8));
+    }
+
+    #[test]
     fn shows_the_bytes_held() {
         let bytes = Bytes::default();
         let ptr = filled(&bytes);
-        assert_eq!(format!("{bytes:?}"), "Bytes { held: 64 }");
+        assert_eq!(format!("{bytes:?}"), "Bytes { held: 64, peak: 64 }");
         free(&bytes, ptr, LAYOUT);
     }
 }

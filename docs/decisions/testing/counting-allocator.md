@@ -36,3 +36,12 @@
   (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6043758919, #1536).
   Supersedes the reason of 5d23e00e
   (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042860057).
+  `Bytes` keeps the bytes it holds and the most it held in a window: `peak` reads the
+  most, and `reset_peak` starts a new window at the bytes held then, so a test can
+  bound the memory that one step takes. A read stays a read, as `held` is. The reset
+  swaps the most to 0, then raises it to the bytes held, so an allocation on another
+  thread during the reset counts in the new window. No benchmark holds `Bytes`, and
+  `Allocator` does not change. Lost: one `peak` that also resets (a second read
+  gives a value that the first changed); `take_peak` (it discards a value to start a
+  window). Decided by `laptop.architect` on 2026-10-10T02:42:17Z
+  (https://github.com/synnaxlabs/foundation/issues/2116#issuecomment-6092914109).
