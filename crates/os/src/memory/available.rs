@@ -479,6 +479,22 @@ mod linux {
             assert_eq!(root.available().unwrap(), MIB);
         }
 
+        /// A backslash and three octal digits over `\377` is no escape.
+        #[test]
+        fn a_mount_point_with_an_octal_over_a_byte_keeps_it() {
+            let root = Root::new("v2-over-byte");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "0::/a\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "37 31 0:31 / /cg\\400 rw - cgroup2 cgroup2 rw\n",
+                )
+                .write("cg\\400/a/memory.max", &format!("{MIB}\n"))
+                .write("cg\\400/a/memory.current", "0\n")
+                .write("cg\\400/a/memory.stat", "inactive_file 0\n");
+            assert_eq!(root.available().unwrap(), MIB);
+        }
+
         /// Page cache that the kernel can drop is not used memory.
         #[test]
         fn the_inactive_file_pages_of_a_cgroup_are_room() {
