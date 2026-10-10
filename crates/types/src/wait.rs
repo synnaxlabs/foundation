@@ -1,16 +1,24 @@
 //! The wakers of futures that wait for one event.
 
-use std::mem;
 use std::task::Waker;
-use std::vec;
+use std::{fmt, mem, vec};
 
 /// The wakers of the futures that wait for one event, by the key of each. A future
 /// keeps one waker, the waker of its last poll, and its drop takes it out. Each method
 /// that takes a waker out returns it: drop or wake it after the lock or borrow that
 /// holds the set ends, because the last drop of a waker can drop a task that takes the
 /// same lock.
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct Set(Vec<(u64, Waker)>);
+
+/// Prints the keys only: the `Debug` of a waker prints pointers.
+impl fmt::Debug for Set {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_set()
+            .entries(self.0.iter().map(|(key, _)| key))
+            .finish()
+    }
+}
 
 impl Set {
     /// Makes an empty set. It allocates nothing.
@@ -142,6 +150,16 @@ mod tests {
             .map(|(task, _)| task.0.load(Ordering::Relaxed))
             .collect();
         assert_eq!(wakes, [1, 0, 1]);
+    }
+
+    #[test]
+    fn its_debug_prints_only_its_keys() {
+        let (_, waker) = task();
+        let mut set = Set::new();
+        for key in [4, 1] {
+            assert!(set.insert(key, &waker).is_none());
+        }
+        assert_eq!(format!("{set:?}"), "{4, 1}");
     }
 
     #[test]
