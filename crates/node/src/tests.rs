@@ -2178,6 +2178,26 @@ mod hub {
         chunks.iter().map(|c| i64::from_le_bytes(*c)).collect()
     }
 
+    /// Each sample of the `u8` series of `key` in `received`.
+    pub(super) fn bytes(received: &Received<'_>, key: u128) -> Vec<u8> {
+        let entry = entry(received.set(), key);
+        let entries = received.set().entries();
+        let range = received
+            .view()
+            .range(entries[entry].group)
+            .expect("a range");
+        let count = usize::try_from(range.count).expect("a count");
+        let (_, bytes) = received
+            .view()
+            .iter()
+            .find(|&(present, _)| present == entry)
+            .expect("the view holds the series");
+        let mut out = vec![0; count];
+        codec::decode(entries[entry].data_type, count, bytes, &mut out)
+            .expect("decodes");
+        out
+    }
+
     /// A node of `cores` shards on a new host, with the host.
     fn node(sim: &mut sim::Sim, cores: usize) -> (sim::node::Node, Node) {
         let host = host(sim, cores);
@@ -4096,6 +4116,7 @@ mod port {
                     region: Some(region(&members)),
                     clock: own.clock(),
                     entropy: own.entropy(),
+                    net: own.net(),
                 };
                 let pool = super::pool();
                 let stop = crate::stop::Stop::default();
@@ -4178,7 +4199,7 @@ mod port {
             let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
             let founding = paired(&hosts, OTHER.0);
             let node = start(&hosts[0], founding.clone());
-            peer_hub(&hosts[1], founding, |_, _, host| async move {
+            peer_hub(&hosts[1], founding, |_, _, host, _| async move {
                 host.clock().sleep(Span::MINUTE).await;
             });
             let opened = Arc::new(Mutex::new(None));
@@ -5231,11 +5252,17 @@ mod port {
             founding
         }
 
-        /// As [`peer`], with `founding`, and `act` gets the peer's hub and mesh.
+        /// As [`peer`], with `founding`, and `act` gets the peer's hub, mesh, and
+        /// tasks.
         fn peer_hub<F: Future<Output = ()> + 'static>(
             host: &sim::node::Node,
             founding: Founding,
-            act: impl FnOnce(::hub::Hub, ::mesh::Mesh, sim::node::Node) -> F
+            act: impl FnOnce(
+                ::hub::Hub,
+                ::mesh::Mesh,
+                sim::node::Node,
+                env::tasks::Tasks,
+            ) -> F
             + Send
             + 'static,
         ) {
@@ -5258,6 +5285,7 @@ mod port {
                     region: Some(founding),
                     clock: own.clock(),
                     entropy: own.entropy(),
+                    net: own.net(),
                 };
                 let pool = super::pool();
                 let stop = crate::stop::Stop::default();
@@ -5291,10 +5319,10 @@ mod port {
                     Some(mesh.clone()),
                     hub.clone(),
                     clock,
-                    tasks,
+                    tasks.clone(),
                 );
                 let (mut port, mut act) =
-                    (pin!(port), pin!(act(hub, mesh.clone(), own)));
+                    (pin!(port), pin!(act(hub, mesh.clone(), own, tasks)));
                 poll_fn(|cx| {
                     let stopped = port.as_mut().poll(cx);
                     assert!(stopped.is_pending(), "the peer's transport stopped");
@@ -5333,7 +5361,7 @@ mod port {
                     Err(ended) => Err(ended.to_string()),
                 });
             });
-            peer_hub(&hosts[1], founding, move |hub, _, host| async move {
+            peer_hub(&hosts[1], founding, move |hub, _, host, _| async move {
                 let clock = host.clock();
                 let mut writer = writer(&hub, &["plant.value"]).await;
                 for at in 0..1000 {
@@ -5375,7 +5403,7 @@ mod port {
                     out.lock().unwrap().push(next);
                     std::future::pending::<()>().await;
                 });
-                peer_hub(&hosts[1], theirs, move |hub, _, host| async move {
+                peer_hub(&hosts[1], theirs, move |hub, _, host, _| async move {
                     if opened {
                         let clock = host.clock();
                         let mut writer = writer(&hub, &["plant.value"]).await;
@@ -5430,7 +5458,7 @@ mod port {
             assert_eq!(sim.run_for(TEN), Ok(()), "case {case:?}");
             let results = Arc::new(Mutex::new((0, Vec::new())));
             let out = Arc::clone(&results);
-            peer_hub(&hosts[1], founding, move |hub, mesh, host| async move {
+            peer_hub(&hosts[1], founding, move |hub, mesh, host, _| async move {
                 host.clock().sleep(Span::SECOND).await;
                 let mut readers = Vec::new();
                 for _ in 0..count {
@@ -5478,7 +5506,7 @@ mod port {
             });
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
-            peer_hub(&hosts[1], founding, move |hub, _, _| async move {
+            peer_hub(&hosts[1], founding, move |hub, _, _, _| async move {
                 let reader = hub
                     .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
                     .await;
@@ -5933,12 +5961,161 @@ mod port {
             assert_eq!(*planned.lock().unwrap(), [Ok(()), Err(unknown.to_owned())]);
         }
 
+        /// The operations and the supervisor of a node use one kind table. No call
+        /// shows which table a kind came from, because the kinds of this binary hold
+        /// no state, so the test counts the holders of the table.
+        #[test]
+        fn the_operations_and_the_supervisor_share_one_kind_table() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let founding = paired(&hosts, OTHER.0);
+            let node = start(&hosts[0], founding.clone());
+            let holders = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&holders);
+            peer_hub(
+                &hosts[1],
+                founding,
+                move |hub, mesh, host, tasks| async move {
+                    let (_driver, time) = ::clock::Clock::new(host.clock());
+                    let kinds = Arc::new(crate::kinds());
+                    let config = connector::supervisor::Config {
+                        kinds: Arc::clone(&kinds),
+                        clock: host.clock(),
+                        entropy: host.entropy(),
+                        net: host.net(),
+                        tasks,
+                        hub,
+                    };
+                    let entropy = host.entropy();
+                    let wired = crate::wire(&mesh, OTHER.0, &time, &entropy, config);
+                    out.lock().unwrap().push(Arc::strong_count(&kinds));
+                    drop(wired);
+                },
+            );
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            assert_eq!(*holders.lock().unwrap(), [3]);
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+        }
+
+        /// The node runs a connector that an apply places on it, and its status gives
+        /// how the run ended: `influx` ends with a config error, and does not restart.
+        #[test]
+        fn a_node_runs_a_connector_that_an_apply_places_on_it() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let founding = region(&[member(OWN, &KEY, &host)]);
+            let (node, definitions) = applied(&mut sim, &host, founding, status());
+            let read = read_status(&node, &definitions);
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            node.operate(|ops| async move {
+                apply(&ops, format!("{}{}", status(), connector("influx"))).await;
+            });
+            assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            // `state` running, ending, then stopped; `class` none, then config.
+            assert_eq!(*read.lock().unwrap(), [(0, 0), (3, 1), (2, 1)]);
+        }
+
+        /// A node that starts on a spec that places a connector on it runs the
+        /// connector: a later apply that keeps the connector starts no run, and one
+        /// that changes it starts one. The reader opens after the run of the start,
+        /// because a status written before the open is lost to it.
+        #[test]
+        fn a_node_runs_a_connector_of_the_spec_it_starts_on() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = keyed(&mut sim, 2);
+            let founding = region(&[member(OWN, &KEY, &host)]);
+            let text = format!("{}{}", status(), connector("influx"));
+            let (node, definitions) =
+                applied(&mut sim, &host, founding.clone(), text.clone());
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let node = start(&host, founding);
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            let read = read_status(&node, &definitions);
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            let other = "channel \"plant.other\" { kind = \"index\" }\n";
+            let kept = format!("{text}{other}");
+            let changed = kept.replace("influx:8086", "influx:8087");
+            for text in [kept, changed] {
+                node.operate(|ops| async move {
+                    apply(&ops, text).await;
+                });
+                assert_eq!(sim.run_for(HALF_MINUTE), Ok(()));
+            }
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            assert_eq!(*read.lock().unwrap(), [(0, 0), (3, 1), (2, 1)]);
+        }
+
+        /// Reads each `state` and `class` of `plant.influx` that `node` writes, from a
+        /// task on `node`, by the keys of `definitions`.
+        fn read_status(
+            node: &Node,
+            definitions: &BTreeMap<Name, Definition>,
+        ) -> Arc<Mutex<Vec<(u8, u8)>>> {
+            use super::super::hub::bytes;
+            let [state, class] = ["state", "class"]
+                .map(|name| key_of(definitions, &format!("influx.status.{name}")));
+            let read = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&read);
+            node.spawn(move |hub| async move {
+                let select = ["plant.influx.status.state", "plant.influx.status.class"];
+                let config = ::hub::reader::Config {
+                    select: types::name::Selector::new(select).expect("a selector"),
+                    ..unnamed(
+                        "plant.influx.status.state",
+                        ::hub::reader::Mode::Complete,
+                    )
+                };
+                let mut reader = hub.reader(config).await.expect("the reader opens");
+                while let Ok(received) = reader.next().await {
+                    let [state, class] =
+                        [state, class].map(|key| bytes(&received, key.as_u128()));
+                    out.lock().unwrap().extend(state.into_iter().zip(class));
+                }
+            });
+            read
+        }
+
+        /// The config of the connector `plant.influx`: its body without `kind` and
+        /// `node`.
+        const INFLUX: &str = "address = \"http://influx:8086\"\nselect = \"plant.*\"\n\
+                              reader {\n  mode = \"complete\"\n}\n";
+
+        /// The text of a spec with the status channels of `plant.influx`, with the
+        /// counts that its kind names, homed on [`OWN`].
+        fn status() -> String {
+            use std::fmt::Write as _;
+            let connector = "plant.influx".parse().expect("a name");
+            let config = config_hcl::read(document::Source(0), INFLUX).expect("HCL");
+            let checked = crate::kinds().check("influx", None, &config);
+            let counts = checked.expect("the config checks").counts;
+            let (index, channels) = connector::status::channels(&connector, &counts)
+                .expect("the names fit");
+            let mut text = format!("channel \"{index}\" {{ kind = \"index\" }}\n");
+            writeln!(text, "placement \"plant\" {{").unwrap();
+            writeln!(text, "  select = \"plant.**\"").unwrap();
+            writeln!(text, "  home = \"plant.node{OWN}\"\n}}").unwrap();
+            for (name, data_type) in channels {
+                writeln!(text, "channel \"{name}\" {{").unwrap();
+                writeln!(text, "  data_type = \"{data_type}\"").unwrap();
+                writeln!(text, "  index = \"{index}\"\n}}").unwrap();
+            }
+            text
+        }
+
         /// The text of a spec with the connector `plant.influx` of `kind` on [`OWN`].
         fn connector(kind: &str) -> String {
             format!(
                 "connector \"plant.influx\" {{\n  kind = \"{kind}\"\n  \
-                 node = \"plant.node{OWN}\"\n  address = \"http://influx:8086\"\n  \
-                 select = \"plant.*\"\n  reader {{\n    mode = \"complete\"\n  }}\n}}\n"
+                 node = \"plant.node{OWN}\"\n{INFLUX}}}\n"
             )
         }
 

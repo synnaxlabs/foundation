@@ -46,8 +46,8 @@ pub struct Config {
 }
 
 /// Runs connectors of the kinds in a table, one `run` call at a time per connector.
-/// It is not `Send`: each shard makes its own.
-#[derive(Debug)]
+/// It is not `Send`: each shard makes its own. Its clones share one config.
+#[derive(Clone, Debug)]
 pub struct Supervisor(Rc<Config>);
 
 impl Supervisor {
@@ -85,11 +85,11 @@ impl Supervisor {
     /// # Panics
     ///
     /// When the status channels of `name` do not open for a reason other than a
-    /// stopped mesh: `node` did not define them, or homed them on another node. When
-    /// a status name of `name` is longer than [`Name::MAX_BYTES`], which the plan
-    /// refuses. When the home refuses a status frame for a cause that only a defect of
-    /// `connector` gives. Or when a status frame is larger than the largest block of
-    /// the shard's pool.
+    /// stopped mesh: `node` homed them on another node, or did not define them and
+    /// did not cancel the call. When a status name of `name` is longer than
+    /// [`Name::MAX_BYTES`], which the plan refuses. When the home refuses a status
+    /// frame for a cause that only a defect of `connector` gives. Or when a status
+    /// frame is larger than the largest block of the shard's pool.
     pub async fn run(
         &self,
         kind: &str,
@@ -120,6 +120,10 @@ impl Supervisor {
         });
         let (writer, status) = match opened.await {
             None | Some(Err(hub::writer::Error::Mesh(_))) => return Ok(()),
+            // A cancelled call may find its status channels removed.
+            Some(Err(hub::writer::Error::Unknown(_))) if cancel.cancelled() => {
+                return Ok(());
+            }
             Some(Ok(opened)) => opened,
             Some(Err(error)) => {
                 panic!(
@@ -2556,25 +2560,61 @@ mod tests {
     #[test]
     fn returns_at_a_cancel_while_the_status_channels_wait_to_open() {
         let (returned, runs, _) =
-            unsynced(Span::from_nanos(30_000_000_000), Span::SECOND);
+            unsynced(Span::from_nanos(30_000_000_000), Span::SECOND, false);
+        assert_eq!(returned, Span::SECOND, "the call returns at the cancel");
+        assert_eq!(runs, []);
+    }
+
+    /// The caller removes the status channels and cancels as the mesh time arrives.
+    #[test]
+    fn returns_at_a_cancel_with_a_removal_as_the_mesh_time_arrives() {
+        let (returned, runs, _) = unsynced(Span::SECOND, Span::SECOND, true);
         assert_eq!(returned, Span::SECOND, "the call returns at the cancel");
         assert_eq!(runs, []);
     }
 
     #[test]
+    fn returns_at_a_cancel_before_the_call_on_status_channels_that_are_gone() {
+        let runs = run_on(move |node, tasks| async move {
+            let script = Script::default();
+            let runs = Arc::clone(&script.runs);
+            let supervisor = Supervisor::new(Config {
+                kinds: Arc::new(Table::new().with("script", script)),
+                clock: node.clock(),
+                entropy: node.entropy(),
+                net: node.net(),
+                tasks: tasks.clone(),
+                hub: hub::testing::open(env(&node, tasks.clone())).await.0,
+            });
+            let token = Token::new();
+            token.cancel();
+            let name = name("plant.script");
+            let result = supervisor.run("script", name, &config(), &token).await;
+            result.expect("the call returns ok");
+            runs.lock().expect("no panic under the lock").len()
+        });
+        assert_eq!(runs, 0);
+    }
+
+    #[test]
     fn starts_the_first_run_once_the_node_has_mesh_time() {
         let two = Span::from_nanos(2_000_000_000);
-        let (returned, runs, statuses) = unsynced(two, Span::from_nanos(3_000_000_000));
+        let three = Span::from_nanos(3_000_000_000);
+        let (returned, runs, statuses) = unsynced(two, three, false);
         assert_eq!(runs, [two]);
         assert_eq!(returned, Span::from_nanos(3_000_000_000));
         assert_eq!(states(&statuses), [(0, 0, 0), (3, 0, 0), (2, 0, 0)]);
     }
 
     /// Runs a `Script` connector with no step on a node whose mesh time starts
-    /// `delay` after the call, and cancels it at `cancel`. Checks that the call returns
-    /// `Ok`, and gives when it returned and when each run started, and the status
-    /// frames.
-    fn unsynced(delay: Span, cancel: Span) -> (Span, Vec<Span>, Vec<Written>) {
+    /// `delay` after the call, and cancels it at `cancel`, after it removes the status
+    /// channels when `removed`. Checks that the call returns `Ok`, and gives when it
+    /// returned and when each run started, and the status frames.
+    fn unsynced(
+        delay: Span,
+        cancel: Span,
+        removed: bool,
+    ) -> (Span, Vec<Span>, Vec<Written>) {
         run_on(move |node, tasks| async move {
             let hub =
                 hub::testing::open_unsynced(env(&node, tasks.clone()), delay).await;
@@ -2594,8 +2634,12 @@ mod tests {
             };
             let token = Token::new();
             let (canceller, sleeper) = (token.clone(), clock.clone());
+            let definer = inputs.hub.clone();
             tasks.spawn(async move {
                 sleeper.sleep(cancel).await;
+                if removed {
+                    definer.set_definitions(std::iter::empty());
+                }
                 canceller.cancel();
             });
             let start = clock.now();

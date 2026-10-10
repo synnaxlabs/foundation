@@ -115,12 +115,19 @@
   Supersedes the sentence that a repeat of `Change::Home` gives the state of a call
   that took effect last:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025.
-  `Change::Join` is safe to repeat while no
-  change removes a member: a repeat finds its node a member and is refused
-  (`Unfit::Duplicate`) before the ticket counts a use. The change that removes a member
-  must keep a repeat of an older `Join` from admitting the node again, and needs a
-  ruling before it lands (decided by `laptop.architect`, 2026-10-07T12:55:06Z:
-  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6038355946). A later
+  `Change::Join` is safe to repeat while no change removes a member: a repeat finds its
+  node a member and is refused (`Unfit::Duplicate`) before the ticket counts a use. The
+  change that removes a member must keep a repeat of an older `Join` from admitting the
+  node again, and needs a ruling before it lands (decided by `laptop.architect`,
+  2026-10-07T12:55:06Z:
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6038355946). That
+  change, and the first change that replaces a card, also make `node::wire` read the
+  name of its node again, because today it reads the name once, when the mesh opens
+  (`laptop.architect`, 2026-10-10T14:53:22Z:
+  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098763970). So does
+  the change that lets a node join a running mesh (#1157), because a node that joins
+  opens its mesh before it is a member (`laptop.architect`, 2026-10-10T15:07:08Z,
+  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098894431). A later
   `Change` kind that is not safe to repeat needs a ruling before a member forwards it
   (decided by the architect, 2026-10-07T08:15:18Z:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The

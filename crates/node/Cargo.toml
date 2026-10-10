@@ -40,10 +40,12 @@ wire = { path = "../wire" }
 [dev-dependencies]
 bytes = { workspace = true }
 codec = { path = "../codec" }
+connector = { path = "../connector", features = ["sim"] }
 connector-influx = { path = "../connector-influx", features = ["sim"] }
 counting = { path = "../counting" }
 divan = { workspace = true }
 http = { workspace = true }
+hub = { path = "../hub", features = ["sim"] }
 # Turns on `sim` for the bench, since the bench host runs no features.
 node = { path = ".", features = ["sim"] }
 proptest = { workspace = true }
