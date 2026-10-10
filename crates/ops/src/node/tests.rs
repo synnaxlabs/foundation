@@ -80,11 +80,11 @@ fn applies_with_each_connector_kind_of_the_node() {
             file: "plant.plan".to_owned(),
             pointer: plan::Pointer::from(mesh.pointer()),
             counts: Counts {
-                added: 6,
+                added: 14,
                 changed: 0,
                 removed: 0,
             },
-            homes: 1,
+            homes: 3,
         };
         assert_eq!(applied, Ok(serde_json::to_value(expected).expect("JSON")));
     });

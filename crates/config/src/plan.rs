@@ -15,7 +15,7 @@ use types::digest::Digest;
 use types::name::Name;
 
 use crate::{
-    Definition, Entry, Found, KINDS, channel, checked, duplicate, placement,
+    Definition, Entry, Found, KINDS, channel, checked, connector, duplicate, placement,
     private_key, sort, span, subject,
 };
 
@@ -37,7 +37,8 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 /// A channel keeps the key of the stored channel at its name, so a renamed channel is
 /// removed and added, and each channel with an edge to it changes. A definition of the
 /// applied spec whose label is reserved, which only Foundation makes, or whose kind no
-/// block of a file defines, is never a change.
+/// block of a file defines, is never a change. The status index of a connector takes
+/// the connector's placement, whatever placement selects the index.
 ///
 /// # Errors
 ///
@@ -97,7 +98,8 @@ pub fn plan(
 ///
 /// 1. `config.private-key` for each string of a definition that holds a private key.
 /// 2. The diagnostics of `kinds` for each connector whose kind or config it refuses,
-///    then `config.duplicate-name`, whose earlier name is the first in name order,
+///    and `config.long-name` for each with a status name that is too long, then
+///    `config.duplicate-name`, whose earlier name is the first in name order,
 ///    and `config.subject-is-connector`.
 /// 3. Each problem of the rules of [`plan`] from `config.unplaced` to
 ///    `config.unknown-node`.
@@ -349,7 +351,7 @@ impl<'a> Model<'a> {
     /// index.
     fn definitions(
         definitions: &'a BTreeMap<Name, definition::Definition>,
-        writes: &'a BTreeMap<Name, Vec<Name>>,
+        writes: &'a BTreeMap<Name, connector::Writes>,
     ) -> Self {
         let keys: BTreeMap<Key, &Name> = definitions
             .iter()
@@ -376,7 +378,7 @@ impl<'a> Model<'a> {
         &mut self,
         name: &'a Name,
         definition: &'a definition::Definition,
-        writes: &'a BTreeMap<Name, Vec<Name>>,
+        writes: &'a BTreeMap<Name, connector::Writes>,
         block: Option<&Block>,
     ) {
         match definition {
@@ -390,13 +392,15 @@ impl<'a> Model<'a> {
                 self.nodes.extend(nodes);
             }
             definition::Definition::Connector(connector) => {
+                let writes = writes
+                    .get(name)
+                    .expect("invariant: the kinds checked each connector");
                 self.connectors.push(Connector {
                     name,
                     node: connector.node(),
                     at: block.and_then(|block| span(block, "node")),
-                    writes: writes
-                        .get(name)
-                        .expect("invariant: the kinds checked each connector"),
+                    writes: &writes.channels,
+                    status: writes.index(),
                 });
             }
             _ => {}
@@ -443,25 +447,33 @@ struct Connector<'a> {
     at: Option<Span>,
     /// The channels that it writes to the mesh.
     writes: &'a [Name],
+    /// The index of its status channels.
+    status: &'a Name,
 }
 
-/// What each connector of `definitions` writes to the mesh, by tree key. It adds to
-/// `diagnostics` the diagnostics of `kinds` for each connector whose kind or config it
-/// refuses.
+/// What each connector of `definitions` writes to the mesh, its status channels with
+/// it, by tree key. It adds to `diagnostics` the diagnostics of `kinds` for each
+/// connector whose kind or config it refuses, and `config.long-name` for each whose
+/// status names are too long.
 fn writes(
     definitions: &BTreeMap<Name, definition::Definition>,
     kinds: &Table,
     diagnostics: &mut Vec<Diagnostic>,
-) -> BTreeMap<Name, Vec<Name>> {
+) -> BTreeMap<Name, connector::Writes> {
     let mut writes = BTreeMap::new();
     for (name, definition) in definitions {
         let definition::Definition::Connector(connector) = definition else {
             continue;
         };
         let config = connector.config().document();
-        match kinds.check(connector.kind().as_str(), None, config) {
-            Ok(channels) => {
-                writes.insert(name.clone(), channels.writes);
+        let found = kinds
+            .check(connector.kind().as_str(), None, config)
+            .and_then(|channels| {
+                connector::writes(name, channels, None).map_err(|found| vec![found])
+            });
+        match found {
+            Ok(found) => {
+                writes.insert(name.clone(), found);
             }
             Err(found) => diagnostics.extend(found),
         }
@@ -523,12 +535,18 @@ impl<'f> Index<'f> {
     }
 }
 
-/// Places each index. Reports each index that two writer nodes or [`place`] leave with
-/// no home.
+/// Places each index. The status index of a connector takes the connector's
+/// placement, and the connector reports when it has none. Reports each index that two
+/// writer nodes or [`place`] leave with no home.
 fn indexes<'f>(
     model: &'f Model<'f>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> BTreeMap<&'f Name, Index<'f>> {
+    let statuses: BTreeMap<_, _> = model
+        .connectors
+        .iter()
+        .map(|connector| (connector.status, connector))
+        .collect();
     let mut indexes = BTreeMap::new();
     for &name in &model.indexes {
         let writers: Vec<_> = model
@@ -536,11 +554,18 @@ fn indexes<'f>(
             .iter()
             .filter(|writer| model.feeds(writer, name))
             .collect();
-        let node = writers.first().map(|writer| writer.node);
-        let placed = place(name, model.placements.iter().copied(), node);
-        let index = Index { writers, placed };
+        let placements = model.placements.iter().copied();
+        let index = if let Some(connector) = statuses.get(name) {
+            let placed = place(connector.name, placements, Some(connector.node));
+            Index { writers, placed }
+        } else {
+            let node = writers.first().map(|writer| writer.node);
+            let placed = place(name, placements, node);
+            let index = Index { writers, placed };
+            diagnostics.extend(unplaced(model.label(name), &index.placed));
+            index
+        };
         diagnostics.extend(writer_nodes(name, &index));
-        diagnostics.extend(unplaced(model.label(name), &index.placed));
         indexes.insert(name, index);
     }
     indexes

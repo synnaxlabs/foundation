@@ -76,8 +76,10 @@ pub struct Entry {
 /// Checks the definitions in a mesh's Documents, one Document for each file, and
 /// gives each by its tree key: the name of a channel or a connector, or
 /// `<label>.@<kind>` for each other block. The kind in `kinds` that a `connector`
-/// block names checks its config. Each order of `documents` gives the same entries,
-/// or each gives problems.
+/// block names checks its config. Each connector also gives its status channels at
+/// the span of its label: the index `<connector>.status.time`, then `state` and
+/// `class` as `u8`, `restarts`, and each count of its kind as `u64`. Each order of
+/// `documents` gives the same entries, or each gives problems.
 ///
 /// # Errors
 ///
@@ -96,6 +98,9 @@ pub struct Entry {
 /// channel knows. A `kind` of connector that is missing, is not a name, or is not in
 /// `kinds` hides each problem of the connector's config, and so does a config nested
 /// deeper than `document::encoding::Checked` takes.
+/// `config.long-name` at the label of a connector with a status name longer than
+/// [`Name::MAX_BYTES`]. `config.implied-channel` at the label of each block whose
+/// name is the name of a status channel in any case, with a note at the connector.
 pub fn check(
     documents: &[Document],
     kinds: &Table,
@@ -157,6 +162,7 @@ fn checked<'a>(
             }
         }
     }
+    connector::imply(&mut found);
     let repeats = duplicate::in_labels(&mut found.labels);
     found.diagnostics.extend(repeats);
     if found.diagnostics.is_empty() {
@@ -208,9 +214,8 @@ struct Found<'a> {
     kinds: &'a Table,
     /// The block of each entry, by tree key.
     blocks: BTreeMap<Name, &'a Block>,
-    /// The channels that each connector writes to the mesh, as its kind checks them, by
-    /// tree key.
-    writes: BTreeMap<Name, Vec<Name>>,
+    /// What each connector writes to the mesh, as its kind checks it, by tree key.
+    writes: BTreeMap<Name, connector::Writes>,
 }
 
 /// A problem that is already in the diagnostics.

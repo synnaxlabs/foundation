@@ -74,8 +74,16 @@ fn shows_each_definition_in_file_order_then_the_counts() {
 + channel plant.dip
 + channel plant.trend
 + connector plc
++ channel plc.status.class
++ channel plc.status.restarts
++ channel plc.status.state
++ channel plc.status.time
 + connector influx
-6 to add, 0 to change, 0 to remove.
++ channel influx.status.class
++ channel influx.status.restarts
++ channel influx.status.state
++ channel influx.status.time
+14 to add, 0 to change, 0 to remove.
 "
     );
 }
