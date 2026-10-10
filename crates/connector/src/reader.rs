@@ -15,8 +15,7 @@ const LATEST_HOLD: Code = Code::new("connector.latest-hold");
 const READER_KEYS: [&str; 2] = ["mode", "hold"];
 
 /// The reader settings of an out connector. The reader has its connector's name and no
-/// maximum age. It starts from now, or resumes as [`hub::reader::Config::name`] says
-/// when it takes over its open session or opens while the home holds its position.
+/// maximum age, and opens as [`hub::reader::Config::name`] says.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Settings {
