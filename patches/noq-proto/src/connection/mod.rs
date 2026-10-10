@@ -1977,7 +1977,14 @@ impl Connection {
             }
         }
 
-        // Pacing check.
+        // Pacing check. With no Handshake keys, CONNECTION_CLOSE goes in one space and
+        // ends the pending close, so it is not paced: it is not in flight, and a paced
+        // close can leave after its drain ends. Each repeat answers one packet from the
+        // peer. With Handshake keys, a close that cannot coalesce stays pending, so
+        // only pacing bounds its repeats.
+        if can_send.close && !self.crypto_state.has_keys(EncryptionLevel::Handshake) {
+            return PathBlocked::No;
+        }
         if let Some(delay) = self.path_data_mut(path_id).pacing_delay(bytes_to_send, now) {
             let resume_time = now + delay;
             self.timers.set(
@@ -1985,8 +1992,8 @@ impl Connection {
                 resume_time,
                 self.qlog.with_time(now),
             );
-            // Loss probes and CONNECTION_CLOSE should be subject to pacing, even though
-            // they are not congestion controlled.
+            // Loss probes and CONNECTION_CLOSE with Handshake keys should be subject to
+            // pacing, even though they are not congestion controlled.
             trace!(?space_id, %path_id, ?delay, "blocked by pacing");
             return PathBlocked::Pacing;
         }

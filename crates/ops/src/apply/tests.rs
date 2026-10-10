@@ -12,7 +12,6 @@ use document::Document;
 use document::diagnostic::{Code, Diagnostic};
 use mesh::Mesh;
 use mesh::used::{Behind, Cause};
-use sim::Sim;
 use spec::Pointer;
 use spec::channel::{Edge, Problem};
 use spec::definition::{Definition, Kind};
@@ -23,7 +22,7 @@ use types::name::{Name, Prefix};
 
 use super::{Applied, apply};
 use crate::common::{
-    ADMIN, NODE, PLANT, Reader, files, founded, front_ends, keys, name, open,
+    ADMIN, NODE, PLANT, Reader, fail_sync, files, founded, front_ends, keys, name,
     placed_site, solo,
 };
 use crate::error::Error;
@@ -63,7 +62,7 @@ fn path() -> &'static Path {
 
 #[test]
 fn applies_a_plan_and_then_plans_no_change() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let (_, planned) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         let applied = apply(path(), &planned.encode(), &mesh, &kinds(), keys(0)).await;
         let pointer = mesh.pointer();
@@ -98,7 +97,7 @@ fn applies_a_plan_and_then_plans_no_change() {
 
 #[test]
 fn refuses_a_plan_of_a_spec_that_changed_and_proposes_nothing() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let base = mesh.pointer();
         let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
@@ -127,7 +126,7 @@ fn refuses_a_plan_of_a_spec_that_changed_and_proposes_nothing() {
 
 #[test]
 fn counts_each_change_and_removal_of_an_apply() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let channel = |name| {
             format!(
                 "channel \"site.{name}\" {{\n  data_type = \"f64\"\n  \
@@ -157,7 +156,7 @@ fn counts_each_change_and_removal_of_an_apply() {
 
 #[test]
 fn refuses_a_stale_plan_with_a_founding_change_as_stale() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let base = mesh.pointer();
         let founding = spec::founding::create(ADMIN.public());
         let other =
@@ -186,7 +185,7 @@ fn refuses_a_stale_plan_with_a_founding_change_as_stale() {
 
 #[test]
 fn gives_a_stale_plan_when_another_apply_commits_first() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let base = mesh.pointer();
         let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
@@ -252,7 +251,7 @@ fn one(
 
 #[test]
 fn refuses_a_change_of_a_founding_definition_and_proposes_nothing() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let founding = spec::founding::create(ADMIN.public());
         let (subject, access) = (name("@admin.@subject"), name("@admin.@access"));
         let other =
@@ -309,7 +308,7 @@ fn rogue(planned: &config::plan::Plan, kind: &str, node: &str) -> config::plan::
 
 #[test]
 fn refuses_a_plan_that_plan_refuses_and_proposes_nothing() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let cases = [
             (
@@ -357,7 +356,7 @@ fn added(
 
 #[test]
 fn refuses_a_plan_that_breaks_a_rule_on_names_or_private_keys() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let entry = planned.changes[&name("plc")].new.as_ref().expect("an add");
         let config::Definition::Spec(plc) = entry.definition.clone() else {
@@ -508,7 +507,7 @@ async fn split(mesh: &Mesh) -> config::plan::Plan {
 #[test]
 fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
     let definitions = spec::founding::create(ADMIN.public());
-    founded(&["edge", "other"], definitions, |mesh| async move {
+    founded(&["edge", "other"], definitions, |_, mesh| async move {
         let (_, placed) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         let mut unplaced = placed.clone();
         unplaced.changes.remove(&name("p.@placement"));
@@ -572,7 +571,7 @@ fn refuses_each_plan_that_check_refuses_and_proposes_nothing() {
 
 #[test]
 fn refuses_a_config_that_its_kind_refuses_at_the_apply() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let (_, plant) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
         let refusing = Table::new().with("influx", Reader).with("opcua", Refuser);
         let refused = problem("test.refused", "refused", "Fix it");
@@ -601,7 +600,7 @@ fn refuses_a_plan_with_only_a_home_on_a_node_that_is_not_a_member() {
     let definitions = planned
         .definitions(&founding, keys(0))
         .expect("definitions");
-    founded(&["edge"], definitions, move |mesh| async move {
+    founded(&["edge"], definitions, move |_, mesh| async move {
         let (_, site) = plan_among(&mesh, &[("site.hcl", &site)], &members).await;
         assert!(site.changes.is_empty());
         assert_eq!(site.homes.len(), 1);
@@ -622,7 +621,7 @@ fn refuses_a_plan_with_only_a_home_on_a_node_that_is_not_a_member() {
 
 #[test]
 fn refuses_bytes_that_are_not_a_plan_and_proposes_nothing() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let version = config::plan::Error::Version { found: b'p' };
         let error = refuses(&mesh, b"plan", &kinds(), Error::Plan(version)).await;
         assert_eq!(error.status(), 2);
@@ -643,7 +642,7 @@ fn refuses_bytes_that_are_not_a_plan_and_proposes_nothing() {
 
 #[test]
 fn refuses_a_path_that_is_not_utf8_before_it_reads_the_plan() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let path = Path::new(OsStr::from_bytes(b"a\xff.plan"));
         let error = apply(path, b"plan", &mesh, &kinds(), keys(0))
             .await
@@ -660,7 +659,7 @@ fix: Rename the file to a UTF-8 name
 
 #[test]
 fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         apply(path(), &site.encode(), &mesh, &kinds(), keys(0))
             .await
@@ -693,6 +692,22 @@ fn gives_each_other_error_of_the_mesh_as_an_apply_error() {
 }
 
 #[test]
+fn gives_a_stop_of_the_group_as_stopped() {
+    solo(|node, mesh| async move {
+        let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
+        let stopped = fail_sync(&node);
+        let expected = Error::Stopped(stopped.clone());
+        let error = refuses(&mesh, &site.encode(), &kinds(), expected).await;
+        let text = format!(
+            "error[ops.stopped]: {stopped}\nfix: Fix the cause in the message, then \
+             start the node and plan again\n"
+        );
+        assert_eq!(error.text(), text);
+        assert_eq!(error.status(), 1);
+    });
+}
+
+#[test]
 fn leaves_out_each_count_of_zero() {
     let applied = |added, changed, removed, homes| {
         let pointer = Pointer {
@@ -719,6 +734,30 @@ fn leaves_out_each_count_of_zero() {
     assert_eq!(applied(0, 2, 0, 0), "Applied a\\n.plan: 2 changed.\n");
     assert_eq!(applied(0, 0, 3, 0), "Applied a\\n.plan: 3 removed.\n");
     assert_eq!(applied(0, 0, 0, 1), "Applied a\\n.plan: 1 home listed.\n");
+}
+
+/// `Applied::text` has no caller outside tests until the apply entry of #1744, so no
+/// caller sees a change from `error::escape` to `error::escape_controls`. This test is
+/// its only kill.
+#[test]
+fn escapes_the_file_as_an_error_does() {
+    let applied = Applied {
+        file: "it's \"b\\c\"\ne\u{301}.plan".to_owned(),
+        pointer: plan::Pointer::from(Pointer {
+            version: 1,
+            root: spec::tree::empty(),
+        }),
+        counts: Counts {
+            added: 0,
+            changed: 0,
+            removed: 0,
+        },
+        homes: 0,
+    };
+    assert_eq!(
+        applied.text(),
+        "Applied it's \"b\\\\c\"\\ne\\u{301}.plan: no change.\n"
+    );
 }
 
 #[test]
@@ -762,7 +801,7 @@ fn refuses_a_plan_on_a_node_that_uses_no_spec_as_behind() {
     let subject = Subject::new(vec![PrivateKey([8; 32]).public()]).expect("a subject");
     let misplaced = name("plant.@x.@subject");
     definitions.insert(misplaced.clone(), Definition::Subject(subject));
-    founded(&["edge"], definitions, |mesh| async move {
+    founded(&["edge"], definitions, |_, mesh| async move {
         let spec = mesh.spec().await.expect("a spec");
         assert_eq!(spec.pointer, None);
         let behind = spec.behind.expect("a node behind");
@@ -862,7 +901,7 @@ fn proposes_nothing_for_a_plan_with_no_change() {
         "AAAAC3NzaC1lZDI1NTE5AAAAIP0QMDFGOHfS9XR71aVyCvs+QnNQ4BXrHs9dGDDz7KY6",
         " bob@site\"]\n}\n",
     );
-    solo(move |mesh| async move {
+    solo(move |_, mesh| async move {
         let (_, site) = plan_on(&mesh, &[("people.hcl", people)]).await;
         apply(path(), &site.encode(), &mesh, &kinds(), keys(0))
             .await
@@ -894,7 +933,7 @@ fn proposes_nothing_for_a_plan_with_no_change() {
 
 #[test]
 fn refuses_a_plan_with_no_change_at_an_old_base_as_stale() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let base = mesh.pointer();
         let (_, empty) = plan_on(&mesh, &[]).await;
         assert!(empty.changes.is_empty() && empty.homes.is_empty());
@@ -915,7 +954,7 @@ fn refuses_a_plan_with_no_change_at_an_old_base_as_stale() {
 
 #[test]
 fn applies_a_plan_with_no_home_and_then_a_plan_with_only_a_home() {
-    solo(|mesh| async move {
+    solo(|_, mesh| async move {
         let (_, mut site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         let homes = std::mem::take(&mut site.homes);
         assert!(!homes.is_empty());
@@ -946,11 +985,7 @@ fn applies_a_plan_with_no_home_and_then_a_plan_with_only_a_home() {
 
 #[test]
 fn refuses_a_plan_on_a_node_that_uses_an_old_spec_as_behind() {
-    let mut sim = Sim::new(sim::Config::default());
-    let node = sim.node(sim::node::Config::default());
-    let ran = sim.run_on(&node, |node, tasks| async move {
-        let definitions = spec::founding::create(ADMIN.public());
-        let mesh = open(&node, &tasks, &["edge"], definitions).await;
+    solo(|node, mesh| async move {
         let (_, site) = plan_on(&mesh, &[("site.hcl", &placed_site())]).await;
         apply(path(), &site.encode(), &mesh, &kinds(), keys(0))
             .await
@@ -974,5 +1009,4 @@ fn refuses_a_plan_on_a_node_that_uses_an_old_spec_as_behind() {
         )
         .await;
     });
-    assert_eq!(ran, Ok(()));
 }

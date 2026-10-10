@@ -116,10 +116,6 @@ impl Signed {
     /// Takes one signed card from the start of `bytes`. `None` when the bytes do not
     /// start with what [`Signed::encode`] gives, or when the signature does not hold;
     /// `bytes` is then at no known place.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the join answer of #336 is the first user")
-    )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         Unchecked::decode(bytes)?.check().ok()
     }

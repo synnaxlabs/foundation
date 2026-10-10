@@ -110,6 +110,11 @@ state on `main`.
   exchange and one signature, and one signature check more when the peer sends a
   certificate. With no limit, each spoofed Initial holds about 46 KB until the idle
   timeout (#563).
+- Fixed: #2084 (a peer with no key started a handshake that it kept alive, and the
+  stop of the node waited for it with no bound, because shard 0 holds `lock` until
+  the transport frees the port). The drop of the transport closes each handshake in
+  flight, and the transport waits at most 3 s for the closes to drain after the last
+  session ended, so the round trip of a peer cannot hold the port.
 
 ### `transport` to protocols
 
@@ -421,11 +426,14 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 
 No target yet, because the decoder is private, not built, not reached from a file, or
 not reached from the corpus: `transport::message` (#55), the QUIC hello
-(`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
-#336 adds its target), `spec` tree chunks (#64), the scan of the mesh log files and the
-names of their directory (`mesh::log::scan` and `mesh::log::sequence`, #1746), the names
-in the directory of the spec in use (`mesh::driver::used::pointer`, #1746), each
-connector's protocol parser, the chunk processing of open62541 (`ua_securechannel.c`,
-#1990), and `connector::reader::read`, `connector::http::uri`, and
-`connector_influx::Kind::parse`, which `config_check` reaches only from an input with a
-`connector` block of kind `influx`, and no input holds one yet (#1817).
+(`transport::quic::hello::Hello::decode`), `spec` tree chunks (#64), the scan of the
+mesh log files and the names of their directory (`mesh::log::scan` and
+`mesh::log::sequence`, #1746), the file `founding` of the mesh directory
+(`mesh::region::Founding::decode`, with `mesh::Member::decode` in it, #1746), the join
+answer (`mesh::Member::decode` from a peer, #336 adds its target), the names in the
+directory of the spec in use (`mesh::driver::used::pointer`, #1746), each connector's
+protocol parser, the file `name` of the data directory (`node::name::decode`, #2174),
+the chunk processing of open62541 (`ua_securechannel.c`, #1990), and
+`connector::reader::read`, `connector::http::uri`, and `connector_influx::Kind::parse`,
+which `config_check` reaches only from an input with a `connector` block of kind
+`influx`, and no input holds one yet (#1817).

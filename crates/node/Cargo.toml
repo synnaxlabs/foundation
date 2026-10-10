@@ -6,7 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Exposes `Scope` to the `scope` bench and `fuzz` to the fuzz targets. Off by default.
+# Exposes `Scope` to the `scope` bench, `fuzz` to the fuzz targets, and `create_key` to
+# the tests. Off by default.
 sim = []
 
 [[bin]]
@@ -55,8 +56,8 @@ test = true
 loom = { workspace = true }
 
 # Under `--cfg loom`, tokio has no `net`.
-[target.'cfg(not(loom))'.dev-dependencies]
-# The simulated servers of the process tests serve over `os::net()`.
+[target.'cfg(not(loom))'.dependencies]
+# `foundation start` serves over `os::net()`.
 os = { path = "../os", features = ["net"] }
 
 [lints]

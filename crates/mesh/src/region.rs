@@ -14,6 +14,10 @@ use types::node;
 use raft::Voters;
 use spec::definition::Definition;
 
+use crate::bytes::{
+    put_channel, put_count, put_key, put_keys, put_name, put_prefix, take_channel,
+    take_count, take_key, take_keys, take_name, take_prefix, take_rising,
+};
 use crate::card;
 use crate::change::{self, Change, Join, Malformed};
 use crate::member::Member;
@@ -41,6 +45,75 @@ pub struct Founding {
     /// channel key to the key of a member. An index with no entry has no home until a
     /// spec change gives one.
     pub homes: BTreeMap<channel::Key, node::Key>,
+}
+
+impl Founding {
+    /// The byte form: the prefix, the members in key order, the voters, the
+    /// definitions in name order, and the homes in channel key order. Two values that
+    /// differ only in the order of their members have one byte form.
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        put_prefix(&self.prefix, &mut out);
+        let mut members: Vec<&Member> = self.members.iter().collect();
+        members.sort_by_key(|member| member.card.key());
+        put_count(members.len(), &mut out);
+        for member in members {
+            member.encode(&mut out);
+        }
+        put_keys(&self.voters, &mut out);
+        put_count(self.definitions.len(), &mut out);
+        for (name, definition) in &self.definitions {
+            put_name(name, &mut out);
+            let definition = definition.encode();
+            put_count(definition.len(), &mut out);
+            out.extend(definition);
+        }
+        put_count(self.homes.len(), &mut out);
+        for (&index, &home) in &self.homes {
+            put_channel(index, &mut out);
+            put_key(home, &mut out);
+        }
+        out
+    }
+
+    /// Reads what [`Founding::encode`] gives, with the members in key order. `None`
+    /// when `bytes` are not that form, also with bytes after it.
+    pub(crate) fn decode(mut bytes: &[u8]) -> Option<Self> {
+        let bytes = &mut bytes;
+        let prefix = take_prefix(bytes)?;
+        let mut members: Vec<Member> = Vec::new();
+        for _ in 0..take_count(bytes)? {
+            let member = Member::decode(bytes)?;
+            if members
+                .last()
+                .is_some_and(|last| last.card.key() >= member.card.key())
+            {
+                return None;
+            }
+            members.push(member);
+        }
+        let voters = take_keys(bytes)?;
+        let mut definitions = BTreeMap::new();
+        take_rising(bytes, take_name, |name, bytes| {
+            let len = usize::try_from(take_count(bytes)?).ok()?;
+            let (definition, rest) = bytes.split_at_checked(len)?;
+            *bytes = rest;
+            definitions.insert(name, Definition::decode(definition).ok()?);
+            Some(())
+        })?;
+        let mut homes = BTreeMap::new();
+        take_rising(bytes, take_channel, |index, bytes| {
+            homes.insert(index, take_key(bytes)?);
+            Some(())
+        })?;
+        bytes.is_empty().then_some(Self {
+            prefix,
+            members,
+            voters,
+            definitions,
+            homes,
+        })
+    }
 }
 
 /// The region state that this node holds: its members, its tickets, the founding homes
@@ -180,7 +253,7 @@ impl State {
                 homes,
                 ..
             } => {
-                self.move_pointer(base, root, &holders, &homes)?;
+                self.swap_pointer(base, root, &holders, &homes)?;
                 let mut moved = false;
                 for (index, home) in homes {
                     if let Entry::Vacant(vacant) = self.homes.entry(index) {
@@ -199,9 +272,10 @@ impl State {
         self.voters = voters;
     }
 
-    // Moves the pointer by compare-and-swap on `base`, when the holders of its chunks
-    // are a quorum. The chunks are never read here.
-    fn move_pointer(
+    // Compares `base` with the pointer and, when the holders of its chunks are a
+    // quorum, sets the pointer that the change makes. The chunks are never read
+    // here.
+    fn swap_pointer(
         &mut self,
         base: Pointer,
         root: Digest,
@@ -1467,6 +1541,91 @@ mod tests {
                     last.get(&i).map(|&h| node::Key::from_u128(h))
                 );
             }
+        }
+    }
+
+    // A founding from a small set of prefixes, members in any order, voters,
+    // definitions, and homes.
+    fn foundings() -> impl Strategy<Value = Founding> {
+        let ids = vec![1, 2, 3, 4, 5_u8];
+        let labels = vec!["plant.a", "plant.b", "plant.c"];
+        (
+            prop::sample::select(vec!["", "plant", "plant.cell"]),
+            prop::sample::subsequence(ids.clone(), 0..=5).prop_shuffle(),
+            prop::sample::subsequence(ids, 0..=5),
+            prop::sample::subsequence(labels, 0..=3),
+            prop::collection::btree_map(0..4_u128, 1..=5_u128, 0..=4),
+        )
+            .prop_map(|(prefix, members, voters, labels, homes)| {
+                let definitions = (1..).zip(labels).map(|(id, label)| {
+                    let key = spec::definition::Kind::Subject.key(label).unwrap();
+                    let subject = spec::subject::Subject::new(vec![public(id)]);
+                    (key, Definition::Subject(subject.unwrap()))
+                });
+                Founding {
+                    prefix: prefix.parse().unwrap(),
+                    members: create_members(&members),
+                    voters: voters.into_iter().map(node).collect(),
+                    definitions: definitions.collect(),
+                    homes: homes
+                        .into_iter()
+                        .map(|(i, h)| (index(i), node::Key::from_u128(h)))
+                        .collect(),
+                }
+            })
+    }
+
+    #[test]
+    fn a_founding_with_members_out_of_order_or_of_one_key_does_not_decode() {
+        let members = create_members(&[1, 2]);
+        let none = Founding {
+            prefix: Prefix::ROOT,
+            members: Vec::new(),
+            voters: [node(1)].into(),
+            definitions: BTreeMap::new(),
+            homes: BTreeMap::new(),
+        };
+        let mut head = Vec::new();
+        put_prefix(&Prefix::ROOT, &mut head);
+        put_count(0, &mut head);
+        let with = |order: [usize; 2]| {
+            let mut bytes = Vec::new();
+            put_prefix(&Prefix::ROOT, &mut bytes);
+            put_count(2, &mut bytes);
+            for i in order {
+                members[i].encode(&mut bytes);
+            }
+            bytes.extend(none.encode().strip_prefix(head.as_slice()).unwrap());
+            Founding::decode(&bytes)
+        };
+        let founding = Founding {
+            members: members.clone(),
+            ..none.clone()
+        };
+        assert_eq!(with([0, 1]), Some(founding));
+        assert_eq!(with([1, 0]), None);
+        assert_eq!(with([0, 0]), None);
+    }
+
+    proptest! {
+        // The byte form reads back as the founding with its members in key order, and
+        // no cut of it, or it with a byte more, reads.
+        #[test]
+        fn a_founding_reads_back_from_its_byte_form(
+            founding in foundings(),
+            cut in any::<prop::sample::Index>(),
+            extra in any::<u8>(),
+        ) {
+            let bytes = founding.encode();
+            let mut sorted = founding.clone();
+            sorted.members.sort_by_key(|member| member.card.key());
+            prop_assert_eq!(sorted.encode(), bytes.clone());
+            prop_assert_eq!(Founding::decode(&bytes), Some(sorted));
+            let cut = &bytes[..cut.index(bytes.len())];
+            prop_assert_eq!(Founding::decode(cut), None);
+            let mut longer = bytes;
+            longer.push(extra);
+            prop_assert_eq!(Founding::decode(&longer), None);
         }
     }
 }

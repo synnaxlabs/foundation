@@ -6,20 +6,27 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-sim = ["hyper/server", "hub/sim"]
+sim = ["hyper/server", "hub/sim", "dep:spec"]
 
 [dependencies]
 bytes.workspace = true
 http.workspace = true
 http-body.workspace = true
 hyper.workspace = true
+block = { path = "../block" }
 env = { path = "../env" }
 hub = { path = "../hub" }
 document = { path = "../document" }
+spec = { path = "../spec", optional = true }
 types = { path = "../types" }
+
+[target.'cfg(loom)'.dependencies]
+loom = { workspace = true }
 
 [dev-dependencies]
 codec = { path = "../codec" }
+# Turns on `sim`, because the bench host runs no features.
+connector = { path = ".", features = ["sim"] }
 counting = { path = "../counting" }
 hub = { path = "../hub", features = ["sim"] }
 proptest = { workspace = true }
@@ -29,6 +36,11 @@ spec = { path = "../spec" }
 [[test]]
 name = "alloc"
 harness = false
+
+[[bench]]
+name = "run"
+harness = false
+test = true
 
 [lints]
 workspace = true

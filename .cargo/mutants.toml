@@ -32,6 +32,9 @@ exclude_re = [
   'xtask/src/review\.rs:.*(replace gh ->| in gh$)',
   # Empty outside loom. The loom models fail when a marker is removed.
   'crates/block/src/sync\.rs:.*Track::(read|write)',
+  # The stub is built only under loom, so no test of another build sees its mutant.
+  # The real `net` has no mutant that builds.
+  'crates/node/src/main\.rs:.*replace net -> env::net::Net with Default::default\(\)$',
   # Empty outside a build with the address sanitizer, which `cargo xtask sanitizers`
   # and the fuzz builds make. In `cargo xtask sanitizers`,
   # `asan_reports_a_write_before_a_block` fails without it.

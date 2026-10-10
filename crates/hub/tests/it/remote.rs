@@ -25,8 +25,8 @@ use wire::hub::{Credit, Head, Refusal, Reply, ends};
 
 use super::region::OTHER;
 use super::{
-    AREA, BODY_MAX, I64, POOL, TIME, Test, VALUE, fill, samples, unnamed, without,
-    write, write_series, write_wide,
+    AREA, BODY_MAX, I64, NODE, POOL, TIME, TIME_B, Test, VALUE, fill, samples, unnamed,
+    without, write, write_series, write_wide,
 };
 use crate::net::{HOME, PEER, PORT, own_pool, public_key, transport_sized};
 
@@ -3165,6 +3165,62 @@ fn a_reader_panics_on_an_ack_of_a_position_at_zero_before_it_gave_one() {
             let position = first.next().await.expect("a frame").position();
             let mut second = test.reader(&["value"], Mode::Complete).await;
             second.ack(position);
+        },
+    );
+}
+
+/// The hub holds its region's transport until the hub, each session, and each link
+/// drop. The task of a remote reader holds it until its next poll after that.
+#[test]
+fn lets_go_of_the_transport_once_the_hub_each_session_and_each_link_drop() {
+    remote(
+        25,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| {
+                write_three(test, kept)
+            })
+            .await;
+        },
+        |test, steps| async move {
+            test.set_home(TIME_B, NODE).await;
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            steps.open();
+            reader.next().await.expect("a frame");
+            let writer = test.writer("w", &["time-b", "value-b"]).await;
+            let region = test.region.as_ref().expect("a region");
+            let transport = Rc::clone(&region.transport);
+            let member = region.mesh.member(OTHER).expect("a member");
+            let card = member.card.card();
+            let session = transport
+                .dial(card.public_key, card.addresses.as_slice())
+                .await
+                .expect("the session of the reader");
+            let link = test.hub.link(session);
+            let held = Rc::strong_count(&transport);
+            let Test {
+                clock, hub, region, ..
+            } = test;
+            drop((hub, writer, link, reader));
+            assert_eq!(
+                Rc::strong_count(&transport),
+                held,
+                "the task of the remote reader holds the hub"
+            );
+            clock.sleep(Span::from_nanos(1)).await;
+            assert_eq!(
+                Rc::strong_count(&transport),
+                held - 1,
+                "the hub let go of the transport"
+            );
+            drop(region);
+            clock.sleep(Span::from_nanos(1)).await;
+            assert_eq!(
+                Rc::strong_count(&transport),
+                1,
+                "no task holds the transport"
+            );
         },
     );
 }

@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
-use std::process::{Child, Command, ExitStatus, Output, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -21,13 +21,14 @@ const PATIENCE: Span = Span::from_nanos(90_000_000_000);
 /// The time between two checks of a wait.
 const POLL: Duration = Duration::from_millis(100);
 
-/// One `foundation` node in a temporary directory of its own. Drop removes the
-/// directory, except while the thread panics: a failed test keeps it.
+/// One `foundation` node in a temporary directory of its own. Drop kills the node and
+/// removes the directory, except while the thread panics: a failed test keeps it.
 #[derive(Debug)]
 pub(crate) struct Rig {
     /// The working directory of each command. It holds `plant.hcl`.
     pub(crate) dir: PathBuf,
     clock: Clock,
+    node: Option<Running>,
 }
 
 impl Rig {
@@ -51,6 +52,7 @@ impl Rig {
         Self {
             dir,
             clock: os::clock(),
+            node: None,
         }
     }
 
@@ -62,7 +64,65 @@ impl Rig {
     /// Starts `foundation start --name edge`, with each listener of the node on port 0
     /// of loopback, and waits until it prints that the node runs.
     pub(crate) fn start(&mut self) {
-        todo!("waits on #1732")
+        self.start_with(&["--name", "edge"]);
+    }
+
+    /// [`Rig::start`] with `args` in place of `--name edge`. Panics when a node runs,
+    /// when the node exits before it prints a line, or when 90 s pass first.
+    pub(crate) fn start_with(&mut self, args: &[&str]) {
+        assert!(self.node.is_none(), "a node runs");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
+        command.arg("start").args(args).current_dir(&self.dir);
+        // The node reads no input.
+        let (mut node, _) = Running::new(command);
+        let started = poll(&self.clock, PATIENCE, || match node.ended() {
+            Some(status) => Ok(Some(status)),
+            None if node.stdout.text().contains('\n') => Ok(None),
+            None => Err(node.seen()),
+        });
+        match started {
+            Ok(None) => self.node = Some(node),
+            Ok(Some(status)) => {
+                panic!("the node exited with {status}:\n{}", node.seen())
+            }
+            Err(seen) => {
+                node.process.end();
+                late("the node prints that it runs", PATIENCE, &seen)
+            }
+        }
+    }
+
+    /// Stops the node of [`Rig::start`] with SIGTERM, and gives its output when it
+    /// exits and closes its pipes. Panics when no node runs, or when 90 s pass first.
+    #[cfg(unix)]
+    pub(crate) fn stop(&mut self) -> Output {
+        let mut node = self.node.take().expect("a node runs");
+        node.process.term();
+        let ended = poll(&self.clock, PATIENCE, || {
+            node.ended().ok_or_else(|| node.seen())
+        });
+        match ended {
+            Ok(status) => node.output(status),
+            Err(seen) => {
+                node.process.end();
+                late("the node exits at SIGTERM", PATIENCE, &seen)
+            }
+        }
+    }
+
+    /// Starts `foundation` with `args` in [`Rig::dir`], with `stdout` as its standard
+    /// output, no standard input, and its standard error on a pipe that
+    /// [`Process::errors`] reads. Waits for nothing.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn spawn(&self, args: &[&str], stdout: Stdio) -> Process {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
+        command
+            .args(args)
+            .current_dir(&self.dir)
+            .stdin(Stdio::null())
+            .stdout(stdout)
+            .stderr(Stdio::piped());
+        Process(command.spawn().expect("start the command"))
     }
 
     /// Runs `foundation` with `args` in [`Rig::dir`], with `input` on its standard
@@ -72,6 +132,19 @@ impl Rig {
         let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
         command.args(args).current_dir(&self.dir);
         run(&self.clock, PATIENCE, command, input)
+    }
+
+    /// Starts `foundation` with `args` in [`Rig::dir`], for a test that writes its
+    /// standard input while it runs.
+    pub(crate) fn talk(&self, args: &[&str]) -> Talk {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_foundation"));
+        command.args(args).current_dir(&self.dir);
+        let (running, stdin) = Running::new(command);
+        Talk {
+            running,
+            stdin,
+            clock: self.clock.clone(),
+        }
     }
 
     /// Calls `check` until it gives `Ok`, and gives that value. When 90 s pass first,
@@ -138,7 +211,24 @@ fn poll<T>(
 /// exits and closes its pipes. When `limit` passes first, kills it and panics with the
 /// output so far.
 fn run(clock: &Clock, limit: Span, command: Command, input: &[u8]) -> Output {
-    let mut running = Running::new(command, input);
+    let (mut running, mut stdin) = Running::new(command);
+    let input = input.to_vec();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a process test writes to another process while it runs"
+    )]
+    let input = std::thread::spawn(move || match stdin.write_all(&input) {
+        // The command closed its standard input: it reads no more.
+        Err(error) if error.kind() == ErrorKind::BrokenPipe => {}
+        written => written.expect("write the input"),
+    });
+    running.input = Some(input);
+    end(clock, limit, running)
+}
+
+/// Gives the output of `running` when it exits and closes its pipes. When `limit`
+/// passes first, kills it and panics with the output so far.
+fn end(clock: &Clock, limit: Span, mut running: Running) -> Output {
     let ended = poll(clock, limit, || {
         running.ended().ok_or_else(|| running.seen())
     });
@@ -151,18 +241,54 @@ fn run(clock: &Clock, limit: Span, command: Command, input: &[u8]) -> Output {
     }
 }
 
-/// A command that runs, with a thread for each of its pipes.
+/// A command that a test writes to while it runs: [`Rig::talk`].
+#[derive(Debug)]
+pub(crate) struct Talk {
+    running: Running,
+    stdin: ChildStdin,
+    clock: Clock,
+}
+
+impl Talk {
+    /// Writes `line` to the standard input of the command, and waits until all of
+    /// its standard output so far is `output`. When 90 s pass first, panics with the
+    /// output so far.
+    pub(crate) fn ask(&mut self, line: &str, output: &str) {
+        self.stdin
+            .write_all(line.as_bytes())
+            .expect("write the input");
+        wait(&self.clock, PATIENCE, "the command answers", || {
+            let seen = self.running.stdout.text();
+            if seen == output {
+                Ok(())
+            } else {
+                Err(self.running.seen())
+            }
+        });
+    }
+
+    /// Closes the standard input of the command, and gives its output when it exits
+    /// and closes its pipes. When 90 s pass first, kills it and panics with the output
+    /// so far.
+    pub(crate) fn close(self) -> Output {
+        drop(self.stdin);
+        end(&self.clock, PATIENCE, self.running)
+    }
+}
+
+/// A command that runs, with a thread for each of its output pipes and for the
+/// input that [`run`] writes.
+#[derive(Debug)]
 struct Running {
     process: Process,
-    input: JoinHandle<()>,
+    input: Option<JoinHandle<()>>,
     stdout: Capture,
     stderr: Capture,
 }
 
 impl Running {
-    /// Starts `command`, and writes `input` to it from a thread that then closes its
-    /// standard input.
-    fn new(mut command: Command, input: &[u8]) -> Self {
+    /// Starts `command`, and gives it with its standard input.
+    fn new(mut command: Command) -> (Self, ChildStdin) {
         let child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -170,30 +296,21 @@ impl Running {
             .spawn()
             .expect("start the command");
         let mut process = Process(child);
-        let mut stdin = process.0.stdin.take().expect("piped");
-        let input = input.to_vec();
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "a process test writes to another process while it runs"
-        )]
-        let input = std::thread::spawn(move || match stdin.write_all(&input) {
-            // The command closed its standard input: it reads no more.
-            Err(error) if error.kind() == ErrorKind::BrokenPipe => {}
-            written => written.expect("write the input"),
-        });
-        Self {
-            input,
+        let stdin = process.0.stdin.take().expect("piped");
+        let running = Self {
+            input: None,
             stdout: Capture::new(process.0.stdout.take().expect("piped")),
             stderr: Capture::new(process.0.stderr.take().expect("piped")),
             process,
-        }
+        };
+        (running, stdin)
     }
 
     /// The exit status, once the command has exited and each of its pipes has closed.
     fn ended(&mut self) -> Option<ExitStatus> {
-        let status = self.process.0.try_wait().expect("check the command")?;
-        let closed =
-            self.input.is_finished() && self.stdout.ended() && self.stderr.ended();
+        let status = self.process.exited()?;
+        let written = self.input.as_ref().is_none_or(JoinHandle::is_finished);
+        let closed = written && self.stdout.ended() && self.stderr.ended();
         closed.then_some(status)
     }
 
@@ -208,7 +325,9 @@ impl Running {
 
     /// The output of a command that [`Running::ended`] with `status`.
     fn output(self, status: ExitStatus) -> Output {
-        self.input.join().expect("write the input");
+        if let Some(input) = self.input {
+            input.join().expect("write the input");
+        }
         Output {
             status,
             stdout: self.stdout.end(),
@@ -219,9 +338,38 @@ impl Running {
 
 /// The process of a command. Drop kills it, so a test that panics leaves no
 /// `foundation` process. A process that it starts lives on: `foundation` starts none.
-struct Process(Child);
+#[derive(Debug)]
+pub(crate) struct Process(Child);
 
 impl Process {
+    /// The PID of the command.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pid(&self) -> u32 {
+        self.0.id()
+    }
+
+    /// The standard error of a command that [`Rig::spawn`] started and that exited.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn errors(&mut self) -> String {
+        let mut errors = String::new();
+        let mut pipe = self.0.stderr.take().expect("spawn pipes standard error");
+        std::io::Read::read_to_string(&mut pipe, &mut errors).expect("read the errors");
+        errors
+    }
+
+    /// Sends SIGTERM to the command. Panics when `kill` fails.
+    #[cfg(unix)]
+    pub(crate) fn term(&self) {
+        let pid = self.0.id().to_string();
+        let sent = Command::new("kill").arg(&pid).status().expect("run kill");
+        assert!(sent.success(), "send SIGTERM to {pid}");
+    }
+
+    /// The exit status of the command, or `None` while it runs.
+    pub(crate) fn exited(&mut self) -> Option<ExitStatus> {
+        self.0.try_wait().expect("check the command")
+    }
+
     /// Kills the command and waits for it to exit.
     fn end(&mut self) {
         // `kill` gives `Ok` for a command that exited.
@@ -256,6 +404,7 @@ impl Drop for Process {
 }
 
 /// One output of a command, which a thread reads as the command writes it.
+#[derive(Debug)]
 struct Capture {
     bytes: Arc<Mutex<Vec<u8>>>,
     reader: JoinHandle<()>,
@@ -305,8 +454,11 @@ impl Capture {
 impl Drop for Rig {
     fn drop(&mut self) {
         // While the thread panics, a remove can block and a second panic aborts the
-        // test binary.
+        // test binary. The drop of the node kills it.
         if !std::thread::panicking() {
+            if let Some(mut node) = self.node.take() {
+                node.process.end();
+            }
             std::fs::remove_dir_all(&self.dir).expect("remove the directory");
         }
     }
@@ -343,7 +495,7 @@ fn a_rig_removes_its_directory_with_its_files() {
 fn a_test_that_panics_kills_its_command() {
     let mut command = Command::new("sh");
     command.args(["-c", "exec sleep 60"]);
-    let running = Running::new(command, &[]);
+    let (running, _) = Running::new(command);
     let pid = running.process.0.id();
     let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
         let _running = running;
@@ -386,7 +538,7 @@ fn a_command_that_the_kernel_reaped_drops() {
     };
     let mut command = Command::new("sh");
     command.args(["-c", "exit 0"]);
-    let running = Running::new(command, &[]);
+    let (running, _) = Running::new(command);
     let pid = running.process.0.id();
     wait(
         &os::clock(),
@@ -636,4 +788,42 @@ fn a_wait_past_its_limit_panics_with_the_last_state() {
         panic.downcast_ref::<String>().map(String::as_str),
         Some("the node runs: not within 0s. The last check saw:\nstate: stopped")
     );
+}
+
+#[test]
+fn a_node_that_exits_before_it_runs_panics_with_its_output() {
+    let mut rig = Rig::new();
+    let start = std::panic::AssertUnwindSafe(|| rig.start_with(&[]));
+    let panic = std::panic::catch_unwind(start).expect_err("the start panics");
+    assert_eq!(
+        panic.downcast_ref::<String>().map(String::as_str),
+        Some(
+            "the node exited with exit status: 1:\nstdout:\n\nstderr:\n\
+             error[node.unnamed]: the data directory foundation-data holds no node\n\
+             fix: Give the new node a name with `--name`\n"
+        )
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn a_rig_ends_its_node_before_it_removes_the_directory() {
+    let mut rig = Rig::new();
+    rig.start();
+    let pid = rig
+        .node
+        .as_ref()
+        .expect("a node")
+        .process
+        .0
+        .id()
+        .to_string();
+    let dir = rig.dir.clone();
+    drop(rig);
+    assert!(!dir.exists(), "{} is still there", dir.display());
+    let alive = Command::new("kill")
+        .args(["-0", &pid])
+        .output()
+        .expect("kill -0");
+    assert_eq!(alive.status.code(), Some(1), "{pid} still runs");
 }

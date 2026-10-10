@@ -481,7 +481,9 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Stray { .. }
         | Error::NotIndex(_)
         | Error::UnknownNode(_)
-        | Error::Homes { .. } => {}
+        | Error::Homes { .. }
+        | Error::Founding { .. }
+        | Error::Unfounded { .. } => {}
     };
     let _: fn(&Error) = cases;
 }

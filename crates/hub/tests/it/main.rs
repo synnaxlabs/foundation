@@ -35,6 +35,8 @@ use types::time::{Span, Stamp};
 #[path = "../common/net.rs"]
 mod net;
 
+#[path = "../common/agent.rs"]
+mod agent;
 mod client;
 mod definitions;
 mod link;
@@ -44,9 +46,12 @@ mod node;
 mod region;
 mod remote;
 mod serve;
+#[path = "../common/sessions.rs"]
+mod sessions;
 
-/// The node key of the hub under test.
-const NODE: types::node::Key = types::node::Key::from_u128(1);
+use agent::name;
+use net::NODE;
+
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const AREA: u64 = 1 << 22;
@@ -347,10 +352,6 @@ fn unsynced_on<F>(
         main(Test::new(node, tasks, layout, POOL, None).await).await;
     })
     .expect("the run ends");
-}
-
-fn name(name: &str) -> Name {
-    name.parse().expect("a valid name")
 }
 
 /// An unnamed reader of `reader` on the channels named `channels`.

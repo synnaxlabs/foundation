@@ -145,6 +145,15 @@ UA_Session_remove(UA_Server *server, UA_Session *session,
     /* Notify the application */
     notifySession(server, session, UA_APPLICATIONNOTIFICATIONTYPE_SESSION_CLOSED);
 
+    /* UA_Server_delete frees the server before an external EventLoop runs a
+     * delayed callback, and no callback can still reference the Session after
+     * shutdown. */
+    if(server->state == UA_LIFECYCLESTATE_STOPPED) {
+        UA_Session_clear(session, server);
+        UA_free(sentry);
+        return;
+    }
+
     /* Add a delayed callback to remove the session when the currently
      * scheduled jobs have completed */
     sentry->cleanupCallback.callback = (UA_Callback)removeSessionCallback;

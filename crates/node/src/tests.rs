@@ -76,6 +76,7 @@ fn config(host: &sim::node::Node, budget: Size, memory: Memory) -> Config<block:
         net: host.net(),
         listen: listen(host),
         region: None,
+        name: "edge".parse().expect("a name"),
     }
 }
 
@@ -178,6 +179,28 @@ fn stop_before_the_shards_run_ends_them_and_repeats_freely() {
     run.node.stop();
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));
+}
+
+#[test]
+fn a_stopper_from_another_thread_stops_its_node() {
+    fn sendable<T: Send + Sync + 'static>(_: &T) {}
+    let mut run = start(7, 2, &[]);
+    let stopper = run.node.stopper();
+    sendable(&stopper);
+    assert_eq!(run.sim.run_for(Span::HOUR), Ok(()));
+    stopper.clone().stop();
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(run.node.join(), Ok(()));
+}
+
+#[test]
+fn a_stop_after_the_node_ended_does_nothing() {
+    let mut run = start(7, 2, &[]);
+    let stopper = run.node.stopper();
+    run.node.stop();
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(run.node.join(), Ok(()));
+    stopper.stop();
 }
 
 #[test]
@@ -381,7 +404,7 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
         format!(
             "Config {{ shards: Shards {{ .. }}, clock: {clock:?}, wall: {wall:?}, \
              budget: Size(4096), entropy: {entropy:?}, disk: {DISK:?}, \
-             listen: {listen:?}, region: None, .. }}",
+             listen: {listen:?}, region: None, name: Name(\"edge\"), .. }}",
             listen = config.listen,
         )
     );
@@ -457,6 +480,23 @@ fn host(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
         cores: NonZeroUsize::new(cores).unwrap(),
         ..sim::node::Config::default()
     })
+}
+
+/// Takes the lock of the data directory of `host` once the node frees it. Gives the
+/// lock, and whether it waited.
+async fn take_lock(host: &sim::node::Node) -> (env::files::File, bool) {
+    let (files, clock) = (host.files(), host.clock());
+    let mut waited = false;
+    loop {
+        let mode = env::files::Mode::Create { len: 0 };
+        match files.open(Path::new("lock"), mode).await {
+            Err(env::files::Error::Busy { .. }) => {
+                waited = true;
+                clock.sleep(Span::from_nanos(1_000)).await;
+            }
+            opened => break (opened.expect("the lock opens"), waited),
+        }
+    }
 }
 
 /// A host of `sim` with `cores` cores, whose data directory holds the key [`OWN`]
@@ -620,7 +660,7 @@ mod buffer {
     /// # Panics
     ///
     /// When the node dropped `probe`, or when the opens go on after 10 ms.
-    fn all_opened(probe: &Mutex<Fate>, after: Span) -> bool {
+    pub(super) fn all_opened(probe: &Mutex<Fate>, after: Span) -> bool {
         let fate = fate(probe);
         assert_ne!(fate, Fate::Dropped, "{after:?}");
         assert!(after < Span::from_nanos(10_000_000), "the opens go on");
@@ -707,7 +747,7 @@ mod buffer {
         let host = host(&mut sim, 2);
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let shards = ["shard-0", "shard-1"];
-        let made = ["lock", "node.key", "shard-0", "shard-1", "shards-2"];
+        let made = ["lock", "name", "node.key", "shard-0", "shard-1", "shards-2"];
         assert_eq!(listed(&mut sim, &host, ""), made.map(PathBuf::from));
         for shard in shards {
             assert_eq!(listed(&mut sim, &host, shard), [PathBuf::from("ring")]);
@@ -916,10 +956,10 @@ mod buffer {
     /// leaves the claim alone.
     #[test]
     fn a_stop_ends_the_steps_that_started_and_starts_no_other() {
-        let all = ["lock", "shard-0", "shard-1", "shard-2", "shards-3"];
+        let all = ["lock", "name", "shard-0", "shard-1", "shard-2", "shards-3"];
         let all = all.map(PathBuf::from);
-        let mut seen = [false; 6];
-        for step in 0..200 {
+        let mut seen = [false; 7];
+        for step in 0..250 {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 3);
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
@@ -939,7 +979,7 @@ mod buffer {
                 Vec::new()
             } else {
                 let held = listed.len() - 1;
-                all[..held].iter().chain(&all[4..]).cloned().collect()
+                all[..held].iter().chain(&all[5..]).cloned().collect()
             };
             assert_eq!(listed, made, "at {after:?}");
             seen[listed.len()] = true;
@@ -959,7 +999,7 @@ mod buffer {
                 assert_eq!(ring, len, "{dir:?} at {after:?}");
             }
         }
-        assert_eq!(seen[2..], [true; 4], "a stop after each step");
+        assert_eq!(seen[3..], [true; 4], "a stop after each step");
     }
 
     /// A crash at any point of the claim and the first opens leaves a data directory
@@ -1063,7 +1103,7 @@ mod buffer {
         assert_eq!(panics(&mut run), Vec::<String>::new());
         assert_eq!(fate(&probe), Fate::Dropped);
         assert_eq!(run.node.join(), Err(opened(1)));
-        let made = ["lock", "shard-0", "shards-3"].map(PathBuf::from);
+        let made = ["lock", "name", "shard-0", "shards-3"].map(PathBuf::from);
         assert_eq!(listed(&mut run.sim, &run.host, ""), made);
     }
 
@@ -1195,6 +1235,7 @@ mod directory {
         let listed = listed(&mut sim, &host, "");
         let made = [
             "lock",
+            "name",
             "node.key",
             "other-3",
             "shard-0",
@@ -1282,7 +1323,7 @@ mod directory {
             assert_eq!(e, Error::Directory(io), "{operation:?}");
             assert_eq!(
                 e.to_string(),
-                format!("cannot claim the data directory: {text}")
+                format!("cannot use the data directory: {text}")
             );
             let made: Vec<PathBuf> = made.iter().map(PathBuf::from).collect();
             assert_eq!(listed(&mut sim, &host, ""), made, "{operation:?}");
@@ -1305,7 +1346,9 @@ mod directory {
         .expect("the run ends");
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let listed = listed(&mut sim, &host, "");
-        let made = ["lock", "node.key", "shard-0", "shard-1", &name, "shards-2"];
+        let made = [
+            "lock", "name", "node.key", "shard-0", "shard-1", &name, "shards-2",
+        ];
         assert_eq!(listed, made.map(PathBuf::from));
     }
 
@@ -1327,8 +1370,9 @@ mod directory {
             })
             .expect("the run ends");
             assert_eq!(run_on(&mut sim, &host), Ok(()), "{name}");
-            let mut made =
-                ["lock", "node.key", "shard-0", "shard-1", &name, "shards-2"];
+            let mut made = [
+                "lock", "name", "node.key", "shard-0", "shard-1", &name, "shards-2",
+            ];
             made.sort_unstable();
             let made = made.map(PathBuf::from);
             assert_eq!(listed(&mut sim, &host, ""), made, "{name}");
@@ -1713,13 +1757,13 @@ mod lock {
         assert_eq!(e, Err(busy()));
         assert_eq!(
             busy().to_string(),
-            "cannot claim the data directory: file lock is open for writing in \
+            "cannot use the data directory: file lock is open for writing in \
              another handle"
         );
         first.stop();
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(first.join(), Ok(()));
-        let made = ["lock", "node.key", "shard-0", "shard-1", "shards-2"];
+        let made = ["lock", "name", "node.key", "shard-0", "shard-1", "shards-2"];
         assert_eq!(listed(&mut sim, &host, ""), made.map(PathBuf::from));
     }
 
@@ -1745,7 +1789,7 @@ mod lock {
             assert_eq!(joined[claimed], Ok(()), "seed {seed}");
             assert_eq!(joined[1 - claimed], Err(busy()), "seed {seed}");
             seen[claimed] = true;
-            let made = ["lock", "node.key", "shard-0", "shard-1", "shards-2"];
+            let made = ["lock", "name", "node.key", "shard-0", "shard-1", "shards-2"];
             let made = made.map(PathBuf::from);
             assert_eq!(listed(&mut sim, &host, ""), made, "seed {seed}");
         }
@@ -1800,19 +1844,8 @@ mod lock {
             node.stop();
             let (waited, rings) = sim
                 .run_on(&host, |host, _| async move {
+                    let (lock, waited) = take_lock(&host).await;
                     let files = host.files();
-                    let clock = host.clock();
-                    let mut waited = false;
-                    let lock = loop {
-                        let mode = env::files::Mode::Create { len: 0 };
-                        match files.open(Path::new("lock"), mode).await {
-                            Err(env::files::Error::Busy { .. }) => {
-                                waited = true;
-                                clock.sleep(Span::from_nanos(1_000)).await;
-                            }
-                            opened => break opened.expect("the lock opens"),
-                        }
-                    };
                     let mut rings = Vec::new();
                     for core in 0..3 {
                         let ring = crate::directory::shard(core).join("ring");
@@ -2898,9 +2931,169 @@ mod port {
         assert_eq!(node.join(), Ok(()));
     }
 
+    /// What the peer and the probe of [`stop_with_a_peer`] see.
+    #[derive(Clone, Debug, PartialEq)]
+    enum Event {
+        /// The peer's session closed with this error.
+        Closed(transport::Error),
+        /// The probe took the lock, then bound the node's port with this result.
+        Locked(Result<(), env::net::Error>),
+    }
+
+    /// The node drains a peer's session before it frees the lock: the peer sees its
+    /// close before a probe can take the lock, and the probe then binds the node's
+    /// port at once.
+    #[test]
+    fn a_peer_sees_its_close_before_the_lock_is_free() {
+        let closed = transport::Error::PeerClosed { code: Code(0) };
+        let delay = Span::from_nanos(10 * Span::MILLISECOND.nanos());
+        let (seen, _) =
+            stop_with_a_peer(delay, Span::from_nanos(30 * Span::SECOND.nanos()));
+        assert_eq!(seen, [Event::Closed(closed), Event::Locked(Ok(()))]);
+    }
+
+    /// The node waits at most 3 s for the drain, so a probe takes the lock before a
+    /// peer with a one-way delay of 4 s sees its close. The close is not paced, so it
+    /// leaves at the drop and arrives one delay later, also when the node stops 12.1 s
+    /// in, when a paced close would wait about 0.57 s.
+    #[test]
+    fn a_peer_with_a_delay_over_3_s_sees_its_close_after_the_lock_is_free() {
+        let closed = transport::Error::PeerClosed { code: Code(0) };
+        let delay = Span::from_nanos(4 * Span::SECOND.nanos());
+        let run = Span::from_nanos(12_100 * Span::MILLISECOND.nanos());
+        let (seen, after) = stop_with_a_peer(delay, run);
+        assert_eq!(seen, [Event::Locked(Ok(())), Event::Closed(closed)]);
+        let late = after.nanos() - delay.nanos();
+        assert!(
+            (0..Span::MILLISECOND.nanos()).contains(&late),
+            "the peer saw its close {after:?} after the stop, not {delay:?}"
+        );
+    }
+
+    /// A peer whose one-way delay is under 3 s sees its close first, also when the
+    /// node stops 14.7 s in, when the pacer of the connection would hold the close
+    /// until after the lock is free.
+    #[test]
+    fn a_peer_with_a_delay_under_3_s_sees_its_close_first_after_the_handshake() {
+        let closed = transport::Error::PeerClosed { code: Code(0) };
+        let delay = Span::from_nanos(2_900 * Span::MILLISECOND.nanos());
+        let run = Span::from_nanos(14_700 * Span::MILLISECOND.nanos());
+        let (seen, _) = stop_with_a_peer(delay, run);
+        assert_eq!(seen, [Event::Closed(closed), Event::Locked(Ok(()))]);
+    }
+
+    /// Stops a node `run` after its start, while a peer holds a session over links
+    /// with a one-way `delay`. Gives, in order, what the peer and a probe that takes
+    /// the lock as soon as it is free see, and the time from the stop to the peer's
+    /// close.
+    fn stop_with_a_peer(delay: Span, run: Span) -> (Vec<Event>, Span) {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = keyed(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        let peer = sim.node(sim::node::Config::default());
+        let link = sim::link::Config {
+            delay,
+            ..sim::link::Config::default()
+        };
+        sim.link(&peer, &host, link);
+        sim.link(&host, &peer, link);
+        let listen = listen(&host);
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let at = Arc::new(Mutex::new(None));
+        let (seen, closed_at) = (Arc::clone(&events), Arc::clone(&at));
+        let shard = env::shards::Config {
+            name: "peer".into(),
+            core: None,
+        };
+        let own = peer.clone();
+        let started = peer.shards().start(shard, move |tasks| async move {
+            let (transport, _pool) = transport(&own, tasks, CLIENT);
+            let session = transport
+                .dial(KEY.public(), &[Address::Udp(listen)])
+                .await
+                .expect("a session");
+            let closed = session.closed().await;
+            *closed_at.lock().unwrap() = Some(own.clock().now());
+            seen.lock().unwrap().push(Event::Closed(closed));
+            drop(transport);
+        });
+        drop(started.expect("the peer starts"));
+        assert_eq!(sim.run_for(run), Ok(()));
+        let stopped = peer.clock().now();
+        node.stop();
+        let seen = Arc::clone(&events);
+        sim.run_on(&host, move |host, _| async move {
+            let (lock, _) = take_lock(&host).await;
+            let bound = transport::Port::bind(&host.net(), listen).map(drop);
+            seen.lock().unwrap().push(Event::Locked(bound));
+            drop(lock);
+        })
+        .expect("the probe ends");
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+        let closed = at.lock().unwrap().expect("the peer's session closed");
+        (events.lock().unwrap().clone(), closed - stopped)
+    }
+
+    /// A program with no key starts a handshake that gets no answer, and sends its
+    /// first packet again on each PTO, which keeps the handshake from the idle time.
+    /// The stop holds the lock for the cut of 3 s, which ends the drain of that
+    /// handshake before its 3 PTO of 1024 ms, and less than 1 ms for its other steps.
+    #[test]
+    fn a_handshake_in_flight_holds_the_lock_at_most_3_s() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = keyed(&mut sim, 2);
+        let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+        let peer = sim.node(sim::node::Config::default());
+        let cut = sim::link::Config {
+            loss: 1.0,
+            ..sim::link::Config::default()
+        };
+        sim.link(&host, &peer, cut);
+        let listen = listen(&host);
+        let shard = env::shards::Config {
+            name: "peer".into(),
+            core: None,
+        };
+        let own = peer.clone();
+        let started = peer.shards().start(shard, move |tasks| async move {
+            let (client, _pool) = program(&own, tasks);
+            let dialed = client.dial(KEY.public(), &[Address::Udp(listen)]).await;
+            let refused = dialed.expect_err("the dial fails");
+            assert!(
+                matches!(refused, transport::Error::Unreachable { .. }),
+                "{refused:?}"
+            );
+        });
+        drop(started.expect("the peer starts"));
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        node.stop();
+        let waited = sim
+            .run_on(&host, move |host, _| async move {
+                let before = host.clock().now();
+                drop(take_lock(&host).await);
+                host.clock().now() - before
+            })
+            .expect("the probe ends");
+        let bound = Span::from_nanos(3001 * Span::MILLISECOND.nanos());
+        assert!(waited <= bound, "the stop held the lock {waited:?}");
+        assert_eq!(sim.run(), Ok(()));
+        assert_eq!(node.join(), Ok(()));
+    }
+
     mod key {
         use super::*;
         use crate::identity::{FILE, LEN};
+
+        /// Through the public fuzz entry, which panics when the decode is wrong.
+        #[test]
+        fn a_key_decodes_and_a_key_with_another_tag_does_not() {
+            let mut body = [7; 64];
+            body[..16].copy_from_slice(b"foundation/key/1");
+            crate::fuzz::identity(&body);
+            body[0] ^= 1;
+            crate::fuzz::identity(&body);
+        }
 
         /// The bytes of `node.key` on `host`.
         fn read(sim: &mut sim::Sim, host: &sim::node::Node) -> Vec<u8> {
@@ -3089,7 +3282,7 @@ mod port {
             }
             assert_eq!(
                 Error::Key.to_string(),
-                "the file node.key in the data directory is not a node key; restore \
+                "the file `node.key` in the data directory is not a node key; restore \
                  it from a backup of this node"
             );
         }
@@ -3161,7 +3354,7 @@ mod port {
             assert_eq!(read(&mut sim, &host), short, "keeps the file");
             assert_eq!(
                 Error::Directory(exists).to_string(),
-                "cannot claim the data directory: path node.key is already there"
+                "cannot use the data directory: path node.key is already there"
             );
         }
 
@@ -3414,7 +3607,7 @@ mod port {
         const OPEN: Span = Span::from_nanos(10_000_000);
         /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
         /// fails from [`OPEN`] stops the group in the sim.
-        const WRITE: i64 = 1_792_553_323;
+        const WRITE: i64 = 1_793_467_039;
 
         /// Why the group stops when a write of [`LOG`] fails.
         fn write_failed() -> ::mesh::Stopped {
@@ -3659,10 +3852,9 @@ mod port {
                 let home = opened.expect("the buffer opens");
                 let interner = next.await.expect("the open gives the interner");
                 let (key, entropy) = (identity.key, endpoint.entropy.clone());
-                let (transport, mesh) = endpoint
-                    .open(identity, own.files(), pool, tasks.clone())
-                    .await
-                    .expect("the mesh opens");
+                let opened = endpoint.open(identity, own.files(), pool, tasks.clone());
+                let (transport, mesh) = opened.await;
+                let mesh = mesh.expect("the mesh opens");
                 let mesh = mesh.expect("the peer has a region");
                 let hub = ::hub::Hub::new(::hub::Config {
                     home,
@@ -3719,6 +3911,52 @@ mod port {
             assert_eq!(*set.lock().unwrap(), [Ok(())]);
             node.stop();
             assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+        }
+
+        /// A task's reader of a channel whose home is the peer holds a session to the
+        /// peer when the node stops. The stop drops the reader, and the hub's task of
+        /// that session then drops its part of the transport, so the port is free
+        /// within the drain bound of 3 s.
+        #[test]
+        fn a_stop_frees_the_port_while_a_reader_holds_a_session_to_a_home() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let founding = paired(&hosts, OTHER.0);
+            let node = start(&hosts[0], founding.clone());
+            peer_hub(&hosts[1], founding, |_, _, host| async move {
+                host.clock().sleep(Span::MINUTE).await;
+            });
+            let opened = Arc::new(Mutex::new(None));
+            let out = Arc::clone(&opened);
+            node.spawn(move |hub| async move {
+                match hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await
+                {
+                    Ok(mut reader) => {
+                        *out.lock().unwrap() = Some(Ok(()));
+                        let next = reader.next().await;
+                        panic!("the reader ended before the stop: {next:?}");
+                    }
+                    Err(error) => *out.lock().unwrap() = Some(Err(error)),
+                }
+            });
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            assert_eq!(*opened.lock().unwrap(), Some(Ok(())));
+            let stopped = hosts[0].clock().now();
+            node.stop();
+            let (after, bound) = sim
+                .run_on(&hosts[0], move |host, _| async move {
+                    let (_lock, _) = take_lock(&host).await;
+                    let after = host.clock().now() - stopped;
+                    let bound = transport::Port::bind(&host.net(), listen(&host));
+                    (after, bound.map(drop))
+                })
+                .expect("the probe ends");
+            assert_eq!(bound, Ok(()));
+            let drain = Span::from_nanos(3 * Span::SECOND.nanos());
+            assert!(after <= drain, "the lock was free {after:?} after the stop");
             assert_eq!(node.join(), Ok(()));
         }
 
@@ -4437,6 +4675,30 @@ mod port {
             assert_eq!(node.join(), Ok(()));
         }
 
+        /// A restart with another region, after the log holds a record, stops the
+        /// node, and `join` gives the region that the first start kept.
+        #[test]
+        fn a_restart_with_another_region_stops_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let node = start_alone(&hosts[0]);
+            // Past the longest election timeout, so the node votes for itself.
+            let elected = Span::from_nanos(3 * Span::SECOND.nanos());
+            assert_eq!(sim.run_for(elected), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let mut members = pair(&hosts);
+            let node = start(&hosts[0], region(&members));
+            assert_eq!(sim.run(), Ok(()));
+            members.sort_by_key(|member| member.card.key());
+            let error = ::mesh::Error::Founding {
+                stored: Box::new(region(&[member(OWN, &KEY, &hosts[0])])),
+                given: Box::new(region(&members)),
+            };
+            assert_eq!(node.join(), Err(Error::Mesh(error)));
+        }
+
         /// A chunk store that does not open stops the node, and `join` gives why.
         #[test]
         fn a_chunk_store_that_does_not_open_stops_the_node() {
@@ -4471,19 +4733,8 @@ mod port {
             Vec<PathBuf>,
         ) {
             sim.run_on(host, |host, _| async move {
+                let (lock, waited) = take_lock(&host).await;
                 let files = host.files();
-                let clock = host.clock();
-                let mut waited = false;
-                let lock = loop {
-                    let mode = env::files::Mode::Create { len: 0 };
-                    match files.open(Path::new("lock"), mode).await {
-                        Err(env::files::Error::Busy { .. }) => {
-                            waited = true;
-                            clock.sleep(Span::from_nanos(1_000)).await;
-                        }
-                        opened => break opened.expect("the lock opens"),
-                    }
-                };
                 let udp = env::net::udp::Config {
                     local: listen(&host),
                     send_buffer_bytes: 1 << 16,
@@ -4497,6 +4748,29 @@ mod port {
                 (waited, port, log.map(drop), closes)
             })
             .expect("the probe ends")
+        }
+
+        /// The peer runs no node, so a dial of the mesh to it is in flight at the stop.
+        /// The stop closes that dial, and holds the lock for at most 3 s of its drain
+        /// and less than 1 ms for its other steps.
+        #[test]
+        fn a_dial_to_a_peer_that_is_down_holds_the_lock_at_most_3_s() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let node = start(&hosts[0], region(&pair(&hosts)));
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            node.stop();
+            let waited = sim
+                .run_on(&hosts[0], |host, _| async move {
+                    let before = host.clock().now();
+                    drop(take_lock(&host).await);
+                    host.clock().now() - before
+                })
+                .expect("the probe ends");
+            let bound = Span::from_nanos(3001 * Span::MILLISECOND.nanos());
+            assert!(waited <= bound, "the stop held the lock {waited:?}");
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
         }
 
         /// Starts the peer [`OTHER`] of `members` on `host`, which sets a home in the
@@ -4726,10 +5000,9 @@ mod port {
                 let home = opened.expect("the buffer opens");
                 let interner = next.await.expect("the open gives the interner");
                 let (key, entropy) = (identity.key, endpoint.entropy.clone());
-                let (transport, mesh) = endpoint
-                    .open(identity, own.files(), pool, tasks.clone())
-                    .await
-                    .expect("the mesh opens");
+                let opened = endpoint.open(identity, own.files(), pool, tasks.clone());
+                let (transport, mesh) = opened.await;
+                let mesh = mesh.expect("the mesh opens");
                 let mesh = mesh.expect("the peer has a region");
                 let hub = ::hub::Hub::new(::hub::Config {
                     home,
@@ -5365,6 +5638,448 @@ mod port {
             let host = keyed(&mut sim, 2);
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
             node.operate(|_| async {});
+        }
+    }
+}
+
+mod name {
+    use types::name::Name;
+
+    use super::*;
+    use crate::name::{FILE, LEN};
+
+    const NEW: &str = "name.new";
+
+    fn name(text: &str) -> Name {
+        text.parse().expect("a name")
+    }
+
+    /// What [`crate::name`] gives on `host` for `given`.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a test helper panics on a run that does not end"
+    )]
+    fn resolve(
+        sim: &mut sim::Sim,
+        host: &sim::node::Node,
+        given: Option<&str>,
+    ) -> Result<Name, Error> {
+        let given = given.map(name);
+        sim.run_on(host, move |host, _| async move {
+            crate::name(&host.files(), given).await
+        })
+        .expect("the run ends")
+    }
+
+    /// Writes `bytes` to a new file `path` on `host`.
+    fn write(sim: &mut sim::Sim, host: &sim::node::Node, path: &str, bytes: Vec<u8>) {
+        let path = PathBuf::from(path);
+        sim.run_on(host, move |host, _| async move {
+            let files = host.files();
+            let mode = env::files::Mode::Create {
+                len: bytes.len() as u64,
+            };
+            let file = files.open(&path, mode).await.expect("opens");
+            if !bytes.is_empty() {
+                let pool = block::Pool::heap(block::Config { budget: 4096 });
+                let block = pool.copy(&bytes).expect("a block");
+                file.write_at(0, &[block]).await.expect("writes");
+            }
+            file.sync().await.expect("syncs");
+            files.sync_dir(Path::new("")).await.expect("syncs");
+        })
+        .expect("the run ends");
+    }
+
+    /// The bytes of the file `name` on `host`, or `None` when it is not there.
+    fn read(sim: &mut sim::Sim, host: &sim::node::Node) -> Option<Vec<u8>> {
+        sim.run_on(host, |host, _| async move {
+            let files = host.files();
+            let mode = env::files::Mode::Read;
+            let file = match files.open(Path::new(FILE), mode).await {
+                Err(env::files::Error::NotFound { .. }) => return None,
+                file => file.expect("opens"),
+            };
+            let len = usize::try_from(file.len()).unwrap();
+            if len == 0 {
+                return Some(Vec::new());
+            }
+            let pool = block::Pool::heap(block::Config { budget: 4096 });
+            let into = pool.alloc(len).expect("a block");
+            Some(file.read_at(0, into).await.expect("reads").to_vec())
+        })
+        .expect("the run ends")
+    }
+
+    /// Starts a node named `text` on `host`, runs `sim` for a second, then stops it
+    /// and gives the error of its join.
+    fn start_and_stop(
+        sim: &mut sim::Sim,
+        host: &sim::node::Node,
+        text: &str,
+    ) -> Result<(), Error> {
+        let node = Node::start(Config {
+            name: name(text),
+            ..config(host, Size::MEBIBYTE, Box::new(heap))
+        });
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        node.join()
+    }
+
+    #[test]
+    fn a_data_directory_with_no_name_gives_the_given_one_and_writes_nothing() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(resolve(&mut sim, &host, None), Err(Error::Unnamed));
+        assert_eq!(resolve(&mut sim, &host, Some("edge")), Ok(name("edge")));
+        assert_eq!(read(&mut sim, &host), None);
+        assert_eq!(
+            Error::Unnamed.to_string(),
+            "the data directory holds no node name; give the node a name"
+        );
+    }
+
+    #[test]
+    fn the_first_start_keeps_its_name_for_each_later_start() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(start_and_stop(&mut sim, &host, "site_a.edge"), Ok(()));
+        let kept = read(&mut sim, &host).expect("the file");
+        assert_eq!(kept.len(), 277);
+        assert_eq!(&kept[..17], b"foundation/name/1");
+        assert_eq!(kept[17], 11);
+        assert_eq!(&kept[18..29], b"site_a.edge");
+        assert_eq!(kept[29..273], [0; 244]);
+        let crc = crc32c::crc32c(&kept[..273]).to_le_bytes();
+        assert_eq!(kept[273..], crc, "little-endian");
+        assert_eq!(resolve(&mut sim, &host, None), Ok(name("site_a.edge")));
+        let given = resolve(&mut sim, &host, Some("site_a.edge"));
+        assert_eq!(given, Ok(name("site_a.edge")));
+        assert_eq!(start_and_stop(&mut sim, &host, "site_a.edge"), Ok(()));
+        assert_eq!(read(&mut sim, &host), Some(kept));
+    }
+
+    #[test]
+    fn a_name_of_the_most_bytes_is_kept() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let long = "a".repeat(255);
+        assert_eq!(start_and_stop(&mut sim, &host, &long), Ok(()));
+        let kept = read(&mut sim, &host).expect("the file");
+        assert_eq!((kept.len(), kept[17]), (277, 255));
+        assert_eq!(resolve(&mut sim, &host, None), Ok(name(&long)));
+        assert_eq!(start_and_stop(&mut sim, &host, &long), Ok(()));
+    }
+
+    /// Each file call on the name that fails stops the node with its error, at the
+    /// first start and at a later one. A failed first start leaves no name, and the
+    /// next start makes it.
+    #[test]
+    fn a_failed_file_call_on_the_name_stops_the_node() {
+        use env::files::Operation::{Open, ReadAt, Remove, Rename, Sync, WriteAt};
+        for (path, operation, text) in [
+            (NEW, Remove, "remove of name.new failed with OS error 5"),
+            (NEW, Open, "open of name.new failed with OS error 5"),
+            (NEW, WriteAt, "write_at of name.new failed with OS error 5"),
+            (NEW, Sync, "sync of name.new failed with OS error 5"),
+            (NEW, Rename, "rename of name.new failed with OS error 5"),
+            (FILE, Open, "open of name failed with OS error 5"),
+            (FILE, ReadAt, "read_at of name failed with OS error 5"),
+        ] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            if path == FILE {
+                assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            }
+            host.fail_file(Path::new(path), operation);
+            let error = Error::Directory(env::files::Error::Io {
+                path: PathBuf::from(path),
+                operation,
+                code: 5,
+            });
+            let started = start_and_stop(&mut sim, &host, "edge");
+            assert_eq!(started, Err(error.clone()), "{operation:?} {path}");
+            assert_eq!(
+                error.to_string(),
+                format!("cannot use the data directory: {text}")
+            );
+            if path == NEW {
+                assert_eq!(resolve(&mut sim, &host, None), Err(Error::Unnamed));
+            }
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            assert_eq!(resolve(&mut sim, &host, None), Ok(name("edge")));
+        }
+    }
+
+    /// A read of the name that fails gives its error, not a name or no name.
+    #[test]
+    fn a_failed_read_of_the_name_gives_its_error() {
+        use env::files::Operation::{Open, ReadAt};
+        for operation in [Open, ReadAt] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            host.fail_file(Path::new(FILE), operation);
+            let error = Error::Directory(env::files::Error::Io {
+                path: PathBuf::from(FILE),
+                operation,
+                code: 5,
+            });
+            let found = resolve(&mut sim, &host, None);
+            assert_eq!(found, Err(error), "{operation:?}");
+            host.fail_file(Path::new(FILE), operation);
+            let given = resolve(&mut sim, &host, Some("cloud"));
+            assert_eq!(given, Ok(name("cloud")), "reads nothing: {operation:?}");
+        }
+    }
+
+    /// `node::name` gives a given name and reads nothing, so only the start, under
+    /// the lock, refuses another name.
+    #[test]
+    fn a_start_with_another_name_stops_and_keeps_the_file() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+        let kept = read(&mut sim, &host);
+        let renamed = Error::Renamed {
+            stored: name("edge"),
+            given: name("cloud"),
+        };
+        let given = resolve(&mut sim, &host, Some("cloud"));
+        assert_eq!(given, Ok(name("cloud")));
+        let started = start_and_stop(&mut sim, &host, "cloud");
+        assert_eq!(started, Err(renamed.clone()));
+        assert_eq!(read(&mut sim, &host), kept, "keeps the file");
+        assert_eq!(
+            renamed.to_string(),
+            "the data directory holds the node edge, not cloud; give edge, or another \
+             data directory"
+        );
+    }
+
+    /// A file of another length that is not 0, or that `encode` does not give, is
+    /// not a name: also one whose padding is not zero, under a checksum that holds.
+    #[test]
+    fn a_file_that_no_node_wrote_stops_the_node_which_keeps_it() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+        let kept = read(&mut sim, &host).expect("the file");
+        let mut changed = kept.clone();
+        changed[20] ^= 1;
+        let mut padded = kept.clone();
+        padded[22] = b'x';
+        let checksum = crc32c::crc32c(&padded[..LEN - 4]).to_le_bytes();
+        padded[LEN - 4..].copy_from_slice(&checksum);
+        let short = kept[..LEN - 1].to_vec();
+        let long = [kept, vec![0]].concat();
+        for bytes in [short, long, changed, padded] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = super::host(&mut sim, 2);
+            write(&mut sim, &host, FILE, bytes.clone());
+            assert_eq!(resolve(&mut sim, &host, None), Err(Error::Name));
+            let given = resolve(&mut sim, &host, Some("edge"));
+            assert_eq!(given, Ok(name("edge")));
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Err(Error::Name));
+            assert_eq!(read(&mut sim, &host), Some(bytes), "keeps the file");
+        }
+        assert_eq!(
+            Error::Name.to_string(),
+            "the file `name` in the data directory is not a node name; remove it, and \
+             start the node with its name"
+        );
+    }
+
+    /// The node never leaves a file `name` with no bytes or with zeros, so such a
+    /// file is not a name.
+    #[test]
+    fn an_empty_or_zero_file_is_not_a_name() {
+        for bytes in [Vec::new(), vec![0; LEN]] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            write(&mut sim, &host, FILE, bytes.clone());
+            assert_eq!(resolve(&mut sim, &host, None), Err(Error::Name));
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Err(Error::Name));
+            assert_eq!(read(&mut sim, &host), Some(bytes), "keeps the file");
+        }
+    }
+
+    /// A start removes the file `name.new` that a crash left, of any length, and
+    /// makes the name.
+    #[test]
+    fn a_start_removes_a_new_name_that_a_crash_left() {
+        for bytes in [Vec::new(), vec![7; LEN], vec![7; 3]] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            write(&mut sim, &host, NEW, bytes);
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            assert_eq!(resolve(&mut sim, &host, None), Ok(name("edge")));
+            assert!(!listed(&mut sim, &host, "").contains(&PathBuf::from(NEW)));
+        }
+    }
+
+    /// The error of a start whose shard 0 cannot make its directory.
+    fn shard_dir_failed() -> Error {
+        Error::Buffer {
+            core: 0,
+            error: ::buffer::Error::Files(env::files::Error::Io {
+                path: PathBuf::from("shard-0"),
+                operation: env::files::Operation::CreateDir,
+                code: 5,
+            }),
+        }
+    }
+
+    /// A first start that fails after the claim, before any other sync of the data
+    /// directory, has made the name durable.
+    #[test]
+    fn a_first_start_makes_the_name_durable() {
+        for seed in 0..8 {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new("shard-0"), env::files::Operation::CreateDir);
+            let started = start_and_stop(&mut sim, &host, "edge");
+            assert_eq!(started, Err(shard_dir_failed()), "seed {seed}");
+            sim.crash(&host, sim::Crash::Power);
+            assert_eq!(resolve(&mut sim, &host, None), Ok(name("edge")), "{seed}");
+        }
+    }
+
+    /// A process crash can leave a name that a read sees but a power cut loses. The
+    /// claim of the next start makes it durable, also when the start fails after it.
+    /// Takes the first crash time, on seeds 0 to 7, at which a read sees the name,
+    /// and checks that a power cut then can lose it.
+    #[test]
+    fn a_later_start_makes_the_name_durable() {
+        let mut lost = 0;
+        let crashed = |seed, after| {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let host = host(&mut sim, 2);
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            assert_eq!(sim.run_for(after), Ok(()), "seed {seed} at {after:?}");
+            sim.crash(&host, sim::Crash::Process);
+            drop(node);
+            let found = resolve(&mut sim, &host, None);
+            (sim, host, found)
+        };
+        for seed in 0..8 {
+            let after = (0..10_000_000)
+                .step_by(5_000)
+                .map(Span::from_nanos)
+                .find(|&after| crashed(seed, after).2 == Ok(name("edge")))
+                .expect("a crash leaves the name");
+            let (mut sim, host, _) = crashed(seed, after);
+            sim.crash(&host, sim::Crash::Power);
+            if resolve(&mut sim, &host, None) == Err(Error::Unnamed) {
+                lost += 1;
+            }
+            let (mut sim, host, _) = crashed(seed, after);
+            host.fail_file(Path::new("shard-0"), env::files::Operation::CreateDir);
+            let started = start_and_stop(&mut sim, &host, "edge");
+            assert_eq!(started, Err(shard_dir_failed()), "seed {seed} at {after:?}");
+            sim.crash(&host, sim::Crash::Power);
+            let found = resolve(&mut sim, &host, None);
+            assert_eq!(found, Ok(name("edge")), "seed {seed} at {after:?}");
+        }
+        assert!(lost > 0, "no power cut lost the name");
+    }
+
+    /// Reads the name on `host` `count` times, on a shard of its own, while the run
+    /// goes on. Gives each result.
+    fn reads(
+        host: &sim::node::Node,
+        count: usize,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<Result<Name, Error>>>> {
+        let found = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (slot, own) = (std::sync::Arc::clone(&found), host.clone());
+        let config = env::shards::Config {
+            name: "reader".into(),
+            core: None,
+        };
+        let start = host.shards().start(config, move |_| async move {
+            for _ in 0..count {
+                let read = crate::name(&own.files(), None).await;
+                slot.lock().unwrap().push(read);
+            }
+        });
+        drop(start.expect("starts"));
+        found
+    }
+
+    /// A read while a node starts on the data directory, for the first time or a
+    /// later time, gives no name or the whole name.
+    #[test]
+    fn a_read_during_a_start_gives_no_name_or_the_name() {
+        for (seed, later) in (0..64).flat_map(|seed| [(seed, false), (seed, true)]) {
+            for offset in (0..200_000).step_by(20_000) {
+                let mut sim = sim::Sim::new(sim::Config {
+                    seed,
+                    ..sim::Config::default()
+                });
+                let host = host(&mut sim, 2);
+                if later {
+                    assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+                }
+                let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+                assert_eq!(sim.run_for(Span::from_nanos(offset)), Ok(()));
+                let found = reads(&host, 400);
+                assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+                node.stop();
+                assert_eq!(sim.run(), Ok(()));
+                assert_eq!(node.join(), Ok(()));
+                let kept: &[_] = if later {
+                    &[Ok(name("edge"))]
+                } else {
+                    &[Ok(name("edge")), Err(Error::Unnamed)]
+                };
+                for read in found.lock().unwrap().iter() {
+                    let at = format!("seed {seed}, later {later}, at {offset}");
+                    assert!(kept.contains(read), "{read:?}: {at}");
+                }
+            }
+        }
+    }
+
+    /// A crash every 25 µs of the first start, on seeds 0 to 7, leaves no name or the
+    /// whole name, and the whole name once each ring has opened.
+    #[test]
+    fn a_crash_during_the_first_start_leaves_no_name_or_the_whole_name() {
+        let crashes = [sim::Crash::Process, sim::Crash::Power];
+        for (seed, crash) in (0..8).flat_map(|seed| crashes.map(|crash| (seed, crash)))
+        {
+            for after in (0..).step_by(25_000).map(Span::from_nanos) {
+                let mut sim = sim::Sim::new(sim::Config {
+                    seed,
+                    ..sim::Config::default()
+                });
+                let host = host(&mut sim, 2);
+                let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+                let probe = probe(&node);
+                let run = sim.run_for(after);
+                assert_eq!(run, Ok(()), "seed {seed}: {crash:?} at {after:?}");
+                let opened = super::buffer::all_opened(&probe, after);
+                sim.crash(&host, crash);
+                drop(node);
+                let found = resolve(&mut sim, &host, None);
+                if opened {
+                    let at = format!("seed {seed}: {crash:?} at {after:?}");
+                    assert_eq!(found, Ok(name("edge")), "{at}");
+                    break;
+                }
+                let kept = [Ok(name("edge")), Err(Error::Unnamed)];
+                assert!(
+                    kept.contains(&found),
+                    "{found:?}: seed {seed}: {crash:?} at {after:?}"
+                );
+            }
         }
     }
 }

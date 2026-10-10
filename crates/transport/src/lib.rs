@@ -83,6 +83,7 @@ pub use client::Client;
 pub use code::Code;
 pub use error::Error;
 pub use port::Port;
+pub use quic::Ended;
 pub use session::{Peer, Session};
 
 use table::Table;
@@ -104,11 +105,19 @@ const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 /// `node` binds one [`Port`] and splits it into one part for each shard.
 ///
 /// A session that a dial made stays open until `accept` takes it, also when each caller
-/// of `dial` dropped it. Dropping the transport closes each session that no caller
-/// accepted with `Code(0)`, and the sessions it gave stay open. It refuses each dial
-/// from a peer until each of its connections drained: each session ended, and each
-/// handshake in flight finished or timed out. Then it frees its [`port::Part`], so a
-/// later dial gets no answer.
+/// of `dial` dropped it. Dropping the transport closes with `Code(0)` each session that
+/// no caller accepted, and the sessions it gave stay open. It also closes each
+/// handshake in flight, which includes the handshake of a dial that each caller
+/// dropped. A peer whose dial it closes gets [`Error::Broken`], as for a refused dial,
+/// because QUIC sends no code before the handshake is confirmed. It refuses each dial
+/// from a peer until each session ended and each close drained. A close leaves at once
+/// when this side has confirmed the handshake: a session that a peer opened is
+/// confirmed when [`Transport::accept`] gives it, and one that a dial made is confirmed
+/// one round trip or more after [`Transport::dial`] gives it. Before then, the pacer
+/// can hold the close, so it can leave after the transport frees its port, or not at
+/// all. A close drains in about 3 PTO, and the transport waits for the drains at most
+/// 3 s after the later of its drop and the end of the last session. Then it frees its
+/// [`port::Part`], so a later dial gets no answer, and [`Transport::ended`] resolves.
 pub struct Transport {
     carrier: quic::Carrier,
     public_key: PublicKey,
@@ -234,6 +243,25 @@ impl Transport {
     pub fn status(&self) -> Status {
         self.carrier.status()
     }
+
+    /// Gives a future that resolves once this transport has freed its [`port::Part`]:
+    /// after the transport dropped, each session ended, and each close drained, but at
+    /// most 3 s after the later of the drop and the end of the last session; or once
+    /// the socket broke. A session that has not ended keeps it pending. The future
+    /// holds no part of the transport, so the caller can drop the transport and then
+    /// wait.
+    ///
+    /// ```
+    /// async fn stop(transport: transport::Transport) {
+    ///     let ended = transport.ended();
+    ///     drop(transport);
+    ///     ended.await;
+    /// }
+    /// ```
+    #[must_use]
+    pub fn ended(&self) -> Ended {
+        self.carrier.ended()
+    }
 }
 
 /// What a [`Transport`] counted since [`Transport::new`].
@@ -357,7 +385,11 @@ impl Config {
 mod tests {
     use std::net::SocketAddr;
     use std::num::NonZeroUsize;
+    use std::pin::pin;
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::task::{Context, Poll, Wake, Waker};
 
     use block::{Heap, Pool};
     use types::ed25519::PrivateKey;
@@ -646,6 +678,266 @@ mod tests {
             node.clock().sleep(testing::spans(testing::IDLE, 3)).await;
             let dialed = carrier.connect(SERVER.public(), at).await;
             assert_eq!(dialed.err(), Some(Error::TimedOut));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn ended_resolves_once_the_dropped_transport_drained_and_frees_the_port() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let at = testing::address(&server);
+        testing::transport(&server, SERVER, move |transport, node| async move {
+            let session = transport.accept().await.expect("a session");
+            let mut ended = pin!(transport.ended());
+            assert_eq!(testing::poll_once(ended.as_mut()).await, None);
+            drop(transport);
+            let closed = Error::PeerClosed { code: Code(5) };
+            assert_eq!(session.closed().await, closed);
+            // The connection drains for 3 PTO after the close.
+            assert_eq!(testing::poll_once(ended.as_mut()).await, None);
+            let in_use = env::net::Error::AddressInUse { local: at };
+            assert_eq!(Port::bind(&node.net(), at).err(), Some(in_use));
+            ended.await;
+            assert_eq!(Port::bind(&node.net(), at).err(), None);
+        });
+        testing::carrier(&client, CLIENT, move |carrier, _| async move {
+            let dialed = carrier.connect(SERVER.public(), at).await;
+            let session = dialed.expect("a session");
+            session.close(Code(5));
+            assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// Drops a transport while the handshake of a peer that gets no answer is in
+    /// flight, and asserts that `ended` resolves at the cut, 3 s after the drop, not
+    /// at the idle time. The cut comes first: the drain takes 3 PTO with no round-trip
+    /// sample, 3072 ms, as each PTO is 333 ms, 4 times its half, and the ack delay of
+    /// 25 ms. When `silent`, the peer sends nothing after its first packet; else it
+    /// sends that packet again on each PTO.
+    fn ended_after_a_handshake_in_flight(silent: bool) {
+        let (mut sim, client, server) = testing::nodes(0);
+        let cut = sim::link::Config {
+            loss: 1.0,
+            ..sim::link::Config::default()
+        };
+        sim.link(&server, &client, cut);
+        let at = testing::address(&server);
+        let idle = testing::spans(Span::SECOND, 30);
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let part = testing::part(&node.net(), at);
+            let transport = Transport::new(Config { idle, ..config }, part);
+            let transport = transport.expect("a transport");
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 500))
+                .await;
+            let ended = transport.ended();
+            let before = node.clock().now();
+            drop(transport);
+            ended.await;
+            let waited = node.clock().now() - before;
+            assert_eq!(waited, testing::spans(Span::SECOND, 3));
+        });
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let part = testing::part(&node.net(), testing::address(&node));
+            let setup = testing::setup(&Config { idle, ..config });
+            let carrier = crate::quic::Carrier::new(setup, part);
+            let dialed = carrier.connect(SERVER.public(), at).await;
+            assert_eq!(dialed.err(), Some(Error::TimedOut));
+        });
+        if silent {
+            let first = testing::spans(Span::MILLISECOND, 100);
+            assert_eq!(sim.run_for(first), Ok(()));
+            sim.link(&client, &server, cut);
+        }
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn ended_resolves_in_the_drain_after_a_handshake_in_flight_of_a_silent_peer() {
+        ended_after_a_handshake_in_flight(true);
+    }
+
+    #[test]
+    fn ended_resolves_in_the_drain_after_a_handshake_in_flight_that_repeats() {
+        ended_after_a_handshake_in_flight(false);
+    }
+
+    /// A one-way delay of 10 s gives a round-trip sample of about 20 s, so the close of
+    /// the session would drain for about 150 s.
+    #[test]
+    fn ended_resolves_at_most_3_s_after_the_last_session_ended_on_a_slow_link() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let slow = sim::link::Config {
+            delay: testing::spans(Span::SECOND, 10),
+            ..sim::link::Config::default()
+        };
+        sim.link(&server, &client, slow);
+        sim.link(&client, &server, slow);
+        let at = testing::address(&server);
+        let idle = testing::spans(Span::SECOND, 120);
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let part = testing::part(&node.net(), at);
+            let transport = Transport::new(Config { idle, ..config }, part);
+            let transport = transport.expect("a transport");
+            let session = transport.accept().await.expect("a session");
+            let ended = transport.ended();
+            drop(transport);
+            let before = node.clock().now();
+            drop(session);
+            ended.await;
+            let waited = node.clock().now() - before;
+            let bound = testing::spans(Span::SECOND, 3);
+            assert!(waited <= bound, "the stop waited {waited:?}");
+        });
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let part = testing::part(&node.net(), testing::address(&node));
+            let setup = testing::setup(&Config { idle, ..config });
+            let carrier = crate::quic::Carrier::new(setup, part);
+            let dialed = carrier.connect(SERVER.public(), at).await;
+            let session = dialed.expect("a session");
+            let closed = Error::PeerClosed { code: Code(0) };
+            assert_eq!(session.closed().await, closed);
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// Once the handshake is confirmed, the close of a dropped session leaves at once,
+    /// also when a burst just before the drop has emptied the pacer.
+    #[test]
+    fn the_close_of_a_confirmed_session_leaves_at_the_drop() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let delay = testing::spans(Span::SECOND, 4);
+        let link = sim::link::Config {
+            delay,
+            ..sim::link::Config::default()
+        };
+        sim.link(&server, &client, link);
+        sim.link(&client, &server, link);
+        let at = testing::address(&server);
+        let idle = testing::spans(Span::SECOND, 120);
+        let [dropped, closed] = [(); 2].map(|()| Arc::new(Mutex::new(None)));
+        let (dropped_at, closed_at) = (Arc::clone(&dropped), Arc::clone(&closed));
+        testing::shard(&server, SERVER, move |config, node| async move {
+            let pool = Rc::clone(&config.pool);
+            let part = testing::part(&node.net(), at);
+            let transport = Transport::new(Config { idle, ..config }, part);
+            let transport = transport.expect("a transport");
+            let session = transport.accept().await.expect("a session");
+            let mut sender = session
+                .open_sender(Class::Complete)
+                .await
+                .expect("a stream");
+            let burst = testing::block(&pool, &[0; 16 << 10]);
+            sender.send(burst).await.expect("the burst is sent");
+            // The burst leaves and spends the pacer's tokens, so a paced close waits.
+            node.clock().sleep(Span::MILLISECOND).await;
+            let ended = transport.ended();
+            drop((sender, session, transport));
+            *dropped_at.lock().unwrap() = Some(node.clock().now());
+            ended.await;
+        });
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let part = testing::part(&node.net(), testing::address(&node));
+            let setup = testing::setup(&Config { idle, ..config });
+            let carrier = crate::quic::Carrier::new(setup, part);
+            let dialed = carrier.connect(SERVER.public(), at).await;
+            let closed = dialed.expect("a session").closed().await;
+            *closed_at.lock().unwrap() = Some(node.clock().now());
+            assert_eq!(closed, Error::PeerClosed { code: Code(0) });
+        });
+        assert_eq!(sim.run(), Ok(()));
+        let dropped = dropped.lock().unwrap().expect("the session dropped");
+        let after =
+            closed.lock().unwrap().expect("the peer's session closed") - dropped;
+        let late = after.nanos() - delay.nanos();
+        assert!(
+            (0..Span::MILLISECOND.nanos()).contains(&late),
+            "the peer saw its close {after:?} after the drop, not {delay:?}"
+        );
+    }
+
+    /// The drop closes the dial, whose handshake gets no answer, so the stop does not
+    /// wait for its idle time.
+    #[test]
+    fn ended_resolves_in_3_s_while_a_dial_gets_no_answer() {
+        let (mut sim, client, server) = testing::nodes(0);
+        let cut = sim::link::Config {
+            loss: 1.0,
+            ..sim::link::Config::default()
+        };
+        sim.link(&client, &server, cut);
+        let at = [Address::Udp(testing::address(&server))];
+        let idle = testing::spans(Span::SECOND, 30);
+        testing::shard(&client, CLIENT, move |config, node| async move {
+            let part = testing::part(&node.net(), testing::address(&node));
+            let transport = Transport::new(Config { idle, ..config }, part);
+            let transport = transport.expect("a transport");
+            {
+                let dial = pin!(transport.dial(SERVER.public(), &at));
+                assert!(testing::poll_once(dial).await.is_none());
+            }
+            node.clock()
+                .sleep(testing::spans(Span::MILLISECOND, 500))
+                .await;
+            let ended = transport.ended();
+            let before = node.clock().now();
+            drop(transport);
+            ended.await;
+            let waited = node.clock().now() - before;
+            let bound = testing::spans(Span::SECOND, 3);
+            assert!(waited <= bound, "the stop waited {waited:?}");
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn the_end_wakes_each_ended_that_still_waits_and_no_dropped_one() {
+        struct Count(AtomicUsize);
+        impl Wake for Count {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        let (mut sim, _, server) = testing::nodes(0);
+        testing::transport(&server, SERVER, |transport, _| async move {
+            let counts: [_; 2] =
+                std::array::from_fn(|_| Arc::new(Count(AtomicUsize::new(0))));
+            let mut kept = Box::pin(transport.ended());
+            assert_eq!(format!("{kept:?}"), "Ended { .. }");
+            let mut dropped = Box::pin(transport.ended());
+            for (ended, count) in [(&mut kept, &counts[0]), (&mut dropped, &counts[1])]
+            {
+                let waker = Waker::from(Arc::clone(count));
+                let poll = ended.as_mut().poll(&mut Context::from_waker(&waker));
+                assert_eq!(poll, Poll::Pending);
+            }
+            drop(dropped);
+            let ended = transport.ended();
+            drop(transport);
+            ended.await;
+            let woken = counts
+                .each_ref()
+                .map(|count| count.0.load(Ordering::Relaxed));
+            assert_eq!(woken, [1, 0]);
+            let poll = kept.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+            assert_eq!(poll, Poll::Ready(()));
+        });
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn ended_resolves_once_the_socket_breaks() {
+        let (mut sim, _, server) = testing::nodes(0);
+        testing::transport(&server, SERVER, |transport, node| async move {
+            let at = testing::address(&node);
+            let mut ended = pin!(transport.ended());
+            node.clock().sleep(Span::MILLISECOND).await;
+            assert_eq!(testing::poll_once(ended.as_mut()).await, None);
+            node.fail_udp(at);
+            ended.await;
+            assert_eq!(Port::bind(&node.net(), at).err(), None);
+            drop(transport);
         });
         assert_eq!(sim.run(), Ok(()));
     }

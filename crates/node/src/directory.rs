@@ -1,6 +1,6 @@
 //! The names in the data directory: the lock, the record of the shard count, the
 //! directory of each shard's ring, the mesh's directory, and the chunk store's
-//! directory.
+//! directory. The node's name is in `name` ([`crate::name`]).
 
 use std::path::{Path, PathBuf};
 

@@ -123,11 +123,13 @@ struct State {
 
 impl Hub {
     /// A hub over `config.home` that knows no channel yet. Spawns a task on
-    /// `config.tasks` that ends when the home's buffer fails, or once the hub and each
-    /// of its sessions have dropped. Once the hub and each of its sessions drop, it
-    /// holds no part of the home. So a `::home::Commit` taken before `new` and awaited
-    /// after that drop resolves once the buffer's task ended, and when the caller holds
-    /// no other part of the home, the ring closes when that commit drops.
+    /// `config.tasks` that ends when the home's buffer fails. The hub holds the home
+    /// and `config.region` until the hub and each value and future that it gave,
+    /// directly or through another such value, drop. Each task of the hub ends at its
+    /// next poll after that, and then holds neither. So a `::home::Commit` taken before
+    /// `new` and awaited after that drop resolves once the buffer's task ended, and
+    /// when the caller holds no other part of the home, the ring closes when that
+    /// commit drops.
     #[must_use]
     pub fn new(config: Config) -> Self {
         let Config {
