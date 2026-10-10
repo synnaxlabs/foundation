@@ -60,10 +60,13 @@ impl Rig {
         rig
     }
 
-    /// A disk budget that holds a ring on each shard of this host: 8 MiB for each
-    /// core.
+    /// A disk budget that holds a ring on each shard of this host.
     pub(crate) fn disk() -> u64 {
-        let cores = os::shards().expect("read the cores").cores().get();
+        Rig::disk_for(os::shards().expect("read the cores").cores().get())
+    }
+
+    /// A disk budget that holds a ring on each of `cores` shards: 8 MiB for each.
+    fn disk_for(cores: usize) -> u64 {
         u64::try_from(cores).expect("invariant: a core count fits u64") * (8 << 20)
     }
 
@@ -855,4 +858,13 @@ fn a_rig_ends_its_node_before_it_removes_the_directory() {
         .output()
         .expect("kill -0");
     assert_eq!(alive.status.code(), Some(1), "{pid} still runs");
+}
+
+/// One budget for each host, such as 256 MiB, holds no ring on each of 64 shards.
+#[test]
+fn the_disk_budget_of_a_rig_holds_a_ring_on_each_shard_of_any_host() {
+    for cores in [1, 64, 1024] {
+        let part = Rig::disk_for(cores) / u64::try_from(cores).unwrap();
+        assert!(buffer::Layout::fit(part, 1 << 20).is_ok(), "{cores} cores");
+    }
 }
