@@ -952,7 +952,9 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, data_type, intern, key, values};
+    use crate::common::{
+        self, create_interner, create_pool, data_type, intern, key, values,
+    };
     use crate::reader::complete::Charge;
 
     const DIR: &str = "shard-0";
@@ -2964,7 +2966,7 @@ mod tests {
             assert_eq!(data.len(), 1, "one data entry");
             let decoded: Vec<(channel::Key, Vec<u8>)> = stored::read(&data[0].1)
                 .map(|series| {
-                    let mut out = vec![0; 16];
+                    let mut out = Vec::new();
                     codec::decode(series.data_type, 2, series.bytes, &mut out)
                         .expect("decodes");
                     (series.channel, out)
@@ -4824,14 +4826,10 @@ mod tests {
         );
     }
 
-    /// An index type, then each kind of type, with the raw values of 3 samples. A
-    /// variable series is its ends, zeros to the start of its elements, then them.
+    /// An index type, then each kind of type, with the raw values of 3 samples.
     fn every_type() -> [(Type, Vec<u8>); 7] {
-        let le = |values: &[u32]| -> Vec<u8> {
-            values
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect()
+        let raw = |data_type: Type, samples: &[&[u8]]| {
+            (data_type, common::raw(data_type, samples))
         };
         let element = Scalar::U64;
         let sides = types::sample::Sides {
@@ -4843,15 +4841,15 @@ mod tests {
                 Type::Scalar(Scalar::Stamp),
                 [10_i64, 20, 30].map(i64::to_le_bytes).concat(),
             ),
-            (Type::String, [le(&[2, 2, 5]), b"abcde".to_vec()].concat()),
-            (Type::Bytes, [le(&[1, 3, 4]), vec![9, 8, 7, 6]].concat()),
-            (
+            raw(Type::String, &[b"ab", b"", b"cde"]),
+            raw(Type::Bytes, &[&[9], &[8, 7], &[6]]),
+            raw(
                 Type::List { element, max: 2 },
-                [
-                    le(&[1, 1, 3, 0]),
-                    [4_u64, 5, 6].map(u64::to_le_bytes).concat(),
-                ]
-                .concat(),
+                &[
+                    &4_u64.to_le_bytes(),
+                    &[],
+                    &[5_u64, 6].map(u64::to_le_bytes).concat(),
+                ],
             ),
             (
                 Type::Array {
@@ -4902,8 +4900,7 @@ mod tests {
             shard.committed().await.expect("the commit ends");
             let count = usize::try_from(count).expect("a small count");
             let decoded = |data_type: Type, bytes: &[u8]| -> (Type, Vec<u8>) {
-                let len = codec::validate(data_type, count, bytes).expect("valid");
-                let mut out = vec![0; len];
+                let mut out = Vec::new();
                 codec::decode(data_type, count, bytes, &mut out).expect("decodes");
                 (data_type, out)
             };

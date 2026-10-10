@@ -1,12 +1,13 @@
 //! The time to encode, validate, and decode series shaped like sensor data, and
 //! series that FFOR and delta pack at chosen bit widths. `decoder` decodes one vector
-//! at a time. Before it times anything, it checks that each full series compresses at
-//! least as well as its floor.
+//! at a time, `grow` decodes into a new `out`, and `variable` writes and reads the raw
+//! form of a `String` series. Before it times anything, it checks that each full
+//! series compresses at least as well as its floor.
 
 use std::f64::consts::TAU;
 use std::fmt;
 
-use codec::{Decoder, Encoder, VECTOR_LEN, max_len};
+use codec::{Decoder, Encoder, VECTOR_LEN, Variable, max_len};
 use divan::Bencher;
 use divan::counter::ItemsCount;
 use types::sample::{Scalar, Sides, Type};
@@ -508,4 +509,44 @@ fn refuse(bencher: Bencher<'_, '_>, call: &str) {
     let refused = Some(codec::Error::Utf8 { sample: LEN - 1 });
     assert_eq!(refuse(), refused, "{call}");
     bencher.counter(ItemsCount::new(LEN)).bench_local(refuse);
+}
+
+/// Decodes a full series into a new `out` each time, so that `decode` checks the bytes
+/// before it grows `out`.
+#[divan::bench(args = ["adc16.s1", "str.utf8"], sample_count = 1000)]
+fn grow(bencher: Bencher<'_, '_>, name: &str) {
+    let shape = SHAPES.iter().find(|shape| shape.name == name);
+    let shape = shape.expect("a shape");
+    let bytes = shape.encoded(LEN);
+    bencher.counter(ItemsCount::new(LEN)).bench_local(|| {
+        let mut out = Vec::new();
+        let len = divan::black_box(LEN);
+        codec::decode(shape.data_type, len, divan::black_box(&bytes), &mut out)
+            .expect("the bytes are valid");
+        out
+    });
+}
+
+/// Sizes and writes the raw form of the full `String` series of
+/// [`create_utf8_names`], or reads its samples back.
+#[divan::bench(args = ["write", "samples"], sample_count = 1000)]
+fn variable(bencher: Bencher<'_, '_>, call: &str) {
+    let samples = create_utf8_names();
+    let form = Variable::of(Type::String).expect("a variable type");
+    let mut raw = vec![0; form.len(&samples).expect("small samples")];
+    form.write(&samples, &mut raw);
+    let bencher = bencher.counter(ItemsCount::new(samples.len()));
+    match call {
+        "write" => bencher.bench_local(|| {
+            let samples = divan::black_box(&samples);
+            let len = form.len(samples).expect("small samples");
+            form.write(samples, &mut raw[..len])
+        }),
+        "samples" => bencher.bench_local(|| {
+            form.samples(samples.len(), divan::black_box(&raw))
+                .map(<[u8]>::len)
+                .sum::<usize>()
+        }),
+        _ => panic!("invariant: {call} is a call"),
+    }
 }

@@ -2479,7 +2479,7 @@ mod tests {
             .expect("the view holds the series");
         let data_type = set.entries()[entry].data_type;
         let width = data_type.width().expect("a fixed width");
-        let mut out = vec![0; count * width];
+        let mut out = Vec::new();
         codec::decode(data_type, count, bytes, &mut out).expect("decodes");
         out.chunks(width)
             .map(|chunk| {

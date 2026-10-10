@@ -466,7 +466,9 @@ mod tests {
     use types::sample::Sides;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, data_type, intern, key, values};
+    use crate::common::{
+        self, create_interner, create_pool, data_type, intern, key, values,
+    };
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -535,8 +537,7 @@ mod tests {
     fn decoded(set: &KeySet, entry: usize, count: u32, bytes: &[u8]) -> Vec<u8> {
         let data_type = set.entries()[entry].data_type;
         let count = usize::try_from(count).expect("a small count");
-        let len = codec::validate(data_type, count, bytes).expect("an encoded series");
-        let mut out = vec![0; len];
+        let mut out = Vec::new();
         codec::decode(data_type, count, bytes, &mut out).expect("an encoded series");
         out
     }
@@ -913,9 +914,8 @@ mod tests {
                 let text =
                     [&3_u32.to_le_bytes()[..], &1_u32.to_le_bytes(), b"abc"].concat();
                 let wide = Type::List { element, max: 5 };
-                let ends = [0_u32, 2].map(u32::to_le_bytes).concat();
-                let raw =
-                    [&ends[..], &[4_u64, 5].map(u64::to_le_bytes).concat()].concat();
+                let samples = [vec![], [4_u64, 5].map(u64::to_le_bytes).concat()];
+                let raw = common::raw(wide, &samples);
                 let mut list = vec![0; codec::max_len(wide, raw.len())];
                 let len = codec::Encoder::new(wide)
                     .encode(2, &raw, &mut list)

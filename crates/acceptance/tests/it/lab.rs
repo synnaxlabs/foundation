@@ -926,7 +926,6 @@ fn decode(received: &hub::reader::Received<'_>, keys: Keys) -> Vec<Sample> {
             key if key == keys.data => &mut series[1],
             key => panic!("the frame holds {key:?}"),
         };
-        out.resize(count * 8, 0);
         codec::decode(at.data_type, count, bytes, out).expect("the series decodes");
     }
     let [time, data] = series;
