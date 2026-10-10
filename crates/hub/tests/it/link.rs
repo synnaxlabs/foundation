@@ -21,11 +21,13 @@ use wire::hub::client::{
 
 use super::{AREA, BODY_MAX, NODE, POOL, Test};
 use crate::agent::{
-    self, AGENT, Agent, CONNECTION, Got, HOLD, SECOND, SUBJECT, THIRD, accept_on,
-    answer, closed_after, closed_with, header, name, recorded, reset_with, rules,
-    run_program, run_program_on, serve_each, signed,
+    AGENT, Agent, CONNECTION, SECOND, SUBJECT, THIRD, name, reset_with, signed,
 };
-use crate::net::{HOME, own_pool, public_key, transport};
+use crate::net::{HOME, header, own_pool, public_key, transport};
+use crate::sessions::{
+    self, Got, HOLD, accept_on, answer, closed_after, closed_with, recorded, rules,
+    run_program, run_program_on, serve_each,
+};
 
 /// A key that the spec does not list.
 pub(super) const OTHER: PrivateKey = PrivateKey([4; 32]);
@@ -139,7 +141,7 @@ pub(super) fn shrink_wall_error(node: &sim::node::Node, tasks: &env::tasks::Task
     });
 }
 
-/// Runs [`agent::sessions`] on a synced [`Test`] hub.
+/// Runs [`sessions::sessions`] on a synced [`Test`] hub.
 fn sessions<const N: usize, P>(
     seed: u64,
     subjects: [&'static str; N],
@@ -152,7 +154,7 @@ where
         let test = home(node, tasks, POOL, true).await;
         (test.hub.clone(), test)
     };
-    agent::sessions(seed, subjects, open, program)
+    sessions::sessions(seed, subjects, open, program)
 }
 
 /// A [`Test`] hub as [`home`] gives it, with `rules` set unless `None`, and the
@@ -356,28 +358,23 @@ fn refuses_a_hello_through_another_node() {
 #[test]
 fn a_hub_of_testing_open_refuses_a_hello_through_any_node_but_1() {
     let other = node::Key::from_u128(2);
-    let served = Arc::new(Mutex::new(Vec::new()));
-    let kept = Arc::clone(&served);
-    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
-        let (hub, _) = hub::testing::open(crate::node::env(&node, tasks.clone())).await;
-        let (session, link) = accept_on(&hub, &node, &tasks, Some(rules())).await;
-        let accepted = Rc::new(Cell::new(0));
-        serve_each(&session, &link, &tasks, &node.clock(), &kept, &accepted).await;
-        recorded(&node, &kept, accepted.get()).await;
+    let open = async |node: &sim::node::Node, tasks: &env::tasks::Tasks| {
+        let (hub, _) = hub::testing::open(crate::node::env(node, tasks.clone())).await;
+        (hub, ())
     };
-    run(88, home, move |mut agent| async move {
-        let challenge = agent.hello.challenge().await;
-        let mut hello = Agent::hello(challenge);
-        hello.via = other;
-        agent.send_hello(hello, &AGENT).await;
-        assert_eq!(agent.closed().await, closed_with(VIA));
-    });
+    let served =
+        sessions::sessions(88, [SUBJECT], open, move |[mut agent]| async move {
+            let challenge = agent.hello.challenge().await;
+            let mut hello = Agent::hello(challenge);
+            hello.via = other;
+            agent.send_hello(hello, &AGENT).await;
+            assert_eq!(agent.closed().await, closed_with(VIA));
+        });
 
     let refusal = Refusal::Via {
         via: other,
         peer: node::Key::from_u128(1),
     };
-    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
     assert_eq!(served, [Err(serve::Error::Access(refusal))]);
 }
 
