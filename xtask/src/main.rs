@@ -234,6 +234,13 @@ mod tests {
             .lines()
             .map_while(|line| line.trim().strip_prefix("- "))
             .collect();
+        let output = (ci.split("      models: >-\n").nth(1))
+            .and_then(|rest| rest.lines().next())
+            .expect("the changes job has a models output");
+        assert!(
+            output.ends_with("steps.filter.outputs.models }}"),
+            "the models output of the changes job reads another filter: {output}"
+        );
         let metadata = metadata(&root).unwrap();
         let by_cfg = |name| select::packages(&metadata, |s| select::names_cfg(s, name));
         let tasks = [
@@ -242,6 +249,20 @@ mod tests {
             ("miri", miri::packages(&metadata).unwrap()),
         ];
         for (task, packages) in tasks {
+            let job: Vec<&str> = (ci.split(&format!("\n  {task}:\n")).nth(1))
+                .expect("ci.yaml has a job for each model task")
+                .lines()
+                .take_while(|line| line.is_empty() || line.starts_with("    "))
+                .map(str::trim)
+                .collect();
+            let on_models =
+                "if: \"!cancelled() && needs.changes.outputs.models != 'false'\"";
+            assert!(
+                job.contains(&format!("run: cargo xtask {task}").as_str())
+                    && job.contains(&on_models),
+                "the {task} job of .github/workflows/ci.yaml does not run `cargo xtask \
+                 {task}` on the models output"
+            );
             for select::Package { name, .. } in packages {
                 assert!(
                     models.contains(&format!("'crates/{name}/**'").as_str()),
