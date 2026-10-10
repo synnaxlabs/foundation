@@ -289,7 +289,12 @@
   2026-10-09 18:21 UTC).
   A server listens on the listener that its owner gives the manager at
   `Manager::listening`. Each accepted stream is a new connection that gets
-  `ESTABLISHED`, with the context of the listen connection at the accept. As the POSIX
+  `ESTABLISHED`, with the context of the listen connection at the accept. A pass accepts
+  one stream, as the POSIX manager accepts one for each run of its loop, so the run
+  before the next accept gives open62541 the `CLOSING` of a channel that the accept
+  purged: a burst of accepts in one pass held 149 secure channels against the limit of
+  100 (#2255). Lost: the manager gives each queued `CLOSING` after an accept, so it
+  would run work of the loop, and a `CLOSING` would come by two paths. As the POSIX
   manager does, the first `ESTABLISHED` of the listen gives `listen-address`, the host
   of its `address` param, and `listen-port`, from which the server makes its discovery
   URL, and that of an accepted connection gives `remote-address`. A listen with no

@@ -191,8 +191,8 @@ impl Manager {
         .await
     }
 
-    /// Connects, reads, and writes each connection until each waits, and has the task
-    /// of `cx` woken when one can go on.
+    /// Connects, reads, and writes each connection until each waits, accepts at most
+    /// one stream, and has the task of `cx` woken when one can go on.
     fn pass(&self, cx: &mut Context<'_>) {
         let state = self.state();
         state.park(cx.waker());
@@ -371,7 +371,8 @@ impl State {
         self.wake(id);
     }
 
-    /// Moves connection `id` on until it waits, and calls C with no borrow held.
+    /// Moves connection `id` on until it waits or accepts a stream, and calls C with no
+    /// borrow held.
     fn move_on(&self, id: usize, cx: &mut Context<'_>) {
         #[cfg(feature = "sim")]
         self.moves.set(self.moves.get() + 1);
