@@ -24,7 +24,8 @@
   edge to a channel of the wrong kind is `config.wrong-channel`. `place` runs for each
   index, with the node of its first writer: a connector whose `writes` holds the index
   or a channel on it. Its `Tie`, or the `Homeless` of its `home`, is `config.unplaced`
-  at the label of the index, with each placement by its label.
+  at the label of the index, with each placement by its label. An index that a
+  connector implies takes the connector's place instead (STATUS PLACEMENT).
   `place` gives `Result<Placed, Tie>`, and `Placed::home` is `Result<&Name,
   Homeless>`, so `config` takes the winner from `Placed::placement` also when there is
   no home. `config` and `spec::placement` each keep a private `label`: the one in
