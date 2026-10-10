@@ -22,7 +22,7 @@ fn no_child_holds_a_socket_that_os_holds() {
         .expect("a current-thread runtime builds");
     // Stands in for a socket that the parent of this process leaves open, as cargo
     // leaves the socket of a download.
-    let _inherited = rustix::net::socket(AddressFamily::INET, SocketType::DGRAM, None)
+    let _left_open = rustix::net::socket(AddressFamily::INET, SocketType::DGRAM, None)
         .expect("a UDP socket opens");
     let inherited = children::Inherited::list();
     let net = os::net();
