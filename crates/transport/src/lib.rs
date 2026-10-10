@@ -23,7 +23,7 @@
 //!     sender.send(request).await?;
 //!     sender.finish()?;
 //!     while let Some(frame) = receiver.recv().await? {
-//!         let _ = frame.len();
+//!         let _: usize = frame.len();
 //!     }
 //!     Ok(())
 //! }
@@ -224,7 +224,7 @@ impl Transport {
     /// async fn serve(transport: &Transport) -> Result<(), Error> {
     ///     loop {
     ///         let session = transport.accept().await?;
-    ///         let _ = session.peer();
+    ///         let _: transport::Peer = session.peer();
     ///     }
     /// }
     /// ```

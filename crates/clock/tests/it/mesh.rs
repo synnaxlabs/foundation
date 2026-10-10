@@ -150,7 +150,7 @@ fn the_status_follows_each_add_before_the_first_estimate() {
     let (_sim, node) = node();
     let (mut clock, reader) = Clock::new(node.clock());
     assert_eq!(reader.status(), Status::Unsynced(Error::NoSources));
-    let _ = [clock.add(), clock.add()];
+    let _: [clock::source::Key; 2] = [clock.add(), clock.add()];
     let empty = Error::NoMajority {
         sources: 2,
         agreeing: 0,
@@ -167,7 +167,7 @@ fn an_add_after_the_first_estimate_holds_over_at_once() {
     let first = measure(&node, Span::HOUR, ms(2));
     clock.push(source, first);
     assert_eq!(reader.status(), Status::Synced(first));
-    let _ = clock.add();
+    let _: clock::source::Key = clock.add();
     let alone = Error::NoMajority {
         sources: 2,
         agreeing: 1,
@@ -325,7 +325,7 @@ fn keeps_its_slew_in_holdover() {
     let source = clock.add();
     clock.push(source, measure(&node, Span::ZERO, Span::ZERO));
     clock.push(source, measure(&node, us(400), Span::ZERO));
-    let _ = clock.add();
+    let _: clock::source::Key = clock.add();
     let alone = Error::NoMajority {
         sources: 2,
         agreeing: 1,

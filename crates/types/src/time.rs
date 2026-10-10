@@ -946,19 +946,19 @@ mod tests {
             #[test]
             #[should_panic(expected = "stamp overflow: 9223372036854775807 ns + 1 ns")]
             fn adding_past_the_limit_panics() {
-                let _ = Stamp::from_nanos(i64::MAX) + Span::NANOSECOND;
+                let _: Stamp = Stamp::from_nanos(i64::MAX) + Span::NANOSECOND;
             }
 
             #[test]
             #[should_panic(expected = "stamp overflow: -9223372036854775808 ns - 1 ns")]
             fn subtracting_past_the_limit_panics() {
-                let _ = Stamp::from_nanos(i64::MIN) - Span::NANOSECOND;
+                let _: Stamp = Stamp::from_nanos(i64::MIN) - Span::NANOSECOND;
             }
 
             #[test]
             #[should_panic(expected = "span overflow: 9223372036854775807 ns - -1 ns")]
             fn a_difference_past_the_limit_panics() {
-                let _ = Stamp::from_nanos(i64::MAX) - Stamp::from_nanos(-1);
+                let _: Span = Stamp::from_nanos(i64::MAX) - Stamp::from_nanos(-1);
             }
         }
     }
