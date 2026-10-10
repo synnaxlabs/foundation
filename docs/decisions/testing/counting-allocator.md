@@ -41,13 +41,13 @@
   bound the memory that one step takes. A read stays a read, as `held` is. A lock
   orders each growth, reset, and read of the peak, so `peak` is never under a count
   held in the window, and an allocation on another thread during the reset counts in
-  the new window. Frees and shrinks do not take the lock. No benchmark holds `Bytes`,
-  and `Allocator` does not change; a benchmark that holds it later states the cost of
-  the lock in its PR. Lost: one `peak` that also resets (a second read gives a value
-  that the first changed); `take_peak` (it discards a value to start a window); two
-  atomics with no lock (a free between the growth of the count and of the peak lets
-  `peak` give less than a count held); one 128-bit atomic (Rust has no stable
-  `AtomicU128` on each target). Decided by `laptop.architect` on 2026-10-10T02:42:17Z
+  the new window. Frees and shrinks do not take the lock. A loom model checks the lock
+  in each order. No benchmark holds `Bytes`, and `Allocator` does not change; a
+  benchmark that holds it later states the cost of the lock in its PR. Lost: one `peak`
+  that also resets (a second read gives a value that the first changed); `take_peak`
+  (it discards a value to start a window); two atomics with a weaker `peak` doc and a
+  loom model (the proposal); one 128-bit atomic (Rust has no stable `AtomicU128` on
+  each target). Decided by `laptop.architect` on 2026-10-10T02:42:17Z
   (https://github.com/synnaxlabs/foundation/issues/2116#issuecomment-6092914109), and
   the lock on 2026-10-10T04:06:13Z
   (https://github.com/synnaxlabs/foundation/pull/2230#issuecomment-6093592767), which
