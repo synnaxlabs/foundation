@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use connector::kind::Table;
+use document::diagnostic::{Code, Diagnostic};
 use mesh::Mesh;
 use serde_json::{Value, json};
 use types::channel::Key;
@@ -13,7 +14,7 @@ use crate::common::{
     NODE, PLANT, Reader, fail_sync, front_ends, hcl, placed_site, solo,
 };
 use crate::error::Error;
-use crate::front_end::{self, File, FrontEnd, FrontEnds};
+use crate::front_end::{File, FrontEnd, FrontEnds};
 use crate::plan::{self, Counts};
 use crate::used;
 
@@ -188,7 +189,15 @@ fn names_each_extension_of_the_table_in_the_fix() {
 fn reads_with_the_last_front_end_of_an_extension() {
     solo(|_, mesh| async move {
         let refuse = FrontEnd {
-            read: |source, _| Err(vec![front_end::unknown(source, &front_ends())]),
+            read: |_, _| {
+                let code = Code::new("test.refused");
+                Err(vec![Diagnostic::new(
+                    code,
+                    None,
+                    "refused".into(),
+                    "Fix it".into(),
+                )])
+            },
         };
         let front_ends =
             FrontEnds::new("hcl", refuse).with("hcl", FrontEnd { read: hcl });
