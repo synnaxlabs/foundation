@@ -887,7 +887,7 @@ mod tests {
     }
 
     fn ok(text: &str) -> Document {
-        read(Source(0), text).unwrap()
+        crate::read(Source(0), text).unwrap()
     }
 
     fn value(kind: value::Kind) -> Value {
@@ -2689,7 +2689,7 @@ c = "°C # not a comment"
                 let expected = diagnosed(&[Error::TooDeep { span }]);
                 assert_eq!(crate::read(Source(0), &text), expected);
             } else {
-                let document = read(Source(0), &text).unwrap();
+                let document = crate::read(Source(0), &text).unwrap();
                 let bytes = Checked::new(document.clone()).unwrap().encode();
                 assert_eq!(
                     document::encoding::decode(&bytes).unwrap().document(),
