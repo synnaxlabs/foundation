@@ -363,6 +363,37 @@ fn the_read_gives_the_founding_that_the_first_open_kept() {
     run_with(&mut sim, &node, stored);
 }
 
+/// A reopen whose log holds no record writes the founding again, so a failed write
+/// leaves none, and the next open is a first open.
+#[test]
+fn a_failed_reopen_before_a_record_leaves_no_founding() {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let region = sim
+        .run_on(&node, |node, tasks| async move {
+            create_region(&node, &tasks).await
+        })
+        .unwrap();
+    run_with(&mut sim, &node, region.clone());
+    node.fail_file(Path::new("founding.new"), Operation::WriteAt);
+    let error = refused(&mut sim, &node, region.clone());
+    let Error::Files(error) = error else {
+        panic!("{error:?}");
+    };
+    let path = PathBuf::from("founding.new");
+    let operation = Operation::WriteAt;
+    assert_eq!(
+        error,
+        files::Error::Io {
+            path,
+            operation,
+            code: 5
+        }
+    );
+    assert_eq!(read(&mut sim, &node, ""), None);
+    run_with(&mut sim, &node, region);
+}
+
 #[test]
 fn a_reopen_with_the_same_founding_opens_whatever_the_order_of_its_members() {
     let (mut sim, node, mut region) = founded(0);

@@ -23,7 +23,8 @@ const NEW: &str = "founding.new";
 const VERSION: u16 = 1;
 
 /// The founding that the mesh directory `dir` of `files` holds, or `None` when `dir`
-/// is not there or no [`Mesh::open`](crate::Mesh::open) wrote a founding in it.
+/// or its founding file is not there: no [`Mesh::open`](crate::Mesh::open) wrote one,
+/// or an open whose log held no record failed or stopped while it wrote one.
 /// [`Mesh::open`](crate::Mesh::open) with this founding opens the same region.
 ///
 /// # Errors
