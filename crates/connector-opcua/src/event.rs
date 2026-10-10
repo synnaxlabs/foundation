@@ -60,6 +60,19 @@ impl Loop {
         // Also `None` for the `i64::MAX` of an empty loop.
         ticks.max(0).unsigned_abs().checked_mul(100).map(Monotonic)
     }
+
+    /// Gives whether a timer or a delayed callback is due now.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the stop of a server of #435 calls it")
+    )]
+    pub(crate) fn due(&self) -> bool {
+        // SAFETY: the member takes its own loop.
+        let next = unsafe { (self.members().next_timer)(self.raw()) };
+        // SAFETY: the `Clock` at `clock` lives until `drop`. The loop gives the time
+        // of a delayed callback in the same ticks.
+        next <= unsafe { now(self.clock.as_ptr().cast()) }
+    }
 }
 
 impl Drop for Loop {

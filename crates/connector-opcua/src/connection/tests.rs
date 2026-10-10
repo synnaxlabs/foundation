@@ -293,12 +293,7 @@ impl Side {
                 self.run();
                 // SAFETY: the server lives.
                 let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
-                // The loop gives now, rounded down to 100 ns, while a delayed callback
-                // waits.
-                let due = self
-                    .events()
-                    .next()
-                    .is_some_and(|at| at <= self.clock.now());
+                let due = self.events().due();
                 if state == ffi::test::Lifecycle::STOPPED && !due {
                     Poll::Ready(())
                 } else {
@@ -2645,7 +2640,7 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
             assert_eq!(status, Status::GOOD);
             side.drive(Span::SECOND).await;
             assert_eq!(Status(result.get()), Status::GOOD, "the session is made");
-            // Off the 100 ns grid, the next time of the loop is before now.
+            // Off the 100 ns grid, a waiting delayed callback is still due.
             side.clock.sleep(Span::from_nanos(50)).await;
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });

@@ -323,7 +323,7 @@
   A server on the loop of a manager is `STOPPED` when its last connection closes after
   `UA_Server_run_shutdown`. That close can queue a delayed callback on the server, such
   as the removal of a session that is not activated, so its owner drives until the
-  server is `STOPPED` and nothing is due (`event::Loop::next` is `None` or after now).
+  server is `STOPPED` and nothing is due (`event::Loop::due` is false).
   `UA_Server_delete` then frees the server and each session at once. Between that drive
   and the delete, the owner calls nothing that queues a delayed callback on the server,
   such as `UA_Server_addCertificates`: the next run of the loop would read the freed
