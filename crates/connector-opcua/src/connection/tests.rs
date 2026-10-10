@@ -2937,3 +2937,5 @@ fn a_close_before_the_first_read_waits_for_the_end_of_the_peer() {
         .expect("the run ends");
     assert_eq!(connections, (1, 0));
 }
+
+mod probe;
