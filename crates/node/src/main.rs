@@ -261,7 +261,7 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
             }
         }
         node::Error::Pool { pool, cores } if known.from.pool == Origin::Kept => {
-            let (from, fix) = source(dir, Origin::Kept, Resource::Memory);
+            let (from, fix) = kept(dir);
             Failure {
                 code: MEMORY,
                 message: format!(
@@ -276,7 +276,7 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
             error: error @ os::memory::Error::Reserve { .. },
         } if known.from.pool == Origin::Kept => {
             let budget = known.budget.pool;
-            let (from, fix) = source(dir, Origin::Kept, Resource::Memory);
+            let (from, fix) = kept(dir);
             Failure {
                 code: MEMORY,
                 message: format!(
@@ -363,18 +363,25 @@ fn failure(dir: &Path, error: &node::Error) -> Failure {
     Failure { code, message, fix }
 }
 
+/// That a budget comes from the file `budget` of the data directory `dir`, as text,
+/// and the fix of a kept budget that does not fit: remove the file.
+fn kept(dir: &Path) -> (String, String) {
+    let data = dir.display();
+    (
+        format!("which {data} keeps from its first start"),
+        format!(
+            "Remove the file `budget` in {data}, and the next start computes the \
+             budgets again from the free memory and disk"
+        ),
+    )
+}
+
 /// Where a budget of `resource` that gives the node too little comes from, `from`,
 /// as text, and its fix. `dir` is the data directory.
 fn source(dir: &Path, from: Origin, resource: Resource) -> (String, String) {
     let data = dir.display();
     match (from, resource) {
-        (Origin::Kept, _) => (
-            format!("which {data} keeps from its first start"),
-            format!(
-                "Remove the file `budget` in {data}, and the next start computes the \
-                 budgets again from the free memory and disk"
-            ),
-        ),
+        (Origin::Kept, _) => kept(dir),
         (Origin::Most, _) => (
             "the most that a first start gives".to_owned(),
             "Start the node on fewer cores: on Linux, give it a smaller CPU affinity \
