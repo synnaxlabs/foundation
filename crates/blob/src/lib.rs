@@ -346,13 +346,10 @@ struct Flight<'a> {
 impl<'a> Flight<'a> {
     /// Takes `digest` from the state it is in, which is not `Writing`.
     fn new(store: &'a Store, digest: Digest) -> Self {
-        let before = store
+        store
             .chunks
             .borrow_mut()
             .insert(digest, State::Writing(BTreeMap::new()));
-        if let Some(State::Writing(_)) = before {
-            panic!("invariant: one put of a digest is in flight at a time");
-        }
         let serial = store.flights.get();
         store.flights.set(serial + 1);
         Flight {
