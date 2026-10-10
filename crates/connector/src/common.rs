@@ -30,8 +30,21 @@ where
     T: Send + 'static,
     F: Future<Output = T> + 'static,
 {
+    run_with(sim::node::Config::default(), main)
+}
+
+/// Runs `main` on a shard of one simulated node of `config`, given the node, and
+/// returns its output.
+pub(crate) fn run_with<T, F>(
+    config: sim::node::Config,
+    main: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
+) -> T
+where
+    T: Send + 'static,
+    F: Future<Output = T> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config::default());
-    let node = sim.node(sim::node::Config::default());
+    let node = sim.node(config);
     sim.run_on(&node, main).expect("the run ends")
 }
 

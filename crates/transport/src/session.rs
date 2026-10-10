@@ -132,7 +132,7 @@ impl Session {
     /// async fn serve(session: &Session) -> Result<(), Error> {
     ///     loop {
     ///         let incoming = session.accept().await?;
-    ///         let _ = incoming.class;
+    ///         let _: transport::Class = incoming.class;
     ///     }
     /// }
     /// ```
@@ -150,6 +150,7 @@ impl Session {
     ///     session.datagrams()
     /// }
     /// ```
+    #[expect(clippy::todo, reason = "a stub until #68")]
     #[must_use]
     pub fn datagrams(&self) -> (datagram::Sender, datagram::Receiver) {
         todo!("#68")

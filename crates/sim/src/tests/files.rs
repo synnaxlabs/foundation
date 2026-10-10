@@ -2004,6 +2004,8 @@ fn a_write_open_waits_for_the_close_of_a_failed_remove_through_the_handle_in_a_p
     }
 }
 
+/// The wait is 584 years out, so its timer wakes only when due, to keep the run in its
+/// step budget.
 #[test]
 fn a_write_open_waits_for_a_dropped_remove_at_the_end_of_true_time() {
     let mut sim = sim(0);
@@ -2011,6 +2013,7 @@ fn a_write_open_waits_for_a_dropped_remove_at_the_end_of_true_time() {
         monotonic: Monotonic(0),
         wall: types::time::Stamp::from_nanos(i64::MIN),
         disk_bytes: MIB,
+        arm_max: None,
         ..node::Config::default()
     });
     let found = sim
