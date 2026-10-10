@@ -18,3 +18,17 @@
   checked whole Document does not make a checked connector body. Decided by the
   architect (#1089,
   https://github.com/synnaxlabs/foundation/pull/1089#issuecomment-6031438972).
+- **HCL DIAGNOSTICS (#2079, 2026-10-10)** `config_hcl::read` gives `Result<Document,
+  Vec<Diagnostic>>`, the shape of `ops::FrontEnd::read`: a diagnostic for each problem
+  in the text, at least one, in source order. `Error`, `Expected`, `Unclosed`, `Form`,
+  `Number`, and `From<&Error> for Diagnostic` are private, and `Refusal::Text` holds
+  `Vec<Diagnostic>`. Each front end gives the neutral model at the boundary, and no
+  caller read an `Error` variant. `node` and the `ops` tests use `FrontEnd { read:
+  config_hcl::read }`, with no adapter. The crate's tests keep exact `Error` values
+  through the private type. Lost: a second public `read` that gives diagnostics next
+  to the one that gives `Error` (two reads that differ only in the error type).
+  Supersedes "`read` gives a list of `Error`" of HCL ERRORS. Decided by
+  `laptop.architect-2` (2026-10-10T02:51:42Z,
+  https://github.com/synnaxlabs/foundation/issues/2079#issuecomment-6093002544); the
+  oracle edit approved by the person (2026-10-10T02:58:30Z,
+  https://github.com/synnaxlabs/foundation/issues/2079#issuecomment-6093003661).

@@ -13,8 +13,8 @@
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054035444. A
   directory gives each file in it that the table reads, in path order. `Source(i)` is
   the index of the file in the order `ops` reads it, and `ops` keeps the paths to
-  print spans. `node` fills the table (#1756) with `config_hcl::read`, its errors
-  mapped through `From<&config_hcl::Error> for Diagnostic`. `write` and `update` join
+  print spans. `node` fills the table (#1756) with `config_hcl::read` (HCL
+  DIAGNOSTICS). `write` and `update` join
   `FrontEnd` with the first operation that writes a file. Lost: `ops` calls
   `config_hcl::read` (breaks K1), a `FrontEnd` trait (one implementation, no state),
   and `Box<dyn Fn>` (no front end needs state). Decided by `laptop.architect-2`
