@@ -538,7 +538,7 @@ impl Buffer {
                 .map(|&(_, slot, index)| (index, slot))
                 .collect();
             let place = AREA_START + layout.place(offset);
-            found.extend(read::newest(file, pool, place, (path, tag), &wanted).await?);
+            found.extend(read::newest(file, pool, place, path, tag, &wanted).await?);
         }
         Ok(found)
     }
