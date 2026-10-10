@@ -1,6 +1,7 @@
-//! A file driver over memory. It counts syncs and can slow each one (#1016), and
-//! its calls end at once, which the `alloc` binary needs (#2136). Only a test that
-//! needs this runs on it, until #517 and #2136 move it to `sim`.
+//! A file driver over memory. It counts syncs and can slow each one (#1016), it
+//! can fail a write at an offset (#1104), and its calls end at once, which the
+//! `alloc` binary needs (#2136). Only a test that needs this runs on it, until #517
+//! and #2136 move it to `sim`.
 
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
@@ -23,6 +24,8 @@ type Bytes = Arc<Mutex<Vec<u8>>>;
 pub(crate) struct Memory {
     files: Arc<Mutex<hash::Map<PathBuf, Bytes>>>,
     syncs_fail: Arc<AtomicBool>,
+    /// The offset of the next write to fail.
+    failed_write: Arc<Mutex<Option<u64>>>,
     syncs: Arc<AtomicU64>,
     /// How many descriptors are open.
     opens: Arc<AtomicU64>,
@@ -42,6 +45,12 @@ impl Memory {
     /// Every later sync fails with an I/O error.
     pub(crate) fn fail_syncs(&self) {
         self.syncs_fail.store(true, Relaxed);
+    }
+
+    /// The next write that starts at `offset` fails with an I/O error. Later
+    /// writes pass.
+    pub(crate) fn fail_write_at(&self, offset: u64) {
+        *lock(&self.failed_write) = Some(offset);
     }
 
     /// Every later sync takes `span` of `clock`'s time, as a disk does.
@@ -156,6 +165,7 @@ impl Driver for Memory {
                 files: Arc::clone(&self.files),
                 path: Mutex::new(path.into()),
                 syncs_fail: Arc::clone(&self.syncs_fail),
+                failed_write: Arc::clone(&self.failed_write),
                 syncs: Arc::clone(&self.syncs),
                 opens: Arc::clone(&self.opens),
                 slow: Arc::clone(&self.slow),
@@ -203,6 +213,7 @@ struct Open {
     /// The path of the file now: a rename changes it.
     path: Mutex<PathBuf>,
     syncs_fail: Arc<AtomicBool>,
+    failed_write: Arc<Mutex<Option<u64>>>,
     syncs: Arc<AtomicU64>,
     opens: Arc<AtomicU64>,
     slow: Arc<Mutex<Option<(Clock, Span)>>>,
@@ -220,6 +231,11 @@ impl Descriptor for Open {
     }
 
     fn write_at<'a>(&'a self, offset: u64, parts: &'a [Block]) -> Request<'a, ()> {
+        let failed = lock(&self.failed_write).take_if(|at| *at == offset);
+        if failed.is_some() {
+            let failed = io(&lock(&self.path), Operation::WriteAt, 5);
+            return Box::pin(async { Err(failed) });
+        }
         let mut bytes = lock(&self.bytes);
         let mut at = to_usize(offset);
         for part in parts {
