@@ -1291,8 +1291,8 @@ fn a_failed_write_of_the_walk_fails_the_open() {
             .expect("queues");
         buffer.committed().await.expect("commits");
         drop(buffer);
-        // The first write of an open is the header's; the second is the walk's.
-        shard.memory().fail_write(2);
+        // The walk writes the window at the tail, the area's start, as it read it.
+        shard.memory().fail_write_at(AREA_START);
         let reopened = shard.open(ring, &mut Slots::new()).await.map(drop);
         let failed = Error::Files(FileError::Io {
             path: PathBuf::from(RING),
