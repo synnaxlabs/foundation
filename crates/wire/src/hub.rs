@@ -51,10 +51,67 @@ const BEHIND: u8 = 3;
 pub const UNKNOWN: u32 = 16;
 /// Stop code: the node is not the home of the open's index.
 pub const NOT_HOME: u32 = 17;
-/// Stop code: the home's buffer failed.
+/// Stop code: the home's buffer failed, or its mesh stopped.
 pub const FAILED: u32 = 18;
-/// Stop code: the home had no memory for a reply. A later open can succeed.
+/// Stop code: the side that stops had no block for a stream's session, or no room for
+/// a request body under its cap. A later open or request can succeed, but not when
+/// the block is larger than each block of that side's pool.
 pub const BUSY: u32 = 19;
+
+/// A code of HUB WIRE that ends a session, from the side that stops the stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Refusal {
+    /// [`MALFORMED`](crate::header::MALFORMED).
+    Malformed,
+    /// [`UNKNOWN`].
+    Unknown,
+    /// [`NOT_HOME`].
+    NotHome,
+    /// [`FAILED`].
+    Failed,
+    /// [`BUSY`].
+    Busy,
+}
+
+impl Refusal {
+    /// The refusal that `code` names, or `None` for a code that HUB WIRE does not
+    /// name.
+    #[must_use]
+    pub fn from_code(code: u32) -> Option<Self> {
+        match code {
+            crate::header::MALFORMED => Some(Self::Malformed),
+            UNKNOWN => Some(Self::Unknown),
+            NOT_HOME => Some(Self::NotHome),
+            FAILED => Some(Self::Failed),
+            BUSY => Some(Self::Busy),
+            _ => None,
+        }
+    }
+
+    /// The code that stops or resets the stream.
+    #[must_use]
+    pub fn code(self) -> u32 {
+        match self {
+            Self::Malformed => crate::header::MALFORMED,
+            Self::Unknown => UNKNOWN,
+            Self::NotHome => NOT_HOME,
+            Self::Failed => FAILED,
+            Self::Busy => BUSY,
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Malformed => "a message broke the hub protocol",
+            Self::Unknown => "the home does not know a channel of the open",
+            Self::NotHome => "the node is not the home of the index",
+            Self::Failed => "the home's buffer failed, or its mesh stopped",
+            Self::Busy => "the side that stopped had no block for the session",
+        })
+    }
+}
 
 /// The first message from the reader's node, which opens the session. The run of its
 /// [`keys`] follows.
@@ -196,7 +253,8 @@ pub enum Reply {
 pub struct Head {
     /// How the frame reached the home.
     pub path: Path,
-    /// The samples of the frame.
+    /// The samples of the frame. A head whose range ends past `u64::MAX` is not
+    /// valid.
     pub range: Range,
     /// The count of the frame's series, which is the count of its ends. At least 1,
     /// since a frame holds its index. A head with more series than the session has
@@ -218,7 +276,8 @@ impl Reply {
     ///
     /// # Panics
     ///
-    /// When a head has no series, or `out` is not [`Reply::encoded_len`] bytes.
+    /// When a head has no series or a range that ends past `u64::MAX`, or `out` is
+    /// not [`Reply::encoded_len`] bytes.
     pub fn encode(&self, out: &mut [u8]) {
         let mut out = Writer::new(out, self.encoded_len());
         match self {
@@ -226,6 +285,12 @@ impl Reply {
             Self::Behind => out.put(&[BEHIND]),
             Self::Head(head) => {
                 assert!(head.series > 0, "a head names at least one series");
+                assert!(
+                    end(head.range).is_some(),
+                    "a head's range ends past the highest seq: {} samples from seq {}",
+                    head.range.count,
+                    head.range.seq
+                );
                 out.put(&[HEAD, path_byte(head.path)]);
                 out.put(&head.range.seq.to_le_bytes());
                 out.put(&head.range.count.to_le_bytes());
@@ -240,8 +305,8 @@ impl Reply {
     ///
     /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte
     /// names no reply, [`Error::Length`] when the length fits no reply of that kind,
-    /// [`Error::Path`] when a head names no path, and [`Error::Series`] when it names
-    /// no series.
+    /// [`Error::Path`] when a head names no path, [`Error::Series`] when it names no
+    /// series, and [`Error::Range`] when its range ends past `u64::MAX`.
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         let mut fields = Fields::new(rest, Error::Length { len: bytes.len() });
@@ -264,9 +329,13 @@ impl Reply {
                 if series == 0 {
                     return Err(Error::Series);
                 }
+                let range = Range { seq, count };
+                if end(range).is_none() {
+                    return Err(Error::Range { seq, count });
+                }
                 Ok(Self::Head(Head {
                     path,
-                    range: Range { seq, count },
+                    range,
                     series,
                 }))
             }
@@ -440,6 +509,13 @@ pub enum Error {
     Channels,
     /// A head names no series.
     Series,
+    /// A head's range ends past the highest seq.
+    Range {
+        /// The seq of the range.
+        seq: u64,
+        /// The count of the range.
+        count: u32,
+    },
     /// A head names no path.
     Path {
         /// The path byte.
@@ -462,6 +538,17 @@ pub enum Error {
         series: u32,
         /// The places of the session.
         places: u32,
+    },
+    /// A head of a reader session is on the backfill path. A session gets only live
+    /// frames.
+    Backfill,
+    /// A head starts before the end of the head before it. The heads of a session
+    /// rise.
+    Seq {
+        /// The seq of the head.
+        seq: u64,
+        /// The seq plus the count of the head before it.
+        end: u64,
     },
     /// A message of a run has more keys or ends than remain in the run.
     Run {
@@ -501,9 +588,12 @@ pub enum Error {
         /// The bytes of the body that did not come.
         remain: usize,
     },
+    /// The home finished the stream outside a body, before it ended the session.
+    Finished,
 }
 
 impl fmt::Display for Error {
+    #[expect(clippy::too_many_lines, reason = "one arm for each error")]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Empty => f.write_str("the hub message is empty"),
@@ -517,6 +607,11 @@ impl fmt::Display for Error {
             ),
             Self::Channels => f.write_str("the hub open names no channel"),
             Self::Series => f.write_str("the frame head names no series"),
+            Self::Range { seq, count } => write!(
+                f,
+                "the frame head has {count} samples from seq {seq}, which end past the \
+                 highest seq"
+            ),
             Self::Path { byte } => write!(
                 f,
                 "the frame head names path {byte}, which this node does not know"
@@ -534,6 +629,14 @@ impl fmt::Display for Error {
                 f,
                 "the frame head names {series} series, and the session has {places} \
                  places"
+            ),
+            Self::Backfill => {
+                f.write_str("the frame head of a reader session is on backfill")
+            }
+            Self::Seq { seq, end } => write!(
+                f,
+                "the frame head starts at seq {seq}, before the end {end} of the head \
+                 before it"
             ),
             Self::Run { items, remain } => write!(
                 f,
@@ -566,6 +669,9 @@ impl fmt::Display for Error {
                 f,
                 "the stream ended with {remain} bytes of its body to come"
             ),
+            Self::Finished => {
+                f.write_str("the home finished the stream before it ended the session")
+            }
         }
     }
 }
@@ -619,6 +725,11 @@ fn run<const N: usize>(message: &[u8]) -> Result<&[[u8; N]], Error> {
     } else {
         Ok(items)
     }
+}
+
+/// The seq after `range`, or `None` past `u64::MAX`.
+fn end(range: Range) -> Option<u64> {
+    range.seq.checked_add(u64::from(range.count))
 }
 
 fn path_byte(path: Path) -> u8 {
@@ -889,6 +1000,23 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_head_whose_range_ends_past_the_highest_seq() {
+            let mut bytes = encode_reply(head(Path::Live, u64::MAX - 1, 1, 1));
+            assert_eq!(
+                Reply::decode(&bytes),
+                Ok(head(Path::Live, u64::MAX - 1, 1, 1))
+            );
+            bytes[10] = 2;
+            assert_eq!(
+                Reply::decode(&bytes),
+                Err(Error::Range {
+                    seq: u64::MAX - 1,
+                    count: 2
+                })
+            );
+        }
+
+        #[test]
         fn decodes_a_head_of_one_series() {
             let mut bytes = zeros(2, 18);
             bytes[14] = 1;
@@ -899,6 +1027,15 @@ mod tests {
         #[should_panic(expected = "a head names at least one series")]
         fn panics_on_a_head_of_no_series() {
             head(Path::Live, 0, 0, 0).encode(&mut [0; 18]);
+        }
+
+        #[test]
+        #[should_panic(
+            expected = "a head's range ends past the highest seq: 1 samples from seq \
+                        18446744073709551615"
+        )]
+        fn panics_on_a_head_whose_range_ends_past_the_highest_seq() {
+            head(Path::Live, u64::MAX, 1, 1).encode(&mut [0; 18]);
         }
 
         #[test]
@@ -1163,6 +1300,10 @@ mod tests {
             (Error::Channels, "the hub open names no channel"),
             (Error::Series, "the frame head names no series"),
             (
+                Error::Range { seq: 7, count: 2 },
+                "the frame head has 2 samples from seq 7, which end past the highest seq",
+            ),
+            (
                 Error::Path { byte: 2 },
                 "the frame head names path 2, which this node does not know",
             ),
@@ -1181,6 +1322,14 @@ mod tests {
                     places: 3,
                 },
                 "the frame head names 4 series, and the session has 3 places",
+            ),
+            (
+                Error::Backfill,
+                "the frame head of a reader session is on backfill",
+            ),
+            (
+                Error::Seq { seq: 3, end: 11 },
+                "the frame head starts at seq 3, before the end 11 of the head before it",
             ),
             (
                 Error::Run {
@@ -1249,8 +1398,16 @@ mod tests {
         prop_oneof![
             Just(Reply::Opened),
             Just(Reply::Behind),
-            (path, any::<u64>(), any::<u32>(), 1..=u32::MAX)
-                .prop_map(|(path, seq, count, series)| head(path, seq, count, series)),
+            (path, any::<u64>(), any::<u32>(), 1..=u32::MAX).prop_map(
+                |(path, seq, count, series)| {
+                    head(
+                        path,
+                        seq.min(u64::MAX.saturating_sub(u64::from(count))),
+                        count,
+                        series,
+                    )
+                }
+            ),
         ]
     }
 
@@ -1267,6 +1424,41 @@ mod tests {
                 [[kind].as_slice(), &rest].concat()
             })
         })
+    }
+
+    #[test]
+    fn names_each_code_of_hub_wire_that_ends_a_session() {
+        let refusals = [
+            (Refusal::Malformed, 2, "a message broke the hub protocol"),
+            (
+                Refusal::Unknown,
+                16,
+                "the home does not know a channel of the open",
+            ),
+            (
+                Refusal::NotHome,
+                17,
+                "the node is not the home of the index",
+            ),
+            (
+                Refusal::Failed,
+                18,
+                "the home's buffer failed, or its mesh stopped",
+            ),
+            (
+                Refusal::Busy,
+                19,
+                "the side that stopped had no block for the session",
+            ),
+        ];
+        for (refusal, code, meaning) in refusals {
+            assert_eq!(refusal.code(), code);
+            assert_eq!(Refusal::from_code(code), Some(refusal));
+            assert_eq!(refusal.to_string(), meaning);
+        }
+        for code in (0..32).filter(|code| ![2, 16, 17, 18, 19].contains(code)) {
+            assert_eq!(Refusal::from_code(code), None, "{code}");
+        }
     }
 
     proptest! {

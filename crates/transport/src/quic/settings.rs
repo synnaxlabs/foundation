@@ -65,7 +65,7 @@ pub(crate) struct Setup {
     pub(crate) role: Role,
     /// The largest message this side takes: at least 1472, at most `pool.largest()`.
     pub(crate) message_bytes_max: usize,
-    /// At least `message_bytes_max`.
+    /// At least twice `message_bytes_max`.
     pub(crate) window_bytes: usize,
     pub(crate) streams_max: NonZeroU32,
     /// Positive.
@@ -264,6 +264,8 @@ fn transport(setup: &Setup) -> TransportConfig {
         .allow_spin(false)
         .datagram_receive_buffer_size(Some(setup.message_bytes_max))
         .datagram_send_buffer_size(DATAGRAM_QUEUE_BYTES_MAX)
+        // Path zero stays, as `next_packet_number` and `largest_acked` of the
+        // noq-proto patch need.
         .max_concurrent_multipath_paths(0)
         .max_remote_nat_traversal_addresses(0)
         .server_handshake_migration(false)
@@ -560,6 +562,26 @@ mod tests {
             });
         }
 
+        #[test]
+        fn sends_one_reset_for_initials_from_many_ports_of_one_ip_at_once() {
+            let resets = testing::run(1, |shard| {
+                let (now, mut buffer) =
+                    (pair::at(Duration::from_millis(1)), Vec::new());
+                let mut dialer = program(shard);
+                dialer.connect(now, pair::SERVER_KEY.public(), pair::SERVER);
+                let initial = dialer.transmit(now, &mut buffer).expect("an Initial");
+                let initial = initial.contents.to_vec();
+                let mut endpoint = program(shard);
+                (0..1_000u16)
+                    .filter(|port| {
+                        let victim = SocketAddr::new(pair::CLIENT.ip(), 1_000 + port);
+                        reply(&mut endpoint, now, victim, &initial).is_some()
+                    })
+                    .count()
+            });
+            assert_eq!(resets, 1);
+        }
+
         /// A program's endpoint on `shard`.
         fn program(shard: &testing::Shard) -> Endpoint {
             let setup = shard.client().setup().expect("a setup");
@@ -827,6 +849,247 @@ mod tests {
         const ROUND_TRIP: Duration = Duration::from_millis(125);
     }
 
+    mod probe {
+        use super::*;
+
+        /// The most time between two probes to a peer that does not answer.
+        const GAP_MAX: Duration = Duration::from_secs(2);
+
+        /// A pair with link delay `delay`, whose connections outlive each run here.
+        fn pair(shard: &testing::Shard, delay: Duration) -> Pair {
+            let idle = Span::from_nanos(120 * Span::SECOND.nanos());
+            Pair::new(shard, idle, delay)
+        }
+
+        /// The times between two instants at which `side` sent, from `sent` on.
+        fn gaps(side: &Side, sent: usize) -> Vec<Duration> {
+            let mut at: Vec<_> = side.sent[sent..].iter().map(|&(at, ..)| at).collect();
+            at.dedup();
+            at.windows(2)
+                .map(|pair| pair[1].checked_sub(pair[0]).expect("in order"))
+                .collect()
+        }
+
+        /// Connects `pair`, stops the server, writes 100 bytes from the client, and
+        /// runs `span`. The client's sends start at the write.
+        fn unanswered(mut pair: Pair, span: Duration) -> Pair {
+            pair.dial(pair::SERVER_KEY.public());
+            pair.run(Duration::from_secs(3));
+            pair.server.silent = true;
+            let connection = pair.client.connection();
+            let stream = connection.streams().open(Dir::Uni).expect("a stream");
+            let mut send = connection.send_stream(stream);
+            assert_eq!(send.write(&[0; 100]).expect("written"), 100);
+            pair.client.sent.clear();
+            pair.run(span);
+            pair
+        }
+
+        #[test]
+        fn to_a_silent_server_in_a_dial_come_at_most_2_s_apart() {
+            let gaps = testing::run(1, |shard| {
+                let mut pair = pair(shard, DELAY);
+                pair.server.silent = true;
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_secs(100));
+                gaps(&pair.client, 0)
+            });
+            assert!(gaps.len() >= 30, "{gaps:?}");
+            assert!(gaps.iter().all(|&gap| gap <= GAP_MAX), "{gaps:?}");
+        }
+
+        #[test]
+        fn with_data_in_flight_double_up_to_2_s_apart() {
+            let gaps = testing::run(1, |shard| {
+                let pair = unanswered(pair(shard, DELAY), Duration::from_secs(100));
+                gaps(&pair.client, 0)
+            });
+            assert!(gaps.len() >= 30, "{gaps:?}");
+            let doubled = (0..gaps.len()).map(|i| {
+                let exponent = u32::try_from(i).expect("fits").min(16);
+                (gaps[0] * 2_u32.pow(exponent)).min(GAP_MAX)
+            });
+            assert_eq!(gaps, doubled.collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn at_an_idle_of_1_s_come_at_most_a_third_of_it_apart() {
+            let (dial, data) = testing::run(1, |shard| {
+                let idle = Span::SECOND;
+                let mut pair = Pair::new(shard, idle, DELAY);
+                pair.dial(pair::SERVER_KEY.public());
+                while pair.server.sent.is_empty() {
+                    pair.run(Duration::from_millis(1));
+                }
+                // The server's first flight is on the link, so the client has a round
+                // trip and sends its last handshake packet to a silent server.
+                pair.server.silent = true;
+                pair.run(Duration::from_secs(1));
+                let dial = gaps(&pair.client, 0);
+                let pair = Pair::new(shard, idle, DELAY);
+                let pair = unanswered(pair, Duration::from_secs(1));
+                (dial, gaps(&pair.client, 0))
+            });
+            let gap_max = Duration::from_secs(1) / 3;
+            for gaps in [dial, data] {
+                assert!(gaps.len() >= 2, "{gaps:?}");
+                assert!(gaps.iter().all(|&gap| gap <= gap_max), "{gaps:?}");
+            }
+        }
+
+        #[test]
+        fn at_an_idle_of_10_s_come_at_most_1_s_apart() {
+            let gaps = testing::run(1, |shard| {
+                let idle = Span::from_nanos(10 * Span::SECOND.nanos());
+                let pair = Pair::new(shard, idle, DELAY);
+                let pair = unanswered(pair, Duration::from_secs(8));
+                gaps(&pair.client, 0)
+            });
+            assert!(gaps.len() >= 5, "{gaps:?}");
+            assert!(
+                gaps.iter().all(|&gap| gap <= Duration::from_secs(1)),
+                "{gaps:?}"
+            );
+        }
+
+        // A round trip of 1.2 s with no second sample gives a probe timeout over 2 s.
+        #[test]
+        fn never_come_before_the_probe_timeout() {
+            let gaps = testing::run(1, |shard| {
+                let delay = Duration::from_millis(600);
+                let pair = unanswered(pair(shard, delay), Duration::from_secs(60));
+                gaps(&pair.client, 0)
+            });
+            // A probe is two datagrams, the second a few ms after the first.
+            let probes: Vec<_> = gaps.iter().filter(|&&gap| gap > DELAY).collect();
+            assert!(probes.len() >= 10, "{gaps:?}");
+            assert!(probes.iter().all(|&&gap| gap > GAP_MAX), "{gaps:?}");
+        }
+
+        // A round trip of 1.6 s makes the cap 1.5 round trips, 2.4 s, over 2 s.
+        #[test]
+        fn on_a_round_trip_of_1_6_s_come_up_to_2_4_s_apart() {
+            let gaps = testing::run(1, |shard| {
+                let mut pair = pair(shard, Duration::from_millis(800));
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_secs(10));
+                let connection = pair.client.connection();
+                let stream = connection.streams().open(Dir::Uni).expect("a stream");
+                for _ in 0..30 {
+                    let connection = pair.client.connection();
+                    let mut send = connection.send_stream(stream);
+                    assert_eq!(send.write(&[0; 100]).expect("written"), 100);
+                    pair.run(Duration::from_secs(3));
+                }
+                pair.server.silent = true;
+                let connection = pair.client.connection();
+                let mut send = connection.send_stream(stream);
+                assert_eq!(send.write(&[0; 100]).expect("written"), 100);
+                pair.client.sent.clear();
+                pair.run(Duration::from_secs(60));
+                gaps(&pair.client, 0)
+            });
+            let probes: Vec<_> = gaps.iter().filter(|&&gap| gap > DELAY).collect();
+            assert!(probes.iter().any(|&&gap| gap > GAP_MAX), "{gaps:?}");
+            let cap = Duration::from_millis(2_400);
+            assert!(probes.iter().all(|&&gap| gap <= cap), "{gaps:?}");
+        }
+
+        #[test]
+        fn after_a_write_between_two_probes_come_one_gap_after_the_write() {
+            let (since, gaps) = testing::run(1, |shard| {
+                let mut pair = unanswered(pair(shard, DELAY), Duration::from_secs(60));
+                let probe = pair.client.sent.last().expect("a probe").0;
+                let now = Duration::from_secs(63);
+                let write = now.max(probe + Duration::from_secs(1));
+                pair.run(write.checked_sub(now).expect("not before now"));
+                let connection = pair.client.connection();
+                let stream = connection.streams().open(Dir::Uni).expect("a stream");
+                let mut send = connection.send_stream(stream);
+                assert_eq!(send.write(&[0; 100]).expect("written"), 100);
+                pair.client.sent.clear();
+                pair.run(Duration::from_secs(3));
+                assert_eq!(pair.client.sent[0].0, write);
+                let since = write.checked_sub(probe).expect("after the probe");
+                (since, gaps(&pair.client, 0))
+            });
+            assert!(since < GAP_MAX, "{since:?}");
+            assert_eq!(gaps[0], GAP_MAX, "{gaps:?}");
+        }
+
+        // The server's probe is in the Initial space. The client's ACK resets the
+        // backoff, and the lost Handshake packet left long before the probe, so its
+        // probe timeout has passed.
+        #[test]
+        fn back_off_no_more_after_an_ack_so_a_lost_handshake_goes_at_once() {
+            let (answer, sent) = testing::run(1, |shard| {
+                let mut pair = pair(shard, DELAY);
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_millis(35));
+                pair.server.drops = 1;
+                let before = pair.server.sent.len();
+                pair.run(Duration::from_secs(1));
+                let server: Vec<_> =
+                    pair.server.sent.iter().map(|&(at, ..)| at).collect();
+                let probe = server[before + 1];
+                let mut client = pair.client.sent.iter().map(|&(at, ..)| at);
+                let answer = client.find(|&at| at >= probe + DELAY);
+                (answer.expect("an answer"), server)
+            });
+            assert!(sent.contains(&(answer + DELAY)), "{answer:?} {sent:?}");
+        }
+
+        #[test]
+        fn a_timer_that_fires_long_after_its_deadline_sends_one_probe() {
+            let sent = testing::run(1, |shard| {
+                let mut pair = unanswered(pair(shard, DELAY), Duration::from_secs(10));
+                pair.client.silent = true;
+                pair.run(Duration::from_secs(20));
+                pair.client.silent = false;
+                pair.client.sent.clear();
+                pair.run(Duration::ZERO);
+                pair.client.sent.len()
+            });
+            // A probe is two datagrams when data is in flight.
+            assert_eq!(sent, 2);
+        }
+
+        // The client gets only the first datagram of the server's flight, which acks
+        // both of its Initials, so it has nothing ack-eliciting in flight and probes
+        // against the anti-amplification deadlock by the release's rule. Its one round
+        // trip of 200 ms gives a PTO base of 600 ms; the cap at an idle of 1 s is 333 ms.
+        #[test]
+        fn against_the_amplification_deadlock_come_once_at_the_cap_then_at_the_probe_timeout()
+         {
+            let gaps = testing::run(1, |shard| {
+                let delay = Duration::from_millis(100);
+                let mut pair = Pair::new(shard, Span::SECOND, delay);
+                pair.dial(pair::SERVER_KEY.public());
+                pair.server.drops = 1_000;
+                while pair.server.sent.len() < 3 {
+                    pair.run(Duration::from_millis(1));
+                }
+                pair.server.silent = true;
+                let (at, _, first) = pair.server.sent[1].clone();
+                let arrival = at + delay;
+                let now = Duration::from_nanos(pair.now().0);
+                pair.run(arrival.checked_sub(now).expect("not yet arrived"));
+                let sent = pair.client.sent.len();
+                let meta = pair::meta(pair::SERVER, &first);
+                pair.client.endpoint.receive(pair.now(), &meta, &first);
+                pair.run(Duration::from_secs(5));
+                gaps(&pair.client, sent)
+            });
+            // A probe with data in flight is two datagrams, the second 16 ms later.
+            let probes: Vec<_> = gaps.iter().filter(|&&gap| gap > DELAY * 5).collect();
+            let (cap, pto_base) =
+                (Duration::from_secs(1) / 3, Duration::from_millis(600));
+            assert!(probes.len() >= 3, "{gaps:?}");
+            assert_eq!(*probes[0], cap, "{gaps:?}");
+            assert!(probes[1..].iter().all(|&&gap| gap >= pto_base), "{gaps:?}");
+        }
+    }
+
     mod datagrams {
         use super::*;
 
@@ -835,7 +1098,7 @@ mod tests {
             testing::run(1, |shard| {
                 let pair = Pair::with(shard, Span::SECOND, DELAY, |config| {
                     config.message_bytes_max = NonZeroUsize::MAX;
-                    config.window_bytes = config.pool.largest();
+                    config.window_bytes = 2 * config.pool.largest();
                 });
                 let largest =
                     shard.config(pair::SERVER_KEY, Span::SECOND).pool.largest();

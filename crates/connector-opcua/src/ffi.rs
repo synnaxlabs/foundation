@@ -11,6 +11,10 @@ pub(crate) struct Status(pub(crate) u32);
 
 impl Status {
     pub(crate) const GOOD: Self = Self(0);
+    pub(crate) const BAD_NOT_FOUND: Self = Self(0x803E_0000);
+    #[cfg(test)]
+    pub(crate) const BAD_INVALID_ARGUMENT: Self = Self(0x80AB_0000);
+    pub(crate) const BAD_CONNECTION_CLOSED: Self = Self(0x80AE_0000);
     #[cfg(test)]
     pub(crate) const BAD_INTERNAL_ERROR: Self = Self(0x8002_0000);
     #[cfg(test)]
@@ -30,6 +34,84 @@ impl std::fmt::Debug for Status {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.name())
     }
+}
+
+/// `UA_String` and `UA_ByteString`.
+#[repr(C)]
+pub(crate) struct Bytes {
+    pub(crate) length: usize,
+    pub(crate) data: *mut u8,
+}
+
+/// `UA_NodeId`.
+#[repr(C)]
+pub(crate) struct Key {
+    namespace: u16,
+    kind: u32,
+    identifier: [u64; 2],
+}
+
+/// `UA_DataType`, with `UA_ENABLE_TYPEDESCRIPTION`.
+#[repr(C)]
+pub(crate) struct DataType {
+    name: *const c_char,
+    keys: [Key; 3],
+    /// `memSize` in the low 16 bits, then `typeKind`, `pointerFree`, `overlayable`,
+    /// and `membersSize`.
+    bits: u32,
+    members: *const c_void,
+}
+
+impl DataType {
+    /// Gives the size of a value in memory, in bytes.
+    pub(crate) fn size(&self) -> usize {
+        usize::try_from(self.bits & 0xffff).expect("invariant: a u16 fits a usize")
+    }
+
+    /// Gives the name of the type, such as `Variant`.
+    pub(crate) fn name(&self) -> &'static str {
+        // SAFETY: each type of `UA_TYPES` has a static name that ends with a NUL.
+        let name = unsafe { CStr::from_ptr(self.name) };
+        name.to_str().expect("invariant: each type name is ASCII")
+    }
+}
+
+/// `UA_DecodeBinaryOptions`, all null but the length that the decoder sets.
+#[repr(C)]
+#[derive(Default)]
+pub(crate) struct DecodeOptions {
+    pointers: [usize; 4],
+    pub(crate) decoded: usize,
+}
+
+/// `UA_TYPES_COUNT`.
+pub(crate) const TYPES: usize = 388;
+
+/// The index of `ByteString` in `UA_TYPES`.
+pub(crate) const BYTE_STRING: usize = 14;
+
+/// The index of `Variant` in `UA_TYPES`.
+#[cfg(test)]
+pub(crate) const VARIANT: usize = 23;
+
+// `shim.c` asserts the same sizes.
+const _: () = {
+    assert!(size_of::<Key>() == 24, "UA_NodeId changed");
+    assert!(size_of::<DataType>() == 96, "UA_DataType changed");
+    assert!(
+        size_of::<DecodeOptions>() == 40,
+        "UA_DecodeBinaryOptions changed"
+    );
+    assert!(
+        offset_of!(DecodeOptions, decoded) == 32,
+        "decodedLength moved"
+    );
+};
+
+/// Gives `UA_TYPES`, the table of built-in types.
+pub(crate) fn types() -> &'static [DataType; TYPES] {
+    // SAFETY: the table is initialized at compile time, and open62541 never writes it.
+    unsafe { &UA_TYPES }
 }
 
 /// `UA_Callback`.
@@ -164,6 +246,58 @@ const _: () = {
     assert!(offset_of!(EventLoop, unlock) == at(22), "unlock moved");
 };
 
+/// `UA_KeyValueMap`.
+#[repr(C)]
+pub(crate) struct KeyValueMap {
+    pub(crate) size: usize,
+    pub(crate) map: *mut c_void,
+}
+
+/// `UA_ConnectionState`.
+pub(crate) type ConnectionState = c_int;
+pub(crate) const OPENING: ConnectionState = 1;
+pub(crate) const ESTABLISHED: ConnectionState = 2;
+pub(crate) const CLOSING: ConnectionState = 3;
+
+/// `UA_ConnectionManager_connectionCallback`.
+pub(crate) type ConnectionCallback = unsafe extern "C" fn(
+    cm: *mut ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    context: *mut *mut c_void,
+    state: ConnectionState,
+    params: *const KeyValueMap,
+    message: Bytes,
+);
+
+/// `UA_ConnectionManager`, which Rust holds only by pointer.
+#[repr(C)]
+pub(crate) struct ConnectionManager([u8; 0]);
+
+/// The hooks of a manager of `shim_cm_new`. Each takes its `state`.
+#[repr(C)]
+pub(crate) struct Hooks {
+    pub(crate) open: unsafe extern "C" fn(
+        state: *mut c_void,
+        host: Bytes,
+        port: u16,
+        application: *mut c_void,
+        context: *mut c_void,
+        callback: ConnectionCallback,
+    ) -> u32,
+    pub(crate) listen: unsafe extern "C" fn(
+        state: *mut c_void,
+        host: Bytes,
+        port: u16,
+        application: *mut c_void,
+        context: *mut c_void,
+        callback: ConnectionCallback,
+    ) -> u32,
+    pub(crate) send:
+        unsafe extern "C" fn(state: *mut c_void, id: usize, buffer: *mut Bytes) -> u32,
+    pub(crate) close: unsafe extern "C" fn(state: *mut c_void, id: usize) -> u32,
+}
+
 /// `UA_Client`, which Rust holds only by pointer.
 #[repr(C)]
 pub(crate) struct Client([u8; 0]);
@@ -172,28 +306,175 @@ pub(crate) struct Client([u8; 0]);
 pub(crate) type Now = unsafe extern "C" fn(clock: *mut c_void) -> i64;
 
 unsafe extern "C" {
+    static UA_TYPES: [DataType; TYPES];
+
+    pub(crate) fn UA_decodeBinary(
+        input: *const Bytes,
+        value: *mut c_void,
+        data_type: *const DataType,
+        options: *mut DecodeOptions,
+    ) -> u32;
+    pub(crate) fn UA_encodeBinary(
+        value: *const c_void,
+        data_type: *const DataType,
+        output: *mut Bytes,
+        options: *mut c_void,
+    ) -> u32;
+    pub(crate) fn UA_calcSizeBinary(
+        value: *const c_void,
+        data_type: *const DataType,
+        options: *mut c_void,
+    ) -> usize;
+    pub(crate) fn UA_clear(value: *mut c_void, data_type: *const DataType);
+
     pub(crate) fn UA_StatusCode_name(code: u32) -> *const c_char;
     pub(crate) fn UA_random_seed_deterministic(value: u64);
 
     pub(crate) fn shim_loop_new(now: Now, clock: *mut c_void) -> *mut EventLoop;
     pub(crate) fn shim_loop_free(el: *mut EventLoop);
+    pub(crate) fn shim_log_warning(
+        el: *mut EventLoop,
+        message: *const u8,
+        length: usize,
+    );
 
     pub(crate) fn shim_client_new(el: *mut EventLoop) -> *mut Client;
     pub(crate) fn UA_Client_run_iterate(client: *mut Client, timeout_ms: u32) -> u32;
     pub(crate) fn UA_Client_delete(client: *mut Client);
+
+    pub(crate) fn shim_cm_new(
+        el: *mut EventLoop,
+        hooks: *const Hooks,
+        state: *mut c_void,
+    ) -> *mut ConnectionManager;
+    pub(crate) fn shim_cm_free(cm: *mut ConnectionManager);
+    pub(crate) fn shim_buffer_free(buffer: *mut Bytes);
+    pub(crate) fn shim_establish(
+        cm: *mut ConnectionManager,
+        id: usize,
+        application: *mut c_void,
+        context: *mut *mut c_void,
+        callback: ConnectionCallback,
+        address: *const u8,
+        length: usize,
+        port: *const u16,
+    );
 }
 
-/// Only `link` calls these.
+/// Only tests use these.
 #[cfg(test)]
 pub(crate) mod test {
-    use std::ffi::c_void;
+    use std::ffi::{c_int, c_void};
+    use std::mem::offset_of;
 
-    /// `UA_String` and `UA_ByteString`.
+    use super::{
+        Bytes, ConnectionCallback, ConnectionManager, EventLoop, KeyValueMap, at,
+    };
+
+    /// `UA_Server`, which Rust holds only by pointer.
     #[repr(C)]
-    pub(crate) struct Bytes {
-        pub(crate) length: usize,
-        pub(crate) data: *mut u8,
+    pub(crate) struct Server([u8; 0]);
+
+    /// `UA_LifecycleState` of a server.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(transparent)]
+    pub(crate) struct Lifecycle(pub(crate) c_int);
+
+    impl Lifecycle {
+        pub(crate) const STOPPED: Self = Self(0);
+        pub(crate) const STOPPING: Self = Self(2);
     }
+
+    /// The members of `UA_ConnectionManager`. `shim.c` asserts the same size and
+    /// offsets.
+    #[repr(C)]
+    pub(crate) struct Members {
+        pub(crate) next: *mut c_void,
+        pub(crate) kind: c_int,
+        pub(crate) name: Bytes,
+        pub(crate) event_loop: *mut EventLoop,
+        pub(crate) params: KeyValueMap,
+        pub(crate) state: c_int,
+        pub(crate) start: unsafe extern "C" fn(cm: *mut ConnectionManager) -> u32,
+        pub(crate) stop: unsafe extern "C" fn(cm: *mut ConnectionManager),
+        pub(crate) free: unsafe extern "C" fn(cm: *mut ConnectionManager) -> u32,
+        pub(crate) protocol: Bytes,
+        pub(crate) open: unsafe extern "C" fn(
+            cm: *mut ConnectionManager,
+            params: *const KeyValueMap,
+            application: *mut c_void,
+            context: *mut c_void,
+            callback: ConnectionCallback,
+        ) -> u32,
+        pub(crate) send: unsafe extern "C" fn(
+            cm: *mut ConnectionManager,
+            id: usize,
+            params: *const KeyValueMap,
+            buffer: *mut Bytes,
+        ) -> u32,
+        pub(crate) close:
+            unsafe extern "C" fn(cm: *mut ConnectionManager, id: usize) -> u32,
+        pub(crate) alloc: unsafe extern "C" fn(
+            cm: *mut ConnectionManager,
+            id: usize,
+            buffer: *mut Bytes,
+            size: usize,
+        ) -> u32,
+        pub(crate) free_buffer: unsafe extern "C" fn(
+            cm: *mut ConnectionManager,
+            id: usize,
+            buffer: *mut Bytes,
+        ),
+    }
+
+    const _: () = {
+        assert!(
+            size_of::<Members>() == at(18),
+            "UA_ConnectionManager changed"
+        );
+        assert!(offset_of!(Members, kind) == at(1), "kind moved");
+        assert!(offset_of!(Members, event_loop) == at(4), "event_loop moved");
+        assert!(offset_of!(Members, state) == at(7), "state moved");
+        assert!(offset_of!(Members, protocol) == at(11), "protocol moved");
+        assert!(offset_of!(Members, open) == at(13), "open moved");
+        assert!(offset_of!(Members, send) == at(14), "send moved");
+        assert!(offset_of!(Members, close) == at(15), "close moved");
+        assert!(offset_of!(Members, alloc) == at(16), "alloc moved");
+        assert!(
+            offset_of!(Members, free_buffer) == at(17),
+            "free_buffer moved"
+        );
+    };
+
+    /// `UA_NodeId` with a numeric identifier.
+    #[repr(C, align(8))]
+    pub(crate) struct NodeId {
+        pub(crate) namespace: u16,
+        pub(crate) kind: c_int,
+        pub(crate) numeric: u32,
+        pub(crate) rest: [u32; 3],
+    }
+
+    const _: () = {
+        assert!(size_of::<NodeId>() == at(3), "UA_NodeId changed");
+        assert!(offset_of!(NodeId, kind) == 4, "kind moved");
+        assert!(offset_of!(NodeId, numeric) == at(1), "numeric moved");
+    };
+
+    /// `UA_QualifiedName`.
+    #[repr(C)]
+    pub(crate) struct QualifiedName {
+        pub(crate) namespace: u16,
+        pub(crate) name: Bytes,
+    }
+
+    const _: () = {
+        assert!(
+            size_of::<QualifiedName>() == at(3),
+            "UA_QualifiedName changed"
+        );
+        assert!(offset_of!(QualifiedName, name) == at(1), "name moved");
+    };
 
     unsafe extern "C" {
         pub(crate) fn UA_DateTime_now() -> i64;
@@ -212,6 +493,10 @@ pub(crate) mod test {
             client: *mut super::Client,
             url: *const std::ffi::c_char,
         ) -> u32;
+        pub(crate) fn UA_Client_connectSecureChannelAsync(
+            client: *mut super::Client,
+            url: *const std::ffi::c_char,
+        ) -> u32;
         pub(crate) fn __UA_Client_AsyncService(
             client: *mut super::Client,
             request: *const c_void,
@@ -222,6 +507,43 @@ pub(crate) mod test {
             key: *mut u32,
         ) -> u32;
 
-        pub(crate) fn UA_UInt32_random() -> u32;
+        pub(crate) fn UA_new(kind: *const c_void) -> *mut c_void;
+        pub(crate) fn UA_delete(value: *mut c_void, kind: *const c_void);
+        pub(crate) fn UA_findDataType(id: *const NodeId) -> *const c_void;
+        pub(crate) fn UA_KeyValueMap_setScalar(
+            map: *mut KeyValueMap,
+            key: QualifiedName,
+            value: *const c_void,
+            kind: *const c_void,
+        ) -> u32;
+        pub(crate) fn UA_KeyValueMap_clear(map: *mut KeyValueMap);
+        pub(crate) fn shim_map_set_strings(
+            map: *mut KeyValueMap,
+            key: *const std::ffi::c_char,
+            strings: *const *const std::ffi::c_char,
+            size: usize,
+        ) -> u32;
+        pub(crate) fn UA_KeyValueMap_getScalar(
+            map: *const KeyValueMap,
+            key: QualifiedName,
+            kind: *const c_void,
+        ) -> *const c_void;
+        pub(crate) fn UA_Client_disconnect(client: *mut super::Client) -> u32;
+        pub(crate) fn UA_Client_disconnectAsync(client: *mut super::Client) -> u32;
+
+        pub(crate) fn shim_server_new(
+            el: *mut EventLoop,
+            port: u16,
+            url: *const std::ffi::c_char,
+        ) -> *mut Server;
+        pub(crate) fn UA_Server_run_startup(server: *mut Server) -> u32;
+        pub(crate) fn UA_Server_run_shutdown(server: *mut Server) -> u32;
+        pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;
+        pub(crate) fn UA_Server_getLifecycleState(server: *mut Server) -> Lifecycle;
+        pub(crate) fn shim_response_result(response: *const c_void) -> u32;
+        pub(crate) fn shim_server_discovery_url(
+            server: *mut Server,
+            index: usize,
+        ) -> *const Bytes;
     }
 }

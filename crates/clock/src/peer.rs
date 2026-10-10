@@ -162,7 +162,7 @@ mod tests {
         fn sends_mesh_time_in_holdover() {
             let m = known(TODAY, Span::MILLISECOND);
             let (_sim, node, mut clock, reader) = synced(at(), m);
-            let _ = clock.add();
+            let _: source::Key = clock.add();
             let time = Time::Known {
                 received: m.interval(),
                 answered: m.interval(),
@@ -249,7 +249,7 @@ mod tests {
             let m = known(TODAY, Span::MILLISECOND);
             let (_sim, node, mut clock, reader) = synced(at(), m);
             assert_eq!(ask(&node, &reader), Some(m));
-            let _ = clock.add();
+            let _: source::Key = clock.add();
             assert_eq!(ask(&node, &reader), Some(m), "in holdover");
         }
 

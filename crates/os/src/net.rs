@@ -256,7 +256,6 @@ mod tests {
         }
 
         #[test]
-        #[cfg(target_pointer_width = "64")]
         fn gives_the_code_of_a_refused_option() {
             let fd = listener::socket(loopback()).unwrap();
             let mut options = options(false);

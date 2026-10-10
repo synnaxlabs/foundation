@@ -80,9 +80,9 @@
   `config.subject-is-connector`; then `config.unplaced`, `config.connector-home`,
   `config.split-placement`, `config.writer-nodes`, and `config.unknown-node`.
   `spec::access::Policy::new` refuses an empty `allow`, so `Plan::decode` refuses it.
-  #2013 PR 3 makes apply call `check` after `definitions` and before
-  `Mesh::apply`, with the members and the kind table of the node that applies, as both
-  can change after `plan`. Decided by `laptop.architect-2`, 2026-10-08T21:36:36Z
+  The `ops` apply calls `check` after `definitions` and before `Mesh::apply`, with the
+  members and the kind table of the node that applies, as both can change after `plan`.
+  Decided by `laptop.architect-2`, 2026-10-08T21:36:36Z
   (https://github.com/synnaxlabs/foundation/issues/2013). The rules are in `config`
   once, on one model of the definitions that `plan` builds with spans, and both take the
   connectors of an index in name order, so each gives the same problems. Name order, and

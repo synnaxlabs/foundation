@@ -10,7 +10,8 @@ use crate::serve::{self, Request, client};
 
 /// The hub's part of one transport session. For a client session, it holds the
 /// admitted hello, so the hello is checked once for the connection, and it closes the
-/// session when the hello expires. A clone is the same link.
+/// session when the hello ends ([`access::proof::Admitted::ends`]). A clone is the
+/// same link.
 #[derive(Clone, Debug)]
 pub struct Link(Peer);
 

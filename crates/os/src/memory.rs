@@ -8,6 +8,12 @@ use std::{fmt, io, process};
 use rustix::io::Errno;
 use rustix::mm::{self, MapFlags, MprotectFlags, ProtFlags};
 
+mod available;
+
+pub use available::available;
+#[cfg(all(target_os = "linux", feature = "sim"))]
+pub use available::available_under;
+
 /// The protection of reserved pages.
 const RESERVED: ProtFlags = ProtFlags::empty();
 
@@ -475,7 +481,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_pointer_width = "64")]
     fn a_reserve_larger_than_the_address_space_fails() {
         let error = Memory::new(1 << 62).unwrap_err();
         assert_eq!(

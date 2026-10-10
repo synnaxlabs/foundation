@@ -3,15 +3,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use document::Source;
-use document::diagnostic::Diagnostic;
+use document::Span;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use spec::definition::{Definition, Kind};
+use spec::definition::Definition;
 use types::name::Name;
 
-use crate::error::{Error, Place, Problem};
+use crate::error::{Error, Place};
 use crate::front_end::{self, File, FrontEnd};
 
 #[cfg(test)]
@@ -37,13 +36,7 @@ pub(crate) fn plan(
     kinds: &connector::kind::Table,
 ) -> Result<(Output, config::plan::Plan), Error> {
     let paths: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();
-    let failed = |diagnostics: Vec<Diagnostic>| {
-        let problems = diagnostics
-            .into_iter()
-            .map(|diagnostic| Problem::of(diagnostic, &paths))
-            .collect();
-        Error::Config(problems)
-    };
+    let failed = |diagnostics| Error::config(diagnostics, &paths);
     let documents = front_end::read(files, front_ends).map_err(failed)?;
     let plan = config::plan::plan(&documents, base, applied, members, kinds)
         .map_err(failed)?;
@@ -186,7 +179,7 @@ pub(crate) struct Change {
 }
 
 /// Adds and changes in file order, then removals in tree key order.
-type Order = (bool, Option<(Source, u32)>, Name);
+type Order = (bool, Option<Span>, Name);
 
 impl Change {
     fn of(
@@ -196,13 +189,13 @@ impl Change {
         paths: &[PathBuf],
     ) -> (Order, Self) {
         let (action, kind, span, definition) = if let Some(entry) = &change.new {
-            let (kind, definition) = match &entry.definition {
-                config::Definition::Spec(definition) => {
-                    (definition.kind(), Some(definition))
-                }
-                config::Definition::Channel(_) => (Kind::Channel, None),
-                _ => unreachable!("invariant: `ops` knows each kind of definition"),
-            };
+            let definition =
+                if let config::Definition::Spec(definition) = &entry.definition {
+                    Some(definition)
+                } else {
+                    None
+                };
+            let kind = entry.definition.kind();
             (Action::of(change), kind, entry.label_span, definition)
         } else {
             let stored = applied
@@ -221,8 +214,7 @@ impl Change {
         let label = kind
             .label(name)
             .expect("invariant: a planned change is at a tree key of its kind");
-        let at = span.map(|span| (span.source(), span.start().offset));
-        let order = (at.is_none(), at, name.clone());
+        let order = (span.is_none(), span, name.clone());
         let change = Self {
             action,
             kind: kind.as_str().to_owned(),

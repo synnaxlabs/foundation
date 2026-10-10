@@ -7,7 +7,8 @@ use types::{
     frame::{self, Path, Range},
 };
 use wire::hub::{
-    Credit, FromHome, FromReader, Head, Home, Mode, Open, Reader, Reply, ends, keys,
+    Credit, Error, FromHome, FromReader, Head, Home, Mode, Open, Reader, Reply, ends,
+    keys,
 };
 
 const SERIES: [u32; 4] = [1, 3, 1_000, 100_000];
@@ -23,12 +24,20 @@ fn run_of(series: u32) -> Vec<u8> {
     run
 }
 
+/// A head of no samples, so one reader takes it again on each iteration.
 fn head(series: u32) -> Reply {
     Reply::Head(Head {
         path: Path::Live,
-        range: Range { seq: 7, count: 1 },
+        range: Range { seq: 7, count: 0 },
         series,
     })
+}
+
+/// [`Reader::decode`], called out of line as production calls it from many sites, so
+/// that no bench measures the inlining of its one call site.
+#[inline(never)]
+fn decode<'m>(reader: &mut Reader, message: &'m [u8]) -> Result<FromHome<'m>, Error> {
+    reader.decode(message)
 }
 
 /// A reader of `places` places that the home opened.
@@ -37,7 +46,7 @@ fn opened(places: u32) -> Reader {
         mode: Mode::Latest,
         channels: places,
     });
-    reader.decode(&[1]).expect("the session opens");
+    decode(&mut reader, &[1]).expect("the session opens");
     reader
 }
 
@@ -93,10 +102,10 @@ fn decode_ends(bencher: Bencher<'_, '_>, series: u32) {
     bencher
         .with_inputs(|| {
             let mut reader = opened(series);
-            reader.decode(&out).expect("the head decodes");
+            decode(&mut reader, &out).expect("the head decodes");
             reader
         })
-        .bench_local_refs(|reader| match reader.decode(divan::black_box(&run)) {
+        .bench_local_refs(|reader| match decode(reader, divan::black_box(&run)) {
             Ok(FromHome::Ends { ends, .. }) => sum(ends),
             other => panic!("the ends did not decode: {other:?}"),
         });
@@ -110,21 +119,22 @@ fn decode_a_frame(bencher: Bencher<'_, '_>, series: u32) {
     let mut out = [0; 18];
     head(series).encode(&mut out);
     let mut reader = opened(series);
-    bencher.bench_local(|| {
-        reader
-            .decode(divan::black_box(&out))
-            .expect("the head decodes");
-        let sum = match reader.decode(divan::black_box(&run)) {
+    let mut frame = || {
+        decode(&mut reader, divan::black_box(&out)).expect("the head decodes");
+        let sum = match decode(&mut reader, divan::black_box(&run)) {
             Ok(FromHome::Ends { ends, .. }) => sum(ends),
             other => panic!("the ends did not decode: {other:?}"),
         };
-        match reader.decode(divan::black_box(&body)) {
+        match decode(&mut reader, divan::black_box(&body)) {
             Ok(FromHome::Body { bytes, last: true }) => {
                 sum.wrapping_add(u64::from(bytes[0]))
             }
             other => panic!("the body did not decode: {other:?}"),
         }
-    });
+    };
+    // A test runs the bench once, so this shows that one reader takes a frame again.
+    frame();
+    bencher.bench_local(frame);
 }
 
 /// Decodes a body of `messages` messages of 1 024 bytes, with where each starts.
@@ -136,17 +146,19 @@ fn decode_a_body(bencher: Bencher<'_, '_>, messages: u32) {
     ends::encode([(0, messages * 1_024)], &mut run);
     let body = vec![7; usize::try_from(messages * 1_024).expect("a u32 fits a usize")];
     let mut reader = opened(1);
-    bencher.bench_local(|| {
-        reader.decode(&out).expect("the head decodes");
-        reader.decode(&run).expect("the ends decode");
+    let mut frame = || {
+        decode(&mut reader, &out).expect("the head decodes");
+        decode(&mut reader, &run).expect("the ends decode");
         body.chunks(1_024).fold(0, |sum: usize, message| {
             let at = reader.body().expect("the body comes next");
-            match reader.decode(divan::black_box(message)) {
+            match decode(&mut reader, divan::black_box(message)) {
                 Ok(FromHome::Body { bytes, .. }) => sum.wrapping_add(at + bytes.len()),
                 other => panic!("the body did not decode: {other:?}"),
             }
         })
-    });
+    };
+    frame();
+    bencher.bench_local(frame);
 }
 
 #[divan::bench]
@@ -156,7 +168,7 @@ fn encode_and_decode_a_head(bencher: Bencher<'_, '_>) {
         .with_inputs(|| opened(3))
         .bench_local_refs(|reader| {
             divan::black_box(head(3)).encode(&mut out);
-            match reader.decode(divan::black_box(&out)) {
+            match decode(reader, divan::black_box(&out)) {
                 Ok(FromHome::Head(head)) => head,
                 other => panic!("the head did not decode: {other:?}"),
             }

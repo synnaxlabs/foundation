@@ -248,6 +248,7 @@ fn lock<K, S, T>(slots: &Slots<K, S, T>) -> MutexGuard<'_, BTreeMap<K, Slot<S, T
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use std::cell::RefCell;
     use std::rc::Rc;

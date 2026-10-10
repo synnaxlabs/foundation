@@ -34,8 +34,8 @@ thread, so `connector-opcua` sets its start value on each thread that calls open
 | 1 | Unit and property tests (`proptest`) | Every commit |
 | 2 | Coverage-guided fuzzing (`cargo-fuzz`) of every decoder of outside input: wire, config, codecs, protocol parsers | Short run per merge, continuous nightly |
 | 3 | Deterministic simulation of a whole mesh: drops, partitions, crashes mid-write, clock jumps. A recorded random value replays a run | Thousands of runs per merge, millions nightly |
-| 4 | Unit benchmarks, per function | Every merge, 5% check (P1) |
-| 5 | Component benchmarks | Every merge, 5% check (P1) |
+| 4 | Unit benchmarks, per function | Every merge, cost check (P1) |
+| 5 | Component benchmarks | Every merge, cost check (P1) |
 | 6 | End-to-end performance against P1 on shared machines | Nightly and release |
 | 7 | Protocol simulators per connector | Every merge |
 | 8 | Hardware in the loop with real devices | Nightly and release |
@@ -96,7 +96,9 @@ logic that a simulated test can reach.
   adds or changes an arm that a target reaches adds an input that reaches it, and never
   defers it: a fuzz input needs no approval.
 - Each PR runs every target for 60 seconds. A nightly schedule runs them longer on
-  the ARM runner, which is idle at night.
+  the ARM runner.
+- `cargo xtask fuzz [seconds]` runs every target on the pinned nightly, with its
+  inputs in `oracles/fuzz/`.
 
 Simulation checks liveness as well as safety: after faults stop, the mesh converges
 within a bound (r16 60). A failed run prints its replay value, and CI runs that value
@@ -177,12 +179,13 @@ again once to prove that the failure replays (r16 59).
   `Display`) and **coverage marks** that prove a test reached a branch. Both need a
   dependency approval in `docs/dependencies.md` first (r16 51, 52).
 - **Wake protocols and lock-free code** get loom for small models and shuttle (PCT)
-  for larger ones. Only `ring` gates std types behind `cfg(loom)`. Code with `unsafe`
-  runs under Miri (r16 61). `cargo xtask loom` builds the tests in release mode with
-  `--cfg loom`. Then it runs, with `LOOM_MAX_PREEMPTIONS=3`, each test target that
-  compiles a file that names `loom` in a `cfg`, oracles included. `cargo xtask
-  shuttle` does the same with `--cfg shuttle`. `cargo xtask miri` runs Miri on each
-  crate whose source names `unsafe_code`, and fails when such a crate runs no tests.
+  for larger ones. A crate gates std types behind `cfg(loom)` only in code that a loom
+  model runs, and the gate swaps them for the `loom` types of the same name. Code with
+  `unsafe` runs under Miri (r16 61). `cargo xtask loom` builds the tests in release mode
+  with `--cfg loom`. Then it runs, with `LOOM_MAX_PREEMPTIONS=3`, each test target that
+  compiles a file that names `loom` in a `cfg`, oracles included. `cargo xtask shuttle`
+  does the same with `--cfg shuttle`. `cargo xtask miri` runs Miri on each crate whose
+  source names `unsafe_code`, and fails when such a crate runs no tests.
 - **Hot paths** of product code (`docs/claude/performance.md`) run under a counting
   allocator that fails on any allocation.
 - **Unit tests are co-located** in a `#[cfg(test)] mod tests` block. Group by subject

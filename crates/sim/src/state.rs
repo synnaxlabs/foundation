@@ -68,6 +68,7 @@ struct Node {
     resumes: Option<Monotonic>,
     cores: NonZeroUsize,
     unpinnable: bool,
+    arm_max: Option<Span>,
     entropy: Rng,
     shards: shard::Starts,
     /// The monotonic reading at boot.
@@ -186,6 +187,7 @@ impl State {
             resumes: Some(self.now),
             cores: config.cores,
             unpinnable: config.unpinnable,
+            arm_max: config.arm_max,
             entropy,
             shards: shard::Starts::default(),
             boot: config.monotonic,
@@ -284,15 +286,23 @@ impl State {
             .filter(|&task| self.resumes(task).is_some_and(|at| at <= self.now))
     }
 
-    /// When a timer of `node` with `deadline` fires.
+    /// When a timer of `node` with `deadline` fires: at the deadline, or early at the
+    /// node's [`node::Config::arm_max`]. A deadline past the end of true time at the
+    /// poll gets no early wake, so a run that waits only for it stays stuck.
     pub(crate) fn due(&self, node: usize, deadline: Monotonic) -> Due {
         let now = self.monotonic(node);
         if deadline <= now {
             return Due::Passed;
         }
-        match self.now.0.checked_add(deadline.0 - now.0) {
-            Some(at) => Due::At(Monotonic(at)),
-            None => Due::Never,
+        let Some(at) = self.now.0.checked_add(deadline.0 - now.0) else {
+            return Due::Never;
+        };
+        match self.nodes[node].arm_max {
+            Some(max) if at <= self.last().0 => {
+                let early = self.now.0.saturating_add(max.nanos().unsigned_abs());
+                Due::At(Monotonic(at.min(early)))
+            }
+            _ => Due::At(Monotonic(at)),
         }
     }
 

@@ -43,6 +43,11 @@ impl Session {
         Weak(Rc::downgrade(&self.0))
     }
 
+    /// The carrier's session under this one.
+    pub(crate) fn quic(&self) -> &quic::Session {
+        &self.0
+    }
+
     /// Who is on the other end.
     ///
     /// ```
@@ -127,7 +132,7 @@ impl Session {
     /// async fn serve(session: &Session) -> Result<(), Error> {
     ///     loop {
     ///         let incoming = session.accept().await?;
-    ///         let _ = incoming.class;
+    ///         let _: transport::Class = incoming.class;
     ///     }
     /// }
     /// ```
@@ -145,6 +150,7 @@ impl Session {
     ///     session.datagrams()
     /// }
     /// ```
+    #[expect(clippy::todo, reason = "a stub until #68")]
     #[must_use]
     pub fn datagrams(&self) -> (datagram::Sender, datagram::Receiver) {
         todo!("#68")
@@ -199,6 +205,11 @@ impl Weak {
             .upgrade()
             .filter(|session| session.live())
             .map(Session)
+    }
+
+    /// Whether this is a handle to `session`.
+    pub(crate) fn is(&self, session: &Session) -> bool {
+        std::ptr::eq(self.0.as_ptr(), Rc::as_ptr(&session.0))
     }
 }
 
@@ -271,11 +282,11 @@ mod tests {
 
     #[test]
     fn a_too_large_message_keeps_its_room_until_a_read_or_a_reset_takes_it() {
-        // The receive budget is the window plus the largest message: 2^17 bytes. A
-        // message that never arrives holds 65,000 of it, so 50,000 more fit once.
+        // The receive budget is the window plus the largest message: 3 * 2^16 bytes.
+        // Two messages that never arrive hold 130,000 of it, so 50,000 more fit once.
         const LEN: usize = 50_000;
         let narrow = |config| Config {
-            window_bytes: 1 << 16,
+            window_bytes: 1 << 17,
             ..config
         };
         let (mut sim, ..) = testing::sessions(
@@ -285,7 +296,7 @@ mod tests {
                 side.node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
                 let complete = 2;
                 let header = [[complete].as_slice(), &message::prefix(65_000)].concat();
-                side.session.0.raw(&header);
+                (0..2).for_each(|_| side.session.0.raw(&header));
                 side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
                 let mut senders: Vec<crate::stream::Sender> = Vec::new();
                 for fill in 1..=4 {
@@ -311,8 +322,13 @@ mod tests {
                     bytes_max: 100,
                 };
                 side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
-                let mut held = side.session.accept().await.expect("a stream").receiver;
-                assert!(poll_once(pin!(held.recv())).await.is_none());
+                let mut held = Vec::new();
+                for _ in 0..2 {
+                    let mut receiver =
+                        side.session.accept().await.expect("a stream").receiver;
+                    assert!(poll_once(pin!(receiver.recv())).await.is_none());
+                    held.push(receiver);
+                }
                 let mut first = side.session.accept().await.expect("a stream").receiver;
                 let mut second =
                     side.session.accept().await.expect("a stream").receiver;
@@ -348,9 +364,9 @@ mod tests {
     }
 
     fn dropped_wait(read: Read) {
-        // The receive budget is the window plus the largest message: 2^17 bytes.
+        // The receive budget is the window plus the largest message: 3 * 2^16 bytes.
         let narrow = |config| Config {
-            window_bytes: 1 << 16,
+            window_bytes: 1 << 17,
             ..config
         };
         let (mut sim, ..) = testing::sessions(
@@ -359,7 +375,7 @@ mod tests {
             |side| async move {
                 side.node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
                 let complete = 2;
-                for len in [65_000, 65_000, 1 << 16] {
+                for len in [65_000, 65_000, 65_000, 1 << 16] {
                     let header =
                         [[complete].as_slice(), &message::prefix(len)].concat();
                     side.session.0.raw(&header);
@@ -372,16 +388,17 @@ mod tests {
             move |side| async move {
                 side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
                 let mut receivers = Vec::new();
-                for _ in 0..4 {
+                for _ in 0..5 {
                     let incoming = side.session.accept().await.expect("a stream");
                     assert_eq!(incoming.class, Class::Complete);
                     receivers.push(incoming.receiver);
                 }
-                let [first, second, waits, small] = &mut receivers[..] else {
-                    unreachable!("four streams");
+                let [held @ .., waits, small] = &mut receivers[..] else {
+                    unreachable!("five streams");
                 };
-                assert!(poll_once(pin!(first.recv())).await.is_none());
-                assert!(poll_once(pin!(second.recv())).await.is_none());
+                for receiver in held {
+                    assert!(poll_once(pin!(receiver.recv())).await.is_none());
+                }
                 // Boxed, so that the drop below ends the future, not only a borrow.
                 let mut buffer = vec![0; 1 << 16];
                 let mut waiting: Pin<Box<dyn Future<Output = _>>> = match read {
@@ -790,10 +807,10 @@ mod tests {
             };
             let heap = block::Heap::new(memory.reservation());
             let pool = Rc::new(block::Pool::new(memory, heap));
-            // The receive budget is the window plus the largest message: 100_000.
+            // The receive budget is the window plus the largest message: 150_000.
             let config = Config {
                 message_bytes_max: NonZeroUsize::new(50_000).expect("not zero"),
-                window_bytes: 50_000,
+                window_bytes: 100_000,
                 pool: Rc::clone(&pool),
                 ..config
             };
@@ -806,7 +823,7 @@ mod tests {
             let mut a = first.accept().await.expect("a stream").receiver;
             let mut b = second.accept().await.expect("a stream").receiver;
             let mut stalled = Vec::new();
-            for _ in 0..2 {
+            for _ in 0..3 {
                 let incoming = first.accept().await.expect("a stream");
                 assert_eq!(incoming.class, Class::Command);
                 stalled.push(incoming.receiver);
@@ -838,7 +855,7 @@ mod tests {
     }
 
     /// Dials the server two times. Sends a message of [`LEN`] bytes of 1 on the first
-    /// session and one of 2 on the second, then on the first two `Command` streams
+    /// session and one of 2 on the second, then on the first three `Command` streams
     /// that each hold the prefix of a message of [`LEN`] bytes and only part of it.
     /// Waits for the server to close each session with code 4.
     async fn send_and_stall(config: Config, node: sim::node::Node, at: [Address; 1]) {
@@ -859,7 +876,7 @@ mod tests {
         node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
         let command = 0;
         let part = [&[command], &*message::prefix(LEN), &[3; 1_000]].concat();
-        for _ in 0..2 {
+        for _ in 0..3 {
             first.0.raw(&part);
         }
         let closed = Error::PeerClosed { code: Code(4) };

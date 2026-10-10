@@ -1,11 +1,11 @@
 //! Runs a test of this binary again in a child process, with the C flags it picks.
 
-use std::process::Command;
+use std::process::{Command, Output};
 
 /// The variable that marks a child process.
 const MARK: &str = "CONNECTOR_OPCUA_CHILD";
 
-/// Whether this process is a child that `run` started.
+/// Whether this process is a child that `run` or `output` started.
 pub(crate) fn running() -> bool {
     #[expect(
         clippy::disallowed_methods,
@@ -15,18 +15,33 @@ pub(crate) fn running() -> bool {
     mark.is_some()
 }
 
-/// Runs the test `name` in a child process, and asserts that it passes. The child
-/// gets only `PATH` and, as `CC`, the compiler that `cc` picks here without its flags,
-/// so `cflags` is the only C flags that `cc` reads there.
-pub(crate) fn run(name: &str, cflags: Option<&str>) {
-    let target = env!("CONNECTOR_OPCUA_TARGET");
-    let compiler = cc::Build::new()
+/// Gives the tool that `build` picks for `target` outside a build script.
+pub(crate) fn tool(build: &mut cc::Build, target: &str) -> cc::Tool {
+    build
         .target(target)
         .host(target)
         .opt_level(0)
         .cargo_metadata(false)
         .cargo_warnings(false)
-        .get_compiler();
+        .get_compiler()
+}
+
+/// Runs the test `name` as `output` does, and asserts that it passes.
+pub(crate) fn run(name: &str, envs: &[(&str, &str)]) {
+    let output = output(name, envs);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.contains("test result: ok. 1 passed"),
+        "{name} with {envs:?}: {stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Runs the test `name` in a child process, and gives its output. The child gets only
+/// `PATH`, `envs`, and, as `CC` unless `envs` sets it, the compiler that `cc` picks
+/// here without its flags, so `cc` reads C flags there only from `envs`.
+pub(crate) fn output(name: &str, envs: &[(&str, &str)]) -> Output {
+    let compiler = tool(&mut cc::Build::new(), env!("CONNECTOR_OPCUA_TARGET"));
     #[expect(
         clippy::disallowed_methods,
         reason = "`cc` finds the compiler on the PATH of the child process"
@@ -38,14 +53,7 @@ pub(crate) fn run(name: &str, cflags: Option<&str>) {
         .env_clear()
         .env("PATH", path)
         .env("CC", compiler.path())
-        .env(MARK, "1");
-    if let Some(cflags) = cflags {
-        child.env("CFLAGS", cflags);
-    }
-    let output = child.output().unwrap();
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    assert!(
-        output.status.success() && stdout.contains("test result: ok. 1 passed"),
-        "{name} with CFLAGS={cflags:?}: {stdout}"
-    );
+        .env(MARK, "1")
+        .envs(envs.iter().copied());
+    child.output().unwrap()
 }

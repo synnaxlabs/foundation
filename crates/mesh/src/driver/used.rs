@@ -3,6 +3,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::future::poll_fn;
 use std::mem;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,7 @@ use types::digest::Digest;
 use types::name::{Name, Prefix};
 use types::time::Span;
 
-use super::{Group, Mesh};
+use super::{Group, Mesh, Slot};
 use crate::error::{Error, Stopped};
 use crate::used::{Behind, Cause, Spec};
 use spec::Pointer;
@@ -183,8 +184,8 @@ impl Used {
 
     // Records what the job for `pointer` gave. A read for a pointer that a newer one
     // replaced still sets the spec in use or `Spec::behind`. A get for one changes
-    // nothing.
-    fn settle(&mut self, pointer: Pointer, done: Done) {
+    // nothing. Returns whether the spec in use changed.
+    fn settle(&mut self, pointer: Pointer, done: Done) -> bool {
         let newest = self
             .newest
             .as_mut()
@@ -200,10 +201,10 @@ impl Used {
                     behind: None,
                 };
                 self.chunks = chunks;
-                return;
+                return true;
             }
             (Done::Failed { cause, .. }, None) => cause,
-            (Done::Got(..), None) => return,
+            (Done::Got(..), None) => return false,
             (Done::Failed { cause, got }, Some(newest)) => {
                 newest.got.extend(got);
                 newest.step = match &cause {
@@ -218,12 +219,13 @@ impl Used {
             (Done::Got(_, Ok(Some(chunk))), Some(newest)) => {
                 newest.got.push(chunk);
                 newest.step = Step::Read;
-                return;
+                return false;
             }
             (Done::Got(digest, Ok(None)), Some(_)) => missing(digest),
             (Done::Got(_, Err(error)), Some(_)) => Cause::Blob(error),
         };
         self.spec.behind = Some(Behind { pointer, cause });
+        false
     }
 }
 
@@ -422,20 +424,14 @@ pub(super) async fn keep(
         let Some(gave) = gave.await else {
             continue;
         };
-        let done = match gave {
-            Gave::Got(digest, got) => Done::Got(digest, got),
-            Gave::Read(Ok((definitions, chunks)), got) => {
-                match name(&files, &held, pointer).await {
-                    Ok(()) => Done::Taken(definitions, chunks),
-                    Err(cause) => Done::Failed { cause, got },
-                }
-            }
-            Gave::Read(Err(cause), got) => Done::Failed { cause, got },
-        };
+        let done = hold(gave, &files, &held, pointer).await;
         let Some(group) = group.upgrade() else { return };
         let mut group = group.borrow_mut();
-        group.used.settle(pointer, done);
+        let moved = group.used.settle(pointer, done);
         group.wake_calls();
+        if moved {
+            group.wake_watches();
+        }
     }
 }
 
@@ -479,6 +475,21 @@ async fn read(
     let mut kept = Chunks::default();
     spec::region::tree(&mut kept, &definitions);
     Ok((definitions, kept))
+}
+
+// Names `pointer` in `held` when its read has no problem. Gives what its job gave, or
+// the cause of a failed name.
+async fn hold(gave: Gave, files: &Files, held: &Path, pointer: Pointer) -> Done {
+    match gave {
+        Gave::Got(digest, got) => Done::Got(digest, got),
+        Gave::Read(Ok((definitions, chunks)), got) => {
+            match name(files, held, pointer).await {
+                Ok(()) => Done::Taken(definitions, chunks),
+                Err(cause) => Done::Failed { cause, got },
+            }
+        }
+        Gave::Read(Err(cause), got) => Done::Failed { cause, got },
+    }
 }
 
 // Makes the file in `held` that names `pointer` durable, then removes each other file
@@ -526,22 +537,59 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// [`Stopped`] when the group stops first.
+    /// [`Stopped`] when the group stopped, before or during the call.
     pub async fn spec(&self) -> Result<Spec, Stopped> {
         let call = Call::new(&self.group);
         let committed = self.group.borrow().state.pointer().version;
         poll_fn(|cx| {
             let mut group = self.group.borrow_mut();
-            if group.used.reached(committed) {
-                return Poll::Ready(Ok(group.used.spec.clone()));
-            }
             if let Some(stopped) = group.stopped.get() {
                 return Poll::Ready(Err(stopped.clone()));
+            }
+            if group.used.reached(committed) {
+                return Poll::Ready(Ok(group.used.spec.clone()));
             }
             group.calls.insert(call.slot, cx.waker().clone());
             Poll::Pending
         })
         .await
+    }
+
+    /// A watch of the spec that this node uses.
+    #[must_use]
+    pub fn watch_spec(&self) -> Watch {
+        Watch {
+            slot: Slot::new(&self.group),
+        }
+    }
+}
+
+/// A watch of the spec that a node uses.
+pub struct Watch {
+    slot: Slot<Option<Pointer>>,
+}
+
+impl fmt::Debug for Watch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Watch")
+            .field("given", &self.slot.given.flatten())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Watch {
+    /// The first call returns the spec in use at once. Each later call waits until
+    /// the pointer in use differs from the one it last returned, and returns the
+    /// newest spec: two changes between calls give one result. A change of only
+    /// `behind` does not wake it.
+    ///
+    /// # Errors
+    ///
+    /// [`Stopped`], the cause, at once, on each call after the group stops or each
+    /// [`Mesh`] of it drops, as [`crate::Watch::next`] does.
+    pub async fn next(&mut self) -> Result<Spec, Stopped> {
+        let read = |group: &Group| (group.used.spec.pointer, group.used.spec.clone());
+        self.slot.next(read).await
     }
 }
 

@@ -1,13 +1,14 @@
 //! Test helpers for the modules of this crate.
 
-use std::sync::Arc;
-
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::tasks::Tasks;
+use spec::definition::Definition;
+use types::channel;
+use types::name::Name;
 
 use crate::kind::Table;
-use crate::supervisor;
+use crate::{supervisor, testing};
 
 /// Runs `main` on a shard of one simulated node and returns its output.
 pub(crate) fn run<T, F>(
@@ -29,22 +30,58 @@ where
     T: Send + 'static,
     F: Future<Output = T> + 'static,
 {
+    run_with(sim::node::Config::default(), main)
+}
+
+/// Runs `main` on a shard of one simulated node of `config`, given the node, and
+/// returns its output.
+pub(crate) fn run_with<T, F>(
+    config: sim::node::Config,
+    main: impl FnOnce(sim::node::Node, Tasks) -> F + Send + 'static,
+) -> T
+where
+    T: Send + 'static,
+    F: Future<Output = T> + 'static,
+{
     let mut sim = sim::Sim::new(sim::Config::default());
-    let node = sim.node(sim::node::Config::default());
+    let node = sim.node(config);
     sim.run_on(&node, main).expect("the run ends")
 }
 
-/// The inputs of a supervisor of `kinds` on a shard of `node`.
-pub(crate) fn inputs(
+/// The inputs of a supervisor of `kinds` on a shard of `node`, with a hub on a new
+/// shard that defines the status channels of `connector` with keys from
+/// [`STATUS`] on.
+pub(crate) async fn create_config(
     node: &sim::node::Node,
     tasks: Tasks,
     kinds: Table,
+    connector: &str,
 ) -> supervisor::Config {
-    supervisor::Config {
-        kinds: Arc::new(kinds),
+    let config = testing::create_config(env(node, tasks), node.net(), kinds).await;
+    let status = create_status(connector);
+    config
+        .hub
+        .set_definitions(status.iter().map(|(name, def)| (name, def)));
+    config
+}
+
+/// The inputs of a hub on a new shard of `node`.
+pub(crate) fn env(node: &sim::node::Node, tasks: Tasks) -> hub::testing::Env {
+    hub::testing::Env {
+        files: node.files(),
         clock: node.clock(),
+        wall: node.wall(),
         entropy: node.entropy(),
-        net: node.net(),
         tasks,
     }
+}
+
+/// The first key of the status channels that [`create_config`] defines.
+pub(crate) const STATUS: channel::Key = channel::Key::from_u128(100);
+
+/// The definitions of the status channels of `connector`, with no count, with keys
+/// from [`STATUS`] on.
+pub(crate) fn create_status(connector: &str) -> Vec<(Name, Definition)> {
+    let connector = connector.parse().expect("a valid name");
+    testing::create_status(&connector, &[], STATUS)
 }

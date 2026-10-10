@@ -20,7 +20,7 @@ use types::sample::{Scalar, Type};
 
 use super::{
     I64, LIVE, RING, SETTLE, applied, channels, config, definition, entry, keys, name,
-    poll_flagged, run, samples, without, write, write_series, written,
+    poll_flagged, run, samples, unnamed, without, write, write_series, written,
 };
 
 pub(super) const I32: Type = Type::Scalar(Scalar::I32);
@@ -95,11 +95,8 @@ fn ends_each_session_on_a_removed_data_channel_at_once() {
             error.expect_err("unknown"),
             writer::Error::Unknown(name("value"))
         );
-        let error = test.hub.reader(&[name("value")], Mode::Latest).await;
-        assert_eq!(
-            error.expect_err("unknown"),
-            reader::Error::Unknown(name("value"))
-        );
+        let error = test.hub.reader(unnamed(&["value"], Mode::Latest)).await;
+        assert_eq!(error.expect_err("unknown"), reader::Error::Empty);
         // The removal closed the writer, so another takes control of the index.
         let mut other = test.writer("b", &["value-c"]).await;
         let outcomes = write_series(&mut other, &[(1, &[now + 1]), (5, &[30])]);
@@ -196,7 +193,9 @@ fn ends_the_sessions_of_a_data_channel_that_moves_to_another_index() {
         let writer = test.writer("b", &["value", "value-b"]).await;
         let entries = writer.set().entries();
         let keys: Vec<_> = entries.iter().map(|entry| entry.key.as_u128()).collect();
-        assert_eq!(keys, [3, 2, 4]);
+        // The move keeps the data slot of `value`, which is lower than the slot of
+        // `time-b`.
+        assert_eq!(keys, [2, 3, 4]);
     });
 }
 
@@ -349,16 +348,37 @@ fn gives_a_latest_reader_of_a_changed_channel_no_series_of_the_removed_one() {
         assert_eq!(write_i32(&mut writer, now + 1, 20), [applied(1)]);
         let received = reader.next().await.expect("a frame");
         assert_eq!(keys(&received), [1, 2]);
-        let at = entry(received.set, 2);
-        assert_eq!(received.set.entries()[at].data_type, I32);
+        let at = entry(received.set(), 2);
+        assert_eq!(received.set().entries()[at].data_type, I32);
         let (_, bytes) = received
-            .view
+            .view()
             .iter()
             .find(|&(present, _)| present == at)
             .expect("the view holds the series");
         let mut out = [0; 4];
         codec::decode(I32, 1, bytes, &mut out).expect("decodes");
         assert_eq!(i32::from_le_bytes(out), 20);
+    });
+}
+
+/// A latest reader on a renamed channel takes the newest frame with the series written
+/// under the old name: a rename keeps the history of the channel.
+#[test]
+fn gives_a_latest_reader_of_a_renamed_channel_the_series_of_its_old_name() {
+    run(47, |test| async move {
+        let mut writer = test.writer("a", &["value"]).await;
+        let now = test.now();
+        assert_eq!(write(&mut writer, &[now], &[10]), [applied(0)]);
+        let mut renamed = channels();
+        let value = renamed
+            .remove(&name("value"))
+            .expect("a channel of the test");
+        renamed.insert(name("level"), value);
+        test.hub.set_definitions(&renamed);
+        let mut reader = test.reader(&["level"], Mode::Latest).await;
+        let received = reader.next().await.expect("the newest frame");
+        assert_eq!(keys(&received), [1, 2]);
+        assert_eq!(samples(&received, 2), [10]);
     });
 }
 
@@ -594,7 +614,7 @@ async fn reopen(
         node: super::NODE,
         time: mesh.clone(),
         entropy: node.entropy(),
-        mesh: None,
+        region: None,
     })
 }
 

@@ -10,6 +10,7 @@
 //! its end from the last, and the rest gives the elements.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use codec::{Encoder, Error};
 use fuzz::codec::{PAD, Shape};

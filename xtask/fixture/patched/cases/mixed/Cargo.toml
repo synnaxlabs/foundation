@@ -1,0 +1,14 @@
+[package]
+name = "mixed"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+p = "1.3"
+old = { package = "p", version = "0.9" }
+
+[patch.crates-io]
+p = { path = "../../patches/p" }

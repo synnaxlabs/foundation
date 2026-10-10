@@ -129,7 +129,7 @@ fn cases() -> Vec<Case> {
 fn index_last(interner: &mut Interner) -> Arc<KeySet> {
     let data: Vec<_> = (100_001..200_000).map(|n| (key(n), F64)).collect();
     for &(key, _) in &data {
-        interner.slots().data(key);
+        interner.slots().data(key, F64);
     }
     interner.intern(&[Group {
         index: key(200_000),
@@ -142,7 +142,7 @@ fn in_turn(interner: &mut Interner) -> Arc<KeySet> {
     interner.slots().index(key(300_000));
     interner.slots().index(key(300_001));
     for n in 300_002..400_000 {
-        interner.slots().data(key(n));
+        interner.slots().data(key(n), F64);
     }
     let data = |from| -> Vec<_> {
         (from..400_000).step_by(2).map(|n| (key(n), F64)).collect()

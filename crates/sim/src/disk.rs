@@ -56,6 +56,11 @@ pub(crate) struct Disk {
     /// The changes of entries that no `sync_dir` covered, in the order that their calls
     /// ended.
     log: Vec<Change>,
+    /// The path of each open descriptor as its open or rename gave it, by the key of
+    /// its handle.
+    descriptors: BTreeMap<u64, PathBuf>,
+    /// The normal path of each descriptor closed, in order.
+    closes: Vec<PathBuf>,
 }
 
 /// A change of the entries of directory `dir`: each name, and the inode that it then
@@ -101,6 +106,8 @@ pub(crate) struct File {
     durable: bool,
     /// The edits in the log that name the file.
     logged: u64,
+    /// Each normal path that an open made it at or a rename gave it.
+    names: BTreeSet<PathBuf>,
 }
 
 /// The durable bytes of a sector, its clean bytes in the cache, and its writes.
@@ -135,6 +142,8 @@ impl Disk {
             used: 0,
             inodes: BTreeMap::from([(ROOT, Inode::Dir(Dir::default()))]),
             log: Vec::new(),
+            descriptors: BTreeMap::new(),
+            closes: Vec::new(),
         }
     }
 
@@ -155,6 +164,28 @@ impl Disk {
             Inode::Dir(_) => Ok(at),
             Inode::File(_) => Err(Cause::Code(NOT_DIRECTORY)),
         }
+    }
+
+    /// Whether `path` has named file `inode`, which a hold keeps.
+    pub(crate) fn named_by(&self, inode: u64, path: &Path) -> bool {
+        match self.inodes.get(&inode) {
+            Some(Inode::File(file)) => file.names.contains(&normal(path)),
+            _ => unreachable!("invariant: held file {inode} is there"),
+        }
+    }
+
+    /// The directory of `path`, its last name, and the inode of that entry, if any.
+    /// `None` for an empty path.
+    fn lookup<'a>(&self, path: &'a Path) -> Result<Option<Entry<'a>>, Cause> {
+        let segments = segments(path);
+        let Some((name, parent)) = segments.split_last() else {
+            return Ok(None);
+        };
+        let dir = self.dir(parent)?;
+        let Inode::Dir(Dir { entries, .. }) = &self.inodes[&dir] else {
+            unreachable!("invariant: inode {dir} is a directory");
+        };
+        Ok(Some((dir, name, entries.get(*name).copied())))
     }
 
     /// Directory `key`.
@@ -210,6 +241,7 @@ impl Disk {
                     linked: true,
                     durable: false,
                     logged: 0,
+                    names: BTreeSet::from([normal(path)]),
                 };
                 self.inodes.insert(key, Inode::File(file));
                 self.edit(dir, vec![(name.into(), Some(key))]);
@@ -271,17 +303,11 @@ impl Disk {
     /// Unlinks the file at `path`. It stays while a hold, a durable entry, or a change
     /// in the log keeps it.
     pub(crate) fn remove(&mut self, path: &Path) -> Result<(), Cause> {
-        let (segments, slashed) = (segments(path), slashed(path));
-        let Some((name, parent)) = segments.split_last() else {
+        let Some((dir, name, found)) = self.lookup(path)? else {
             return Err(Cause::Code(DIRECTORY));
         };
-        let dir = self.dir(parent)?;
-        let inode = *self
-            .dir_mut(dir)
-            .entries
-            .get(*name)
-            .ok_or(Cause::NotFound)?;
-        self.named(inode, slashed)?.linked = false;
+        let inode = found.ok_or(Cause::NotFound)?;
+        self.named(inode, slashed(path))?.linked = false;
         self.edit(dir, vec![(name.into(), None)]);
         Ok(())
     }
@@ -294,14 +320,16 @@ impl Disk {
         Ok(())
     }
 
-    /// Moves the entry of file `inode` from `from` to `to`, both in one directory.
-    /// `NotFound` when `from` no longer names it; `Exists` when `to` is taken.
+    /// Moves the entry of the file of `handle` from `from` to `to`, both in one
+    /// directory, and gives descriptor `handle`, when it is still open, the path `to`.
+    /// `NotFound` when `from` no longer names the file; `Exists` when `to` is taken.
     pub(crate) fn rename(
         &mut self,
-        inode: u64,
+        handle: Handle,
         from: &Path,
         to: &Path,
     ) -> Result<(), Cause> {
+        let inode = handle.inode;
         let (dir, old) = self.entry(inode, from)?;
         let new = segments(to)
             .pop()
@@ -310,23 +338,52 @@ impl Disk {
             return Err(Cause::Exists(to.to_path_buf()));
         }
         self.edit(dir, vec![(old.into(), None), (new.to_owned(), Some(inode))]);
+        self.file(inode).names.insert(normal(to));
+        if let Some(path) = self.descriptors.get_mut(&handle.key) {
+            *path = to.to_path_buf();
+        }
         Ok(())
     }
 
     /// The directory and the name of the entry at `path`, a path of a handle of file
     /// `inode`. `NotFound` when the entry no longer names it.
     fn entry<'a>(&self, inode: u64, path: &'a Path) -> Result<(u64, &'a OsStr), Cause> {
-        let segments = segments(path);
-        let (name, parent) = segments
-            .split_last()
-            .expect("invariant: a handle names a file");
-        let dir = self.dir(parent)?;
-        match &self.inodes[&dir] {
-            Inode::Dir(entries) if entries.entries.get(*name) == Some(&inode) => {
-                Ok((dir, name))
-            }
+        match self
+            .lookup(path)?
+            .expect("invariant: a handle names a file")
+        {
+            (dir, name, Some(found)) if found == inode => Ok((dir, name)),
             _ => Err(Cause::NotFound),
         }
+    }
+
+    /// Makes `handle`, which an open of `path` gave, a descriptor.
+    pub(crate) fn opened(&mut self, handle: Handle, path: &Path) {
+        self.descriptors.insert(handle.key, path.to_path_buf());
+    }
+
+    /// The path of descriptor `handle` now, as its open or rename gave it.
+    pub(crate) fn path(&self, handle: Handle) -> &Path {
+        let Some(path) = self.descriptors.get(&handle.key) else {
+            unreachable!(
+                "invariant: descriptor {} of file {} has a path",
+                handle.key, handle.inode
+            )
+        };
+        path
+    }
+
+    /// Closes descriptor `handle`: drops its hold and logs its path.
+    pub(crate) fn close(&mut self, handle: Handle) {
+        self.release(handle);
+        let path = normal(self.path(handle));
+        self.descriptors.remove(&handle.key);
+        self.closes.push(path);
+    }
+
+    /// The path of each descriptor closed, in order.
+    pub(crate) fn closes(&self) -> &[PathBuf] {
+        &self.closes
     }
 
     /// Adds one hold of the file of `handle`.
@@ -344,14 +401,20 @@ impl Disk {
         self.collect(handle.inode);
     }
 
-    /// Crashes the disk by `crash`. Each hold drops, as at the death of the process
-    /// that held the files, and each file that only a hold kept is freed. After a
-    /// `Power` crash, each directory goes back to its durable entries with the changes
-    /// of a prefix of the log, what they no longer reach is freed, and each sector
-    /// keeps its durable bytes or its bytes after one write that no sync covered, by
-    /// `rng`. The prefix draws from `rng` only when the log is not empty. Returns the
-    /// number of changes that a `Power` crash kept, or 0 after a `Process` crash.
+    /// Crashes the disk by `crash`. Each hold drops and each descriptor closes, as at
+    /// the death of the process that held the files, and each file that only a hold
+    /// kept is freed. After a `Power` crash, each directory goes back to its durable
+    /// entries with the changes of a prefix of the log, what they no longer reach is
+    /// freed, and each sector keeps its durable bytes or its bytes after one write that
+    /// no sync covered, by `rng`. The prefix draws from `rng` only when the log is not
+    /// empty. Returns the number of changes that a `Power` crash kept, or 0 after a
+    /// `Process` crash.
     pub(crate) fn crash(&mut self, crash: Crash, rng: &mut Rng) -> u64 {
+        self.closes.extend(
+            mem::take(&mut self.descriptors)
+                .values()
+                .map(|path| normal(path)),
+        );
         let inodes: Vec<u64> = self.inodes.keys().copied().collect();
         for inode in inodes {
             if let Some(Inode::File(file)) = self.inodes.get_mut(&inode) {
@@ -439,17 +502,13 @@ impl Disk {
     /// What an open of `path` by `mode` finds, with each fault it gives before it
     /// takes space.
     fn target<'a>(&self, path: &'a Path, mode: Mode) -> Result<Target<'a>, Cause> {
-        let (segments, slashed) = (segments(path), slashed(path));
-        let Some((name, parent)) = segments.split_last() else {
+        let slashed = slashed(path);
+        let Some((dir, name, found)) = self.lookup(path)? else {
             return Err(Cause::Code(DIRECTORY));
         };
-        let dir = self.dir(parent)?;
-        let Inode::Dir(Dir { entries, .. }) = &self.inodes[&dir] else {
-            unreachable!("invariant: inode {dir} is a directory");
-        };
-        let inode = match (entries.get(*name), mode) {
+        let inode = match (found, mode) {
             (_, Mode::Create { .. }) if slashed => return Err(Cause::Code(DIRECTORY)),
-            (Some(&inode), _) => inode,
+            (Some(inode), _) => inode,
             (None, Mode::Create { len }) => return Ok(Target::New { dir, name, len }),
             (None, Mode::Read | Mode::Write) => return Err(Cause::NotFound),
         };
@@ -767,6 +826,9 @@ fn within(start: u64, part: &Range<u64>) -> Range<usize> {
     index(part.start - start)..index(part.end - start)
 }
 
+/// A directory, a name in it, and the inode that the name gives, if any.
+type Entry<'a> = (u64, &'a OsStr, Option<u64>);
+
 /// The segments of a checked path: only its names, since `.` adds nothing.
 fn segments(path: &Path) -> Vec<&OsStr> {
     (path.components())
@@ -811,6 +873,7 @@ mod tests {
             linked: true,
             durable: false,
             logged: 0,
+            names: BTreeSet::new(),
         }
     }
 

@@ -498,7 +498,8 @@ mod tests {
             let frames = Frames::new();
             let mut set = carried(1);
             let latest = set.open_latest(0);
-            let _ = set.open_complete(0, 0, u64::MAX, complete::Charge::Whole);
+            let _: complete::Key =
+                set.open_complete(0, 0, u64::MAX, complete::Charge::Whole);
             set.applied(0, frames.frame(Path::Backfill, 0..2), &frames.set, 0..2);
             assert_eq!(woken(&mut set), []);
             assert_eq!(set.listed(), []);

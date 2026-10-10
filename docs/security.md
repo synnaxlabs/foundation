@@ -110,6 +110,11 @@ state on `main`.
   exchange and one signature, and one signature check more when the peer sends a
   certificate. With no limit, each spoofed Initial holds about 46 KB until the idle
   timeout (#563).
+- Fixed: #2084 (a peer with no key started a handshake that it kept alive, and the
+  stop of the node waited for it with no bound, because shard 0 holds `lock` until
+  the transport frees the port). The drop of the transport closes each handshake in
+  flight, and the transport waits at most 3 s for the closes to drain after the last
+  session ended, so the round trip of a peer cannot hold the port.
 
 ### `transport` to protocols
 
@@ -121,8 +126,9 @@ state on `main`.
   rejects a client's. It gives a `Hub` stream to the hub only when a member of its
   region has the peer's public key, once, at the header (NODE PORT); it rejects a
   client's until #1744. `node` stops and resets each other stream until its protocol
-  has a server. It reads no datagram yet (#1661), and admits every peer to a session
-  (#1628).
+  has a server. It reads no datagram yet (#1661). It admits each member of the region
+  to a session, and at most 256 sessions of other peers at once (NODE PORT); it
+  rejects a stream whose header has not arrived within 10 s.
 
 ### Subject to owner
 
@@ -303,6 +309,13 @@ state on `main`.
 
 - Each protocol parser reads bytes from a device. A connector reaches the core only
   through `hub`. Not built. Each parser gets a fuzz target when it lands.
+- `connector-opcua` decodes OPC UA with the C code of open62541. Fuzzed:
+  `connector_opcua_decode`. Its chunk processing is not fuzzed yet (#1990).
+- The random generator of the open62541 copy is PCG32, which a peer can predict. The
+  copy takes the nonces of the security policy None and the session token of its server
+  from it. OPEN62541 SOURCE bars it for each nonce, key, and session token of Foundation
+  code, and states what a security policy that encrypts, or an OPC UA server of
+  Foundation, changes first. Neither is built.
 
 ### Encoded series
 
@@ -349,7 +362,8 @@ state on `main`.
   manifest. aws-lc-rs is the only crypto provider, with one recorded exception.
 - `unsafe` is denied in the workspace. The crates that allow it (`block`, `ring`,
   `counting`) run under Miri in CI.
-- The `fuzz/` crate has its own lock file, which `cargo deny` does not read (#252).
+- The `fuzz/` crate has its own lock file. The `deny` job of `ci.yaml` checks it with
+  `cargo deny` on each change to it.
 - A local patch of a Rust crate (`patches/`) is a path package, which `cargo deny`
   does not check against advisories. The `Advisories of each patched release` step of
   the `deny` job checks its release (#1867). The open62541 copy in `patches/open62541/`
@@ -362,7 +376,8 @@ state on `main`.
 The rule is one target for each decoder of outside input
 (`docs/claude/testing.md`). An encoder or a writer also gets a target when a
 decoder must read its output back (`codec_encoder`, `config_hcl_write`). Inputs are
-in `oracles/fuzz/<target>/`. The CI job is #252.
+in `oracles/fuzz/<target>/`. The `fuzz` job of `ci.yaml` runs each target for 60
+seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 
 | Target | Surface | Checks besides "no panic" |
 | --- | --- | --- |
@@ -370,7 +385,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; each valid message made from the input decodes to itself |
 | `wire_blob` | `wire::blob::Server::decode`, `Requester::decode`, `Put::body`, `Reply::body`, `Body::take`, `Body::end`, `get::encode`, `Put::encode`, `Reply::encode` | Each message encodes to the same bytes; each body counts exactly the bytes of its head, and each refusal of a body is the one that its rest gives; a body ends unfinished while bytes remain; each valid message made from the input decodes to itself |
-| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
+| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reader::end`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session; each head is live, ends at or below `u64::MAX`, and starts at or after the end of the head before it; each refusal is one that the order, the mode, or the heads of the session give; the body is where `Reader::body` says; `Reader::end` refuses each point before `Behind`, with `Unfinished` inside a body; each valid message made from the input decodes to itself |
 | `wire_hub_client` | `wire::hub::client::Challenge::decode`, `Signed::decode`, `Request::decode`, `Response::decode`, `Body::take`, `Body::end`, and the encoders of each message | Each message encodes to the same bytes; each decoder refuses another kind with `Error::Kind`; each body ends at its length and nowhere else, and each refusal of a body is the one that its rest gives; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
 | `transport_certificate` | `transport::fuzzing::peer`: the client verifier and the peer of a node's server, for a dialer's chain of 0 to 3 certificates (feature `fuzzing`) | Gives the peer that a second reader of the rules gives: a client for no certificate, none for a chain of more than one or a certificate over 1024 bytes, and else none or the node whose key follows the Ed25519 key header in the certificate; a certificate that a node issues reads back to its key, and two of it are refused. Not reached: the handshake signature, which fuzzed bytes cannot make |
@@ -394,6 +409,7 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
+| `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES` | No memory fault or leak; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. Until #435 is fixed, the encoding decodes with as many zeros after it as its length. |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
@@ -410,12 +426,16 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 
 No target yet, because the decoder is private, not built, not reached from a file, or
 not reached from the corpus: `transport::message` (#55), the QUIC hello
-(`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
-#336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
+(`transport::quic::hello::Hello::decode`), `spec` tree chunks (#64), the scan of the
 mesh log files and the names of their directory (`mesh::log::scan` and
-`mesh::log::sequence`, #1746), the names in the directory of the spec in use
-(`mesh::driver::used::pointer`, #1746), each connector's protocol parser, the OPC UA
-binary decoding of open62541 (`UA_decodeBinary`, #1885), and `connector::reader::read`,
+`mesh::log::sequence`, #1746), the file `founding` of the mesh directory
+(`mesh::region::Founding::decode`, with `mesh::Member::decode` in it, #1746), the join
+answer (`mesh::Member::decode` from a peer, #336 adds its target), the names in the
+directory of the spec in use (`mesh::driver::used::pointer`, #1746), each connector's
+protocol parser, the file `name` of the data directory (`node::name::decode`, #2174),
+the file `budget` of the data directory (`node::budget::decode`, #2174), the parsers of
+`/proc/self/mountinfo` and `/proc/self/cgroup` in `os::memory` (#2226), the chunk
+processing of open62541 (`ua_securechannel.c`, #1990), and `connector::reader::read`,
 `connector::http::uri`, and `connector_influx::Kind::parse`, which `config_check`
 reaches only from an input with a `connector` block of kind `influx`, and no input holds
 one yet (#1817).

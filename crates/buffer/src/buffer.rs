@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
+use std::num::NonZeroU8;
 use std::path::{self, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
@@ -19,15 +20,17 @@ use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::{self, File, Files, Mode};
 use env::tasks::Tasks;
-use types::channel::{Slot, Slots};
+use types::channel::{self, Slot, Slots};
 use types::frame::Path;
+use types::hash;
 use types::time::Span;
+use types::wait;
 
 use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
 use crate::log::{self, Found, Logs, Mark, Tail};
-use crate::read::{Read, Reading};
+use crate::read::{self, Read, Reading, Stored};
 use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
 
@@ -260,7 +263,7 @@ struct Shared {
 impl Shared {
     /// Ends the task's idle span. The caller holds no borrow of `state`.
     fn unpark(&self) {
-        let parked = self.state.borrow_mut().parked.take();
+        let parked = self.state.borrow_mut().parked.0.take();
         if let Some(waker) = parked {
             waker.wake();
         }
@@ -283,14 +286,13 @@ struct State {
     /// How many deadlines ended with no error.
     commits: u64,
     /// The waiting [`Commit`]s, which the end of each commit and of the task wakes.
-    wakers: Vec<Waker>,
-    /// The waker of each waiting [`End`] by its key. Only the end of the task wakes
-    /// them, and the drop of an `End` takes its waker out.
-    ending: Vec<(u64, Waker)>,
-    /// The key of the next [`End`].
-    next_end: u64,
+    committing: wait::Set,
+    /// The waiting [`End`]s. Only the end of the task wakes them.
+    ending: wait::Set,
+    /// The key of the next [`Commit`] or [`End`] in its set.
+    next_key: u64,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
-    parked: Option<Waker>,
+    parked: Parked,
     /// Whether the handle dropped. The task ends when it next idles.
     closed: bool,
     /// Whether the task ended. An [`End`], and a [`Commit`] held past the drop, wait
@@ -298,6 +300,16 @@ struct State {
     ended: bool,
     /// The error that ended the task.
     failed: Option<files::Error>,
+}
+
+/// The task's waker, while it idles.
+struct Parked(Option<Waker>);
+
+/// Prints whether the task idles in place of its waker, whose `Debug` prints pointers.
+impl fmt::Debug for Parked {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.is_some().fmt(f)
+    }
 }
 
 impl State {
@@ -319,14 +331,15 @@ impl State {
     /// Marks the task ended and moves each waiter into `woken`.
     fn end(&mut self, woken: &mut Vec<Waker>) {
         self.ended = true;
-        woken.append(&mut self.wakers);
-        woken.extend(self.ending.drain(..).map(|(_, waker)| waker));
+        self.committing.drain(woken);
+        self.ending.drain(woken);
     }
 
-    /// Takes the waker of the [`End`] with `key` out of `ending`.
-    fn forget(&mut self, key: u64) -> Option<Waker> {
-        let at = self.ending.iter().position(|(held, _)| *held == key)?;
-        Some(self.ending.swap_remove(at).1)
+    /// The key of the next [`Commit`] or [`End`].
+    fn key(&mut self) -> u64 {
+        let key = self.next_key;
+        self.next_key += 1;
+        key
     }
 
     /// Closes the open group into the queue and opens a spare.
@@ -368,9 +381,7 @@ impl Buffer {
     /// durable. It reads the header and the records from the ring's tail and writes
     /// them again, so its time grows with the records. Open one directory at most one
     /// time at once. Opens at once can fail with `Busy`, `Files(Length)`, or
-    /// `Files(Full)`. Dropping this future before it ends and then opening the same
-    /// directory again in this process can lose the commits of the second open, because
-    /// a remove of the first can still run (#1310).
+    /// `Files(Full)`.
     ///
     /// # Errors
     ///
@@ -415,10 +426,10 @@ impl Buffer {
                 logs,
                 taken: 0,
                 commits: 0,
-                wakers: Vec::new(),
-                ending: Vec::new(),
-                next_end: 0,
-                parked: None,
+                committing: wait::Set::new(),
+                ending: wait::Set::new(),
+                next_key: 0,
+                parked: Parked(None),
                 closed: false,
                 ended: false,
                 failed: None,
@@ -490,6 +501,57 @@ impl Buffer {
             return Err(Error::Files(failed.clone()));
         }
         walked.map(|()| reading.finish())
+    }
+
+    /// The newest durable entry with `tag` on `path` of each index that has one, with
+    /// the index's slot, in no order. It skips records that a trim hid, and a trim
+    /// frees no record that the call reads. It reads only the table of each record
+    /// that holds an entry it gives, once, then the bytes of each entry it gives.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Files`] when a ring read fails and [`Error::Pool`] when the pool has
+    /// no block for a table or an entry; the buffer goes on. When a commit's file call
+    /// fails before the call ends, the error that ended the buffer.
+    pub async fn newest(
+        &self,
+        path: Path,
+        tag: NonZeroU8,
+    ) -> Result<Vec<(Slot, Stored)>, Error> {
+        let found = self.search(path, tag).await;
+        // After the reads: a ring read after a failed sync gives `Poisoned`.
+        if let Some(failed) = &self.shared.state.borrow().failed {
+            return Err(Error::Files(failed.clone()));
+        }
+        found
+    }
+
+    /// The newest durable entry with `tag` on `path` of each index, as
+    /// [`newest`](Self::newest) gives, with the error of the first failed read. It
+    /// takes the records when called, so a record made during the call is not read.
+    async fn search(
+        &self,
+        path: Path,
+        tag: NonZeroU8,
+    ) -> Result<Vec<(Slot, Stored)>, Error> {
+        let Shared {
+            file, pool, layout, ..
+        } = &*self.shared;
+        let mut records = self.shared.state.borrow().logs.tagged(path, tag);
+        records.sort_unstable_by_key(|&(offset, ..)| offset);
+        let mut found = Vec::with_capacity(records.len());
+        for record in records.chunk_by(|a, b| a.0 == b.0) {
+            let [(offset, ..), ..] = *record else {
+                unreachable!("invariant: a chunk is not empty");
+            };
+            let wanted: hash::Map<channel::Key, Slot> = record
+                .iter()
+                .map(|&(_, slot, index)| (index, slot))
+                .collect();
+            let place = AREA_START + layout.place(offset);
+            found.extend(read::newest(file, pool, place, path, tag, &wanted).await?);
+        }
+        Ok(found)
     }
 
     /// Gives `reading` the records of `path` of the index at `slot` until it ends.
@@ -596,9 +658,10 @@ impl Buffer {
     /// durable. [`Commit`] says what one held past the drop gives.
     #[must_use]
     pub fn committed(&self) -> Commit {
+        let until = self.shared.state.borrow().durable_at();
         Commit {
-            shared: Rc::clone(&self.shared),
-            until: self.shared.state.borrow().durable_at(),
+            waiter: Waiter::new(&self.shared, Event::Commit),
+            until,
         }
     }
 
@@ -607,12 +670,8 @@ impl Buffer {
     /// each entry appended before the drop is durable.
     #[must_use]
     pub fn ended(&self) -> End {
-        let mut state = self.shared.state.borrow_mut();
-        let key = state.next_end;
-        state.next_end += 1;
         End {
-            shared: Rc::clone(&self.shared),
-            key,
+            waiter: Waiter::new(&self.shared, Event::End),
         }
     }
 }
@@ -863,7 +922,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
             if state.closed {
                 return Poll::Ready(true);
             }
-            state.parked = Some(cx.waker().clone());
+            state.parked = Parked(Some(cx.waker().clone()));
             idled = true;
             Poll::Pending
         })
@@ -907,7 +966,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
                 state.end(&mut woken);
             }
         }
-        woken.append(&mut state.wakers);
+        state.committing.drain(&mut woken);
         drop(state);
         for waker in woken.drain(..) {
             waker.wake();
@@ -934,7 +993,7 @@ async fn write(shared: &Shared, sealed: &[Sealed]) -> Result<(), files::Error> {
 /// else with the error that ended the task.
 #[derive(Debug)]
 pub struct Commit {
-    shared: Rc<Shared>,
+    waiter: Waiter,
     /// The count of `commits` that resolves it.
     until: u64,
 }
@@ -943,18 +1002,15 @@ impl Future for Commit {
     type Output = Result<(), files::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.shared.state.borrow_mut();
-        // Before `failed`: a commit that synced stays well after a later sync fails.
-        if state.commits >= self.until && (!state.closed || state.ended) {
-            return Poll::Ready(Ok(()));
-        }
-        if let Some(error) = &state.failed {
-            return Poll::Ready(Err(error.clone()));
-        }
-        if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
-            state.wakers.push(cx.waker().clone());
-        }
-        Poll::Pending
+        let until = self.until;
+        self.waiter.poll(cx, |state| {
+            // Before `failed`: a commit that synced stays well after a later sync
+            // fails.
+            if state.commits >= until && (!state.closed || state.ended) {
+                return Some(Ok(()));
+            }
+            state.failed.clone().map(Err)
+        })
     }
 }
 
@@ -962,33 +1018,88 @@ impl Future for Commit {
 /// ring open until it drops.
 #[derive(Debug)]
 pub struct End {
-    shared: Rc<Shared>,
-    /// Its key in `ending`.
-    key: u64,
+    waiter: Waiter,
 }
 
 impl Future for End {
     type Output = Result<(), files::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let mut state = self.shared.state.borrow_mut();
-        if state.ended {
-            return Poll::Ready(state.failed.clone().map_or(Ok(()), Err));
+        self.waiter.poll(cx, |state| {
+            state
+                .ended
+                .then(|| state.failed.clone().map_or(Ok(()), Err))
+        })
+    }
+}
+
+/// What a [`Waiter`] waits for.
+#[derive(Clone, Copy, Debug)]
+enum Event {
+    Commit,
+    End,
+}
+
+impl Event {
+    /// The set of `state` that keeps the wakers of this event.
+    fn set(self, state: &mut State) -> &mut wait::Set {
+        match self {
+            Self::Commit => &mut state.committing,
+            Self::End => &mut state.ending,
         }
-        let replaced = state.forget(self.key);
-        state.ending.push((self.key, cx.waker().clone()));
-        // A waker's drop can drop another `End`, which borrows the state.
+    }
+}
+
+/// The part of a [`Commit`] or an [`End`] that keeps its waker in the set of its
+/// event. Its drop takes the waker out.
+struct Waiter {
+    shared: Rc<Shared>,
+    event: Event,
+    key: u64,
+}
+
+impl Waiter {
+    fn new(shared: &Rc<Shared>, event: Event) -> Self {
+        Self {
+            key: shared.state.borrow_mut().key(),
+            shared: Rc::clone(shared),
+            event,
+        }
+    }
+
+    /// Gives what `ready` reads from the state, else keeps the waker of `cx`.
+    fn poll<T>(
+        &self,
+        cx: &Context<'_>,
+        ready: impl FnOnce(&State) -> Option<T>,
+    ) -> Poll<T> {
+        let mut state = self.shared.state.borrow_mut();
+        if let Some(output) = ready(&state) {
+            return Poll::Ready(output);
+        }
+        let replaced = self.event.set(&mut state).insert(self.key, cx.waker());
+        // A waker's drop can drop another waiter, which borrows the state.
         drop(state);
         drop(replaced);
         Poll::Pending
     }
 }
 
-impl Drop for End {
+/// Prints what the waiter waits for, not the state of the buffer.
+impl fmt::Debug for Waiter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Waiter")
+            .field("event", &self.event)
+            .field("key", &self.key)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for Waiter {
     fn drop(&mut self) {
         let mut state = self.shared.state.borrow_mut();
-        let held = state.forget(self.key);
-        // A waker's drop can drop another `End`, which borrows the state.
+        let held = self.event.set(&mut state).remove(self.key);
+        // As in `poll`.
         drop(state);
         drop(held);
     }
@@ -1001,7 +1112,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use block::Heap;
-    use types::channel;
     use types::time::Stamp;
 
     use super::*;
@@ -1221,6 +1331,58 @@ mod tests {
             (None, vec![], Mark::at(9)),
         ];
         assert_eq!(*reads, expected);
+    }
+
+    /// No commit trims yet, so the test hides records as a trim will. `newest` gives
+    /// the tagged entry of the oldest record that is not hidden, and skips it once
+    /// that record is hidden, also when later records of its path are not hidden.
+    #[test]
+    fn newest_skips_the_records_that_a_trim_hid() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let found = Arc::new(Mutex::new(Vec::new()));
+        let given = Arc::clone(&found);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = slots.index(channel::Key::from_u128(1));
+                let part = pool.alloc(100).expect("a block").freeze();
+                let tagged = Entry {
+                    len: 0,
+                    tag: 1,
+                    ..entry(1, one, Path::Live, 0, &part)
+                };
+                buffer.append([tagged]).expect("the ring has room");
+                buffer.committed().await.expect("commits");
+                for first in [0, 3] {
+                    let batch = [entry(1, one, Path::Live, first, &part)];
+                    buffer.append(batch).expect("the ring has room");
+                    buffer.committed().await.expect("commits");
+                }
+                let firsts = async || {
+                    let newest = buffer
+                        .newest(Path::Live, NonZeroU8::MIN)
+                        .await
+                        .expect("reads");
+                    newest
+                        .iter()
+                        .map(|(slot, stored)| (*slot, stored.first))
+                        .collect()
+                };
+                let mut found: Vec<Vec<(Slot, u64)>> = vec![firsts().await];
+                for offset in [4096, 8192] {
+                    buffer.shared.state.borrow_mut().logs.hide(offset);
+                    found.push(firsts().await);
+                }
+                *given.lock().expect("no panic held the lock") = found;
+                buffer
+            },
+        );
+        let found = found.lock().expect("no panic held the lock");
+        let tagged = vec![(Slot::new(0), 0)];
+        assert_eq!(*found, [tagged.clone(), tagged, vec![]]);
     }
 
     /// The durable end counts the entries with no samples at its seq. A read that

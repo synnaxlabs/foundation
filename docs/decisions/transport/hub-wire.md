@@ -27,15 +27,24 @@
   no count of channels or series has a cap, and the reader fills one block of its
   frame's length: the header, the range, a descriptor for each series, and the body to
   the last end. A run message with more keys or ends than remain is not valid. A head of
-  no series is not valid, since a frame holds its index. The home checks each key as it
-  arrives and never allocates by the peer's count. A head with more series than places,
-  or an end with a place the session does not have or that is not above the place before
-  it, is not valid; `wire::hub::Reader` checks the head as it arrives and `types` checks
-  the ends, so the reader holds no more ends than it has places. The ends and the body
-  are in place order: the home writes the series of each place it has, from 0, each from
-  the frame's block as a slice, with ends it computes in that order. It cuts each series
-  from `Frame::body` by `frame::Places::lay`, which finds them with `View::bounds`
-  (the architect, 2026-10-07T22:35:41Z,
+  no series is not valid, since a frame holds its index. Nor is a head whose range ends
+  past `u64::MAX`, because the position after it does not fit (`laptop.architect`,
+  2026-10-10T03:45:10Z,
+  https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6093432445). Nor is a
+  head of a reader session on the backfill path, since a session gets only live frames,
+  or one that starts before the end of the head before it, since the heads of a session
+  rise. `wire::hub::Reader` checks these two after the places, so `hub` takes the frames
+  of a session in seq order (`laptop.architect`, 2026-10-10T03:41:52Z,
+  https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6093407122; lost: a
+  `max` and a saturating add in `hub`, which let such a frame reach the user). The home
+  checks each key as it arrives and never allocates by the peer's count. A head with
+  more series than places, or an end with a place the session does not have or that is
+  not above the place before it, is not valid; `wire::hub::Reader` checks the head as it
+  arrives and `types` checks the ends, so the reader holds no more ends than it has
+  places. The ends and the body are in place order: the home writes the series of each
+  place it has, from 0, each from the frame's block as a slice, with ends it computes in
+  that order. It cuts each series from `Frame::body` by `frame::Places::lay`, which
+  finds them with `View::bounds` (the architect, 2026-10-07T22:35:41Z,
   https://github.com/synnaxlabs/foundation/issues/1639#issuecomment-6048265226; lost:
   `View::ends`, which gives no start, and `Frame::bounds`, a search for each place).
   `View::bounds` is crate-private, as no crate outside `types` calls it (the architect,
@@ -79,34 +88,62 @@
   `Complete`, since the class sets the priority of each frame that the home sends back;
   the home's `hub` checks it at the `Open` and stops the session with `MALFORMED`.
   Stop codes: 16 `UNKNOWN` (a channel the home does not know), 17 `NOT_HOME` (the node
-  is not the home of the index), 18 `FAILED` (the home's buffer failed), 19 `BUSY` (the
-  home's pool had no block for a reply; a later open can succeed), and 2
+  is not the home of the index), 18 `FAILED` (the home failed: its buffer or its mesh
+  stopped), 19 `BUSY` (the side that stops had no block for a stream's session, in both
+  directions, or no room for a request body under its cap; a later open or request can
+  succeed, but not when the block is larger than each block of that side's pool), and 2
   `wire::header::MALFORMED` (a message that does not decode, comes from the wrong side,
-  or breaks a rule above), which every protocol may use. A reset drops the frames in
-  flight, which is correct for `FAILED`, since the session cannot go on (lost: a
-  `Reply::Failed` that keeps them, a second end message to fuzz). Each reply block holds
-  one message. An ends message holds at most the frame's series, at 8 bytes each, the
-  size of their descriptors in the frame's block, so the pool can always hold it (the
-  architect, 2026-10-07T22:17:44Z,
+  or breaks a rule above), which every protocol may use. The meanings of 18 and 19 were
+  decided by the architect (2026-10-07T23:31:29Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511). The
+  exception for a block larger than each block of the pool was decided by
+  `laptop.architect` (2026-10-08T23:44:54Z,
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6071260886).
+  Supersedes the meanings of 18 and 19 in
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641 ("the
+  home's buffer failed") and
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084 ("the home
+  had no memory for a reply"), and the meaning of 19 in item 3 of
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483 ("the node
+  had no memory for a reply or a request body"). The text of 19 for both causes was
+  decided by `laptop.architect` (2026-10-09T00:12:49Z,
+  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074). A reset
+  drops the frames in flight, which is correct for `FAILED`, since the session cannot go
+  on (lost: a `Reply::Failed` that keeps them, a second end message to fuzz). Each reply
+  block holds one message. An ends message holds at most the frame's series, at 8 bytes
+  each, the size of their descriptors in the frame's block, so the pool can always hold
+  it (the architect, 2026-10-07T22:17:44Z,
   https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6047985988).
   Supersedes "A reply block holds at most `min(bytes_max, Pool::largest)` bytes"
-  (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084). The
-  home ends the session on `BUSY` and does not wait: the pool gives no wake, so a wait
-  needs a clock in `hub` and a wait queue for each session, and the end frees the
-  frames the session pins (`mesh` ends its stream in the same case). The class rule and
-  code 18 were decided by the architect (2026-10-07T21:34:19Z,
+  (https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084). When
+  its pool has no block for a reply, the home ends the session on `BUSY` and does not
+  wait: the pool gives no wake, so a wait needs a clock in `hub` and a wait queue for
+  each session, and the end frees the frames the session pins (`mesh` ends its stream in
+  the same case). The class rule and code 18 were decided by the architect
+  (2026-10-07T21:34:19Z,
   https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047300641), code 19
-  by the architect (2026-10-07T21:47:56Z,
-  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084).
-  Lost: a `message_bytes_max` of at least the largest pool block (a client or a
-  foreign peer can set 1472, and it ties `transport` to the pool); a cap of 91 channels
-  a session, the most that fit in 1472 bytes; the index in its own field of `Open`,
-  because the home knows its index and a second copy needs a check; the whole
-  `Frame::body` (a reader gets only its view); an `UNSYNCED` code, because an unnamed
-  open needs no mesh time (READER RULES), and a later named open can add one; grants for
-  many sessions in one message, which wait until a link carries a second session; a
-  public series count on `View`, for a home that writes the ends from `View::iter`,
-  which gives the home's entry order and not place order (the architect,
+  `BUSY` and the end of a session on it by the architect (2026-10-07T21:47:56Z,
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084). The text
+  of code 19 was decided by `laptop.architect` (2026-10-09T04:00:55Z,
+  https://github.com/synnaxlabs/foundation/pull/2093#issuecomment-6073992277).
+  Supersedes the code 19 text of
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6047519084, the
+  meaning of 19 in item 3 of
+  https://github.com/synnaxlabs/foundation/pull/1946#issuecomment-6069496483 ("the node
+  had no memory for a reply or a request body"), and the sentence of
+  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074 that
+  gives its text to the PR of #2012. The block refusal of a reader (#2003) widened the
+  text of code 19 to the text of
+  https://github.com/synnaxlabs/foundation/issues/2012#issuecomment-6071577074. Lost: a
+  `message_bytes_max` of at least the largest pool block (a client or a foreign peer can
+  set 1472, and it ties `transport` to the pool); a cap of 91 channels a session, the
+  most that fit in 1472 bytes; the index in its own field of `Open`, because the home
+  knows its index and a second copy needs a check; the whole `Frame::body` (a reader
+  gets only its view); an `UNSYNCED` code, because an unnamed open needs no mesh time
+  (READER RULES), and a later named open can add one; grants for many sessions in one
+  message, which wait until a link carries a second session; a public series count on
+  `View`, for a home that writes the ends from `View::iter`, which gives the home's
+  entry order and not place order (the architect,
   https://github.com/synnaxlabs/foundation/issues/1146#issuecomment-6032284157). The
   coordinator approved the messages (2026-10-05); the architect decided the rest (#561,
   2026-10-06) and the run, the index place, and `MALFORMED` on #1064
@@ -182,3 +219,12 @@
   gives `Latest` for a `Behind` in a latest session, since only a complete session
   falls behind. Decided by the architect (2026-10-08T01:04:51Z):
   https://github.com/synnaxlabs/foundation/issues/1689#issuecomment-6050026992.
+  At the reader's node (#340 PR 4d-b), a message that `wire::hub::Reader` refuses, or
+  ends that `types` refuses, stops the stream with `MALFORMED`, and a pool with no
+  block for `Open`, its keys, a frame, or a `Credit` stops it with `BUSY`. Each later
+  `next` gives the same `Ended`. Decided by `laptop.architect` (2026-10-07T23:31:29Z:
+  https://github.com/synnaxlabs/foundation/issues/340#issuecomment-6048960511). A
+  `Credit` that still waits to send when the stream stops drops with its sender, so the
+  home's receive half resets with code 0, not the refusal code, until #2031
+  (`laptop.architect`, 2026-10-08T23:49:49Z:
+  https://github.com/synnaxlabs/foundation/pull/2003#issuecomment-6071319399).

@@ -49,10 +49,12 @@ const WRONG_CHANNEL: Code = Code::new("config.wrong-channel");
 ///   [`spec::placement::place`] gives a `Tie` for, or a `Homeless` `home`.
 /// - `config.connector-home` at the `home` of a placement that wins for a connector and
 ///   names a node other than the connector's `node`.
-/// - `config.split-placement` at each index when the placement that wins for it is not
-///   the one that wins for its nearest connector, the connector with the longest name
-///   above it: at the label of the index's placement, or of the connector's when no
-///   placement selects the index.
+/// - `config.split-placement` at each index whose writers, the connectors that write
+///   it or a channel on it, are on one node, when the winner of a writer is not the
+///   winner of the index: once, naming each such writer, at the label of the index's
+///   placement, or of the first such writer's when no placement selects the index.
+///   Its fix is the one fix of the unit of the index: its writers, each connector
+///   that writes another index of theirs, and so on.
 /// - `config.writer-nodes` at the `node` of the first connector, in name order, on a
 ///   second node that writes an index or a channel on it.
 /// - `config.unknown-node` at each node that a connector or a placement names and that
@@ -183,10 +185,7 @@ impl Plan {
         let mut definitions = applied.clone();
         for (name, change) in &self.changes {
             let stored = definitions.remove(name);
-            let new = change.new.as_ref().map(|entry| match &entry.definition {
-                Definition::Spec(definition) => definition.kind(),
-                Definition::Channel(_) => definition::Kind::Channel,
-            });
+            let new = change.new.as_ref().map(|entry| entry.definition.kind());
             let kinds = stored
                 .as_ref()
                 .map(definition::Definition::kind)
@@ -306,10 +305,8 @@ struct Model<'a> {
     indexes: Vec<&'a Name>,
     /// The index of each data channel whose index is a channel, by name.
     index_of: BTreeMap<&'a Name, &'a Name>,
-    /// Each connector and its node, in name order.
-    connectors: Vec<(&'a Name, &'a Name)>,
-    /// Each connector that a kind checked, in name order.
-    writers: Vec<Writer<'a>>,
+    /// Each connector, in name order.
+    connectors: Vec<Connector<'a>>,
     /// Each node that a placement names.
     nodes: Vec<(&'a Name, Option<Span>)>,
     /// The span of the label of each definition.
@@ -325,7 +322,6 @@ impl<'a> Model<'a> {
             indexes: Vec::new(),
             index_of: BTreeMap::new(),
             connectors: Vec::new(),
-            writers: Vec::new(),
             nodes: Vec::new(),
             labels: BTreeMap::new(),
             homes: BTreeMap::new(),
@@ -394,8 +390,8 @@ impl<'a> Model<'a> {
                 self.nodes.extend(nodes);
             }
             definition::Definition::Connector(connector) => {
-                self.connectors.push((name, connector.node()));
-                self.writers.push(Writer {
+                self.connectors.push(Connector {
+                    name,
                     node: connector.node(),
                     at: block.and_then(|block| span(block, "node")),
                     writes: writes
@@ -424,6 +420,13 @@ impl<'a> Model<'a> {
         }
     }
 
+    /// Reports whether `connector` writes `index` or a channel on it.
+    fn feeds(&self, connector: &Connector<'_>, index: &Name) -> bool {
+        connector.writes.iter().any(|name| {
+            name == index || self.index_of.get(name).copied() == Some(index)
+        })
+    }
+
     /// The span of the label of `name`.
     fn label(&self, name: &Name) -> Option<Span> {
         self.labels.get(name).copied().flatten()
@@ -431,7 +434,9 @@ impl<'a> Model<'a> {
 }
 
 /// A connector, as its kind checks its config.
-struct Writer<'a> {
+struct Connector<'a> {
+    /// Its tree key.
+    name: &'a Name,
     /// The node that runs it.
     node: &'a Name,
     /// Where the block names the node.
@@ -465,7 +470,7 @@ fn writes(
 }
 
 /// Runs each rule of [`plan`] after `config.wrong-channel` on `model`, and gives each
-/// index with the node of its first writer and where [`place`] puts it.
+/// index.
 fn rules<'a>(
     model: &'a Model<'a>,
     members: &BTreeSet<Name>,
@@ -500,21 +505,43 @@ fn wrong(found: &Found<'_>, channels: &BTreeMap<Name, Channel>) -> Vec<Diagnosti
         .collect()
 }
 
-/// The node of an index's first writer, and where [`place`] puts the index.
-type Index<'f> = (Option<&'f Name>, Result<Placed<'f>, Tie>);
+/// An index, as the rules after `config.wrong-channel` read it.
+struct Index<'f> {
+    /// Each connector that writes the index or a channel on it, in name order.
+    writers: Vec<&'f Connector<'f>>,
+    /// Where [`place`] puts the index, with the node of its first writer.
+    placed: Result<Placed<'f>, Tie>,
+}
 
-/// Places each index, with the node of its first writer. Reports each index that two
-/// writer nodes or [`place`] leave with no home.
+impl<'f> Index<'f> {
+    /// The first writer that runs on another node than the first writer.
+    fn apart(&self) -> Option<&'f Connector<'f>> {
+        let (first, rest) = self.writers.split_first()?;
+        rest.iter()
+            .copied()
+            .find(|writer| writer.node != first.node)
+    }
+}
+
+/// Places each index. Reports each index that two writer nodes or [`place`] leave with
+/// no home.
 fn indexes<'f>(
     model: &'f Model<'f>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> BTreeMap<&'f Name, Index<'f>> {
     let mut indexes = BTreeMap::new();
-    for &index in &model.indexes {
-        let writer = writer(model, index, diagnostics);
-        let placed = place(index, model.placements.iter().copied(), writer);
-        diagnostics.extend(unplaced(model.label(index), &placed));
-        indexes.insert(index, (writer, placed));
+    for &name in &model.indexes {
+        let writers: Vec<_> = model
+            .connectors
+            .iter()
+            .filter(|writer| model.feeds(writer, name))
+            .collect();
+        let node = writers.first().map(|writer| writer.node);
+        let placed = place(name, model.placements.iter().copied(), node);
+        let index = Index { writers, placed };
+        diagnostics.extend(writer_nodes(name, &index));
+        diagnostics.extend(unplaced(model.label(name), &index.placed));
+        indexes.insert(name, index);
     }
     indexes
 }
@@ -523,105 +550,154 @@ fn indexes<'f>(
 fn homes(indexes: BTreeMap<&Name, Index<'_>>) -> BTreeMap<Name, Name> {
     indexes
         .into_iter()
-        .filter_map(|(index, (_, placed))| {
+        .filter_map(|(index, Index { placed, .. })| {
             Some((index.clone(), placed.ok()?.home.ok()?.clone()))
         })
         .collect()
 }
 
-/// A connector's key and node, and where [`place`] puts it.
-type Connector<'f> = (&'f Name, &'f Name, Result<Placed<'f>, Tie>);
+/// A connector, and where [`place`] puts it.
+struct Located<'f> {
+    connector: &'f Connector<'f>,
+    placed: Result<Placed<'f>, Tie>,
+}
 
-/// An index, the node of its first writer, where [`place`] puts it, and its nearest
-/// connector.
-type Nearest<'f, 'c> = (
-    &'f Name,
-    Option<&'f Name>,
-    &'f Result<Placed<'f>, Tie>,
-    &'c Connector<'f>,
-);
+impl<'f> Located<'f> {
+    /// The placement that wins for the connector, if one does.
+    fn winner(&self) -> Option<&'f Name> {
+        self.placed
+            .as_ref()
+            .ok()
+            .and_then(|placed| placed.placement)
+    }
+}
+
+/// A unit of failover: connectors on one node, linked by the indexes that they write.
+/// An index joins the unit of its writers when they are on one node.
+struct Unit<'f> {
+    linked: Linked<'f>,
+    /// The fix of each of its diagnostics, or `None` when no placement wins for a
+    /// connector or an index of it.
+    fix: Option<Fix<'f>>,
+}
+
+/// Connectors and the indexes that link them.
+struct Linked<'f> {
+    /// Its connectors, in name order.
+    connectors: Vec<&'f Name>,
+    /// Its indexes, in name order.
+    indexes: Vec<&'f Name>,
+}
 
 /// Places each connector, with its `node` as the writer. Reports
 /// `config.connector-home` at the `home` of a winner that names another node,
 /// `config.unplaced` at each connector that [`place`] gives a tie or no home for, and
-/// `config.split-placement` at each index whose nearest connector above its name has
-/// another winner.
+/// `config.split-placement` at each index whose writers are on one node and do not
+/// all have its winner.
 fn connectors<'f>(
     model: &'f Model<'f>,
-    indexes: &'f BTreeMap<&'f Name, Index<'f>>,
+    indexes: &BTreeMap<&'f Name, Index<'f>>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     let placements = &model.placements;
-    let connectors: Vec<_> = model
+    let located: BTreeMap<_, _> = model
         .connectors
         .iter()
-        .map(|&(name, node)| {
+        .map(|connector| {
+            let Connector { name, node, .. } = *connector;
             let placed = place(name, placements.iter().copied(), Some(node));
-            (name, node, placed)
+            (name, Located { connector, placed })
         })
         .collect();
-    let nearest: Vec<_> = indexes
-        .iter()
-        .filter_map(|(index, (writer, own))| {
-            let connector = connectors
-                .iter()
-                .filter(|(name, ..)| index.starts_with(name))
-                .max_by_key(|(name, ..)| name.segments().count())?;
-            Some((*index, *writer, own, connector))
-        })
-        .collect();
-    let moves = moves(&connectors, &nearest, placements);
-    for (name, node, placed) in &connectors {
+    let (units, of) = units(&located, indexes, placements);
+    for Located { connector, placed } in located.values() {
+        let Connector { name, node, .. } = **connector;
         if let Ok(Placed {
             placement: Some(placement),
             home: Ok(home),
             ..
         }) = placed
-            && home != node
+            && *home != node
         {
-            diagnostics
-                .push(connector_home(model, placement, home, name, node, &moves));
+            let unit = &units[of[name]];
+            let fix = match &unit.fix {
+                Some(Fix::Win { placement: t }) if t == placement => {
+                    &Fix::Home { node }
+                }
+                Some(fix) => fix,
+                None => unreachable!(
+                    "invariant: the unit of {name} at {placement} has no fix"
+                ),
+            };
+            let p = label(placement);
+            diagnostics.push(Diagnostic::new(
+                CONNECTOR_HOME,
+                model.homes.get(placement).copied().flatten(),
+                format!(
+                    "the placement `{p}` names the home `{home}`, but the connector \
+                     `{name}` runs on the node `{node}`"
+                ),
+                text(fix, &unit.linked.connectors),
+            ));
         } else {
             diagnostics.extend(unplaced(model.label(name), placed));
         }
     }
-    for (index, _, own, (connector, _, theirs)) in nearest {
-        if let (Ok(own), Ok(theirs)) = (own, theirs) {
-            let (own, theirs) = (own.placement, theirs.placement);
-            diagnostics.extend(split(model, index, own, connector, theirs, &moves));
-        }
+    let joined = units
+        .iter()
+        .flat_map(|unit| unit.linked.indexes.iter().map(move |name| (*name, unit)));
+    for (name, unit) in joined {
+        let index = &indexes[name];
+        let Ok(placed) = &index.placed else {
+            continue;
+        };
+        let theirs = index.writers.iter().filter_map(|writer| {
+            let theirs = located[writer.name].placed.as_ref().ok()?;
+            Some((writer.name, theirs.placement))
+        });
+        let Some((at, message)) = split(name, placed.placement, theirs) else {
+            continue;
+        };
+        let Some(fix) = &unit.fix else {
+            unreachable!("invariant: the unit of the index {name} has no fix");
+        };
+        diagnostics.push(Diagnostic::new(
+            SPLIT_PLACEMENT,
+            model.label(at),
+            message,
+            text(fix, &unit.linked.connectors),
+        ));
     }
 }
 
-/// The one fix of each diagnostic of each connector that no placement can win for
-/// with each of its indexes at the connector's node, or whose placement to win names no
-/// `home` while an index of the connector has no writer, by connector. `nearest` holds
-/// the nearest connector of each index. The fix names each winner, the connector's
-/// first.
-fn moves<'f, 'c>(
-    connectors: &'c [Connector<'f>],
-    nearest: &[Nearest<'f, 'c>],
+/// Each unit of the connectors of `located`, with its fix, and the position of the
+/// unit of each connector. The fix of a unit names one target: the winner of its first
+/// connector that a placement wins for, or the one placement that wins for its indexes.
+/// When no placement can win for each of its connectors and indexes at its node, the
+/// fix names each winner, the target first.
+fn units<'f>(
+    located: &BTreeMap<&'f Name, Located<'f>>,
+    indexes: &BTreeMap<&'f Name, Index<'f>>,
     placements: &[(&'f Name, &'f Policy)],
-) -> BTreeMap<&'c Name, Fix<'f>> {
+) -> (Vec<Unit<'f>>, BTreeMap<&'f Name, usize>) {
     let mut nodes = BTreeMap::<_, BTreeSet<_>>::new();
-    for (_, node, placed) in connectors {
-        if let Some(placement) =
-            placed.as_ref().ok().and_then(|placed| placed.placement)
+    for located in located.values() {
+        if let Some(winner) = located.winner() {
+            let node = located.connector.node;
+            nodes.entry(winner).or_default().insert(node);
+        }
+    }
+    for index in indexes.values() {
+        if let Ok(Placed {
+            placement: Some(own),
+            ..
+        }) = index.placed
         {
-            nodes.entry(placement).or_default().insert(*node);
+            let writers = index.writers.iter().map(|writer| writer.node);
+            nodes.entry(own).or_default().extend(writers);
         }
     }
-    let mut owners = BTreeMap::<_, BTreeSet<_>>::new();
-    let mut unwritten = BTreeSet::new();
-    for (_, writer, own, (connector, node, _)) in nearest {
-        if let Some(own) = own.as_ref().ok().and_then(|own| own.placement) {
-            owners.entry(*connector).or_default().insert(own);
-            nodes.entry(own).or_default().insert(*node);
-        }
-        if writer.is_none() {
-            unwritten.insert(*connector);
-        }
-    }
+    let (linked, of) = link(located, indexes);
     let home = |placement: &Name| {
         placements
             .iter()
@@ -631,64 +707,118 @@ fn moves<'f, 'c>(
     let elsewhere = |placement: &Name, node: &Name| {
         home(placement).is_some_and(|home| home != node)
     };
-    let mut moves = BTreeMap::new();
-    for (name, node, placed) in connectors {
-        let Ok(Placed { placement, .. }) = *placed else {
-            continue;
-        };
-        let owners: Vec<_> = owners
-            .remove(*name)
-            .unwrap_or_default()
-            .into_iter()
+    let unit = |linked: Linked<'f>| {
+        let connectors = &linked.connectors;
+        let node = located[connectors[0]].connector.node;
+        let mut winners = connectors.iter().filter_map(|c| located[c].winner());
+        let target = winners.next();
+        let spread = |p: &Name| nodes[p].iter().any(|other| *other != node);
+        let owners: BTreeSet<_> = linked
+            .indexes
+            .iter()
+            .filter_map(|name| indexes[name].placed.as_ref().ok()?.placement)
             .collect();
-        let spread = |p: &Name| nodes[p].iter().any(|other| other != node);
-        let unhoused = |p: &Name| unwritten.contains(*name) && home(p).is_none();
-        let fix = match (placement, owners.as_slice()) {
-            (Some(p), _) if (elsewhere(p, node) || unhoused(p)) && spread(p) => {
-                let others = owners.iter().copied().filter(|owner| *owner != p);
-                Fix::Exclude {
-                    placements: [p].into_iter().chain(others).collect(),
+        let owners: Vec<_> = owners.into_iter().collect();
+        let fix = match (target, owners.as_slice()) {
+            (Some(t), _) if elsewhere(t, node) && spread(t) => {
+                let others: BTreeSet<_> = winners.chain(owners).collect();
+                let others = others.into_iter().filter(|other| *other != t);
+                Some(Fix::Exclude {
+                    placements: [t].into_iter().chain(others).collect(),
                     node,
-                }
+                })
             }
-            (Some(p), _) | (None, &[p]) if unhoused(p) && !spread(p) => {
-                Fix::House { placement: p, node }
+            (Some(placement), _) => Some(Fix::Win { placement }),
+            (None, &[placement]) if !elsewhere(placement, node) => {
+                Some(Fix::Win { placement })
             }
-            (None, &[p]) if !elsewhere(p, node) && !unhoused(p) => continue,
-            (None, [_, ..]) => Fix::Regroup { owners, node },
-            _ => continue,
+            (None, []) => None,
+            (None, _) => Some(Fix::Regroup { owners, node }),
         };
-        moves.insert(*name, fix);
+        Unit { linked, fix }
+    };
+    (linked.into_iter().map(unit).collect(), of)
+}
+
+/// The connectors of `located` by unit, with the indexes that link them, and the
+/// position of the unit of each connector. Each index whose writers are on one node
+/// links them.
+fn link<'f>(
+    located: &BTreeMap<&'f Name, Located<'f>>,
+    indexes: &BTreeMap<&'f Name, Index<'f>>,
+) -> (Vec<Linked<'f>>, BTreeMap<&'f Name, usize>) {
+    let joining: Vec<_> = indexes
+        .iter()
+        .filter(|(_, index)| index.apart().is_none())
+        .collect();
+    let position: BTreeMap<_, _> = located.keys().copied().zip(0..).collect();
+    let mut parent: Vec<usize> = (0..located.len()).collect();
+    let root = |parent: &mut Vec<usize>, mut i: usize| {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    };
+    for (_, index) in &joining {
+        if let Some((first, rest)) = index.writers.split_first() {
+            let first = root(&mut parent, position[first.name]);
+            for writer in rest {
+                let other = root(&mut parent, position[writer.name]);
+                parent[other] = first;
+            }
+        }
     }
-    moves
+    let mut of = BTreeMap::new();
+    let mut roots = BTreeMap::new();
+    let mut units = Vec::new();
+    for (name, i) in position {
+        let unit = *roots.entry(root(&mut parent, i)).or_insert_with(|| {
+            units.push(Linked {
+                connectors: Vec::new(),
+                indexes: Vec::new(),
+            });
+            units.len() - 1
+        });
+        units[unit].connectors.push(name);
+        of.insert(name, unit);
+    }
+    for (name, index) in joining {
+        if let Some(first) = index.writers.first() {
+            units[of[first.name]].indexes.push(*name);
+        }
+    }
+    (units, of)
+}
+
+/// Joins `items`, in order: "a", "a and b", or "a, b, and c".
+fn list(items: &[String]) -> String {
+    match items {
+        [one] => one.clone(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+        [] => unreachable!("invariant: a list names an item"),
+    }
 }
 
 /// Names each placement in `keys`, in order, by its label: "`p`", "`p` and `q`", or
 /// "`p`, `q`, and `r`".
 fn each(keys: &[&Name]) -> String {
     let labels: Vec<_> = keys.iter().map(|key| format!("`{}`", label(key))).collect();
-    match labels.as_slice() {
-        [one] => one.clone(),
-        [first, second] => format!("{first} and {second}"),
-        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
-        [] => unreachable!("invariant: a moved connector has a winner"),
-    }
+    list(&labels)
 }
 
-/// The fix of a diagnostic of a connector. [`moves`] gives the first three, which move
-/// the connector or its indexes to another placement.
+/// The fix of a diagnostic of a unit. The first two move the unit or its indexes to
+/// another placement.
 enum Fix<'a> {
-    /// Take the connector and its indexes out of `placements`, the connector's winner
-    /// first, into a placement whose `home` is `node`.
+    /// Take the connectors and their indexes out of `placements`, the target first,
+    /// into a placement whose `home` is `node`.
     Exclude {
         placements: Vec<&'a Name>,
         node: &'a Name,
     },
-    /// Make `node` the home of `placement`, keep `node` out of its `standby` and
-    /// `copies`, and make `placement` win for the connector and its indexes.
-    House { placement: &'a Name, node: &'a Name },
-    /// Take the indexes of the connector out of `owners`, the placements that win for
-    /// them, into a placement for the connector whose `home` is `node`.
+    /// Take the indexes of the connectors out of `owners`, the placements that win for
+    /// them, into a placement for the connectors whose `home` is `node`.
     Regroup {
         owners: Vec<&'a Name>,
         node: &'a Name,
@@ -696,35 +826,29 @@ enum Fix<'a> {
     /// Name `node` as the `home` of the placement that wins, and keep `node` out of its
     /// `standby` and `copies`.
     Home { node: &'a Name },
-    /// Make `placement` win for the connector and its indexes.
+    /// Make `placement` win for the connectors and their indexes.
     Win { placement: &'a Name },
 }
 
-/// The text of the fix of a diagnostic of `connector`: the fix that [`moves`] gives
-/// `connector`, or else `otherwise`.
-fn fix(
-    moves: &BTreeMap<&Name, Fix<'_>>,
-    connector: &Name,
-    otherwise: &Fix<'_>,
-) -> String {
-    match moves.get(connector).unwrap_or(otherwise) {
+/// The text of `fix` for the unit of `connectors`. A unit of one connector names "the
+/// connector `c`", and a larger one "the connectors `a` and `b`".
+fn text(fix: &Fix<'_>, connectors: &[&Name]) -> String {
+    let names: Vec<_> = connectors.iter().map(|name| format!("`{name}`")).collect();
+    let (them, theirs, each_one) = match connectors {
+        [_] => ("the connector", "its", "the connector"),
+        _ => ("the connectors", "their", "the connectors"),
+    };
+    let names = list(&names);
+    match fix {
         Fix::Exclude { placements, node } => format!(
-            "Exclude the connector `{connector}` and its indexes from the `select` of \
-             {}, and select them with another placement whose `home` is `{node}`",
+            "Exclude {them} {names} and {theirs} indexes from the `select` of {}, and \
+             select them with another placement whose `home` is `{node}`",
             each(placements)
         ),
-        Fix::House { placement, node } => {
-            let p = label(placement);
-            format!(
-                "Name `{node}` as the `home` of `{p}`, keep `{node}` out of its \
-                 `standby` and `copies`, and make `{p}` win for the connector \
-                 `{connector}` and its indexes"
-            )
-        }
         Fix::Regroup { owners, node } => format!(
-            "Exclude the indexes of the connector `{connector}` from the `select` of \
-             {}, and select the connector and its indexes with another placement \
-             whose `home` is `{node}`",
+            "Exclude the indexes of {them} {names} from the `select` of {}, and select \
+             {each_one} and {theirs} indexes with another placement whose `home` is \
+             `{node}`",
             each(owners)
         ),
         Fix::Home { node } => format!(
@@ -732,83 +856,47 @@ fn fix(
              `copies`"
         ),
         Fix::Win { placement } => format!(
-            "Make the placement `{}` win for the connector `{connector}` and its \
-             indexes",
+            "Make the placement `{}` win for {them} {names} and {theirs} indexes",
             label(placement)
         ),
     }
 }
 
-/// The `config.connector-home` diagnostic of `connector` on `node`, whose winner
-/// `placement` names `home`, with the fix that [`fix`] gives from `moves`.
-fn connector_home(
-    model: &Model<'_>,
-    placement: &Name,
-    home: &Name,
-    connector: &Name,
-    node: &Name,
-    moves: &BTreeMap<&Name, Fix<'_>>,
-) -> Diagnostic {
-    let p = label(placement);
-    let fix = fix(moves, connector, &Fix::Home { node });
-    Diagnostic::new(
-        CONNECTOR_HOME,
-        model.homes.get(placement).copied().flatten(),
-        format!(
-            "the placement `{p}` names the home `{home}`, but the connector \
-             `{connector}` runs on the node `{node}`"
-        ),
-        fix,
-    )
-}
-
-/// A `config.split-placement` diagnostic when `own`, the placement that wins for
-/// `index`, is not `theirs`, the one that wins for the connector `connector`, with the
-/// fix that [`fix`] gives from `moves`.
-fn split(
-    model: &Model<'_>,
+/// Where and what a `config.split-placement` of `index` reports, when `own`, the
+/// placement that wins for it, is not each of `theirs`, the placements that win for its
+/// writers: at `own`, or at the first other winner when no placement selects `index`.
+fn split<'a>(
     index: &Name,
-    own: Option<&Name>,
-    connector: &Name,
-    theirs: Option<&Name>,
-    moves: &BTreeMap<&Name, Fix<'_>>,
-) -> Option<Diagnostic> {
-    let (at, message) = match (own, theirs) {
-        (Some(own), Some(theirs)) if own != theirs => (
-            own,
-            format!(
-                "the placement `{}` wins for the index `{index}`, but the placement \
-                 `{}` wins for the connector `{connector}`",
-                label(own),
-                label(theirs)
-            ),
+    own: Option<&'a Name>,
+    theirs: impl Iterator<Item = (&'a Name, Option<&'a Name>)>,
+) -> Option<(&'a Name, String)> {
+    let mut at = own;
+    let mut clauses = Vec::new();
+    for (connector, theirs) in theirs {
+        let clause = match (own, theirs) {
+            (_, Some(theirs)) if own != Some(theirs) => {
+                at = at.or(Some(theirs));
+                format!(
+                    "the placement `{}` wins for the connector `{connector}`",
+                    label(theirs)
+                )
+            }
+            (Some(_), None) => {
+                format!("no placement selects the connector `{connector}`")
+            }
+            _ => continue,
+        };
+        clauses.push(clause);
+    }
+    let head = match own {
+        Some(own) => format!(
+            "the placement `{}` wins for the index `{index}`",
+            label(own)
         ),
-        (Some(own), None) => (
-            own,
-            format!(
-                "the placement `{}` wins for the index `{index}`, but no placement \
-                 selects the connector `{connector}`",
-                label(own)
-            ),
-        ),
-        (None, Some(theirs)) => (
-            theirs,
-            format!(
-                "no placement selects the index `{index}`, but the placement `{}` \
-                 wins for the connector `{connector}`",
-                label(theirs)
-            ),
-        ),
-        _ => return None,
+        None => format!("no placement selects the index `{index}`"),
     };
-    let placement = theirs.unwrap_or(at);
-    let fix = fix(moves, connector, &Fix::Win { placement });
-    Some(Diagnostic::new(
-        SPLIT_PLACEMENT,
-        model.label(at),
-        message,
-        fix,
-    ))
+    let at = at.filter(|_| !clauses.is_empty())?;
+    Some((at, format!("{head}, but {}", clauses.join(", and "))))
 }
 
 /// The `config.unplaced` diagnostic at `at`, the label of the name that `placed`
@@ -832,32 +920,21 @@ fn label(key: &Name) -> Name {
         .expect("invariant: the key of a placement block has its label form")
 }
 
-/// The node of the first connector that writes `index` or a channel on it. Reports
-/// `config.writer-nodes` at the first such connector on another node.
-fn writer<'f>(
-    model: &'f Model<'f>,
-    index: &Name,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Option<&'f Name> {
-    let mut writers = model.writers.iter().filter(|writer| {
-        writer.writes.iter().any(|name| {
-            name == index || model.index_of.get(name).copied() == Some(index)
-        })
-    });
-    let first = writers.next()?;
-    if let Some(second) = writers.find(|writer| writer.node != first.node) {
-        diagnostics.push(Diagnostic::new(
-            WRITER_NODES,
-            second.at,
-            format!(
-                "connectors on the nodes `{}` and `{}` write the index `{index}`, so \
-                 it has no one home",
-                first.node, second.node
-            ),
-            format!("Run each connector that writes `{index}` on one node"),
-        ));
-    }
-    Some(first.node)
+/// The `config.writer-nodes` diagnostic of `index` at its first writer on another node
+/// than its first writer.
+fn writer_nodes(name: &Name, index: &Index<'_>) -> Option<Diagnostic> {
+    let second = index.apart()?;
+    let first = index.writers[0];
+    Some(Diagnostic::new(
+        WRITER_NODES,
+        second.at,
+        format!(
+            "connectors on the nodes `{}` and `{}` write the index `{name}`, so it has \
+             no one home",
+            first.node, second.node
+        ),
+        format!("Run each connector that writes `{name}` on one node"),
+    ))
 }
 
 /// Reports `config.unknown-node` at each node that a connector or a placement names and
@@ -867,7 +944,10 @@ fn unknown(
     members: &BTreeSet<Name>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    let writers = model.writers.iter().map(|writer| (writer.node, writer.at));
+    let writers = model
+        .connectors
+        .iter()
+        .map(|writer| (writer.node, writer.at));
     let placed = model.nodes.iter().copied();
     for (node, at) in writers.chain(placed) {
         if members.contains(node) {

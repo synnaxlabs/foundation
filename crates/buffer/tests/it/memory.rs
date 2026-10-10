@@ -1,4 +1,7 @@
-//! A file driver over memory, a stand-in until `sim` has files (#114).
+//! A file driver over memory. It counts syncs and can slow each one (#1016), it
+//! can fail a write at an offset (#1104), and its calls end at once, which the
+//! `alloc` binary needs (#2136). Only a test that needs this runs on it, until #517
+//! and #2136 move it to `sim`.
 
 use std::path::{Component, Path, PathBuf};
 use std::pin::Pin;
@@ -21,11 +24,14 @@ type Bytes = Arc<Mutex<Vec<u8>>>;
 pub(crate) struct Memory {
     files: Arc<Mutex<hash::Map<PathBuf, Bytes>>>,
     syncs_fail: Arc<AtomicBool>,
+    /// The offset of the next write to fail.
+    failed_write: Arc<Mutex<Option<u64>>>,
     syncs: Arc<AtomicU64>,
     /// How many descriptors are open.
     opens: Arc<AtomicU64>,
     /// What every sync sleeps for, on a clock, before it ends.
     slow: Arc<Mutex<Option<(Clock, Span)>>>,
+    reads: Arc<AtomicU64>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -42,6 +48,12 @@ impl Memory {
         self.syncs_fail.store(true, Relaxed);
     }
 
+    /// The next write that starts at `offset` fails with an I/O error. Later
+    /// writes pass.
+    pub(crate) fn fail_write_at(&self, offset: u64) {
+        *lock(&self.failed_write) = Some(offset);
+    }
+
     /// Every later sync takes `span` of `clock`'s time, as a disk does.
     pub(crate) fn slow_syncs(&self, clock: Clock, span: Span) {
         *lock(&self.slow) = Some((clock, span));
@@ -50,6 +62,11 @@ impl Memory {
     /// How many syncs were asked for, failed ones included.
     pub(crate) fn syncs(&self) -> u64 {
         self.syncs.load(Relaxed)
+    }
+
+    /// How many reads were asked for.
+    pub(crate) fn reads(&self) -> u64 {
+        self.reads.load(Relaxed)
     }
 
     /// How many descriptors are open now.
@@ -64,17 +81,6 @@ impl Memory {
     /// When there is no file at `path`.
     pub(crate) fn bytes(&self, path: &str) -> Vec<u8> {
         lock(&self.file(path)).clone()
-    }
-
-    /// Puts `bytes` at `offset` of a file, as a crash or a defect would.
-    ///
-    /// # Panics
-    ///
-    /// When there is no file at `path`, or the bytes end past it.
-    pub(crate) fn put(&self, path: &str, offset: usize, bytes: &[u8]) {
-        let file = self.file(path);
-        let mut file = lock(&file);
-        file[offset..offset + bytes.len()].copy_from_slice(bytes);
     }
 
     fn file(&self, path: &str) -> Bytes {
@@ -165,9 +171,11 @@ impl Driver for Memory {
                 files: Arc::clone(&self.files),
                 path: Mutex::new(path.into()),
                 syncs_fail: Arc::clone(&self.syncs_fail),
+                failed_write: Arc::clone(&self.failed_write),
                 syncs: Arc::clone(&self.syncs),
                 opens: Arc::clone(&self.opens),
                 slow: Arc::clone(&self.slow),
+                reads: Arc::clone(&self.reads),
             });
             open
         });
@@ -212,9 +220,11 @@ struct Open {
     /// The path of the file now: a rename changes it.
     path: Mutex<PathBuf>,
     syncs_fail: Arc<AtomicBool>,
+    failed_write: Arc<Mutex<Option<u64>>>,
     syncs: Arc<AtomicU64>,
     opens: Arc<AtomicU64>,
     slow: Arc<Mutex<Option<(Clock, Span)>>>,
+    reads: Arc<AtomicU64>,
 }
 
 impl Drop for Open {
@@ -229,6 +239,11 @@ impl Descriptor for Open {
     }
 
     fn write_at<'a>(&'a self, offset: u64, parts: &'a [Block]) -> Request<'a, ()> {
+        let failed = lock(&self.failed_write).take_if(|at| *at == offset);
+        if failed.is_some() {
+            let failed = io(&lock(&self.path), Operation::WriteAt, 5);
+            return Box::pin(async { Err(failed) });
+        }
         let mut bytes = lock(&self.bytes);
         let mut at = to_usize(offset);
         for part in parts {
@@ -239,6 +254,7 @@ impl Descriptor for Open {
     }
 
     fn read_at(&self, offset: u64, mut into: Unique) -> Request<'_, Unique> {
+        self.reads.fetch_add(1, Relaxed);
         let bytes = lock(&self.bytes);
         let at = to_usize(offset);
         let len = into.len();

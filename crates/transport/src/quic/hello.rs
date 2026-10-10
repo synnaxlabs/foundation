@@ -1,11 +1,13 @@
 //! The hello: the limits a node sends on its first one-way stream, which its peer
 //! obeys. It is (id, value) pairs, both QUIC varints, ids strictly increasing.
 
+use std::time::Instant;
+
 use noq_proto::{Dir, ReadError, StreamEvent, StreamId, VarInt};
 
 use super::connection::Fault;
-use crate::MESSAGE_BYTES_MIN;
 use crate::varint::{self, Varint};
+use crate::{MESSAGE_BYTES_MIN, window_min};
 
 /// The most bytes a hello takes.
 pub(super) const BYTES_MAX: usize = 256;
@@ -52,7 +54,7 @@ impl Hello {
     ///
     /// The fault when the hello is over 256 bytes, ends inside a pair, has an id
     /// at or below the one before it, misses id 0, misses id 1, has a
-    /// `message_bytes_max` below 1472, or has a `window_bytes` below its
+    /// `message_bytes_max` below 1472, or has a `window_bytes` below twice its
     /// `message_bytes_max`. When more than one applies, the first in this list,
     /// except that the pairs are read in order: the first pair that is cut or has a
     /// low id gives its fault.
@@ -88,10 +90,10 @@ impl Hello {
                  {MESSAGE_BYTES_MIN}"
             )));
         }
-        if window_bytes < message_bytes_max {
+        if window_bytes < window_min(message_bytes_max) {
             return Err(Fault(format!(
-                "a hello with window_bytes {window_bytes} below message_bytes_max \
-                 {message_bytes_max}"
+                "a hello with window_bytes {window_bytes} below twice \
+                 message_bytes_max {message_bytes_max}"
             )));
         }
         Ok(Self {
@@ -109,6 +111,8 @@ pub(super) enum Peer {
         stream: Option<StreamId>,
         /// The bytes of the hello that arrived.
         bytes: Vec<u8>,
+        /// When the handshake ended, once it has.
+        since: Option<Instant>,
     },
     Arrived(Hello),
 }
@@ -119,6 +123,27 @@ impl Peer {
         Self::Waiting {
             stream: None,
             bytes: Vec::new(),
+            since: None,
+        }
+    }
+
+    /// Starts the wait for the hello at `now`, when the handshake ends.
+    ///
+    /// # Panics
+    ///
+    /// After the hello arrived.
+    pub(super) fn wait(&mut self, now: Instant) {
+        let Self::Waiting { since, .. } = self else {
+            panic!("invariant: the handshake ends before the hello arrives");
+        };
+        *since = Some(now);
+    }
+
+    /// When the wait for the hello started, while it has not arrived.
+    pub(super) fn since(&self) -> Option<Instant> {
+        match *self {
+            Self::Waiting { since, .. } => since,
+            Self::Arrived(_) => None,
         }
     }
 
@@ -151,7 +176,7 @@ impl Peer {
         inner: &mut noq_proto::Connection,
         event: &StreamEvent,
     ) -> Result<Option<Hello>, Fault> {
-        let Self::Waiting { stream, bytes } = self else {
+        let Self::Waiting { stream, bytes, .. } = self else {
             panic!("invariant: the hello is read until it arrives");
         };
         let id = match (*stream, event) {
@@ -286,9 +311,10 @@ mod tests {
                 "a hello with a message_bytes_max of {message}, below 1472"
             ));
         }
-        if window < message {
+        if window / 2 < message {
             return Err(format!(
-                "a hello with window_bytes {window} below message_bytes_max {message}"
+                "a hello with window_bytes {window} below twice message_bytes_max \
+                 {message}"
             ));
         }
         Ok(Hello {
@@ -395,27 +421,28 @@ mod tests {
     proptest! {
         #[test]
         fn decode_gives_what_encode_sent(
-            a in MESSAGE_BYTES_MIN as u64..=VarInt::MAX.into_inner(),
-            b in MESSAGE_BYTES_MIN as u64..=VarInt::MAX.into_inner(),
+            message in MESSAGE_BYTES_MIN as u64..=VarInt::MAX.into_inner() / 2,
+            window in 0..=VarInt::MAX.into_inner(),
         ) {
+            let window = window.max(2 * message);
             let hello = Hello {
-                window_bytes: usize::try_from(a.max(b)).expect("64 bits"),
-                message_bytes_max: usize::try_from(a.min(b)).expect("64 bits"),
+                window_bytes: usize::try_from(window).expect("64 bits"),
+                message_bytes_max: usize::try_from(message).expect("64 bits"),
             };
             prop_assert_eq!(Hello::decode(&hello.encode()), Ok(hello));
         }
 
         #[test]
-        fn decode_refuses_only_a_window_bytes_below_the_message_bytes_max(
+        fn decode_refuses_only_a_window_bytes_below_twice_the_message_bytes_max(
             message in value().prop_map(|value| value.max(MESSAGE_BYTES_MIN as u64)),
             offset in -64_i64..=64,
         ) {
-            let window = message
+            let window = (2 * message)
                 .saturating_add_signed(offset)
                 .min(VarInt::MAX.into_inner());
-            let expected = if window < message {
+            let expected = if window < 2 * message {
                 fault(&format!(
-                    "a hello with window_bytes {window} below message_bytes_max \
+                    "a hello with window_bytes {window} below twice message_bytes_max \
                      {message}"
                 ))
             } else {
@@ -433,10 +460,10 @@ mod tests {
             ids in prop::collection::btree_set(2..=VarInt::MAX.into_inner(), 0..=10),
             value in 0..=VarInt::MAX.into_inner(),
         ) {
-            let mut pairs = vec![(0, 2_000), (1, 1_500)];
+            let mut pairs = vec![(0, 3_000), (1, 1_500)];
             pairs.extend(ids.into_iter().map(|id| (id, value)));
             let hello = Hello {
-                window_bytes: 2_000,
+                window_bytes: 3_000,
                 message_bytes_max: 1_500,
             };
             prop_assert_eq!(Hello::decode(&encode(&pairs)), Ok(hello));
@@ -511,7 +538,7 @@ mod tests {
 
     #[test]
     fn decode_reads_every_pair() {
-        let mut pairs = vec![(0, 2_000), (1, 1_500)];
+        let mut pairs = vec![(0, 3_000), (1, 1_500)];
         pairs.extend((2..=63).map(|id| (id, 0)));
         pairs.push((63, 0));
         assert_eq!(
@@ -519,14 +546,14 @@ mod tests {
             fault("a hello with id 63 after id 63")
         );
         assert_eq!(
-            Hello::decode(&encode(&[(0, 2_000), (1, 1_500), (1 << 40, 0), (2, 0)])),
+            Hello::decode(&encode(&[(0, 3_000), (1, 1_500), (1 << 40, 0), (2, 0)])),
             fault("a hello with id 2 after id 1099511627776")
         );
     }
 
     #[test]
     fn decode_reads_the_most_pairs_that_fit() {
-        let mut pairs = vec![(0, 2_000), (1, 1_500)];
+        let mut pairs = vec![(0, 3_000), (1, 1_500)];
         pairs.extend((2..=104).map(|id| (id, 0)));
         pairs.push((0, 64));
         assert_eq!(encode(&pairs).len(), BYTES_MAX);
@@ -574,7 +601,9 @@ mod tests {
         let cases = [
             (
                 [(0, 63), (1, 1_472), (2, 7)],
-                fault("a hello with window_bytes 63 below message_bytes_max 1472"),
+                fault(
+                    "a hello with window_bytes 63 below twice message_bytes_max 1472",
+                ),
             ),
             (
                 [(0, 2_000), (1, 7), (2, 7)],
@@ -595,9 +624,9 @@ mod tests {
                 }),
             ),
             (
-                [(0, 2_000), (1, 1_500), (63, 0)],
+                [(0, 3_000), (1, 1_500), (63, 0)],
                 Ok(Hello {
-                    window_bytes: 2_000,
+                    window_bytes: 3_000,
                     message_bytes_max: 1_500,
                 }),
             ),
@@ -624,7 +653,7 @@ mod tests {
 
     #[test]
     fn decode_refuses_a_cut_inside_a_wide_id() {
-        let whole = encode(&[(0, 2_000), (1, 1_500)]);
+        let whole = encode(&[(0, 3_000), (1, 1_500)]);
         for cut in [
             &[0x80][..],
             &[0x80, 0x10, 0x00],
@@ -644,21 +673,21 @@ mod tests {
     #[test]
     fn decode_takes_varints_that_are_not_the_fewest_bytes() {
         let mut bytes = vec![0x40, 0x00];
-        bytes.extend(long(1_472));
+        bytes.extend(long(3_000));
         bytes.extend([0x01, 0x45, 0xc0]);
         let hello = Hello {
-            window_bytes: 1_472,
+            window_bytes: 3_000,
             message_bytes_max: 1_472,
         };
         assert_eq!(Hello::decode(&bytes), Ok(hello));
         // Id 0 and its value in 4 bytes, id 1 in 2 bytes, then unknown id 2^20 with
         // value 5 in 2 bytes.
         let bytes = [
-            0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x07, 0xd0, 0x40, 0x01, 0x45, 0xdc,
+            0x80, 0x00, 0x00, 0x00, 0x80, 0x00, 0x0b, 0xb8, 0x40, 0x01, 0x45, 0xdc,
             0x80, 0x10, 0x00, 0x00, 0x40, 0x05,
         ];
         let hello = Hello {
-            window_bytes: 2_000,
+            window_bytes: 3_000,
             message_bytes_max: 1_500,
         };
         assert_eq!(Hello::decode(&bytes), Ok(hello));
@@ -671,7 +700,7 @@ mod tests {
         let bytes = [0x00, 0x40, 0x05, 0x01, 0x45, 0xc0];
         assert_eq!(
             Hello::decode(&bytes),
-            fault("a hello with window_bytes 5 below message_bytes_max 1472")
+            fault("a hello with window_bytes 5 below twice message_bytes_max 1472")
         );
     }
 
@@ -731,7 +760,7 @@ mod tests {
             fault("a hello with no window_bytes")
         );
         assert_eq!(
-            Hello::decode(&encode(&[(0, 2_000), (1, 1_500), (5, 0), (3, 0), (2, 0)])),
+            Hello::decode(&encode(&[(0, 3_000), (1, 1_500), (5, 0), (3, 0), (2, 0)])),
             fault("a hello with id 3 after id 5")
         );
         assert_eq!(
@@ -753,7 +782,7 @@ mod tests {
     #[test]
     fn decode_refuses_an_id_at_or_below_the_one_before() {
         assert_eq!(
-            Hello::decode(&encode(&[(0, 2_000), (0, 2_000), (1, 1_500)])),
+            Hello::decode(&encode(&[(0, 3_000), (0, 3_000), (1, 1_500)])),
             fault("a hello with id 0 after id 0")
         );
         assert_eq!(
@@ -761,7 +790,7 @@ mod tests {
             fault("a hello with id 0 after id 1")
         );
         assert_eq!(
-            Hello::decode(&encode(&[(0, 2_000), (1, 1_500), (5, 0), (3, 0)])),
+            Hello::decode(&encode(&[(0, 3_000), (1, 1_500), (5, 0), (3, 0)])),
             fault("a hello with id 3 after id 5")
         );
         assert_eq!(
@@ -769,7 +798,7 @@ mod tests {
             fault("a hello with id 2 after id 2")
         );
         assert_eq!(
-            Hello::decode(&encode(&[(0, 2_000), (1, 1_500), (1 << 30, 0), (2, 0)])),
+            Hello::decode(&encode(&[(0, 3_000), (1, 1_500), (1 << 30, 0), (2, 0)])),
             fault("a hello with id 2 after id 1073741824")
         );
     }
@@ -798,33 +827,33 @@ mod tests {
             fault("a hello with a message_bytes_max of 1471, below 1472")
         );
         let hello = Hello {
-            window_bytes: 2_000,
+            window_bytes: 3_000,
             message_bytes_max: 1_472,
         };
-        assert_eq!(Hello::decode(&encode(&[(0, 2_000), (1, 1_472)])), Ok(hello));
+        assert_eq!(Hello::decode(&encode(&[(0, 3_000), (1, 1_472)])), Ok(hello));
     }
 
     #[test]
-    fn decode_refuses_a_window_bytes_below_the_message_bytes_max() {
+    fn decode_refuses_a_window_bytes_below_twice_the_message_bytes_max() {
         assert_eq!(
-            Hello::decode(&encode(&[(0, 1_471), (1, 1_472)])),
-            fault("a hello with window_bytes 1471 below message_bytes_max 1472")
+            Hello::decode(&encode(&[(0, 2_943), (1, 1_472)])),
+            fault("a hello with window_bytes 2943 below twice message_bytes_max 1472")
         );
         assert_eq!(
-            Hello::decode(&encode(&[(0, 1_472), (1, 2_000)])),
-            fault("a hello with window_bytes 1472 below message_bytes_max 2000")
+            Hello::decode(&encode(&[(0, 2_000), (1, 2_000)])),
+            fault("a hello with window_bytes 2000 below twice message_bytes_max 2000")
         );
         assert_eq!(
-            Hello::decode(&encode(&[(0, 1 << 33), (1, 1 << 34)])),
+            Hello::decode(&encode(&[(0, (1 << 35) - 1), (1, 1 << 34)])),
             fault(
-                "a hello with window_bytes 8589934592 below message_bytes_max \
+                "a hello with window_bytes 34359738367 below twice message_bytes_max \
                  17179869184"
             )
         );
         let hello = Hello {
-            window_bytes: 1_472,
+            window_bytes: 2_944,
             message_bytes_max: 1_472,
         };
-        assert_eq!(Hello::decode(&encode(&[(0, 1_472), (1, 1_472)])), Ok(hello));
+        assert_eq!(Hello::decode(&encode(&[(0, 2_944), (1, 1_472)])), Ok(hello));
     }
 }

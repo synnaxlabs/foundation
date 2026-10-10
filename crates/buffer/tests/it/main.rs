@@ -7,6 +7,7 @@ mod memory;
 
 use std::collections::BTreeSet;
 use std::future::poll_fn;
+use std::num::NonZeroU8;
 use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
 use std::pin::{Pin, pin};
@@ -17,12 +18,12 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Heap, Pool};
 use buffer::{
-    Buffer, Config, End, Entry, Error, Layout, Limit, Mark, Parts, Read, Rejected,
-    Stored, Tail, Unfit,
+    Buffer, Commit, Config, End, Entry, Error, Layout, Limit, Mark, Parts, Read,
+    Rejected, Stored, Tail, Unfit,
 };
 use env::clock::Clock;
 use env::entropy::Entropy;
-use env::files::{Error as FileError, Mode, Operation, SECTOR};
+use env::files::{Error as FileError, Files, Mode, Operation, SECTOR};
 use env::tasks::Tasks;
 use proptest::prelude::*;
 use types::channel::{self, Slot, Slots};
@@ -57,9 +58,17 @@ const COVER: usize = 512;
 const DATA: u8 = 1;
 const RESTART: u8 = 3;
 
+/// The disk that the files of a test are on.
+enum Disk {
+    Sim(sim::node::Node),
+    Memory(Memory),
+}
+
 /// What one test gets on its shard.
 struct Shard {
-    memory: Memory,
+    disk: Disk,
+    /// The files on `disk`.
+    files: Files,
     pool: Rc<Pool>,
     clock: Clock,
     tasks: Tasks,
@@ -69,7 +78,7 @@ struct Shard {
 impl Shard {
     async fn open(&self, layout: Layout, slots: &mut Slots) -> Result<Buffer, Error> {
         let config = Config {
-            files: self.memory.files(),
+            files: self.files.clone(),
             dir: PathBuf::from(DIR),
             pool: Rc::clone(&self.pool),
             clock: self.clock.clone(),
@@ -90,67 +99,142 @@ impl Shard {
         block.freeze()
     }
 
+    /// The `Memory` that the test runs on.
+    ///
+    /// # Panics
+    ///
+    /// When the test runs on the node's disk.
+    fn memory(&self) -> &Memory {
+        match &self.disk {
+            Disk::Memory(memory) => memory,
+            Disk::Sim(_) => panic!("the test runs on the node's disk"),
+        }
+    }
+
+    /// The node whose disk the test runs on.
+    ///
+    /// # Panics
+    ///
+    /// When the test runs on memory.
+    fn node(&self) -> &sim::node::Node {
+        match &self.disk {
+            Disk::Sim(node) => node,
+            Disk::Memory(_) => panic!("the test runs on memory"),
+        }
+    }
+
     /// Makes the ring file with `len` zero bytes and no header, when no file is there.
     async fn create_zeroed(&self, len: u64) {
-        self.memory
-            .files()
+        let dir = self.files.create_dir(FilePath::new(DIR)).await;
+        dir.expect("the directory is made");
+        self.files
             .open(FilePath::new(RING), Mode::Create { len })
             .await
             .expect("the file is made");
     }
 
+    /// Whether a write handle holds the ring: a write open of it is then busy.
+    ///
+    /// # Panics
+    ///
+    /// When the test runs on memory, which never gives `Busy`.
+    async fn ring_held(&self) -> bool {
+        self.node();
+        match self.files.open(FilePath::new(RING), Mode::Write).await {
+            Ok(_) => false,
+            Err(FileError::Busy { .. }) => true,
+            Err(error) => panic!("the ring does not open: {error}"),
+        }
+    }
+
+    /// The bytes of the ring file.
+    async fn bytes(&self) -> Vec<u8> {
+        let ring = self.files.open(FilePath::new(RING), Mode::Read).await;
+        let ring = ring.expect("the ring opens");
+        let pool = pool();
+        let mut bytes = Vec::new();
+        for at in (0..ring.len()).step_by(to_usize(BLOCK)) {
+            let len = to_usize(BLOCK.min(ring.len() - at));
+            let block = pool.alloc(len).expect("a block");
+            bytes.extend_from_slice(&ring.read_at(at, block).await.expect("reads"));
+        }
+        bytes
+    }
+
+    /// Puts `bytes` at `offset` of the ring file, as a crash or a defect would. No
+    /// buffer may hold the ring.
+    async fn put(&self, offset: usize, bytes: &[u8]) {
+        let ring = self.files.open(FilePath::new(RING), Mode::Write).await;
+        let ring = ring.expect("the ring opens to write");
+        let mut block = pool().alloc(bytes.len()).expect("a block");
+        block.copy_from_slice(bytes);
+        let offset = u64::try_from(offset).expect("fits in u64");
+        ring.write_at(offset, &[block.freeze()])
+            .await
+            .expect("writes");
+    }
+
     /// Puts `bytes` at `at` of both header blocks and fixes their CRCs.
-    fn tamper(&self, at: usize, bytes: &[u8]) {
+    async fn tamper(&self, at: usize, bytes: &[u8]) {
         for place in [0, to_usize(BLOCK)] {
-            self.tamper_block(place, at, bytes);
+            self.tamper_block(place, at, bytes).await;
         }
     }
 
     /// Puts `bytes` at `at` of the header block at `place` and fixes its CRC.
-    fn tamper_block(&self, place: usize, at: usize, bytes: &[u8]) {
-        let file = self.memory.bytes(RING);
+    async fn tamper_block(&self, place: usize, at: usize, bytes: &[u8]) {
+        let file = self.bytes().await;
         let mut block = file[place..place + to_usize(BLOCK)].to_vec();
         block[at..at + bytes.len()].copy_from_slice(bytes);
         let crc = crc32c::crc32c(&block[..CRC_AT]);
         let crc = crc32c::crc32c_append(crc, &block[CRC_AT + 4..COVER]);
         block[CRC_AT..CRC_AT + 4].copy_from_slice(&crc.to_le_bytes());
-        self.memory.put(RING, place, &block);
+        self.put(place, &block).await;
     }
 
     /// Opens a ring that holds a record at `offset` that this build cannot read. The
     /// open must give `Invalid`, as [`Shard::open_refused`] says.
     async fn open_invalid(&self, layout: Layout, offset: u64) {
-        self.open_refused(layout, Error::Invalid { offset }).await;
+        let case = format!("a record at {offset}");
+        let error = Error::Invalid { offset };
+        self.open_refused(layout, error, &case).await;
     }
 
     /// Opens a ring that passes its CRCs and that this build cannot read. The open
-    /// must give `error`, leave the file as it was, and not sync it.
-    async fn open_refused(&self, layout: Layout, error: Error) {
-        let before = self.memory.bytes(RING);
-        let syncs = self.memory.syncs();
+    /// must give `error`, leave the file as it was, and not sync it: a fault fails
+    /// the next sync of the ring, so an open that syncs it gives `Io`. Each failed
+    /// assert names `case`.
+    async fn open_refused(&self, layout: Layout, error: Error, case: &str) {
+        let before = self.bytes().await;
+        self.node().fail_file(FilePath::new(RING), Operation::Sync);
         let opened = self.open(layout, &mut Slots::new()).await;
-        assert_eq!(opened.map(drop), Err(error));
-        assert_eq!(self.memory.syncs(), syncs, "the open synced the ring");
-        assert!(
-            self.memory.bytes(RING) == before,
-            "the open changed the ring"
-        );
+        assert_eq!(opened.map(drop), Err(error), "{case}");
+        let changed = self.bytes().await != before;
+        assert!(!changed, "{case}: the open changed the ring");
+        let ring = self.files.open(FilePath::new(RING), Mode::Write).await;
+        let synced = ring.expect("the ring opens to write").sync().await;
+        let fault = FileError::Io {
+            path: RING.into(),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(synced, Err(fault), "{case}: the open synced the ring");
     }
 
     /// Puts `bytes` at `at` of the body of the record at `offset` of the area, and
     /// seals the record.
-    fn tamper_record(&self, offset: u64, at: usize, bytes: &[u8]) {
+    async fn tamper_record(&self, offset: u64, at: usize, bytes: &[u8]) {
         let body = to_usize(AREA_START + offset) + 9;
-        self.memory.put(RING, body + at, bytes);
-        self.seal(offset);
+        self.put(body + at, bytes).await;
+        self.seal(offset).await;
     }
 
     /// Fixes the CRC of the record at `offset` of the area, so that it still follows
     /// the record before it, a restart record or a data record. The tail offset in
     /// each header block must be 0. The first record follows the tail chain of the
     /// header, so for it the two header blocks must be the same up to the seq.
-    fn seal(&self, offset: u64) {
-        let file = self.memory.bytes(RING);
+    async fn seal(&self, offset: u64) {
+        let file = self.bytes().await;
         for block in [0, to_usize(BLOCK)] {
             let tail = &file[block + TAIL_AT..block + TAIL_AT + 8];
             assert_eq!(tail, [0; 8], "the tail offset of the ring is not 0");
@@ -181,7 +265,7 @@ impl Shard {
         let crc = crc32c::crc32c_append(chain, &file[start..start + 4]);
         let end = start + 9 + len_at(start);
         let crc = crc32c::crc32c_append(crc, &file[start + 8..end]);
-        self.memory.put(RING, start + 4, &crc.to_le_bytes());
+        self.put(start + 4, &crc.to_le_bytes()).await;
     }
 
     /// Makes a ring with a data record at `BLOCK` and one at `2 * BLOCK`.
@@ -355,24 +439,16 @@ fn entries(reads: &[Read]) -> Vec<Stored> {
     reads.iter().flat_map(|read| read.entries.clone()).collect()
 }
 
-/// Starts one shard of one node, with the node's files in `memory`, to run `main`
-/// until it returns. A panic in `main` comes back from the run as
-/// [`sim::Error::Panicked`].
+/// Starts one shard of one node to run `main` until it returns, on the node's
+/// disk. A panic in `main` comes back from the run as [`sim::Error::Panicked`].
 fn start<F>(
     seed: u64,
-    memory: Memory,
     main: impl FnOnce(Shard) -> F + Send + 'static,
 ) -> (sim::Sim, env::thread::Handle)
 where
     F: Future<Output = ()> + 'static,
 {
-    let mut sim = sim::Sim::new(sim::Config {
-        seed,
-        ..sim::Config::default()
-    });
-    let node = sim.node(sim::node::Config::default());
-    let clock = node.clock();
-    let entropy = node.entropy();
+    let (sim, node) = create_node(seed);
     let config = env::shards::Config {
         name: DIR.into(),
         core: None,
@@ -380,29 +456,49 @@ where
     let handle = node
         .shards()
         .start(config, move |tasks| {
-            let config = block::Config { budget: POOL };
-            let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
             main(Shard {
-                memory,
-                pool: Rc::new(pool),
-                clock,
+                files: node.files(),
+                pool: Rc::new(pool()),
+                clock: node.clock(),
                 tasks,
-                entropy,
+                entropy: node.entropy(),
+                disk: Disk::Sim(node),
             })
         })
         .expect("the shard starts");
     (sim, handle)
 }
 
-/// Runs `main` on one shard of one node, with the node's files in `memory`, until
-/// it returns.
-fn run<F>(seed: u64, memory: Memory, main: impl FnOnce(Shard) -> F + Send + 'static)
+/// Runs `main` as [`start`] does, until it returns.
+fn run<F>(seed: u64, main: impl FnOnce(Shard) -> F + Send + 'static)
 where
     F: Future<Output = ()> + 'static,
 {
-    let (mut sim, handle) = start(seed, memory, main);
+    let (mut sim, handle) = start(seed, main);
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
+}
+
+/// Runs `main` as [`run`] does, with the files in a new `Memory` in place of the
+/// node's disk. Only a test that needs what `Memory` gives runs on it.
+fn run_on_memory<F>(seed: u64, main: impl FnOnce(Shard) -> F + Send + 'static)
+where
+    F: Future<Output = ()> + 'static,
+{
+    run(seed, |shard| {
+        let memory = Memory::default();
+        main(Shard {
+            files: memory.files(),
+            disk: Disk::Memory(memory),
+            ..shard
+        })
+    });
+}
+
+/// A pool with the budget of a test's shard.
+fn pool() -> Pool {
+    let config = block::Config { budget: POOL };
+    Pool::new(config.clone(), Heap::new(config.reservation()))
 }
 
 /// The result of a call to the memory driver, which ends at once.
@@ -535,32 +631,31 @@ fn a_memory_empty_path_names_no_file() {
 
 #[test]
 fn a_new_ring_keeps_its_layout_across_opens() {
-    let memory = Memory::default();
-    run(1, memory.clone(), |shard| async move {
+    run_on_memory(1, |shard| async move {
         let first = layout(AREA, BODY_MAX);
         let buffer = shard.open(first, &mut Slots::new()).await.expect("opens");
         assert_eq!(buffer.layout(), first);
-        assert_eq!(shard.memory.syncs(), 2, "the header and the open");
+        assert_eq!(shard.memory().syncs(), 2, "the header and the open");
         drop(buffer);
-        let header = shard.memory.bytes(RING)[..to_usize(AREA_START)].to_vec();
+        let header = shard.bytes().await[..to_usize(AREA_START)].to_vec();
         let other = layout(2 * AREA, 2 * BODY_MAX);
         let buffer = shard.open(other, &mut Slots::new()).await.expect("reopens");
         assert_eq!(buffer.layout(), first);
-        let reopened = &shard.memory.bytes(RING)[..to_usize(AREA_START)];
+        let reopened = &shard.bytes().await[..to_usize(AREA_START)];
         assert_eq!(reopened, header, "the reopen rewrote the header");
+        let bytes = shard.bytes().await;
+        assert_eq!(bytes.len(), to_usize(AREA_START + AREA));
+        assert_eq!(&bytes[..8], b"FNDNRING");
+        assert_eq!(
+            bytes[..to_usize(BLOCK)],
+            bytes[to_usize(BLOCK)..to_usize(AREA_START)]
+        );
     });
-    let bytes = memory.bytes(RING);
-    assert_eq!(bytes.len(), to_usize(AREA_START + AREA));
-    assert_eq!(&bytes[..8], b"FNDNRING");
-    assert_eq!(
-        bytes[..to_usize(BLOCK)],
-        bytes[to_usize(BLOCK)..to_usize(AREA_START)]
-    );
 }
 
 #[test]
 fn pool_is_the_pool_of_the_config() {
-    run(1, Memory::default(), |shard| async move {
+    run(1, |shard| async move {
         let layout = layout(AREA, BODY_MAX);
         let buffer = shard.open(layout, &mut Slots::new()).await.expect("opens");
         assert!(std::ptr::eq(buffer.pool(), Rc::as_ptr(&shard.pool)));
@@ -569,7 +664,7 @@ fn pool_is_the_pool_of_the_config() {
 
 #[test]
 fn entries_are_durable_at_committed_and_recovered_at_open() {
-    run(2, Memory::default(), |shard| async move {
+    run_on_memory(2, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -596,7 +691,7 @@ fn entries_are_durable_at_committed_and_recovered_at_open() {
         buffer.committed().await.expect("commits");
         assert_eq!(buffer.durable(a, Path::Live), live);
         assert_eq!(buffer.durable(b, Path::Backfill), backfill);
-        assert_eq!(shard.memory.syncs(), 3, "one sync per commit");
+        assert_eq!(shard.memory().syncs(), 3, "one sync per commit");
         drop(buffer);
         let mut slots = Slots::new();
         let buffer = shard
@@ -616,7 +711,7 @@ fn entries_are_durable_at_committed_and_recovered_at_open() {
 /// Two entries of one path in one record keep their own `stored_at`.
 #[test]
 fn a_read_gives_each_entry_its_own_stored_at() {
-    run(1, Memory::default(), |shard| async move {
+    run(1, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -647,7 +742,7 @@ fn a_read_gives_each_entry_its_own_stored_at() {
 /// An open takes a ring that holds a record of the caller, with no samples.
 #[test]
 fn an_open_takes_a_ring_with_a_caller_record() {
-    run(1, Memory::default(), |shard| async move {
+    run(1, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -666,7 +761,7 @@ fn an_open_takes_a_ring_with_a_caller_record() {
 
 #[test]
 fn durable_moves_only_at_a_commit() {
-    run(3, Memory::default(), |shard| async move {
+    run(3, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -687,21 +782,39 @@ fn durable_moves_only_at_a_commit() {
     });
 }
 
+/// The shard waits on a gate with no timer, so only a task of the buffer can run in
+/// the idle window.
 #[test]
 fn an_idle_buffer_wakes_no_task() {
-    let (mut sim, handle) = start(20, Memory::default(), |shard| async move {
+    let gate = Arc::new(Mutex::new((false, None::<Waker>)));
+    let held = Arc::clone(&gate);
+    let (mut sim, handle) = start(20, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        shard.clock.sleep(commits(2000)).await;
+        poll_fn(|cx| {
+            let mut gate = held.lock().unwrap();
+            if gate.0 {
+                return Poll::Ready(());
+            }
+            gate.1 = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
         drop(buffer);
     });
     sim.run_for(COMMIT).expect("the open ends");
     let idle = sim.digest();
     sim.run_for(commits(200)).expect("the buffer idles");
     assert_eq!(sim.digest(), idle, "a task ran while the buffer idled");
+    let waker = {
+        let mut gate = gate.lock().unwrap();
+        gate.0 = true;
+        gate.1.take()
+    };
+    waker.expect("the shard waits on the gate").wake();
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
 }
@@ -709,7 +822,7 @@ fn an_idle_buffer_wakes_no_task() {
 /// Runs a buffer that idles while its shard wakes every one and a half commits,
 /// with `empty` empty appends at each wake. Returns the digest of the run.
 fn idle_with_wakes(empty: usize) -> u64 {
-    let (mut sim, handle) = start(27, Memory::default(), move |shard| async move {
+    let (mut sim, handle) = start(27, move |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -735,11 +848,44 @@ fn empty_appends_wake_no_task() {
     assert_eq!(idle_with_wakes(2), idle_with_wakes(0));
 }
 
+/// Runs a buffer whose task waits for the deadline of one entry, with `empty` empty
+/// appends meanwhile. Returns the digest of the run.
+fn busy_with_appends(empty: usize) -> u64 {
+    let (mut sim, handle) = start(28, move |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        shard.clock.sleep(commits(3)).await;
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(3)).await;
+        for _ in 0..empty {
+            buffer.append(Vec::new()).expect("takes an empty batch");
+        }
+        assert_eq!(buffer.committed().await, Ok(()));
+        drop(buffer);
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    sim.digest()
+}
+
+/// Appends to a buffer whose task does not idle wake no task: the waker that the
+/// first append takes is gone.
+#[test]
+fn appends_to_a_busy_buffer_wake_no_task() {
+    assert_eq!(busy_with_appends(2), busy_with_appends(0));
+}
+
 /// A `committed` with nothing appended before it waits on nothing: it resolves at
 /// once, and the task syncs nothing for it.
 #[test]
 fn committed_on_an_idle_buffer_resolves_at_once() {
-    run(21, Memory::default(), |shard| async move {
+    run_on_memory(21, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -751,14 +897,14 @@ fn committed_on_an_idle_buffer_resolves_at_once() {
         let polled = poll_fn(|cx| Poll::Ready(commit.as_mut().poll(cx))).await;
         assert_eq!(polled, Poll::Ready(Ok(())), "the first poll resolves");
         shard.clock.sleep(commits(4)).await;
-        assert_eq!(shard.memory.syncs(), 2, "the header and the open only");
+        assert_eq!(shard.memory().syncs(), 2, "the header and the open only");
         assert_eq!(shard.clock.now() - before, commits(4), "no deadline ran");
     });
 }
 
 #[test]
 fn the_first_append_after_an_idle_span_commits_after_one_commit() {
-    run(22, Memory::default(), |shard| async move {
+    run_on_memory(22, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -773,20 +919,20 @@ fn the_first_append_after_an_idle_span_commits_after_one_commit() {
         assert_eq!(buffer.durable(a, Path::Live), tail(0, None));
         shard.clock.sleep(tenths(2)).await;
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
-        assert_eq!(shard.memory.syncs(), 3, "the append alone woke the task");
+        assert_eq!(shard.memory().syncs(), 3, "the append alone woke the task");
     });
 }
 
 #[test]
 fn a_busy_buffer_keeps_one_deadline_per_commit() {
-    run(42, Memory::default(), |shard| async move {
+    run_on_memory(42, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        shard.memory.slow_syncs(shard.clock.clone(), tenths(2));
+        shard.memory().slow_syncs(shard.clock.clone(), tenths(2));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -795,7 +941,7 @@ fn a_busy_buffer_keeps_one_deadline_per_commit() {
             .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
             .expect("queues during the first sync");
         shard.clock.sleep(tenths(12)).await;
-        assert_eq!(shard.memory.syncs(), 4, "two deadlines, one commit apart");
+        assert_eq!(shard.memory().syncs(), 4, "two deadlines, one commit apart");
         assert_eq!(buffer.durable(a, Path::Live), tail(2, Some(2)));
     });
 }
@@ -804,7 +950,7 @@ fn a_busy_buffer_keeps_one_deadline_per_commit() {
 /// wakes it, and the deadline that just passed fires at once.
 #[test]
 fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
-    run(43, Memory::default(), |shard| async move {
+    run_on_memory(43, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -820,7 +966,7 @@ fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
             .sleep(Span::from_nanos(COMMIT.nanos() / 10))
             .await;
         assert_eq!(
-            shard.memory.syncs(),
+            shard.memory().syncs(),
             3,
             "the passed deadline fired at the wake"
         );
@@ -834,7 +980,7 @@ fn an_append_at_the_deadline_of_a_parked_task_commits_at_once() {
 #[test]
 fn a_deadline_that_passes_during_a_sync_fires_when_the_sync_ends() {
     for (tenths, seed) in [(10, 45), (11, 46), (30, 140)] {
-        run(seed, Memory::default(), move |shard| async move {
+        run_on_memory(seed, move |shard| async move {
             let mut slots = Slots::new();
             let buffer = shard
                 .open(layout(AREA, BODY_MAX), &mut slots)
@@ -843,7 +989,7 @@ fn a_deadline_that_passes_during_a_sync_fires_when_the_sync_ends() {
             let a = slots.index(key(1));
             let tenth = COMMIT.nanos() / 10;
             let sync = Span::from_nanos(tenth * tenths);
-            shard.memory.slow_syncs(shard.clock.clone(), sync);
+            shard.memory().slow_syncs(shard.clock.clone(), sync);
             shard.clock.sleep(commits(21)).await;
             let opened = shard.clock.now();
             buffer
@@ -867,27 +1013,26 @@ fn a_deadline_that_passes_during_a_sync_fires_when_the_sync_ends() {
 
 #[test]
 fn a_dropped_idle_buffer_ends_its_task_at_once() {
-    let memory = Memory::default();
-    run(23, memory.clone(), |shard| async move {
+    run(23, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         shard.clock.sleep(commits(21)).await;
-        assert_eq!(shard.memory.open_files(), 1);
+        assert!(shard.ring_held().await, "the task holds the ring");
         drop(buffer);
         shard
             .clock
             .sleep(Span::from_nanos(COMMIT.nanos() / 4))
             .await;
-        assert_eq!(shard.memory.open_files(), 0, "the task holds the ring open");
+        assert!(!shard.ring_held().await, "the task holds the ring open");
     });
 }
 
 #[test]
 fn a_batch_past_the_open_group_starts_the_next_record() {
-    run(4, Memory::default(), |shard| async move {
+    run_on_memory(4, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -908,7 +1053,7 @@ fn a_batch_past_the_open_group_starts_the_next_record() {
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(3)));
         buffer.committed().await.expect("commits");
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(3)));
-        assert_eq!(shard.memory.syncs(), 3, "both records go in one sync");
+        assert_eq!(shard.memory().syncs(), 3, "both records go in one sync");
         drop(buffer);
         let mut slots = Slots::new();
         let buffer = shard
@@ -924,7 +1069,7 @@ fn a_batch_past_the_open_group_starts_the_next_record() {
 
 #[test]
 fn a_full_ring_queues_nothing() {
-    run(5, Memory::default(), |shard| async move {
+    run(5, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(4 * BLOCK, BODY_MAX), &mut slots)
@@ -953,7 +1098,7 @@ fn a_full_ring_queues_nothing() {
 
 #[test]
 fn a_batch_is_queued_whole_or_not_at_all() {
-    run(6, Memory::default(), |shard| async move {
+    run(6, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(8 * BLOCK, 8183), &mut slots)
@@ -995,7 +1140,7 @@ fn a_batch_is_queued_whole_or_not_at_all() {
 /// and after it commit in its place.
 #[test]
 fn a_batch_no_record_holds_is_large_and_queues_nothing() {
-    run(108, Memory::default(), |shard| async move {
+    run(108, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1043,7 +1188,7 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
         drop(buffer);
         let count = to_usize(AREA_START + BLOCK) + 9;
         assert_eq!(
-            shard.memory.bytes(RING)[count..count + 4],
+            shard.bytes().await[count..count + 4],
             2_u32.to_le_bytes(),
             "the large batches left the group open, so one record holds both"
         );
@@ -1061,7 +1206,7 @@ fn a_batch_no_record_holds_is_large_and_queues_nothing() {
 /// batch before it takes the blocks of its entries.
 #[test]
 fn an_append_is_large_exactly_when_the_layout_check_fails() {
-    run(141, Memory::default(), |shard| async move {
+    run(141, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1115,7 +1260,7 @@ fn an_append_is_large_exactly_when_the_layout_check_fails() {
 /// at the purge before.
 #[test]
 fn a_failed_append_holds_no_part() {
-    run(109, Memory::default(), |shard| async move {
+    run(109, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1147,7 +1292,7 @@ fn a_failed_append_holds_no_part() {
 /// sync fails the reopen.
 #[test]
 fn a_reopen_syncs_the_ring_once() {
-    run(26, Memory::default(), |shard| async move {
+    run_on_memory(26, |shard| async move {
         let ring = layout(AREA, BODY_MAX);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
@@ -1169,11 +1314,11 @@ fn a_reopen_syncs_the_ring_once() {
         drop(buffer);
         drop(shard.open(ring, &mut Slots::new()).await.expect("reopens"));
         assert_eq!(
-            shard.memory.syncs(),
+            shard.memory().syncs(),
             5,
             "the header, the open, two commits, the reopen"
         );
-        shard.memory.fail_syncs();
+        shard.memory().fail_syncs();
         let reopened = shard.open(ring, &mut Slots::new()).await.map(drop);
         let failed = Error::Files(FileError::Io {
             path: PathBuf::from(RING),
@@ -1184,16 +1329,42 @@ fn a_reopen_syncs_the_ring_once() {
     });
 }
 
+/// A failed write of a window that the walk read fails the open with the write's
+/// error.
+#[test]
+fn a_failed_write_of_the_walk_fails_the_open() {
+    run_on_memory(7, |shard| async move {
+        let ring = layout(AREA, BODY_MAX);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        // The walk writes the window at the tail, the area's start, as it read it.
+        shard.memory().fail_write_at(AREA_START);
+        let reopened = shard.open(ring, &mut Slots::new()).await.map(drop);
+        let failed = Error::Files(FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        });
+        assert_eq!(reopened, Err(failed));
+    });
+}
+
 #[test]
 fn a_failed_sync_ends_the_buffer_with_its_error() {
-    run(7, Memory::default(), |shard| async move {
+    run_on_memory(7, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        shard.memory.fail_syncs();
+        shard.memory().fail_syncs();
         buffer
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
@@ -1216,7 +1387,11 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
         );
         assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)));
         assert_eq!(buffer.committed().await, ended);
-        assert_eq!(shard.memory.syncs(), 3, "the task ended at the failed sync");
+        assert_eq!(
+            shard.memory().syncs(),
+            3,
+            "the task ended at the failed sync"
+        );
     });
 }
 
@@ -1224,7 +1399,7 @@ fn a_failed_sync_ends_the_buffer_with_its_error() {
 /// makes no commit, and a failed commit does not count.
 #[test]
 fn commits_counts_the_commits_that_ended() {
-    run(29, Memory::default(), |shard| async move {
+    run_on_memory(29, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1247,11 +1422,11 @@ fn commits_counts_the_commits_that_ended() {
             buffer.committed().await.expect("commits");
             assert_eq!(buffer.commits(), count);
         }
-        let syncs = shard.memory.syncs();
+        let syncs = shard.memory().syncs();
         buffer.committed().await.expect("nothing pending");
         assert_eq!(buffer.commits(), 2, "nothing pending made no commit");
-        assert_eq!(shard.memory.syncs(), syncs, "it synced nothing");
-        shard.memory.fail_syncs();
+        assert_eq!(shard.memory().syncs(), syncs, "it synced nothing");
+        shard.memory().fail_syncs();
         buffer
             .append([entry(1, a, Path::Live, 6, 1, None, Parts::default())])
             .expect("queues");
@@ -1269,14 +1444,14 @@ fn commits_counts_the_commits_that_ended() {
 /// a commit runs goes in the next one, and so does a `committed` future made then.
 #[test]
 fn commits_moves_before_an_entry_appended_during_the_commit_is_durable() {
-    run(30, Memory::default(), |shard| async move {
+    run_on_memory(30, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory().slow_syncs(shard.clock.clone(), tenths(4));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -1300,7 +1475,7 @@ fn commits_moves_before_an_entry_appended_during_the_commit_is_durable() {
 /// sees the entries of that commit durable, across every record of the commit.
 #[test]
 fn durable_changes_only_at_a_commit_that_moves_commits() {
-    run(132, Memory::default(), |shard| async move {
+    run_on_memory(132, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1315,14 +1490,14 @@ fn durable_changes_only_at_a_commit_that_moves_commits() {
                 buffer.durable(b, Path::Live),
             )
         };
-        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory().slow_syncs(shard.clock.clone(), tenths(4));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
         let empty = (0, tail(0, None), tail(0, None));
         assert_eq!(read(&buffer), empty, "an append moves nothing");
         shard.clock.sleep(tenths(12)).await;
-        assert_eq!(shard.memory.syncs(), 3, "the first sync runs");
+        assert_eq!(shard.memory().syncs(), 3, "the first sync runs");
         assert_eq!(read(&buffer), empty, "a sync in flight moves nothing");
         let big = Parts::from(shard.block(2000));
         let rest = Parts::from(shard.block(1500));
@@ -1350,7 +1525,7 @@ fn durable_changes_only_at_a_commit_that_moves_commits() {
 
 #[test]
 fn a_drop_ends_the_commit_task() {
-    run(8, Memory::default(), |shard| async move {
+    run_on_memory(8, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1361,14 +1536,18 @@ fn a_drop_ends_the_commit_task() {
             .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
             .expect("queues");
         buffer.committed().await.expect("commits");
-        assert_eq!(shard.memory.syncs(), 3);
+        assert_eq!(shard.memory().syncs(), 3);
         buffer
             .append([entry(1, a, Path::Live, 3, 1, Some(31), Parts::default())])
             .expect("queues");
         drop(buffer);
         shard.clock.sleep(commits(10)).await;
-        assert_eq!(shard.memory.syncs(), 4, "one deadline runs after the drop");
-        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+        assert_eq!(
+            shard.memory().syncs(),
+            4,
+            "one deadline runs after the drop"
+        );
+        assert_eq!(shard.memory().open_files(), 0, "the task ended");
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1386,7 +1565,7 @@ fn a_drop_ends_the_commit_task() {
 /// drop writes the entry.
 #[test]
 fn a_commit_on_an_entry_queued_at_the_drop_resolves_at_the_next_deadline() {
-    run(136, Memory::default(), |shard| async move {
+    run_on_memory(136, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1402,7 +1581,7 @@ fn a_commit_on_an_entry_queued_at_the_drop_resolves_at_the_next_deadline() {
         assert_eq!(commit.await, Ok(()), "the deadline wrote the entry");
         assert_eq!(shard.clock.now() - started, COMMIT, "at the next deadline");
         assert_eq!(
-            shard.memory.open_files(),
+            shard.memory().open_files(),
             0,
             "the ring closed with the future"
         );
@@ -1420,7 +1599,7 @@ fn a_commit_on_an_entry_queued_at_the_drop_resolves_at_the_next_deadline() {
 
 #[test]
 fn committed_waits_for_an_entry_appended_during_a_commit() {
-    run(19, Memory::default(), |shard| async move {
+    run_on_memory(19, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1428,7 +1607,7 @@ fn committed_waits_for_an_entry_appended_during_a_commit() {
             .expect("opens");
         let a = slots.index(key(1));
         let sync = Span::from_nanos(4_000_000);
-        shard.memory.slow_syncs(shard.clock.clone(), sync);
+        shard.memory().slow_syncs(shard.clock.clone(), sync);
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -1442,7 +1621,7 @@ fn committed_waits_for_an_entry_appended_during_a_commit() {
         buffer.committed().await.expect("commits");
         assert_eq!(buffer.durable(a, Path::Live), tail(2, Some(2)));
         assert_eq!(
-            shard.memory.syncs(),
+            shard.memory().syncs(),
             4,
             "the second entry took its own sync"
         );
@@ -1451,7 +1630,7 @@ fn committed_waits_for_an_entry_appended_during_a_commit() {
 
 #[test]
 fn an_entry_below_the_tail_is_a_broken_invariant() {
-    let (mut sim, _handle) = start(9, Memory::default(), |shard| async move {
+    let (mut sim, _handle) = start(9, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1478,7 +1657,7 @@ fn an_entry_below_the_tail_is_a_broken_invariant() {
 
 #[test]
 fn an_entry_past_the_last_seq_is_a_broken_invariant() {
-    let (mut sim, _handle) = start(11, Memory::default(), |shard| async move {
+    let (mut sim, _handle) = start(11, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -1510,14 +1689,14 @@ fn an_entry_past_the_last_seq_is_a_broken_invariant() {
 
 #[test]
 fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
-    run(107, Memory::default(), |shard| async move {
+    run(107, |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
-        let blocks = shard.memory.bytes(RING)[..to_usize(AREA_START)].to_vec();
-        let files = shard.memory.files();
+        let blocks = shard.bytes().await[..to_usize(AREA_START)].to_vec();
+        let files = &shard.files;
         files.remove(FilePath::new(RING)).await.expect("removes");
         shard.create_zeroed(AREA_START).await;
-        shard.memory.put(RING, 0, &blocks);
+        shard.put(0, &blocks).await;
         let opened = shard
             .open(layout(2 * AREA, BODY_MAX), &mut Slots::new())
             .await;
@@ -1533,7 +1712,7 @@ fn a_file_of_only_the_header_blocks_is_read_for_its_length() {
 
 #[test]
 fn a_file_shorter_than_the_header_blocks_is_not_read() {
-    run(17, Memory::default(), |shard| async move {
+    run(17, |shard| async move {
         shard.create_zeroed(BLOCK).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(
@@ -1548,9 +1727,9 @@ fn a_file_shorter_than_the_header_blocks_is_not_read() {
 
 #[test]
 fn a_file_with_no_header_is_missing() {
-    run(11, Memory::default(), |shard| async move {
+    run(11, |shard| async move {
         shard.create_zeroed(AREA_START + AREA).await;
-        shard.memory.put(RING, 0, b"not a ring");
+        shard.put(0, b"not a ring").await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Missing));
     });
@@ -1559,9 +1738,9 @@ fn a_file_with_no_header_is_missing() {
 /// Bytes past the first sector of a header block still make the file not a ring.
 #[test]
 fn a_file_with_bytes_past_the_first_sector_of_a_header_block_is_missing() {
-    run(11, Memory::default(), |shard| async move {
+    run(11, |shard| async move {
         shard.create_zeroed(AREA_START + AREA).await;
-        shard.memory.put(RING, COVER, b"not a ring");
+        shard.put(COVER, b"not a ring").await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Missing));
     });
@@ -1574,7 +1753,7 @@ fn a_file_with_bytes_past_the_first_sector_of_a_header_block_is_missing() {
 fn a_ring_with_one_zero_header_block_opens_from_the_other() {
     let block = to_usize(BLOCK);
     for (lost, kept) in [(0, block), (block, 0)] {
-        run(102, Memory::default(), move |shard| async move {
+        run(102, move |shard| async move {
             let ring = layout(AREA, BODY_MAX);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
@@ -1584,13 +1763,13 @@ fn a_ring_with_one_zero_header_block_opens_from_the_other() {
                 .expect("queues");
             buffer.committed().await.expect("commits");
             drop(buffer);
-            shard.memory.put(RING, lost, &[0; SECTOR]);
-            let before = shard.memory.bytes(RING);
+            shard.put(lost, &[0; SECTOR]).await;
+            let before = shard.bytes().await;
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens again");
             let a = slots.index(key(1));
             assert_eq!(buffer.tail(a, Path::Live), tail(3, Some(30)), "{lost}");
-            let after = shard.memory.bytes(RING);
+            let after = shard.bytes().await;
             assert_eq!(after[kept..kept + block], before[kept..kept + block]);
         });
     }
@@ -1601,16 +1780,16 @@ fn a_ring_with_one_zero_header_block_opens_from_the_other() {
 /// both blocks get the same first checkpoint.
 #[test]
 fn a_ring_whose_first_header_write_was_lost_opens_as_new() {
-    run(102, Memory::default(), |shard| async move {
+    run(102, |shard| async move {
         let block = to_usize(BLOCK);
         let ring = layout(AREA, BODY_MAX);
         drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
         for place in [0, block] {
-            shard.memory.put(RING, place, &[0; SECTOR]);
+            shard.put(place, &[0; SECTOR]).await;
         }
         let opened = shard.open(ring, &mut Slots::new()).await;
         assert_eq!(opened.map(|buffer| buffer.layout()), Ok(ring));
-        let bytes = shard.memory.bytes(RING);
+        let bytes = shard.bytes().await;
         assert_eq!(&bytes[..8], b"FNDNRING");
         assert_eq!(bytes[..block], bytes[block..2 * block]);
     });
@@ -2071,14 +2250,11 @@ fn drop_an_open_then_commit(seed: u64, after: i64) -> Option<bool> {
     Some(recovered.expect("the last open ends") == tail(3, Some(30)))
 }
 
-/// A known defect, <https://github.com/synnaxlabs/foundation/issues/1310>: the
-/// remove of a dropped open can still run and remove the ring that the next open
-/// made, so a kill loses an entry that the next open committed. This pins the loss
-/// on 6 runs that hang on the delay of each file call before the drop. A change that
-/// moves those delays makes them keep the entry, and the defect stays: the search in
-/// the issue then finds the runs again.
+/// The next open waits for the remove of a dropped open, so a kill keeps the entry
+/// that the next open committed. Each of the 6 runs drops the open while a remove of
+/// its ring is in flight.
 #[test]
-fn a_dropped_open_can_remove_the_ring_of_the_next_open() {
+fn a_dropped_open_keeps_the_ring_of_the_next_open() {
     let cases = [
         (143_161, 70_000),
         (150_046, 120_000),
@@ -2089,7 +2265,7 @@ fn a_dropped_open_can_remove_the_ring_of_the_next_open() {
     ];
     for (seed, after) in cases {
         let kept = drop_an_open_then_commit(seed, after);
-        assert_eq!(kept, Some(false), "seed {seed}, drop at {after} ns");
+        assert_eq!(kept, Some(true), "seed {seed}, drop at {after} ns");
     }
 }
 
@@ -2802,11 +2978,11 @@ fn a_ring_in_a_nested_directory_keeps_its_commits_across_a_power_cut() {
 
 #[test]
 fn two_header_blocks_with_a_wrong_crc_are_damaged() {
-    run(12, Memory::default(), |shard| async move {
+    run(12, |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
-        shard.memory.put(RING, BODY_MAX_AT, &[1]);
-        shard.memory.put(RING, to_usize(BLOCK) + BODY_MAX_AT, &[1]);
+        shard.put(BODY_MAX_AT, &[1]).await;
+        shard.put(to_usize(BLOCK) + BODY_MAX_AT, &[1]).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Damaged));
     });
@@ -2814,10 +2990,10 @@ fn two_header_blocks_with_a_wrong_crc_are_damaged() {
 
 #[test]
 fn another_format_version_is_not_read() {
-    run(13, Memory::default(), |shard| async move {
+    run(13, |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
-        shard.tamper(VERSION_AT, &2_u16.to_le_bytes());
+        shard.tamper(VERSION_AT, &2_u16.to_le_bytes()).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Err(Error::Version(2)));
     });
@@ -2825,10 +3001,10 @@ fn another_format_version_is_not_read() {
 
 #[test]
 fn a_header_with_sizes_that_make_no_ring_is_unfit() {
-    run(14, Memory::default(), |shard| async move {
+    run(14, |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
-        shard.tamper(BODY_MAX_AT, &0_u32.to_le_bytes());
+        shard.tamper(BODY_MAX_AT, &0_u32.to_le_bytes()).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(
             opened.map(drop),
@@ -2844,12 +3020,12 @@ fn a_header_with_sizes_that_make_no_ring_is_unfit() {
 /// ring.
 #[test]
 fn a_header_with_a_body_under_one_block_is_unfit() {
-    run(28, Memory::default(), |shard| async move {
+    run(28, |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
         let body_max = BODY_MAX - 1;
         let small = u32::try_from(body_max).expect("a small size");
-        shard.tamper(BODY_MAX_AT, &small.to_le_bytes());
+        shard.tamper(BODY_MAX_AT, &small.to_le_bytes()).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         let unfit = Unfit {
             area: AREA,
@@ -2861,7 +3037,7 @@ fn a_header_with_a_body_under_one_block_is_unfit() {
 
 #[test]
 fn a_record_whose_entry_cannot_be_read_is_invalid() {
-    run(18, Memory::default(), |shard| async move {
+    run(18, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -2873,7 +3049,7 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
             .expect("queues");
         buffer.committed().await.expect("commits");
         drop(buffer);
-        shard.tamper_record(BLOCK, 4 + 16, &[2]);
+        shard.tamper_record(BLOCK, 4 + 16, &[2]).await;
         shard.open_invalid(layout(AREA, BODY_MAX), BLOCK).await;
     });
 }
@@ -2882,7 +3058,7 @@ fn a_record_whose_entry_cannot_be_read_is_invalid() {
 #[test]
 fn a_record_over_the_most_entries_is_invalid() {
     for (count, opens) in [(1023_u32, true), (1024, false)] {
-        run(102, Memory::default(), move |shard| async move {
+        run(102, move |shard| async move {
             let ring = least(100_000);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
@@ -2908,7 +3084,7 @@ fn a_record_over_the_most_entries_is_invalid() {
                 body.extend_from_slice(&0_u32.to_le_bytes());
             }
             assert_eq!(body.len(), len);
-            shard.tamper_record(BLOCK, 0, &body);
+            shard.tamper_record(BLOCK, 0, &body).await;
             if !opens {
                 return shard.open_invalid(ring, BLOCK).await;
             }
@@ -2926,7 +3102,7 @@ fn a_record_over_the_most_entries_is_invalid() {
 
 #[test]
 fn a_record_with_an_entry_past_the_last_seq_is_invalid() {
-    run(103, Memory::default(), |shard| async move {
+    run(103, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -2939,14 +3115,16 @@ fn a_record_with_an_entry_past_the_last_seq_is_invalid() {
         buffer.committed().await.expect("commits");
         drop(buffer);
         // `first` of the first entry: after the count, the index, and the path.
-        shard.tamper_record(BLOCK, 4 + 16 + 1, &u64::MAX.to_le_bytes());
+        shard
+            .tamper_record(BLOCK, 4 + 16 + 1, &u64::MAX.to_le_bytes())
+            .await;
         shard.open_invalid(layout(AREA, BODY_MAX), BLOCK).await;
     });
 }
 
 #[test]
 fn a_record_with_an_entry_below_the_tail_is_invalid() {
-    run(106, Memory::default(), |shard| async move {
+    run(106, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -2963,7 +3141,9 @@ fn a_record_with_an_entry_below_the_tail_is_invalid() {
         drop(buffer);
         // `first` of the second entry: after the count, one table of 51 bytes,
         // the index, and the path.
-        shard.tamper_record(BLOCK, 4 + 51 + 16 + 1, &1u64.to_le_bytes());
+        shard
+            .tamper_record(BLOCK, 4 + 51 + 16 + 1, &1u64.to_le_bytes())
+            .await;
         shard.open_invalid(layout(AREA, BODY_MAX), BLOCK).await;
     });
 }
@@ -2971,9 +3151,9 @@ fn a_record_with_an_entry_below_the_tail_is_invalid() {
 /// The open writes the header blocks and the records before the invalid one again.
 #[test]
 fn an_open_that_finds_an_invalid_record_leaves_the_ring_as_read() {
-    run(107, Memory::default(), |shard| async move {
+    run(107, |shard| async move {
         shard.create_two_records().await;
-        shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
+        shard.tamper_record(2 * BLOCK, 4 + 16, &[2]).await;
         shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
     });
 }
@@ -2982,11 +3162,15 @@ fn an_open_that_finds_an_invalid_record_leaves_the_ring_as_read() {
 #[test]
 fn an_open_that_finds_an_invalid_record_leaves_a_zero_header_block_as_read() {
     for lost in [0, to_usize(BLOCK)] {
-        run(110, Memory::default(), move |shard| async move {
+        run(110, move |shard| async move {
             shard.create_two_records().await;
-            shard.memory.put(RING, lost, &[0; SECTOR]);
-            shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
-            shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
+            shard.put(lost, &[0; SECTOR]).await;
+            shard.tamper_record(2 * BLOCK, 4 + 16, &[2]).await;
+            let invalid = Error::Invalid { offset: 2 * BLOCK };
+            let case = format!("the zero block at {lost}");
+            shard
+                .open_refused(layout(AREA, BODY_MAX), invalid, &case)
+                .await;
         });
     }
 }
@@ -2994,12 +3178,12 @@ fn an_open_that_finds_an_invalid_record_leaves_a_zero_header_block_as_read() {
 /// A checkpoint is in the first sector of its block. The open keeps the other bytes.
 #[test]
 fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
-    run(111, Memory::default(), |shard| async move {
+    run(111, |shard| async move {
         shard.create_two_records().await;
         for block in [0, to_usize(BLOCK)] {
-            shard.memory.put(RING, block + COVER, b"past the sector");
+            shard.put(block + COVER, b"past the sector").await;
         }
-        shard.tamper_record(2 * BLOCK, 4 + 16, &[2]);
+        shard.tamper_record(2 * BLOCK, 4 + 16, &[2]).await;
         shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
     });
 }
@@ -3009,10 +3193,10 @@ fn an_open_that_finds_an_invalid_record_leaves_bytes_past_the_first_sector() {
 #[test]
 #[should_panic(expected = "the header blocks differ before the seq")]
 fn seal_refuses_the_first_record_under_two_tail_chains() {
-    run(112, Memory::default(), |shard| async move {
+    run(112, |shard| async move {
         shard.create_two_records().await;
-        shard.memory.put(RING, 0, &[0; SECTOR]);
-        shard.seal(0);
+        shard.put(0, &[0; SECTOR]).await;
+        shard.seal(0).await;
     });
 }
 
@@ -3020,12 +3204,12 @@ fn seal_refuses_the_first_record_under_two_tail_chains() {
 #[test]
 #[should_panic(expected = "the header blocks differ before the seq")]
 fn seal_refuses_the_first_record_under_the_tail_chains_of_two_whole_blocks() {
-    run(121, Memory::default(), |shard| async move {
+    run(121, |shard| async move {
         shard.create_two_records().await;
         let last = SEQ_AT - 1;
-        let chain = shard.memory.bytes(RING)[last] ^ 1;
-        shard.tamper_block(to_usize(BLOCK), last, &[chain]);
-        shard.seal(0);
+        let chain = shard.bytes().await[last] ^ 1;
+        shard.tamper_block(to_usize(BLOCK), last, &[chain]).await;
+        shard.seal(0).await;
     });
 }
 
@@ -3033,23 +3217,23 @@ fn seal_refuses_the_first_record_under_the_tail_chains_of_two_whole_blocks() {
 #[test]
 #[should_panic(expected = "the ring has no header")]
 fn seal_refuses_the_first_record_of_a_ring_with_no_header() {
-    run(120, Memory::default(), |shard| async move {
+    run(120, |shard| async move {
         shard.create_two_records().await;
         for block in [0, to_usize(BLOCK)] {
-            shard.memory.put(RING, block, &[0; SECTOR]);
+            shard.put(block, &[0; SECTOR]).await;
         }
-        shard.seal(0);
+        shard.seal(0).await;
     });
 }
 
 /// The offset of a record can be 0, so a header block has its own error.
 #[test]
 fn a_record_of_an_unknown_kind_at_the_start_of_the_ring_is_invalid() {
-    run(118, Memory::default(), |shard| async move {
+    run(118, |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
-        shard.memory.put(RING, to_usize(AREA_START) + 8, &[4]);
-        shard.seal(0);
+        shard.put(to_usize(AREA_START) + 8, &[4]).await;
+        shard.seal(0).await;
         shard.open_invalid(layout(AREA, BODY_MAX), 0).await;
     });
 }
@@ -3058,28 +3242,28 @@ fn a_record_of_an_unknown_kind_at_the_start_of_the_ring_is_invalid() {
 #[test]
 #[should_panic(expected = "the tail offset of the ring is not 0")]
 fn seal_refuses_a_ring_with_a_moved_tail() {
-    run(117, Memory::default(), |shard| async move {
+    run(117, |shard| async move {
         shard.create_two_records().await;
-        shard.tamper(TAIL_AT, &(2 * BLOCK).to_le_bytes());
-        shard.seal(2 * BLOCK);
+        shard.tamper(TAIL_AT, &(2 * BLOCK).to_le_bytes()).await;
+        shard.seal(2 * BLOCK).await;
     });
 }
 
 #[test]
 #[should_panic(expected = "no record starts at 8192")]
 fn seal_refuses_a_block_inside_a_record() {
-    run(115, Memory::default(), |shard| async move {
+    run(115, |shard| async move {
         shard.create_long_record().await;
-        shard.seal(2 * BLOCK);
+        shard.seal(2 * BLOCK).await;
     });
 }
 
 #[test]
 #[should_panic(expected = "no chain value of kind 0 before 16384")]
 fn seal_refuses_a_record_after_a_block_that_is_no_record() {
-    run(116, Memory::default(), |shard| async move {
+    run(116, |shard| async move {
         shard.create_two_records().await;
-        shard.seal(4 * BLOCK);
+        shard.seal(4 * BLOCK).await;
     });
 }
 
@@ -3087,23 +3271,23 @@ fn seal_refuses_a_record_after_a_block_that_is_no_record() {
 /// second block reads as the kind of a data record.
 #[test]
 fn a_record_of_an_unknown_kind_after_a_long_record_is_invalid() {
-    run(114, Memory::default(), |shard| async move {
+    run(114, |shard| async move {
         let ring = shard.create_long_record().await;
         let kind = to_usize(AREA_START + 3 * BLOCK) + 8;
-        assert_eq!(shard.memory.bytes(RING)[kind - to_usize(BLOCK)], DATA);
-        shard.memory.put(RING, kind, &[4]);
-        shard.seal(3 * BLOCK);
+        assert_eq!(shard.bytes().await[kind - to_usize(BLOCK)], DATA);
+        shard.put(kind, &[4]).await;
+        shard.seal(3 * BLOCK).await;
         shard.open_invalid(ring, 3 * BLOCK).await;
     });
 }
 
 #[test]
 fn a_record_of_an_unknown_kind_is_invalid() {
-    run(109, Memory::default(), |shard| async move {
+    run(109, |shard| async move {
         shard.create_two_records().await;
         let kind = to_usize(AREA_START + 2 * BLOCK) + 8;
-        shard.memory.put(RING, kind, &[4]);
-        shard.seal(2 * BLOCK);
+        shard.put(kind, &[4]).await;
+        shard.seal(2 * BLOCK).await;
         shard.open_invalid(layout(AREA, BODY_MAX), 2 * BLOCK).await;
     });
 }
@@ -3111,25 +3295,28 @@ fn a_record_of_an_unknown_kind_is_invalid() {
 /// A zeroed block has kind 0, so kind 0 ends the walk for each chain value.
 #[test]
 fn a_block_of_kind_zero_that_follows_the_chain_ends_the_walk() {
-    run(113, Memory::default(), |shard| async move {
+    run(113, |shard| async move {
         shard.create_two_records().await;
         let kind = to_usize(AREA_START + 2 * BLOCK) + 8;
-        shard.memory.put(RING, kind, &[0]);
-        shard.seal(2 * BLOCK);
+        shard.put(kind, &[0]).await;
+        shard.seal(2 * BLOCK).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(opened.map(drop), Ok(()));
-        assert_eq!(shard.memory.bytes(RING)[kind], RESTART);
+        assert_eq!(shard.bytes().await[kind], RESTART);
     });
 }
 
 #[test]
 fn an_open_that_finds_an_unaligned_tail_leaves_the_ring_as_read() {
-    run(108, Memory::default(), |shard| async move {
+    run(108, |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
-        shard.tamper(TAIL_AT, &(BLOCK + 1).to_le_bytes());
+        shard.tamper(TAIL_AT, &(BLOCK + 1).to_le_bytes()).await;
         let unaligned = Error::Unaligned { tail: BLOCK + 1 };
-        shard.open_refused(layout(AREA, BODY_MAX), unaligned).await;
+        let case = "a tail one byte past a block";
+        shard
+            .open_refused(layout(AREA, BODY_MAX), unaligned, case)
+            .await;
     });
 }
 
@@ -3149,24 +3336,23 @@ fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
         (Some(second), second, true),
     ];
     for (newer, unaligned, taken) in cases {
-        run(119, Memory::default(), move |shard| async move {
+        run(119, move |shard| async move {
             let ring = layout(AREA, BODY_MAX);
             let buffer = shard.open(ring, &mut Slots::new()).await;
             drop(buffer.expect("opens"));
             if let Some(place) = newer {
-                shard.tamper_block(place, SEQ_AT, &1u64.to_le_bytes());
+                shard.tamper_block(place, SEQ_AT, &1u64.to_le_bytes()).await;
             }
-            shard.tamper_block(unaligned, TAIL_AT, &u64::MAX.to_le_bytes());
-            let (before, syncs) = (shard.memory.bytes(RING), shard.memory.syncs());
-            let opened = shard.open(ring, &mut Slots::new()).await;
-            let refused = Err(Error::Unaligned { tail: u64::MAX });
-            let expected = if taken { refused } else { Ok(()) };
+            shard
+                .tamper_block(unaligned, TAIL_AT, &u64::MAX.to_le_bytes())
+                .await;
             let case = format!("newer: {newer:?}, the block at {unaligned}");
-            assert_eq!(opened.map(drop), expected, "{case}");
             if taken {
-                assert_eq!(shard.memory.syncs(), syncs, "{case}: the open synced");
-                let after = shard.memory.bytes(RING);
-                assert!(after == before, "{case}: the open changed the ring");
+                let refused = Error::Unaligned { tail: u64::MAX };
+                shard.open_refused(ring, refused, &case).await;
+            } else {
+                let opened = shard.open(ring, &mut Slots::new()).await;
+                assert_eq!(opened.map(drop), Ok(()), "{case}");
             }
         });
     }
@@ -3174,12 +3360,12 @@ fn an_open_checks_the_tail_of_the_header_block_that_it_takes() {
 
 #[test]
 fn a_header_with_an_area_at_the_end_of_u64_is_not_read() {
-    run(104, Memory::default(), |shard| async move {
+    run(104, |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
         let area = u64::MAX - 4095;
         // The area is 8 bytes at offset 10 of a header block.
-        shard.tamper(10, &area.to_le_bytes());
+        shard.tamper(10, &area.to_le_bytes()).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         assert_eq!(
             opened.map(drop),
@@ -3193,12 +3379,12 @@ fn a_header_with_an_area_at_the_end_of_u64_is_not_read() {
 
 #[test]
 fn a_header_with_an_area_under_four_records_is_unfit() {
-    run(157, Memory::default(), |shard| async move {
+    run(157, |shard| async move {
         let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         drop(buffer.expect("opens"));
         let area = 3 * BLOCK;
         // The area is 8 bytes at offset 10 of a header block.
-        shard.tamper(10, &area.to_le_bytes());
+        shard.tamper(10, &area.to_le_bytes()).await;
         let opened = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
         let unfit = Unfit {
             area,
@@ -3224,12 +3410,12 @@ fn a_layout_with_an_area_at_the_end_of_u64_makes_no_ring() {
 /// a new chain.
 #[test]
 fn each_open_starts_a_new_chain() {
-    run(20, Memory::default(), |shard| async move {
+    run(20, |shard| async move {
         let mut chains = Vec::new();
         for _ in 0..2 {
             let buffer = shard.open(layout(AREA, BODY_MAX), &mut Slots::new()).await;
             drop(buffer.expect("opens"));
-            let file = shard.memory.bytes(RING);
+            let file = shard.bytes().await;
             let at = to_usize(AREA_START) + 9;
             let chain = file[at..at + 4].try_into().expect("four bytes");
             chains.push(u32::from_le_bytes(chain));
@@ -3243,7 +3429,7 @@ fn each_open_starts_a_new_chain() {
 #[test]
 fn opens_with_no_data_leave_room_for_the_largest_record() {
     for ring in [least(BODY_MAX), layout(AREA, BODY_MAX)] {
-        run(24, Memory::default(), move |shard| async move {
+        run(24, move |shard| async move {
             let area = ring.area();
             for _ in 0..area / BLOCK {
                 drop(shard.open(ring, &mut Slots::new()).await.expect("opens"));
@@ -3264,7 +3450,7 @@ fn opens_with_no_data_leave_room_for_the_largest_record() {
 #[test]
 fn opens_with_no_data_after_an_entry_leave_room_for_the_next() {
     for torn in [false, true] {
-        run(25, Memory::default(), move |shard| async move {
+        run(25, move |shard| async move {
             let ring = layout(6 * BLOCK, BODY_MAX);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
@@ -3279,7 +3465,7 @@ fn opens_with_no_data_after_an_entry_leave_room_for_the_next() {
             }
             if torn {
                 let after = to_usize(AREA_START + 2 * BLOCK);
-                shard.memory.put(RING, after, &[0xA5; SECTOR]);
+                shard.put(after, &[0xA5; SECTOR]).await;
             }
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens again");
@@ -3307,7 +3493,7 @@ fn opens_with_no_data_after_an_entry_leave_room_for_the_next() {
 
 #[test]
 fn a_full_ring_does_not_reopen_before_its_tail_moves() {
-    run(21, Memory::default(), |shard| async move {
+    run(21, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(4 * BLOCK, BODY_MAX), &mut slots)
@@ -3517,6 +3703,54 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
     .expect("the buffer ends");
 }
 
+/// The test of the hand-written `Debug` of the private `Waiter` that a `Commit` and an
+/// `End` hold: it prints only its event and its key.
+#[test]
+fn a_waiter_prints_only_its_event_and_key() {
+    let (mut sim, node) = create_node(142);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let buffer = Buffer::open(config, &mut Slots::new())
+            .await
+            .expect("opens");
+        let mut polled = pin!(buffer.ended());
+        let polled = polled
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        assert_eq!(polled, Poll::Pending);
+        let commit = format!("{:?}", buffer.committed());
+        let end = format!("{:?}", buffer.ended());
+        let waiter = "Waiter { event: Commit, key: 1, .. }";
+        assert!(commit.contains(waiter), "{commit}");
+        let waiter = "Waiter { event: End, key: 2, .. }";
+        assert!(end.contains(waiter), "{end}");
+    })
+    .expect("the buffer ends");
+}
+
+/// The test of the hand-written `Debug` of the private `Parked`: a buffer prints
+/// whether its task idles, and no pointer of the task's waker.
+#[test]
+fn a_buffer_prints_whether_it_idles_and_no_pointer() {
+    run_on_memory(144, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        shard.clock.sleep(commits(3)).await;
+        let printed = format!("{buffer:?}");
+        assert!(printed.contains("parked: true"), "{printed}");
+        assert!(!printed.contains("0x"), "{printed}");
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let printed = format!("{buffer:?}");
+        assert!(printed.contains("parked: false"), "{printed}");
+    });
+}
+
 /// `End`s polled from other tasks and dropped while the buffer is held keep no
 /// waker.
 #[test]
@@ -3584,23 +3818,120 @@ fn the_end_of_the_task_wakes_the_last_waker_of_each_end() {
     .expect("the buffer ends");
 }
 
+/// `Commit`s polled once while an entry waits and dropped keep no waker.
+#[test]
+fn a_dropped_commit_keeps_no_waker() {
+    let (mut sim, node) = create_node(132);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        for _ in 0..1000 {
+            let commit = pin!(buffer.committed());
+            let waker = Waker::from(Arc::clone(&flag));
+            let polled = commit.poll(&mut Context::from_waker(&waker));
+            assert_eq!(polled, Poll::Pending);
+        }
+        assert_eq!(Arc::strong_count(&flag), 1, "the drop takes its waker out");
+        assert_eq!(buffer.committed().await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// A `Commit` keeps only the waker of its last poll, and the commit wakes it.
+#[test]
+fn a_commit_polled_with_new_wakers_keeps_the_last_one() {
+    let (mut sim, node) = create_node(133);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let mut commit = pin!(buffer.committed());
+        let flags: Vec<Arc<Flag>> = (0..1000)
+            .map(|_| Arc::new(Flag(AtomicBool::new(false))))
+            .collect();
+        for flag in &flags {
+            let waker = Waker::from(Arc::clone(flag));
+            let polled = commit.as_mut().poll(&mut Context::from_waker(&waker));
+            assert_eq!(polled, Poll::Pending);
+        }
+        let held: Vec<usize> = flags.iter().map(Arc::strong_count).collect();
+        let mut expected = vec![1; 1000];
+        expected[999] = 2;
+        assert_eq!(held, expected);
+        assert_eq!(buffer.committed().await, Ok(()));
+        let woken: Vec<bool> = flags
+            .iter()
+            .map(|flag| flag.0.load(Ordering::Relaxed))
+            .collect();
+        let mut expected = vec![false; 1000];
+        expected[999] = true;
+        assert_eq!(woken, expected);
+        assert_eq!(commit.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// The drop of a polled `Commit` leaves the waker of another, and the commit wakes it.
+///
+/// No test checks that a `Commit` or an `End` drops a waker after the borrow of the
+/// state ends, in a poll or in its own drop. Only a waker that holds a `Commit` or an
+/// `End` can see the order, and such a waker is not `Send`, so safe code cannot make
+/// it.
+#[test]
+fn a_dropped_commit_keeps_the_wakers_of_others() {
+    let (mut sim, node) = create_node(134);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let poll = |commit: Pin<&mut Commit>, flag: &Arc<Flag>| {
+            let waker = Waker::from(Arc::clone(flag));
+            commit.poll(&mut Context::from_waker(&waker))
+        };
+        let kept = Arc::new(Flag(AtomicBool::new(false)));
+        let mut commit = pin!(buffer.committed());
+        assert_eq!(poll(commit.as_mut(), &kept), Poll::Pending);
+        let dropped = Arc::new(Flag(AtomicBool::new(false)));
+        assert_eq!(poll(pin!(buffer.committed()), &dropped), Poll::Pending);
+        assert_eq!(Arc::strong_count(&kept), 2);
+        assert_eq!(buffer.committed().await, Ok(()));
+        assert!(kept.0.load(Ordering::Relaxed), "the commit wakes it");
+        assert_eq!(commit.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
 /// An `End` taken at a drop during a sync that then fails gives its error.
 #[test]
 fn an_end_taken_at_a_drop_during_a_failing_sync_gives_its_error() {
-    run(120, Memory::default(), |shard| async move {
+    run_on_memory(120, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
-        shard.memory.fail_syncs();
+        shard.memory().slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory().fail_syncs();
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
         shard.clock.sleep(tenths(12)).await;
-        assert_eq!(shard.memory.syncs(), 3, "the sync runs");
+        assert_eq!(shard.memory().syncs(), 3, "the sync runs");
         let end = buffer.ended();
         drop(buffer);
         let failed = FileError::Io {
@@ -3665,7 +3996,7 @@ fn an_open_while_an_end_of_a_dropped_buffer_is_held_fails_with_busy() {
 
 #[test]
 fn an_append_with_no_block_for_its_record_header_is_refused() {
-    run(112, Memory::default(), |shard| async move {
+    run(112, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -3895,13 +4226,13 @@ proptest! {
         seed in any::<u64>(),
         steps in prop::collection::vec(step(), 0..40),
     ) {
-        run(seed, Memory::default(), |shard| follow(shard, steps));
+        run(seed, |shard| follow(shard, steps));
     }
 }
 
 #[test]
 fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_its_deadline() {
-    run(40, Memory::default(), |shard| async move {
+    run_on_memory(40, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -3914,13 +4245,17 @@ fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_its_dead
             .expect("queues");
         drop(buffer);
         shard.clock.sleep(tenths(9)).await;
-        assert_eq!(shard.memory.syncs(), 2, "the entry waits for the deadline");
-        assert_eq!(shard.memory.open_files(), 1, "the task runs");
+        assert_eq!(
+            shard.memory().syncs(),
+            2,
+            "the entry waits for the deadline"
+        );
+        assert_eq!(shard.memory().open_files(), 1, "the task runs");
         shard.clock.sleep(tenths(2)).await;
-        assert_eq!(shard.memory.syncs(), 3, "the deadline writes the entry");
-        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+        assert_eq!(shard.memory().syncs(), 3, "the deadline writes the entry");
+        assert_eq!(shard.memory().open_files(), 0, "the task ended");
         shard.clock.sleep(commits(10)).await;
-        assert_eq!(shard.memory.syncs(), 3, "no later deadline runs");
+        assert_eq!(shard.memory().syncs(), 3, "no later deadline runs");
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -3936,7 +4271,7 @@ fn a_drop_right_after_the_first_append_of_an_idle_span_ends_the_task_at_its_dead
 
 #[test]
 fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
-    run(41, Memory::default(), |shard| async move {
+    run_on_memory(41, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -3944,7 +4279,7 @@ fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
             .expect("opens");
         let a = slots.index(key(1));
         let sync = Span::from_nanos(4_000_000);
-        shard.memory.slow_syncs(shard.clock.clone(), sync);
+        shard.memory().slow_syncs(shard.clock.clone(), sync);
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -3957,16 +4292,16 @@ fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
             .expect("queues while the first sync runs");
         drop(buffer);
         assert_eq!(
-            shard.memory.open_files(),
+            shard.memory().open_files(),
             1,
             "the task syncs the first entry"
         );
         shard.clock.sleep(sync).await;
-        assert_eq!(shard.memory.syncs(), 3, "the first sync ended");
-        assert_eq!(shard.memory.open_files(), 1, "the second entry waits");
+        assert_eq!(shard.memory().syncs(), 3, "the first sync ended");
+        assert_eq!(shard.memory().open_files(), 1, "the second entry waits");
         shard.clock.sleep(commits(10)).await;
-        assert_eq!(shard.memory.syncs(), 4, "the next deadline writes it");
-        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+        assert_eq!(shard.memory().syncs(), 4, "the next deadline writes it");
+        assert_eq!(shard.memory().open_files(), 0, "the task ended");
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -3985,7 +4320,7 @@ fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
 /// blocks of a record on their own, so the rest is over the largest block too.
 #[test]
 fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
-    run(101, Memory::default(), |mut shard| async move {
+    run(101, |mut shard| async move {
         let parts_pool = Rc::clone(&shard.pool);
         let config = block::Config { budget: 96 << 10 };
         shard.pool =
@@ -4020,7 +4355,7 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
 /// is; the next open recovers the record.
 #[test]
 fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
-    run(143, Memory::default(), |mut shard| async move {
+    run(143, |mut shard| async move {
         let config = block::Config { budget: 640 << 10 };
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
@@ -4061,7 +4396,7 @@ fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
 /// and an open recovers it.
 #[test]
 fn an_entry_over_the_largest_pool_block_is_large() {
-    run(155, Memory::default(), |mut shard| async move {
+    run(155, |mut shard| async move {
         let largest = 1 << 17;
         let over = Parts::from([shard.block(largest), shard.block(1)]);
         let more = Parts::from([shard.block(largest), shard.block(2)]);
@@ -4113,7 +4448,7 @@ fn an_entry_over_the_largest_pool_block_is_large() {
 /// as it is: an open with the larger pool recovers the entry.
 #[test]
 fn an_open_with_an_entry_over_the_largest_pool_block_fails() {
-    run(156, Memory::default(), |mut shard| async move {
+    run(156, |mut shard| async move {
         let ring = least(600_000);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
@@ -4151,7 +4486,7 @@ fn an_open_with_an_entry_over_the_largest_pool_block_fails() {
 /// opened a group, and is recovered at the next open.
 #[test]
 fn one_entry_of_the_entry_max_commits_and_is_recovered() {
-    run(110, Memory::default(), |shard| async move {
+    run(110, |shard| async move {
         let ring = layout(AREA, BODY_MAX);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
@@ -4177,7 +4512,7 @@ fn one_entry_of_the_entry_max_commits_and_is_recovered() {
 /// durable.
 #[test]
 fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
-    run(120, Memory::default(), |shard| async move {
+    run_on_memory(120, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4190,12 +4525,16 @@ fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
         let first = buffer.committed();
         shard.clock.sleep(commits(3)).await;
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
-        shard.memory.fail_syncs();
+        shard.memory().fail_syncs();
         buffer
             .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
             .expect("queues");
         shard.clock.sleep(commits(3)).await;
-        assert_eq!(shard.memory.syncs(), 4, "the second commit failed its sync");
+        assert_eq!(
+            shard.memory().syncs(),
+            4,
+            "the second commit failed its sync"
+        );
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
         let ended = Err(FileError::Io {
             path: PathBuf::from(RING),
@@ -4211,7 +4550,7 @@ fn a_synced_commit_resolves_well_after_a_later_commit_failed() {
 /// drop ends the task at once.
 #[test]
 fn a_drop_after_an_abandoned_commit_ends_the_task_at_once() {
-    run(123, Memory::default(), |shard| async move {
+    run(123, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4232,7 +4571,7 @@ fn a_drop_after_an_abandoned_commit_ends_the_task_at_once() {
             .clock
             .sleep(Span::from_nanos(COMMIT.nanos() / 4))
             .await;
-        assert_eq!(shard.memory.open_files(), 0, "the task holds the ring open");
+        assert!(!shard.ring_held().await, "the task holds the ring open");
     });
 }
 
@@ -4241,7 +4580,7 @@ fn a_drop_after_an_abandoned_commit_ends_the_task_at_once() {
 /// Both resolve well: every entry appended before each call is durable.
 #[test]
 fn a_commit_made_after_its_entries_synced_resolves_well_after_a_later_failure() {
-    run(122, Memory::default(), |shard| async move {
+    run_on_memory(122, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4255,12 +4594,16 @@ fn a_commit_made_after_its_entries_synced_resolves_well_after_a_later_failure() 
         shard.clock.sleep(commits(3)).await;
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
         let after = buffer.committed();
-        shard.memory.fail_syncs();
+        shard.memory().fail_syncs();
         buffer
             .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
             .expect("queues");
         shard.clock.sleep(commits(3)).await;
-        assert_eq!(shard.memory.syncs(), 4, "the second commit failed its sync");
+        assert_eq!(
+            shard.memory().syncs(),
+            4,
+            "the second commit failed its sync"
+        );
         assert_eq!(buffer.durable(a, Path::Live), tail(3, Some(30)));
         assert_eq!(before.await, Ok(()), "its entries are durable");
         assert_eq!(after.await, Ok(()), "the same entries are durable");
@@ -4271,7 +4614,7 @@ fn a_commit_made_after_its_entries_synced_resolves_well_after_a_later_failure() 
 /// that sync only: it resolves when the sync ends, not one commit span later.
 #[test]
 fn a_commit_awaited_during_a_slow_sync_resolves_when_the_sync_ends() {
-    run(124, Memory::default(), |shard| async move {
+    run_on_memory(124, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4280,7 +4623,7 @@ fn a_commit_awaited_during_a_slow_sync_resolves_when_the_sync_ends() {
         let a = slots.index(key(1));
         let tenth = COMMIT.nanos() / 10;
         shard
-            .memory
+            .memory()
             .slow_syncs(shard.clock.clone(), Span::from_nanos(tenth * 15));
         let opened = shard.clock.now();
         buffer
@@ -4297,7 +4640,7 @@ fn a_commit_awaited_during_a_slow_sync_resolves_when_the_sync_ends() {
 /// resolves well when that deadline syncs, also when the next one fails.
 #[test]
 fn a_commit_made_during_a_sync_resolves_with_that_sync() {
-    run(131, Memory::default(), |shard| async move {
+    run_on_memory(131, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4305,7 +4648,7 @@ fn a_commit_made_during_a_sync_resolves_with_that_sync() {
             .expect("opens");
         let a = slots.index(key(1));
         let sync = Span::from_nanos(COMMIT.nanos() * 4 / 10);
-        shard.memory.slow_syncs(shard.clock.clone(), sync);
+        shard.memory().slow_syncs(shard.clock.clone(), sync);
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -4314,12 +4657,16 @@ fn a_commit_made_during_a_sync_resolves_with_that_sync() {
         let first = buffer.committed();
         shard.clock.sleep(commits(1)).await;
         assert_eq!(buffer.durable(a, Path::Live), tail(1, Some(1)));
-        shard.memory.fail_syncs();
+        shard.memory().fail_syncs();
         buffer
             .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
             .expect("queues");
         shard.clock.sleep(commits(3)).await;
-        assert_eq!(shard.memory.syncs(), 4, "the second commit failed its sync");
+        assert_eq!(
+            shard.memory().syncs(),
+            4,
+            "the second commit failed its sync"
+        );
         assert_eq!(first.await, Ok(()), "its entries synced");
     });
 }
@@ -4328,7 +4675,7 @@ fn a_commit_made_during_a_sync_resolves_with_that_sync() {
 /// resolves well: `commits` passed its target, it did not land on it.
 #[test]
 fn a_commit_held_across_two_later_commits_resolves_well() {
-    run(125, Memory::default(), |shard| async move {
+    run(125, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4355,7 +4702,7 @@ fn a_commit_held_across_two_later_commits_resolves_well() {
 /// while the future is pending, and the future resolves with its entries durable.
 #[test]
 fn a_commit_outlives_the_borrow_of_its_buffer() {
-    run(133, Memory::default(), |shard| async move {
+    run(133, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4379,14 +4726,14 @@ fn a_commit_outlives_the_borrow_of_its_buffer() {
 /// sync's result, and the ring closes when the future drops.
 #[test]
 fn a_commit_held_past_the_drop_during_a_sync_resolves_with_the_sync() {
-    run(134, Memory::default(), |shard| async move {
+    run_on_memory(134, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory().slow_syncs(shard.clock.clone(), tenths(4));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -4395,13 +4742,13 @@ fn a_commit_held_past_the_drop_during_a_sync_resolves_with_the_sync() {
         drop(buffer);
         shard.clock.sleep(tenths(4)).await;
         assert_eq!(
-            shard.memory.open_files(),
+            shard.memory().open_files(),
             1,
             "the future holds the ring open"
         );
         assert_eq!(commit.await, Ok(()), "the sync made its entries durable");
         assert_eq!(
-            shard.memory.open_files(),
+            shard.memory().open_files(),
             0,
             "the ring closed with the future"
         );
@@ -4412,15 +4759,15 @@ fn a_commit_held_past_the_drop_during_a_sync_resolves_with_the_sync() {
 /// with the error that ended the buffer.
 #[test]
 fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
-    run(135, Memory::default(), |shard| async move {
+    run_on_memory(135, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
-        shard.memory.fail_syncs();
+        shard.memory().slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory().fail_syncs();
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -4434,7 +4781,7 @@ fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
         });
         assert_eq!(commit.await, ended, "the sync failed");
         assert_eq!(
-            shard.memory.open_files(),
+            shard.memory().open_files(),
             0,
             "the ring closed with the future"
         );
@@ -4445,14 +4792,14 @@ fn a_commit_held_past_the_drop_during_a_failing_sync_resolves_with_its_error() {
 /// task ended, here after it wrote that append, so a reopen recovers both entries.
 #[test]
 fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
-    run(137, Memory::default(), |shard| async move {
+    run_on_memory(137, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory().slow_syncs(shard.clock.clone(), tenths(4));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -4469,8 +4816,8 @@ fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
             tenths(12),
             "after the second sync"
         );
-        assert_eq!(shard.memory.syncs(), 4);
-        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+        assert_eq!(shard.memory().syncs(), 4);
+        assert_eq!(shard.memory().open_files(), 0, "the task ended");
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4487,23 +4834,23 @@ fn a_commit_held_past_the_drop_resolves_after_the_last_write() {
 /// commit: not at once, and not at its next deadline.
 #[test]
 fn a_drop_with_nothing_queued_ends_the_task_at_the_commit_in_flight() {
-    run(162, Memory::default(), |shard| async move {
+    run_on_memory(162, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory().slow_syncs(shard.clock.clone(), tenths(4));
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
         shard.clock.sleep(tenths(12)).await;
         drop(buffer);
         shard.clock.sleep(tenths(1)).await;
-        assert_eq!(shard.memory.open_files(), 1, "the sync still runs");
+        assert_eq!(shard.memory().open_files(), 1, "the sync still runs");
         shard.clock.sleep(tenths(2)).await;
-        assert_eq!(shard.memory.open_files(), 0, "the task ended at the sync");
+        assert_eq!(shard.memory().open_files(), 0, "the task ended at the sync");
     });
 }
 
@@ -4511,16 +4858,16 @@ fn a_drop_with_nothing_queued_ends_the_task_at_the_commit_in_flight() {
 /// the entries queued at the drop, nor waits for its next deadline.
 #[test]
 fn a_drop_ends_the_task_at_a_failed_commit_in_flight() {
-    run(161, Memory::default(), |shard| async move {
+    run_on_memory(161, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        let opened = shard.memory.syncs();
-        shard.memory.slow_syncs(shard.clock.clone(), tenths(4));
-        shard.memory.fail_syncs();
+        let opened = shard.memory().syncs();
+        shard.memory().slow_syncs(shard.clock.clone(), tenths(4));
+        shard.memory().fail_syncs();
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -4538,8 +4885,12 @@ fn a_drop_ends_the_task_at_a_failed_commit_in_flight() {
         };
         assert_eq!(commit.await, Err(failed));
         assert_eq!(shard.clock.now() - dropped, tenths(2), "at the failed sync");
-        assert_eq!(shard.memory.syncs() - opened, 1, "no write after the drop");
-        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+        assert_eq!(
+            shard.memory().syncs() - opened,
+            1,
+            "no write after the drop"
+        );
+        assert_eq!(shard.memory().open_files(), 0, "the task ended");
     });
 }
 
@@ -4547,14 +4898,14 @@ fn a_drop_ends_the_task_at_a_failed_commit_in_flight() {
 /// after the drop.
 #[test]
 fn a_commit_on_an_entry_queued_at_the_drop_resolves_with_a_failed_write() {
-    run(138, Memory::default(), |shard| async move {
+    run(138, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
         let a = slots.index(key(1));
-        shard.memory.fail_syncs();
+        shard.node().fail_file(FilePath::new(RING), Operation::Sync);
         buffer
             .append([entry(1, a, Path::Live, 0, 1, Some(1), Parts::default())])
             .expect("queues");
@@ -4566,7 +4917,7 @@ fn a_commit_on_an_entry_queued_at_the_drop_resolves_with_a_failed_write() {
             code: 5,
         });
         assert_eq!(commit.await, ended, "the write after the drop failed");
-        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+        assert!(!shard.ring_held().await, "the task ended");
     });
 }
 
@@ -4574,7 +4925,7 @@ fn a_commit_on_an_entry_queued_at_the_drop_resolves_with_a_failed_write() {
 /// drop fails.
 #[test]
 fn a_synced_commit_held_past_the_drop_resolves_well_after_a_failed_write() {
-    run(139, Memory::default(), |shard| async move {
+    run(139, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4586,7 +4937,7 @@ fn a_synced_commit_held_past_the_drop_resolves_well_after_a_failed_write() {
             .expect("queues");
         buffer.committed().await.expect("commits");
         let first = buffer.committed();
-        shard.memory.fail_syncs();
+        shard.node().fail_file(FilePath::new(RING), Operation::Sync);
         buffer
             .append([entry(1, a, Path::Live, 1, 1, Some(2), Parts::default())])
             .expect("queues");
@@ -4596,7 +4947,7 @@ fn a_synced_commit_held_past_the_drop_resolves_well_after_a_failed_write() {
             Ok(()),
             "its entries were durable before the drop"
         );
-        assert_eq!(shard.memory.open_files(), 0, "the task ended");
+        assert!(!shard.ring_held().await, "the task ended");
     });
 }
 
@@ -4605,7 +4956,7 @@ fn a_synced_commit_held_past_the_drop_resolves_well_after_a_failed_write() {
 /// no entry gives nothing.
 #[test]
 fn a_read_gives_the_entries_of_one_path_in_order() {
-    run(144, Memory::default(), |shard| async move {
+    run(144, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4680,7 +5031,7 @@ fn a_read_gives_the_entries_of_one_path_in_order() {
 /// read gives nothing.
 #[test]
 fn a_budget_splits_the_log_over_reads_that_follow_next() {
-    run(145, Memory::default(), |shard| async move {
+    run(145, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4744,7 +5095,7 @@ fn a_budget_splits_the_log_over_reads_that_follow_next() {
 /// nothing until the next frame is durable.
 #[test]
 fn a_handoff_at_the_tail_is_given_once() {
-    run(146, Memory::default(), |shard| async move {
+    run(146, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4803,7 +5154,7 @@ fn a_handoff_at_the_tail_is_given_once() {
 /// the gap.
 #[test]
 fn a_read_stops_before_a_skip_and_the_next_reports_the_gap() {
-    run(147, Memory::default(), |shard| async move {
+    run(147, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4863,7 +5214,7 @@ fn a_read_stops_before_a_skip_and_the_next_reports_the_gap() {
 /// Entries not yet synced are not given. After `committed`, they are.
 #[test]
 fn a_read_gives_only_durable_entries() {
-    run(148, Memory::default(), |shard| async move {
+    run(148, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4900,7 +5251,7 @@ fn a_read_gives_only_durable_entries() {
 /// nothing, and `next` is the mark.
 #[test]
 fn a_mark_inside_an_entry_gives_it_whole_and_one_past_the_tail_gives_nothing() {
-    run(149, Memory::default(), |shard| async move {
+    run(149, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -4987,7 +5338,7 @@ fn a_failed_ring_read_gives_its_error_and_a_later_read_passes() {
 /// blocks come back passes.
 #[test]
 fn a_read_with_no_block_for_the_table_gives_the_pool_error() {
-    run(151, Memory::default(), |shard| async move {
+    run(151, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -5027,7 +5378,7 @@ fn a_read_with_no_block_for_the_table_gives_the_pool_error() {
 /// After a failed sync, a read gives the error that ended the buffer.
 #[test]
 fn a_read_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
-    run(152, Memory::default(), |shard| async move {
+    run(152, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -5037,7 +5388,7 @@ fn a_read_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
         let frame = entry(1, a, Path::Live, 0, 3, Some(30), shard.block(10).into());
         buffer.append([frame]).expect("queues");
         buffer.committed().await.expect("commits");
-        shard.memory.fail_syncs();
+        shard.node().fail_file(FilePath::new(RING), Operation::Sync);
         buffer
             .append([entry(1, a, Path::Live, 3, 1, None, Parts::default())])
             .expect("queues");
@@ -5097,7 +5448,7 @@ fn a_read_across_a_failed_sync_gives_the_error_that_ended_the_buffer() {
 /// as at its budget, and the next read goes on from there.
 #[test]
 fn a_read_ends_at_a_pool_shortage_and_keeps_what_it_holds() {
-    run(153, Memory::default(), |shard| async move {
+    run(153, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
@@ -5142,7 +5493,7 @@ fn a_read_ends_at_a_pool_shortage_and_keeps_what_it_holds() {
 /// A record whose header and entry table pass one 4 KiB block is read whole.
 #[test]
 fn a_record_with_a_table_over_one_block_is_read() {
-    run(154, Memory::default(), |shard| async move {
+    run(154, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX * 4), &mut slots)
@@ -5235,5 +5586,601 @@ fn a_read_after_a_power_cut_gives_the_entries_the_tail_reports() {
         );
         assert!(cut != 0 || !ended, "seed {seed}: the cut missed the commit");
         ended
+    });
+}
+
+/// An entry of `index` with `tag`, no samples at `first`, and `bytes`.
+fn tagged(
+    index: u32,
+    slot: Slot,
+    path: Path,
+    first: u64,
+    tag: u8,
+    bytes: Block,
+) -> Entry {
+    Entry {
+        tag,
+        ..entry(index, slot, path, first, 0, None, bytes.into())
+    }
+}
+
+/// What a read gives back for a `tagged` entry.
+fn stored_tagged(first: u64, tag: u8, bytes: Block) -> Stored {
+    Stored {
+        tag,
+        ..stored(first, 0, None, bytes)
+    }
+}
+
+/// What `newest` gives, by slot.
+async fn newest(
+    buffer: &Buffer,
+    path: Path,
+    tag: u8,
+) -> Result<Vec<(Slot, Stored)>, Error> {
+    let mut newest = buffer
+        .newest(path, NonZeroU8::new(tag).expect("a tag over 0"))
+        .await?;
+    newest.sort_by_key(|(slot, _)| *slot);
+    Ok(newest)
+}
+
+/// `newest` gives the last durable entry with the tag on the path of each index,
+/// across records and within one, also after a reopen. An index with no such entry
+/// is absent.
+#[test]
+fn newest_gives_the_last_durable_entry_of_the_tag_on_the_path_of_each_index() {
+    run(170, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let (a, b, c) = (
+            slots.index(key(1)),
+            slots.index(key(2)),
+            slots.index(key(3)),
+        );
+        let data = |index, slot, first| {
+            entry(
+                index,
+                slot,
+                Path::Live,
+                first,
+                1,
+                Some(9),
+                shard.block(20).into(),
+            )
+        };
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(1)),
+                data(3, c, 0),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(2)),
+                tagged(1, a, Path::Live, 0, 1, shard.block(3)),
+                tagged(2, b, Path::Live, 0, 1, shard.block(4)),
+                tagged(1, a, Path::Backfill, 0, 1, shard.block(5)),
+                tagged(2, b, Path::Live, 0, 2, shard.block(6)),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer
+            .append([data(1, a, 0), data(2, b, 0), data(3, c, 1)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let expected = vec![
+            (a, stored_tagged(0, 1, shard.block(3))),
+            (b, stored_tagged(0, 1, shard.block(4))),
+        ];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(expected));
+        let backfill = vec![(a, stored_tagged(0, 1, shard.block(5)))];
+        assert_eq!(newest(&buffer, Path::Backfill, 1).await, Ok(backfill));
+        assert_eq!(newest(&buffer, Path::Live, 4).await, Ok(Vec::new()));
+        buffer
+            .append([tagged(1, a, Path::Live, 1, 1, shard.block(7))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("reopens");
+        let (a, b) = (slots.index(key(1)), slots.index(key(2)));
+        let reopened = vec![
+            (a, stored_tagged(1, 1, shard.block(7))),
+            (b, stored_tagged(0, 1, shard.block(4))),
+        ];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(reopened));
+    });
+}
+
+/// A failed read of the ring gives its error, and a later `newest` passes.
+#[test]
+fn newest_gives_the_error_of_a_failed_ring_read() {
+    let (mut sim, node) = create_node(171);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let pool = Rc::clone(&config.pool);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        let bytes = || {
+            let mut block = pool.alloc(1).expect("a block");
+            block[0] = 8;
+            block.freeze()
+        };
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, bytes())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        node.fail_file(FilePath::new(RING), Operation::ReadAt);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::ReadAt,
+            code: 5,
+        };
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
+        assert_eq!(found, Err(Error::Files(failed)));
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
+        assert_eq!(found, Ok(vec![(a, stored_tagged(0, 1, bytes()))]));
+    })
+    .expect("the buffer ends");
+}
+
+/// A pool with no block for the table gives `Error::Pool`.
+#[test]
+fn newest_with_no_block_for_the_table_gives_the_pool_error() {
+    run(172, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(1))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let mut held = Vec::new();
+        let mut len = shard.pool.largest();
+        while len > 0 {
+            while let Ok(block) = shard.pool.alloc(len) {
+                held.push(block);
+            }
+            len -= len.div_ceil(16);
+        }
+        let exhausted = block::Error::Exhausted {
+            requested: 4096,
+            available: 0,
+        };
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
+        assert_eq!(found, Err(Error::Pool(exhausted)));
+    });
+}
+
+/// After a failed sync, `newest` gives the error that ended the buffer.
+#[test]
+fn newest_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
+    run(173, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(1))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        shard.node().fail_file(FilePath::new(RING), Operation::Sync);
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(2))])
+            .expect("queues");
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(buffer.committed().await, Err(failed.clone()));
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
+        assert_eq!(found, Err(Error::Files(failed)));
+    });
+}
+
+/// `newest` runs back to back while a commit's sync fails. Each call gives the
+/// entries of its 20 indexes or, once the sync failed, the error that ended the
+/// buffer, also a call in flight when the sync failed.
+#[test]
+fn newest_across_a_failed_sync_gives_the_error_that_ended_the_buffer() {
+    let (mut sim, node) = create_node(185);
+    let errors = sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let pool = Rc::clone(&config.pool);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let batch: Vec<Entry> = (1..=20)
+            .map(|index| {
+                let slot = slots.index(key(index));
+                let bytes = pool.alloc(8).expect("a block").freeze();
+                tagged(index, slot, Path::Live, 0, 1, bytes)
+            })
+            .collect();
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        node.fail_file(FilePath::new(RING), Operation::Sync);
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, None, Parts::default())])
+            .expect("queues");
+        let mut errors = Vec::new();
+        while errors.len() < 2 {
+            match buffer.newest(Path::Live, NonZeroU8::MIN).await {
+                Ok(found) => assert_eq!(found.len(), 20),
+                Err(error) => errors.push(error),
+            }
+        }
+        errors
+    });
+    let failed = Error::Files(FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::Sync,
+        code: 5,
+    });
+    assert_eq!(errors.expect("the run ends"), [failed.clone(), failed]);
+}
+
+/// With a block for the table but none for the entry, `newest` gives the pool
+/// error of the entry's bytes, and a later call passes.
+#[test]
+fn newest_with_no_block_for_the_entry_gives_the_pool_error() {
+    run(186, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, 3 * 4096), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        let tag = tagged(1, a, Path::Live, 0, 1, shard.block(5000));
+        buffer.append([tag]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let one = shard.pool.alloc(4096).expect("a block for the table");
+        let mut held = Vec::new();
+        let mut len = shard.pool.largest();
+        while len > 0 {
+            while let Ok(block) = shard.pool.alloc(len) {
+                held.push(block);
+            }
+            len -= len.div_ceil(16);
+        }
+        drop(one);
+        let exhausted = block::Error::Exhausted {
+            requested: 5000,
+            available: 0,
+        };
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
+        assert_eq!(found, Err(Error::Pool(exhausted)));
+        drop(held);
+        let expected = vec![(a, stored_tagged(0, 1, shard.block(5000)))];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(expected));
+    });
+}
+
+/// `newest` reads the table of a record once for all indexes tagged in it, then the
+/// bytes of each entry it gives. Three indexes, each tagged in the first record and
+/// with data in the second: one table and three entries make four reads.
+#[test]
+fn newest_reads_one_table_for_the_indexes_tagged_in_one_record() {
+    run_on_memory(180, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let (a, b, c) = (
+            slots.index(key(1)),
+            slots.index(key(2)),
+            slots.index(key(3)),
+        );
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(1)),
+                tagged(2, b, Path::Live, 0, 1, shard.block(2)),
+                tagged(3, c, Path::Live, 0, 1, shard.block(3)),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let data = |index, slot| {
+            entry(
+                index,
+                slot,
+                Path::Live,
+                0,
+                1,
+                Some(9),
+                shard.block(20).into(),
+            )
+        };
+        buffer
+            .append([data(1, a), data(2, b), data(3, c)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let before = shard.memory().reads();
+        let found = newest(&buffer, Path::Live, 1).await.expect("reads");
+        assert_eq!(found.len(), 3);
+        assert_eq!(shard.memory().reads() - before, 4);
+    });
+}
+
+/// `newest` reads the table of each record once, also when the ring holds the newest
+/// entries of the indexes in more than one record. Odd indexes are tagged in the
+/// first record and even ones in the second: two tables and 16 entries make 18 reads.
+#[test]
+fn newest_reads_each_table_once_for_the_indexes_tagged_in_two_records() {
+    run_on_memory(186, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let indexes: Vec<_> = (1..=16).map(|n| (n, slots.index(key(n)))).collect();
+        for odd in [true, false] {
+            let batch = indexes
+                .iter()
+                .filter(|&&(n, _)| (n % 2 == 1) == odd)
+                .map(|&(n, slot)| tagged(n, slot, Path::Live, 0, 1, shard.block(1)));
+            buffer.append(batch).expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let before = shard.memory().reads();
+        let found = newest(&buffer, Path::Live, 1).await.expect("reads");
+        assert_eq!(found.len(), 16);
+        assert_eq!(shard.memory().reads() - before, 18);
+    });
+}
+
+/// `newest` gives the entries of one record in table order, also entries with no
+/// bytes, which share a body offset. Its doc gives no order, but hash order must not
+/// decide one.
+#[test]
+fn newest_gives_the_entries_of_a_record_in_table_order() {
+    run(181, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let batch: Vec<Entry> = (1..=8)
+            .map(|n| tagged(n, slots.index(key(n)), Path::Live, 0, 1, shard.block(0)))
+            .collect();
+        let table: Vec<Slot> = batch.iter().map(|entry| entry.slot).collect();
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        let found = buffer
+            .newest(Path::Live, NonZeroU8::MIN)
+            .await
+            .expect("reads");
+        let given: Vec<Slot> = found.iter().map(|(slot, _)| *slot).collect();
+        assert_eq!(given, table);
+    });
+}
+
+/// `newest` reads no table of a record that holds only an entry of another tag. A
+/// is tagged 1 in the first record and 2 in the second: one table and one entry
+/// make two reads.
+#[test]
+fn newest_reads_no_record_of_another_tag() {
+    run_on_memory(187, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        for tag in [1, 2] {
+            buffer
+                .append([tagged(1, a, Path::Live, 0, tag, shard.block(1))])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let before = shard.memory().reads();
+        let found = newest(&buffer, Path::Live, 1).await.expect("reads");
+        assert_eq!(found, vec![(a, stored_tagged(0, 1, shard.block(1)))]);
+        assert_eq!(shard.memory().reads() - before, 2);
+    });
+}
+
+/// `newest` reads no table of a record that holds no newest tagged entry. A is
+/// tagged in the first record and b in the third, so the second and the fourth are
+/// not read: two tables and two entries make four reads.
+#[test]
+fn newest_reads_only_the_records_of_the_newest_tagged_entries() {
+    run_on_memory(184, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let (a, b) = (slots.index(key(1)), slots.index(key(2)));
+        let data = |index, slot| {
+            entry(
+                index,
+                slot,
+                Path::Live,
+                0,
+                1,
+                Some(9),
+                shard.block(20).into(),
+            )
+        };
+        for batch in [
+            tagged(1, a, Path::Live, 0, 1, shard.block(1)),
+            data(2, b),
+            tagged(2, b, Path::Live, 1, 1, shard.block(2)),
+            data(1, a),
+        ] {
+            buffer.append([batch]).expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let before = shard.memory().reads();
+        let expected = vec![
+            (a, stored_tagged(0, 1, shard.block(1))),
+            (b, stored_tagged(1, 1, shard.block(2))),
+        ];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(expected));
+        assert_eq!(shard.memory().reads() - before, 4);
+    });
+}
+
+/// 64 indexes tagged in the first record, then 400 records that each hold data of
+/// all 64. The reads do not grow with the records after the tags: one table and one
+/// read for each entry given.
+#[test]
+fn newest_reads_no_record_after_the_tags() {
+    run_on_memory(183, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(512 * BLOCK, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let all: Vec<(u32, Slot)> = (1..=64)
+            .map(|index| (index, slots.index(key(index))))
+            .collect();
+        buffer
+            .append(all.iter().map(|&(index, slot)| {
+                tagged(index, slot, Path::Live, 0, 1, shard.block(1))
+            }))
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        for record in 0..400 {
+            buffer
+                .append(all.iter().map(|&(index, slot)| {
+                    entry(
+                        index,
+                        slot,
+                        Path::Live,
+                        record,
+                        1,
+                        Some(9),
+                        Parts::default(),
+                    )
+                }))
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let before = shard.memory().reads();
+        let found = newest(&buffer, Path::Live, 1).await.expect("reads");
+        assert_eq!(found.len(), 64);
+        assert_eq!(shard.memory().reads() - before, 1 + 64);
+    });
+}
+
+/// A table past 4 KiB, with the tagged entry last and data bytes before it.
+#[test]
+fn newest_reads_an_entry_after_a_table_of_two_blocks() {
+    run(184, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(64 * BLOCK, 4 * 4096), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        let b = slots.index(key(2));
+        let mut batch: Vec<Entry> = (0..90)
+            .map(|first| {
+                entry(2, b, Path::Live, first, 1, Some(9), shard.block(30).into())
+            })
+            .collect();
+        batch.push(tagged(1, a, Path::Live, 0, 1, shard.block(77)));
+        batch.push(tagged(2, b, Path::Live, 90, 1, shard.block(55)));
+        batch.push(entry(
+            1,
+            a,
+            Path::Live,
+            0,
+            1,
+            Some(9),
+            shard.block(40).into(),
+        ));
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        let expected = vec![
+            (a, stored_tagged(0, 1, shard.block(77))),
+            (b, stored_tagged(90, 1, shard.block(55))),
+        ];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(expected));
+    });
+}
+
+/// A handoff record with no holder has empty bytes: `newest` gives it.
+#[test]
+fn newest_gives_an_entry_with_no_bytes() {
+    run(181, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(3))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(0))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let found = newest(&buffer, Path::Live, 1).await;
+        assert_eq!(found, Ok(vec![(a, stored_tagged(0, 1, shard.block(0)))]));
+    });
+}
+
+/// An appended entry that is not durable yet is absent, also while its commit
+/// runs, and a commit that ends while `newest` reads changes nothing it gives.
+#[test]
+fn newest_gives_no_entry_that_is_not_durable() {
+    run(182, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        let b = slots.index(key(2));
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(1)),
+                tagged(2, b, Path::Live, 0, 1, shard.block(2)),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let appended = shard.clock.now();
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(5)),
+                tagged(2, b, Path::Live, 0, 1, shard.block(6)),
+            ])
+            .expect("queues");
+        let found = newest(&buffer, Path::Live, 1).await;
+        assert!(
+            shard.clock.now() - appended < COMMIT,
+            "the commit is pending"
+        );
+        let first = vec![
+            (a, stored_tagged(0, 1, shard.block(1))),
+            (b, stored_tagged(0, 1, shard.block(2))),
+        ];
+        let second = vec![
+            (a, stored_tagged(0, 1, shard.block(5))),
+            (b, stored_tagged(0, 1, shard.block(6))),
+        ];
+        assert_eq!(found, Ok(first));
+        buffer.committed().await.expect("commits");
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(second));
     });
 }

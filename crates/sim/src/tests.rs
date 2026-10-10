@@ -11,11 +11,11 @@ mod shards;
 mod tcp;
 
 use std::collections::BTreeSet;
-use std::future::{Ready, pending};
+use std::future::{Ready, pending, poll_fn};
 use std::net::SocketAddr;
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
@@ -1413,36 +1413,94 @@ fn run_for_runs_a_negative_span_as_zero() {
     assert_eq!(node.clock().now(), node::Config::default().monotonic);
 }
 
-/// Counts the polls of its future.
-struct Counted<F>(Pin<Box<F>>, Arc<AtomicUsize>);
-
-impl<F: Future> Future for Counted<F> {
-    type Output = F::Output;
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<F::Output> {
-        self.1.fetch_add(1, Ordering::Relaxed);
-        self.0.as_mut().poll(cx)
-    }
+/// Starts a shard named `name` on `node` that sleeps for `span`. Gives its handle and
+/// the time from the start of the sleep at each of its polls.
+fn timed_sleep(
+    node: &node::Node,
+    name: &str,
+    span: Span,
+) -> (env::thread::Handle, Arc<Mutex<Vec<Span>>>) {
+    let clock = node.clock();
+    let polls = Arc::new(Mutex::new(Vec::new()));
+    let times = Arc::clone(&polls);
+    let handle = node.shards().start(shard(name), move |_| async move {
+        let start = clock.now();
+        let mut sleep = Box::pin(clock.sleep(span));
+        poll_fn(|cx| {
+            times.lock().unwrap().push(clock.now() - start);
+            sleep.as_mut().poll(cx)
+        })
+        .await;
+    });
+    (handle.unwrap(), polls)
 }
 
+/// States one wake at the deadline, so its node arms each timer for its deadline.
 #[test]
 fn a_timer_wakes_its_task_only_when_due() {
     let mut sim = sim(0);
-    let node = sim.node(node::Config::default());
-    let (early, late) = (node.clock(), node.clock());
-    let polls = Arc::new(AtomicUsize::new(0));
-    let count = Arc::clone(&polls);
+    let node = sim.node(node::Config {
+        arm_max: None,
+        ..node::Config::default()
+    });
+    let early = node.clock();
     let a = node.shards().start(shard("early"), move |_| async move {
         early.sleep(Span::SECOND).await;
     });
-    let b = node.shards().start(shard("late"), move |_| {
-        let sleep = async move { late.sleep(Span::from_nanos(2_000_000_000)).await };
-        Counted(Box::pin(sleep), count)
-    });
+    let (b, polls) = timed_sleep(&node, "late", millis(2_000));
     sim.run().unwrap();
     a.unwrap().join().unwrap();
-    b.unwrap().join().unwrap();
-    assert_eq!(polls.load(Ordering::Relaxed), 2);
+    b.join().unwrap();
+    assert_eq!(*polls.lock().unwrap(), [millis(0), millis(2_000)]);
+}
+
+/// As on `os`, a timer whose deadline is past the node's `arm_max` wakes its task
+/// once each `arm_max`, and completes at its deadline.
+#[test]
+fn a_timer_wakes_its_task_at_each_arm_max_until_due() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        arm_max: Some(millis(700)),
+        ..node::Config::default()
+    });
+    let (handle, polls) = timed_sleep(&node, "sleep", millis(2_500));
+    sim.run().unwrap();
+    handle.join().unwrap();
+    let wakes = [0, 700, 1_400, 2_100, 2_500].map(millis);
+    assert_eq!(*polls.lock().unwrap(), wakes);
+}
+
+/// A node of the default config wakes a timer each second until it is due, as `os`
+/// does.
+#[test]
+fn a_timer_of_a_default_node_wakes_its_task_each_second_until_due() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let (handle, polls) = timed_sleep(&node, "sleep", millis(2_500));
+    sim.run().unwrap();
+    handle.join().unwrap();
+    let wakes = [0, 1_000, 2_000, 2_500].map(millis);
+    assert_eq!(*polls.lock().unwrap(), wakes);
+}
+
+#[test]
+#[should_panic(expected = "arm_max Span(0) is not positive")]
+fn a_node_with_an_arm_max_of_zero_panics() {
+    let mut sim = sim(0);
+    sim.node(node::Config {
+        arm_max: Some(Span::ZERO),
+        ..node::Config::default()
+    });
+}
+
+#[test]
+#[should_panic(expected = "arm_max Span(-1000000) is not positive")]
+fn a_node_with_a_negative_arm_max_panics() {
+    let mut sim = sim(0);
+    sim.node(node::Config {
+        arm_max: Some(millis(-1)),
+        ..node::Config::default()
+    });
 }
 
 fn millis(n: i64) -> Span {
@@ -1605,6 +1663,71 @@ fn a_timer_past_the_end_after_a_wall_step_waits() {
     );
 }
 
+/// A deadline at the end of true time still wakes early.
+#[test]
+fn a_timer_due_at_the_end_of_true_time_wakes_early() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        wall: Stamp::from_nanos(i64::MAX - 2_500_000_000),
+        ..node::Config::default()
+    });
+    let (handle, polls) = timed_sleep(&node, "sleep", millis(2_500));
+    sim.run().unwrap();
+    handle.join().unwrap();
+    let wakes = [0, 1_000, 2_000, 2_500].map(millis);
+    assert_eq!(*polls.lock().unwrap(), wakes);
+}
+
+/// An early wake past the last nanosecond of true time is the deadline.
+#[test]
+fn an_early_wake_past_the_last_nanosecond_wakes_at_the_deadline() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        monotonic: Monotonic(0),
+        wall: Stamp::from_nanos(i64::MIN),
+        ..node::Config::default()
+    });
+    sim.run_for(Span::from_nanos(i64::MAX)).unwrap();
+    sim.run_for(Span::from_nanos(i64::MAX - 1)).unwrap();
+    let (handle, polls) = timed_sleep(&node, "sleep", Span::from_nanos(2));
+    sim.run().unwrap();
+    handle.join().unwrap();
+    assert_eq!(*polls.lock().unwrap(), [Span::ZERO, Span::from_nanos(2)]);
+}
+
+/// The end of true time is the earliest end of any node, also for a timer of a node
+/// whose own clocks end later.
+#[test]
+fn a_timer_past_the_end_set_by_another_node_does_not_wake_early() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let _ending = ending(&mut sim);
+    let (_handle, polls) = timed_sleep(&node, "shard-0", millis(2_500));
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
+    assert_eq!(*polls.lock().unwrap(), [millis(0)]);
+}
+
+#[test]
+fn a_timer_past_the_end_of_true_time_does_not_wake_early() {
+    let mut sim = sim(0);
+    let node = ending(&mut sim);
+    let (_handle, polls) = timed_sleep(&node, "shard-0", millis(2_500));
+    assert_eq!(
+        sim.run(),
+        Err(Error::Stuck {
+            threads: vec!["shard-0".into()],
+            seed: 0,
+        })
+    );
+    assert_eq!(*polls.lock().unwrap(), [millis(0)]);
+}
+
 /// Starts a shard on `node` that sleeps for `span`, then logs its name and the time.
 fn log_after(
     node: &node::Node,
@@ -1735,13 +1858,13 @@ fn a_wall_step_back_lets_a_waiting_timer_fire() {
     assert_eq!(log.lock().unwrap().clone(), [("a", start + millis(750))]);
 }
 
+/// The timer arms for one early wake before the node that ends true time joins, and
+/// gets no wake after it.
 #[test]
 fn a_node_added_later_holds_back_a_timer_past_its_end() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
-    let log = Arc::new(Mutex::new(Vec::new()));
-    let _handle =
-        log_after(&node, "a", Span::from_nanos(2 * Span::SECOND.nanos()), &log);
+    let (_handle, polls) = timed_sleep(&node, "a", millis(2_000));
     sim.run_for(Span::ZERO).unwrap();
     let _ending = ending(&mut sim);
     assert_eq!(
@@ -1751,8 +1874,7 @@ fn a_node_added_later_holds_back_a_timer_past_its_end() {
             seed: 0,
         })
     );
-    sim.run_for(Span::SECOND).unwrap();
-    assert_eq!(log.lock().unwrap().clone(), []);
+    assert_eq!(*polls.lock().unwrap(), [millis(0), millis(1_000)]);
 }
 
 #[test]

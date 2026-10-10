@@ -9,6 +9,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::Failure;
+
 const ARGUMENT: Code = Code::new("ops.argument");
 const UNKNOWN: Code = Code::new("ops.unknown-operation");
 const INPUT: Code = Code::new("ops.input");
@@ -17,6 +19,10 @@ const BAD_PLAN: Code = Code::new("ops.bad-plan");
 const BEHIND: Code = Code::new("ops.behind");
 const STALE_PLAN: Code = Code::new("ops.stale-plan");
 const APPLY: Code = Code::new("ops.apply");
+const STOPPED: Code = Code::new("ops.stopped");
+/// The fix of [`ARGUMENT`].
+const HELP: &str =
+    "Match the arguments to `foundation --help` or `foundation <operation> --help`";
 
 /// Why a command line did not run to its end.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -45,9 +51,24 @@ pub(crate) enum Error {
     },
     /// The region did not apply the plan.
     Apply(mesh::Error),
+    /// The node did not start, or stopped with an error.
+    Start(Failure),
+    /// The group of the mesh stopped, so the node can neither plan nor apply.
+    Stopped(mesh::Stopped),
 }
 
 impl Error {
+    /// `Config` with the problem of each of `diagnostics`, whose spans are in the files
+    /// at `paths`, by source.
+    pub(crate) fn config(diagnostics: Vec<Diagnostic>, paths: &[PathBuf]) -> Self {
+        Self::Config(
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| Problem::of(diagnostic, paths))
+                .collect(),
+        )
+    }
+
     pub(crate) fn status(&self) -> u8 {
         match self {
             Self::Argument { .. }
@@ -58,7 +79,9 @@ impl Error {
             | Self::Output { .. }
             | Self::Behind(_)
             | Self::Stale { .. }
-            | Self::Apply(_) => 1,
+            | Self::Apply(_)
+            | Self::Start(_)
+            | Self::Stopped(_) => 1,
         }
     }
 
@@ -66,10 +89,8 @@ impl Error {
     pub(crate) fn problems(&self) -> Cow<'_, [Problem]> {
         let (code, fix) = match self {
             Self::Config(problems) => return Cow::Borrowed(problems),
-            Self::Argument { .. } => (
-                ARGUMENT,
-                "Match the arguments to the operation in `foundation docs`".to_owned(),
-            ),
+            Self::Start(failure) => (failure.code, failure.fix.clone()),
+            Self::Argument { .. } => (ARGUMENT, HELP.to_owned()),
             Self::Unknown {
                 closest: Some(closest),
                 ..
@@ -95,6 +116,11 @@ impl Error {
             Self::Apply(_) => (
                 APPLY,
                 "Fix the cause in the message, then plan and apply again".to_owned(),
+            ),
+            Self::Stopped(_) => (
+                STOPPED,
+                "Fix the cause in the message, then start the node and plan again"
+                    .to_owned(),
             ),
         };
         Cow::Owned(vec![Problem {
@@ -279,6 +305,8 @@ impl fmt::Display for Error {
                  of the plan"
             ),
             Self::Apply(error) => error.fmt(f),
+            Self::Start(failure) => f.write_str(&failure.message),
+            Self::Stopped(stopped) => stopped.fmt(f),
         }
     }
 }

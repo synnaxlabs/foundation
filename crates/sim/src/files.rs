@@ -75,6 +75,17 @@ impl Call {
             _ => None,
         }
     }
+
+    /// The path whose file a call of `path` replaces, makes, or removes.
+    fn changes<'a>(&'a self, path: &'a Path) -> Option<&'a Path> {
+        match self {
+            Self::Open(Mode::Write | Mode::Create { .. })
+            | Self::Remove
+            | Self::Unlink { .. } => Some(path),
+            Self::Rename { to, .. } => Some(to),
+            _ => None,
+        }
+    }
 }
 
 /// The error of `operation` on `path`, which failed by `cause`.
@@ -158,7 +169,7 @@ pub(crate) struct Files {
     done: BTreeMap<u64, (usize, Ended)>,
     /// The waker of each close that waits for the calls of its descriptor, by the key
     /// of its handle.
-    closes: BTreeMap<u64, Waker>,
+    closing: BTreeMap<u64, Waker>,
     rng: Rng,
     /// The last tick. A call's key is the tick of its start, a file or directory
     /// that it makes takes the same key, and a write takes a tick when it ends. One
@@ -177,7 +188,7 @@ impl Files {
             flights: BTreeMap::new(),
             queue: BTreeSet::new(),
             done: BTreeMap::new(),
-            closes: BTreeMap::new(),
+            closing: BTreeMap::new(),
             rng,
             tick: disk::ROOT,
             digest: DefaultHasher::new(),
@@ -205,13 +216,13 @@ impl Files {
         &mut self,
         now: Monotonic,
         node: usize,
-        path: &Path,
+        path: PathBuf,
         call: Call,
         held: Option<Held>,
     ) -> u64 {
         let key = self.tick();
         let delay = self.rng.below(DELAYS);
-        let fault = (node, disk::normal(path), call.operation());
+        let fault = (node, disk::normal(&path), call.operation());
         let fault = self.faults.iter().position(|aimed| *aimed == fault);
         let failed = fault.map(|at| self.faults.remove(at)).is_some();
         let disk = &mut self.disks[node];
@@ -223,11 +234,14 @@ impl Files {
                 before = disk.file(handle.inode).start_read(range, &mut self.rng);
             }
         }
-        let at = Monotonic(now.0.saturating_add(delay));
+        let mut at = Monotonic(now.0.saturating_add(delay));
+        if let Some(path) = call.changes(&path) {
+            at = at.max(self.wait_end(node, path));
+        }
         self.queue.insert((at, key));
         let flight = Flight {
             node,
-            path: path.to_path_buf(),
+            path,
             call,
             held,
             failed,
@@ -237,6 +251,39 @@ impl Files {
         };
         self.flights.insert(key, flight);
         key
+    }
+
+    /// The time that a call of `node` that changes what `path` names ends no earlier
+    /// than: the end of the last call on `path` that a dropped future or handle left
+    /// to run, or of a remove through a handle, live or not, or zero. A call without a
+    /// handle is on its path. A call through a handle is on each path that has named
+    /// its file, and on the path of each dropped rename of the file, so it stays on
+    /// them after a rename or a remove.
+    fn wait_end(&self, node: usize, path: &Path) -> Monotonic {
+        let (path, disk) = (disk::normal(path), &self.disks[node]);
+        let pending: Vec<_> = (self.queue.iter().rev())
+            .map(|(at, key)| (*at, &self.flights[key]))
+            .filter(|(_, flight)| {
+                let unlink = matches!(flight.call, Call::Unlink { .. });
+                flight.node == node && (flight.dropped || unlink)
+            })
+            .collect();
+        let moved: BTreeSet<_> = (pending.iter())
+            .filter_map(|(_, flight)| match &flight.call {
+                Call::Rename { handle, to } if disk::normal(to) == path => {
+                    Some(handle.inode)
+                }
+                _ => None,
+            })
+            .collect();
+        (pending.iter())
+            .find(|(_, flight)| match flight.call.handle() {
+                Some(handle) => {
+                    moved.contains(&handle.inode) || disk.named_by(handle.inode, &path)
+                }
+                None => disk::normal(&flight.path) == path,
+            })
+            .map_or(Monotonic::default(), |(at, _)| *at)
     }
 
     /// The true time at which the first call in flight ends.
@@ -264,7 +311,7 @@ impl Files {
                 (flight.node, flight.dropped, flight.waker.take());
             let kind = mem::discriminant(&flight.call);
             let close = flight.call.handle().map(|handle| handle.key);
-            wakers.extend(close.and_then(|key| self.closes.remove(&key)));
+            wakers.extend(close.and_then(|key| self.closing.remove(&key)));
             let ended = self.apply(key, flight);
             (due, key, kind, ended.result.is_ok()).hash(&mut self.digest);
             if dropped {
@@ -330,7 +377,7 @@ impl Files {
                 Ok(Done::Unit)
             }
             Call::Rename { handle, to } => {
-                disk.rename(handle.inode, &path, to).map(|()| Done::Unit)
+                disk.rename(*handle, &path, to).map(|()| Done::Unit)
             }
             Call::Unlink { handle } => {
                 disk.unlink(handle.inode, &path).map(|()| Done::Unit)
@@ -405,7 +452,7 @@ impl Files {
                 .expect("invariant: a queued call is in flight");
             flight.dropped = true;
             let close = flight.call.handle().map(|handle| handle.key);
-            closes.extend(close.and_then(|key| self.closes.remove(&key)));
+            closes.extend(close.and_then(|key| self.closing.remove(&key)));
             let kind = mem::discriminant(&flight.call);
             let drawn = (matches!(flight.call, Call::Open(Mode::Create { .. }))
                 && !flight.failed
@@ -454,14 +501,29 @@ impl Files {
         if calls.all(|held| held.key != handle.key) {
             return (Poll::Ready(()), Some(waker));
         }
-        (Poll::Pending, self.closes.insert(handle.key, waker))
+        (Poll::Pending, self.closing.insert(handle.key, waker))
+    }
+
+    /// The path of descriptor `handle` of `node` now, as its open or rename gave it.
+    pub(crate) fn path(&self, node: usize, handle: Handle) -> PathBuf {
+        self.disks[node].path(handle).to_path_buf()
+    }
+
+    /// Makes `handle`, which an open of `path` on `node` gave, a descriptor.
+    pub(crate) fn opened(&mut self, node: usize, handle: Handle, path: &Path) {
+        self.disks[node].opened(handle, path);
     }
 
     /// Closes descriptor `handle` of `node`. Returns the waker of its close, to drop
     /// after the lock is released.
-    pub(crate) fn release(&mut self, node: usize, handle: Handle) -> Option<Waker> {
-        self.disks[node].release(handle);
-        self.closes.remove(&handle.key)
+    pub(crate) fn close(&mut self, node: usize, handle: Handle) -> Option<Waker> {
+        self.disks[node].close(handle);
+        self.closing.remove(&handle.key)
+    }
+
+    /// The path of each descriptor that `node` closed, in order.
+    pub(crate) fn closes(&self, node: usize) -> Vec<PathBuf> {
+        self.disks[node].closes().to_vec()
     }
 }
 
