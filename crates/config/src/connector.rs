@@ -80,6 +80,8 @@ pub(crate) struct Writes {
     channels: Vec<Name>,
     /// The channels that it implies, by name.
     implied: Vec<(Name, Kind<Name>)>,
+    /// The span of the connector's label.
+    label: Option<Span>,
 }
 
 impl Writes {
@@ -137,15 +139,16 @@ pub(crate) fn writes(
     Ok(Writes {
         channels: channels.writes,
         implied,
+        label: at,
     })
 }
 
 /// Adds each channel that each connector implies to the entries, with the span of the
 /// connector's label. Reports `config.implied-channel` at each block whose key is, in
-/// any ASCII case, an implied channel, and as [`writers`] does.
+/// any ASCII case, an implied channel, and as [`implied_writes`] does.
 pub(crate) fn imply(found: &mut Found<'_>) {
     for (connector, writes) in &found.writes {
-        let at = found.entries[connector].label_span;
+        let at = writes.label;
         for (channel, kind) in &writes.implied {
             let lower = channel.as_str().to_ascii_lowercase();
             let Some(labels) = found.labels.get(lower.as_str()) else {
@@ -157,13 +160,13 @@ pub(crate) fn imply(found: &mut Found<'_>) {
                 found.entries.insert(channel.clone(), entry);
                 continue;
             };
-            let owner = Owner {
+            let implied = Implied {
                 connector,
                 channel,
                 label: at,
             };
             for (label, _) in labels {
-                found.diagnostics.push(owner.refuse(
+                found.diagnostics.push(implied.refuse(
                     label.span,
                     "a block cannot have its name",
                     "Give the block another name".into(),
@@ -171,36 +174,33 @@ pub(crate) fn imply(found: &mut Found<'_>) {
             }
         }
     }
-    let label = |connector: &Name| found.entries[connector].label_span;
-    let refused = writers(&found.writes, label);
+    let refused = implied_writes(&found.writes);
     found.diagnostics.extend(refused);
 }
 
 /// The `config.implied-channel` diagnostic of each connector of `writes` whose kind
 /// writes, in any ASCII case, a channel that a connector of `writes` implies, at the
-/// span that `label` gives for the connector.
-pub(crate) fn writers(
-    writes: &BTreeMap<Name, Writes>,
-    label: impl Fn(&Name) -> Option<Span>,
-) -> Vec<Diagnostic> {
-    let mut owners = BTreeMap::new();
+/// connector's label.
+pub(crate) fn implied_writes(writes: &BTreeMap<Name, Writes>) -> Vec<Diagnostic> {
+    let mut implied = BTreeMap::new();
     for (connector, writes) in writes {
         for (channel, _) in &writes.implied {
-            let owner = Owner {
+            let lower = channel.as_str().to_ascii_lowercase();
+            let channel = Implied {
                 connector,
                 channel,
-                label: label(connector),
+                label: writes.label,
             };
-            owners.insert(channel.as_str().to_ascii_lowercase(), owner);
+            implied.insert(lower, channel);
         }
     }
     let mut diagnostics = Vec::new();
     for (writer, writes) in writes {
         for channel in &writes.channels {
             let lower = channel.as_str().to_ascii_lowercase();
-            if let Some(owner) = owners.get(&lower) {
-                diagnostics.push(owner.refuse(
-                    label(writer),
+            if let Some(implied) = implied.get(&lower) {
+                diagnostics.push(implied.refuse(
+                    writes.label,
                     &format!("the connector `{writer}` cannot write it"),
                     format!("Write another channel from the connector `{writer}`"),
                 ));
@@ -211,18 +211,18 @@ pub(crate) fn writers(
 }
 
 /// A channel that a connector implies.
-struct Owner<'a> {
+struct Implied<'a> {
     connector: &'a Name,
     channel: &'a Name,
     /// The span of the connector's label.
     label: Option<Span>,
 }
 
-impl Owner<'_> {
+impl Implied<'_> {
     /// The `config.implied-channel` diagnostic at `at`, which states that `refused`, with
     /// a note at the connector.
     fn refuse(&self, at: Option<Span>, refused: &str, fix: String) -> Diagnostic {
-        let Owner {
+        let Implied {
             connector,
             channel,
             label,

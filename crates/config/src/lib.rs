@@ -102,7 +102,8 @@ pub struct Entry {
 /// [`Name::MAX_BYTES`]. `config.implied-channel` at the label of each block whose key
 /// in the map is, in any ASCII case, a status channel, and at the label of each
 /// connector whose kind writes one, with a note at the connector of the channel. Of
-/// the connectors at one key, only the first in span order implies or writes channels.
+/// the connectors at one key, only the first in span order, no span first, then in the
+/// order of `documents`, implies or writes channels.
 pub fn check(
     documents: &[Document],
     kinds: &Table,
@@ -120,11 +121,18 @@ fn checked<'a>(
     if !alarms.is_empty() {
         return Err(alarms);
     }
+    let mut blocks: Vec<_> = documents
+        .iter()
+        .flat_map(|document| &document.blocks)
+        .collect();
+    // At a repeated key, the first block in span order is kept, no span first, then in
+    // the order of `documents`.
+    blocks.sort_by_key(|block| block.labels.first().and_then(|label| label.span));
     let mut found = Found {
         entries: BTreeMap::new(),
         diagnostics: Vec::new(),
         labels: BTreeMap::new(),
-        channels: names(documents, Kind::Channel)
+        channels: names(&blocks, Kind::Channel)
             .map(|(name, _)| name)
             .collect(),
         connectors: BTreeMap::new(),
@@ -132,9 +140,7 @@ fn checked<'a>(
         blocks: BTreeMap::new(),
         writes: BTreeMap::new(),
     };
-    let mut connectors: Vec<_> = names(documents, Kind::Connector).collect();
-    connectors.sort_by_key(|(_, label)| label.span);
-    for (name, label) in connectors {
+    for (name, label) in names(&blocks, Kind::Connector) {
         let lower = name.as_str().to_ascii_lowercase().into();
         found.connectors.entry(lower).or_insert(label);
     }
@@ -144,13 +150,6 @@ fn checked<'a>(
             .diagnostics
             .extend(read::unknown(document, "a file", &[], &keywords));
     }
-    let mut blocks: Vec<_> = documents
-        .iter()
-        .flat_map(|document| &document.blocks)
-        .collect();
-    // At a repeated key, the first block in span order is kept, whatever the order of
-    // `documents`.
-    blocks.sort_by_key(|block| block.labels.first().and_then(|label| label.span));
     for block in blocks {
         let Some((kind, check_block)) = KINDS
             .iter()
@@ -194,11 +193,14 @@ fn sort(diagnostics: &mut [Diagnostic]) {
     diagnostics.sort_by_key(|diagnostic| diagnostic.span);
 }
 
-/// The name and the label of each block of `kind` in `documents` whose one label
-/// reads as a name. `check` reports each other label.
-fn names(documents: &[Document], kind: Kind) -> impl Iterator<Item = (Name, &Label)> {
-    let blocks = documents.iter().flat_map(|document| &document.blocks);
+/// The name and the label of each block of `kind` in `blocks` whose one label reads as
+/// a name, in the order of `blocks`. `check` reports each other label.
+fn names<'a>(
+    blocks: &[&'a Block],
+    kind: Kind,
+) -> impl Iterator<Item = (Name, &'a Label)> {
     blocks
+        .iter()
         .filter(move |block| &*block.keyword == kind.as_str())
         .filter_map(|block| match block.labels.as_slice() {
             [label] => Some((read::label(label).ok()?, label)),

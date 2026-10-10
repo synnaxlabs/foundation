@@ -134,7 +134,7 @@ fn problems(
     }
     let mut diagnostics = Vec::new();
     let writes = writes(definitions, kinds, &mut diagnostics);
-    diagnostics.extend(connector::writers(&writes, |_| None));
+    diagnostics.extend(connector::implied_writes(&writes));
     diagnostics.extend(duplicate::in_definitions(definitions));
     diagnostics.extend(subject::not_connectors(definitions));
     if !diagnostics.is_empty() {
