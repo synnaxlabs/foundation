@@ -1435,6 +1435,7 @@ fn timed_sleep(
     (handle.unwrap(), polls)
 }
 
+/// States one wake at the deadline, so its node arms each timer for its deadline.
 #[test]
 fn a_timer_wakes_its_task_only_when_due() {
     let mut sim = sim(0);
