@@ -303,11 +303,12 @@
   while the one server is the test server: before a server serves users, the manager
   must keep listening after an error of one stream (#2005), and a pass must move only
   the connections that are woken, since a pass moves each connection (about 107 ns
-  each on the bench of #435 6b3). Deferred by `laptop.architect-2`
+  each on the bench of #435 6b3, on box2, an Intel Xeon Platinum 8488C). Deferred by
+  `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6092329880,
-  2026-10-10 01:45 UTC). Lost: the manager binds its own listener with
-  `Net::listen` from the parameters. `address` is a host name and
-  `Net::listen` takes a socket address, so the open would resolve in a hook that must
+  2026-10-10 01:45 UTC). Lost: the manager binds its own listener with `Net::listen`
+  from the parameters. `address` is a host name and `Net::listen` takes a socket
+  address, so the open would resolve in a hook that must
   give `ESTABLISHED` before it returns, and an owner that binds port 0 could not learn
   the port before it builds the URL of its server. Also lost: one constructor with an
   `Option<Listener>`, which a client gives as a literal `None` (`docs/claude/rust.md`;
