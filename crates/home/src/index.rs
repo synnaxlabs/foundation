@@ -47,10 +47,15 @@ impl Accepted {
 }
 
 impl Index {
-    /// An index whose paths stand at `live` and `backfill`, with an empty gate.
-    pub(crate) fn new(limits: order::Limits, live: Tail, backfill: Tail) -> Self {
+    /// An index with `gate`, whose paths stand at `live` and `backfill`.
+    pub(crate) fn new(
+        limits: order::Limits,
+        gate: Gate,
+        live: Tail,
+        backfill: Tail,
+    ) -> Self {
         Self {
-            gate: Gate::new(),
+            gate,
             order: Order::new(limits, live, backfill),
         }
     }
@@ -205,7 +210,7 @@ mod tests {
             earliest: "2000-01-01T00:00:00Z".parse().expect("a valid stamp"),
             ahead: Span::SECOND,
         };
-        Index::new(limits, Tail::default(), Tail::default())
+        Index::new(limits, Gate::new(), Tail::default(), Tail::default())
     }
 
     fn at(nanos: u64) -> Monotonic {

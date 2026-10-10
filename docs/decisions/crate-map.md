@@ -16,10 +16,11 @@ Rules:
    `sim` builds simulated ones. Below `hub`, only `home` writes channels, and only its
    companion samples.
 8. Tests follow the same rules, with these extra dev-dependencies only: any crate may
-   take `sim` and `counting`, `connector-ni` may take `daqmx-stub`, `hub` may take
-   `buffer`, so its tests build a real `home::Shard`, and `access` may take `document`,
-   so its tests build a `spec::connector::Connector` (`laptop.architect`,
-   2026-10-08T03:01:36Z:
+   take `sim`, `counting`, and `waker` (`laptop.architect`, 2026-10-10 06:25 UTC,
+   #2254, https://github.com/synnaxlabs/foundation/issues/2254#issuecomment-6094631943),
+   `connector-ni` may take `daqmx-stub`, `hub` may take `buffer`, so its tests build a
+   real `home::Shard`, and `access` may take `document`, so its tests build a
+   `spec::connector::Connector` (`laptop.architect`, 2026-10-08T03:01:36Z:
    https://github.com/synnaxlabs/foundation/issues/810#issuecomment-6051285927), and
    `config` may take `config-hcl` and `connector-influx`, so its tests check a real file
    with a real kind (`laptop.architect-2`, 2026-10-08T03:02Z:
@@ -46,18 +47,19 @@ Rules:
    `buffer` in the `hub` row (hub code could call the ring), the hub tests in `node`,
    and a builder that takes a `sim::node::Node`, which adds an edge on `sim`.
 
-Order: layer 1 (`block`, `ring`, `counting`) -> `types` -> (`env`, `document`, `raft`,
-`estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`; layer 2
-`os` -> (`transport`, `buffer`) -> (`clock`, `blob`, `sim`) -> `mesh` -> (`home`,
-`replica`) -> `hub`; layer 3 `secret` -> `connector` -> `connector-<kind>`; layer 4
-(`config-hcl`, `config`) -> `ops` -> `node`.
+Order: layer 1 (`block`, `ring`, `counting`, `waker`) -> `types` -> (`env`, `document`,
+`raft`, `estimate`, `control`, `delivery`) -> `codec` -> `wire` -> `spec` -> `access`;
+layer 2 `os` -> (`transport`, `buffer`) -> (`clock`, `blob`, `sim`) -> `mesh` ->
+(`home`, `replica`) -> `hub`; layer 3 `secret` -> `connector` -> `connector-<kind>`;
+layer 4 (`config-hcl`, `config`) -> `ops` -> `node`.
 
 | Layer | Crate | Job (one sentence) | Allowed dependencies |
 | --- | --- | --- | --- |
 | 1 | `block` | Owns pools of preallocated, aligned buffers (`Pool`, `Unique`, `Block`, one refcount per frame, offsets only) and their unsafe memory code. | none |
 | 1 | `ring` | Carries handles between shards through bounded single-producer, single-consumer rings, owns the wake protocol (loom-checked) and the `latest` cell that one shard writes and every shard reads, and holds its own unsafe slot code (memory delegation, 2026-10-04). A consumer parks at once: the shard idle loop owns the spin window through `try_pop` (#46). | none |
 | 1 | `counting` | Counts heap allocations so tests and benchmarks can assert that code does not allocate, counts the heap bytes held so tests can bound the memory of a structure, finds freed blocks that hold given bytes so tests can assert that code erases a secret, and holds the `unsafe impl GlobalAlloc` of every crate after `block`, which keeps its own. A dev-dependency only. | none |
-| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public and private keys, with the derive, the sign, and the verify, subject hellos, connection keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. | `block` |
+| 1 | `waker` | Makes wakers for tests that own a value that is not `Send`, so a test can give a future a waker whose drop runs its code. Holds the `unsafe` of those wakers. A waker used on another thread aborts the process. A dev-dependency only (`laptop.architect`, 2026-10-10 06:25 UTC, #2254, https://github.com/synnaxlabs/foundation/issues/2254#issuecomment-6094631943, 06:28 UTC, https://github.com/synnaxlabs/foundation/issues/2254#issuecomment-6094654313; the abort, 2026-10-10 09:11 UTC, #2265, https://github.com/synnaxlabs/foundation/pull/2265#issuecomment-6095996730, items 3 and 4 withdrawn 09:19 UTC, https://github.com/synnaxlabs/foundation/pull/2265#issuecomment-6096058772). | none |
+| 1 | `types` | Defines byte-level values: time, byte sizes, sample types, series, frames, key sets, masks, views, keys, slots, quality, names, node keys, Ed25519 public and private keys, with the derive, the sign, and the verify, subject hellos, connection keys, control authority, content digests, the one selector matcher, and the one quote form for text in diagnostics. It also holds the wakers of the futures that wait for one event (`wait::Set`) (`laptop.architect`, 2026-10-10 05:33 UTC, #1701, https://github.com/synnaxlabs/foundation/issues/1701#issuecomment-6094250342). | `block` |
 | 1 | `env` | Defines the injected seams for monotonic time, the OS wall clock (read only by `clock`), files, the network, serial ports, randomness, shards, dedicated threads, and task spawning. | `types`, `block` |
 | 1 | `document` | Defines the syntax-neutral Document with source positions, diagnostics, shared value readers, and its canonical encoding. | `types` |
 | 1 | `raft` | Runs a sans-I/O replicated log (etcd model, PreVote, CheckQuorum) that knows nothing about specs. | `types` |

@@ -21,6 +21,12 @@
 #include <string.h>
 #include <unistd.h>
 
+/* The reason of `encryptUserIdentityTokenEcc` in `CLOCK_CALLS` of `cargo xtask
+ * open62541` needs encryption off. */
+#ifdef UA_ENABLE_ENCRYPTION
+#error "connector-opcua builds open62541 with encryption off"
+#endif
+
 /* The global clocks give a fixed time, so no OS clock enters through the C code.
  * `cargo xtask open62541` lists each call site. */
 UA_DateTime UA_DateTime_now(void) { return 0; }
@@ -395,7 +401,7 @@ struct shim_cm {
     void *state;
 };
 
-/* `src/ffi.rs` mirrors the struct for the tests, and asserts the same offsets. */
+/* `src/ffi/test.rs` mirrors the struct, and asserts the same offsets. */
 _Static_assert(sizeof(UA_ConnectionManager) == 18 * sizeof(void *),
                "UA_ConnectionManager changed");
 #define AT(member, word)                                                               \

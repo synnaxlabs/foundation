@@ -11,6 +11,8 @@ use std::process::Command;
 
 use env::files::{Error, Files, Mode};
 
+#[path = "../it/free.rs"]
+mod free;
 #[path = "../it/kept.rs"]
 mod kept;
 #[path = "../common/sockets.rs"]
@@ -106,6 +108,11 @@ fn a_disk_that_drops_while_the_test_panics_stays_mounted() {
         remove(mount);
     }
     assert!(mounted, "{} is not mounted", mount.display());
+}
+
+#[test]
+fn free_drops_by_the_bytes_of_a_created_file() {
+    run(|files, _| async move { free::check(&files).await });
 }
 
 #[test]

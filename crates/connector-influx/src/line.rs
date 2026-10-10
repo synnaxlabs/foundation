@@ -92,7 +92,6 @@ impl Measurement {
             let wrote = match value {
                 Value::Float(Float(float)) => write!(out, "{float:e}"),
                 Value::Integer(integer) => write!(out, "{integer}i"),
-                Value::Unsigned(unsigned) => write!(out, "{unsigned}u"),
                 Value::Boolean(boolean) => {
                     out.push(if boolean { b't' } else { b'f' });
                     Ok(())
@@ -109,15 +108,14 @@ impl Measurement {
     }
 }
 
-/// One field value, in InfluxDB's types.
+/// One field value, in a type that InfluxDB 1, 2, and 3 each store, so no unsigned
+/// integer.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Value {
     /// A 64-bit float.
     Float(Float),
     /// A signed 64-bit integer.
     Integer(i64),
-    /// An unsigned 64-bit integer.
-    Unsigned(u64),
     /// A boolean.
     Boolean(bool),
 }

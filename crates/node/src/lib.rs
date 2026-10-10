@@ -38,8 +38,6 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::task::Poll;
 
-use document::diagnostic::Diagnostic;
-use document::{Document, Source};
 use env::thread::Handle;
 use types::frame::key_set::Interner;
 use types::time::{Span, Stamp};
@@ -168,9 +166,9 @@ impl Node {
     /// data directory, or checks the ones there, and each shard opens its buffer in
     /// directory `shard-<i>` of its files, and makes it there when it is not there. The
     /// shards open their buffers one after another, in order of core. Once each buffer
-    /// has opened, shard 0 reads the node's key and private key from the file
-    /// `node.key` in the data directory, and makes the file at the first start once it
-    /// has mesh time, unless `create_key` made it, then opens the mesh of
+    /// has opened, shard 0 reads the node's key, private key, and seal key from the
+    /// file `node.key` in the data directory, and makes the file at the first start
+    /// once it has mesh time, unless `create_key` made it, then opens the mesh of
     /// [`Config::region`] when it has one, then serves the port, admits each member of
     /// the region and at most 256 sessions of other peers at once, until its transport
     /// or the mesh's group stops, which stops the node. Returns once each shard runs or
@@ -317,16 +315,16 @@ impl Node {
     }
 
     /// Calls `task` with the node's hub on shard 0, once each shard has opened its
-    /// buffer and, with a region, the mesh has opened, and after each task given
-    /// before it, then runs its future. So the code in its closure body runs in the
-    /// order of the calls; the futures that tasks give run in no set order. Does not
-    /// wait. A node that stops or fails before shard 0 calls a task drops it uncalled.
-    /// A task runs on shard 0's thread, so it may hold values that are not `Send`,
-    /// such as sessions; it sends its result back through a value it owns. Its future
-    /// runs until it completes or shard 0 ends, which drops it. A panic in a task ends
-    /// shard 0 and fails the node: [`Node::join`] gives [`Error::Panicked`], unless
-    /// the node saw the transport or the mesh's group stop first, which gives
-    /// [`Error::Transport`] or [`Error::Group`].
+    /// buffer, the node takes sessions, and, with a region, the mesh has opened, and
+    /// after each task given before it, then runs its future. So the code in its
+    /// closure body runs in the order of the calls; the futures that tasks give run in
+    /// no set order. Does not wait. A node that stops or fails before shard 0 calls a
+    /// task drops it uncalled. A task runs on shard 0's thread, so it may hold values
+    /// that are not `Send`, such as sessions; it sends its result back through a value
+    /// it owns. Its future runs until it completes or shard 0 ends, which drops it. A
+    /// panic in a task ends shard 0 and fails the node: [`Node::join`] gives
+    /// [`Error::Panicked`], unless the node saw the transport or the mesh's group stop
+    /// first, which gives [`Error::Transport`] or [`Error::Group`].
     pub fn spawn<F>(&self, task: impl FnOnce(hub::Hub) -> F + Send + 'static)
     where
         F: Future<Output = ()> + 'static,
@@ -379,13 +377,13 @@ impl Node {
     /// shard that could not start or pin, or [`Error::Memory`] for a shard with no
     /// memory, else [`Error::Shards`] or [`Error::Directory`] for a data directory that
     /// shard 0 could not claim, else [`Error::Buffer`] for the first shard by core
-    /// whose buffer did not open, [`Error::Budget`] or [`Error::Directory`] for a file
-    /// `budget` that shard 0 could not read or write, [`Error::Key`] or
-    /// [`Error::Directory`] for a key file that shard 0 could not read or write,
-    /// [`Error::Blob`] for a chunk store or [`Error::Mesh`] for a mesh that did not
-    /// open, or [`Error::Transport`] or [`Error::Group`], whichever the node sees stop
-    /// first, else [`Error::Panicked`] for the first shard by core that panicked. Any
-    /// failed shard stops the node.
+    /// whose buffer, or the home over it, did not open, [`Error::Budget`] or
+    /// [`Error::Directory`] for a file `budget` that shard 0 could not read or write,
+    /// [`Error::Key`] or [`Error::Directory`] for a key file that shard 0 could not
+    /// read or write, [`Error::Blob`] for a chunk store or [`Error::Mesh`] for a mesh
+    /// that did not open, or [`Error::Transport`] or [`Error::Group`], whichever the
+    /// node sees stop first, else [`Error::Panicked`] for the first shard by core that
+    /// panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
             // The shard sets `failed` on its own thread, so read it after the join.
@@ -409,9 +407,10 @@ impl Stopper {
 }
 
 /// Makes the file `node.key` in `files`, the data directory of a node that has not
-/// started, with `key` and `private_key`, and makes it durable. Each start of the node
-/// then uses them. For tests that must know a node's key before its first start; a
-/// node that starts with no file makes its own key.
+/// started, with `key`, `private_key`, and a new seal key from `entropy`, and makes it
+/// durable. Each start of the node then uses them. Gives the public seal key, for the
+/// node's card. For tests that must know a node's keys before its first start; a node
+/// that starts with no file makes its own keys.
 ///
 /// # Errors
 ///
@@ -421,10 +420,19 @@ impl Stopper {
 #[cfg(feature = "sim")]
 pub async fn create_key(
     files: &env::files::Files,
+    entropy: &env::entropy::Entropy,
     key: types::node::Key,
     private_key: types::ed25519::PrivateKey,
-) -> Result<(), Error> {
-    identity::store(files, &identity::Identity { key, private_key }).await
+) -> Result<types::node::SealKey, Error> {
+    let opener = secret::seal::Opener::generate(entropy);
+    let seal_key = opener.public();
+    let identity = identity::Identity {
+        key,
+        private_key,
+        opener,
+    };
+    identity::store(files, &identity).await?;
+    Ok(seal_key)
 }
 
 /// The name of the node of the data directory `files`: `given`, else the one that the
@@ -666,11 +674,11 @@ impl Open {
         }
     }
 
-    /// Waits for the interner, opens the shard's buffer on the shard's thread, gives
-    /// the interner to the next shard, and gives the shard's home over the buffer. A
-    /// failed open is kept for [`Node::join`], keeps the interner from the shards
-    /// after it, and gives `None`. So does a stop raised before the open, but it is
-    /// not a failure.
+    /// Waits for the interner, opens the shard's buffer and its home on the shard's
+    /// thread, gives the interner to the next shard, and gives the home. A failed
+    /// open is kept for [`Node::join`], keeps the interner from the shards after it,
+    /// and gives `None`. So does a stop raised before the open, but it is not a
+    /// failure.
     async fn run(
         self,
         files: env::files::Files,
@@ -692,15 +700,20 @@ impl Open {
             layout: self.layout,
             commit: COMMIT,
         };
-        match buffer::Buffer::open(config, interner.slots()).await {
-            Ok(buffer) => {
+        let opened = async {
+            let buffer = buffer::Buffer::open(config, interner.slots()).await?;
+            let config = home::Config {
+                shard: self.shard,
+                buffer,
+                clock: self.clock,
+                limits: LIMITS,
+            };
+            home::Shard::open(config).await
+        };
+        match opened.await {
+            Ok(shard) => {
                 self.give.give(interner);
-                Some(home::Shard::new(home::Config {
-                    shard: self.shard,
-                    buffer,
-                    clock: self.clock,
-                    limits: LIMITS,
-                }))
+                Some(shard)
             }
             Err(error) => {
                 let error = Error::Buffer { core, error };
@@ -909,14 +922,13 @@ fn operations(
     entropy: env::entropy::Entropy,
 ) -> ops::Node {
     let key = move || channel_key(&time, &entropy);
-    let front_ends = BTreeMap::from([("hcl", ops::FrontEnd { read: hcl })]);
+    let front_ends = BTreeMap::from([(
+        "hcl",
+        ops::FrontEnd {
+            read: config_hcl::read,
+        },
+    )]);
     ops::Node::new(mesh, key, front_ends, connector::kind::Table::new())
-}
-
-/// The HCL front end.
-fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
-    config_hcl::read(source, text)
-        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
 /// Gives `hub` what the spec that `mesh` uses defines, then returns a future that gives
@@ -1003,7 +1015,7 @@ pub enum Error {
         /// Why the OS gave none.
         error: os::memory::Error,
     },
-    /// The buffer of the shard on `core` did not open.
+    /// The buffer of the shard on `core`, or the home over it, did not open.
     Buffer {
         /// The core of the shard.
         core: usize,

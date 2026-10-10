@@ -7,6 +7,7 @@ mod memory;
 
 use std::collections::BTreeSet;
 use std::future::poll_fn;
+use std::num::NonZeroU8;
 use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
 use std::pin::{Pin, pin};
@@ -17,8 +18,8 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Heap, Pool};
 use buffer::{
-    Buffer, Config, End, Entry, Error, Layout, Limit, Mark, Parts, Read, Rejected,
-    Stored, Tail, Unfit,
+    Buffer, Commit, Config, End, Entry, Error, Layout, Limit, Mark, Parts, Read,
+    Rejected, Stored, Tail, Unfit,
 };
 use env::clock::Clock;
 use env::entropy::Entropy;
@@ -845,6 +846,39 @@ fn idle_with_wakes(empty: usize) -> u64 {
 #[test]
 fn empty_appends_wake_no_task() {
     assert_eq!(idle_with_wakes(2), idle_with_wakes(0));
+}
+
+/// Runs a buffer whose task waits for the deadline of one entry, with `empty` empty
+/// appends meanwhile. Returns the digest of the run.
+fn busy_with_appends(empty: usize) -> u64 {
+    let (mut sim, handle) = start(28, move |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        shard.clock.sleep(commits(3)).await;
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(3)).await;
+        for _ in 0..empty {
+            buffer.append(Vec::new()).expect("takes an empty batch");
+        }
+        assert_eq!(buffer.committed().await, Ok(()));
+        drop(buffer);
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    sim.digest()
+}
+
+/// Appends to a buffer whose task does not idle wake no task: the waker that the
+/// first append takes is gone.
+#[test]
+fn appends_to_a_busy_buffer_wake_no_task() {
+    assert_eq!(busy_with_appends(2), busy_with_appends(0));
 }
 
 /// A `committed` with nothing appended before it waits on nothing: it resolves at
@@ -3669,6 +3703,156 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
     .expect("the buffer ends");
 }
 
+/// The test of the hand-written `Debug` of the private `Waiter` that a `Commit` and an
+/// `End` hold: it prints only its event and its key.
+#[test]
+fn a_waiter_prints_only_its_event_and_key() {
+    let (mut sim, node) = create_node(142);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let buffer = Buffer::open(config, &mut Slots::new())
+            .await
+            .expect("opens");
+        let mut polled = pin!(buffer.ended());
+        let polled = polled
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        assert_eq!(polled, Poll::Pending);
+        let commit = format!("{:?}", buffer.committed());
+        let end = format!("{:?}", buffer.ended());
+        let waiter = "Waiter { event: Commit, key: 1, .. }";
+        assert!(commit.contains(waiter), "{commit}");
+        let waiter = "Waiter { event: End, key: 2, .. }";
+        assert!(end.contains(waiter), "{end}");
+    })
+    .expect("the buffer ends");
+}
+
+/// The test of the hand-written `Debug` of the private `Parked`: a buffer prints
+/// whether its task idles, and no pointer of the task's waker.
+#[test]
+fn a_buffer_prints_whether_it_idles_and_no_pointer() {
+    run_on_memory(144, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        shard.clock.sleep(commits(3)).await;
+        let printed = format!("{buffer:?}");
+        assert!(printed.contains("parked: true"), "{printed}");
+        assert!(!printed.contains("0x"), "{printed}");
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let printed = format!("{buffer:?}");
+        assert!(printed.contains("parked: false"), "{printed}");
+    });
+}
+
+/// A waker drops after the borrow of the state ends: a `Commit` and an `End` drop it
+/// in a poll that replaces it and in their own drop. The waker holds an `End`, whose
+/// drop borrows the state.
+#[test]
+fn a_waker_drops_after_the_borrow_of_the_state() {
+    let (mut sim, node) = create_node(143);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        drop_wakers(&buffer, buffer.committed());
+        drop_wakers(&buffer, buffer.ended());
+        assert_eq!(buffer.committed().await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// The commit task drops each waker of an `End` at its end after the borrow of the
+/// state ends. The waker holds an `End`, whose drop borrows the state.
+#[test]
+fn a_waker_drops_at_the_end_after_the_borrow_of_the_state() {
+    let (mut sim, node) = create_node(145);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let mut end = pin!(buffer.ended());
+        let waker = waker::holding(buffer.ended());
+        assert!(
+            end.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        drop(waker);
+        let other = buffer.ended();
+        drop(buffer);
+        assert_eq!(other.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// The commit task drops each waker of a `Commit` that it wakes after the borrow of
+/// the state ends. The waker holds an `End`, whose drop borrows the state.
+#[test]
+fn a_waker_drops_at_the_commit_after_the_borrow_of_the_state() {
+    let (mut sim, node) = create_node(146);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let mut commit = pin!(buffer.committed());
+        let waker = waker::holding(buffer.ended());
+        assert!(
+            commit
+                .as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        drop(waker);
+        assert_eq!(buffer.committed().await, Ok(()));
+        assert_eq!(commit.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// Polls `waiter` with a waker that holds an `End` of `buffer`, then with a no-op
+/// waker, then with one more such waker, and drops `waiter`.
+fn drop_wakers<F: Future>(buffer: &Buffer, waiter: F) {
+    let mut waiter = pin!(waiter);
+    let waker = waker::holding(buffer.ended());
+    assert!(
+        waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    drop(waker);
+    let noop = Waker::noop();
+    assert!(
+        waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(noop))
+            .is_pending()
+    );
+    let waker = waker::holding(buffer.ended());
+    assert!(
+        waiter
+            .as_mut()
+            .poll(&mut Context::from_waker(&waker))
+            .is_pending()
+    );
+    drop(waker);
+}
+
 /// `End`s polled from other tasks and dropped while the buffer is held keep no
 /// waker.
 #[test]
@@ -3732,6 +3916,98 @@ fn the_end_of_the_task_wakes_the_last_waker_of_each_end() {
         assert_eq!(woken, [false, true, true]);
         assert_eq!(first.await, Ok(()));
         assert_eq!(second.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// `Commit`s polled once while an entry waits and dropped keep no waker.
+#[test]
+fn a_dropped_commit_keeps_no_waker() {
+    let (mut sim, node) = create_node(132);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        for _ in 0..1000 {
+            let commit = pin!(buffer.committed());
+            let waker = Waker::from(Arc::clone(&flag));
+            let polled = commit.poll(&mut Context::from_waker(&waker));
+            assert_eq!(polled, Poll::Pending);
+        }
+        assert_eq!(Arc::strong_count(&flag), 1, "the drop takes its waker out");
+        assert_eq!(buffer.committed().await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// A `Commit` keeps only the waker of its last poll, and the commit wakes it.
+#[test]
+fn a_commit_polled_with_new_wakers_keeps_the_last_one() {
+    let (mut sim, node) = create_node(133);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let mut commit = pin!(buffer.committed());
+        let flags: Vec<Arc<Flag>> = (0..1000)
+            .map(|_| Arc::new(Flag(AtomicBool::new(false))))
+            .collect();
+        for flag in &flags {
+            let waker = Waker::from(Arc::clone(flag));
+            let polled = commit.as_mut().poll(&mut Context::from_waker(&waker));
+            assert_eq!(polled, Poll::Pending);
+        }
+        let held: Vec<usize> = flags.iter().map(Arc::strong_count).collect();
+        let mut expected = vec![1; 1000];
+        expected[999] = 2;
+        assert_eq!(held, expected);
+        assert_eq!(buffer.committed().await, Ok(()));
+        let woken: Vec<bool> = flags
+            .iter()
+            .map(|flag| flag.0.load(Ordering::Relaxed))
+            .collect();
+        let mut expected = vec![false; 1000];
+        expected[999] = true;
+        assert_eq!(woken, expected);
+        assert_eq!(commit.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// The drop of a polled `Commit` leaves the waker of another, and the commit wakes it.
+#[test]
+fn a_dropped_commit_keeps_the_wakers_of_others() {
+    let (mut sim, node) = create_node(134);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let poll = |commit: Pin<&mut Commit>, flag: &Arc<Flag>| {
+            let waker = Waker::from(Arc::clone(flag));
+            commit.poll(&mut Context::from_waker(&waker))
+        };
+        let kept = Arc::new(Flag(AtomicBool::new(false)));
+        let mut commit = pin!(buffer.committed());
+        assert_eq!(poll(commit.as_mut(), &kept), Poll::Pending);
+        let dropped = Arc::new(Flag(AtomicBool::new(false)));
+        assert_eq!(poll(pin!(buffer.committed()), &dropped), Poll::Pending);
+        assert_eq!(Arc::strong_count(&kept), 2);
+        assert_eq!(buffer.committed().await, Ok(()));
+        assert!(kept.0.load(Ordering::Relaxed), "the commit wakes it");
+        assert_eq!(commit.await, Ok(()));
     })
     .expect("the buffer ends");
 }
@@ -5407,5 +5683,601 @@ fn a_read_after_a_power_cut_gives_the_entries_the_tail_reports() {
         );
         assert!(cut != 0 || !ended, "seed {seed}: the cut missed the commit");
         ended
+    });
+}
+
+/// An entry of `index` with `tag`, no samples at `first`, and `bytes`.
+fn tagged(
+    index: u32,
+    slot: Slot,
+    path: Path,
+    first: u64,
+    tag: u8,
+    bytes: Block,
+) -> Entry {
+    Entry {
+        tag,
+        ..entry(index, slot, path, first, 0, None, bytes.into())
+    }
+}
+
+/// What a read gives back for a `tagged` entry.
+fn stored_tagged(first: u64, tag: u8, bytes: Block) -> Stored {
+    Stored {
+        tag,
+        ..stored(first, 0, None, bytes)
+    }
+}
+
+/// What `newest` gives, by slot.
+async fn newest(
+    buffer: &Buffer,
+    path: Path,
+    tag: u8,
+) -> Result<Vec<(Slot, Stored)>, Error> {
+    let mut newest = buffer
+        .newest(path, NonZeroU8::new(tag).expect("a tag over 0"))
+        .await?;
+    newest.sort_by_key(|(slot, _)| *slot);
+    Ok(newest)
+}
+
+/// `newest` gives the last durable entry with the tag on the path of each index,
+/// across records and within one, also after a reopen. An index with no such entry
+/// is absent.
+#[test]
+fn newest_gives_the_last_durable_entry_of_the_tag_on_the_path_of_each_index() {
+    run(170, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let (a, b, c) = (
+            slots.index(key(1)),
+            slots.index(key(2)),
+            slots.index(key(3)),
+        );
+        let data = |index, slot, first| {
+            entry(
+                index,
+                slot,
+                Path::Live,
+                first,
+                1,
+                Some(9),
+                shard.block(20).into(),
+            )
+        };
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(1)),
+                data(3, c, 0),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(2)),
+                tagged(1, a, Path::Live, 0, 1, shard.block(3)),
+                tagged(2, b, Path::Live, 0, 1, shard.block(4)),
+                tagged(1, a, Path::Backfill, 0, 1, shard.block(5)),
+                tagged(2, b, Path::Live, 0, 2, shard.block(6)),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer
+            .append([data(1, a, 0), data(2, b, 0), data(3, c, 1)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let expected = vec![
+            (a, stored_tagged(0, 1, shard.block(3))),
+            (b, stored_tagged(0, 1, shard.block(4))),
+        ];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(expected));
+        let backfill = vec![(a, stored_tagged(0, 1, shard.block(5)))];
+        assert_eq!(newest(&buffer, Path::Backfill, 1).await, Ok(backfill));
+        assert_eq!(newest(&buffer, Path::Live, 4).await, Ok(Vec::new()));
+        buffer
+            .append([tagged(1, a, Path::Live, 1, 1, shard.block(7))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("reopens");
+        let (a, b) = (slots.index(key(1)), slots.index(key(2)));
+        let reopened = vec![
+            (a, stored_tagged(1, 1, shard.block(7))),
+            (b, stored_tagged(0, 1, shard.block(4))),
+        ];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(reopened));
+    });
+}
+
+/// A failed read of the ring gives its error, and a later `newest` passes.
+#[test]
+fn newest_gives_the_error_of_a_failed_ring_read() {
+    let (mut sim, node) = create_node(171);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let pool = Rc::clone(&config.pool);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        let bytes = || {
+            let mut block = pool.alloc(1).expect("a block");
+            block[0] = 8;
+            block.freeze()
+        };
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, bytes())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        node.fail_file(FilePath::new(RING), Operation::ReadAt);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::ReadAt,
+            code: 5,
+        };
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
+        assert_eq!(found, Err(Error::Files(failed)));
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
+        assert_eq!(found, Ok(vec![(a, stored_tagged(0, 1, bytes()))]));
+    })
+    .expect("the buffer ends");
+}
+
+/// A pool with no block for the table gives `Error::Pool`.
+#[test]
+fn newest_with_no_block_for_the_table_gives_the_pool_error() {
+    run(172, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(1))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let mut held = Vec::new();
+        let mut len = shard.pool.largest();
+        while len > 0 {
+            while let Ok(block) = shard.pool.alloc(len) {
+                held.push(block);
+            }
+            len -= len.div_ceil(16);
+        }
+        let exhausted = block::Error::Exhausted {
+            requested: 4096,
+            available: 0,
+        };
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
+        assert_eq!(found, Err(Error::Pool(exhausted)));
+    });
+}
+
+/// After a failed sync, `newest` gives the error that ended the buffer.
+#[test]
+fn newest_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
+    run(173, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(1))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        shard.node().fail_file(FilePath::new(RING), Operation::Sync);
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(2))])
+            .expect("queues");
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(buffer.committed().await, Err(failed.clone()));
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
+        assert_eq!(found, Err(Error::Files(failed)));
+    });
+}
+
+/// `newest` runs back to back while a commit's sync fails. Each call gives the
+/// entries of its 20 indexes or, once the sync failed, the error that ended the
+/// buffer, also a call in flight when the sync failed.
+#[test]
+fn newest_across_a_failed_sync_gives_the_error_that_ended_the_buffer() {
+    let (mut sim, node) = create_node(185);
+    let errors = sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let pool = Rc::clone(&config.pool);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let batch: Vec<Entry> = (1..=20)
+            .map(|index| {
+                let slot = slots.index(key(index));
+                let bytes = pool.alloc(8).expect("a block").freeze();
+                tagged(index, slot, Path::Live, 0, 1, bytes)
+            })
+            .collect();
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        node.fail_file(FilePath::new(RING), Operation::Sync);
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 1, None, Parts::default())])
+            .expect("queues");
+        let mut errors = Vec::new();
+        while errors.len() < 2 {
+            match buffer.newest(Path::Live, NonZeroU8::MIN).await {
+                Ok(found) => assert_eq!(found.len(), 20),
+                Err(error) => errors.push(error),
+            }
+        }
+        errors
+    });
+    let failed = Error::Files(FileError::Io {
+        path: PathBuf::from(RING),
+        operation: Operation::Sync,
+        code: 5,
+    });
+    assert_eq!(errors.expect("the run ends"), [failed.clone(), failed]);
+}
+
+/// With a block for the table but none for the entry, `newest` gives the pool
+/// error of the entry's bytes, and a later call passes.
+#[test]
+fn newest_with_no_block_for_the_entry_gives_the_pool_error() {
+    run(186, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, 3 * 4096), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        let tag = tagged(1, a, Path::Live, 0, 1, shard.block(5000));
+        buffer.append([tag]).expect("queues");
+        buffer.committed().await.expect("commits");
+        let one = shard.pool.alloc(4096).expect("a block for the table");
+        let mut held = Vec::new();
+        let mut len = shard.pool.largest();
+        while len > 0 {
+            while let Ok(block) = shard.pool.alloc(len) {
+                held.push(block);
+            }
+            len -= len.div_ceil(16);
+        }
+        drop(one);
+        let exhausted = block::Error::Exhausted {
+            requested: 5000,
+            available: 0,
+        };
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
+        assert_eq!(found, Err(Error::Pool(exhausted)));
+        drop(held);
+        let expected = vec![(a, stored_tagged(0, 1, shard.block(5000)))];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(expected));
+    });
+}
+
+/// `newest` reads the table of a record once for all indexes tagged in it, then the
+/// bytes of each entry it gives. Three indexes, each tagged in the first record and
+/// with data in the second: one table and three entries make four reads.
+#[test]
+fn newest_reads_one_table_for_the_indexes_tagged_in_one_record() {
+    run_on_memory(180, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let (a, b, c) = (
+            slots.index(key(1)),
+            slots.index(key(2)),
+            slots.index(key(3)),
+        );
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(1)),
+                tagged(2, b, Path::Live, 0, 1, shard.block(2)),
+                tagged(3, c, Path::Live, 0, 1, shard.block(3)),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let data = |index, slot| {
+            entry(
+                index,
+                slot,
+                Path::Live,
+                0,
+                1,
+                Some(9),
+                shard.block(20).into(),
+            )
+        };
+        buffer
+            .append([data(1, a), data(2, b), data(3, c)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let before = shard.memory().reads();
+        let found = newest(&buffer, Path::Live, 1).await.expect("reads");
+        assert_eq!(found.len(), 3);
+        assert_eq!(shard.memory().reads() - before, 4);
+    });
+}
+
+/// `newest` reads the table of each record once, also when the ring holds the newest
+/// entries of the indexes in more than one record. Odd indexes are tagged in the
+/// first record and even ones in the second: two tables and 16 entries make 18 reads.
+#[test]
+fn newest_reads_each_table_once_for_the_indexes_tagged_in_two_records() {
+    run_on_memory(186, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let indexes: Vec<_> = (1..=16).map(|n| (n, slots.index(key(n)))).collect();
+        for odd in [true, false] {
+            let batch = indexes
+                .iter()
+                .filter(|&&(n, _)| (n % 2 == 1) == odd)
+                .map(|&(n, slot)| tagged(n, slot, Path::Live, 0, 1, shard.block(1)));
+            buffer.append(batch).expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let before = shard.memory().reads();
+        let found = newest(&buffer, Path::Live, 1).await.expect("reads");
+        assert_eq!(found.len(), 16);
+        assert_eq!(shard.memory().reads() - before, 18);
+    });
+}
+
+/// `newest` gives the entries of one record in table order, also entries with no
+/// bytes, which share a body offset. Its doc gives no order, but hash order must not
+/// decide one.
+#[test]
+fn newest_gives_the_entries_of_a_record_in_table_order() {
+    run(181, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let batch: Vec<Entry> = (1..=8)
+            .map(|n| tagged(n, slots.index(key(n)), Path::Live, 0, 1, shard.block(0)))
+            .collect();
+        let table: Vec<Slot> = batch.iter().map(|entry| entry.slot).collect();
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        let found = buffer
+            .newest(Path::Live, NonZeroU8::MIN)
+            .await
+            .expect("reads");
+        let given: Vec<Slot> = found.iter().map(|(slot, _)| *slot).collect();
+        assert_eq!(given, table);
+    });
+}
+
+/// `newest` reads no table of a record that holds only an entry of another tag. A
+/// is tagged 1 in the first record and 2 in the second: one table and one entry
+/// make two reads.
+#[test]
+fn newest_reads_no_record_of_another_tag() {
+    run_on_memory(187, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        for tag in [1, 2] {
+            buffer
+                .append([tagged(1, a, Path::Live, 0, tag, shard.block(1))])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let before = shard.memory().reads();
+        let found = newest(&buffer, Path::Live, 1).await.expect("reads");
+        assert_eq!(found, vec![(a, stored_tagged(0, 1, shard.block(1)))]);
+        assert_eq!(shard.memory().reads() - before, 2);
+    });
+}
+
+/// `newest` reads no table of a record that holds no newest tagged entry. A is
+/// tagged in the first record and b in the third, so the second and the fourth are
+/// not read: two tables and two entries make four reads.
+#[test]
+fn newest_reads_only_the_records_of_the_newest_tagged_entries() {
+    run_on_memory(184, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let (a, b) = (slots.index(key(1)), slots.index(key(2)));
+        let data = |index, slot| {
+            entry(
+                index,
+                slot,
+                Path::Live,
+                0,
+                1,
+                Some(9),
+                shard.block(20).into(),
+            )
+        };
+        for batch in [
+            tagged(1, a, Path::Live, 0, 1, shard.block(1)),
+            data(2, b),
+            tagged(2, b, Path::Live, 1, 1, shard.block(2)),
+            data(1, a),
+        ] {
+            buffer.append([batch]).expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let before = shard.memory().reads();
+        let expected = vec![
+            (a, stored_tagged(0, 1, shard.block(1))),
+            (b, stored_tagged(1, 1, shard.block(2))),
+        ];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(expected));
+        assert_eq!(shard.memory().reads() - before, 4);
+    });
+}
+
+/// 64 indexes tagged in the first record, then 400 records that each hold data of
+/// all 64. The reads do not grow with the records after the tags: one table and one
+/// read for each entry given.
+#[test]
+fn newest_reads_no_record_after_the_tags() {
+    run_on_memory(183, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(512 * BLOCK, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let all: Vec<(u32, Slot)> = (1..=64)
+            .map(|index| (index, slots.index(key(index))))
+            .collect();
+        buffer
+            .append(all.iter().map(|&(index, slot)| {
+                tagged(index, slot, Path::Live, 0, 1, shard.block(1))
+            }))
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        for record in 0..400 {
+            buffer
+                .append(all.iter().map(|&(index, slot)| {
+                    entry(
+                        index,
+                        slot,
+                        Path::Live,
+                        record,
+                        1,
+                        Some(9),
+                        Parts::default(),
+                    )
+                }))
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let before = shard.memory().reads();
+        let found = newest(&buffer, Path::Live, 1).await.expect("reads");
+        assert_eq!(found.len(), 64);
+        assert_eq!(shard.memory().reads() - before, 1 + 64);
+    });
+}
+
+/// A table past 4 KiB, with the tagged entry last and data bytes before it.
+#[test]
+fn newest_reads_an_entry_after_a_table_of_two_blocks() {
+    run(184, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(64 * BLOCK, 4 * 4096), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        let b = slots.index(key(2));
+        let mut batch: Vec<Entry> = (0..90)
+            .map(|first| {
+                entry(2, b, Path::Live, first, 1, Some(9), shard.block(30).into())
+            })
+            .collect();
+        batch.push(tagged(1, a, Path::Live, 0, 1, shard.block(77)));
+        batch.push(tagged(2, b, Path::Live, 90, 1, shard.block(55)));
+        batch.push(entry(
+            1,
+            a,
+            Path::Live,
+            0,
+            1,
+            Some(9),
+            shard.block(40).into(),
+        ));
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        let expected = vec![
+            (a, stored_tagged(0, 1, shard.block(77))),
+            (b, stored_tagged(90, 1, shard.block(55))),
+        ];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(expected));
+    });
+}
+
+/// A handoff record with no holder has empty bytes: `newest` gives it.
+#[test]
+fn newest_gives_an_entry_with_no_bytes() {
+    run(181, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(3))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(0))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let found = newest(&buffer, Path::Live, 1).await;
+        assert_eq!(found, Ok(vec![(a, stored_tagged(0, 1, shard.block(0)))]));
+    });
+}
+
+/// An appended entry that is not durable yet is absent, also while its commit
+/// runs, and a commit that ends while `newest` reads changes nothing it gives.
+#[test]
+fn newest_gives_no_entry_that_is_not_durable() {
+    run(182, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        let b = slots.index(key(2));
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(1)),
+                tagged(2, b, Path::Live, 0, 1, shard.block(2)),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let appended = shard.clock.now();
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(5)),
+                tagged(2, b, Path::Live, 0, 1, shard.block(6)),
+            ])
+            .expect("queues");
+        let found = newest(&buffer, Path::Live, 1).await;
+        assert!(
+            shard.clock.now() - appended < COMMIT,
+            "the commit is pending"
+        );
+        let first = vec![
+            (a, stored_tagged(0, 1, shard.block(1))),
+            (b, stored_tagged(0, 1, shard.block(2))),
+        ];
+        let second = vec![
+            (a, stored_tagged(0, 1, shard.block(5))),
+            (b, stored_tagged(0, 1, shard.block(6))),
+        ];
+        assert_eq!(found, Ok(first));
+        buffer.committed().await.expect("commits");
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(second));
     });
 }

@@ -44,9 +44,6 @@ fn value(text: &str) -> Value {
         _ if text.ends_with('i') => {
             Value::Integer(text.trim_end_matches('i').parse().unwrap())
         }
-        _ if text.ends_with('u') => {
-            Value::Unsigned(text.trim_end_matches('u').parse().unwrap())
-        }
         _ => Value::Float(float(text.parse().unwrap())),
     }
 }
@@ -90,20 +87,19 @@ fn writes_one_known_line() {
     let measurement = Measurement::new(
         "plant",
         &[("site", "west"), ("line", "a b")],
-        &["temp", "n", "total", "open"],
+        &["temp", "n", "open"],
     )
     .unwrap();
     let mut out = b"before\n".to_vec();
     let values = [
         Some(Value::Float(float(21.5))),
         Some(Value::Integer(-3)),
-        Some(Value::Unsigned(7)),
         Some(Value::Boolean(true)),
     ];
     measurement.line(&mut out, &values, Stamp::from_nanos(1_000));
     assert_eq!(
         text(&out),
-        "before\nplant,line=a\\ b,site=west temp=2.15e1,n=-3i,total=7u,open=t 1000\n"
+        "before\nplant,line=a\\ b,site=west temp=2.15e1,n=-3i,open=t 1000\n"
     );
 }
 
@@ -484,7 +480,6 @@ fn field_value() -> impl Strategy<Value = Value> {
             .prop_filter_map("finite", Float::new)
             .prop_map(Value::Float),
         any::<i64>().prop_map(Value::Integer),
-        any::<u64>().prop_map(Value::Unsigned),
         any::<bool>().prop_map(Value::Boolean),
     ]
 }

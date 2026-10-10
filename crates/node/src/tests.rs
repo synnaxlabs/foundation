@@ -10,6 +10,8 @@ use types::byte::Size;
 use types::ed25519::PrivateKey;
 use types::time::Span;
 
+use secret::seal::Opener;
+
 use crate::identity::{self, Identity};
 use crate::{Budget, Config, Error, Node};
 
@@ -26,6 +28,8 @@ const PORT: u16 = 7000;
 const KEY: PrivateKey = PrivateKey([2; 32]);
 /// The node's key in the data directory of [`keyed`].
 const OWN: types::node::Key = types::node::Key::from_u128(1);
+/// The bytes of the seal key in the data directory of [`keyed`].
+const SEAL: [u8; 32] = [3; 32];
 
 /// A disk budget of two rings of 64 MiB, with their header blocks.
 const DISK: Size = Size::from_bytes(2 * (8192 + (64 << 20)));
@@ -552,6 +556,7 @@ fn keyed(sim: &mut sim::Sim, cores: usize) -> sim::node::Node {
     let identity = Identity {
         key: OWN,
         private_key: KEY,
+        opener: Opener::from_bytes(SEAL),
     };
     write_key(sim, &host, identity::encode(&identity).to_vec());
     host
@@ -1803,6 +1808,55 @@ mod home {
             ]
         );
     }
+
+    /// A read of the ring that fails at a restart over a handoff record fails the
+    /// node with its error, in the open of the buffer and in the open of the home
+    /// over it: the fault lands at each step of 25 us until the opens are done. Then
+    /// the node runs a task.
+    #[test]
+    fn a_failed_read_at_a_restart_over_a_handoff_fails_the_node() {
+        use super::hub::{I64, data, define, index, write, writer};
+
+        let ring = Path::new("shard-0/ring");
+        let error = Error::Buffer {
+            core: 0,
+            error: ::buffer::Error::Files(env::files::Error::Io {
+                path: ring.to_owned(),
+                operation: env::files::Operation::ReadAt,
+                code: 5,
+            }),
+        };
+        for after in (0..).step_by(25_000).map(Span::from_nanos) {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 1);
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            node.spawn(move |hub| async move {
+                define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
+                let mut writer = writer(&hub, &["value"]).await;
+                let stamp = writer.now().nanos();
+                write(&mut writer, stamp, 7);
+                std::future::pending::<()>().await;
+            });
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            sim.crash(&host, sim::Crash::Process);
+            drop(node);
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            let probe = probe(&node);
+            assert_eq!(sim.run_for(after), Ok(()), "{after:?}");
+            host.fail_file(ring, env::files::Operation::ReadAt);
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()), "{after:?}");
+            node.stop();
+            assert_eq!(sim.run(), Ok(()), "{after:?}");
+            match node.join() {
+                Ok(()) => {
+                    assert_eq!(fate(&probe), Fate::Ran, "{after:?}");
+                    break;
+                }
+                joined => assert_eq!(joined, Err(error.clone()), "{after:?}"),
+            }
+            assert!(after < Span::from_nanos(10_000_000), "the opens go on");
+        }
+    }
 }
 
 mod lock {
@@ -2083,7 +2137,7 @@ mod hub {
             .iter()
             .find(|&(present, _)| present == entry)
             .expect("the view holds the series");
-        let mut out = vec![0; count * 8];
+        let mut out = Vec::new();
         codec::decode(entries[entry].data_type, count, bytes, &mut out)
             .expect("decodes");
         let (chunks, _) = out.as_chunks::<8>();
@@ -3168,14 +3222,16 @@ mod port {
     }
 
     mod key {
+        use types::node::SealKey;
+
         use super::*;
         use crate::identity::{FILE, LEN};
 
         /// Through the public fuzz entry, which panics when the decode is wrong.
         #[test]
         fn a_key_decodes_and_a_key_with_another_tag_does_not() {
-            let mut body = [7; 64];
-            body[..16].copy_from_slice(b"foundation/key/1");
+            let mut body = [7; 96];
+            body[..16].copy_from_slice(b"foundation/key/2");
             crate::fuzz::identity(&body);
             body[0] ^= 1;
             crate::fuzz::identity(&body);
@@ -3203,7 +3259,7 @@ mod port {
                 let pool = block::Pool::heap(block::Config { budget: 4096 });
                 let into = pool.alloc(LEN).expect("a block");
                 let read = file.expect("opens").read_at(0, into).await;
-                read.expect("reads").starts_with(b"foundation/key/1")
+                read.expect("reads").starts_with(b"foundation/key/2")
             })
             .expect("the run ends")
         }
@@ -3213,6 +3269,7 @@ mod port {
             let identity = Identity {
                 key: OWN,
                 private_key: KEY,
+                opener: Opener::from_bytes(SEAL),
             };
             identity::encode(&identity).to_vec()
         }
@@ -3270,12 +3327,13 @@ mod port {
             assert_eq!(start_and_stop(&mut sim, &host), Ok(()));
             let made = read(&mut sim, &host);
             assert_eq!(made.len(), LEN);
-            assert_eq!(&made[..16], b"foundation/key/1");
+            assert_eq!(&made[..16], b"foundation/key/2");
             let key = u128::from_be_bytes(made[16..32].try_into().unwrap());
             assert_eq!(key >> 76 & 0xf, 7, "version 7");
             let millis = i64::try_from(key >> 80).unwrap();
             let wall = super::super::hub::WALL / 1_000_000;
             assert!((wall..wall + 1_000).contains(&millis), "{millis} at {wall}");
+            assert_ne!(made[64..96], made[32..64], "the seal key is its own");
             let public = PrivateKey(made[32..64].try_into().unwrap()).public();
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
             assert_eq!(dial(&mut sim, &host, public), Ok(Peer::Node(public)));
@@ -3296,30 +3354,50 @@ mod port {
             });
             assert_ne!(made[0][16..32], made[1][16..32], "keys");
             assert_ne!(made[0][32..64], made[1][32..64], "private keys");
+            assert_ne!(made[0][64..96], made[1][64..96], "seal keys");
         }
 
-        #[test]
-        fn a_node_proves_the_key_in_its_data_directory() {
+        /// A node started on the `node.key` `bytes` proves the public half of
+        /// `private_key` and keeps the bytes.
+        fn proves(bytes: &[u8], private_key: &PrivateKey) {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
-            write_key(&mut sim, &host, own());
+            write_key(&mut sim, &host, bytes.to_vec());
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
-            let public = KEY.public();
+            let public = private_key.public();
             assert_eq!(dial(&mut sim, &host, public), Ok(Peer::Node(public)));
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
-            assert_eq!(read(&mut sim, &host), own());
+            assert_eq!(read(&mut sim, &host), bytes);
         }
 
-        /// 68 zero bytes are a key that a crash kept from being written.
+        #[test]
+        fn a_node_proves_the_key_in_its_data_directory() {
+            proves(&own(), &KEY);
+        }
+
+        /// Each input of the fuzz corpus that decoded in the form `foundation/key/1`
+        /// has a copy in the new form: `valid-2`, which a node proves and keeps, and
+        /// `valid-body-2`, which with its CRC32C is `valid-2`.
+        #[test]
+        fn a_node_proves_the_key_of_each_valid_input_of_the_corpus() {
+            let valid: &[u8; LEN] =
+                include_bytes!("../../../oracles/fuzz/node_identity/valid-2");
+            let body =
+                include_bytes!("../../../oracles/fuzz/node_identity/valid-body-2");
+            assert_eq!(crate::sector::summed(body).as_ref(), Some(valid));
+            proves(valid, &PrivateKey([7; 32]));
+        }
+
+        /// 100 zero bytes are a key that a crash kept from being written.
         #[test]
         fn a_node_makes_a_key_over_zero_bytes() {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 2);
             write_key(&mut sim, &host, vec![0; LEN]);
             assert_eq!(start_and_stop(&mut sim, &host), Ok(()));
-            assert_eq!(&read(&mut sim, &host)[..16], b"foundation/key/1");
+            assert_eq!(&read(&mut sim, &host)[..16], b"foundation/key/2");
         }
 
         /// A `node.key` with no bytes is a key not yet written.
@@ -3337,7 +3415,7 @@ mod port {
             .expect("the run ends");
             assert_eq!(read(&mut sim, &host), Vec::<u8>::new());
             assert_eq!(start_and_stop(&mut sim, &host), Ok(()));
-            assert_eq!(&read(&mut sim, &host)[..16], b"foundation/key/1");
+            assert_eq!(&read(&mut sim, &host)[..16], b"foundation/key/2");
         }
 
         /// A file of another length that is not 0, or of another tag or checksum, stops
@@ -3345,19 +3423,22 @@ mod port {
         #[test]
         fn a_key_that_is_not_valid_stops_the_node() {
             // Each tag byte with one bit changed, and the tag of the next form.
-            let edits = (0..16).map(|i| (i, own()[i] ^ 1)).chain([(15, b'2')]);
+            let edits = (0..16).map(|i| (i, own()[i] ^ 1)).chain([(15, b'3')]);
             let tags = edits.map(|(i, byte)| {
-                let mut tag = own();
+                let mut tag = <[u8; LEN]>::try_from(own()).unwrap();
                 tag[i] = byte;
-                let crc = crc32c::crc32c(&tag[..64]);
-                tag[64..].copy_from_slice(&crc.to_le_bytes());
-                tag
+                crate::sector::checksum(&mut tag);
+                tag.to_vec()
             });
             let mut changed = own();
             changed[40] ^= 1;
             let short = own()[..LEN - 1].to_vec();
             let long = [own(), vec![0]].concat();
-            for bytes in [short, long, changed].into_iter().chain(tags) {
+            // The form before the seal key: the tag `foundation/key/1`, the node key,
+            // and the private key.
+            let old = [b"foundation/key/1".as_slice(), &own()[16..64]].concat();
+            let old = crate::sector::summed::<68>(&old).unwrap().to_vec();
+            for bytes in [short, long, changed, old].into_iter().chain(tags) {
                 let mut sim = sim::Sim::new(sim::Config::default());
                 let host = host(&mut sim, 2);
                 write_key(&mut sim, &host, bytes.clone());
@@ -3382,15 +3463,30 @@ mod port {
             sim: &mut sim::Sim,
             host: &sim::node::Node,
             private_key: PrivateKey,
-        ) -> Result<(), Error> {
+        ) -> Result<SealKey, Error> {
             sim.run_on(host, move |host, _| async move {
-                crate::create_key(&host.files(), OWN, private_key).await
+                crate::create_key(&host.files(), &host.entropy(), OWN, private_key)
+                    .await
             })
             .expect("the run ends")
         }
 
-        /// Each start proves the key that `create_key` writes, also over 68 zero
-        /// bytes.
+        /// Checks that `made` holds [`OWN`], [`KEY`], and the private half of
+        /// `seal_key`, with the tag and the checksum.
+        fn assert_created(made: &[u8], seal_key: SealKey) {
+            let made: &[u8; LEN] = made.try_into().expect("the length of a key");
+            let opener = Opener::from_bytes(made[64..96].try_into().unwrap());
+            assert_eq!(opener.public(), seal_key, "the seal key");
+            let identity = Identity {
+                key: OWN,
+                private_key: KEY,
+                opener,
+            };
+            assert_eq!(identity::encode(&identity), *made);
+        }
+
+        /// Each start proves the key that `create_key` writes, also over 100 zero
+        /// bytes, and keeps its seal key.
         #[test]
         fn a_node_proves_the_key_that_create_key_writes() {
             for before in [None, Some(vec![0; LEN])] {
@@ -3399,16 +3495,26 @@ mod port {
                 if let Some(bytes) = before {
                     write_key(&mut sim, &host, bytes);
                 }
-                assert_eq!(create(&mut sim, &host, KEY), Ok(()));
-                assert_eq!(read(&mut sim, &host), own());
+                let seal_key = create(&mut sim, &host, KEY).expect("creates");
+                let made = read(&mut sim, &host);
+                assert_created(&made, seal_key);
                 let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
                 let public = KEY.public();
                 assert_eq!(dial(&mut sim, &host, public), Ok(Peer::Node(public)));
                 node.stop();
                 assert_eq!(sim.run(), Ok(()));
                 assert_eq!(node.join(), Ok(()));
-                assert_eq!(read(&mut sim, &host), own());
+                assert_eq!(read(&mut sim, &host), made);
             }
+        }
+
+        /// Two calls of `create_key` on two hosts make two seal keys.
+        #[test]
+        fn create_key_makes_a_seal_key_from_the_entropy() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [host(&mut sim, 1), host(&mut sim, 1)];
+            let made = hosts.map(|host| create(&mut sim, &host, KEY).expect("creates"));
+            assert_ne!(made[0], made[1]);
         }
 
         /// `create_key` writes nothing over a file that holds a key, valid or not.
@@ -3433,8 +3539,8 @@ mod port {
             write_key(&mut sim, &host, short.clone());
             let length = env::files::Error::Length {
                 path: PathBuf::from("node.key"),
-                expected: 68,
-                found: 67,
+                expected: 100,
+                found: 99,
             };
             assert_eq!(create(&mut sim, &host, KEY), Err(Error::Directory(length)));
             assert_eq!(read(&mut sim, &host), short, "keeps the file");
@@ -3459,8 +3565,8 @@ mod port {
             })
             .expect("the run ends");
             assert_eq!(read(&mut sim, &host), Vec::<u8>::new());
-            assert_eq!(create(&mut sim, &host, KEY), Ok(()));
-            assert_eq!(read(&mut sim, &host), own());
+            let seal_key = create(&mut sim, &host, KEY).expect("creates");
+            assert_created(&read(&mut sim, &host), seal_key);
         }
 
         /// A power cut after `create_key` keeps the key.
@@ -3472,9 +3578,9 @@ mod port {
                     ..sim::Config::default()
                 });
                 let host = host(&mut sim, 2);
-                assert_eq!(create(&mut sim, &host, KEY), Ok(()));
+                let seal_key = create(&mut sim, &host, KEY).expect("creates");
                 sim.crash(&host, sim::Crash::Power);
-                assert_eq!(read(&mut sim, &host), own(), "seed {seed}");
+                assert_created(&read(&mut sim, &host), seal_key);
             }
         }
 
@@ -3516,7 +3622,7 @@ mod port {
                     Err(Error::Directory(error))
                 );
                 assert_eq!(start_and_stop(&mut sim, &host), Ok(()));
-                assert_eq!(&read(&mut sim, &host)[..16], b"foundation/key/1");
+                assert_eq!(&read(&mut sim, &host)[..16], b"foundation/key/2");
             }
         }
 
@@ -3693,7 +3799,7 @@ mod port {
         const OPEN: Span = Span::from_nanos(10_000_000);
         /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
         /// fails from [`OPEN`] stops the group in the sim.
-        const WRITE: i64 = 1_793_836_019;
+        const WRITE: i64 = 1_793_874_296;
 
         /// Why the group stops when a write of [`LOG`] fails.
         fn write_failed() -> ::mesh::Stopped {
@@ -3922,6 +4028,7 @@ mod port {
                 let identity = Identity {
                     key: OTHER.0,
                     private_key: OTHER.1,
+                    opener: Opener::from_bytes(SEAL),
                 };
                 let endpoint = Endpoint {
                     part: bound.split(NonZeroUsize::MIN).pop().expect("one part"),
@@ -4645,8 +4752,9 @@ mod port {
         }
 
         /// A task that panics after the group stops, before the node sees the stop:
-        /// `join` gives the panic. At [`WRITE`], three idle tasks that wake at that
-        /// instant make the sim run the group's stop first.
+        /// `join` gives the panic. At [`WRITE`], four idle tasks that wake at that
+        /// instant make the sim run the group's stop, then this task, before the node
+        /// sees the stop. The task asserts that the group stopped before it panics.
         #[test]
         fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -4654,7 +4762,7 @@ mod port {
             let node = start_alone(&host);
             let at =
                 sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let own = host.clone();
                 node.spawn(move |_| async move {
                     own.clock().sleep_until(at).await;
@@ -4662,8 +4770,12 @@ mod port {
                 });
             }
             let own = host.clone();
-            node.spawn(move |_| async move {
+            node.operate(move |ops| async move {
+                let mut watch = ops.mesh().watch(INDEX);
                 own.clock().sleep_until(at).await;
+                let mut next = pin!(watch.next());
+                let polled = poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx))).await;
+                assert_eq!(polled, Poll::Ready(Err(write_failed())));
                 panic!("a task panics");
             });
             assert_eq!(sim.run_for(OPEN), Ok(()));
@@ -5077,6 +5189,7 @@ mod port {
                 let identity = Identity {
                     key: OTHER.0,
                     private_key: OTHER.1,
+                    opener: Opener::from_bytes(SEAL),
                 };
                 let definitions = founding.definitions.clone();
                 let endpoint = Endpoint {
@@ -5401,6 +5514,7 @@ mod port {
             let identity = Identity {
                 key: OWN,
                 private_key: KEY,
+                opener: Opener::from_bytes(SEAL),
             };
             write_key(&mut sim, &host, identity::encode(&identity).to_vec());
             assert_eq!(applied_key(&mut sim, &host).as_u128() >> 80, 0);
@@ -5419,6 +5533,7 @@ mod port {
             let identity = Identity {
                 key: OWN,
                 private_key: KEY,
+                opener: Opener::from_bytes(SEAL),
             };
             write_key(&mut sim, &host, identity::encode(&identity).to_vec());
             let ten_ms = Span::from_nanos(10 * Span::MILLISECOND.nanos());
