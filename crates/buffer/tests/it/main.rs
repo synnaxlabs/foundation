@@ -5391,3 +5391,205 @@ fn a_read_after_a_power_cut_gives_the_entries_the_tail_reports() {
         ended
     });
 }
+
+/// An entry of `index` with `tag`, no samples at `first`, and `bytes`.
+fn tagged(
+    index: u32,
+    slot: Slot,
+    path: Path,
+    first: u64,
+    tag: u8,
+    bytes: Block,
+) -> Entry {
+    Entry {
+        tag,
+        ..entry(index, slot, path, first, 0, None, bytes.into())
+    }
+}
+
+/// What a read gives back for a `tagged` entry.
+fn stored_tagged(first: u64, tag: u8, bytes: Block) -> Stored {
+    Stored {
+        tag,
+        ..stored(first, 0, None, bytes)
+    }
+}
+
+/// What `newest` gives, by slot.
+async fn newest(
+    buffer: &Buffer,
+    path: Path,
+    tag: u8,
+) -> Result<Vec<(Slot, Stored)>, Error> {
+    let mut newest = buffer.newest(path, tag).await?;
+    newest.sort_by_key(|(slot, _)| *slot);
+    Ok(newest)
+}
+
+/// `newest` gives the last durable entry with the tag on the path of each index,
+/// across records and within one, also after a reopen. An index with no such entry
+/// is absent.
+#[test]
+fn newest_gives_the_last_durable_entry_of_the_tag_on_the_path_of_each_index() {
+    run(170, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let (a, b, c) = (
+            slots.index(key(1)),
+            slots.index(key(2)),
+            slots.index(key(3)),
+        );
+        let data = |index, slot, first| {
+            entry(
+                index,
+                slot,
+                Path::Live,
+                first,
+                1,
+                Some(9),
+                shard.block(20).into(),
+            )
+        };
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(1)),
+                data(3, c, 0),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer
+            .append([
+                tagged(1, a, Path::Live, 0, 1, shard.block(2)),
+                tagged(1, a, Path::Live, 0, 1, shard.block(3)),
+                tagged(2, b, Path::Live, 0, 1, shard.block(4)),
+                tagged(1, a, Path::Backfill, 0, 1, shard.block(5)),
+                tagged(2, b, Path::Live, 0, 2, shard.block(6)),
+            ])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        buffer
+            .append([data(1, a, 0), data(2, b, 0), data(3, c, 1)])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let expected = vec![
+            (a, stored_tagged(0, 1, shard.block(3))),
+            (b, stored_tagged(0, 1, shard.block(4))),
+        ];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(expected));
+        let backfill = vec![(a, stored_tagged(0, 1, shard.block(5)))];
+        assert_eq!(newest(&buffer, Path::Backfill, 1).await, Ok(backfill));
+        assert_eq!(newest(&buffer, Path::Live, 4).await, Ok(Vec::new()));
+        buffer
+            .append([tagged(1, a, Path::Live, 1, 1, shard.block(7))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("reopens");
+        let (a, b) = (slots.index(key(1)), slots.index(key(2)));
+        let reopened = vec![
+            (a, stored_tagged(1, 1, shard.block(7))),
+            (b, stored_tagged(0, 1, shard.block(4))),
+        ];
+        assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(reopened));
+    });
+}
+
+/// A failed read of the ring gives its error, and a later `newest` passes.
+#[test]
+fn newest_gives_the_error_of_a_failed_ring_read() {
+    let (mut sim, node) = create_node(171);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let pool = Rc::clone(&config.pool);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        let bytes = || {
+            let mut block = pool.alloc(1).expect("a block");
+            block[0] = 8;
+            block.freeze()
+        };
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, bytes())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        node.fail_file(FilePath::new(RING), Operation::ReadAt);
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::ReadAt,
+            code: 5,
+        };
+        let found = buffer.newest(Path::Live, 1).await;
+        assert_eq!(found, Err(Error::Files(failed)));
+        let found = buffer.newest(Path::Live, 1).await;
+        assert_eq!(found, Ok(vec![(a, stored_tagged(0, 1, bytes()))]));
+    })
+    .expect("the buffer ends");
+}
+
+/// A pool with no block for the table gives `Error::Pool`.
+#[test]
+fn newest_with_no_block_for_the_table_gives_the_pool_error() {
+    run(172, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(1))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        let mut held = Vec::new();
+        let mut len = shard.pool.largest();
+        while len > 0 {
+            while let Ok(block) = shard.pool.alloc(len) {
+                held.push(block);
+            }
+            len -= len.div_ceil(16);
+        }
+        let exhausted = block::Error::Exhausted {
+            requested: 4096,
+            available: 0,
+        };
+        let found = buffer.newest(Path::Live, 1).await;
+        assert_eq!(found, Err(Error::Pool(exhausted)));
+    });
+}
+
+/// After a failed sync, `newest` gives the error that ended the buffer.
+#[test]
+fn newest_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
+    run(173, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(1))])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        shard.node().fail_file(FilePath::new(RING), Operation::Sync);
+        buffer
+            .append([tagged(1, a, Path::Live, 0, 1, shard.block(2))])
+            .expect("queues");
+        let failed = FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        };
+        assert_eq!(buffer.committed().await, Err(failed.clone()));
+        let found = buffer.newest(Path::Live, 1).await;
+        assert_eq!(found, Err(Error::Files(failed)));
+    });
+}

@@ -27,7 +27,7 @@ use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
 use crate::log::{self, Found, Logs, Mark, Tail};
-use crate::read::{Read, Reading};
+use crate::read::{self, Read, Reading, Stored};
 use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
 
@@ -488,6 +488,55 @@ impl Buffer {
             return Err(Error::Files(failed.clone()));
         }
         walked.map(|()| reading.finish())
+    }
+
+    /// The newest durable entry with `tag` on `path` of each index that has one, by
+    /// the index's slot, in no order. It skips records that a trim hid. For each
+    /// index it reads the tables of its records from the newest back until one holds
+    /// the tag, then the entry's bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Files`] when a ring read fails and [`Error::Pool`] when the pool has
+    /// no block for a table or an entry; the buffer goes on. When a commit's file call
+    /// fails before the call ends, the error that ended the buffer.
+    pub async fn newest(
+        &self,
+        path: Path,
+        tag: u8,
+    ) -> Result<Vec<(Slot, Stored)>, Error> {
+        let found = self.search(path, tag).await;
+        // After the reads: a ring read after a failed sync gives `Poisoned`.
+        if let Some(failed) = &self.shared.state.borrow().failed {
+            return Err(Error::Files(failed.clone()));
+        }
+        found
+    }
+
+    /// The newest durable entry with `tag` on `path` of each index, as
+    /// [`newest`](Self::newest) gives, with the error of the first failed read.
+    async fn search(&self, path: Path, tag: u8) -> Result<Vec<(Slot, Stored)>, Error> {
+        let Shared {
+            file, pool, layout, ..
+        } = &*self.shared;
+        let slots = self.shared.state.borrow().logs.indexes(path);
+        let mut found = Vec::new();
+        for slot in slots {
+            let mut before = u64::MAX;
+            loop {
+                let run = self.shared.state.borrow().logs.newest(slot, path, before);
+                let Some((index, run)) = run else { break };
+                let place = AREA_START + layout.place(run.offset);
+                if let Some(stored) =
+                    read::newest(file, pool, place, index, path, tag).await?
+                {
+                    found.push((slot, stored));
+                    break;
+                }
+                before = run.offset;
+            }
+        }
+        Ok(found)
     }
 
     /// Gives `reading` the records of `path` of the index at `slot` until it ends.
@@ -1219,6 +1268,52 @@ mod tests {
             (None, vec![], Mark::at(9)),
         ];
         assert_eq!(*reads, expected);
+    }
+
+    /// No commit trims yet, so the test hides records as a trim will. `newest` skips
+    /// the tagged entry of a hidden record, also when later records of its path are
+    /// not hidden.
+    #[test]
+    fn newest_skips_the_records_that_a_trim_hid() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let found = Arc::new(Mutex::new(Vec::new()));
+        let given = Arc::clone(&found);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = slots.index(channel::Key::from_u128(1));
+                let part = pool.alloc(100).expect("a block").freeze();
+                let tagged = Entry {
+                    len: 0,
+                    tag: 1,
+                    ..entry(1, one, Path::Live, 0, &part)
+                };
+                buffer.append([tagged]).expect("the ring has room");
+                buffer.committed().await.expect("commits");
+                for first in [0, 3] {
+                    let batch = [entry(1, one, Path::Live, first, &part)];
+                    buffer.append(batch).expect("the ring has room");
+                    buffer.committed().await.expect("commits");
+                }
+                let firsts = async || {
+                    let newest = buffer.newest(Path::Live, 1).await.expect("reads");
+                    newest
+                        .iter()
+                        .map(|(slot, stored)| (*slot, stored.first))
+                        .collect()
+                };
+                let mut found: Vec<Vec<(Slot, u64)>> = vec![firsts().await];
+                buffer.shared.state.borrow_mut().logs.hide(8192);
+                found.push(firsts().await);
+                *given.lock().expect("no panic held the lock") = found;
+                buffer
+            },
+        );
+        let found = found.lock().expect("no panic held the lock");
+        assert_eq!(*found, [vec![(Slot::new(0), 0)], vec![]]);
     }
 
     /// The durable end counts the entries with no samples at its seq. A read that

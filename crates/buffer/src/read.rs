@@ -200,6 +200,41 @@ impl<'a> Reading<'a> {
     }
 }
 
+/// The last entry of `index` on `path` with `tag` in the record at `place` in the
+/// ring `file`, or `None` when the record holds no such entry.
+///
+/// # Errors
+///
+/// [`Error::Files`] when a ring read fails, and [`Error::Pool`] when the pool has no
+/// block.
+pub(crate) async fn newest(
+    file: &File,
+    pool: &Pool,
+    place: u64,
+    index: channel::Key,
+    path: Path,
+    tag: u8,
+) -> Result<Option<Stored>, Error> {
+    let table = table(file, pool, place).await?;
+    let found = headers(&table)
+        .filter(|(header, _)| {
+            (header.index, header.path, header.tag) == (index, path, tag)
+        })
+        .last();
+    drop(table);
+    let Some((header, offset)) = found else {
+        return Ok(None);
+    };
+    Ok(Some(Stored {
+        first: header.first,
+        len: header.len,
+        stored_at: header.stored_at,
+        last: header.last,
+        tag: header.tag,
+        bytes: bytes(file, pool, place, offset, header.bytes).await?,
+    }))
+}
+
 /// Each entry header of the record whose header and entry table are `table`, with
 /// the body offset of its bytes.
 ///
