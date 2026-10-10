@@ -18,3 +18,5 @@
   https://github.com/synnaxlabs/foundation/issues/1317#issuecomment-6094721967, and
   stated as more than `usize::MAX` bytes by `laptop.architect` (2026-10-10 09:23
   UTC): https://github.com/synnaxlabs/foundation/pull/2269#issuecomment-6096088015.
+  `Node::start` builds each `block::Config` after the port binds, and for an `Unfit`
+  starts no shard and gives `Error::Pool`.
