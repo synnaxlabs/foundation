@@ -50,19 +50,52 @@
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681.
   Decided by `laptop.architect-2` (2026-10-08T18:03:02Z,
   https://github.com/synnaxlabs/foundation/pull/1911#issuecomment-6066009681).
-  The apply gives four codes. Each `config::plan::Error` is `ops.bad-plan`, status 2,
-  with its `Display` as the message and the fix ``Make a plan with `foundation plan`,
-  and apply it with no edits``. A node with no spec in use or with `Spec::behind` set
-  gives `ops.behind`, status 1, after the decode and before the base compare: the
-  message names the newest pointer and one line for its `Cause`, and the fix is `Fix the
-  cause, then plan again`. One private function of `ops` reads `Mesh::spec` and gives
-  the spec in use or this error, for each caller. A plan whose base is not the spec in
-  use, before the proposal or after another change applies first, is `ops.stale-plan`,
-  status 1, fix `Plan again`. Each other error of `Mesh::apply` is `ops.apply`, status
-  1, with its `Display` as the message and the fix `Fix the cause in the message, then
-  plan and apply again`. There is no `ops.reserved-change`: `Plan::definitions` refuses
-  a change at a reserved label (FIRST ADMIN). `ops.behind` and the `ops.apply` fix
-  decided by `laptop.architect-2` (2026-10-08T23:51:37Z, items 1 and 2 of
+  The apply gives six codes of its own. A plan file path that is not UTF-8 is
+  `ops.path-not-utf8`, status 2, as in `plan`. Each `config::plan::Error` is
+  `ops.bad-plan`, status 2, with its `Display` as the message and the fix ``Make a plan
+  with `foundation plan`, and apply it with no edits``. A node with no spec in use or
+  with `Spec::behind` set gives `ops.behind`, status 1, after the decode and before the
+  base compare: the message names the newest pointer and one line for its `Cause`, and
+  the fix is `Fix the cause, then plan again`. One private function of `ops` reads
+  `Mesh::spec` and gives the spec in use, this error, or the stop (`ops.stopped`), for
+  each caller. A plan whose base is not the spec in use, before the proposal or after
+  another change applies first, is `ops.stale-plan`, status 1, fix `Plan again`. Each
+  other error of `Mesh::apply`, except a stop, is `ops.apply`, status 1, with its
+  `Display` as the message and the fix `Fix the cause in the message, then plan and
+  apply again`. A stop of the group of the mesh, from `Mesh::spec` or from
+  `Mesh::apply`, is `ops.stopped`, status 1, in `plan` and in `apply`, with the
+  `Display` of the stop as the message and the fix `Fix the cause in the message, then
+  start the node and plan again`. It can come after a proposal, so plan again to see
+  whether the change applied. Lost: a code for each variant of the stop, which gives a
+  better hint but adds three codes for one cause. The code has only this cause: #1744
+  gives a node that does not run `ops.no-node` (`laptop.architect-2`,
+  2026-10-09T23:13:35Z,
+  https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090851088).
+  Supersedes the code `ops.stopped` of `Unreached::Stopped` in
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6053197935.
+  `ops.stopped` decided by `laptop.architect-2` (2026-10-09T03:42:35Z, (b) of
+  https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6073812317); the
+  fix, which supersedes the fix of (b), by `laptop.architect` (2026-10-09T22:19:11Z,
+  https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090194371) and
+  `laptop.architect-2` (2026-10-09T22:24:28Z,
+  https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090256164), one
+  code with this fix for each stop by `laptop.architect-2` (2026-10-09T23:12:10Z,
+  https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090836329), and
+  "except a stop" by `laptop.architect-2` (2026-10-09T22:19:29Z,
+  https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090197852).
+  Supersedes the code of `mesh::Error::Stopped` in step 4 of
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063695586. There
+  is no `ops.reserved-change`: `Plan::definitions` refuses a change at a reserved label
+  (FIRST ADMIN). After `definitions`, each problem of `config::plan::check` is a
+  `Config` problem with its own code and no place, status 2 (PLAN FILE): plan
+  https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071877567, approved
+  by `laptop.architect-2` (2026-10-09T00:48:39Z,
+  https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872).
+  `ops.path-not-utf8` in the apply decided by `laptop.architect-2`
+  (2026-10-09T20:50:27Z, item 1 of
+  https://github.com/synnaxlabs/foundation/pull/2178#issuecomment-6089032114).
+  `ops.behind` and the `ops.apply` fix decided by `laptop.architect-2`
+  (2026-10-08T23:51:37Z, items 1 and 2 of
   https://github.com/synnaxlabs/foundation/pull/2035#issuecomment-6071339913). The
   order and the codes `ops.stale-plan` and `ops.apply` are steps 3 and 4 of the plan
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6063695586, approved

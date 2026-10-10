@@ -11,8 +11,6 @@ pub(crate) struct Status(pub(crate) u32);
 
 impl Status {
     pub(crate) const GOOD: Self = Self(0);
-    #[cfg(test)]
-    pub(crate) const BAD_NOT_SUPPORTED: Self = Self(0x803D_0000);
     pub(crate) const BAD_NOT_FOUND: Self = Self(0x803E_0000);
     #[cfg(test)]
     pub(crate) const BAD_INVALID_ARGUMENT: Self = Self(0x80AB_0000);
@@ -287,6 +285,14 @@ pub(crate) struct Hooks {
         context: *mut c_void,
         callback: ConnectionCallback,
     ) -> u32,
+    pub(crate) listen: unsafe extern "C" fn(
+        state: *mut c_void,
+        host: Bytes,
+        port: u16,
+        application: *mut c_void,
+        context: *mut c_void,
+        callback: ConnectionCallback,
+    ) -> u32,
     pub(crate) send:
         unsafe extern "C" fn(state: *mut c_void, id: usize, buffer: *mut Bytes) -> u32,
     pub(crate) close: unsafe extern "C" fn(state: *mut c_void, id: usize) -> u32,
@@ -343,6 +349,16 @@ unsafe extern "C" {
     ) -> *mut ConnectionManager;
     pub(crate) fn shim_cm_free(cm: *mut ConnectionManager);
     pub(crate) fn shim_buffer_free(buffer: *mut Bytes);
+    pub(crate) fn shim_establish(
+        cm: *mut ConnectionManager,
+        id: usize,
+        application: *mut c_void,
+        context: *mut *mut c_void,
+        callback: ConnectionCallback,
+        address: *const u8,
+        length: usize,
+        port: *const u16,
+    );
 }
 
 /// Only tests use these.
@@ -354,6 +370,20 @@ pub(crate) mod test {
     use super::{
         Bytes, ConnectionCallback, ConnectionManager, EventLoop, KeyValueMap, at,
     };
+
+    /// `UA_Server`, which Rust holds only by pointer.
+    #[repr(C)]
+    pub(crate) struct Server([u8; 0]);
+
+    /// `UA_LifecycleState` of a server.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(transparent)]
+    pub(crate) struct Lifecycle(pub(crate) c_int);
+
+    impl Lifecycle {
+        pub(crate) const STOPPED: Self = Self(0);
+        pub(crate) const STOPPING: Self = Self(2);
+    }
 
     /// The members of `UA_ConnectionManager`. `shim.c` asserts the same size and
     /// offsets.
@@ -463,6 +493,10 @@ pub(crate) mod test {
             client: *mut super::Client,
             url: *const std::ffi::c_char,
         ) -> u32;
+        pub(crate) fn UA_Client_connectSecureChannelAsync(
+            client: *mut super::Client,
+            url: *const std::ffi::c_char,
+        ) -> u32;
         pub(crate) fn __UA_Client_AsyncService(
             client: *mut super::Client,
             request: *const c_void,
@@ -473,6 +507,8 @@ pub(crate) mod test {
             key: *mut u32,
         ) -> u32;
 
+        pub(crate) fn UA_new(kind: *const c_void) -> *mut c_void;
+        pub(crate) fn UA_delete(value: *mut c_void, kind: *const c_void);
         pub(crate) fn UA_findDataType(id: *const NodeId) -> *const c_void;
         pub(crate) fn UA_KeyValueMap_setScalar(
             map: *mut KeyValueMap,
@@ -481,6 +517,33 @@ pub(crate) mod test {
             kind: *const c_void,
         ) -> u32;
         pub(crate) fn UA_KeyValueMap_clear(map: *mut KeyValueMap);
+        pub(crate) fn shim_map_set_strings(
+            map: *mut KeyValueMap,
+            key: *const std::ffi::c_char,
+            strings: *const *const std::ffi::c_char,
+            size: usize,
+        ) -> u32;
+        pub(crate) fn UA_KeyValueMap_getScalar(
+            map: *const KeyValueMap,
+            key: QualifiedName,
+            kind: *const c_void,
+        ) -> *const c_void;
         pub(crate) fn UA_Client_disconnect(client: *mut super::Client) -> u32;
+        pub(crate) fn UA_Client_disconnectAsync(client: *mut super::Client) -> u32;
+
+        pub(crate) fn shim_server_new(
+            el: *mut EventLoop,
+            port: u16,
+            url: *const std::ffi::c_char,
+        ) -> *mut Server;
+        pub(crate) fn UA_Server_run_startup(server: *mut Server) -> u32;
+        pub(crate) fn UA_Server_run_shutdown(server: *mut Server) -> u32;
+        pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;
+        pub(crate) fn UA_Server_getLifecycleState(server: *mut Server) -> Lifecycle;
+        pub(crate) fn shim_response_result(response: *const c_void) -> u32;
+        pub(crate) fn shim_server_discovery_url(
+            server: *mut Server,
+            index: usize,
+        ) -> *const Bytes;
     }
 }

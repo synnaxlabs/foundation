@@ -208,6 +208,7 @@ mod tests {
     use types::authority::Authority;
     use types::channel;
     use types::frame::{Form, Label, Path};
+    use types::name::Selector;
     use types::sample::{Scalar, Type};
 
     const BAD: Code = Code::new("test.bad");
@@ -1013,11 +1014,14 @@ mod tests {
             let write = Write::new(now.nanos(), vec![30, 10, 20]);
             let refusals = Arc::clone(&write.refusals);
             inputs.kinds = Arc::new(Table::new().with("write", write));
-            let mut reader = inputs
-                .hub
-                .reader(&[name("plant.value")], Mode::Complete)
-                .await
-                .expect("the reader opens");
+            let open = hub::reader::Config {
+                select: Selector::new(["plant.value"]).expect("a selector"),
+                mode: Mode::Complete,
+                subject: name("test"),
+                name: None,
+                hold: Span::ZERO,
+            };
+            let mut reader = inputs.hub.reader(open).await.expect("the reader opens");
             let supervisor = Supervisor::new(inputs);
             let result = supervisor
                 .run("write", name("plant.write"), &config(), &Token::new())

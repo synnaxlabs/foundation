@@ -348,6 +348,30 @@ fn a_datagram_over_the_path_mtu_is_lost() {
     });
 }
 
+/// A segment of 65,500 bytes and its headers are over the 65,536-byte MTU of the
+/// Linux loopback, so the batch is over the path MTU with GSO.
+#[test]
+#[cfg(target_os = "linux")]
+fn the_short_last_datagram_of_a_batch_over_the_path_mtu_arrives() {
+    on_thread("udp-mtu-batch", || async {
+        let net = net();
+        let local = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), 0);
+        let (mut sender, _) = bind(&net, local);
+        let (_, mut receiver) = bind(&net, local);
+        let contents = vec![7; udp::TRANSMIT_BYTES_MAX];
+        let big = Transmit {
+            segment: NonZeroUsize::new(65_500),
+            ..transmit(receiver.local(), &contents)
+        };
+        assert_eq!(send(&mut sender, &big).await, Ok(()));
+        let to = transmit(receiver.local(), b"after");
+        assert_eq!(send(&mut sender, &to).await, Ok(()));
+        let datagrams = receive(&mut receiver, 2).await;
+        let arrived: Vec<&[u8]> = datagrams.iter().map(|d| &d.contents[..]).collect();
+        assert_eq!(arrived, [&[7; 7][..], b"after"]);
+    });
+}
+
 #[test]
 fn a_datagram_past_the_end_of_its_buffer_arrives_cut() {
     on_thread("udp-cut", || async {

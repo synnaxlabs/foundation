@@ -479,7 +479,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_pointer_width = "64")]
     fn a_reserve_larger_than_the_address_space_fails() {
         let error = Memory::new(1 << 62).unwrap_err();
         assert_eq!(

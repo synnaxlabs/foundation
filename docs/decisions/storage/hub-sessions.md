@@ -296,3 +296,53 @@
   in `Config::channels`, because it would repeat each method of `Draft`
   (`laptop.architect`, 2026-10-09T18:47:52Z:
   https://github.com/synnaxlabs/foundation/issues/2170#issuecomment-6087166096).
+  A reader opens from `hub::reader::Config { select, mode, subject, name, hold }`: it
+  reads each channel whose name `select` matches at the open, which share one index, or
+  the open gives `ManyIndexes` with the least matched name and the least name on another
+  index (`laptop.architect`, 2026-10-08T06:18:32Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6053699496). A
+  selector that matches no channel gives `Empty` until #1819 (`laptop.architect`,
+  2026-10-08T06:18:32Z and 06:37:34Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6053699496 and
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6054016051). A named
+  reader has one session for each subject and name at the home of its index
+  (`laptop.architect`, 2026-10-08T10:15:04Z:
+  https://github.com/synnaxlabs/foundation/issues/1851#issuecomment-6057659053, and
+  `laptop.architect`, 2026-10-09T21:04:47Z:
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192): a later
+  open takes over the session, which ends with `Ended::Replaced` before the frames that
+  wait for it, as the home closed it (`laptop.architect`, 2026-10-09T21:04:47Z:
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192).
+  Supersedes the plan test "after the frames that wait for it" of
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057332703. A named
+  complete reader that opens while the home holds its position resumes at the position
+  where its last complete session opened, and ends with `Ended::Behind` when a frame
+  after that position was released (`laptop.architect`, 2026-10-09T21:04:47Z and
+  21:34:41Z: https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192
+  and https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089638162), or
+  dropped because no complete session on its index was open (`laptop.architect`,
+  2026-10-09T21:53:40Z:
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089887271).
+  Trigger: #1742 PR 3 adds `Reader::ack`, and the reader then resumes past its last ack.
+  A named open before mesh time gives `Unsynced`. A hold on an unnamed or latest reader
+  panics (`laptop.architect`, 2026-10-08T10:01:19Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). A named
+  reader whose index has its home at another node gives `reader::Error::Remote { home }`
+  (`laptop.architect`, 2026-10-09T19:33:23Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6087879895).
+  Trigger: #1155 removes `reader::Error::Remote` when a named reader opens across nodes.
+  Amended (#2185): `Hub::new` states when the hub lets go of the region, so `node` cites
+  the hub and not one of its tasks (`laptop.architect`, 2026-10-09T21:38:13Z:
+  https://github.com/synnaxlabs/foundation/issues/2185#issuecomment-6089685674). The hub
+  holds the home and `hub::Config::region` until the hub and each value and future that
+  it gave, directly or through another such value, drop (`laptop.architect`,
+  2026-10-09T23:21:55Z, the class in place of a list of holders:
+  https://github.com/synnaxlabs/foundation/pull/2197#issuecomment-6090938158). Each task
+  of the hub ends at its next poll after that, holding neither. The test
+  `remote::lets_go_of_the_transport_once_the_hub_each_session_and_each_link_drop` drops
+  a writer and a `Link` beside a remote reader, and asserts that the hub lets go of the
+  transport at the next poll of its tasks, and that the transport has no other holder
+  once the region drops. Lost: `Hub::ended`, because the event that `node` waits for is
+  the free port, which the transport gives, so a hub future adds a surface whose one
+  caller must still wait for the transport (`laptop.architect`, 2026-10-09T21:38:13Z:
+  https://github.com/synnaxlabs/foundation/issues/2185#issuecomment-6089685674).

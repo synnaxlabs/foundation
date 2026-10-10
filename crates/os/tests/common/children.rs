@@ -9,8 +9,29 @@ use env::net::Net;
 
 const CHILDREN: usize = 500;
 
+/// The sockets that a new child holds at the start of a test: those that this process
+/// got from its parent and that are not closed on exec. Cargo leaves the socket of a
+/// download open in each test binary that it then runs.
+pub(crate) struct Baseline(Vec<String>);
+
+impl Baseline {
+    /// The sockets that a new child holds now. Call it before the first call of the
+    /// test into `os`, so that no socket of `os` is in it.
+    pub(crate) fn list() -> Self {
+        Self(listed())
+    }
+
+    /// Each socket that a new child holds after its exec and that the baseline does
+    /// not hold, by its path in `/dev/fd`.
+    pub(crate) fn added(&self) -> Vec<String> {
+        let mut added = listed();
+        added.retain(|socket| !self.0.contains(socket));
+        added
+    }
+}
+
 /// Each socket that a new child holds after its exec, by its path in `/dev/fd`.
-pub(crate) fn held() -> Vec<String> {
+fn listed() -> Vec<String> {
     let list = r#"for f in /dev/fd/*; do if [ -S "$f" ]; then echo "$f"; fi; done"#;
     let listed = (Command::new("sh").args(["-c", list]).output()).expect("run sh");
     assert!(listed.status.success(), "sh lists the descriptors");
@@ -18,9 +39,10 @@ pub(crate) fn held() -> Vec<String> {
     listed.lines().map(String::from).collect()
 }
 
-/// Each socket that each of 500 new children holds, spawned while `threads` threads
-/// that `os` starts each run `work` in a loop.
+/// Each socket that `baseline` does not hold and that each of 500 new children holds,
+/// spawned while `threads` threads that `os` starts each run `work` in a loop.
 pub(crate) fn held_while(
+    baseline: &Baseline,
     threads: usize,
     work: impl AsyncFn(&Net) + Send + Sync + 'static,
 ) -> Vec<String> {
@@ -39,7 +61,7 @@ pub(crate) fn held_while(
             started.expect("the thread starts")
         })
         .collect();
-    let held = (0..CHILDREN).flat_map(|_| held()).collect();
+    let held = (0..CHILDREN).flat_map(|_| baseline.added()).collect();
     stop.store(true, Ordering::Relaxed);
     for worker in workers {
         worker.join().expect("the work runs with no panic");

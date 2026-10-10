@@ -839,10 +839,16 @@ impl Lab {
 fn collect(member: &Member, channel: &str, keys: Keys) -> Arc<Mutex<Got>> {
     let got = Arc::<Mutex<Got>>::default();
     let out = Arc::clone(&got);
-    let name: types::name::Name = channel.parse().expect("lab failure: a channel name");
+    let open = hub::reader::Config {
+        select: types::name::Selector::new([channel]).expect("lab failure: a selector"),
+        mode: hub::reader::Mode::Complete,
+        subject: "lab".parse().expect("lab failure: a name"),
+        name: None,
+        hold: types::time::Span::ZERO,
+    };
     let node = member.node.as_ref().expect("lab failure: the node runs");
     node.spawn(move |hub| async move {
-        let opened = hub.reader(&[name], hub::reader::Mode::Complete).await;
+        let opened = hub.reader(open).await;
         let mut reader = opened.expect("the reader opens");
         out.lock().unwrap().opened = true;
         loop {
