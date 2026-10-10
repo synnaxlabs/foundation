@@ -3696,6 +3696,10 @@ fn a_waiter_prints_only_its_event_and_key() {
 
 /// The test of the hand-written `Debug` of the private `Parked`: a buffer prints
 /// whether its task idles, and no pointer of the task's waker.
+///
+/// It is also the only kill of the hand mutant that clones the waker in `unpark` in
+/// place of taking it. That mutant only wakes a task that does not idle, an extra
+/// poll that no caller can see, and no driver counts wakes.
 #[test]
 fn a_buffer_prints_whether_it_idles_and_no_pointer() {
     run_on_memory(144, |shard| async move {

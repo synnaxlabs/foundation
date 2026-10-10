@@ -951,7 +951,8 @@ impl Future for Commit {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let until = self.until;
         self.waiter.poll(cx, |state| {
-            // Before `failed`: a commit that synced stays well after a later sync fails.
+            // Before `failed`: a commit that synced stays well after a later sync
+            // fails.
             if state.commits >= until && (!state.closed || state.ended) {
                 return Some(Ok(()));
             }
