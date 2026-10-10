@@ -108,9 +108,9 @@ pub struct Entry {
     pub stored_at: Stamp,
     /// The newest stamp of the samples, `None` for a caller record.
     pub last: Option<Stamp>,
-    /// A tag the caller gives and reads back. The buffer gives it no meaning: only
-    /// [`Buffer::newest`](crate::Buffer::newest) compares it, with the tag its caller
-    /// gives.
+    /// A tag the caller gives and reads back. The buffer gives it no meaning, apart
+    /// from 0: [`Buffer::newest`](crate::Buffer::newest) never gives an entry of tag
+    /// 0, and compares each other tag with the tag its caller gives.
     pub tag: u8,
     /// The bytes, written in place; see [`Parts`].
     pub parts: Parts,
