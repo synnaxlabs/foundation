@@ -1,4 +1,5 @@
 //! The C functions of open62541 and `shim.c` that Rust calls, each declared once.
+//! `shim.c` asserts the value and size of each C enum that this module mirrors.
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
@@ -392,8 +393,7 @@ pub(crate) mod test {
     pub(crate) struct Channel(pub(crate) c_int);
 
     impl Channel {
-        /// `UA_SECURECHANNELSTATE_CLOSED`. `shim.c` asserts it and the size of the
-        /// type.
+        /// `UA_SECURECHANNELSTATE_CLOSED`.
         pub(crate) const CLOSED: Self = Self(0);
     }
 

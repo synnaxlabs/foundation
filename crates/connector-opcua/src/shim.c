@@ -80,6 +80,20 @@ _Static_assert(UA_SECURECHANNELSTATE_CLOSED == 0,
                "UA_SECURECHANNELSTATE_CLOSED moved");
 _Static_assert(sizeof(UA_SecureChannelState) == sizeof(int),
                "UA_SecureChannelState changed");
+_Static_assert(UA_TIMERPOLICY_ONCE == 0 && UA_TIMERPOLICY_CURRENTTIME == 1 &&
+                   UA_TIMERPOLICY_BASETIME == 2,
+               "UA_TimerPolicy moved");
+_Static_assert(sizeof(UA_TimerPolicy) == sizeof(int), "UA_TimerPolicy changed");
+_Static_assert(UA_EVENTLOOPSTATE_FRESH == 0 && UA_EVENTLOOPSTATE_STARTED == 2,
+               "UA_EventLoopState moved");
+_Static_assert(sizeof(UA_EventLoopState) == sizeof(int), "UA_EventLoopState changed");
+_Static_assert(UA_CONNECTIONSTATE_OPENING == 1 && UA_CONNECTIONSTATE_ESTABLISHED == 2 &&
+                   UA_CONNECTIONSTATE_CLOSING == 3,
+               "UA_ConnectionState moved");
+_Static_assert(sizeof(UA_ConnectionState) == sizeof(int), "UA_ConnectionState changed");
+_Static_assert(UA_LIFECYCLESTATE_STOPPED == 0 && UA_LIFECYCLESTATE_STOPPING == 2,
+               "UA_LifecycleState moved");
+_Static_assert(sizeof(UA_LifecycleState) == sizeof(int), "UA_LifecycleState changed");
 
 /* `src/ffi.rs` mirrors the struct, in words of the size of a pointer, and asserts the
  * same offsets. */
