@@ -83,10 +83,10 @@ impl Reader {
     ///    [`Error::Reopen`] for a second `Opened`.
     /// 3. The content against the session: [`Error::Latest`] for a behind in a latest
     ///    session; for a head, [`Error::Places`] when it has more series than places,
-    ///    [`Error::Backfill`] when it is on the backfill path, [`Error::Range`] when
-    ///    its range ends past `u64::MAX`, and [`Error::Seq`] when it starts before the
-    ///    end of the head before it; [`Error::Run`] for a message with more ends than
-    ///    remain; and [`Error::Body`] for a message longer than the rest of the body.
+    ///    [`Error::Backfill`] when it is on the backfill path, and [`Error::Seq`]
+    ///    when it starts before the end of the head before it; [`Error::Run`] for a
+    ///    message with more ends than remain; and [`Error::Body`] for a message longer
+    ///    than the rest of the body.
     ///
     /// The session is then not valid ([`MALFORMED`](crate::header::MALFORMED)), and
     /// the caller stops it.
@@ -179,12 +179,12 @@ impl Reader {
             return Err(Error::Backfill);
         }
         let Range { seq, count } = head.range;
-        let end = seq.checked_add(u64::from(count));
-        let end = end.ok_or(Error::Range { seq, count })?;
         if seq < self.end {
             return Err(Error::Seq { seq, end: self.end });
         }
-        Ok(end)
+        Ok(seq
+            .checked_add(u64::from(count))
+            .expect("Reply::decode refuses a range past the highest seq"))
     }
 }
 
@@ -321,23 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_head_whose_range_ends_past_the_highest_seq() {
-        let mut reader = opened(1);
-        let last = head_at(Path::Live, u64::MAX - 2, 2, 1);
-        assert_eq!(event(&mut reader, &last), Ok(Event::Head(1)));
-        let mut reader = opened(1);
-        assert_eq!(
-            reader
-                .decode(&head_at(Path::Live, u64::MAX - 2, 3, 1))
-                .err(),
-            Some(Error::Range {
-                seq: u64::MAX - 2,
-                count: 3
-            })
-        );
-    }
-
-    #[test]
     fn refuses_a_head_that_starts_before_the_end_of_the_last() {
         let mut reader = at_end_6();
         assert_eq!(
@@ -358,24 +341,26 @@ mod tests {
     }
 
     #[test]
-    fn checks_a_head_for_places_then_the_path_then_the_range_then_the_seq() {
+    fn checks_a_head_for_the_range_then_places_then_the_path_then_the_seq() {
         let mut reader = at_end_6();
+        let mut past_end = head_at(Path::Backfill, u64::MAX - 1, 1, 2);
+        past_end[10] = 2;
         let cases = [
             (
-                head_at(Path::Backfill, 0, u32::MAX, 2),
+                past_end,
+                Error::Range {
+                    seq: u64::MAX - 1,
+                    count: 2,
+                },
+            ),
+            (
+                head_at(Path::Backfill, 0, 0, 2),
                 Error::Places {
                     series: 2,
                     places: 1,
                 },
             ),
-            (head_at(Path::Backfill, u64::MAX, 1, 1), Error::Backfill),
-            (
-                head_at(Path::Live, u64::MAX, 1, 1),
-                Error::Range {
-                    seq: u64::MAX,
-                    count: 1,
-                },
-            ),
+            (head_at(Path::Backfill, 0, 0, 1), Error::Backfill),
             (head_at(Path::Live, 0, 0, 1), Error::Seq { seq: 0, end: 6 }),
         ];
         for (message, error) in cases {

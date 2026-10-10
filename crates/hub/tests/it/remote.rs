@@ -3131,12 +3131,19 @@ async fn send_at(sender: &mut Sender, seq: u64) {
     send(sender, 16, |out| out.fill(1)).await;
 }
 
-/// Checks that a reader whose home sends a frame at seq 10 and then `head` gets the
-/// frame, then ends with `expected`, which prints as `text`, and that the stream of
-/// the home resets as malformed.
+/// The message of `head`.
+fn head_message(head: Head) -> [u8; 18] {
+    let mut message = [0; 18];
+    Reply::Head(head).encode(&mut message);
+    message
+}
+
+/// Checks that a reader whose home sends a frame at seq 10 and then the head
+/// `message` gets the frame, then ends with `expected`, which prints as `text`, and
+/// that the stream of the home resets as malformed.
 fn ends_at_a_head(
     seed: u64,
-    head: Head,
+    message: [u8; 18],
     expected: wire::hub::Error,
     text: &'static str,
 ) {
@@ -3146,8 +3153,10 @@ fn ends_at_a_head(
         move |node, _, transport, steps| async move {
             let (_, mut sender, mut receiver) = fake_open(&transport).await;
             send_at(&mut sender, 10).await;
-            let head = Reply::Head(head);
-            send(&mut sender, head.encoded_len(), |out| head.encode(out)).await;
+            send(&mut sender, message.len(), |out| {
+                out.copy_from_slice(&message);
+            })
+            .await;
             let error = loop {
                 if let Err(error) = receiver.recv().await {
                     break error;
@@ -3180,11 +3189,11 @@ fn ends_at_a_head(
 fn a_reader_stops_the_stream_as_malformed_when_a_head_starts_before_the_last_ends() {
     ends_at_a_head(
         16,
-        Head {
+        head_message(Head {
             path: Path::Live,
             range: Range { seq: 3, count: 1 },
             series: 2,
-        },
+        }),
         wire::hub::Error::Seq { seq: 3, end: 11 },
         "the frame head starts at seq 3, before the end 11 of the head before it",
     );
@@ -3192,16 +3201,18 @@ fn a_reader_stops_the_stream_as_malformed_when_a_head_starts_before_the_last_end
 
 #[test]
 fn a_reader_stops_the_stream_as_malformed_when_a_head_ends_past_the_highest_seq() {
+    let mut message = head_message(Head {
+        path: Path::Live,
+        range: Range {
+            seq: u64::MAX,
+            count: 0,
+        },
+        series: 2,
+    });
+    message[10] = 1;
     ends_at_a_head(
         20,
-        Head {
-            path: Path::Live,
-            range: Range {
-                seq: u64::MAX,
-                count: 1,
-            },
-            series: 2,
-        },
+        message,
         wire::hub::Error::Range {
             seq: u64::MAX,
             count: 1,
@@ -3215,11 +3226,11 @@ fn a_reader_stops_the_stream_as_malformed_when_a_head_ends_past_the_highest_seq(
 fn a_reader_stops_the_stream_as_malformed_when_a_head_is_on_the_backfill_path() {
     ends_at_a_head(
         21,
-        Head {
+        head_message(Head {
             path: Path::Backfill,
             range: Range { seq: 20, count: 1 },
             series: 2,
-        },
+        }),
         wire::hub::Error::Backfill,
         "the frame head of a reader session is on backfill",
     );

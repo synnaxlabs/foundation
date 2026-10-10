@@ -51,8 +51,8 @@ fn reader(places: u32, mode: Mode) -> Reader {
 
 /// The reply in `message`, read where its kind is in order: an opened by a reader that
 /// decoded nothing, and a head or a behind by a complete reader that has a place for
-/// each series and took no head. A head that it refuses for its path or its range
-/// reads from its bytes.
+/// each series and took no head. A head that it refuses for its path reads from its
+/// bytes.
 fn reply(message: &[u8]) -> Result<Reply, Error> {
     if let Ok(FromHome::Opened) = reader(u32::MAX, COMPLETE).decode(message) {
         return Ok(Reply::Opened);
@@ -60,7 +60,7 @@ fn reply(message: &[u8]) -> Result<Reply, Error> {
     match opened(u32::MAX).decode(message) {
         Ok(FromHome::Head(head)) => Ok(Reply::Head(head)),
         Ok(FromHome::Behind) => Ok(Reply::Behind),
-        Err(Error::Backfill | Error::Range { .. }) => Ok(Reply::Head(head(message))),
+        Err(Error::Backfill) => Ok(Reply::Head(head(message))),
         Err(error) => Err(error),
         Ok(event) => panic!("{event:?} came where only a head or a behind is in order"),
     }
@@ -89,7 +89,7 @@ fn head(message: &[u8]) -> Head {
 /// The refusal of `head` by a session of `places` places whose last head ended at
 /// `end`, or `None` when the session takes it.
 fn refusal(head: Head, places: u32, end: u64) -> Option<Error> {
-    let Range { seq, count } = head.range;
+    let seq = head.range.seq;
     if head.series > places {
         Some(Error::Places {
             series: head.series,
@@ -97,8 +97,6 @@ fn refusal(head: Head, places: u32, end: u64) -> Option<Error> {
         })
     } else if head.path == Path::Backfill {
         Some(Error::Backfill)
-    } else if seq.checked_add(u64::from(count)).is_none() {
-        Some(Error::Range { seq, count })
     } else if seq < end {
         Some(Error::Seq { seq, end })
     } else {
@@ -121,6 +119,7 @@ fn malformed(error: Error) -> bool {
             | Error::Kind { .. }
             | Error::Length { .. }
             | Error::Series
+            | Error::Range { .. }
             | Error::Path { .. }
     )
 }
