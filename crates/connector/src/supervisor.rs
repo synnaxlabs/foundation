@@ -3088,12 +3088,15 @@ mod tests {
                     ..settings(Span::ZERO)
                 };
                 let error = ctx.reader(&none).await.expect_err("no channel");
-                got.lock().expect("no panic").push(error.to_string());
+                got.lock()
+                    .expect("no panic")
+                    .push((error.to_string(), error));
                 Ok(())
             },
             |_, _| async {},
         );
-        assert_eq!(got, ["the selector matches no channel"]);
+        let empty = hub::reader::Error::Empty;
+        assert_eq!(got, [("the selector matches no channel".to_owned(), empty)]);
     }
 
     /// Runs `write` as `plant.write` on a new shard, while a writer as
