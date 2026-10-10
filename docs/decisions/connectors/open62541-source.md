@@ -32,9 +32,7 @@
   randomness, or process state. A symbol is outside the copy when no object exports it:
   a `static` function of one file does not hide a call of the OS function of its name
   from another. A key of `FUNCTION_SYMBOLS` with no reference fails, so a file that the
-  build leaves out loses its keys. Changed by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099166264,
-  2026-10-10 15:36 UTC). A new outside symbol also goes in `OUTSIDE` in
+  build leaves out loses its keys. A new outside symbol also goes in `OUTSIDE` in
   `connector-opcua`, which lists the outside symbols of the production build. A header
   list is not a check: a listed header can include another (`pthread.h` includes
   `time.h`). So the check refuses no system header, and each header that the copy
@@ -43,14 +41,21 @@
   Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1884#issuecomment-6060989375,
   2026-10-08 13:31 UTC). Supersedes the closed list of system headers of
-  https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715. `SYMBOLS`
-  holds memory and string functions, the 5 constructors that `shim.c` defines to abort,
-  and one exception that reads process state: the allocator, whose addresses the OS
-  places at random, so no result of the copy may depend on an address. On x86-64 the
-  assembler makes `_GLOBAL_OFFSET_TABLE_` undefined in each object that reads the table,
-  with no relocation, so only a reference that the C makes counts. The check builds with
-  no stack protector, so the compiler adds no reference to its random canary, and a
-  reference that the C makes fails. Approved by `laptop.architect-2`
+  https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715. The
+  sentences "`SYMBOLS` admits a symbol for any file. Each other reference needs its key
+  in `FUNCTION_SYMBOLS`." and "A key of `FUNCTION_SYMBOLS` with no reference fails, so a
+  file that the build leaves out loses its keys.": changed by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099166264,
+  2026-10-10 15:36 UTC); approved by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099491752,
+  2026-10-10 16:07 UTC). `SYMBOLS` holds memory and string functions, the 5 constructors
+  that `shim.c` defines to abort, and one exception that reads process state: the
+  allocator, whose addresses the OS places at random, so no result of the copy may
+  depend on an address. On x86-64 the assembler makes `_GLOBAL_OFFSET_TABLE_` undefined
+  in each object that reads the table, with no relocation, so only a reference that the
+  C makes counts. The check builds with no stack protector, so the compiler adds no
+  reference to its random canary, and a reference that the C makes fails. Approved by
+  `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099166264,
   2026-10-10 15:36 UTC). A reference is an undefined symbol that a relocation names, and
   it is outside the copy when no object exports it: approved by `laptop.architect`
@@ -114,7 +119,9 @@
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849
   (`laptop.director`,
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6064080980,
-  2026-10-08 16:10 UTC).
+  2026-10-08 16:10 UTC). The flags that the check adds: approved by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093693327,
+  2026-10-10 04:19 UTC).
   Our change makes the random state `UA_rng` of `src/util/ua_util.c` one per thread
   (`UA_THREAD_LOCAL`), so a draw on one thread does not move the state of another.
   Decided by `laptop.architect-2`
