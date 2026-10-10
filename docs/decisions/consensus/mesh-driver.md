@@ -332,9 +332,11 @@
   record leaves a first open, also with another founding (`laptop.architect`,
   2026-10-09T23:35:56Z:
   https://github.com/synnaxlabs/foundation/pull/2200#issuecomment-6091088392). This
-  supersedes the later open of the plan, which reads and compares `founding` at each
-  open after the first, and the rule of #1209 that a crash before the log exists
-  leaves a first open only for the same set. Each
+  supersedes the later open of the plan
+  (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063177321), which
+  reads and compares `founding` at each open after the first. It also supersedes the
+  rule of #1209 that a crash before the log exists leaves a first open only for the
+  same set. Each
   open whose log holds a record compares `founding` with `Config::founding`, its members
   in key order, before `raft` starts. Another value gives
   `Error::Founding { stored, given }`, each a `Box<region::Founding>`. Its text names
