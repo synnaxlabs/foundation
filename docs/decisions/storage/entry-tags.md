@@ -34,5 +34,5 @@
   https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094432871,
   2026-10-10T05:58:44Z, and
   https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094544644,
-  2026-10-10T06:13:43Z). Supersedes "19.5 to 25.7 B for each log with a tagged
-  record" and "22 to 35 B for each log and nonzero tag".
+  2026-10-10T06:13:43Z). The bytes replace those in item 3 of
+  https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094432871.
