@@ -181,28 +181,17 @@ impl Class {
     /// The class of a run that ended with `end`, and the text of `error`: empty for
     /// `Ok`, else the text of the error with no class, cut to [`ERROR_MAX`] bytes.
     fn with_text(end: &Result<(), kind::Error>) -> (Self, String) {
-        let text = match end {
-            Ok(()) => String::new(),
+        let (class, text) = match end {
+            Ok(()) => (Self::None, String::new()),
             Err(kind::Error::Config(diagnostics)) => {
                 let texts: Vec<_> =
                     diagnostics.iter().map(ToString::to_string).collect();
-                texts.join("; ")
+                (Self::Config, texts.join("; "))
             }
-            Err(kind::Error::Device(source) | kind::Error::Retry(source)) => {
-                source.to_string()
-            }
+            Err(kind::Error::Device(source)) => (Self::Device, source.to_string()),
+            Err(kind::Error::Retry(source)) => (Self::Retry, source.to_string()),
         };
-        (Self::of(end), cut(&text).to_owned())
-    }
-
-    /// The class of a run that ended with `end`.
-    fn of(end: &Result<(), kind::Error>) -> Self {
-        match end {
-            Ok(()) => Self::None,
-            Err(kind::Error::Config(_)) => Self::Config,
-            Err(kind::Error::Device(_)) => Self::Device,
-            Err(kind::Error::Retry(_)) => Self::Retry,
-        }
+        (class, cut(text))
     }
 }
 
@@ -616,8 +605,9 @@ impl Session {
 
 /// The longest prefix of `text` of at most [`ERROR_MAX`] bytes that ends at a char
 /// boundary.
-fn cut(text: &str) -> &str {
-    &text[..text.floor_char_boundary(ERROR_MAX)]
+fn cut(mut text: String) -> String {
+    text.truncate(text.floor_char_boundary(ERROR_MAX));
+    text
 }
 
 /// The stamp 1 ns after `stamp`.
@@ -809,8 +799,8 @@ mod tests {
         fn cuts_a_text_to_the_longest_prefix_that_fits(
             text in "(a|é|€|😀){0,1100}",
         ) {
-            let got = cut(&text);
-            prop_assert!(text.starts_with(got));
+            let got = cut(text.clone());
+            prop_assert!(text.starts_with(&got));
             prop_assert!(got.len() <= ERROR_MAX);
             let next = text[got.len()..].chars().next();
             prop_assert!(next.is_none_or(|c| got.len() + c.len_utf8() > ERROR_MAX));
