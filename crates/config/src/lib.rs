@@ -546,20 +546,12 @@ mod tests {
             home: Some(key("a")),
             ..placement::Nodes::default()
         };
-        let channel = spec::channel::Channel {
-            key: types::channel::Key::from_u128(1),
-            kind: spec::channel::Kind::Index {
-                error: None,
-                control: None,
-            },
-        };
         let config = document::encoding::Checked::new(document::Document::default());
         let connector = connector::Connector::new(key("k"), key("a"), config.unwrap());
         let keep = types::time::Span::ZERO;
         let specs = [
             (stored("@admin.@access"), Of::Access),
             (Stored::Connector(connector), Of::Connector),
-            (Stored::Channel(channel), Of::Channel),
             (
                 Stored::Region(region::Delegation::new(1, [key("a")]).unwrap()),
                 Of::Region,
