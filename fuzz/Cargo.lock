@@ -867,6 +867,7 @@ dependencies = [
  "mesh",
  "ops",
  "os",
+ "secret",
  "spec",
  "transport",
  "types",
