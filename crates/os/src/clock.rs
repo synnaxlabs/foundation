@@ -177,8 +177,11 @@ impl env::clock::Timer for Timer {
         loop {
             // Ends by the second pass: a sleep armed from Tokio's now is pending. While
             // it is, the clock is not read, since the sleep fires late by at most
-            // `ARM_MAX`.
-            if this.armed == Some(deadline) && this.sleep.as_mut().poll(cx).is_pending()
+            // `ARM_MAX`. The poll is outside the coop budget, since a spent budget
+            // makes it pending after the sleep fired.
+            let mut sleep = tokio::task::coop::unconstrained(this.sleep.as_mut());
+            if this.armed == Some(deadline)
+                && Pin::new(&mut sleep).poll(cx).is_pending()
             {
                 return Poll::Pending;
             }

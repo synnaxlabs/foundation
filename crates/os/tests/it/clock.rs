@@ -192,6 +192,39 @@ fn a_poll_for_the_armed_deadline_reads_the_clock_once_the_sleep_fired() {
     });
 }
 
+/// A task that spends its Tokio budget before it polls its sleep, as the drain of a
+/// busy socket does, still sees the sleep complete once the deadline passed. The body
+/// of a thread of `os` has no budget, so the test runs in a `block_on`.
+#[test]
+fn a_sleep_completes_after_its_deadline_when_its_task_spent_its_budget() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let clock = os::clock();
+    runtime.block_on(async move {
+        let deadline = clock.now() + millis(100);
+        let mut sleep = pin!(clock.sleep_until(deadline));
+        let completed = std::future::poll_fn(|cx| {
+            while let Poll::Ready(progress) = tokio::task::coop::poll_proceed(cx) {
+                progress.made_progress();
+            }
+            if sleep.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(true);
+            }
+            if clock.now() > deadline + seconds(3) {
+                return Poll::Ready(false);
+            }
+            Poll::Pending
+        })
+        .await;
+        assert!(
+            completed,
+            "the sleep did not complete 3 s after its deadline"
+        );
+    });
+}
+
 #[test]
 fn a_sleep_that_re_arms_completes_at_the_deadline_or_later() {
     let clock = os::clock();
