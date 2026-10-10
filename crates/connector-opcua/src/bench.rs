@@ -133,8 +133,8 @@ struct Answers {
 impl Manager {
     /// Makes the manager on `clock` and `net`, with its listener on `address` and port
     /// 4840, and drives it until each client is connected. Then it runs `body` on the
-    /// manager, and closes each session and deletes the server and the clients, also
-    /// after a panic in the connect or in `body`, which it then resumes.
+    /// manager, and closes the channel of each client and deletes the server and the
+    /// clients, also after a panic in the connect or in `body`, which it then resumes.
     ///
     /// # Panics
     ///
@@ -274,13 +274,13 @@ impl Manager {
         self.answers.count.get()
     }
 
-    /// Asks each client to close its session, stops the server, deletes it with
+    /// Closes the channel of each client, stops the server, deletes it with
     /// `delete_server`, then deletes the clients.
     async fn close(mut self) {
         for client in &self.clients {
             // SAFETY: the client lives.
             let status = Status(unsafe {
-                ffi::test::UA_Client_disconnectAsync(client.as_ptr())
+                ffi::test::UA_Client_disconnectSecureChannelAsync(client.as_ptr())
             });
             assert_eq!(status, Status::GOOD, "open62541 refused a disconnect");
         }
@@ -291,8 +291,8 @@ impl Manager {
         // SAFETY: the server lives on the loop, and nothing uses it after.
         unsafe { self.connections.delete_server(server) }.await;
         for client in self.clients.drain(..) {
-            // SAFETY: nothing uses the client after it. It asked to disconnect, so the
-            // delete waits for no answer.
+            // SAFETY: nothing uses the client after it. The drive of `delete_server`
+            // ran the close of its channel, so the delete waits for nothing.
             unsafe { ffi::UA_Client_delete(client.as_ptr()) };
         }
         // SAFETY: nothing is on its loop, and nothing uses it after it.
@@ -646,6 +646,53 @@ mod tests {
             Manager::scope(node.clock(), node.net(), address, 0, body).await;
         })
         .expect("the run ends");
+    }
+
+    /// Runs a scope with `idle` idle clients on links of `link`, with a pause of the
+    /// node for 61 s at `at` of the connect, and gives the message of its panic.
+    fn paused(link: sim::link::Config, idle: usize, at: Span) -> String {
+        let mut sim = Sim::new(sim::Config {
+            link,
+            ..sim::Config::default()
+        });
+        let node = sim.node(node::Config::default());
+        sim.run_on(&node, move |node, tasks| async move {
+            let (clock, address) = (node.clock(), node.addresses()[0]);
+            let start = clock.now();
+            let pauser = node.clone();
+            tasks.spawn(async move {
+                clock.sleep_until(start + at).await;
+                pauser.pause(Span::from_nanos(61_000_000_000));
+            });
+            let body = async |_: &Manager| {};
+            let scope = Manager::scope(node.clock(), node.net(), address, idle, body);
+            let panic = caught(scope).await.expect_err("the connect panics");
+            panic
+                .downcast_ref::<String>()
+                .expect("a formatted panic")
+                .clone()
+        })
+        .expect("the run ends")
+    }
+
+    /// At 3.3 ms, the answer to the activate of the session is in flight, so the
+    /// session activates after the close asks it to close.
+    #[test]
+    fn a_scope_closes_after_a_deadline_in_the_handshake() {
+        let link = sim::link::Config::default();
+        let message = paused(link, 0, Span::from_nanos(3_300_000));
+        assert_eq!(message, "0 of 1 clients connected in 1m");
+    }
+
+    /// With jitter, 10 of the 16 clients have their namespaces at 15.5 ms.
+    #[test]
+    fn the_deadline_panic_gives_the_count_of_connected_clients() {
+        let link = sim::link::Config {
+            jitter: Span::from_nanos(1_000_000),
+            ..sim::link::Config::default()
+        };
+        let message = paused(link, 15, Span::from_nanos(15_500_000));
+        assert_eq!(message, "10 of 16 clients connected in 1m");
     }
 
     #[test]
