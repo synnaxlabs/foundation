@@ -327,6 +327,21 @@ fn a_change_before_the_old_run_ended_then_a_removal_starts_no_run() {
     assert_eq!(starts(Some(ms(2_000)), specs), [start("plant.a", 0, 0)]);
 }
 
+/// A name that a removal ended before its next run starts again at once when it comes
+/// back.
+#[test]
+fn an_addition_after_a_removal_that_ended_the_loop_starts_at_once() {
+    let spec = |version| vec![("plant.a", "hold", NODE, version)];
+    let specs = vec![
+        on(0, spec(0)),
+        on(1_000, spec(1)),
+        on(1_500, Vec::new()),
+        on(4_000, spec(3)),
+    ];
+    let starts = starts(Some(ms(2_000)), specs);
+    assert_eq!(starts, [start("plant.a", 0, 0), start("plant.a", 4_000, 3)]);
+}
+
 #[test]
 fn a_drop_cancels_each_run() {
     let spec = vec![("plant.a", "hold", NODE, 0), ("plant.b", "quick", NODE, 0)];
