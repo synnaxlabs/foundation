@@ -7,7 +7,7 @@ publish.workspace = true
 
 [dependencies]
 
-[target.'cfg(loom)'.dependencies]
+[target.'cfg(loom)'.dev-dependencies]
 loom = { workspace = true }
 
 [[test]]

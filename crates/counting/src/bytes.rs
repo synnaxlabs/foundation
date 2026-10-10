@@ -2,18 +2,8 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fmt;
-use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-
-#[cfg(loom)]
-use loom::{
-    hint,
-    sync::atomic::{AtomicBool, AtomicUsize},
-};
-#[cfg(not(loom))]
-use std::{
-    hint,
-    sync::atomic::{AtomicBool, AtomicUsize},
-};
+use std::sync::atomic::Ordering::{self, Acquire, Relaxed, Release};
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 
 /// A global allocator that counts the bytes it holds, so a test can bound the memory
 /// of a structure. It counts no allocations: to assert that code does not allocate,
@@ -35,33 +25,19 @@ use std::{
 /// }
 /// ```
 pub struct Bytes {
-    held: AtomicUsize,
-    /// The most bytes held since the last [`Bytes::reset_peak`]. Only a holder of
-    /// `locked` reads or writes it, so it is never under a `held` that a growth set.
-    peak: AtomicUsize,
-    locked: AtomicBool,
+    counts: Counts<AtomicUsize, AtomicBool>,
 }
 
 impl Bytes {
     /// Returns an allocator that holds no bytes.
-    #[cfg(not(loom))]
     #[must_use]
     pub const fn new() -> Self {
         Self {
-            held: AtomicUsize::new(0),
-            peak: AtomicUsize::new(0),
-            locked: AtomicBool::new(false),
-        }
-    }
-
-    /// Returns an allocator that holds no bytes. Loom's atomics have no `const` `new`.
-    #[cfg(loom)]
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            held: AtomicUsize::new(0),
-            peak: AtomicUsize::new(0),
-            locked: AtomicBool::new(false),
+            counts: Counts {
+                held: AtomicUsize::new(0),
+                peak: AtomicUsize::new(0),
+                locked: AtomicBool::new(false),
+            },
         }
     }
 
@@ -71,7 +47,7 @@ impl Bytes {
     /// allocates on its own threads at any time.
     #[must_use]
     pub fn held(&self) -> usize {
-        self.held.load(Relaxed)
+        self.counts.held()
     }
 
     /// The most bytes held at once, on every thread, after the last
@@ -79,43 +55,20 @@ impl Bytes {
     /// read it in a binary with no test harness, like [`Self::held`].
     #[must_use]
     pub fn peak(&self) -> usize {
-        self.under_lock(|| self.peak.load(Relaxed))
+        self.counts.peak()
     }
 
     /// Starts a new window of [`Self::peak`] at the bytes held now.
     pub fn reset_peak(&self) {
-        self.under_lock(|| self.peak.store(self.held(), Relaxed));
+        self.counts.reset_peak();
     }
 
     /// Counts `size` bytes for `ptr` unless it is null, and returns it.
     fn counted(&self, ptr: *mut u8, size: usize) -> *mut u8 {
         if !ptr.is_null() {
-            self.grow(size);
+            self.counts.grow(size);
         }
         ptr
-    }
-
-    fn grow(&self, size: usize) {
-        self.under_lock(|| {
-            let held = self.held.fetch_add(size, Relaxed) + size;
-            self.peak.fetch_max(held, Relaxed);
-        });
-    }
-
-    /// Runs `f` while no other thread grows `held` or uses `peak`. A spin lock, as a
-    /// `Mutex` can allocate on some targets. `f` must not allocate: the lock is not
-    /// reentrant, so an allocation in `f` spins forever.
-    fn under_lock<T>(&self, f: impl FnOnce() -> T) -> T {
-        while self
-            .locked
-            .compare_exchange_weak(false, true, Acquire, Relaxed)
-            .is_err()
-        {
-            hint::spin_loop();
-        }
-        let value = f();
-        self.locked.store(false, Release);
-        value
     }
 }
 
@@ -127,12 +80,140 @@ impl Default for Bytes {
 
 impl fmt::Debug for Bytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.counts.fmt(f)
+    }
+}
+
+/// The counts of a [`Bytes`], generic over its atomics so that a loom model runs this
+/// code on loom's.
+struct Counts<W, F> {
+    held: W,
+    /// The most bytes held since the last reset. Only a holder of `locked` reads or
+    /// writes it, so it is never under a `held` that a growth set.
+    peak: W,
+    locked: F,
+}
+
+impl<W: Word, F: Flag> Counts<W, F> {
+    fn held(&self) -> usize {
+        self.held.load(Relaxed)
+    }
+
+    fn peak(&self) -> usize {
+        self.under_lock(|| self.peak.load(Relaxed))
+    }
+
+    fn reset_peak(&self) {
+        self.under_lock(|| self.peak.store(self.held(), Relaxed));
+    }
+
+    fn grow(&self, size: usize) {
+        self.under_lock(|| {
+            let held = self.held.fetch_add(size, Relaxed) + size;
+            self.peak.fetch_max(held, Relaxed);
+        });
+    }
+
+    fn shrink(&self, size: usize) {
+        self.held.fetch_sub(size, Relaxed);
+    }
+
+    /// Runs `f` while no other thread grows `held` or uses `peak`. A spin lock, as a
+    /// `Mutex` can allocate on some targets. `f` must not allocate: the lock is not
+    /// reentrant, so an allocation in `f` spins forever.
+    fn under_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        while self
+            .locked
+            .compare_exchange_weak(false, true, Acquire, Relaxed)
+            .is_err()
+        {
+            F::spin();
+        }
+        let value = f();
+        self.locked.store(false, Release);
+        value
+    }
+}
+
+impl<W: Word, F: Flag> fmt::Debug for Counts<W, F> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bytes")
             .field("held", &self.held())
             .field("peak", &self.peak())
             .finish()
     }
 }
+
+/// The `AtomicUsize` operations of [`Counts`].
+trait Word {
+    fn load(&self, order: Ordering) -> usize;
+    fn store(&self, value: usize, order: Ordering);
+    fn fetch_add(&self, value: usize, order: Ordering) -> usize;
+    fn fetch_sub(&self, value: usize, order: Ordering) -> usize;
+    fn fetch_max(&self, value: usize, order: Ordering) -> usize;
+}
+
+/// The `AtomicBool` operations of [`Counts`], and the hint of its spin loop.
+trait Flag {
+    fn compare_exchange_weak(
+        &self,
+        current: bool,
+        new: bool,
+        success: Ordering,
+        failure: Ordering,
+    ) -> Result<bool, bool>;
+    fn store(&self, value: bool, order: Ordering);
+    fn spin();
+}
+
+/// Implements [`Word`] and [`Flag`] for a pair of atomic types with the std names.
+macro_rules! atomics {
+    ($word:ty, $flag:ty, $spin:path) => {
+        impl Word for $word {
+            fn load(&self, order: Ordering) -> usize {
+                <$word>::load(self, order)
+            }
+            fn store(&self, value: usize, order: Ordering) {
+                <$word>::store(self, value, order);
+            }
+            fn fetch_add(&self, value: usize, order: Ordering) -> usize {
+                <$word>::fetch_add(self, value, order)
+            }
+            fn fetch_sub(&self, value: usize, order: Ordering) -> usize {
+                <$word>::fetch_sub(self, value, order)
+            }
+            fn fetch_max(&self, value: usize, order: Ordering) -> usize {
+                <$word>::fetch_max(self, value, order)
+            }
+        }
+
+        impl Flag for $flag {
+            fn compare_exchange_weak(
+                &self,
+                current: bool,
+                new: bool,
+                success: Ordering,
+                failure: Ordering,
+            ) -> Result<bool, bool> {
+                <$flag>::compare_exchange_weak(self, current, new, success, failure)
+            }
+            fn store(&self, value: bool, order: Ordering) {
+                <$flag>::store(self, value, order);
+            }
+            fn spin() {
+                $spin();
+            }
+        }
+    };
+}
+
+atomics!(AtomicUsize, AtomicBool, std::hint::spin_loop);
+#[cfg(all(test, loom))]
+atomics!(
+    loom::sync::atomic::AtomicUsize,
+    loom::sync::atomic::AtomicBool,
+    loom::hint::spin_loop
+);
 
 // SAFETY: each call passes its arguments to `System` under the same contract, and
 // `held` changes no memory that `System` gives out.
@@ -154,17 +235,15 @@ unsafe impl GlobalAlloc for Bytes {
         // One change, so no thread reads a count that no state of the blocks had.
         if !new.is_null() {
             match new_size.checked_sub(layout.size()) {
-                Some(grown) => self.grow(grown),
-                None => {
-                    self.held.fetch_sub(layout.size() - new_size, Relaxed);
-                }
+                Some(grown) => self.counts.grow(grown),
+                None => self.counts.shrink(layout.size() - new_size),
             }
         }
         new
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        self.held.fetch_sub(layout.size(), Relaxed);
+        self.counts.shrink(layout.size());
         // SAFETY: the caller keeps the contract of `GlobalAlloc::dealloc`, and every
         // pointer this allocator returns comes from `System`.
         unsafe { System.dealloc(ptr, layout) }
@@ -172,7 +251,6 @@ unsafe impl GlobalAlloc for Bytes {
 }
 
 #[cfg(test)]
-#[cfg(not(loom))]
 mod tests {
     use std::{slice, thread};
 
@@ -377,15 +455,23 @@ mod tests {
 #[cfg(loom)]
 mod model {
     use loom::sync::Arc;
+    use loom::sync::atomic::{AtomicBool, AtomicUsize};
     use loom::thread;
 
     use super::*;
 
-    const LAYOUT: Layout = Layout::new::<[u64; 8]>();
+    /// The counts of a new [`Bytes`], on loom's atomics.
+    fn counts() -> Counts<AtomicUsize, AtomicBool> {
+        Counts {
+            held: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            locked: AtomicBool::new(false),
+        }
+    }
 
-    /// The two numbers of the `Debug` output of a [`Bytes`]: held, then peak.
-    fn shown(bytes: &Bytes) -> (usize, usize) {
-        let shown = format!("{bytes:?}");
+    /// The two numbers of the `Debug` output of `counts`: held, then peak.
+    fn shown(counts: &Counts<AtomicUsize, AtomicBool>) -> (usize, usize) {
+        let shown = format!("{counts:?}");
         let mut numbers = shown
             .split(|c: char| !c.is_ascii_digit())
             .filter(|number| !number.is_empty())
@@ -399,19 +485,16 @@ mod model {
     #[test]
     fn peaks_at_or_over_each_count_held_while_another_thread_allocates() {
         loom::model(|| {
-            let bytes = Arc::new(Bytes::new());
-            let other = Arc::clone(&bytes);
+            let counts = Arc::new(counts());
+            let other = Arc::clone(&counts);
             let thread = thread::spawn(move || {
-                // SAFETY: the layout is not empty.
-                let ptr = unsafe { other.alloc(LAYOUT) };
-                assert!(!ptr.is_null(), "the system has no memory for 64 bytes");
-                // SAFETY: `other` returned `ptr` for `LAYOUT`.
-                unsafe { other.dealloc(ptr, LAYOUT) };
+                other.grow(64);
+                other.shrink(64);
             });
-            bytes.reset_peak();
-            let held = bytes.held();
-            let (shown_held, shown_peak) = shown(&bytes);
-            let peak = bytes.peak();
+            counts.reset_peak();
+            let held = counts.held();
+            let (shown_held, shown_peak) = shown(&counts);
+            let peak = counts.peak();
             thread.join().expect("the allocating thread does not panic");
             assert!(
                 peak >= held,
