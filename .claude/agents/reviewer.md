@@ -109,20 +109,23 @@ Check:
   `.cargo/mutants.toml` entry gives its reason, or, for a hand mutant that `cargo
   mutants` never makes, its test doc gives it, and the report links that doc
   (`testing.md`). When the PR exists to remove work, which test fails if it is reverted?
-  For a bug fix, revert the fix, run its regression test, and name the call chain
-  through which it fails. A test that passes, or whose call chain does not reach the
-  cause that the PR names, is a finding. For a fix of a test that fails only sometimes,
-  also name the line of the regression test that makes the cause happen: a test that
-  needs timing, load, or the state of the runner to fail is a finding. When the
-  exception in `testing.md` holds (the crate's architect ruled, in a comment that the PR
-  links, that the code is correct in each order of the race, and only a hook that only
-  tests use could force the order), check instead that the fixed test passes in each
-  order and still fails when its defect happens in the order that reaches it, and that
-  the PR links the failing runs. Do both again in each round whose range changes the fix
-  or that test. Does each new `.cargo/mutants.toml` entry meet the rule in `testing.md`?
-  Does an entry skip code that the PR adds or changes, when the entry is wider than one
-  function or its reason ends with the PR (a stub that it fills)? The PR narrows or
-  removes that entry.
+  For work that no test can count through the product code (`testing.md`, "Test what the
+  change is for"), which committed bench line runs it, and does each pair of alternate
+  runs on one named machine favor the change? Such a bench line answers "Name a change
+  to the code that no test would catch" for that work. For a bug fix, revert the fix,
+  run its regression test, and name the call chain through which it fails. A test that
+  passes, or whose call chain does not reach the cause that the PR names, is a finding.
+  For a fix of a test that fails only sometimes, also name the line of the regression
+  test that makes the cause happen: a test that needs timing, load, or the state of the
+  runner to fail is a finding. When the exception in `testing.md` holds (the crate's
+  architect ruled, in a comment that the PR links, that the code is correct in each
+  order of the race, and only a hook that only tests use could force the order), check
+  instead that the fixed test passes in each order and still fails when its defect
+  happens in the order that reaches it, and that the PR links the failing runs. Do both
+  again in each round whose range changes the fix or that test. Does each new
+  `.cargo/mutants.toml` entry meet the rule in `testing.md`? Does an entry skip code
+  that the PR adds or changes, when the entry is wider than one function or its reason
+  ends with the PR (a stub that it fills)? The PR narrows or removes that entry.
 - Copies: when the PR corrects what a doc, a comment, or a decision states, or renames
   or removes a name that a text uses (a code, an item, a key), search the workspace
   (`git grep`) and the open issues (`gh issue list --search`) for each other copy of the

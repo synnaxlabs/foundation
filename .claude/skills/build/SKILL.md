@@ -124,7 +124,7 @@ take the next issue meanwhile.
   parts it does not touch.
 - In `acceptance`, and in a test of an acceptance scenario in `crates/node/tests/it/`
   (`docs/claude/testing.md`, "No `#[ignore]`"), a scenario that cannot run yet is
-  `#[ignore = "waits on #<n>"]`, and a `Lab` method that cannot is
+  `#[ignore = "waits on #<n>"]`, and a method of its test bench that cannot is
   `todo!("waits on #<n>")`. The list names each open issue that states a step it needs,
   and no other. Never delete or weaken a scenario to make it pass.
 - A new third-party dependency needs the person's approval and an entry in

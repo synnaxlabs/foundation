@@ -118,7 +118,10 @@ again once to prove that the failure replays (r16 59).
   regression test.
 - **Test what the change is for.** When a change exists to remove work (a clock read, a
   copy, an allocation, a round trip), a test counts that work and fails when the change
-  is reverted.
+  is reverted. Work that no test can count through the product code, such as a lock or
+  an atomic operation, is tested by a committed bench line that runs the path. The PR
+  gives the numbers of both forms from alternate runs on one named machine, and each
+  pair favors the change. For such work, add no counter for tests to the product code.
 - **Pin the exact error.** Assert the variant and its fields or message
   (`assert!(matches!(err, Error::Backwards { .. }))`, `assert_eq!(err.to_string(),
   "...")`), never only `is_err()`. Clippy denies `assertions_on_result_states`
