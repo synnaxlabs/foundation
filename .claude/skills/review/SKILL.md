@@ -155,6 +155,10 @@ Public surface: <none, or each item and its approval>
 Hot path: <none, or each function>
 ```
 
+The end lines, `Deferred:` to `Hot path:`, are the last paragraph of the comment, in
+the order of the template. Each is a plain line, not a list item, with no blank line
+between them. A value may wrap onto the next line.
+
 Each of the `Reviewers:`, `Range:`, and `Findings:` lines holds its value alone:
 `Findings: 2`, never `Findings: 2, each fixed in <sha>`. The check fails on the second.
 `Reviewers:` names the reviewers that ran (Round 1, Second round). A later round that
