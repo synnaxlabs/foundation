@@ -2988,21 +2988,27 @@ fn implies_no_channel_of_a_connector_whose_name_repeats() {
     assert_eq!(codes(&reversed), expected);
 }
 
+/// Only the connector writes its status channels, in any ASCII case.
 #[test]
-fn gives_writer_nodes_for_a_connector_that_writes_a_status_channel_on_another_node() {
-    let text = format!(
-        "{COUNTED}connector \"d\" {{\n  kind = \"writer\"\n  node = \"m\"\n  \
-         writes = [\"c.status.state\"]\n}}\n"
+fn refuses_a_connector_that_writes_a_status_channel_of_another() {
+    let writer = "connector \"d\" {\n  kind = \"writer\"\n  node = \"n\"\n  \
+                  writes = [\"C.Status.State\"]\n}\n";
+    let documents = documents(&[COUNTED, writer]);
+    let found = config::check(&documents, &kinds()).expect_err("problems");
+    let span = |document: &Document| document.blocks[0].labels[0].span;
+    let mut expected = Diagnostic::new(
+        Code::new("config.implied-channel"),
+        span(&documents[1]),
+        "the connector `c` implies the channel `c.status.state`, so the connector `d` \
+         cannot write it"
+            .into(),
+        "Write another channel from the connector `d`".into(),
     );
-    let found = Spec::create_empty().plan(&[&text], &["m", "n"]);
-    let expected = problem(
-        "config.writer-nodes",
-        (0, value(&text, "node", "\"m\"")),
-        "connectors on the nodes `n` and `m` write the index `c.status.time`, so it \
-         has no one home",
-        "Run each connector that writes `c.status.time` on one node",
-    );
-    assert_eq!(problems(found), [expected]);
+    expected.notes.push(Note {
+        span: span(&documents[0]).expect("a span"),
+        text: "the connector".into(),
+    });
+    assert_eq!(found, [expected]);
 }
 
 #[test]
