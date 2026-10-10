@@ -287,8 +287,8 @@ impl State {
     }
 
     /// When a timer of `node` with `deadline` fires: at the deadline, or early at the
-    /// node's [`node::Config::arm_max`]. A deadline past the end of true time gets no
-    /// early wake, so a run that waits only for it stays stuck.
+    /// node's [`node::Config::arm_max`]. A deadline past the end of true time at the
+    /// poll gets no early wake, so a run that waits only for it stays stuck.
     pub(crate) fn due(&self, node: usize, deadline: Monotonic) -> Due {
         let now = self.monotonic(node);
         if deadline <= now {
