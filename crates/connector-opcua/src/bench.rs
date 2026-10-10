@@ -120,6 +120,7 @@ pub struct Manager {
     /// C holds its address while a read waits.
     answers: Box<Answers>,
     /// Only `close` drops it, after it deletes the server and the clients on its loop.
+    /// After a panic of the close, nothing runs its loop again.
     connections: ManuallyDrop<connection::Manager>,
 }
 
@@ -141,8 +142,9 @@ impl Manager {
     /// If `idle` is 65535 or more, as open62541 counts sessions in 16 bits, if a
     /// connect fails or does not end in 60 s of `clock`, if open62541 refuses the
     /// server, a client, or a step of the close, if a channel of a client is not
-    /// closed after the close, or if the port is taken. A panic of the close frees
-    /// nothing after it, and replaces a panic of the connect or `body`.
+    /// closed after the close, or if the port is taken. A panic of the close leaks the
+    /// manager and each server and client that it has not deleted, and replaces a panic
+    /// of the connect or `body`.
     pub async fn scope<T>(
         clock: Clock,
         net: Net,
@@ -342,7 +344,7 @@ impl Manager {
     }
 }
 
-/// The state of a client.
+/// The state of the channel and the connect of a client of a [`Manager`].
 struct State {
     channel: ffi::test::Channel,
     /// The status of the connect.
@@ -465,8 +467,8 @@ mod tests {
         .expect("the run ends");
     }
 
-    /// A panic of the close replaces the panic of the body. The close then frees
-    /// nothing, so the child runs with no leak check.
+    /// A panic of the close replaces the panic of the body. The close then leaks the
+    /// manager, the server, and the clients, so the child runs with no leak check.
     #[test]
     fn a_panic_of_the_close_replaces_a_panic_of_the_body() {
         let name = "bench::tests::the_close_panics_after_the_body";
