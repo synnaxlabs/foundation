@@ -258,7 +258,7 @@ async fn serve(
     let mut home = Home::default();
     let Some(Opened {
         mut session,
-        credit,
+        complete,
         mut layout,
     }) = open(state, class, &mut home, receiver).await?
     else {
@@ -268,7 +268,7 @@ async fn serve(
     sender.send(reply(state, wire::hub::Reply::Opened)?).await?;
     // `peer` lives across turns, so a frame never drops a read of the peer. `take`
     // gives up a frame only in the poll that returns it.
-    let mut peer = pin!(peer(receiver, home, credit.as_ref()));
+    let mut peer = pin!(peer(receiver, home, complete.as_ref()));
     loop {
         let event = {
             let mut take = pin!(session.take());
@@ -319,13 +319,13 @@ enum Event<F> {
 async fn peer(
     receiver: &mut Receiver,
     mut home: Home,
-    credit: Option<&Complete>,
+    complete: Option<&Complete>,
 ) -> Result<(), Error> {
     while let Some(message) = receiver.recv().await? {
         let FromReader::Credit(grant) = home.decode(&message)? else {
             unreachable!("invariant: after the keys run, Home gives only credits");
         };
-        credit
+        complete
             .expect("invariant: Home refuses a credit in a latest session")
             .grant(grant.limit_bytes);
     }
@@ -335,8 +335,8 @@ async fn peer(
 /// A session open at the home.
 struct Opened {
     session: Session,
-    /// The credit of a complete session.
-    credit: Option<Complete>,
+    /// The grant and the ack of a complete session.
+    complete: Option<Complete>,
     layout: Layout,
 }
 
@@ -388,21 +388,21 @@ async fn open(
         slots: slots.clone(),
         index,
     };
-    let (session, credit) = match open.mode {
+    let (session, complete) = match open.mode {
         Mode::Complete { limit_bytes } => {
             let charge = ::home::reader::complete::Charge::Places(slots.clone());
-            let (session, credit) =
+            let (session, complete) =
                 Session::complete(state, channels, limit_bytes, charge);
-            (session, Some(credit))
+            (session, Some(complete))
         }
         Mode::Latest => (Session::latest(state, channels), None),
     };
-    if let Some(credit) = &credit {
-        credit.grant(granted);
+    if let Some(complete) = &complete {
+        complete.grant(granted);
     }
     Ok(Some(Opened {
         session,
-        credit,
+        complete,
         layout: Layout::new(slots, index),
     }))
 }

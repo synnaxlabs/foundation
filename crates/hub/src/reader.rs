@@ -327,11 +327,11 @@ impl Local {
         hold: Span,
     ) -> Result<Self, Error> {
         let charge = ::home::reader::complete::Charge::Whole;
-        let (session, credit) = match (mode, named) {
+        let (session, complete) = match (mode, named) {
             (Mode::Complete, None) => {
-                let (session, credit) =
+                let (session, complete) =
                     Session::complete(state, channels, WINDOW, charge);
-                (session, Some(credit))
+                (session, Some(complete))
             }
             (Mode::Complete, Some(named)) => {
                 let key = {
@@ -345,8 +345,8 @@ impl Local {
                     )?;
                     state.take_over(opened)
                 };
-                let (session, credit) = Session::with_credit(state, key, channels);
-                (session, Some(credit))
+                let (session, complete) = Session::with_complete(state, key, channels);
+                (session, Some(complete))
             }
             (Mode::Latest, None) => (Session::latest(state, channels), None),
             (Mode::Latest, Some(named)) => {
@@ -360,15 +360,15 @@ impl Local {
         };
         Ok(Self {
             session,
-            complete: credit.map(|credit| (credit, 0)),
+            complete: complete.map(|complete| (complete, 0)),
         })
     }
 
     /// Raises the grant by the charge of `frame`, which the reader gave back.
     fn give_back(&mut self, frame: &Frame) {
-        if let Some((credit, taken_bytes)) = &mut self.complete {
+        if let Some((complete, taken_bytes)) = &mut self.complete {
             *taken_bytes += frame.charge();
-            credit.grant(*taken_bytes + WINDOW);
+            complete.grant(*taken_bytes + WINDOW);
         }
     }
 }
@@ -513,9 +513,9 @@ impl Reader {
         );
         match &self.source {
             Source::Local(Local {
-                complete: Some((credit, _)),
+                complete: Some((complete, _)),
                 ..
-            }) => credit.ack(position.live),
+            }) => complete.ack(position.live),
             Source::Local(_) | Source::Remote(_) => {}
         }
     }
@@ -623,7 +623,7 @@ impl Session {
                 .borrow_mut()
                 .home
                 .open_complete(channels.index, limit_bytes, charge);
-        Self::with_credit(state, key, channels)
+        Self::with_complete(state, key, channels)
     }
 
     /// Opens a latest session on `channels`.
@@ -632,18 +632,18 @@ impl Session {
         Self::new(state, key, channels)
     }
 
-    fn with_credit(
+    fn with_complete(
         state: &Rc<RefCell<State>>,
         key: ::home::reader::complete::Key,
         channels: Channels,
     ) -> (Self, Complete) {
         let session = Self::new(state, key.into(), channels);
-        let credit = Complete {
+        let complete = Complete {
             state: Rc::clone(state),
             key,
             ending: session.ending.clone(),
         };
-        (session, credit)
+        (session, complete)
     }
 
     fn new(
