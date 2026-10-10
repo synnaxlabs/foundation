@@ -7,7 +7,7 @@ use document::Span;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use spec::definition::{Definition, Kind};
+use spec::definition::Definition;
 use types::name::Name;
 
 use crate::error::{Error, Place};
@@ -189,13 +189,11 @@ impl Change {
         paths: &[PathBuf],
     ) -> (Order, Self) {
         let (action, kind, span, definition) = if let Some(entry) = &change.new {
-            let (kind, definition) = match &entry.definition {
-                config::Definition::Spec(definition) => {
-                    (definition.kind(), Some(definition))
-                }
-                config::Definition::Channel(_) => (Kind::Channel, None),
-                _ => unreachable!("invariant: `ops` knows each kind of definition"),
+            let definition = match &entry.definition {
+                config::Definition::Spec(definition) => Some(definition),
+                _ => None,
             };
+            let kind = entry.definition.kind();
             (Action::of(change), kind, entry.label_span, definition)
         } else {
             let stored = applied

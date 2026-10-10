@@ -52,6 +52,17 @@ pub enum Definition {
     Channel(spec::channel::Kind<Name>),
 }
 
+impl Definition {
+    /// The kind of the definition.
+    #[must_use]
+    pub const fn kind(&self) -> Kind {
+        match self {
+            Self::Spec(definition) => definition.kind(),
+            Self::Channel(_) => Kind::Channel,
+        }
+    }
+}
+
 /// A checked definition and the label that names it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -482,6 +493,17 @@ mod tests {
 
     fn key(text: &str) -> Name {
         text.parse().unwrap()
+    }
+
+    #[test]
+    fn gives_the_kind_of_each_definition() {
+        let settings = entry(&["a"], Some(gib(1)), None, None).definition;
+        let index = spec::channel::Kind::Index {
+            error: None,
+            control: None,
+        };
+        assert_eq!(settings.kind(), definition::Kind::NodeSettings);
+        assert_eq!(Definition::Channel(index).kind(), definition::Kind::Channel);
     }
 
     #[test]
