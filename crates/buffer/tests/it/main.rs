@@ -3690,6 +3690,30 @@ fn a_waker_drops_after_the_borrow_of_the_state() {
     .expect("the buffer ends");
 }
 
+/// The commit task drops each waker of an `End` at its end after the borrow of the
+/// state ends. The waker holds an `End`, whose drop borrows the state.
+#[test]
+fn a_waker_drops_at_the_end_after_the_borrow_of_the_state() {
+    let (mut sim, node) = create_node(145);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let mut end = pin!(buffer.ended());
+        let waker = waker::holding(buffer.ended());
+        assert!(
+            end.as_mut()
+                .poll(&mut Context::from_waker(&waker))
+                .is_pending()
+        );
+        drop(waker);
+        let other = buffer.ended();
+        drop(buffer);
+        assert_eq!(other.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
 /// Polls `waiter` with a waker that holds an `End` of `buffer`, then with a no-op
 /// waker, then with one more such waker, and drops `waiter`.
 fn drop_wakers<F: Future>(buffer: &Buffer, waiter: F) {
