@@ -43,17 +43,18 @@ it. Report a gap in a rule only when the rule on `main` today still lets it thro
 
 Check, with file and line at the merge commit:
 
-1. **Tests.** Each fails when the change is reverted. Work that no test can count has
-   the bench line of `testing.md` ("Test what the change is for") in its place.
-   Reason from the diff first. Only
-   when you cannot settle it, revert the change that is not a test and run one
-   `cargo test -p <crate> <filter>`. Build only with `-p <crate>`, with no lock. Never
-   run `--workspace`, Miri, loom, or shuttle. Run `cargo mutants` or a bench only in
-   the background, under `lockf -k ~/.cache/foundation-heavy.lock`, because it waits
+1. **Tests.** Each fails when the change is reverted. Work that no test can count
+   through the product code has in its place a committed bench line, and the PR gives
+   the numbers of both forms from alternate runs on one named machine, each pair in
+   favor of the change (`testing.md`, "Test what the change is for"). Reason from the
+   diff first. Only when you cannot settle it, revert the change that is not a test and
+   run one `cargo test -p <crate> <filter>`. Build only with `-p <crate>`, with no lock.
+   Never run `--workspace`, Miri, loom, or shuttle. Run `cargo mutants` or a bench only
+   in the background, under `lockf -k ~/.cache/foundation-heavy.lock`, because it waits
    for the lock (`docs/coordination.md`, "Heavy runs on the laptop"). A bench starts
-   only when `uptime` shows a load under 8, and the verdict names the load. Tests
-   check behavior through public calls, not a private field or the `Debug` string of the
-   type under test (the test of a hand-written `Debug` impl itself excepted), unless a
+   only when `uptime` shows a load under 8, and the verdict names the load. Tests check
+   behavior through public calls, not a private field or the `Debug` string of the type
+   under test (the test of a hand-written `Debug` impl itself excepted), unless a
    written reason holds and the assertion is not the only kill of a mutant whose reason
    no record gives: a `.cargo/mutants.toml` entry, or, for a hand mutant that
    `cargo mutants` never makes, the doc of that test, which a round comment links
