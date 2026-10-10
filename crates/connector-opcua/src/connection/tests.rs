@@ -4,6 +4,7 @@ use std::ffi::{CStr, CString, c_char, c_void};
 use std::future::poll_fn;
 use std::io::IoSlice;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::panic::{self, AssertUnwindSafe};
 use std::pin::{Pin, pin};
 use std::ptr;
 use std::rc::Rc;
@@ -2116,7 +2117,7 @@ fn the_delete_of_a_server_that_is_not_stopped_panics() {
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, local(&node));
-            // SAFETY: the loop outlives the server, which the panic leaks.
+            // SAFETY: the loop outlives the server, which the test deletes.
             let server = unsafe {
                 ffi::test::shim_server_new(
                     side.events().raw(),
@@ -2129,9 +2130,25 @@ fn the_delete_of_a_server_that_is_not_stopped_panics() {
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
             assert_eq!(status, Status::GOOD);
-            // SAFETY: the server lives on the loop, and nothing uses it after. The
-            // missing shutdown breaks the contract, to reach the panic.
+            // SAFETY: the server lives on the loop. The missing shutdown breaks the
+            // contract, to reach the panic.
+            let delete = unsafe { side.manager.delete_server(server) };
+            let mut delete = pin!(delete);
+            let panic = poll_fn(|cx| {
+                match panic::catch_unwind(AssertUnwindSafe(|| delete.as_mut().poll(cx)))
+                {
+                    Ok(poll) => poll.map(|()| None),
+                    Err(panic) => Poll::Ready(Some(panic)),
+                }
+            })
+            .await
+            .expect("the delete panics");
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+            assert_eq!(status, Status::GOOD);
+            // SAFETY: the server lives on the loop, and nothing uses it after.
             unsafe { side.manager.delete_server(server) }.await;
+            panic::resume_unwind(panic);
         })
         .expect("the run ends");
 }
