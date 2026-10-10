@@ -23,10 +23,9 @@
   edge that `check` cannot resolve stays `config.unknown-channel` (CHANNEL BLOCK). An
   edge to a channel of the wrong kind is `config.wrong-channel`. `place` runs for each
   index, with the node of its first writer: a connector whose `writes` holds the index
-  or a channel on it, or that implies one (STATUS PLACEMENT). Its `Tie`, or the
-  `Homeless` of its `home`, is `config.unplaced` at the label of the index, with each
-  placement by its label. An index that a connector implies takes the connector's
-  place instead (STATUS PLACEMENT).
+  or a channel on it. Its `Tie`, or the `Homeless` of its `home`, is `config.unplaced`
+  at the label of the index, with each placement by its label. An index that a
+  connector implies takes the connector's place instead (STATUS PLACEMENT).
   `place` gives `Result<Placed, Tie>`, and `Placed::home` is `Result<&Name,
   Homeless>`, so `config` takes the winner from `Placed::placement` also when there is
   no home. `config` and `spec::placement` each keep a private `label`: the one in
@@ -35,6 +34,8 @@
   https://github.com/synnaxlabs/foundation/issues/1903#issuecomment-6069112623.
   `config.unknown-node` is at each node that a connector or a placement names and that
   `members` does not hold, and the fix names a member that is equal to it without case.
+  Each rule that counts the writers of an index also counts a connector that implies
+  the index (STATUS PLACEMENT).
   `config.writer-nodes` is at the `node` of the first connector, in name order, on a
   second node that writes one index (`laptop.architect-2`, 2026-10-09T00:48:39Z,
   https://github.com/synnaxlabs/foundation/issues/2013#issuecomment-6071969872). The

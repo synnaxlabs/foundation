@@ -12,8 +12,7 @@
   the connector writes its status: `config.implied-channel` refuses each connector whose
   kind writes a status channel (#2295), so the index can have no other home, and a rule
   that lets a placement give it one only makes an error that no file can fix. The
-  connector writes each channel that it implies, so each rule that counts the writers
-  of an index (`config.writer-nodes`, `config.split-placement`) counts it. Lost: an
+  connector is a writer of each index that it implies (PLAN SURFACE). Lost: an
   ordinary index, which makes each file that places a connector also select
   `<c>.status.time`, and a pattern of `spec::placement` that selects the status names
   with the connector, a special case for one kind of name in a crate that knows no
