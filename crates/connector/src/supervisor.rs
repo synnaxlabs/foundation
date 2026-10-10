@@ -303,6 +303,8 @@ mod tests {
         Retry,
         /// Returns a device error at once, whose text is `a`, then 600 `é`.
         Long,
+        /// Returns a device error at once, whose text is 1100 `a`.
+        Wide,
         /// Cancels its own token, then returns a device error.
         Abort,
         /// Waits for the cancel, then the span, then returns a device error.
@@ -370,6 +372,7 @@ mod tests {
                 Some(Step::Configs) => Err(Error::Config(vec![bad(), worse()])),
                 Some(Step::Retry) => Err(Error::Retry("busy".into())),
                 Some(Step::Long) => Err(Error::Device(long().into())),
+                Some(Step::Wide) => Err(Error::Device("a".repeat(1_100).into())),
                 Some(Step::Abort) => {
                     ctx.cancel().cancel();
                     Err(Error::Device("stopped its parts".into()))
@@ -720,6 +723,12 @@ mod tests {
         assert_eq!(states, [0, 3, 1, 2], "a cancel in the wait");
         assert!(out.statuses[2].1[3] > 0, "a wait: {:?}", out.statuses);
         assert_eq!(errors(&out.statuses)[3], (Span::ZERO, "no reply"));
+    }
+
+    #[test]
+    fn cuts_a_long_error_text_to_1024_bytes() {
+        let out = supervise("script", vec![Step::Wide], config(), Some(ms(5_000)));
+        assert_eq!(out.statuses[1].2, "a".repeat(1_024));
     }
 
     /// The 512th `é` takes bytes 1023 and 1024, across the bound of 1024 bytes.
