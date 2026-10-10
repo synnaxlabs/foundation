@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn writes_no_backoff_when_the_next_run_passed_before_the_write() {
-        let (statuses, runs) = refuse_the_last_wait(vec![Step::Hold(ms(2_000))]);
+        let (statuses, runs) = refuse_the_last_wait(vec![Step::Hold(ms(2_000))], None);
         let [_, again] = runs[..] else {
             panic!("two runs: {runs:?}");
         };
@@ -743,8 +743,12 @@ mod tests {
 
     /// Runs `steps` and fills the pool from 1.5 s after the start of the last run
     /// for 1 s, so the home refuses the frame of the wait after it. The last step
-    /// holds a task for 2 s. Returns the status and the start of each run.
-    fn refuse_the_last_wait(steps: Vec<Step>) -> (Vec<Written>, Vec<Span>) {
+    /// holds a task for 2 s. When `step` is given, the wall steps forward by it 2.001
+    /// s after the start of the last run. Returns the status and the start of each run.
+    fn refuse_the_last_wait(
+        steps: Vec<Step>,
+        step: Option<Span>,
+    ) -> (Vec<Written>, Vec<Span>) {
         let count = steps.len();
         run_on(move |node, tasks| async move {
             let script = Script {
@@ -767,14 +771,18 @@ mod tests {
             let hog = inputs.hub.writer(hog).await.expect("opens");
             let (token, clock) = (Token::new(), node.clock());
             let (canceller, sleeper) = (token.clone(), clock.clone());
-            let filled = Arc::clone(&runs);
+            let (filled, stepper) = (Arc::clone(&runs), node.clone());
             tasks.spawn(async move {
                 while filled.lock().expect("no panic under the lock").len() < count {
                     sleeper.sleep(ms(10)).await;
                 }
                 sleeper.sleep(ms(1_500)).await;
                 let held = fill(&hog);
-                sleeper.sleep(ms(1_000)).await;
+                sleeper.sleep(ms(501)).await;
+                if let Some(step) = step {
+                    stepper.step_wall(step);
+                }
+                sleeper.sleep(ms(499)).await;
                 drop(held);
                 sleeper.sleep(ms(5_000)).await;
                 canceller.cancel();
@@ -794,7 +802,7 @@ mod tests {
     #[test]
     fn writes_the_backoff_that_is_left_when_the_home_refused_the_wait() {
         let steps = vec![Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
-        let (statuses, runs) = refuse_the_last_wait(steps);
+        let (statuses, runs) = refuse_the_last_wait(steps, None);
         let [_, second, third] = runs[..] else {
             panic!("three runs: {runs:?}");
         };
@@ -816,54 +824,8 @@ mod tests {
 
     #[test]
     fn writes_the_backoff_that_is_left_after_a_wall_step_in_the_wait() {
-        // The wait starts 2 s after the second run; its frame is refused until 2.5 s
-        // and written again at 3 s. The wall steps 10 s forward at 2.001 s.
-        let step_at: i64 = 2_001;
-        let statuses = run_on(move |node, tasks| async move {
-            let steps = vec![Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
-            let count = steps.len();
-            let script = Script {
-                steps: Mutex::new(steps.into()),
-                ..Script::default()
-            };
-            let runs = Arc::clone(&script.runs);
-            let kinds = Table::new().with("script", script);
-            let inputs =
-                create_config(&node, tasks.clone(), kinds, "plant.script").await;
-            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
-            let hog = hub::writer::Config {
-                subject: name("plant.other"),
-                authority: Authority(1),
-                lease: None,
-                channels: ["state", "error"]
-                    .map(|c| name(&format!("plant.script.status.{c}")))
-                    .into(),
-            };
-            let hog = inputs.hub.writer(hog).await.expect("opens");
-            let (token, clock) = (Token::new(), node.clock());
-            let (canceller, sleeper) = (token.clone(), clock.clone());
-            let filled = Arc::clone(&runs);
-            let stepper = node.clone();
-            tasks.spawn(async move {
-                while filled.lock().expect("no panic under the lock").len() < count {
-                    sleeper.sleep(ms(10)).await;
-                }
-                sleeper.sleep(ms(1_500)).await;
-                let held = fill(&hog);
-                sleeper.sleep(ms(step_at - 1_500)).await;
-                stepper.step_wall(Span::from_nanos(10_000_000_000));
-                sleeper.sleep(ms(2_500 - step_at)).await;
-                drop(held);
-                sleeper.sleep(ms(5_000)).await;
-                canceller.cancel();
-            });
-            let supervisor = Supervisor::new(inputs);
-            let name = name("plant.script");
-            let result = supervisor.run("script", name, &config(), &token).await;
-            result.expect("ok after a cancel");
-            clock.sleep(Span::SECOND).await;
-            statuses.borrow().clone()
-        });
+        let steps = vec![Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
+        let (statuses, _) = refuse_the_last_wait(steps, Some(ms(10_000)));
         let (at, samples, _) = &statuses[5];
         assert_eq!(samples[..2], [1, 2], "the second wait: {statuses:?}");
         let (run, again, _) = &statuses[6];
