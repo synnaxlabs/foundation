@@ -24,23 +24,19 @@
   `Number`, and `From<&Error> for Diagnostic` are private, and `Refusal::Text` holds
   `Vec<Diagnostic>`. Each front end gives the neutral model at the boundary, and no
   caller read an `Error` variant. `node` and the `ops` tests use `FrontEnd { read:
-  config_hcl::read }`, with no adapter, and `node` no longer takes `document`, which
-  only the adapter used. When `write` and `update` join `FrontEnd` (FRONT ENDS), they
-  give `Vec<Diagnostic>` by the same rule, and `Refusal` and `Unwritable` go private.
-  The crate's tests keep exact `Error` values through the private type. Lost: a second
-  public `read` that gives diagnostics next to the one that gives `Error` (two reads
-  that differ only in the error type). Supersedes "`read` gives a list of `Error`" and
-  "Nesting past the depth limit is `Error::TooDeep` from `read`" of HCL ERRORS
-  (https://github.com/synnaxlabs/foundation/issues/330#issuecomment-6007697466), and
-  "`node` also takes `document`" of NODE MESH
-  (https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6073787912). Decided
+  config_hcl::read }`, with no adapter. When `write` and `update` join `FrontEnd` (FRONT
+  ENDS), they give `Vec<Diagnostic>` by the same rule, and `Refusal` and `Unwritable` go
+  private. The crate's tests keep exact `Error` values through the private type. Lost: a
+  second public `read` that gives diagnostics next to the one that gives `Error` (two
+  reads that differ only in the error type). Supersedes "`read` gives a list of `Error`"
+  and "Nesting past the depth limit is `Error::TooDeep` from `read`" of HCL ERRORS
+  (https://github.com/synnaxlabs/foundation/issues/330#issuecomment-6007697466). Decided
   by `laptop.architect-2` (2026-10-10T02:51:42Z,
   https://github.com/synnaxlabs/foundation/issues/2079#issuecomment-6093002544);
   `Number` and the `# Errors` text of `read` approved by `laptop.architect-2`
   (2026-10-10T03:09:27Z,
   https://github.com/synnaxlabs/foundation/pull/2222#issuecomment-6093159318); the
-  removed `document` dependency of `node` and the `write` doc approved by
-  `laptop.architect-2` (2026-10-10T04:00:01Z,
+  `write` doc approved by `laptop.architect-2` (2026-10-10T04:00:01Z,
   https://github.com/synnaxlabs/foundation/pull/2222#issuecomment-6093542243); the
   oracle edit approved by the person (2026-10-10T02:58:30Z,
   https://github.com/synnaxlabs/foundation/issues/2079#issuecomment-6093074742).

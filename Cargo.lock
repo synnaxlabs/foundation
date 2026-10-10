@@ -1157,6 +1157,7 @@ dependencies = [
  "counting",
  "crc32c",
  "divan",
+ "document",
  "env",
  "estimate",
  "home",
