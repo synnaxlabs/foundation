@@ -24,14 +24,11 @@ pub fn available() -> Result<Size, Error> {
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::io;
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
     use std::path::{Component, Path, PathBuf};
-
-    use procfs_core::process::MountInfo;
-    use procfs_core::{FromBufRead, ProcError, ProcessCGroups};
 
     /// The files of a cgroup that give its limit and its use, and the key in
     /// `memory.stat` of its inactive file pages.
@@ -53,29 +50,75 @@ mod linux {
         inactive: "inactive_file",
     };
 
+    /// A line of `mountinfo`, with each field as the kernel writes it.
+    struct Mount<'a> {
+        root: &'a [u8],
+        point: &'a [u8],
+        kind: &'a [u8],
+        options: &'a [u8],
+    }
+
+    impl<'a> Mount<'a> {
+        /// The mount of `line`, or `None` when it is no mount.
+        fn parse(line: &'a [u8]) -> Option<Self> {
+            let mut fields = line.split(|&byte| byte == b' ');
+            let root = fields.nth(3)?;
+            let point = fields.next()?;
+            // The mount options, then 0 or more optional fields up to `-`.
+            let mut fields = fields.skip(1).skip_while(|field| *field != b"-").skip(1);
+            let kind = fields.next()?;
+            let options = fields.nth(1)?;
+            Some(Self {
+                root,
+                point,
+                kind,
+                options,
+            })
+        }
+    }
+
+    /// A line of `/proc/self/cgroup`.
+    struct Cgroup<'a> {
+        /// Empty on cgroup v2.
+        controllers: &'a [u8],
+        path: &'a [u8],
+    }
+
+    impl<'a> Cgroup<'a> {
+        /// The cgroup of `line`, or `None` when it is no cgroup.
+        fn parse(line: &'a [u8]) -> Option<Self> {
+            // The path is the rest of the line, and can hold a `:`.
+            let mut fields = line.splitn(3, |&byte| byte == b':');
+            fields.next()?;
+            Some(Self {
+                controllers: fields.next()?,
+                path: fields.next()?,
+            })
+        }
+    }
+
     /// The available bytes of the process, whose file system root is `root`.
     pub(super) fn available(root: &Path) -> io::Result<u64> {
         let file = root.join("proc/meminfo");
         let mut least = mem_available(&file, &read(&file)?)?;
         let file = root.join("proc/self/cgroup");
-        let Some(cgroups) = optional(&file)? else {
+        let Some(cgroups) = optional(&file, bytes)? else {
             // A kernel with no cgroups.
             return Ok(least);
         };
-        let cgroups = cgroups_of(&file, &cgroups)?;
+        let cgroups = lines(&cgroups)
+            .map(|line| {
+                Cgroup::parse(line).ok_or_else(|| malformed(&file, "cgroup", line))
+            })
+            .collect::<io::Result<Vec<_>>>()?;
         let file = root.join("proc/self/mountinfo");
-        for line in read(&file)?.lines() {
-            // Its error names a file of `procfs_core` as a bug, and no field.
-            let mount = MountInfo::from_line(line).map_err(|_bug| {
-                invalid(format!(
-                    "{} has a line that is no mount: {line}",
-                    file.display()
-                ))
-            })?;
+        for line in lines(&bytes(&file)?) {
+            let mount =
+                Mount::parse(line).ok_or_else(|| malformed(&file, "mount", line))?;
             let Some((files, inside)) = hierarchy(&mount, &cgroups) else {
                 continue;
             };
-            let point = unescape(mount.mount_point.as_os_str().as_bytes());
+            let point = unescape(mount.point);
             let top = root.join(point.strip_prefix("/").unwrap_or(&point));
             let mut dir = top.join(inside);
             loop {
@@ -93,26 +136,36 @@ mod linux {
     /// For a mount of a memory cgroup hierarchy, its files and the cgroup of the
     /// process inside the mount. `None` for another mount, or a cgroup outside it.
     fn hierarchy(
-        mount: &MountInfo,
-        cgroups: &ProcessCGroups,
+        mount: &Mount<'_>,
+        cgroups: &[Cgroup<'_>],
     ) -> Option<(Files, PathBuf)> {
-        let (files, controller) = match mount.fs_type.as_str() {
-            "cgroup2" => (V2, None),
-            "cgroup" if mount.super_options.contains_key("memory") => {
-                (V1, Some("memory"))
-            }
+        let (files, controller) = match mount.kind {
+            b"cgroup2" => (V2, None),
+            b"cgroup" if listed(mount.options, b"memory") => (V1, Some(b"memory")),
             _ => return None,
         };
-        let cgroup = cgroups.0.iter().find(|cgroup| match controller {
+        let cgroup = cgroups.iter().find(|cgroup| match controller {
             None => cgroup.controllers.is_empty(),
-            Some(controller) => cgroup.controllers.iter().any(|c| c == controller),
+            Some(controller) => listed(cgroup.controllers, controller),
         })?;
-        let inside = Path::new(&cgroup.pathname)
-            .strip_prefix(unescape(mount.root.as_bytes()))
+        let inside = Path::new(OsStr::from_bytes(cgroup.path))
+            .strip_prefix(unescape(mount.root))
             .ok()?;
         // A cgroup outside the root of the cgroup namespace starts with `..`.
         let outside = inside.components().any(|c| c == Component::ParentDir);
         (!outside).then(|| (files, inside.to_path_buf()))
+    }
+
+    /// Whether the list `list`, split at commas, holds `item`.
+    fn listed(list: &[u8], item: &[u8]) -> bool {
+        list.split(|&byte| byte == b',').any(|entry| entry == item)
+    }
+
+    /// The lines of `bytes`, each with no `\n`.
+    fn lines(bytes: &[u8]) -> impl Iterator<Item = &[u8]> {
+        bytes
+            .split_inclusive(|&byte| byte == b'\n')
+            .map(|line| line.strip_suffix(b"\n").unwrap_or(line))
     }
 
     /// A path field of `mountinfo`, where the kernel writes each space, tab, newline,
@@ -140,7 +193,7 @@ mod linux {
 
     /// The room left in the cgroup `dir`, or `None` when it has no limit.
     fn room(dir: &Path, files: &Files) -> io::Result<Option<u64>> {
-        let Some(limit) = optional(&dir.join(files.limit))? else {
+        let Some(limit) = optional(&dir.join(files.limit), read)? else {
             // The root cgroup, or one whose parent gives it no memory controller.
             return Ok(None);
         };
@@ -152,7 +205,7 @@ mod linux {
         let usage = dir.join(files.usage);
         let usage = number(&usage, read(&usage)?.trim())?;
         let stat = dir.join("memory.stat");
-        let Some(text) = optional(&stat)? else {
+        let Some(text) = optional(&stat, read)? else {
             // gVisor writes no `memory.stat`, so the working set is the usage.
             return Ok(Some(limit.saturating_sub(usage)));
         };
@@ -168,9 +221,7 @@ mod linux {
         Ok(Some(limit.saturating_sub(usage.saturating_sub(inactive))))
     }
 
-    /// The bytes of `MemAvailable` in `text`, the text of `file`. Not
-    /// `procfs_core::Meminfo`, which fails when a field that this does not use is not
-    /// there, as under gVisor.
+    /// The bytes of `MemAvailable` in `text`, the text of `file`.
     fn mem_available(file: &Path, text: &str) -> io::Result<u64> {
         let line = text
             .lines()
@@ -186,21 +237,18 @@ mod linux {
         Ok(number(file, kib)?.saturating_mul(1024))
     }
 
-    /// The cgroups that `text`, the text of `file`, lists.
-    fn cgroups_of(file: &Path, text: &str) -> io::Result<ProcessCGroups> {
-        ProcessCGroups::from_buf_read(text.as_bytes()).map_err(|error| {
-            let error = match error {
-                // Its text calls a line of `procfs_core` a bug.
-                ProcError::InternalError(error) => error.msg,
-                error => error.to_string(),
-            };
-            invalid(format!("{}: {error}", file.display()))
-        })
-    }
-
     /// An error for a file of the OS that does not hold what it must.
     fn invalid(what: String) -> io::Error {
         io::Error::new(io::ErrorKind::InvalidData, what)
+    }
+
+    /// An error for a line of `file` that is no `what`.
+    fn malformed(file: &Path, what: &str, line: &[u8]) -> io::Error {
+        let line = String::from_utf8_lossy(line);
+        invalid(format!(
+            "{} has a line that is no {what}: {line}",
+            file.display()
+        ))
     }
 
     fn number(file: &Path, text: &str) -> io::Result<u64> {
@@ -210,14 +258,25 @@ mod linux {
     }
 
     fn read(file: &Path) -> io::Result<String> {
-        fs::read_to_string(file)
-            .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", file.display())))
+        fs::read_to_string(file).map_err(|e| named(file, &e))
     }
 
-    /// The text of `file`, or `None` when it does not exist.
-    fn optional(file: &Path) -> io::Result<Option<String>> {
+    #[expect(clippy::disallowed_methods, reason = "os reads the files of /proc")]
+    fn bytes(file: &Path) -> io::Result<Vec<u8>> {
+        fs::read(file).map_err(|e| named(file, &e))
+    }
+
+    fn named(file: &Path, error: &io::Error) -> io::Error {
+        io::Error::new(error.kind(), format!("{}: {error}", file.display()))
+    }
+
+    /// What `read` gives for `file`, or `None` when it does not exist.
+    fn optional<T>(
+        file: &Path,
+        read: fn(&Path) -> io::Result<T>,
+    ) -> io::Result<Option<T>> {
         match read(file) {
-            Ok(text) => Ok(Some(text)),
+            Ok(content) => Ok(Some(content)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
@@ -468,6 +527,136 @@ mod linux {
                 .write("cg root/a/memory.current", "0\n")
                 .write("cg root/a/memory.stat", "inactive_file 0\n");
             assert_eq!(root.available().unwrap(), MIB);
+        }
+
+        /// The kernel writes each byte of a path raw but a space, tab, newline, and
+        /// backslash, so a path need not be UTF-8.
+        #[test]
+        fn a_mount_point_that_is_not_utf8_of_another_mount_counts_for_nothing() {
+            let root = Root::new("v2-raw-other");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "0::/a\n")
+                .write(
+                    "proc/self/mountinfo",
+                    b"38 31 8:17 / /media/caf\xe9 rw - vfat /dev/sdb1 rw\n\
+                      37 31 0:31 / /cg rw - cgroup2 cgroup2 rw\n",
+                )
+                .write("cg/a/memory.max", format!("{MIB}\n"))
+                .write("cg/a/memory.current", "0\n")
+                .write("cg/a/memory.stat", "inactive_file 0\n");
+            assert_eq!(root.available().unwrap(), MIB);
+        }
+
+        #[test]
+        fn a_cgroup_mount_point_that_is_not_utf8_counts() {
+            let root = Root::new("v2-raw-mount");
+            let dir = OsStr::from_bytes(b"cg\xe9/a");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "0::/a\n")
+                .write(
+                    "proc/self/mountinfo",
+                    b"37 31 0:31 / /cg\xe9 rw - cgroup2 cgroup2 rw\n",
+                )
+                .write(Path::new(dir).join("memory.max"), format!("{MIB}\n"))
+                .write(Path::new(dir).join("memory.current"), "0\n")
+                .write(Path::new(dir).join("memory.stat"), "inactive_file 0\n");
+            assert_eq!(root.available().unwrap(), MIB);
+        }
+
+        #[test]
+        fn a_cgroup_path_that_is_not_utf8_counts() {
+            let root = Root::new("v2-raw-cgroup");
+            let dir = OsStr::from_bytes(b"cg/caf\xe9");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", b"0::/caf\xe9\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "37 31 0:31 / /cg rw - cgroup2 cgroup2 rw\n",
+                )
+                .write(Path::new(dir).join("memory.max"), format!("{MIB}\n"))
+                .write(Path::new(dir).join("memory.current"), "0\n")
+                .write(Path::new(dir).join("memory.stat"), "inactive_file 0\n");
+            assert_eq!(root.available().unwrap(), MIB);
+        }
+
+        /// The path of a cgroup is the rest of its line, and can hold a `:`.
+        #[test]
+        fn a_cgroup_path_with_a_colon_counts() {
+            let root = Root::new("v2-colon");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "0::/a:b\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "37 31 0:31 / /cg rw - cgroup2 cgroup2 rw\n",
+                )
+                .write("cg/a:b/memory.max", format!("{MIB}\n"))
+                .write("cg/a:b/memory.current", "0\n")
+                .write("cg/a:b/memory.stat", "inactive_file 0\n");
+            assert_eq!(root.available().unwrap(), MIB);
+        }
+
+        #[test]
+        fn a_mount_with_two_optional_fields_counts() {
+            let root = Root::new("v1-optional");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "4:memory:/x\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "40 31 0:35 / /sys/fs/cgroup/memory rw shared:9 master:2 - cgroup \
+                     cgroup rw,memory\n",
+                )
+                .write(
+                    "sys/fs/cgroup/memory/x/memory.limit_in_bytes",
+                    format!("{MIB}\n"),
+                )
+                .write("sys/fs/cgroup/memory/x/memory.usage_in_bytes", "0\n")
+                .write(
+                    "sys/fs/cgroup/memory/x/memory.stat",
+                    "total_inactive_file 0\n",
+                );
+            assert_eq!(root.available().unwrap(), MIB);
+        }
+
+        /// The message shows a line that is not UTF-8 lossily.
+        #[test]
+        fn a_line_of_the_cgroup_list_with_no_colon_is_an_error() {
+            let root = Root::new("cgroup-short");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", b"0::/a\n0\xe9\n");
+            let error = root.available().unwrap_err();
+            let file = root.0.join("proc/self/cgroup");
+            assert_eq!(
+                (error.kind(), error.to_string()),
+                (
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} has a line that is no cgroup: 0\u{fffd}",
+                        file.display()
+                    )
+                )
+            );
+        }
+
+        #[test]
+        fn a_line_of_mountinfo_with_no_separator_is_an_error() {
+            let root = v2("v2-no-separator");
+            root.write(
+                "proc/self/mountinfo",
+                "37 31 0:31 / /cg rw cgroup2 cgroup2 rw\n",
+            );
+            let error = root.available().unwrap_err();
+            let file = root.0.join("proc/self/mountinfo");
+            assert_eq!(
+                (error.kind(), error.to_string()),
+                (
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{} has a line that is no mount: 37 31 0:31 / /cg rw cgroup2 \
+                         cgroup2 rw",
+                        file.display()
+                    )
+                )
+            );
         }
 
         /// Each backslash and three digits decodes as an octal byte, or stays as it is.

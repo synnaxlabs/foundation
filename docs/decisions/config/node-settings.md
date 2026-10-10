@@ -20,12 +20,17 @@
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545). On
   Linux the available memory counts the memory cgroup: it is the lesser of
   `MemAvailable` and the room left in the memory cgroup of the process and in each
-  cgroup above it (`os::memory::available`). The room is the limit less the working set,
-  which is the usage less the inactive file pages (`inactive_file`, or
-  `total_inactive_file` on cgroup v1, in `memory.stat`), as the kubelet counts it. A
-  cgroup with no `memory.stat`, as under gVisor, counts its whole usage as the working
-  set. Each subtraction saturates, because the files are read one after another. Lost:
-  `active_file` too. Decided by `laptop.architect-2` (2026-10-09T22:37:18Z,
+  cgroup above it (`os::memory::available`). `os` parses `/proc/self/mountinfo` and
+  `/proc/self/cgroup` from their bytes. Lost: `procfs-core`, whose parsers take only
+  `&str`, so a path that is not UTF-8 failed the read. Decided by `laptop.architect-2`
+  (2026-10-10T03:13:38Z,
+  https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6093191608). The room
+  is the limit less the working set, which is the usage less the inactive file pages
+  (`inactive_file`, or `total_inactive_file` on cgroup v1, in `memory.stat`), as the
+  kubelet counts it. A cgroup with no `memory.stat`, as under gVisor, counts its whole
+  usage as the working set. Each subtraction saturates, because the files are read one
+  after another. Lost: `active_file` too. Decided by `laptop.architect-2`
+  (2026-10-09T22:37:18Z,
   https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6090424579, which
   supersedes item 2, the cgroup doc, of
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6088506863;

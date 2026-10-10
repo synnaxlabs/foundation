@@ -23,8 +23,6 @@ libc = { workspace = true }
 noq-udp = { workspace = true, optional = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-# The parsers of `/proc/self/cgroup` and `mountinfo`.
-procfs-core = { workspace = true }
 rustix = { workspace = true, features = ["thread"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
