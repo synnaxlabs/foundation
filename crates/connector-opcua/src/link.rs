@@ -517,11 +517,14 @@ fn the_rust_outside_tests_builds_no_server() {
 }
 
 /// `UA_Client_new` gives a client the stdout logger, whose `UA_Log_Stdout_log`
-/// `cargo xtask open62541` lets call the global clock. `shim_client_new` gives it the logger of its loop, and the
-/// stderr tests of `event` check that.
+/// `cargo xtask open62541` lets call the global clock. Outside tests, the Rust names
+/// neither it nor a `UA_Log_Stdout` function. `shim_client_new` gives a client the
+/// logger of its loop, and the stderr tests of `event` check that.
 #[test]
-fn the_rust_outside_tests_makes_each_client_with_the_shim() {
-    let named = named_outside_tests(|name| name.starts_with("UA_Client_new"));
+fn the_rust_outside_tests_gives_no_client_the_stdout_logger() {
+    let named = named_outside_tests(|name| {
+        name.starts_with("UA_Client_new") || name.starts_with("UA_Log_Stdout")
+    });
     assert!(named.is_empty(), "the Rust outside tests names {named:?}");
 }
 

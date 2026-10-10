@@ -49,7 +49,8 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
     ("plugins/ua_config_default.c", "interruptServer"),
     // The stdout logger, which we replace with our own.
     ("plugins/ua_log_stdout.c", "UA_Log_Stdout_log"),
-    // ECC user tokens, which need encryption, which is off.
+    // ECC user tokens, which need an ECC policy. Encryption is off, so a client has
+    // only the policy `None`.
     (
         "src/util/ua_encryptedsecret.c",
         "encryptUserIdentityTokenEcc",
