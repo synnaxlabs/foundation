@@ -7,6 +7,7 @@ mod memory;
 
 use std::collections::BTreeSet;
 use std::future::poll_fn;
+use std::num::NonZeroU8;
 use std::ops::Range;
 use std::path::{Path as FilePath, PathBuf};
 use std::pin::{Pin, pin};
@@ -5421,7 +5422,9 @@ async fn newest(
     path: Path,
     tag: u8,
 ) -> Result<Vec<(Slot, Stored)>, Error> {
-    let mut newest = buffer.newest(path, tag).await?;
+    let mut newest = buffer
+        .newest(path, NonZeroU8::new(tag).expect("a tag over 0"))
+        .await?;
     newest.sort_by_key(|(slot, _)| *slot);
     Ok(newest)
 }
@@ -5526,9 +5529,9 @@ fn newest_gives_the_error_of_a_failed_ring_read() {
             operation: Operation::ReadAt,
             code: 5,
         };
-        let found = buffer.newest(Path::Live, 1).await;
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
         assert_eq!(found, Err(Error::Files(failed)));
-        let found = buffer.newest(Path::Live, 1).await;
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
         assert_eq!(found, Ok(vec![(a, stored_tagged(0, 1, bytes()))]));
     })
     .expect("the buffer ends");
@@ -5560,7 +5563,7 @@ fn newest_with_no_block_for_the_table_gives_the_pool_error() {
             requested: 4096,
             available: 0,
         };
-        let found = buffer.newest(Path::Live, 1).await;
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
         assert_eq!(found, Err(Error::Pool(exhausted)));
     });
 }
@@ -5589,7 +5592,7 @@ fn newest_after_a_failed_sync_gives_the_error_that_ended_the_buffer() {
             code: 5,
         };
         assert_eq!(buffer.committed().await, Err(failed.clone()));
-        let found = buffer.newest(Path::Live, 1).await;
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
         assert_eq!(found, Err(Error::Files(failed)));
     });
 }
@@ -5621,7 +5624,7 @@ fn newest_across_a_failed_sync_gives_the_error_that_ended_the_buffer() {
             .expect("queues");
         let mut errors = Vec::new();
         while errors.len() < 2 {
-            match buffer.newest(Path::Live, 1).await {
+            match buffer.newest(Path::Live, NonZeroU8::MIN).await {
                 Ok(found) => assert_eq!(found.len(), 20),
                 Err(error) => errors.push(error),
             }
@@ -5664,7 +5667,7 @@ fn newest_with_no_block_for_the_entry_gives_the_pool_error() {
             requested: 5000,
             available: 0,
         };
-        let found = buffer.newest(Path::Live, 1).await;
+        let found = buffer.newest(Path::Live, NonZeroU8::MIN).await;
         assert_eq!(found, Err(Error::Pool(exhausted)));
         drop(held);
         let expected = vec![(a, stored_tagged(0, 1, shard.block(5000)))];

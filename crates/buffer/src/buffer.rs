@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
+use std::num::NonZeroU8;
 use std::path::{self, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
@@ -504,7 +505,7 @@ impl Buffer {
     pub async fn newest(
         &self,
         path: Path,
-        tag: u8,
+        tag: NonZeroU8,
     ) -> Result<Vec<(Slot, Stored)>, Error> {
         let found = self.search(path, tag).await;
         // After the reads: a ring read after a failed sync gives `Poisoned`.
@@ -517,7 +518,11 @@ impl Buffer {
     /// The newest durable entry with `tag` on `path` of each index, as
     /// [`newest`](Self::newest) gives, with the error of the first failed read. It
     /// takes the records when called, so a record made during the call is not read.
-    async fn search(&self, path: Path, tag: u8) -> Result<Vec<(Slot, Stored)>, Error> {
+    async fn search(
+        &self,
+        path: Path,
+        tag: NonZeroU8,
+    ) -> Result<Vec<(Slot, Stored)>, Error> {
         let Shared {
             file, pool, layout, ..
         } = &*self.shared;
@@ -1297,7 +1302,10 @@ mod tests {
                     buffer.committed().await.expect("commits");
                 }
                 let firsts = async || {
-                    let newest = buffer.newest(Path::Live, 1).await.expect("reads");
+                    let newest = buffer
+                        .newest(Path::Live, NonZeroU8::MIN)
+                        .await
+                        .expect("reads");
                     newest
                         .iter()
                         .map(|(slot, stored)| (*slot, stored.first))

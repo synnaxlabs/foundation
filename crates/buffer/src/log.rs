@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::num::NonZeroU8;
 
 use types::channel::{self, Slot};
 use types::frame::Path;
@@ -182,9 +183,6 @@ struct Log {
     /// How many durable entries with no samples are at `durable.seq`.
     empty: u64,
     runs: VecDeque<Run>,
-    /// Each tag of a durable entry, with the offset of the newest record that
-    /// holds a durable entry of it.
-    tags: Vec<(u8, u64)>,
 }
 
 impl Log {
@@ -195,7 +193,6 @@ impl Log {
             durable: Tail::default(),
             empty: 0,
             runs: VecDeque::new(),
-            tags: Vec::new(),
         }
     }
 
@@ -218,10 +215,6 @@ impl Log {
         let start = self.end();
         self.durable.advance(header)?;
         self.empty = start.after(header.first, header.len).given;
-        match self.tags.iter_mut().find(|(tag, _)| *tag == header.tag) {
-            Some((_, newest)) => *newest = offset,
-            None => self.tags.push((header.tag, offset)),
-        }
         if let Some(newest) = self.runs.back() {
             assert!(
                 newest.offset <= offset,
@@ -248,6 +241,9 @@ impl Log {
 #[cfg_attr(test, derive(PartialEq, Eq))]
 pub(crate) struct Logs {
     paths: hash::Map<(Slot, Path), Log>,
+    /// The offset of the newest record that holds a durable entry with each nonzero
+    /// tag, by the log and the tag. Tag 0 marks samples, which no caller looks up.
+    tags: hash::Map<(Slot, Path, NonZeroU8), u64>,
     /// No read finds a record before this offset.
     hidden: u64,
 }
@@ -310,13 +306,24 @@ impl Logs {
     /// The offset of the newest record that holds a durable entry with `tag` on
     /// `path`, for each index whose record is not hidden, with its slot and index,
     /// in no order.
-    pub(crate) fn tagged(&self, path: Path, tag: u8) -> Vec<(u64, Slot, channel::Key)> {
-        let logs = self.paths.iter().filter(|((_, on), _)| *on == path);
-        logs.filter_map(|(&(slot, _), log)| {
-            let &(_, offset) = log.tags.iter().find(|&&(of, _)| of == tag)?;
-            (offset >= self.hidden).then_some((offset, slot, log.index))
-        })
-        .collect()
+    pub(crate) fn tagged(
+        &self,
+        path: Path,
+        tag: NonZeroU8,
+    ) -> Vec<(u64, Slot, channel::Key)> {
+        let tagged = self.tags.iter().filter(|&(&(_, on, of), &offset)| {
+            (on, of) == (path, tag) && offset >= self.hidden
+        });
+        tagged
+            .map(|(&(slot, ..), &offset)| {
+                let log = self.paths.get(&(slot, path));
+                (
+                    offset,
+                    slot,
+                    log.expect("invariant: a tag has its log").index,
+                )
+            })
+            .collect()
     }
 
     /// Hides the records before the offset `tail` from each later
@@ -353,7 +360,7 @@ impl Logs {
     /// Moves the durable tail of the header's path past the entry, as
     /// [`Tail::advance`], and adds the record at `offset` to the path's runs when
     /// it is not the newest. A record that adds a run drops the path's hidden
-    /// runs.
+    /// runs. A nonzero tag makes `offset` the newest record of its tag on the path.
     ///
     /// # Errors
     ///
@@ -369,7 +376,11 @@ impl Logs {
         offset: u64,
     ) -> Result<(), Invalid> {
         // A third capture would move the closure's state from registers to the stack.
-        self.change(slot, header, |log, hidden| log.sync(header, offset, hidden))
+        self.change(slot, header, |log, hidden| log.sync(header, offset, hidden))?;
+        if let Some(tag) = NonZeroU8::new(header.tag) {
+            self.tags.insert((slot, header.path, tag), offset);
+        }
+        Ok(())
     }
 
     /// Applies `change` to the log of the header's path, which starts empty when

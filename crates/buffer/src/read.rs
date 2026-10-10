@@ -4,6 +4,7 @@
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
 use std::mem;
+use std::num::NonZeroU8;
 use std::ops::Range;
 
 use block::{Block, Pool, Unique};
@@ -206,7 +207,7 @@ pub(crate) async fn newest(
     file: &File,
     pool: &Pool,
     place: u64,
-    (path, tag): (Path, u8),
+    (path, tag): (Path, NonZeroU8),
     wanted: &hash::Map<channel::Key, Slot>,
 ) -> Result<Vec<(Slot, Stored)>, Error> {
     let table = table(file, pool, place).await?;
@@ -216,7 +217,7 @@ pub(crate) async fn newest(
         let Some(&slot) = wanted.get(&header.index) else {
             continue;
         };
-        if (header.path, header.tag) != (path, tag) {
+        if (header.path, header.tag) != (path, tag.get()) {
             continue;
         }
         match last.iter_mut().find(|(seen, ..)| *seen == slot) {
