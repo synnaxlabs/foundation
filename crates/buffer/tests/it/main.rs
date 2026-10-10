@@ -1277,6 +1277,32 @@ fn a_reopen_syncs_the_ring_once() {
     });
 }
 
+/// A failed write of a window that the walk read fails the open with the write's
+/// error.
+#[test]
+fn a_failed_write_of_the_walk_fails_the_open() {
+    run_on_memory(7, |shard| async move {
+        let ring = layout(AREA, BODY_MAX);
+        let mut slots = Slots::new();
+        let buffer = shard.open(ring, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        buffer.committed().await.expect("commits");
+        drop(buffer);
+        // The first write of an open is the header's; the second is the walk's.
+        shard.memory().fail_write(2);
+        let reopened = shard.open(ring, &mut Slots::new()).await.map(drop);
+        let failed = Error::Files(FileError::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::WriteAt,
+            code: 5,
+        });
+        assert_eq!(reopened, Err(failed));
+    });
+}
+
 #[test]
 fn a_failed_sync_ends_the_buffer_with_its_error() {
     run_on_memory(7, |shard| async move {
