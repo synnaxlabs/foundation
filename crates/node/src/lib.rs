@@ -184,7 +184,8 @@ impl Node {
     ///
     /// # Panics
     ///
-    /// If a shard's pool needs more address space than this host has, or if the disk
+    /// If the disk budget holds a ring on each shard and a shard's part of the pool
+    /// budget gives a reservation of more than `usize::MAX` bytes, or if the disk
     /// budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
@@ -536,8 +537,8 @@ impl Role {
 ///
 /// # Panics
 ///
-/// If a part of `budget` needs more address space than this host has, and each part
-/// of `disk` holds a ring.
+/// If each part of `disk` holds a ring and a part of `budget` gives a reservation of
+/// more than `usize::MAX` bytes.
 fn parts(
     budget: types::byte::Size,
     disk: types::byte::Size,
