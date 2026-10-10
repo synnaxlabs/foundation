@@ -7,8 +7,7 @@
 //! series and writes them back to the same bytes.
 //!
 //! Input: the type that `fuzz::codec::shape` reads, then a little-endian `u32` sample
-//! count, then a little-endian `u16` length of `out` for a series that is not valid,
-//! then the encoded series.
+//! count, then a little-endian `u16` length of `out`, then the encoded series.
 
 #![no_main]
 #![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
@@ -28,7 +27,7 @@ fuzz_target!(|bytes: &[u8]| {
     let count = usize::try_from(u32::from_le_bytes([*a, *b, *c, *d])).unwrap();
     let held = usize::from(u16::from_le_bytes([*e, *f]));
     let validated = codec::validate(data_type, count, series);
-    let mut out = vec![PAD; *validated.as_ref().unwrap_or(&held)];
+    let mut out = vec![PAD; held];
     let decoded = codec::decode(data_type, count, series, &mut out);
     assert_eq!(
         decoded,
@@ -106,13 +105,11 @@ fn text(count: usize, series: &[u8]) -> Result<usize, Error> {
     };
     let mut raw = Vec::new();
     codec::decode(Type::Bytes, count, valid, &mut raw).expect("the front decodes");
-    let (ends, elements) = raw.split_at(4 * count);
-    let ends = ends
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|end| u32::from_le_bytes(*end));
-    match fuzz::codec::not_utf8(ends, elements) {
+    let form = Variable::of(Type::Bytes).expect("a variable type");
+    let refused = form
+        .samples(count, &raw)
+        .position(|sample| str::from_utf8(sample).is_err());
+    match refused {
         Some(sample) => Err(Error::Utf8 { sample }),
         None => as_bytes,
     }
