@@ -21,28 +21,39 @@
   `Start::fail` writes an `ops::Failure { code, message, fix }` as `cli` writes its own
   errors, and gives exit status 1. So `ops` keeps the one output form, and `main` gives
   the facts. The codes: `node.busy`, `node.data`, `node.unnamed`, `node.renamed`,
-  `node.name`, and `node.failed`. `node.data` is "this user cannot write the data
-  directory": `os::Error::Dir`, and each `env::files::Error::Io` whose code is `EACCES`,
-  `EPERM`, or `EROFS`, in `node::Error::Directory` or in the `buffer::Error::Files` of
+  `node.name`, `node.budget`, `node.disk`, `node.memory` (NODE SETTINGS), and
+  `node.failed`. `node.data` is "this user cannot write the data directory":
+  `os::Error::Dir`, and each `env::files::Error::Io` whose code is `EACCES`, `EPERM`, or
+  `EROFS`, in `node::Error::Directory` or in the `buffer::Error::Files` of
   `node::Error::Buffer`. Its message is "cannot write the data directory {data}:
   {error}", and its fix "Let this user make and write {data} and each file in it, or
-  give another directory with `--data`". Each other `Directory` error but `Busy` is
+  give another directory with `--data`". Each other `Directory` error but `Busy`, and
+  each buffer error that neither `node.data` nor NODE SETTINGS (`Pool`) names, is
   `node.failed`. Lost: `node.data` for the claim of `lock` alone, which leaves a ring
-  that the user cannot write on `node.failed`. `Node::stopper` gives a `Stopper` that
-  stops the node from another thread. A stop after the node ended does nothing. Lost: a
-  line that `node` writes itself, a second owner of the output form; an entry of the
-  table with a flag that each of its four users skips. Decided by `laptop.architect-2`
-  (2026-10-08T02:21:16Z,
+  that the user cannot write on `node.failed`.
+  `Node::stopper` gives a `Stopper` that stops the node from another thread. A stop
+  after the node ended does nothing. Lost: a line that `node` writes itself, a second
+  owner of the output form; an entry of the table with a flag that each of its four
+  users skips. Decided by `laptop.architect-2` (2026-10-08T02:21:16Z,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6050855867;
   2026-10-08T05:00:46Z, `--name` and the line,
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6052649826;
   2026-10-09T18:30:45Z, `running` (now `line`), `fail`, `Failure`, and the `Stopper`
   doc, https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545;
   2026-10-09T19:31:23Z, `start` as a `Command` variant, which amends the first, and the
-  line, https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6087849613).
-  `main` writes the line on a thread of its own, so a standard output that nobody reads
-  blocks neither shard 0 nor the stop. `main` drops the handles of that thread and of
-  the thread that waits for the signal, because each waits only on the process
+  line, https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6087849613;
+  2026-10-09T20:14:29Z, `node.disk`, `node.memory`, and a code of its own for the file
+  `budget`,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6088506863;
+  2026-10-09T21:08:23Z, `node.budget`,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089288397;
+  2026-10-09T21:35:43Z, `Refused` as `node.memory`,
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601;
+  2026-10-09T22:29:12Z, the three codes in this list,
+  https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6090312136). `main`
+  writes the line on a thread of its own, so a standard output that nobody reads blocks
+  neither shard 0 nor the stop. `main` drops the handles of that thread and of the
+  thread that waits for the signal, because each waits only on the process
   (`env::thread::Handle`). Decided by `laptop.architect-2` (2026-10-09T22:02:37Z,
   https://github.com/synnaxlabs/foundation/pull/2188#issuecomment-6089996352;
   2026-10-09T22:10:27Z, the stop handle also after a clean end,
