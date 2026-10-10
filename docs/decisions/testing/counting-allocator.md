@@ -11,13 +11,13 @@
   `Vec`. Rust defines no read of such a byte on any target, so no sound read exists,
   and Miri stops at one. This is a patch. The long-term fix is a freeze read (Rust RFC
   3605); when Rust has one, `freed_holding` uses it and the exception goes. A binary
-  that bounds the memory of a structure holds `counting::Bytes`, one atomic count of
-  the bytes it holds; a binary holds one counting allocator, `Allocator` or `Bytes`.
-  `Allocator` does not keep that count: a benchmark must not pay for a count that only
-  a test reads, or its baseline moves with no product change, as
+  that bounds the memory of a structure holds `counting::Bytes`, an atomic count of the
+  bytes it holds and of the most it held; a binary holds one counting allocator,
+  `Allocator` or `Bytes`. `Allocator` does not keep that count: a benchmark must not pay
+  for a count that only a test reads, or its baseline moves with no product change, as
   `transport/benches/send.rs` did (+4.2% to +11.2% at p50). Lost: `Allocator` keeps
-  `held` (that cost in each counting binary); a `bool` at construction (a branch on
-  each allocation and free, and a `held` that must panic when it is false);
+  `held` (that cost in each counting binary); a `bool` at construction (a branch on each
+  allocation and free, and a `held` that must panic when it is false);
   `Allocator<const HELD: bool>` (no branch, but `Allocator<true>` says nothing at the
   call site, and no caller needs both counts in one binary). Decided by
   `laptop.architect` on 2026-10-07T16:28:07Z
@@ -36,3 +36,20 @@
   (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6043758919, #1536).
   Supersedes the reason of 5d23e00e
   (https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042860057).
+  `Bytes` keeps the bytes it holds and the most it held in a window: `peak` reads the
+  most, and `reset_peak` starts a new window at the bytes held then, so a test can
+  bound the memory that one step takes. A read stays a read, as `held` is. A lock
+  orders each growth, reset, and read of the peak, so `peak` is never under a count
+  held in the window, and an allocation on another thread during the reset counts in
+  the new window. Frees and shrinks do not take the lock. A loom model checks the lock
+  in each order. No benchmark holds `Bytes`, and `Allocator` does not change; a
+  benchmark that holds it later states the cost of the lock in its PR. Lost: one `peak`
+  that also resets (a second read gives a value that the first changed); `take_peak`
+  (it discards a value to start a window); two atomics with a weaker `peak` doc and a
+  loom model (the proposal); one 128-bit atomic (Rust has no stable `AtomicU128` on
+  each target). Decided by `laptop.architect` on 2026-10-10T02:42:17Z
+  (https://github.com/synnaxlabs/foundation/issues/2116#issuecomment-6092914109), and
+  the lock on 2026-10-10T04:06:13Z
+  (https://github.com/synnaxlabs/foundation/pull/2230#issuecomment-6093592767), which
+  supersedes its swap of the peak to 0. Supersedes "one atomic count of the bytes it
+  holds" of https://github.com/synnaxlabs/foundation/pull/1440#issuecomment-6042194242.

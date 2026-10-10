@@ -37,7 +37,7 @@ pub(crate) enum After {
 /// a key.
 ///
 /// A text of more than `u32::MAX` bytes is written too, and `read` refuses it with
-/// [`Error::TooLarge`](crate::Error::TooLarge).
+/// `hcl.too-large`.
 ///
 /// # Errors
 ///
@@ -452,6 +452,7 @@ fn opens_template(c: char, next: Option<&char>) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use document::diagnostic::Diagnostic;
     use document::encoding::TooDeep;
     use document::value::Float;
     use document::{Label, Position, Source, Span};
@@ -993,7 +994,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             read(Source(0), &text),
-            Err(vec![Error::TooDeep { span: bracket }])
+            Err(vec![Diagnostic::from(&Error::TooDeep { span: bracket })])
         );
     }
 }

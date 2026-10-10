@@ -11,9 +11,7 @@ use types::channel::Key;
 
 use super::Node;
 use crate::apply::Applied;
-use crate::common::{
-    NODE, PLANT, Reader, fail_sync, front_ends, hcl, placed_site, solo,
-};
+use crate::common::{NODE, PLANT, Reader, fail_sync, front_ends, placed_site, solo};
 use crate::error::Error;
 use crate::front_end::{File, FrontEnd, FrontEnds};
 use crate::plan::{self, Counts};
@@ -158,7 +156,15 @@ fn debug_names_each_front_end() {
         let node = create_node(mesh);
         let expected = r#"Node { front_ends: FrontEnds(["hcl"]), .. }"#;
         assert_eq!(format!("{node:?}"), expected);
-        assert_eq!(format!("{:?}", FrontEnd { read: hcl }), "FrontEnd { .. }");
+        assert_eq!(
+            format!(
+                "{:?}",
+                FrontEnd {
+                    read: config_hcl::read
+                }
+            ),
+            "FrontEnd { .. }"
+        );
     });
 }
 
@@ -181,9 +187,19 @@ async fn assert_unknown(mesh: Mesh, front_ends: FrontEnds, extensions: &str) {
 #[test]
 fn names_each_extension_of_the_table_in_the_fix() {
     solo(|_, mesh| async move {
-        let two = front_ends().with("toml", FrontEnd { read: hcl });
+        let two = front_ends().with(
+            "toml",
+            FrontEnd {
+                read: config_hcl::read,
+            },
+        );
         assert_unknown(mesh.clone(), two.clone(), "`.hcl` or `.toml`").await;
-        let three = two.with("yaml", FrontEnd { read: hcl });
+        let three = two.with(
+            "yaml",
+            FrontEnd {
+                read: config_hcl::read,
+            },
+        );
         assert_unknown(mesh, three, "`.hcl`, `.toml`, or `.yaml`").await;
     });
 }
@@ -206,8 +222,12 @@ fn reads_with_the_last_front_end_of_an_extension() {
                 )])
             },
         };
-        let front_ends =
-            FrontEnds::new("hcl", refuse).with("hcl", FrontEnd { read: hcl });
+        let front_ends = FrontEnds::new("hcl", refuse).with(
+            "hcl",
+            FrontEnd {
+                read: config_hcl::read,
+            },
+        );
         let node = create_node_reading(mesh.clone(), front_ends);
         let expected = planned(&mesh, site()).await;
         let (_, output) = node.plan(site()).await.expect("a plan");

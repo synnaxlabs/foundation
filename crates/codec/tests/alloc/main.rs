@@ -1,12 +1,14 @@
-//! Encoding, checking, and decoding a series, whole or one vector at a time, make no
-//! heap allocation. This binary has no test harness: the count covers each thread, and
-//! a harness allocates on its own thread at any time.
+//! Encoding, checking, and decoding a series, whole or one vector at a time, and
+//! writing and reading the raw form of a variable series, make no heap allocation.
+//! Decoding into an `out` that is too small makes one. This binary has no test
+//! harness: the count covers each thread, and a harness allocates on its own thread at
+//! any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
 use std::iter;
 
-use codec::{Decoder, Encoder, Error, VECTOR_LEN, max_len};
+use codec::{Decoder, Encoder, Error, VECTOR_LEN, Variable, max_len};
 use types::sample::{Scalar, Type};
 
 #[global_allocator]
@@ -61,6 +63,26 @@ fn main() {
     }
     round_trip_types();
     refuse();
+    variable();
+}
+
+/// Writes and reads back the raw form of a `List` series.
+fn variable() {
+    let form = Variable::of(Type::List {
+        element: Scalar::U16,
+        max: 2,
+    })
+    .expect("a list is variable");
+    let samples: [&[u8]; 3] = [&[1, 0, 2, 0], &[], &[3, 0]];
+    let mut raw = [0; 32];
+    let ((len, read), allocations) = ALLOCATOR.count(|| {
+        let len = form.len(&samples).expect("the samples are small");
+        let written = form.write(&samples, &mut raw);
+        let read = form.samples(samples.len(), &raw[..written]).eq(samples);
+        (len, read)
+    });
+    assert_eq!(allocations, 0, "the raw form allocated");
+    assert_eq!((len, read), (18, true), "the raw form reads back");
 }
 
 /// A series that one codec packs best.
@@ -200,7 +222,7 @@ fn check(
     case: &str,
 ) -> Vec<u8> {
     let mut series = vec![0; max_len(data_type, values.len())];
-    let mut out = vec![0; values.len()];
+    let mut out = Vec::with_capacity(values.len());
     let (written, allocations) =
         ALLOCATOR.count(|| encoder.encode(count, values, &mut series));
     assert_eq!(allocations, 0, "encoding {case} allocated");
@@ -215,6 +237,26 @@ fn check(
     assert_eq!(allocations, 0, "decoding {case} allocated");
     assert_eq!(result, Ok(()), "{case} decodes");
     assert_eq!(out, values, "{case} reads back");
+    let (result, allocations) =
+        ALLOCATOR.count(|| codec::decode(data_type, count, &series, &mut out));
+    assert_eq!(allocations, 0, "decoding {case} again allocated");
+    assert_eq!(
+        (result, &out[..]),
+        (Ok(()), values),
+        "{case} reads back again"
+    );
+    for mut grown in [Vec::new(), vec![0]] {
+        let held = grown.capacity();
+        let (result, allocations) =
+            ALLOCATOR.count(|| codec::decode(data_type, count, &series, &mut grown));
+        let wanted = u64::from(values.len() > held);
+        assert_eq!(allocations, wanted, "decoding {case} into {held} bytes");
+        assert_eq!(
+            (result, grown.capacity(), &grown[..]),
+            (Ok(()), values.len().max(held), values),
+            "{case} grows {held} bytes to its raw length"
+        );
+    }
     series
 }
 
@@ -245,7 +287,7 @@ fn decode_every_width(scalar: Scalar) {
 
 /// Checks and decodes one bad series for each error.
 fn refuse() {
-    let mut out = [0; 2];
+    let mut out = vec![0; 2];
     let cases = [
         (
             &[][..],
@@ -356,7 +398,7 @@ fn refuse_ends() {
         series.truncate(len);
         values.extend(elements);
         let mut encoded = vec![0; max_len(data_type, values.len())];
-        let mut out = [0; 16];
+        let mut out = vec![0; 16];
         let (results, allocations) = ALLOCATOR.count(|| {
             (
                 Encoder::new(data_type).encode(2, &values, &mut encoded),

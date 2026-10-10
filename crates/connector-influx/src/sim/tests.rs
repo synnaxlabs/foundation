@@ -51,7 +51,7 @@ fn map<V: Clone>(pairs: &[(&str, V)]) -> BTreeMap<String, V> {
 
 #[test]
 fn stores_each_type_and_tag() {
-    let store = stored("m,b=2,a=1 f=1.5,i=-2i,u=3u,t=t,s=\"x y\" 10\n");
+    let store = stored("m,b=2,a=1 f=1.5,i=-2i,t=t,s=\"x y\" 10\n");
     assert_eq!(
         read(&store, "m"),
         [(
@@ -60,7 +60,6 @@ fn stores_each_type_and_tag() {
             map(&[
                 ("f", Field::Float(1.5)),
                 ("i", Field::Integer(-2)),
-                ("u", Field::Unsigned(3)),
                 ("t", Field::Boolean(true)),
                 ("s", Field::String("x y".into())),
             ]),
@@ -373,7 +372,7 @@ fn refuses_an_infinite_float() {
             error,
             Error::Infinite {
                 line: line.into(),
-                field: "v".into(),
+                key: "v".into(),
             }
         );
         assert_eq!(
@@ -382,6 +381,27 @@ fn refuses_an_infinite_float() {
         );
         assert_eq!(store.points("m", &[]).count(), 0);
     }
+}
+
+#[test]
+fn refuses_an_unsigned_integer_and_stores_no_field_of_its_line() {
+    let line = "m v=1,u=3u 10";
+    let (store, error) = refused(&format!("{line}\nm v=2 20\n"));
+    assert_eq!(
+        error,
+        Error::Unsigned {
+            line: line.into(),
+            key: "u".into(),
+        }
+    );
+    assert_eq!(
+        error.to_string(),
+        format!(
+            "the line {line:?} gives the field \"u\" an unsigned integer, which \
+             InfluxDB 1 OSS refuses"
+        )
+    );
+    assert_eq!(times(&store, "m", &[]), [20]);
 }
 
 #[test]
@@ -454,14 +474,13 @@ fn names_each_kind() {
     let names: Vec<String> = [
         Field::Float(0.0),
         Field::Integer(0),
-        Field::Unsigned(0),
         Field::Boolean(false),
         Field::String(String::new()),
     ]
     .iter()
     .map(|field| field.kind().to_string())
     .collect();
-    assert_eq!(names, ["float", "integer", "unsigned", "boolean", "string"]);
+    assert_eq!(names, ["float", "integer", "boolean", "string"]);
     assert_eq!(Kind::Tag.to_string(), "tag");
 }
 
@@ -491,7 +510,6 @@ fn value() -> impl Strategy<Value = Value> {
             .prop_filter_map("finite", line::Float::new)
             .prop_map(Value::Float),
         any::<i64>().prop_map(Value::Integer),
-        any::<u64>().prop_map(Value::Unsigned),
         any::<bool>().prop_map(Value::Boolean),
     ]
 }
@@ -500,7 +518,6 @@ fn field(value: Value) -> Field {
     match value {
         Value::Float(float) => Field::Float(float.get()),
         Value::Integer(integer) => Field::Integer(integer),
-        Value::Unsigned(unsigned) => Field::Unsigned(unsigned),
         Value::Boolean(boolean) => Field::Boolean(boolean),
     }
 }
@@ -600,7 +617,6 @@ fn text(field: &Field) -> String {
         Field::Float(value) => format!("{value:?}"),
         Field::Integer(value) => format!("{value}i"),
         Field::String(value) => format!("{value:?}"),
-        Field::Unsigned(value) => format!("{value}u"),
     }
 }
 

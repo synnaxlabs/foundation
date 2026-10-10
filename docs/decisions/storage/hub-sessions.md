@@ -316,14 +316,48 @@
   Supersedes the plan test "after the frames that wait for it" of
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057332703. A named
   complete reader that opens while the home holds its position resumes at the position
-  where its last complete session opened, and ends with `Ended::Behind` when a frame
-  after that position was released (`laptop.architect`, 2026-10-09T21:04:47Z and
-  21:34:41Z: https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192
-  and https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089638162), or
+  that the acks of its last complete session recorded, or where that session opened
+  when they recorded none. It ends with `Ended::Behind` when a frame after that
+  position was released (`laptop.architect`, 2026-10-09T21:04:47Z and 21:34:41Z:
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192 and
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089638162), or
   dropped because no complete session on its index was open (`laptop.architect`,
   2026-10-09T21:53:40Z:
-  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089887271).
-  Trigger: #1742 PR 3 adds `Reader::ack`, and the reader then resumes past its last ack.
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089887271;
+  `laptop.architect`, 2026-10-08T10:01:19Z and 2026-10-10T00:57:58Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592 and
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091895275).
+  Supersedes the resume where the last complete session opened, of
+  https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089237192.
+  Amended (#1742 PR 3): `Received::position` gives the reader's position after each
+  frame, and `Reader::ack` records it at the home. `Position` holds its index, and an
+  ack of another index panics. The ack of a latest reader, of a reader whose index has
+  its home at another node, or of a reader that ended (after `next` gave an `Ended`, or
+  once the hub ended it with `Removed` or `Replaced`) changes nothing
+  (`laptop.architect`, 2026-10-10T00:20:20Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091530673). An
+  ack at or below the reader's last ack changes nothing too, and `Reader::ack` gives no
+  error: in `delivery`, each path keeps the higher seq, and `Error::Ack` names only a
+  dropped or added path (`laptop.architect`, 2026-10-10T00:57:58Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091895275).
+  Supersedes the `Errors` section and item 3 of
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091530673, and
+  the test "An ack that moves back gives the exact error of `delivery` (`Error::Ack`)"
+  of #1742.
+  `Reader::ack` panics on a position of another index than the reader's, or past each
+  position that `Received::position` gave for the reader. Before it gave one, each
+  position panics (`laptop.architect`, 2026-10-10T01:40:23Z:
+  https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6092284036).
+  Supersedes item 1 of
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091931740. A
+  position that another reader on the index gave, at or below the highest position
+  that `Received::position` gave for the reader, is a true ack (`laptop.architect`,
+  2026-10-10T01:01:30Z and 2026-10-10T01:40:23Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091931740 and
+  https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6092284036).
+  Supersedes the test "An ack of another reader's `Position` panics" of
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091357396.
+  Trigger: #1155 sends the ack of a reader to a home at another node.
   A named open before mesh time gives `Unsynced`. A hold on an unnamed or latest reader
   panics (`laptop.architect`, 2026-10-08T10:01:19Z:
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). A named

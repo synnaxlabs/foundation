@@ -136,6 +136,10 @@ exclude_re = [
   'crates/hub/src/reader/remote\.rs:.*replace > with >= in Sessions::add',
   # Equal keys get no rule (ONE SESSION PER PEER, rule 4), so no test can pin `<`.
   'crates/transport/src/table\.rs:.*replace < with <= in Table::arrive',
+  # Only the `logs` bench calls `buffer::bench::Logs`, and `commit` gives nothing
+  # back. `each_commit_of_the_logs_syncs_one_entry_of_each_index` kills it through the
+  # private logs.
+  'crates/buffer/src/bench\.rs:.*replace Logs::commit with \(\)$',
   # A connector on another node runs here only in a mesh of two nodes, which no test of
   # `Node` starts yet (#2272, whose test removes this entry). The test of `Runs`
   # `a_connector_on_another_node_starts_no_run` kills it.

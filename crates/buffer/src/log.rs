@@ -5,6 +5,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::num::NonZeroU8;
 
 use types::channel::{self, Slot};
 use types::frame::Path;
@@ -240,6 +241,10 @@ impl Log {
 #[cfg_attr(test, derive(PartialEq, Eq))]
 pub(crate) struct Logs {
     paths: hash::Map<(Slot, Path), Log>,
+    /// The offset of the newest record that holds a durable entry with each nonzero
+    /// tag, by the log and the tag. Tag 0 marks samples, which no caller looks up. A
+    /// change that drops a log drops its tags in the same place.
+    tags: hash::Map<(Slot, Path, NonZeroU8), u64>,
     /// No read finds a record before this offset.
     hidden: u64,
 }
@@ -299,14 +304,40 @@ impl Logs {
         }
     }
 
+    /// The offset of the newest record that holds a durable entry with `tag` on
+    /// `path`, for each index whose record is not hidden, with its slot and index,
+    /// in no order.
+    pub(crate) fn tagged(
+        &self,
+        path: Path,
+        tag: NonZeroU8,
+    ) -> Vec<(u64, Slot, channel::Key)> {
+        let tagged = self.tags.iter().filter(|&(&(_, on, of), &offset)| {
+            (on, of) == (path, tag) && offset >= self.hidden
+        });
+        tagged
+            .map(|(&(slot, ..), &offset)| {
+                let log = self.paths.get(&(slot, path));
+                (
+                    offset,
+                    slot,
+                    log.expect("invariant: a tag has its log").index,
+                )
+            })
+            .collect()
+    }
+
     /// Hides the records before the offset `tail` from each later
-    /// [`find`](Self::find). A later record that adds a run to a path drops the
-    /// path's hidden runs, so this call visits no path.
+    /// [`find`](Self::find) and [`tagged`](Self::tagged). A later record that adds a
+    /// run to a path drops the path's hidden runs, so this call visits no path.
     ///
     /// # Panics
     ///
     /// When `tail` is before the tail of an earlier call.
-    #[cfg_attr(not(test), expect(dead_code, reason = "a commit calls it"))]
+    #[cfg_attr(
+        not(any(test, feature = "sim")),
+        expect(dead_code, reason = "a commit calls it")
+    )]
     pub(crate) fn hide(&mut self, tail: u64) {
         assert!(
             self.hidden <= tail,
@@ -333,7 +364,7 @@ impl Logs {
     /// Moves the durable tail of the header's path past the entry, as
     /// [`Tail::advance`], and adds the record at `offset` to the path's runs when
     /// it is not the newest. A record that adds a run drops the path's hidden
-    /// runs.
+    /// runs. A nonzero tag makes `offset` the newest record of its tag on the path.
     ///
     /// # Errors
     ///
@@ -349,7 +380,11 @@ impl Logs {
         offset: u64,
     ) -> Result<(), Invalid> {
         // A third capture would move the closure's state from registers to the stack.
-        self.change(slot, header, |log, hidden| log.sync(header, offset, hidden))
+        self.change(slot, header, |log, hidden| log.sync(header, offset, hidden))?;
+        if let Some(tag) = NonZeroU8::new(header.tag) {
+            self.tags.insert((slot, header.path, tag), offset);
+        }
+        Ok(())
     }
 
     /// Applies `change` to the log of the header's path, which starts empty when

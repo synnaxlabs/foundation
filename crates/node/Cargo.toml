@@ -31,6 +31,7 @@ hub = { path = "../hub" }
 mesh = { path = "../mesh" }
 ops = { path = "../ops" }
 os = { path = "../os" }
+secret = { path = "../secret" }
 spec = { path = "../spec" }
 transport = { path = "../transport" }
 types = { path = "../types" }
