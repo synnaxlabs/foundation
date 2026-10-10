@@ -1273,9 +1273,9 @@ mod tests {
         assert_eq!(*reads, expected);
     }
 
-    /// No commit trims yet, so the test hides records as a trim will. `newest` skips
-    /// the tagged entry of a hidden record, also when later records of its path are
-    /// not hidden.
+    /// No commit trims yet, so the test hides records as a trim will. `newest` gives
+    /// the tagged entry of the oldest record that is not hidden, and skips it once
+    /// that record is hidden, also when later records of its path are not hidden.
     #[test]
     fn newest_skips_the_records_that_a_trim_hid() {
         let mut sim = sim::Sim::new(sim::Config::default());
@@ -1312,14 +1312,17 @@ mod tests {
                         .collect()
                 };
                 let mut found: Vec<Vec<(Slot, u64)>> = vec![firsts().await];
-                buffer.shared.state.borrow_mut().logs.hide(8192);
-                found.push(firsts().await);
+                for offset in [4096, 8192] {
+                    buffer.shared.state.borrow_mut().logs.hide(offset);
+                    found.push(firsts().await);
+                }
                 *given.lock().expect("no panic held the lock") = found;
                 buffer
             },
         );
         let found = found.lock().expect("no panic held the lock");
-        assert_eq!(*found, [vec![(Slot::new(0), 0)], vec![]]);
+        let tagged = vec![(Slot::new(0), 0)];
+        assert_eq!(*found, [tagged.clone(), tagged, vec![]]);
     }
 
     /// The durable end counts the entries with no samples at its seq. A read that
