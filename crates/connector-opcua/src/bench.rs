@@ -14,11 +14,11 @@ use std::ptr::{self, NonNull};
 use std::task::{Context, Poll, Waker};
 
 use env::clock::Clock;
-use env::net::{Net, tcp};
+use env::net::Net;
 use env::rng::Rng;
 use types::time::Monotonic;
 
-use crate::connection::{self, OPTIONS};
+use crate::connection;
 use crate::event::Loop;
 use crate::ffi::test::{Lifecycle, Session};
 use crate::ffi::{self, Status};
@@ -158,12 +158,9 @@ impl Manager {
     async fn new(clock: Clock, net: Net, address: IpAddr, idle: usize) -> Self {
         assert!(idle < SESSIONS, "the server takes {SESSIONS} sessions");
         let local = SocketAddr::new(address, PORT);
-        let listen = tcp::Listen {
-            local,
-            backlog: u32::try_from(idle + 1).expect("at most 2^32 clients"),
-            options: OPTIONS,
-        };
-        let listener = net.listen(&listen).expect("the port is free");
+        let backlog = u32::try_from(idle + 1).expect("at most 100 clients");
+        let listener =
+            connection::bind(&net, local, backlog).expect("the port is free");
         let rng = &mut Rng::from_seed(0);
         let manager = connection::Manager::listening(clock, net, listener, rng);
         let events = manager.events();

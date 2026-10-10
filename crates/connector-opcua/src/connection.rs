@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::fmt;
 use std::future::poll_fn;
 use std::io::{IoSlice, Write as _};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
@@ -26,12 +26,30 @@ use crate::event::Loop;
 use crate::ffi::{self, Bytes, Status};
 
 /// The options of each stream.
-pub(crate) const OPTIONS: tcp::Options = tcp::Options {
+const OPTIONS: tcp::Options = tcp::Options {
     send_buffer_bytes: 1 << 16,
     recv_buffer_bytes: 1 << 16,
     unsent_bytes_max: NonZeroUsize::new(1 << 14).expect("invariant: 2^14 is not 0"),
     delayed: false,
 };
+
+/// Listens on `local` with a queue of `backlog` streams, each with the options of a
+/// stream of a manager, for [`Manager::listening`].
+///
+/// # Errors
+///
+/// As [`Net::listen`].
+pub(crate) fn bind(
+    net: &Net,
+    local: SocketAddr,
+    backlog: u32,
+) -> Result<Listener, net::Error> {
+    net.listen(&tcp::Listen {
+        local,
+        backlog,
+        options: OPTIONS,
+    })
+}
 
 /// The size of the read buffer of each connection.
 const READ_BYTES: usize = 1 << 16;

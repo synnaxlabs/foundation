@@ -1912,12 +1912,8 @@ fn a_closing_from_a_run_in_a_callback_gets_the_context_it_wrote() {
 
 /// Gives a listener of `node` at [`Network::listening`].
 fn listener(node: &node::Node) -> Listener {
-    let listen = tcp::Listen {
-        local: SocketAddr::new(node.addresses()[0], PORT),
-        backlog: 4,
-        options: OPTIONS,
-    };
-    node.net().listen(&listen).expect("the port is free")
+    let local = SocketAddr::new(node.addresses()[0], PORT);
+    super::bind(&node.net(), local, 4).expect("the port is free")
 }
 
 /// Gives a side on `node` whose manager accepts on [`listener`], with the callback
@@ -1980,12 +1976,9 @@ fn notes(
     network
         .sim
         .run_on(&network.local.clone(), move |node, _| async move {
-            let listen = tcp::Listen {
-                local: SocketAddr::new(local, PORT),
-                backlog: 4,
-                options: OPTIONS,
-            };
-            let listener = node.net().listen(&listen).expect("the port is free");
+            let local = SocketAddr::new(local, PORT);
+            let listener =
+                super::bind(&node.net(), local, 4).expect("the port is free");
             let mut side = Side::listening(&node, listener);
             side.callback = note;
             let mut all = vec![
