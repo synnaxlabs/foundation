@@ -1,13 +1,14 @@
 #!/bin/sh
 # Runs wait.sh against fixed GraphQL answers, then once against the API on merged #1428
-# to check the query. A stub `gh` acts as gh does: on an answer with an error message,
-# an HTTP error, or no network, it exits 1, prints the body, if any, and prints the
-# error on stderr; with no login, it exits 4. After the answers run out, it fails with
-# "out of answers". `gh api rate_limit` gives the count in `$STUB/left.<n>` after call
-# <n>, else in `$STUB/left`, else 1. As gh does, it logs each request on stderr for a
-# true `GH_DEBUG`, or, when that is not set, for a true `DEBUG`. A stub `sleep` returns
-# at once, and stops the script on its fifth call; when `$STUB/slow` exists, it sleeps.
-# Needs `jq`. Exit 1 on a failure.
+# to check the query, and reads the last removal of merged #2216 with it. A stub `gh`
+# acts as gh does: on an answer with an error message, an HTTP error, or no network, it
+# exits 1, prints the body, if any, and prints the error on stderr; with no login, it
+# exits 4. After the answers run out, it fails with "out of answers". `gh api
+# rate_limit` gives the count in `$STUB/left.<n>` after call <n>, else in `$STUB/left`,
+# else 1. As gh does, it logs each request on stderr for a true `GH_DEBUG`, or, when
+# that is not set, for a true `DEBUG`. A stub `sleep` returns at once, and stops the
+# script on its fifth call; when `$STUB/slow` exists, it sleeps. Needs `jq`. Exit 1 on a
+# failure.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 gh=$(command -v gh)
@@ -52,9 +53,9 @@ n=$(($(cat "$STUB/sleeps" 2>/dev/null || echo 0) + 1))
 echo "$n" > "$STUB/sleeps"
 [ "$n" -lt 5 ] || kill "$PPID"
 STUB
-# Records the answer body and the filter, then runs the real gh. $6 is `query=...` and
-# $8 the filter. The real gh can itself call gh from PATH, so it gets the PATH without
-# this stub.
+# Records the answer body, the query, and the filter, then runs the real gh. $6 is
+# `query=...` and $8 the filter. The real gh can itself call gh from PATH, so it gets
+# the PATH without this stub.
 cat > "$tmp/live/gh" <<STUB
 #!/bin/sh
 PATH='$PATH'
