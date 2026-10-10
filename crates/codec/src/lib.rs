@@ -2529,6 +2529,39 @@ mod tests {
             assert_eq!((out.as_ptr(), out), (memory, values));
         }
 
+        /// A reused `out` of the raw length gets no zero fill and no second check
+        /// before the fill. The bytes past an error, which a caller must not rely on,
+        /// show both: the first vector is decoded, and the last byte is untouched.
+        #[test]
+        fn fills_no_zeros_into_a_reused_out() {
+            let ints: Vec<u8> = (0..2048_u32)
+                .map(|i| u8::try_from(i % 200).expect("small"))
+                .collect();
+            let (count, text) = variable(1, &["a"; 2048]);
+            let truncated = |vector, needed| Error::Truncated {
+                vector,
+                needed,
+                available: needed - 1,
+            };
+            for (data_type, count, values, first, error) in [
+                (
+                    Type::Scalar(Scalar::U8),
+                    2048,
+                    &ints[..],
+                    VECTOR_LEN,
+                    truncated(1, 772),
+                ),
+                (Type::Bytes, count, &text, 4 * VECTOR_LEN, truncated(3, 3)),
+            ] {
+                let mut encoded = encode_type(data_type, count, values);
+                encoded.pop();
+                let mut out = vec![0xa5; values.len()];
+                assert_eq!(decode(data_type, count, &encoded, &mut out), Err(error));
+                assert_eq!(out[..first], values[..first], "{data_type:?}");
+                assert_eq!(out.last(), Some(&0xa5), "{data_type:?} got a zero fill");
+            }
+        }
+
         /// A count or an end that the bytes do not hold must not size `out`: a
         /// count of 2^40 would take terabytes.
         #[test]
