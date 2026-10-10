@@ -638,13 +638,21 @@ const UA_String *shim_server_discovery_url(UA_Server *server, size_t index) {
     return &description->discoveryUrls[index];
 }
 
-/* Asks `client` for the Value of the current time of its server, i=2258, and has
- * `callback` called with `data` and the answer. */
-UA_StatusCode shim_client_read_time(UA_Client *client,
-                                    UA_ClientAsyncReadValueAttributeCallback callback,
-                                    void *data) {
-    return UA_Client_readValueAttribute_async(
-        client, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME),
-        callback, data, NULL);
+/* Asks `client` for the Value of node `node` of namespace 0, and has `callback` called
+ * with `data` and the answer. */
+UA_StatusCode shim_client_read(UA_Client *client, UA_UInt32 node,
+                               UA_ClientAsyncReadValueAttributeCallback callback,
+                               void *data) {
+    return UA_Client_readValueAttribute_async(client, UA_NODEID_NUMERIC(0, node),
+                                              callback, data, NULL);
+}
+
+/* Gives the status of `value`, an answer of a read: `BadNoData` when it holds no
+ * value. A read callback gets `Good` whatever the answer holds. */
+UA_StatusCode shim_value_status(const void *value) {
+    const UA_DataValue *answer = (const UA_DataValue *)value;
+    if(answer->hasStatus && answer->status != UA_STATUSCODE_GOOD)
+        return answer->status;
+    return answer->hasValue ? UA_STATUSCODE_GOOD : UA_STATUSCODE_BADNODATA;
 }
 

@@ -551,11 +551,13 @@ pub(crate) mod test {
         pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_getLifecycleState(server: *mut Server) -> Lifecycle;
         pub(crate) fn shim_response_result(response: *const c_void) -> u32;
-        pub(crate) fn shim_client_read_time(
+        pub(crate) fn shim_client_read(
             client: *mut super::Client,
+            node: u32,
             callback: Read,
             data: *mut c_void,
         ) -> u32;
+        pub(crate) fn shim_value_status(value: *const c_void) -> u32;
         pub(crate) fn UA_Client_getState(
             client: *mut super::Client,
             channel: *mut c_int,

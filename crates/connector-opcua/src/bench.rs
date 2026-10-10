@@ -106,6 +106,9 @@ unsafe extern "C" fn idle(_: *mut c_void, _: *mut c_void) {}
 /// The port of the server of a [`Manager`].
 const PORT: u16 = 4840;
 
+/// The node of the current time of a server.
+const TIME: u32 = 2258;
+
 /// `UA_SESSIONSTATE_ACTIVATED`.
 const ACTIVATED: c_int = 4;
 
@@ -210,14 +213,17 @@ impl Manager {
     ///
     /// If open62541 refuses the read.
     pub fn ask(&self) {
-        self.drive_after(|| {
-            let data = ptr::from_ref::<Answers>(&self.answers).cast_mut().cast();
-            // SAFETY: the client lives, and `answers` outlives it.
-            let status = Status(unsafe {
-                ffi::test::shim_client_read_time(self.clients[0].as_ptr(), answer, data)
-            });
-            assert_eq!(status, Status::GOOD, "open62541 refused the read");
+        self.drive_after(|| self.read(TIME));
+    }
+
+    /// Asks the first client for a read of the Value of `node` of namespace 0.
+    fn read(&self, node: u32) {
+        let data = ptr::from_ref::<Answers>(&self.answers).cast_mut().cast();
+        // SAFETY: the client lives, and `answers` outlives it.
+        let status = Status(unsafe {
+            ffi::test::shim_client_read(self.clients[0].as_ptr(), node, answer, data)
         });
+        assert_eq!(status, Status::GOOD, "open62541 refused the read");
     }
 
     /// Gives the count of reads answered.
@@ -333,22 +339,26 @@ impl std::fmt::Debug for Manager {
 }
 
 /// Counts an answer of a read in the [`Answers`] at `data`, and keeps the first
-/// status other than `Good`.
+/// status other than `Good`, of the read or of its value.
 ///
 /// # Safety
 ///
-/// `data` points at live `Answers`.
+/// `data` points at live `Answers`, and `value` at the answer when `status` is `Good`.
 unsafe extern "C" fn answer(
     _: *mut ffi::Client,
     data: *mut c_void,
     _: u32,
     status: u32,
-    _: *mut c_void,
+    value: *mut c_void,
 ) {
-    // SAFETY: `ask` gives live answers.
+    // SAFETY: `read` gives live answers.
     let answers = unsafe { &*data.cast::<Answers>() };
     answers.count.set(answers.count.get() + 1);
-    let status = Status(status);
+    let mut status = Status(status);
+    if status == Status::GOOD {
+        // SAFETY: open62541 gives the answer with `Good`.
+        status = Status(unsafe { ffi::test::shim_value_status(value) });
+    }
     if status != Status::GOOD && answers.failed.get().is_none() {
         answers.failed.set(Some(status));
     }
@@ -356,6 +366,8 @@ unsafe extern "C" fn answer(
 
 #[cfg(test)]
 mod tests {
+    use std::panic::{self, AssertUnwindSafe};
+
     use env::clock::Clock;
     use sim::{Sim, node};
     use types::time::Span;
@@ -432,6 +444,23 @@ mod tests {
             }
         })
         .expect("the run ends");
+    }
+
+    /// A read callback of open62541 gets `Good` also when the value has a bad status.
+    #[test]
+    fn a_read_of_an_unknown_node_fails_with_its_status() {
+        check(0, async |manager, clock| {
+            manager.drive_after(|| manager.read(999_999));
+            clock.sleep(DELAY).await;
+            manager.drive();
+            clock.sleep(DELAY).await;
+            manager.drive();
+            let failed = panic::catch_unwind(AssertUnwindSafe(|| manager.answers()))
+                .expect_err("the read failed");
+            let message = failed.downcast_ref::<String>().expect("a formatted panic");
+            assert_eq!(message, "a read failed: BadNodeIdUnknown");
+            assert_eq!(manager.answers.count.get(), 1);
+        });
     }
 
     #[test]
