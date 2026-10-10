@@ -47,7 +47,8 @@ fn the_port_binds_at_once_when_the_lock_is_free() {
         serves.send(()).unwrap();
         async {}
     });
-    if let Err(error) = recv(&serving) {
+    let load = Duration::from_nanos(LOAD.nanos().unsigned_abs());
+    if let Err(error) = recv(&serving, PATIENCE + load) {
         node.stop();
         panic!("the node does not serve ({error}): {:?}", node.join());
     }
@@ -182,16 +183,19 @@ async fn lock(files: &env::files::Files) -> env::files::File {
 /// When it sends nothing within 60 s.
 #[track_caller]
 fn wait<T>(receiver: &mpsc::Receiver<T>) -> T {
-    recv(receiver).expect("the shard sends within 60 s")
+    recv(receiver, PATIENCE).expect("the shard sends within 60 s")
 }
 
-/// What a shard sends on `receiver` within 60 s.
-fn recv<T>(receiver: &mpsc::Receiver<T>) -> Result<T, mpsc::RecvTimeoutError> {
+/// What a shard sends on `receiver` within `timeout`.
+fn recv<T>(
+    receiver: &mpsc::Receiver<T>,
+    timeout: Duration,
+) -> Result<T, mpsc::RecvTimeoutError> {
     #[expect(
         clippy::disallowed_methods,
         reason = "the test thread waits on a shard in real time"
     )]
-    receiver.recv_timeout(PATIENCE)
+    receiver.recv_timeout(timeout)
 }
 
 /// The disk of `dir` for one shard. `io` gets the handle of its I/O thread.
