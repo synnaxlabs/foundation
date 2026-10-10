@@ -4,6 +4,7 @@
 pub(crate) mod client;
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::future::poll_fn;
 use std::pin::pin;
@@ -50,6 +51,8 @@ pub enum Error {
     ManyIndexes,
     /// The keys of the open do not hold their index. Code `MALFORMED`.
     NoIndex,
+    /// The open lists the channel twice. Code `MALFORMED`.
+    Repeated(channel::Key),
     /// The open names a channel that this node does not know. Code `UNKNOWN`.
     Unknown(channel::Key),
     /// A channel of the open was removed from the definitions. Code `UNKNOWN`.
@@ -109,6 +112,7 @@ impl Error {
             | Self::Class(_)
             | Self::ManyIndexes
             | Self::NoIndex
+            | Self::Repeated(_)
             | Self::Unadmitted
             | Self::Pending => Some(Code(MALFORMED)),
             Self::Access(error) => Some(Code(client::refusal(error).code())),
@@ -140,6 +144,7 @@ impl fmt::Display for Error {
             Self::NoIndex => {
                 f.write_str("the open does not name the index of its channels")
             }
+            Self::Repeated(key) => write!(f, "the open lists the channel {key} twice"),
             Self::Unknown(key) => {
                 write!(
                     f,
@@ -417,6 +422,8 @@ struct Opening<'s> {
     index: Option<channel::Key>,
     /// The position of the index in the keys checked.
     at: Option<usize>,
+    /// The keys checked, so a key listed twice is found.
+    listed: BTreeSet<channel::Key>,
 }
 
 impl<'s> Opening<'s> {
@@ -432,6 +439,7 @@ impl<'s> Opening<'s> {
             ending,
             index: None,
             at: None,
+            listed: BTreeSet::new(),
         }
     }
 
@@ -457,8 +465,8 @@ impl<'s> Opening<'s> {
         .await
     }
 
-    /// Checks that each of `keys` is known and on the index of the open, and adds it to
-    /// the channels of the open.
+    /// Checks that each of `keys` is known, on the index of the open, and not listed
+    /// before, and adds it to the channels of the open.
     fn check(&mut self, keys: keys::Iter<'_>) -> Result<(), Error> {
         let state = &mut *self.state.borrow_mut();
         let checked = state.opens.keys_mut(self.key);
@@ -467,7 +475,10 @@ impl<'s> Opening<'s> {
             if *self.index.get_or_insert(of) != of {
                 return Err(Error::ManyIndexes);
             }
-            if key == of && self.at.is_none() {
+            if !self.listed.insert(key) {
+                return Err(Error::Repeated(key));
+            }
+            if key == of {
                 self.at = Some(checked.len());
             }
             checked.push(key);
