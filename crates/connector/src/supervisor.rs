@@ -3080,6 +3080,27 @@ mod tests {
     }
 
     #[test]
+    fn resumes_a_reader_of_no_hold_that_takes_over_its_open_session() {
+        let writes = vec![(ms(100), 7), (ms(300), 8)];
+        let got = read_through(
+            |ctx, got| async move {
+                let reader = ctx.reader(&settings(Span::ZERO)).await;
+                let mut first = reader.expect("the reader opens");
+                first.next().await.expect("a frame");
+                ctx.clock().sleep(ms(100)).await;
+                let reader = ctx.reader(&settings(Span::ZERO)).await;
+                let mut reader = reader.expect("the reader opens");
+                let next = reader.next().await.map(|received| values(&received));
+                got.lock().expect("no panic").push(next);
+                drop(first);
+                Ok(())
+            },
+            |hub, clock| write_at(hub, clock, writes),
+        );
+        assert_eq!(got, [Err(hub::reader::Ended::Behind)]);
+    }
+
+    #[test]
     fn gives_a_kind_the_error_of_the_hub_for_a_reader_of_no_channel() {
         let got = read_through(
             |ctx, got| async move {
