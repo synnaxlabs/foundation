@@ -110,7 +110,8 @@ fn entries_match(
             "channel" | "connector" => label.text.to_string(),
             keyword => format!("{}.@{keyword}", label.text),
         };
-        keys.insert(key.to_ascii_lowercase());
+        let key = key.to_ascii_lowercase();
+        assert!(keys.insert(key.clone()), "two blocks have the key {key}");
     }
     for (key, entry) in entries {
         match &entry.definition {
@@ -143,7 +144,13 @@ fn entries_match(
                 .expect("the status names of a connector that passed fit");
             let status = status.into_iter().map(|(name, _)| name);
             let implied = std::iter::once(time).chain(status);
-            keys.extend(implied.map(|name| name.as_str().to_ascii_lowercase()));
+            for name in implied {
+                let name = name.as_str().to_ascii_lowercase();
+                assert!(
+                    keys.insert(name.clone()),
+                    "a block has the key of the status channel {name}"
+                );
+            }
         }
     }
     assert_eq!(
