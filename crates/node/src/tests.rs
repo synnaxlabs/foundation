@@ -338,9 +338,13 @@ fn each_shard_reserves_its_part_of_the_budget_and_core_0_takes_the_rest() {
     run.node.stop();
     assert_eq!(run.sim.run(), Ok(()));
     assert_eq!(run.node.join(), Ok(()));
-    let part = usize::try_from(budget.bytes() / 3).unwrap();
-    assert_eq!(part * 3 + 2, usize::try_from(budget.bytes()).unwrap());
-    let reservation = |budget| block::Config { budget }.reservation();
+    let part = budget.bytes() / 3;
+    assert_eq!(part * 3 + 2, budget.bytes());
+    let reservation = |budget| {
+        block::Config::new(budget)
+            .expect("the budget fits")
+            .reservation()
+    };
     assert_eq!(
         *calls.lock().unwrap(),
         [reservation(part + 2), reservation(part), reservation(part)]
@@ -373,10 +377,9 @@ fn a_shard_with_no_memory_stops_the_node_before_later_shards_start() {
 #[test]
 fn join_gives_a_shard_with_no_memory_over_one_that_panicked() {
     for seed in 0..32 {
-        let len = block::Config {
-            budget: (1 << 20) / 3,
-        }
-        .reservation();
+        let len = block::Config::new((1 << 20) / 3)
+            .expect("the budget fits")
+            .reservation();
         let error = os::memory::Error::Reserve { len, code: 12 };
         let mut run = start_with(
             seed,
@@ -490,7 +493,8 @@ fn write(sim: &mut sim::Sim, host: &sim::node::Node, path: &str, bytes: Vec<u8>)
         };
         let file = files.open(&path, mode).await.expect("opens");
         if !bytes.is_empty() {
-            let pool = block::Pool::heap(block::Config { budget: 4096 });
+            let pool =
+                block::Pool::heap(block::Config::new(4096).expect("the budget fits"));
             let block = pool.copy(&bytes).expect("a block");
             file.write_at(0, &[block]).await.expect("writes");
         }
@@ -514,7 +518,8 @@ fn bytes(sim: &mut sim::Sim, host: &sim::node::Node, path: &str) -> Option<Vec<u
         if len == 0 {
             return Some(Vec::new());
         }
-        let pool = block::Pool::heap(block::Config { budget: 4096 });
+        let pool =
+            block::Pool::heap(block::Config::new(4096).expect("the budget fits"));
         let into = pool.alloc(len).expect("a block");
         Some(file.read_at(0, into).await.expect("reads").to_vec())
     })
@@ -566,7 +571,8 @@ fn write_key(sim: &mut sim::Sim, host: &sim::node::Node, bytes: Vec<u8>) {
         };
         let path = Path::new(identity::FILE);
         let file = files.open(path, mode).await.expect("opens");
-        let pool = block::Pool::heap(block::Config { budget: 4096 });
+        let pool =
+            block::Pool::heap(block::Config::new(4096).expect("the budget fits"));
         let block = pool.copy(&bytes).expect("a block");
         file.write_at(0, &[block]).await.expect("writes");
         file.sync().await.expect("syncs");
@@ -666,7 +672,7 @@ mod buffer {
     /// Writes one entry of index `key` to the ring of shard `core` of `host`.
     fn write(sim: &mut sim::Sim, host: &sim::node::Node, core: usize, key: u128) {
         sim.run_on(host, move |host, tasks| async move {
-            let config = block::Config { budget: 1 << 20 };
+            let config = block::Config::new(1 << 20).expect("the budget fits");
             let memory = block::Heap::new(config.reservation());
             let pool = Rc::new(block::Pool::new(config, memory));
             let config = ::buffer::Config {
@@ -1678,7 +1684,7 @@ mod home {
         let (give, take) = handoff::pair();
         give.give(Interner::new());
         let (give, next) = handoff::pair();
-        let config = block::Config { budget: 1 << 22 };
+        let config = block::Config::new(1 << 22).expect("the budget fits");
         let memory = block::Heap::new(config.reservation());
         let pool = block::Pool::new(config, memory);
         let open = Open {
@@ -2459,7 +2465,7 @@ mod port {
 
     /// A pool of 1 MiB to send on.
     fn pool() -> Rc<block::Pool> {
-        let config = block::Config { budget: 1 << 20 };
+        let config = block::Config::new(1 << 20).expect("the budget fits");
         let memory = block::Heap::new(config.reservation());
         Rc::new(block::Pool::new(config, memory))
     }
@@ -3188,7 +3194,9 @@ mod port {
                 let mode = env::files::Mode::Read;
                 let file = files.open(Path::new(FILE), mode).await.expect("opens");
                 let len = usize::try_from(file.len()).unwrap();
-                let pool = block::Pool::heap(block::Config { budget: 4096 });
+                let pool = block::Pool::heap(
+                    block::Config::new(4096).expect("the budget fits"),
+                );
                 let into = pool.alloc(len).expect("a block");
                 file.read_at(0, into).await.expect("reads").to_vec()
             })
@@ -3200,7 +3208,9 @@ mod port {
             sim.run_on(host, |host, _| async move {
                 let mode = env::files::Mode::Create { len: LEN as u64 };
                 let file = host.files().open(Path::new(FILE), mode).await;
-                let pool = block::Pool::heap(block::Config { budget: 4096 });
+                let pool = block::Pool::heap(
+                    block::Config::new(4096).expect("the budget fits"),
+                );
                 let into = pool.alloc(LEN).expect("a block");
                 let read = file.expect("opens").read_at(0, into).await;
                 read.expect("reads").starts_with(b"foundation/key/1")
@@ -4975,7 +4985,7 @@ mod port {
             let held = Arc::new(Mutex::new(Vec::new()));
             let out = Arc::clone(&held);
             let started = host.shards().start(shard, move |_| async move {
-                let pool = block::Config { budget: 1 << 20 };
+                let pool = block::Config::new(1 << 20).expect("the budget fits");
                 let memory = block::Heap::new(pool.reservation());
                 let pool = Rc::new(block::Pool::new(pool, memory));
                 // A node gives no read of its chunk store, so the test opens the store

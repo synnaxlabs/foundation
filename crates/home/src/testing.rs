@@ -54,7 +54,7 @@ pub async fn shard(env: Env) -> (Shard, Interner, Stamp, clock::Reader) {
 ///
 /// When the ring does not open.
 pub async fn unsynced_shard(env: Env, delay: Span) -> (Shard, Interner, clock::Reader) {
-    let config = block::Config { budget: 1 << 23 };
+    let config = block::Config::new(1 << 23).expect("the budget fits");
     let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
     let (clock, mesh) = clock::Clock::new(env.clock.clone());
     let (wall, sleep) = (env.wall, env.clock.sleep(delay));

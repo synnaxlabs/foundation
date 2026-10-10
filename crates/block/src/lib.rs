@@ -900,8 +900,13 @@ mod fixture {
         }
     }
 
+    pub(crate) fn config(budget: usize) -> Config {
+        let budget = u64::try_from(budget).expect("a usize fits in a u64");
+        Config::new(budget).expect("the budget fits")
+    }
+
     pub(crate) fn create_pool(budget: usize) -> Pool {
-        let config = Config { budget };
+        let config = config(budget);
         let heap = Heap::new(config.reservation());
         Pool::new(config, heap)
     }
@@ -958,7 +963,7 @@ mod fixture {
         }
 
         pub(crate) fn create_paged_pool(budget: usize) -> (Pool, Pages) {
-            let config = Config { budget };
+            let config = super::config(budget);
             let len = config.reservation();
             let mut marks = vec![false; len.div_ceil(PAGE)];
             marks[..ALIGN.div_ceil(PAGE)].fill(true);
@@ -978,7 +983,7 @@ mod fixture {
     }
 
     pub(crate) fn create_watched_pool(budget: usize) -> (Pool, Arc<Watch>) {
-        let config = Config { budget };
+        let config = config(budget);
         let (memory, switch) = Scarce::new(config.reservation());
         let watch = Arc::new(Watch {
             drops: AtomicUsize::new(0),
@@ -1044,7 +1049,8 @@ mod tests {
 
         #[test]
         fn is_one_span_for_each_class_and_a_header() {
-            let reservation = |budget| Config { budget }.reservation();
+            let reservation =
+                |budget| Config::new(budget).expect("the budget fits").reservation();
             assert_eq!(reservation(0), 64);
             assert_eq!(reservation(127), 64);
             assert_eq!(reservation(128), 64 + 128);
@@ -1189,14 +1195,20 @@ mod tests {
         #[test]
         #[should_panic(expected = "pool needs 192 bytes of memory, got 128")]
         fn panics_when_the_memory_is_too_short() {
-            drop(Pool::new(Config { budget: 128 }, Heap::new(128)));
+            drop(Pool::new(
+                Config::new(128).expect("the budget fits"),
+                Heap::new(128),
+            ));
         }
 
         #[test]
         #[should_panic(expected = "pool memory must be aligned to 64 bytes")]
         fn panics_when_the_memory_is_misaligned() {
             let memory = Misaligned(Heap::new(256));
-            drop(Pool::new(Config { budget: 128 }, memory));
+            drop(Pool::new(
+                Config::new(128).expect("the budget fits"),
+                memory,
+            ));
         }
     }
 
@@ -1256,7 +1268,7 @@ mod tests {
 
             #[test]
             fn gives_its_largest_block_and_stops_at_the_budget() {
-                let pool = Pool::heap(Config { budget: 256 });
+                let pool = Pool::heap(Config::new(256).expect("the budget fits"));
                 assert_eq!(pool.largest(), 192);
                 let mut block = pool.alloc(192).expect("the budget has room");
                 block.fill(1);
@@ -1267,7 +1279,7 @@ mod tests {
 
             #[test]
             fn holds_no_block_with_no_budget() {
-                let pool = Pool::heap(Config { budget: 0 });
+                let pool = Pool::heap(Config::new(0).expect("the budget fits"));
                 assert_eq!(pool.largest(), 0);
                 let error = pool.alloc(0).expect_err("no block fits");
                 assert_eq!(error, too_large(0, 0));
@@ -1284,7 +1296,7 @@ mod tests {
                 expected = "heap memory of 13835058055282163776 bytes is too large"
             )]
             fn panics_when_the_heap_cannot_hold_the_reservation() {
-                drop(Pool::heap(Config { budget: 1 << 57 }));
+                drop(Pool::heap(Config::new(1 << 57).expect("the budget fits")));
             }
         }
     }

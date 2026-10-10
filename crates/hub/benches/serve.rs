@@ -582,7 +582,7 @@ async fn create_shard(
     node: &sim::node::Node,
     tasks: Tasks,
 ) -> (home::Shard, Interner, i64, clock::Reader) {
-    let config = block::Config { budget: 1 << 23 };
+    let config = block::Config::new(1 << 23).expect("the budget fits");
     let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
     let (clock, mesh) = clock::Clock::new(node.clock());
     let wall = node.wall();

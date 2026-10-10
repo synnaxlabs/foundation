@@ -250,7 +250,7 @@ mod tests {
 
     #[test]
     fn stored_entries_differ_when_any_field_differs() {
-        let config = Config { budget: 1 << 20 };
+        let config = Config::new(1 << 20).expect("the budget fits");
         let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
         let base = Stored {
             first: 1,

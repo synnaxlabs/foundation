@@ -1037,7 +1037,7 @@ fuzz_target!(|input: Input| {
         .clone()
         .shards()
         .start(config, move |tasks| async move {
-            let config = block::Config { budget: 1 << 21 };
+            let config = block::Config::new(1 << 21).expect("the budget fits");
             let pool =
                 Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
             let shard = Shard { node, tasks, pool };

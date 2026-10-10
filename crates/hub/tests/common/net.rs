@@ -68,7 +68,7 @@ pub(crate) fn transport_sized(
 
 /// A pool for a transport, so a test that fills the hub's pool does not fill it.
 pub(crate) fn own_pool() -> Rc<Pool> {
-    let config = block::Config { budget: 1 << 20 };
+    let config = block::Config::new(1 << 20).expect("the budget fits");
     Rc::new(Pool::new(
         config.clone(),
         block::Heap::new(config.reservation()),

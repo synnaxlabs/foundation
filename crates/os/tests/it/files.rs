@@ -25,7 +25,7 @@ fn run<F: Future<Output = ()>>(body: impl FnOnce(Files, PathBuf) -> F) {
 }
 
 fn pool() -> Pool {
-    let config = block::Config { budget: 1 << 20 };
+    let config = block::Config::new(1 << 20).expect("the budget fits");
     let memory = block::Heap::new(config.reservation());
     Pool::new(config, memory)
 }

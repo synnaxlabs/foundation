@@ -144,7 +144,7 @@ pub(crate) async fn open(
     names: &[&str],
     definitions: BTreeMap<Name, Definition>,
 ) -> Mesh {
-    let budget = block::Config { budget: 1 << 20 };
+    let budget = block::Config::new(1 << 20).expect("the budget fits");
     let memory = block::Heap::new(budget.reservation());
     let pool = Rc::new(block::Pool::new(budget, memory));
     let at = SocketAddr::new(node.addresses()[0], PORT);

@@ -19,7 +19,7 @@ pub(crate) const PORT: u16 = 4433;
 /// The config of a transport on `node` with `key`: messages of at most 256 KiB, and a
 /// pool of 1 MiB of its own.
 pub(crate) fn config(node: &Node, tasks: env::tasks::Tasks, key: PrivateKey) -> Config {
-    let pool = block::Config { budget: 1 << 20 };
+    let pool = block::Config::new(1 << 20).expect("the budget fits");
     let memory = Heap::new(pool.reservation());
     Config {
         private_key: key,

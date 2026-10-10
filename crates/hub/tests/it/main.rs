@@ -125,7 +125,8 @@ impl Test {
         pool: usize,
         region: Option<hub::Region>,
     ) -> Self {
-        let config = block::Config { budget: pool };
+        let pool = u64::try_from(pool).expect("a usize fits in a u64");
+        let config = block::Config::new(pool).expect("the budget fits");
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         let (unsynced, mesh) = clock::Clock::new(node.clock());
         let mut interner = Interner::new();

@@ -1547,7 +1547,7 @@ mod tests {
 
     /// A pool of one page.
     fn small_pool() -> Rc<Pool> {
-        let budget = block::Config { budget: 4096 };
+        let budget = block::Config::new(4096).expect("the budget fits");
         let memory = block::Heap::new(budget.reservation());
         Rc::new(Pool::new(budget, memory))
     }
@@ -4656,7 +4656,7 @@ mod tests {
     #[test]
     fn a_group_that_waits_gives_the_cause_of_its_last_try() {
         solo(|node, tasks| async move {
-            let budget = block::Config { budget: 4096 };
+            let budget = block::Config::new(4096).expect("the budget fits");
             let (memory, switch) = Scarce::new(budget.reservation());
             let pool = Rc::new(Pool::new(budget, memory));
             let config = Config {
@@ -4756,7 +4756,7 @@ mod tests {
     #[test]
     fn a_group_that_waits_for_refused_memory_gives_that_cause() {
         solo(|node, tasks| async move {
-            let budget = block::Config { budget: 4 << 20 };
+            let budget = block::Config::new(4 << 20).expect("the budget fits");
             let (memory, switch) = Scarce::new(budget.reservation());
             let config = Config {
                 pool: Rc::new(Pool::new(budget, memory)),
@@ -4781,7 +4781,7 @@ mod tests {
     #[test]
     fn a_pool_with_no_block_of_one_sector_does_not_open() {
         solo(|node, tasks| async move {
-            let budget = block::Config { budget: 0 };
+            let budget = block::Config::new(0).expect("the budget fits");
             let memory = block::Heap::new(budget.reservation());
             let config = Config {
                 pool: Rc::new(Pool::new(budget, memory)),
@@ -4799,7 +4799,7 @@ mod tests {
     #[test]
     fn memory_that_the_system_refuses_holds_a_message_until_it_commits() {
         solo(|node, tasks| async move {
-            let budget = block::Config { budget: 4 << 20 };
+            let budget = block::Config::new(4 << 20).expect("the budget fits");
             let (memory, switch) = Scarce::new(budget.reservation());
             let pool = Rc::new(Pool::new(budget, memory));
             let config = Config {

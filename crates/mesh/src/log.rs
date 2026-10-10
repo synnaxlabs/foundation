@@ -1266,7 +1266,7 @@ mod tests {
 
     /// A pool whose largest block, 1,792 bytes, is 3.5 sectors.
     fn odd_pool() -> Rc<Pool> {
-        let config = block::Config { budget: 2048 };
+        let config = block::Config::new(2048).expect("the budget fits");
         let memory = block::Heap::new(config.reservation());
         let pool = Rc::new(Pool::new(config, memory));
         assert_eq!(pool.largest(), 1792);
@@ -1369,7 +1369,7 @@ mod tests {
             let (mut sim, node) = create_node(0);
             let (new, listed, held) = sim
                 .run_on(&node, move |node, _| async move {
-                    let config = block::Config { budget };
+                    let config = block::Config::new(budget).expect("the budget fits");
                     let memory = block::Heap::new(config.reservation());
                     let pool = Rc::new(Pool::new(config, memory));
                     let files = node.files();
@@ -1398,7 +1398,7 @@ mod tests {
         let (mut sim, node) = create_node(0);
         let written = sim
             .run_on(&node, |node, _| async move {
-                let config = block::Config { budget: 704 };
+                let config = block::Config::new(704).expect("the budget fits");
                 let memory = block::Heap::new(config.reservation());
                 let pool = Rc::new(Pool::new(config, memory));
                 let entry = bytes(1, 580);
@@ -1447,7 +1447,7 @@ mod tests {
             let (mut sim, node) = create_node(0);
             let written = sim
                 .run_on(&node, move |node, _| async move {
-                    let config = block::Config { budget };
+                    let config = block::Config::new(budget).expect("the budget fits");
                     let memory = block::Heap::new(config.reservation());
                     let pool = Rc::new(Pool::new(config, memory));
                     let entry = bytes(1, record - 60);
@@ -1473,7 +1473,7 @@ mod tests {
     // has none for the 16 blocks of its first record.
     #[test]
     fn a_write_holds_one_block_of_the_pool_at_a_time() {
-        let cases: [(usize, &[usize]); 3] = [
+        let cases: [(u64, &[usize]); 3] = [
             (82_000, &[81_920]),
             (9472, &[9217]),
             (1_000_000, &[984_040, 81_536]),
@@ -1489,7 +1489,8 @@ mod tests {
             let written = sim
                 .run_on(&node, move |node, _| async move {
                     let new = || {
-                        let config = block::Config { budget };
+                        let config =
+                            block::Config::new(budget).expect("the budget fits");
                         let memory = block::Heap::new(config.reservation());
                         Rc::new(Pool::new(config, memory))
                     };
@@ -1519,7 +1520,7 @@ mod tests {
     fn opens_with_a_pool_whose_largest_block_is_one_sector() {
         let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
-            let config = block::Config { budget: 576 };
+            let config = block::Config::new(576).expect("the budget fits");
             let memory = block::Heap::new(config.reservation());
             let pool = Rc::new(Pool::new(config, memory));
             assert_eq!(pool.largest(), SECTOR);
@@ -2514,7 +2515,7 @@ mod tests {
         let error = sim
             .run_on(&node, |node, _| async move {
                 drop(open(&node).await.unwrap());
-                let config = block::Config { budget: 4096 };
+                let config = block::Config::new(4096).expect("the budget fits");
                 let memory = block::Heap::new(config.reservation());
                 let pool = Rc::new(Pool::new(config, memory));
                 assert_eq!(pool.largest(), 3584);
@@ -3043,7 +3044,7 @@ mod tests {
     fn the_zeros_cover_each_block_of_the_stopped_write() {
         let (mut sim, node) = create_node(0);
         sim.run_on(&node, |node, _| async move {
-            let config = block::Config { budget: 140_000 };
+            let config = block::Config::new(140_000).expect("the budget fits");
             let memory = block::Heap::new(config.reservation());
             let pool = Rc::new(Pool::new(config, memory));
             let (mut log, _) = Log::open(node.files(), DIR.into(), Rc::clone(&pool))

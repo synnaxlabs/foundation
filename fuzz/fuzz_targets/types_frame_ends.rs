@@ -165,7 +165,7 @@ fn fit(len: usize, ends: &[(usize, usize)]) {
 /// must be the ones that `ends` cut from its body.
 fn draft(set: &KeySet, layout: Layout, ends: &[(usize, usize)]) {
     let body_len = layout.body_len();
-    let config = block::Config { budget: 1 << 21 };
+    let config = block::Config::new(1 << 21).expect("the budget fits");
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let mut draft = layout
         .draft(&pool, Form::Raw)

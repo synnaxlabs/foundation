@@ -116,7 +116,8 @@ fn next(mut state: u64) -> u64 {
 
 /// A pool of `budget` bytes on the heap.
 pub(crate) fn create_pool(budget: usize) -> block::Pool {
-    let config = block::Config { budget };
+    let budget = u64::try_from(budget).expect("a usize fits in a u64");
+    let config = block::Config::new(budget).expect("the budget fits");
     let memory = block::Heap::new(config.reservation());
     block::Pool::new(config, memory)
 }

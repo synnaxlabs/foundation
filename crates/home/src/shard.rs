@@ -57,7 +57,7 @@ use crate::{handoff, order, split, stored};
 /// #         index: stamps,
 /// #         data: &[(values, Type::Scalar(Scalar::I64))],
 /// #     }]);
-/// #     let config = block::Config { budget: 1 << 21 };
+/// #     let config = block::Config::new(1 << 21).expect("the budget fits");
 /// #     let heap = Heap::new(config.reservation());
 /// #     let config = buffer::Config {
 /// #         files: node.files(),
@@ -936,7 +936,7 @@ mod tests {
     use std::task::Waker;
     use std::time::Instant;
 
-    use block::{Heap, Pool, Unique};
+    use block::{Pool, Unique};
     use buffer::Layout;
     use env::clock::Clock;
     use env::entropy::Entropy;
@@ -992,8 +992,7 @@ mod tests {
     impl Test {
         /// What a test on a shard of `node` gets, with the node's clock running.
         fn new(node: sim::node::Node, tasks: Tasks) -> Self {
-            let config = block::Config { budget: POOL };
-            let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
+            let pool = create_pool(POOL);
             let (clock, reader) = clock::Clock::new(node.clock());
             let wall = node.wall();
             tasks.spawn(async move { clock.run(wall).await });

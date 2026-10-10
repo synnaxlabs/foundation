@@ -49,13 +49,13 @@ struct Plan {
 }
 
 fn scarce_pool() -> Pool {
-    let config = block::Config { budget: 1 << 16 };
+    let config = block::Config::new(1 << 16).expect("the budget fits");
     let memory = Heap::new(config.reservation());
     Pool::new(config, memory)
 }
 
 fn send_pool() -> Pool {
-    let config = block::Config { budget: 1 << 20 };
+    let config = block::Config::new(1 << 20).expect("the budget fits");
     let memory = Heap::new(config.reservation());
     Pool::new(config, memory)
 }

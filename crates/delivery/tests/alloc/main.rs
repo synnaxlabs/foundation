@@ -33,7 +33,7 @@ fn main() {
         index: channel::Key::from_u128(1),
         data: &[],
     }]);
-    let config = block::Config { budget: 1 << 16 };
+    let config = block::Config::new(1 << 16).expect("the budget fits");
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let frame = || {
         Draft::new(&pool, &set, Form::Raw, &[(0, 8)])
@@ -311,7 +311,7 @@ fn alternating() {
         index,
         data: &[(channel::Key::from_u128(3), F64)],
     }]);
-    let config = block::Config { budget: 1 << 16 };
+    let config = block::Config::new(1 << 16).expect("the budget fits");
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let frame = |set: &KeySet| {
         Draft::new(&pool, set, Form::Raw, &[(0, 8), (1, 8)])

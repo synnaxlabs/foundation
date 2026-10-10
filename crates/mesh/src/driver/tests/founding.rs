@@ -475,7 +475,7 @@ fn a_power_cut_in_the_first_open_leaves_a_first_open() {
 #[test]
 fn memory_that_the_system_refuses_for_the_founding_file_gives_the_pool_error() {
     solo(|node, tasks| async move {
-        let budget = block::Config { budget: 4 << 20 };
+        let budget = block::Config::new(4 << 20).expect("the budget fits");
         let (memory, switch) = Scarce::new(budget.reservation());
         let config = Config {
             pool: Rc::new(Pool::new(budget, memory)),
@@ -500,7 +500,7 @@ fn memory_that_the_system_refuses_for_the_founding_read_gives_the_pool_error() {
     let (mut sim, node, region) = founded(0);
     let error = sim
         .run_on(&node, |node, tasks| async move {
-            let budget = block::Config { budget: 4 << 20 };
+            let budget = block::Config::new(4 << 20).expect("the budget fits");
             let (memory, switch) = Scarce::new(budget.reservation());
             let pool = Rc::new(Pool::new(budget, memory));
             drop(pool.alloc(crate::file::CHUNK).unwrap());

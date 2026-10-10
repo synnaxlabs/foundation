@@ -10,7 +10,10 @@ use env::files::{File, Files, Mode};
 
 /// The pool of the file's block. A call can come while the shard's buffer holds the
 /// blocks of the shard's pool, so that pool can lack room for it.
-const POOL: block::Config = block::Config { budget: 4096 };
+const POOL: block::Config = match block::Config::new(4096) {
+    Ok(config) => config,
+    Err(_) => panic!("invariant: a sector fits"),
+};
 
 /// What a file of `N` bytes holds.
 #[derive(Debug, PartialEq, Eq)]

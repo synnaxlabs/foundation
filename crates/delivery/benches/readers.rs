@@ -55,7 +55,7 @@ fn frame() -> (Frame, Arc<KeySet>) {
         index: channel::Key::from_u128(1),
         data: &[],
     }]);
-    let config = block::Config { budget: 1 << 16 };
+    let config = block::Config::new(1 << 16).expect("the budget fits");
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let frame = Draft::new(&pool, &set, Form::Raw, &[(0, 8)])
         .expect("the pool holds the frame")
@@ -126,7 +126,7 @@ fn wide() -> (Frame, Arc<KeySet>) {
         index: channel::Key::from_u128(1),
         data: &data,
     }]);
-    let config = block::Config { budget: 1 << 22 };
+    let config = block::Config::new(1 << 22).expect("the budget fits");
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let lens: Vec<_> = (0..CHANNELS).map(|entry| (entry, 8)).collect();
     let frame = Draft::new(&pool, &set, Form::Raw, &lens)
@@ -236,7 +236,7 @@ fn release_places_alternating(bencher: Bencher<'_, '_>, channels: usize) {
         index: channel::Key::from_u128(1),
         data: &db,
     }]);
-    let config = block::Config { budget: 1 << 24 };
+    let config = block::Config::new(1 << 24).expect("the budget fits");
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     let build = |set: &Arc<KeySet>| {
         let lens: Vec<_> = (0..set.entries().len()).map(|entry| (entry, 8)).collect();
