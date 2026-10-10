@@ -95,7 +95,7 @@ impl<'a> Received<'a> {
     #[must_use]
     pub fn position(&self) -> Position {
         let position = self.lens.after(&self.view);
-        self.given.set(self.given.get().max(Some(position.live)));
+        self.given.set(Some(position.live));
         position
     }
 }
@@ -311,8 +311,8 @@ pub struct Reader {
     source: Source,
     /// The slot of the reader's index.
     index: channel::Slot,
-    /// The highest `live` of a position that [`Received::position`] gave, or `None`
-    /// before it gave one. A home at another node can send a frame of a lower seq.
+    /// The `live` of the last position that [`Received::position`] gave, or `None`
+    /// before it gave one. The positions of a reader rise, so it is the highest.
     given: Cell<Option<u64>>,
     /// The frame that the last [`Received`] lends.
     frame: Option<Frame>,
