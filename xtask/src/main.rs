@@ -224,17 +224,15 @@ mod tests {
         );
     }
 
-    /// The `jobs` of `.github/workflows/ci.yaml` in the workspace at `root`, from the
-    /// line break before the first job, with no blank or comment line, which YAML
-    /// skips.
-    fn ci_jobs(root: &Path) -> String {
+    /// `.github/workflows/ci.yaml` in the workspace at `root`, with no blank or comment
+    /// line, which YAML skips.
+    fn workflow(root: &Path) -> String {
         let text =
             std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
         let ci: Vec<&str> = (text.lines())
             .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
             .collect();
-        // A key such as `defaults`, `env`, or `run-name` can change what a job runs,
-        // or hold text that looks like a job.
+        // A key such as `defaults`, `env`, or `run-name` can change what a job runs.
         let keys: Vec<&str> = (ci.iter().copied())
             .filter(|line| !line.starts_with(' '))
             .collect();
@@ -243,40 +241,79 @@ mod tests {
             ["name: CI", "on:", "concurrency:", "jobs:"],
             "ci.yaml has a top-level key that the checks do not read"
         );
-        let ci = ci.join("\n");
-        let (_, jobs) = ci.split_once("\njobs:").unwrap();
-        jobs.to_string()
+        ci.join("\n")
     }
 
-    /// The paths of the `models` filter in `jobs`.
-    fn models(jobs: &str) -> Vec<&str> {
-        // The filter is a key of the `filters` text of the `changes` job.
-        (jobs.split("\n            models:\n").nth(1))
-            .expect("ci.yaml has a models filter")
-            .lines()
-            .map_while(|line| line.trim().strip_prefix("- "))
+    /// The lines under the first line of `lines` that is `key`: each line after it up
+    /// to the first that is not indented further, which is the value of `key` in YAML.
+    fn under<'a>(lines: &[&'a str], key: &str) -> Vec<&'a str> {
+        let indent = |line: &str| line.len() - line.trim_start().len();
+        let start = (lines.iter().position(|line| *line == key))
+            .unwrap_or_else(|| panic!("ci.yaml has no `{}` in {lines:#?}", key.trim()));
+        (lines[start + 1..].iter().copied())
+            .take_while(|line| indent(line) > indent(key))
+            .collect()
+    }
+
+    /// The paths of the `models` filter of the step `filter` of the job `changes` in
+    /// the lines `ci` of a workflow.
+    fn models<'a>(ci: &[&'a str]) -> Vec<&'a str> {
+        let steps = under(&under(&under(ci, "jobs:"), "  changes:"), "    steps:");
+        // Text under a key is indented past it, so a line at the indent of a step key
+        // is one.
+        let id = (steps.iter().position(|line| *line == "        id: filter"))
+            .expect("the changes job has a step `filter`");
+        let start = (steps[..id].iter())
+            .rposition(|line| line.starts_with("      - "))
+            .unwrap();
+        let step = under(&steps[start..], steps[start]);
+        let filters = under(&under(&step, "        with:"), "          filters: |");
+        (under(&filters, "            models:").iter())
+            .map(|line| line.trim().strip_prefix("- ").expect("a path"))
             .collect()
     }
 
     #[test]
-    fn models_reads_only_the_filter_named_models() {
-        let jobs = "\n            old_models:\n              - 'crates/types/**'\n            \
-                    models:\n              - 'crates/env/**'\n";
-        assert_eq!(models(jobs), ["'crates/env/**'"]);
+    fn models_reads_only_the_models_filter_of_the_step_filter() {
+        let ci = concat!(
+            "jobs:\n",
+            "  changes:\n",
+            "    steps:\n",
+            "      - uses: actions/checkout@v4\n",
+            "        env:\n",
+            "          NOTE: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
+            "      - uses: dorny/paths-filter\n",
+            "        id: filter\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            old_models:\n",
+            "              - 'crates/types/**'\n",
+            "            models:\n",
+            "              - 'crates/env/**'\n",
+            "            wait:\n",
+            "              - 'crates/types/**'\n",
+            "      - run: true\n",
+        );
+        let ci: Vec<&str> = ci.lines().collect();
+        assert_eq!(models(&ci), ["'crates/env/**'"]);
     }
 
     #[test]
     fn models_filter_names_each_crate_that_a_model_task_selects() {
         let root = fixture().join("../..");
-        let ci = ci_jobs(&root);
-        let models = models(&ci);
-        let output = (ci.split("\n      models: >-\n").nth(1))
-            .and_then(|rest| rest.lines().next())
-            .expect("the changes job has a models output");
+        let ci = workflow(&root);
+        let ci: Vec<&str> = ci.lines().collect();
+        let (models, jobs) = (models(&ci), under(&ci, "jobs:"));
+        let output = under(
+            &under(&under(&jobs, "  changes:"), "    outputs:"),
+            "      models: >-",
+        );
         assert_eq!(
-            output.trim(),
-            "${{ github.event_name == 'push' && 'false' || \
-             steps.filter.outputs.models }}",
+            output,
+            ["        ${{ github.event_name == 'push' && 'false' || \
+                 steps.filter.outputs.models }}"],
             "the models output of the changes job is not the models filter on each PR"
         );
         let metadata = metadata(&root).unwrap();
@@ -287,11 +324,7 @@ mod tests {
             ("miri", miri::packages(&metadata).unwrap()),
         ];
         for (task, packages) in tasks {
-            let job: Vec<&str> = (ci.split(&format!("\n  {task}:\n")).nth(1))
-                .unwrap_or_else(|| panic!("ci.yaml has no job `{task}`"))
-                .lines()
-                .take_while(|line| line.starts_with("    "))
-                .collect();
+            let job = under(&jobs, &format!("  {task}:"));
             let on_models =
                 "    if: \"!cancelled() && needs.changes.outputs.models != 'false'\"";
             let run = format!("run: cargo xtask {task}");
@@ -327,7 +360,8 @@ mod tests {
     #[test]
     fn models_filter_names_each_workspace_crate_that_miri_runs() {
         let root = fixture().join("../..");
-        let (ci, metadata) = (ci_jobs(&root), metadata(&root).unwrap());
+        let (ci, metadata) = (workflow(&root), metadata(&root).unwrap());
+        let ci: Vec<&str> = ci.lines().collect();
         let models = models(&ci);
         let workspace = metadata["packages"].as_array().unwrap();
         // Each entry is a crate whose code Miri runs, and the crate that Miri tests.
