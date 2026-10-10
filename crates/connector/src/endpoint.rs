@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt;
+use std::mem;
 use std::ops::Deref;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
@@ -168,15 +169,16 @@ impl<K: Ord, S, T> Drop for Lease<K, S, T> {
             drop(endpoint);
             return;
         }
-        if let Some(slot) = table.slots.get_mut(&self.key) {
-            *slot = Slot::Busy(wait::Set::new());
-        }
+        let open = (table.slots.get_mut(&self.key))
+            .map(|slot| mem::replace(slot, Slot::Busy(wait::Set::new())));
         drop(table);
         let _free = Free {
             table: &self.table,
             key: Some(&self.key),
         };
         drop(endpoint);
+        // Its settings may panic at their drop, so they drop after the lock.
+        drop(open);
     }
 }
 
