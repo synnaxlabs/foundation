@@ -448,8 +448,8 @@ impl Network {
 
     /// Connects from the peer to [`Self::listening`], and runs [`hold`] on the
     /// stream.
-    fn dial_and_hold(&self, delay: Span, bytes: usize) -> Arc<Mutex<usize>> {
-        let taken = Arc::new(Mutex::new(0));
+    fn dial_and_hold(&self, delay: Span, bytes: usize) -> Arc<AtomicUsize> {
+        let taken = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&taken);
         let net = self.peer.net();
         let clock = self.peer.clock();
@@ -470,8 +470,8 @@ impl Network {
     }
 
     /// Accepts one stream on the peer, and runs [`hold`] on it.
-    fn accept_and_hold(&self, delay: Span, bytes: usize) -> Arc<Mutex<usize>> {
-        let taken = Arc::new(Mutex::new(0));
+    fn accept_and_hold(&self, delay: Span, bytes: usize) -> Arc<AtomicUsize> {
+        let taken = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&taken);
         self.accept(move |stream, clock| hold(stream, clock, delay, bytes, count));
         taken
@@ -558,7 +558,7 @@ async fn hold(
     clock: Clock,
     delay: Span,
     bytes: usize,
-    taken: Arc<Mutex<usize>>,
+    taken: Arc<AtomicUsize>,
 ) {
     clock.sleep(delay).await;
     let say = vec![7; bytes];
@@ -572,7 +572,7 @@ async fn hold(
         });
         let Some(n) = write.await else { break };
         sent += n.expect("the write works");
-        *taken.lock().expect("no panic under the lock") = sent;
+        taken.store(sent, Ordering::Relaxed);
     }
     clock.sleep(Span::from_nanos(1_000_000_000_000)).await;
 }
@@ -2084,10 +2084,7 @@ fn only_a_stream_that_reads_holds_a_read_buffer() {
             (opened, side.buffers())
         })
         .expect("the run ends");
-    assert_eq!(
-        buffers,
-        (vec![(1, 0), (2, 0)], vec![(1, 0), (3, READ_BYTES)])
-    );
+    assert_eq!(buffers, (vec![(1, 0), (2, 0)], vec![(1, 0), (3, 64 << 10)]));
 }
 
 #[test]
@@ -2230,7 +2227,8 @@ fn the_delete_of_a_server_that_is_not_stopped_panics() {
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
             assert_eq!(status, Status::GOOD);
-            // SAFETY: the server lives on the loop, and the test deletes it after.
+            // SAFETY: the server lives on the loop. The panic of a server that is not
+            // stopped comes before the delete, so the server lives after it.
             let delete = unsafe { side.manager.delete_server(server) };
             let panic = caught(delete).await.expect_err("the delete panics");
             // SAFETY: the server lives.
@@ -2798,7 +2796,7 @@ impl Open {
         network: &mut Network,
         delay: Span,
         bytes: usize,
-        body: impl FnOnce(Side, usize, Arc<Mutex<usize>>) -> F + Send + 'static,
+        body: impl FnOnce(Side, usize, Arc<AtomicUsize>) -> F + Send + 'static,
     ) -> T
     where
         T: Send + 'static,
@@ -2854,7 +2852,7 @@ fn received(network: &mut Network, open: Open) -> usize {
     let delay = Span::from_nanos(3_600_000_000);
     open.run(network, delay, 1 << 20, |side, _, taken| async move {
         side.clock.sleep(Span::from_nanos(2_000_000_000)).await;
-        let taken = *taken.lock().expect("no panic under the lock");
+        let taken = taken.load(Ordering::Relaxed);
         // The block holds all of `side`, not only its clock, so its streams live.
         drop(side);
         taken
