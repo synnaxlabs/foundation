@@ -946,9 +946,10 @@ fn check_refuses_each_connector_that_the_kinds_refuse() {
 }
 
 /// Only an index that a connector implies takes the connector's place. A plan can
-/// define a status data name as an index, and it is placed on its own.
+/// define a status data name as an index, and it is placed as each index that the
+/// connector writes.
 #[test]
-fn check_places_an_index_at_a_status_data_name_on_its_own() {
+fn check_places_an_index_at_a_status_data_name_as_one_that_the_connector_writes() {
     let text = format!("{COUNTED}{}", placement("c", "\"c\"", "n"));
     let entries = config::check(&documents(&[&text]), &kinds()).expect("entries");
     let mut definitions = made(&entries);
@@ -960,12 +961,12 @@ fn check_places_an_index_at_a_status_data_name_on_its_own() {
     let members = BTreeSet::from([name("n")]);
     let found = config::plan::check(&definitions, &members, &kinds());
     let expected = (
-        "config.unplaced",
+        "config.split-placement",
         None,
-        "no placement selects the index, and no connector writes it".into(),
-        "Select the index with a placement that names a `home`, or write it with a \
-         connector"
+        "no placement selects the index `c.status.state`, but the placement `c` wins \
+         for the connector `c`"
             .into(),
+        "Make the placement `c` win for the connector `c` and its indexes".into(),
     );
     assert_eq!(problems(found.map(|()| unreachable())), [expected]);
 }
@@ -2989,10 +2990,10 @@ fn refuses_each_block_at_the_name_of_a_status_channel() {
     assert_eq!(found, expected);
 }
 
-/// A connector whose name repeats implies no channel, so the order of the files changes
-/// no problem.
+/// Of the connectors at a name that repeats, the first in span order implies its
+/// channels, so the order of the files changes no problem.
 #[test]
-fn implies_no_channel_of_a_connector_whose_name_repeats() {
+fn implies_the_channels_of_the_first_connector_at_a_name_that_repeats() {
     let uncounted = COUNTED.replace("  counts = [\"confirmed\"]\n", "");
     let channel = "channel \"c.status.confirmed\" {\n  data_type = \"u8\"\n  \
                    index = \"a.time\"\n}\n";
@@ -3005,10 +3006,11 @@ fn implies_no_channel_of_a_connector_whose_name_repeats() {
             .map(|diagnostic| (diagnostic.code.as_str().to_owned(), diagnostic.span))
             .collect()
     };
-    let expected = [(
-        "config.duplicate-name".to_owned(),
-        documents[1].blocks[0].labels[0].span,
-    )];
+    let span = |document: &Document| document.blocks[0].labels[0].span;
+    let expected = [
+        ("config.duplicate-name".to_owned(), span(&documents[1])),
+        ("config.implied-channel".to_owned(), span(&documents[3])),
+    ];
     assert_eq!(codes(&documents), expected);
     assert_eq!(codes(&reversed), expected);
 }
@@ -3056,6 +3058,69 @@ fn refuses_a_connector_that_writes_its_own_status_channel() {
         text: "the connector".into(),
     });
     assert_eq!(found, [expected]);
+}
+
+/// The definitions of `COUNTED`, with a connector `d` of the kind `writer` on `node`
+/// that writes `writes`.
+fn with_writer(node: &str, writes: &str) -> BTreeMap<Name, Stored> {
+    let entries = config::check(&documents(&[COUNTED]), &kinds()).expect("entries");
+    let mut definitions = made(&entries);
+    let text = format!(
+        "connector \"d\" {{\n  kind = \"writer\"\n  node = \"{node}\"\n  \
+         writes = [\"{writes}\"]\n}}\n"
+    );
+    let alone = config::check(&documents(&[&text]), &kinds()).expect("d alone");
+    let d = made(&alone).remove(&name("d")).expect("d");
+    definitions.insert(name("d"), d);
+    definitions
+}
+
+/// `check` refuses a connector that writes a status channel of another on any node.
+#[test]
+fn check_refuses_a_connector_that_writes_a_status_channel_of_another() {
+    let members = BTreeSet::from([name("n"), name("m")]);
+    for node in ["m", "n"] {
+        let definitions = with_writer(node, "c.status.state");
+        let found = config::plan::check(&definitions, &members, &kinds());
+        let expected = (
+            "config.implied-channel",
+            None,
+            "the connector `c` implies the channel `c.status.state`, so the connector \
+             `d` cannot write it"
+                .into(),
+            "Write another channel from the connector `d`".into(),
+        );
+        assert_eq!(problems(found.map(|()| unreachable())), [expected]);
+    }
+}
+
+/// A connector writes its status index, so a channel on that index that another
+/// connector writes on another node leaves the index with no one home.
+#[test]
+fn check_counts_a_connector_as_a_writer_of_its_status_index() {
+    let mut definitions = with_writer("m", "x");
+    let Some(Stored::Channel(index)) = definitions.get(&name("c.status.time")) else {
+        panic!("the status index");
+    };
+    let index = index.key;
+    let scalar = DataType::Sample(Type::Scalar(Scalar::F64));
+    let data = Data::new(name("c.status.time"), None, scalar, None).expect("no unit");
+    let x = Channel {
+        key: Key::from_u128(999),
+        kind: spec::channel::Kind::Data(data).map(|_| index),
+    };
+    definitions.insert(name("x"), Stored::Channel(x));
+    let members = BTreeSet::from([name("n"), name("m")]);
+    let found = config::plan::check(&definitions, &members, &kinds());
+    let expected = (
+        "config.writer-nodes",
+        None,
+        "connectors on the nodes `n` and `m` write the index `c.status.time`, so it has \
+         no one home"
+            .into(),
+        "Run each connector that writes `c.status.time` on one node".into(),
+    );
+    assert_eq!(problems(found.map(|()| unreachable())), [expected]);
 }
 
 #[test]

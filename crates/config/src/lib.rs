@@ -101,8 +101,8 @@ pub struct Entry {
 /// `config.long-name` at the label of a connector with a status name longer than
 /// [`Name::MAX_BYTES`]. `config.implied-channel` at the label of each block whose key
 /// in the map is, in any ASCII case, a status channel, and at the label of each
-/// connector whose kind writes one, with a note at the connector of the channel. A
-/// connector whose name repeats hides the problems of its status channels.
+/// connector whose kind writes one, with a note at the connector of the channel. Of
+/// the connectors at one key, only the first in span order has status channels.
 pub fn check(
     documents: &[Document],
     kinds: &Table,
@@ -143,25 +143,33 @@ fn checked<'a>(
         found
             .diagnostics
             .extend(read::unknown(document, "a file", &[], &keywords));
-        for block in &document.blocks {
-            let Some((kind, check_block)) = KINDS
-                .iter()
-                .find(|(kind, _)| kind.as_str() == &*block.keyword)
-            else {
-                // `read::unknown` reported it.
-                continue;
+    }
+    let mut blocks: Vec<_> = documents
+        .iter()
+        .flat_map(|document| &document.blocks)
+        .collect();
+    // At a repeated key, the first block in span order is kept, whatever the order of
+    // `documents`.
+    blocks.sort_by_key(|block| block.labels.first().and_then(|label| label.span));
+    for block in blocks {
+        let Some((kind, check_block)) = KINDS
+            .iter()
+            .find(|(kind, _)| kind.as_str() == &*block.keyword)
+        else {
+            // `read::unknown` reported it.
+            continue;
+        };
+        let key = found.key(block, *kind);
+        let key = key.filter(|(key, _)| !found.entries.contains_key(key));
+        let name = key.as_ref().map(|(name, _)| name);
+        let definition = check_block(&mut found, block, name);
+        if let (Some((key, label_span)), Some(definition)) = (key, definition) {
+            let entry = Entry {
+                definition,
+                label_span,
             };
-            let key = found.key(block, *kind);
-            let name = key.as_ref().map(|(name, _)| name);
-            let definition = check_block(&mut found, block, name);
-            if let (Some((key, label_span)), Some(definition)) = (key, definition) {
-                let entry = Entry {
-                    definition,
-                    label_span,
-                };
-                found.blocks.insert(key.clone(), block);
-                found.entries.insert(key, entry);
-            }
+            found.blocks.insert(key.clone(), block);
+            found.entries.insert(key, entry);
         }
     }
     connector::imply(&mut found);

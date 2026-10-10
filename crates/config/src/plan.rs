@@ -99,8 +99,9 @@ pub fn plan(
 /// 1. `config.private-key` for each string of a definition that holds a private key.
 /// 2. The diagnostics of `kinds` for each connector whose kind or config it refuses,
 ///    and `config.long-name` for each with a status name that is too long, then
-///    `config.duplicate-name`, whose earlier name is the first in name order,
-///    and `config.subject-is-connector`.
+///    `config.implied-channel` for each connector whose kind writes a status channel,
+///    `config.duplicate-name`, whose earlier name is the first in name order, and
+///    `config.subject-is-connector`.
 /// 3. Each problem of the rules of [`plan`] from `config.unplaced` to
 ///    `config.unknown-node`.
 pub fn check(
@@ -133,6 +134,7 @@ fn problems(
     }
     let mut diagnostics = Vec::new();
     let writes = writes(definitions, kinds, &mut diagnostics);
+    diagnostics.extend(connector::writers(&writes, |_| None));
     diagnostics.extend(duplicate::in_definitions(definitions));
     diagnostics.extend(subject::not_connectors(definitions));
     if !diagnostics.is_empty() {
@@ -425,7 +427,7 @@ impl<'a> Model<'a> {
 
     /// Reports whether `connector` writes `index` or a channel on it.
     fn feeds(&self, connector: &Connector<'_>, index: &Name) -> bool {
-        connector.writes.channels().iter().any(|name| {
+        connector.writes.names().any(|name| {
             name == index || self.index_of.get(name).copied() == Some(index)
         })
     }
@@ -517,7 +519,7 @@ fn wrong(found: &Found<'_>, channels: &BTreeMap<Name, Channel>) -> Vec<Diagnosti
 
 /// An index, as the rules after `config.wrong-channel` read it.
 struct Index<'f> {
-    /// Each connector whose kind writes the index or a channel on it, in name order.
+    /// Each connector that writes the index or a channel on it, in name order.
     writers: Vec<&'f Connector<'f>>,
     /// Where [`place`] puts the index, with the node of its first writer, or, for an
     /// index that a connector implies, where it puts the connector.
