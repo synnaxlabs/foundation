@@ -481,8 +481,8 @@ fn named_outside_tests(
 }
 
 /// Each file that a build of the library of the crate at `root` reads, and the cfgs
-/// that the builds set, sorted. The builds are those for the target of this build,
-/// with its target features, and with each set of the cfgs that the crate tests and
+/// that the builds set, sorted. The builds are those on this host, with the target
+/// features of this build, and with each set of the cfgs that the crate tests and
 /// rustc does not know (features among them), each with debug assertions on and off
 /// and with each panic strategy. rustc names each such cfg in a build that reads the
 /// file that tests it. A file under a known value of a target cfg that this build does
@@ -859,7 +859,7 @@ fn the_scan_reads_no_cfg_from_a_quoted_comment() {
     let named = named_outside_tests(&root, |name| name == "named");
     assert_eq!(named, [at(&root, "src/o.rs")]);
     assert_eq!(built(&root).1, ["feature=\"foo\""]);
-    let lib = "#[cfg(target_os = \"nope\")] // as for `feature` x\nmod f;\n";
+    let lib = "#[cfg(target_os = \"nope\")] // = note: as for `feature` x\nmod f;\n";
     let root = create_tree("hidden", &[("src/lib.rs", lib), ("src/f.rs", "")]);
     let refused = std::panic::catch_unwind(|| named_outside_tests(&root, |_| false));
     let message = *refused.unwrap_err().downcast::<String>().unwrap();
