@@ -447,124 +447,72 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
 
 /// The `src/` directory of the crate.
 fn src() -> std::path::PathBuf {
-    std::path::Path::new(ROOT).join("src")
+    std::path::Path::new(ROOT)
+        .join("src")
+        .canonicalize()
+        .unwrap()
 }
 
-/// Each identifier for which `named` holds, as `path: identifier`, in each `.rs`
-/// file under `src` that a `#[cfg(test)]` module declaration does not cut off.
-/// Comments and inline modules count. A declaration with a `path` attribute, or with
-/// a name that another `mod` at column 0 of its file also has, cuts off nothing.
-///
-/// # Panics
-///
-/// When a file that the scan reads has a `path` attribute that is not alone on its
-/// line over a `#[cfg(test)]` declaration, as it can name a file outside `src/`.
+/// Each identifier for which `named` holds, as `path: identifier`, in the Rust
+/// outside tests: each `.rs` file under `src` and each file that rustc reads for the
+/// crate at `src/lib.rs` with every feature, less each file that rustc reads only for
+/// a test build on this host. Comments and inline modules count.
 fn named_outside_tests(
     src: &std::path::Path,
     named: impl Fn(&str) -> bool,
 ) -> Vec<String> {
-    let files = files_under(src, "rs");
-    let mut cut = Vec::new();
-    for path in &files {
-        let text = std::fs::read_to_string(path).unwrap();
-        let dir = match path.file_stem().unwrap().to_str().unwrap() {
-            "lib" | "mod" => path.parent().unwrap().to_path_buf(),
-            stem => path.with_file_name(stem),
-        };
-        let lines: Vec<_> = text.lines().collect();
-        let declared: Vec<_> = lines
-            .iter()
-            .enumerate()
-            .filter_map(|(at, line)| Some((at, declared(line)?)))
-            .collect();
-        for &(at, module) in &declared {
-            let pathed = attributes_above(&lines, at)
-                .any(|line| words(line).any(|word| word == "path"));
-            let shared = lines.iter().enumerate().any(|(other, line)| {
-                let mut words = words(line).filter(|word| !word.is_empty());
-                other != at
-                    && !line.starts_with(char::is_whitespace)
-                    && words.by_ref().any(|word| word == "mod")
-                    && words.next() == Some(module)
-            });
-            if under_cfg_test(&lines, at) && !pathed && !shared {
-                cut.extend([dir.join(format!("{module}.rs")), dir.join(module)]);
-            }
-        }
-    }
-    let kept: Vec<_> = files
-        .iter()
-        .filter(|path| !cut.iter().any(|cut| path.starts_with(cut)))
-        .collect();
-    for path in &kept {
-        let text = std::fs::read_to_string(path).unwrap();
-        let lines: Vec<_> = text.lines().collect();
-        for (at, attribute) in attributes(&text) {
-            let item = at
-                + lines[at..]
-                    .iter()
-                    .take_while(|line| line.trim_start().starts_with("#["))
-                    .count();
-            assert!(
-                !words(attribute).any(|word| word == "path")
-                    || lines[at] == attribute && under_cfg_test(&lines, item),
-                "{}:{}: the scan does not follow `#[path]` outside tests",
-                path.display(),
-                at + 1
-            );
-        }
-    }
-    kept.into_iter()
-        .flat_map(|path| named_in(path, &named))
+    let built = read_by_rustc(src, &[]);
+    let tested = read_by_rustc(src, &["--test"]);
+    let mut files = files_under(src, "rs");
+    files.extend(built.iter().cloned());
+    files.sort();
+    files.dedup();
+    files
+        .into_iter()
+        .filter(|path| built.contains(path) || !tested.contains(path))
+        .flat_map(|path| named_in(&path, &named))
         .collect()
 }
 
-/// The module that `line` declares in a file of its own, such as `t` for `mod t;` at
-/// column 0.
-fn declared(line: &str) -> Option<&str> {
-    line.trim_start_matches("pub(crate) ")
-        .trim_start_matches("pub ")
-        .strip_prefix("mod ")?
-        .strip_suffix(';')
-}
-
-/// Each attribute of `text` from its `#[` to its closing `]`, also one over several
-/// lines or after another on its line, with the index of its first line.
-fn attributes(text: &str) -> impl Iterator<Item = (usize, &str)> {
-    text.match_indices("#[").map(move |(start, _)| {
-        let mut depth = 0;
-        let end = text[start + 1..]
-            .char_indices()
-            .find_map(|(at, c)| {
-                match c {
-                    '[' => depth += 1,
-                    ']' => depth -= 1,
-                    _ => {}
-                }
-                (depth == 0).then_some(start + 1 + at + 1)
-            })
-            .unwrap_or(text.len());
-        (text[..start].matches('\n').count(), &text[start..end])
-    })
-}
-
-/// The lines of the attributes and doc comments above the item at line `at`.
-fn attributes_above<'a>(lines: &[&'a str], at: usize) -> impl Iterator<Item = &'a str> {
-    lines[..at].iter().rev().copied().take_while(|line| {
-        ["#[", "///", ")]", " "]
-            .iter()
-            .any(|start| line.starts_with(start))
-    })
-}
-
-/// Whether the attributes above the item at line `at` of `lines` hold `#[cfg(test)]`.
-fn under_cfg_test(lines: &[&str], at: usize) -> bool {
-    attributes_above(lines, at).any(|line| line == "#[cfg(test)]")
-}
-
-/// The identifiers and numbers of `text`.
-fn words(text: &str) -> impl Iterator<Item = &str> {
-    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+/// Each file that rustc reads to expand the crate at `src/lib.rs` with every feature
+/// of `Cargo.toml` and `flags`. No other crate is given, so its names fail to resolve,
+/// but rustc lists the files of the crate still.
+fn read_by_rustc(src: &std::path::Path, flags: &[&str]) -> Vec<std::path::PathBuf> {
+    let manifest =
+        std::fs::read_to_string(std::path::Path::new(ROOT).join("Cargo.toml")).unwrap();
+    let features = manifest
+        .lines()
+        .skip_while(|line| *line != "[features]")
+        .skip(1)
+        .take_while(|line| !line.starts_with('['))
+        .filter_map(|line| line.split_once(" = "))
+        .flat_map(|(feature, _)| {
+            ["--cfg".to_owned(), format!("feature=\"{feature}\"")]
+        });
+    let output = std::process::Command::new("rustc")
+        .args([
+            "--edition",
+            "2024",
+            "--crate-type",
+            "lib",
+            "--emit",
+            "dep-info=-",
+        ])
+        .args(features)
+        .args(flags)
+        .arg(src.join("lib.rs"))
+        .output()
+        .unwrap();
+    let deps = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        !deps.is_empty(),
+        "rustc gives no files: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    deps.lines()
+        .filter_map(|line| line.strip_suffix(':'))
+        .map(|path| std::fs::canonicalize(path.replace("\\ ", " ")).unwrap())
+        .collect()
 }
 
 /// Each file under `dir` with the extension `extension`, sorted.
@@ -583,6 +531,11 @@ fn files_under(dir: &std::path::Path, extension: &str) -> Vec<std::path::PathBuf
     }
     files.sort();
     files
+}
+
+/// The identifiers and numbers of `text`.
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
 }
 
 /// Each identifier of `path` for which `named` holds, as `path: identifier`.
@@ -604,136 +557,75 @@ fn the_scan_names_only_the_files_outside_tests() {
     assert_eq!(named, [at("bench.rs"), at("ffi.rs")]);
 }
 
-/// A file under `#[cfg(test)]` is cut off, and the file declared after it is scanned.
+/// A file that only a test build reads is cut off, with the files that it declares.
 #[test]
-fn the_scan_cuts_off_only_the_module_under_cfg_test() {
-    let src = create_tree(
+fn the_scan_cuts_off_only_the_files_of_a_test_build() {
+    let root = create_tree(
         "gated",
         &[
-            ("lib.rs", "#[cfg(test)]\n#[allow(unused)]\nmod t;\nmod p;\n"),
-            ("t.rs", "named"),
-            ("p.rs", "named"),
-            ("t/u.rs", "named"),
+            (
+                "src/lib.rs",
+                "#[cfg(test)]\n#[allow(unused)]\nmod t;\nmod p;\n",
+            ),
+            ("src/t.rs", "mod u;"),
+            ("src/t/u.rs", "fn named() {}"),
+            ("src/p.rs", "fn named() {}"),
         ],
     );
-    let named = named_outside_tests(&src, |name| name == "named");
-    assert_eq!(named, [format!("{}: named", src.join("p.rs").display())]);
+    let named = named_outside_tests(&root.join("src"), |name| name == "named");
+    assert_eq!(named, [at(&root, "src/p.rs")]);
 }
 
-/// The scan fails on a `#[path]` module outside tests, which can name a file outside
-/// `src/`.
+/// The scan reads a file outside `src/` that a `path` attribute, also under
+/// `cfg_attr`, or an `include!` gives to the crate, and cuts off the file that the
+/// test build reads in its place.
 #[test]
-#[should_panic(expected = "lib.rs:1: the scan does not follow `#[path]` outside tests")]
-fn the_scan_refuses_a_path_module_outside_tests() {
-    let src = create_tree("path", &[("lib.rs", "#[path = \"../p.rs\"]\nmod p;\n")]);
-    named_outside_tests(&src, |_| true);
-}
-
-/// A `path` inside `cfg_attr` over several lines is refused.
-#[test]
-#[should_panic(expected = "lib.rs:1: the scan does not follow `#[path]` outside tests")]
-fn the_scan_refuses_a_path_under_cfg_attr() {
-    let src = create_tree(
-        "cfg_attr",
-        &[(
-            "lib.rs",
-            "#[cfg_attr(\n    not(test),\n    path = \"../p.rs\"\n)]\nmod p;\n",
-        )],
+fn the_scan_reads_each_file_that_the_crate_includes() {
+    let root = create_tree(
+        "path",
+        &[
+            (
+                "src/lib.rs",
+                "#[path = \"../p.rs\"]\nmod p;\n\
+                 #[cfg_attr(not(test), path = \"../q.rs\")]\nmod q;\n\
+                 include!(\"../i.rs\");\n",
+            ),
+            ("p.rs", "fn named() {}"),
+            ("q.rs", "fn named() {}"),
+            ("i.rs", "fn named() {}"),
+            ("src/q.rs", "fn named() {}"),
+        ],
     );
-    named_outside_tests(&src, |_| true);
-}
-
-/// A `path` after another attribute on its line is refused, also over a
-/// `#[cfg(test)]` declaration.
-#[test]
-#[should_panic(expected = "lib.rs:2: the scan does not follow `#[path]` outside tests")]
-fn the_scan_refuses_a_path_after_another_attribute() {
-    let src = create_tree(
-        "one_line",
-        &[(
-            "lib.rs",
-            "#[cfg(test)]\n#[allow(unused)] #[path = \"../p.rs\"]\nmod p;\n",
-        )],
+    let named = named_outside_tests(&root.join("src"), |name| name == "named");
+    assert_eq!(
+        named,
+        [at(&root, "i.rs"), at(&root, "p.rs"), at(&root, "q.rs")]
     );
-    named_outside_tests(&src, |_| true);
 }
 
-/// A `#[cfg(test)]` declaration with `#[path]` cuts off neither the file of its name
-/// nor the file that it names.
+/// A test mock that a `path` attribute gives in place of a module is cut off, and
+/// the module is read.
 #[test]
 fn the_scan_reads_the_module_that_a_test_mock_shadows() {
-    let src = create_tree(
+    let root = create_tree(
         "mock",
         &[
             (
-                "lib.rs",
-                "#[cfg(test)]\n#[path = \"mock.rs\"]\nmod clock;\n",
+                "src/lib.rs",
+                "#[cfg(test)]\n#[path = \"mock.rs\"]\nmod clock;\n\
+                 #[cfg(not(test))]\nmod clock;\n",
             ),
-            ("mock.rs", "named"),
-            ("clock.rs", "named"),
+            ("src/mock.rs", "fn named() {}"),
+            ("src/clock.rs", "fn named() {}"),
         ],
     );
-    let named = named_outside_tests(&src, |name| name == "named");
-    let at = |file: &str| format!("{}: named", src.join(file).display());
-    assert_eq!(named, [at("clock.rs"), at("mock.rs")]);
+    let named = named_outside_tests(&root.join("src"), |name| name == "named");
+    assert_eq!(named, [at(&root, "src/clock.rs")]);
 }
 
-/// A `#[path]` alone on its line passes over a `#[cfg(test)]` below it, and its
-/// declaration cuts off nothing.
-#[test]
-fn the_scan_follows_a_path_above_cfg_test() {
-    let src = create_tree(
-        "path_above",
-        &[
-            ("lib.rs", "#[path = \"x.rs\"]\n#[cfg(test)]\nmod x;\n"),
-            ("x.rs", "named"),
-        ],
-    );
-    let named = named_outside_tests(&src, |name| name == "named");
-    assert_eq!(named, [format!("{}: named", src.join("x.rs").display())]);
-}
-
-/// A `#[cfg(test)]` declaration cuts off nothing when another declaration of its file
-/// has its name.
-#[test]
-fn the_scan_reads_a_module_that_two_declarations_share() {
-    let src = create_tree(
-        "shared",
-        &[
-            (
-                "lib.rs",
-                "#[cfg(test)]\nmod clock;\n#[cfg(not(test))]\nmod clock;\n",
-            ),
-            ("clock.rs", "named"),
-        ],
-    );
-    let named = named_outside_tests(&src, |name| name == "named");
-    assert_eq!(
-        named,
-        [format!("{}: named", src.join("clock.rs").display())]
-    );
-}
-
-/// A `#[cfg(test)]` declaration cuts off nothing when an inline module or another
-/// visibility has its name.
-#[test]
-fn the_scan_reads_a_module_that_an_inline_or_pub_super_module_shares() {
-    let src = create_tree(
-        "inline",
-        &[
-            (
-                "lib.rs",
-                "#[cfg(test)]\nmod clock;\n#[cfg(not(test))]\nmod clock {\n    mod real;\n}\n\
-                 #[cfg(test)]\npub mod time;\n#[cfg(not(test))]\npub(super) mod time;\n",
-            ),
-            ("clock.rs", ""),
-            ("clock/real.rs", "named"),
-            ("time.rs", "named"),
-        ],
-    );
-    let named = named_outside_tests(&src, |name| name == "named");
-    let at = |file: &str| format!("{}: named", src.join(file).display());
-    assert_eq!(named, [at("clock/real.rs"), at("time.rs")]);
+/// How [`named_outside_tests`] gives the name `named` in `file` of `root`.
+fn at(root: &std::path::Path, file: &str) -> String {
+    format!("{}: named", root.join(file).display())
 }
 
 /// A directory under `OUT_DIR` named `name` that holds only `files`.
@@ -749,7 +641,7 @@ fn create_tree(name: &str, files: &[(&str, &str)]) -> std::path::PathBuf {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, text).unwrap();
     }
-    dir
+    dir.canonicalize().unwrap()
 }
 
 /// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
