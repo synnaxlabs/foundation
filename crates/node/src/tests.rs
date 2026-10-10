@@ -4646,7 +4646,8 @@ mod port {
 
         /// A task that panics after the group stops, before the node sees the stop:
         /// `join` gives the panic. At [`WRITE`], five idle tasks that wake at that
-        /// instant make the sim run the group's stop first.
+        /// instant make the sim run the group's stop, then this task, before the node
+        /// sees the stop.
         #[test]
         fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
