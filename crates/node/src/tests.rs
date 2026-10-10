@@ -5551,7 +5551,7 @@ mod name {
             (sim, host, found)
         };
         for seed in 0..8 {
-            let after = (0..)
+            let after = (0..10_000_000)
                 .step_by(5_000)
                 .map(Span::from_nanos)
                 .find(|&after| crashed(seed, after).2 == Ok(name("edge")))
