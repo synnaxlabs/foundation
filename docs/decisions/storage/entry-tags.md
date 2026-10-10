@@ -19,8 +19,13 @@
   path and +93 B for each log
   (https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094187306); the
   offsets from the recovery walk only, which give a later call of `newest` a stale
-  record. Decided by `laptop.architect` (#2236,
+  record. The offsets beside the logs cost +0.27 to +0.79 ns for each durable entry,
+  and 19.5 to 25.7 B for each log with a tagged record
+  (https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094277124); P1
+  accepts up to +0.8 ns. Decided by `laptop.architect` (#2236,
   https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6093837946,
-  2026-10-10T04:37:55Z, and
+  2026-10-10T04:37:55Z,
   https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094205375,
-  2026-10-10T05:27:21Z).
+  2026-10-10T05:27:21Z, and
+  https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094287815,
+  2026-10-10T05:39:15Z).
