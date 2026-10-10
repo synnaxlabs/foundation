@@ -147,7 +147,8 @@ mod tests {
         }
     }
 
-    /// Each commit moves the durable tail of each index past one more entry.
+    /// Each commit moves the durable tail of each index past one more entry, and
+    /// each log keeps one run.
     #[test]
     fn each_commit_of_the_logs_syncs_one_entry_of_each_index() {
         let mut logs = Logs::new(2);
@@ -157,6 +158,7 @@ mod tests {
         for n in 0..2 {
             let slot = Slot::new(n);
             assert_eq!(logs.inner.durable(slot, Path::Live).seq, 3, "index {n}");
+            assert_eq!(logs.inner.runs(slot, Path::Live).count(), 1, "index {n}");
         }
     }
 }
