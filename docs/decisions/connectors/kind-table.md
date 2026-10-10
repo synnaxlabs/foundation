@@ -28,3 +28,10 @@
   https://github.com/synnaxlabs/foundation/pull/2150#issuecomment-6082402451; for
   `backoff` and `error`, `laptop.architect-2`, 2026-10-08T06:29:21Z:
   https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6053869186).
+  `node` builds the table once, in `kinds`, and gives `ops::Node` an
+  `Arc<kind::Table>`, the type that `supervisor::Config` takes, so that each kind is
+  one value for the life of the process (`laptop.architect-2`, 2026-10-10T15:29:33Z:
+  https://github.com/synnaxlabs/foundation/pull/2252#issuecomment-6099106464).
+  Trigger: when `node` runs connectors (PR 2 of #1156), the supervisors get the same
+  `Arc`, from the one wiring site (`laptop.director`, 2026-10-09T05:05:48Z:
+  https://github.com/synnaxlabs/foundation/issues/1156#issuecomment-6074666909).

@@ -11,7 +11,7 @@ use spec::definition::Definition;
 use types::name::Name;
 
 use crate::error::{Error, Place};
-use crate::front_end::{self, File, FrontEnd};
+use crate::front_end::{self, File, FrontEnds};
 
 #[cfg(test)]
 mod tests;
@@ -32,7 +32,7 @@ pub(crate) fn plan(
     base: spec::Pointer,
     applied: &BTreeMap<Name, Definition>,
     members: &BTreeSet<Name>,
-    front_ends: &BTreeMap<&'static str, FrontEnd>,
+    front_ends: &FrontEnds,
     kinds: &connector::kind::Table,
 ) -> Result<(Output, config::plan::Plan), Error> {
     let paths: Vec<PathBuf> = files.iter().map(|file| file.path.clone()).collect();

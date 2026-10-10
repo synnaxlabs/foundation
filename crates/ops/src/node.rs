@@ -1,13 +1,13 @@
 //! The handles that the operations on one node use.
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde_json::Value;
 use types::channel;
 
-use crate::front_end::{File, FrontEnd};
+use crate::front_end::{File, FrontEnds};
 use crate::{apply, plan, used};
 
 #[cfg(test)]
@@ -18,26 +18,21 @@ mod tests;
 pub struct Node {
     mesh: mesh::Mesh,
     key: Box<dyn Fn() -> channel::Key>,
-    front_ends: BTreeMap<&'static str, FrontEnd>,
-    kinds: connector::kind::Table,
+    front_ends: FrontEnds,
+    kinds: Arc<connector::kind::Table>,
 }
 
 impl Node {
     /// `key` gives the key of each new channel: each call gives a key that no channel
-    /// holds and no earlier call gave. `front_ends` maps each file extension to its
-    /// syntax, and `kinds` holds each connector kind of the node.
-    ///
-    /// # Panics
-    ///
-    /// When `front_ends` is empty.
+    /// holds and no earlier call gave. `front_ends` gives the syntax of each file
+    /// extension, and `kinds` holds each connector kind of the node.
     #[must_use]
     pub fn new(
         mesh: mesh::Mesh,
         key: impl Fn() -> channel::Key + 'static,
-        front_ends: BTreeMap<&'static str, FrontEnd>,
-        kinds: connector::kind::Table,
+        front_ends: FrontEnds,
+        kinds: Arc<connector::kind::Table>,
     ) -> Self {
-        assert!(!front_ends.is_empty(), "`ops::Node` needs a front end");
         Self {
             mesh,
             key: Box::new(key),
@@ -96,7 +91,7 @@ impl Node {
 impl fmt::Debug for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
-            .field("front_ends", &self.front_ends.keys())
+            .field("front_ends", &self.front_ends)
             .finish_non_exhaustive()
     }
 }

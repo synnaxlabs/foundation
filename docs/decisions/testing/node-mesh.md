@@ -131,8 +131,12 @@
   (`Rc<ops::Node>`), the value that `ops::serve` of #1744 takes, so the lab runs the
   production value and the node has one key maker. A new channel key is a UUIDv7 at mesh
   time. `ops::Node` holds the handles that the operation table uses: the mesh, the key
-  maker, the front ends, and the connector kinds, and `new` refuses an empty table of
-  front ends. `node` may take `config-hcl`, as the composition root. Trigger: when the
+  maker, the front ends, and the connector kinds. `new` takes `ops::FrontEnds`, which
+  holds at least one front end (`laptop.architect-2`, 2026-10-09T05:10:54Z,
+  https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6074720909).
+  Supersedes "`new` refuses an empty front-end table once" of
+  https://github.com/synnaxlabs/foundation/issues/1756#issuecomment-6072660664. `node`
+  may take `config-hcl`, as the composition root. Trigger: when the
   lab reaches the node through the CLI, remove `Node::operate` if nothing else calls it.
   Lost: a `call(body)` dispatch, which is a table entry of #1744; typed methods on
   `ops::Node` that make `Output`, `Applied`, `Error`, and `Problem` public; a `hub` that

@@ -26,7 +26,7 @@ use types::name::{Name, Prefix};
 use types::node::{self, SealKey};
 use types::time::Span;
 
-use crate::front_end::{File, FrontEnd};
+use crate::front_end::{File, FrontEnd, FrontEnds};
 
 pub(crate) const PLANT: &str =
     include_str!("../../acceptance/tests/it/fixtures/plant.hcl");
@@ -73,13 +73,13 @@ impl kind::Kind for Reader {
     }
 }
 
-pub(crate) fn front_ends() -> BTreeMap<&'static str, FrontEnd> {
-    BTreeMap::from([(
+pub(crate) fn front_ends() -> FrontEnds {
+    FrontEnds::new(
         "hcl",
         FrontEnd {
             read: config_hcl::read,
         },
-    )])
+    )
 }
 
 pub(crate) fn name(text: &str) -> Name {

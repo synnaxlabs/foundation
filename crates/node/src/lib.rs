@@ -27,7 +27,6 @@ mod task;
 #[cfg(not(loom))]
 mod tests;
 
-use std::collections::BTreeMap;
 use std::fmt;
 use std::future::poll_fn;
 use std::iter;
@@ -872,7 +871,8 @@ impl Serve {
                 transport: Rc::clone(&transport),
             });
             let ops = mesh.as_ref().map(|mesh| {
-                Rc::new(operations(mesh.clone(), time.clone(), entropy.clone()))
+                let (time, entropy) = (time.clone(), entropy.clone());
+                Rc::new(operations(mesh.clone(), time, entropy))
             });
             let hub = hub::Hub::new(hub::Config {
                 home,
@@ -919,20 +919,26 @@ fn channel_key(
     types::channel::Key::v7(at, u128::from_le_bytes(random))
 }
 
-/// The operations on `mesh`, whose keys [`channel_key`] makes.
+/// The operations on `mesh` with the connector kinds of [`kinds`], whose keys
+/// [`channel_key`] makes.
 fn operations(
     mesh: mesh::Mesh,
     time: clock::Reader,
     entropy: env::entropy::Entropy,
 ) -> ops::Node {
     let key = move || channel_key(&time, &entropy);
-    let front_ends = BTreeMap::from([(
+    let front_ends = ops::FrontEnds::new(
         "hcl",
         ops::FrontEnd {
             read: config_hcl::read,
         },
-    )]);
-    ops::Node::new(mesh, key, front_ends, connector::kind::Table::new())
+    );
+    ops::Node::new(mesh, key, front_ends, Arc::new(kinds()))
+}
+
+/// The connector kinds of this binary.
+fn kinds() -> connector::kind::Table {
+    connector::kind::Table::new().with("influx", connector_influx::Kind::default())
 }
 
 /// Gives `hub` what the spec that `mesh` uses defines, then returns a future that gives

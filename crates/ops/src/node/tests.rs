@@ -1,9 +1,10 @@
 use std::cell::Cell;
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use connector::kind::Table;
-use document::Source;
+use document::diagnostic::{Code, Diagnostic};
+use document::{Position, Span};
 use mesh::Mesh;
 use serde_json::{Value, json};
 use types::channel::Key;
@@ -11,20 +12,27 @@ use types::channel::Key;
 use super::Node;
 use crate::apply::Applied;
 use crate::common::{NODE, PLANT, Reader, fail_sync, front_ends, placed_site, solo};
-use crate::error::{Error, Problem};
-use crate::front_end::{self, File};
+use crate::error::Error;
+use crate::front_end::{File, FrontEnd, FrontEnds};
 use crate::plan::{self, Counts};
 use crate::used;
 
 /// The node of `mesh`, whose channel keys count from 1.
 fn create_node(mesh: Mesh) -> Node {
+    create_node_reading(mesh, front_ends())
+}
+
+/// The node of `mesh` that reads with `front_ends`, whose channel keys count from 1.
+fn create_node_reading(mesh: Mesh, front_ends: FrontEnds) -> Node {
     let made = Cell::new(0);
     let key = move || {
         made.set(made.get() + 1);
         Key::from_u128(made.get())
     };
-    Node::new(mesh, key, front_ends(), kinds())
+    Node::new(mesh, key, front_ends, Arc::new(kinds()))
 }
+
+const REFUSED: Code = Code::new("test.refused");
 
 fn kinds() -> Table {
     Table::new().with("influx", Reader).with("opcua", Reader)
@@ -54,19 +62,6 @@ async fn planned(mesh: &Mesh, files: Vec<(PathBuf, String)>) -> Value {
 
 fn site() -> Vec<(PathBuf, String)> {
     vec![(PathBuf::from("site.hcl"), placed_site())]
-}
-
-#[test]
-#[should_panic(expected = "`ops::Node` needs a front end")]
-fn refuses_an_empty_table_of_front_ends() {
-    solo(|_, mesh| async move {
-        drop(Node::new(
-            mesh,
-            || Key::from_u128(1),
-            BTreeMap::new(),
-            Table::new(),
-        ));
-    });
 }
 
 #[test]
@@ -137,13 +132,7 @@ fn plans_with_each_connector_kind_of_the_node() {
 #[test]
 fn gives_the_json_error_of_a_plan() {
     solo(|_, mesh| async move {
-        let node = create_node(mesh);
-        let files = vec![(PathBuf::from("site.txt"), placed_site())];
-        let error = node.plan(files).await.expect_err("an unknown extension");
-        let problem = front_end::unknown(Source(0), &front_ends());
-        let paths = [PathBuf::from("site.txt")];
-        let expected = Error::Config(vec![Problem::of(problem, &paths)]);
-        assert_eq!(error, expected.json());
+        assert_unknown(mesh, front_ends(), "`.hcl`").await;
     });
 }
 
@@ -165,7 +154,84 @@ fn gives_the_json_error_of_an_apply() {
 fn debug_names_each_front_end() {
     solo(|_, mesh| async move {
         let node = create_node(mesh);
-        assert_eq!(format!("{node:?}"), r#"Node { front_ends: ["hcl"], .. }"#);
+        let expected = r#"Node { front_ends: FrontEnds(["hcl"]), .. }"#;
+        assert_eq!(format!("{node:?}"), expected);
+        assert_eq!(
+            format!(
+                "{:?}",
+                FrontEnd {
+                    read: config_hcl::read
+                }
+            ),
+            "FrontEnd { .. }"
+        );
+    });
+}
+
+/// Plans a `.txt` file on a node of `mesh` that reads with `front_ends`, and asserts
+/// that its error names `extensions` in the fix.
+async fn assert_unknown(mesh: Mesh, front_ends: FrontEnds, extensions: &str) {
+    let node = create_node_reading(mesh, front_ends);
+    let files = vec![(PathBuf::from("site.txt"), placed_site())];
+    let error = node.plan(files).await.expect_err("an unknown extension");
+    let expected = json!({ "errors": [{
+        "code": "ops.unknown-extension",
+        "fix": format!("Use a file that ends in {extensions}"),
+        "message": "no config syntax reads this file",
+        "notes": [],
+        "place": { "column": 1, "file": "site.txt", "line": 1 },
+    }]});
+    assert_eq!(error, expected);
+}
+
+#[test]
+fn names_each_extension_of_the_table_in_the_fix() {
+    solo(|_, mesh| async move {
+        let two = front_ends().with(
+            "toml",
+            FrontEnd {
+                read: config_hcl::read,
+            },
+        );
+        assert_unknown(mesh.clone(), two.clone(), "`.hcl` or `.toml`").await;
+        let three = two.with(
+            "yaml",
+            FrontEnd {
+                read: config_hcl::read,
+            },
+        );
+        assert_unknown(mesh, three, "`.hcl`, `.toml`, or `.yaml`").await;
+    });
+}
+
+#[test]
+fn reads_with_the_last_front_end_of_an_extension() {
+    solo(|_, mesh| async move {
+        let refuse = FrontEnd {
+            read: |source, _| {
+                let start = Position {
+                    offset: 0,
+                    line: 0,
+                    column: 0,
+                };
+                Err(vec![Diagnostic::new(
+                    REFUSED,
+                    Span::new(source, start, start),
+                    "refused".to_owned(),
+                    "Fix it".to_owned(),
+                )])
+            },
+        };
+        let front_ends = FrontEnds::new("hcl", refuse).with(
+            "hcl",
+            FrontEnd {
+                read: config_hcl::read,
+            },
+        );
+        let node = create_node_reading(mesh.clone(), front_ends);
+        let expected = planned(&mesh, site()).await;
+        let (_, output) = node.plan(site()).await.expect("a plan");
+        assert_eq!(output, expected);
     });
 }
 

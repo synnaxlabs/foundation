@@ -870,6 +870,7 @@ dependencies = [
  "clock",
  "config-hcl",
  "connector",
+ "connector-influx",
  "crc32c",
  "document",
  "env",

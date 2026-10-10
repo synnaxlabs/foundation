@@ -2,12 +2,24 @@
   it takes `kinds`, and does not depend on `config-hcl` (K1). `ops::FrontEnd { read:
   fn(Source, &str) -> Result<Document, Vec<Diagnostic>> }` is `Copy` with no
   `#[non_exhaustive]`, so `node` builds it with a struct literal. An error from `read`
-  holds at least one problem. The table is a `BTreeMap<&'static str, FrontEnd>`, keyed
-  by the extension with no dot (`"hcl"`). The text after the last `.` of a file name
-  picks the front end. A file with no front end gives `ops.unknown-extension` at the
-  empty span at the start of the file, as DIAGNOSTICS says for a problem with a whole
-  file: the message is "no config syntax reads this file", and the fix names each
-  extension (`laptop.architect-2`, 2026-10-08T18:11:55Z,
+  holds at least one problem. The table is `ops::FrontEnds`, which holds at least one
+  front end, keyed by the extension with no dot (`"hcl"`) (`laptop.architect-2`,
+  2026-10-09T05:10:54Z,
+  https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6074720909).
+  `FrontEnd` and `FrontEnds` have a hand-written `Debug` (`FrontEnd { .. }`,
+  `FrontEnds(["hcl"])`), because a derive prints the address of `read`, which changes
+  from run to run (`laptop.architect-2`, 2026-10-10T15:29:33Z:
+  https://github.com/synnaxlabs/foundation/pull/2252#issuecomment-6099106464).
+  Supersedes the derived `Debug` of
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054035444 and
+  https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6074720909.
+  Supersedes "gets `front_ends: BTreeMap<&'static str, FrontEnd>`" of
+  https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054035444. The
+  text after the last `.` of a file name picks the front end. A file with no front end
+  gives `ops.unknown-extension` at the empty span at the start of the file, as
+  DIAGNOSTICS says for a problem with a whole file: the message is "no config syntax
+  reads this file", and the fix names each extension (`laptop.architect-2`,
+  2026-10-08T18:11:55Z,
   https://github.com/synnaxlabs/foundation/pull/1950#issuecomment-6066159732).
   Supersedes "with no span" and "The message names the path" of
   https://github.com/synnaxlabs/foundation/issues/337#issuecomment-6054035444. A

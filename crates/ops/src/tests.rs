@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::io;
 use std::path::Path;
@@ -6,10 +6,10 @@ use std::path::Path;
 use document::Source;
 use serde_json::{Map, Value, json};
 
-use crate::FrontEnd;
 use crate::error::Error;
 use crate::front_end;
 use crate::operation::{self, Response, TABLE};
+use crate::{FrontEnd, FrontEnds};
 
 /// The fix of `ops.argument`.
 const HELP: &str =
@@ -493,12 +493,12 @@ fn error_codes_and_fixes_match_the_golden_file() {
         .flat_map(|error| error.problems().into_owned())
         .map(|problem| format!("{}\t{}\n", problem.code, problem.fix))
         .collect();
-    let front_ends = BTreeMap::from([(
+    let front_ends = FrontEnds::new(
         "hcl",
         FrontEnd {
             read: |_, _| Err(Vec::new()),
         },
-    )]);
+    );
     let unknown = front_end::unknown(Source(0), &front_ends);
     let not_utf8 = front_end::not_utf8(Path::new("plant.yaml"));
     for diagnostic in [unknown, not_utf8] {

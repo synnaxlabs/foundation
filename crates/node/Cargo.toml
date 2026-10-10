@@ -21,6 +21,7 @@ buffer = { path = "../buffer" }
 clock = { path = "../clock" }
 config-hcl = { path = "../config-hcl" }
 connector = { path = "../connector" }
+connector-influx = { path = "../connector-influx" }
 crc32c = { workspace = true }
 document = { path = "../document" }
 env = { path = "../env" }
