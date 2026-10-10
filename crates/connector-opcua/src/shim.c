@@ -623,6 +623,11 @@ UA_StatusCode shim_map_set_strings(UA_KeyValueMap *map, const char *key,
     return UA_KeyValueMap_set(map, UA_QUALIFIEDNAME(0, (char *)(uintptr_t)key), &value);
 }
 
+/* Gives the service result of `response`, a response of a service. */
+UA_StatusCode shim_response_result(const void *response) {
+    return ((const UA_ResponseHeader *)response)->serviceResult;
+}
+
 /* Gives discovery URL `index` of `server`, or NULL past the last. */
 const UA_String *shim_server_discovery_url(UA_Server *server, size_t index) {
     const UA_ApplicationDescription *description =

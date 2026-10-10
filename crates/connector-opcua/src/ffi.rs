@@ -540,6 +540,7 @@ pub(crate) mod test {
         pub(crate) fn UA_Server_run_shutdown(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_getLifecycleState(server: *mut Server) -> Lifecycle;
+        pub(crate) fn shim_response_result(response: *const c_void) -> u32;
         pub(crate) fn shim_server_discovery_url(
             server: *mut Server,
             index: usize,
