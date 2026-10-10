@@ -1,6 +1,7 @@
-//! A request that the hub refuses for its length allocates no body. This binary has no
-//! test harness: the peak covers each thread, and a harness allocates on its own
-//! thread at any time.
+//! A request that the hub refuses for its length allocates no body, and the heap of a
+//! hub does not grow over many opens and closes of a named complete reader. This
+//! binary has no test harness: the count covers each thread, and a harness allocates
+//! on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -22,8 +23,10 @@ mod sessions;
 use std::sync::{Arc, Mutex};
 
 use agent::{SUBJECT, name, reset_with};
+use hub::reader::{self, Mode};
 use hub::serve;
 use sessions::{closed_after, sessions};
+use types::name::Selector;
 use types::time::Span;
 use wire::hub::BUSY;
 use wire::hub::client::BODY_BYTES_MAX;
@@ -31,8 +34,14 @@ use wire::hub::client::BODY_BYTES_MAX;
 #[global_allocator]
 static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 
+/// The opens after which the heap is read the first time.
+const FEW: usize = 10;
+/// The opens after which the heap is read the last time.
+const MANY: usize = 1000;
+
 fn main() {
     refuses_a_request_over_the_share_before_it_allocates_the_body();
+    holds_the_same_bytes_over_many_opens_of_a_named_reader();
 }
 
 /// While a request of 1 byte is open, a request of `BODY_BYTES_MAX` of the same
@@ -80,4 +89,30 @@ fn refuses_a_request_over_the_share_before_it_allocates_the_body() {
         "the refusal raised the bytes held by {} from {held}, a body of {body}",
         peak - held,
     );
+}
+
+/// After [`FEW`] opens and drops of a named complete reader, [`MANY`] leave the heap
+/// at the same bytes. The sim runs on one thread, so the count is exact.
+fn holds_the_same_bytes_over_many_opens_of_a_named_reader() {
+    let mut sim = sim::Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    sim.run_on(&node, |node, tasks| async move {
+        let (hub, _) = common::hub(&node, tasks).await;
+        let config = || reader::Config {
+            select: Selector::new(["value"]).expect("a selector"),
+            mode: Mode::Complete,
+            subject: common::name("a"),
+            name: Some(common::name("r")),
+            hold: Span::SECOND,
+        };
+        let mut few = 0;
+        for n in 1..=MANY {
+            drop(hub.reader(config()).await.expect("opens"));
+            if n == FEW {
+                few = ALLOCATOR.held();
+            }
+        }
+        assert_eq!(ALLOCATOR.held(), few, "bytes held after {MANY} opens");
+    })
+    .expect("the run ends");
 }

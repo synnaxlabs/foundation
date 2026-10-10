@@ -6,7 +6,7 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Exposes `wal::Writer` to the `wal` bench. Off by default.
+# Exposes `wal::Writer` and `log::Logs` to the benches. Off by default.
 sim = []
 
 [dependencies]
@@ -30,6 +30,11 @@ harness = false
 
 [[bench]]
 name = "wal"
+harness = false
+test = true
+
+[[bench]]
+name = "logs"
 harness = false
 test = true
 

@@ -912,12 +912,12 @@ fn at(entries: &[types::frame::key_set::Entry], key: types::channel::Key) -> usi
 ///
 /// When the frame holds another channel.
 fn decode(received: &hub::reader::Received<'_>, keys: Keys) -> Vec<Sample> {
-    let entries = received.set.entries();
+    let entries = received.set().entries();
     let mut series = [Vec::new(), Vec::new()];
-    for (entry, bytes) in received.view.iter() {
+    for (entry, bytes) in received.view().iter() {
         let at = &entries[entry];
         let range = received
-            .view
+            .view()
             .range(at.group)
             .expect("the group has a range");
         let count = usize::try_from(range.count).unwrap();
