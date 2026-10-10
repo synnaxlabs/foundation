@@ -30,9 +30,10 @@
   no home. `config` and `spec::placement` each keep a private `label`: the one in
   `config` fails loud on its own keys, and the `Display` of `Tie` and `Homeless` falls
   back to the key. Both rules: `laptop.architect-2`, 2026-10-08T21:10:14Z,
-  https://github.com/synnaxlabs/foundation/issues/1903#issuecomment-6069112623. The
-  status index of a connector takes the connector's place instead (STATUS PLACEMENT).
-  Each other index that a connector implies takes it too (ruling owed,
+  https://github.com/synnaxlabs/foundation/issues/1903#issuecomment-6069112623.
+  `plan` places the status index of a connector with the connector's placement, not
+  with `place` at its first writer (STATUS PLACEMENT). Each other index that a
+  connector implies is placed so too (ruling owed,
   https://github.com/synnaxlabs/foundation/issues/1821#issuecomment-6101711998, item
   2). Each rule that counts the writers of an index also counts a connector
   that implies the index (ruling owed,
