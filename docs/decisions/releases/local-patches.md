@@ -60,9 +60,9 @@
   #2106 did so for `cmpDue`, the split key, and the rename of the time parameter of
   `UA_Timer_process` in `arch/common/timer.c` of open62541, at `652692759`: a hand
   mutant of each changed line fails a test or the build, except the release form of
-  a `UA_assert` line, which builds to the same code with `UA_DEBUG` off (approved by
-  `laptop.architect-2`, 2026-10-09T04:52:13Z,
-  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074512538).
+  a `UA_assert` line, which builds to the same code with `UA_DEBUG` off (its table as
+  merged at `47caaee57` approved by `laptop.architect-2`, 2026-10-10T16:08:36Z,
+  https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6099506041).
   It did so for the swapped results of `cmpBatchWindow` at `17a75f322` (approved by
   `laptop.architect-2`, 2026-10-09T05:27:21Z,
   https://github.com/synnaxlabs/foundation/pull/2106#issuecomment-6074900634), for
