@@ -2511,24 +2511,25 @@ mod tests {
     #[test]
     fn gives_the_error_of_a_pool_with_no_block_for_a_read() {
         let (mut sim, node) = create_node(0);
-        let (error, expected) = sim
+        let error = sim
             .run_on(&node, |node, _| async move {
                 drop(open(&node).await.unwrap());
                 let config = block::Config { budget: 4096 };
                 let memory = block::Heap::new(config.reservation());
                 let pool = Rc::new(Pool::new(config, memory));
-                let largest = pool.largest();
-                let held = pool.alloc(largest).unwrap();
-                let chunk = largest - largest % SECTOR;
-                let expected = pool.alloc(chunk).unwrap_err();
+                assert_eq!(pool.largest(), 3584);
+                let held = pool.alloc(3584).unwrap();
                 let error = Log::open(node.files(), DIR.into(), Rc::clone(&pool))
                     .await
                     .unwrap_err();
                 drop(held);
-                (error, expected)
+                error
             })
             .unwrap();
-        assert!(matches!(expected, block::Error::Exhausted { .. }));
+        let expected = block::Error::Exhausted {
+            requested: 7 * SECTOR,
+            available: 448,
+        };
         assert_eq!(error, Error::Pool(expected));
     }
 
