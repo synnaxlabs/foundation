@@ -13,7 +13,7 @@ smaller frames. With no source, the path counts as once per sample. The other li
 in `docs/decisions/memory/p1.md`. The judgment states how often the path runs (per
 sample, frame, session, or start), its absolute cost against the P1 budget, the noise of
 the machine, and what the change buys. The architect accepts or rejects it on those
-facts. A smaller slowdown needs nothing but its numbers.
+facts. A slowdown under the cost limit needs nothing but its numbers.
 
 Evidence: `docs/research/r1-thread-model.md`, `docs/research/r11-memory-sync.md`, and
 `docs/research/r11-mem-bench/`. The numbers below are from an M3 Max. Rerun on Linux
