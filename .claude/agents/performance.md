@@ -33,16 +33,21 @@ surface makes each call cost (allocations, copies, count changes, locks), read f
 code under it: the carrier or the library that the body will call.
 
 Each changed function on a per-sample, per-frame, or per-message path has a benchmark,
-or the report names the one that covers it. In the same run, report one benchmark whose
-code did not change. If it moves over 2%, or a changed result is within 2 points of 5%,
-the run cannot show the 5% check: it is a finding until the PR links the comment with
-the numbers of the rerun on a quiet Linux host of BENCH BASELINES
-(`docs/decisions/testing/bench-baselines.md`), never a queued run, does what an
-amendment of that record asks in place of the rerun, or is a PR that an amendment of
+or the report names the one that covers it. For each changed result, give its cost at P1
+load: the extra time per call times the calls per second of the path at 100M samples/s
+(`docs/decisions/memory/p1.md`). In the same run, report one benchmark whose code did
+not change. How far it moves is the noise of the run. Apply that percent to each changed
+result. When the slowdown plus the noise reaches the cost limit of P1 and the slowdown
+minus the noise does not, the run cannot show the cost check: it is a finding until the
+PR links the comment with the numbers of the rerun on a quiet Linux host of BENCH
+BASELINES (`docs/decisions/testing/bench-baselines.md`), never a queued run, does what
+an amendment of that record asks in place of the rerun, or is a PR that an amendment of
 that record lets merge with no rerun. Run the same bench source on both commits. When
 one commit cannot run a bench case, remove that case on both, and say so in the report.
 
-A regression over 5% is a finding, not a verdict. Report it as the P1 judgment:
+A slowdown under the cost limit is no finding: report its numbers and its cost at P1
+load. A slowdown at or over the limit is a finding, not a verdict. Report it as the P1
+judgment:
 
 - how often the path runs: per sample, frame, session, or start;
 - the absolute cost (for example ns per frame) against the P1 budget;
