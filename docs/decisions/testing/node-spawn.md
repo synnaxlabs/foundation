@@ -1,7 +1,8 @@
 - **NODE SPAWN (2026-10-07)** `Node::spawn(task)` calls `task` with the node's one hub,
-  on shard 0, once each shard has opened its buffer, then runs its future. It has the
-  shape and the rules of `env::tasks::Tasks::spawn`: no handle, `Output = ()`, and a
-  panic ends shard 0 and fails the node (`Error::Panicked`), unless the transport
+  on shard 0, once each shard has opened its buffer, the node takes sessions, and, with
+  a region, the mesh has opened, then runs its future. It has the shape and the rules
+  of `env::tasks::Tasks::spawn`: no handle, `Output = ()`, and a panic ends shard 0 and
+  fails the node (`Error::Panicked`), unless the transport
   stopped first, which gives `Error::Transport`. Shard 0 calls the tasks
   with the hub in the order of their calls, so their closure bodies run in that order;
   their futures run in no set order. A task that is given before the hub exists waits
@@ -28,5 +29,8 @@
   https://github.com/synnaxlabs/foundation/pull/1769#issuecomment-6051497737.
   Supersedes the panic error of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411.
-  Amended (2026-10-10, #2266, approval owed): adds to "once each shard has opened its
-  buffer" in the first sentence: and once the node takes sessions.
+  That the node takes sessions first (#2266) decided by `laptop.architect-2`
+  (2026-10-10T15:30:28Z):
+  https://github.com/synnaxlabs/foundation/pull/2267#issuecomment-6099114654, with the
+  approval of `laptop.architect` (2026-10-10T15:08:23Z):
+  https://github.com/synnaxlabs/foundation/pull/2267#issuecomment-6098907512.
