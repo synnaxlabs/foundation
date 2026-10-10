@@ -1,4 +1,4 @@
-use types::frame::Path;
+use types::frame::{Path, Range};
 
 use super::{BEHIND, Error, HEAD, Head, Mode, OPENED, Open, Reply, ends, rest_of_run};
 use crate::common::body;
@@ -182,14 +182,20 @@ impl Reader {
         if seq < self.end {
             return Err(Error::Seq { seq, end: self.end });
         }
-        let count = head.range.count;
-        Ok(super::end(head.range).unwrap_or_else(|| {
-            panic!(
-                "invariant: a decoded head's range ends past u64::MAX: {count} samples \
-                 from seq {seq}"
-            )
-        }))
+        match super::end(head.range) {
+            Some(end) => Ok(end),
+            None => past_max(head.range),
+        }
     }
+}
+
+#[cold]
+#[inline(never)]
+fn past_max(range: Range) -> ! {
+    panic!(
+        "invariant: a decoded head's range ends past u64::MAX: {} samples from seq {}",
+        range.count, range.seq
+    )
 }
 
 fn body_len(end: u32) -> usize {
@@ -201,7 +207,6 @@ mod tests {
     use super::*;
     use crate::hub::tests::{cut, encode_ends, encode_reply};
     use proptest::prelude::*;
-    use types::frame::Range;
 
     fn open(channels: u32) -> Open {
         Open {
