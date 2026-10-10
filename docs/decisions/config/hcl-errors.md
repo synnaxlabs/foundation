@@ -30,8 +30,9 @@
   The crate's tests keep exact `Error` values through the private type. Lost: a second
   public `read` that gives diagnostics next to the one that gives `Error` (two reads
   that differ only in the error type). Supersedes "`read` gives a list of `Error`" and
-  "Nesting past the depth limit is `Error::TooDeep` from `read`" of HCL ERRORS. Decided
-  by `laptop.architect-2` (2026-10-10T02:51:42Z,
+  "Nesting past the depth limit is `Error::TooDeep` from `read`" of HCL ERRORS, and
+  "`node` also takes `document`" of NODE MESH. Decided by `laptop.architect-2`
+  (2026-10-10T02:51:42Z,
   https://github.com/synnaxlabs/foundation/issues/2079#issuecomment-6093002544);
   `Number` and the `# Errors` text of `read` approved by `laptop.architect-2`
   (2026-10-10T03:09:27Z,
