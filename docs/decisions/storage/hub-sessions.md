@@ -351,8 +351,10 @@
   Supersedes item 1 of
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091931740. A
   position that another reader on the index gave, at or below the highest position
-  that `Received::position` gave for the reader, is a true ack (`laptop.architect`, 2026-10-10T01:01:30Z:
-  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091931740).
+  that `Received::position` gave for the reader, is a true ack (`laptop.architect`,
+  2026-10-10T01:01:30Z and 2026-10-10T01:40:23Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091931740 and
+  https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6092284036).
   Supersedes the test "An ack of another reader's `Position` panics" of
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091357396.
   Trigger: #1155 sends the ack of a reader to a home at another node.
