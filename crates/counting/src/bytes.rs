@@ -443,8 +443,9 @@ mod tests {
     }
 
     /// Holds the lock through the private field, and asserts that no call that reads
-    /// or sets the peak finishes. The loom model runs [`Counts`], and the stress test
-    /// sees only an `alloc` of [`Bytes`] that skips the lock, and only on enough cores.
+    /// or sets the peak finishes. A stress test through the public calls sees a call
+    /// that skips the lock only on enough cores, and the loom model runs [`Counts`],
+    /// not [`Bytes`].
     #[test]
     fn reads_and_sets_the_peak_only_under_the_lock() {
         let bytes = Bytes::new();
