@@ -357,9 +357,11 @@
   (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093544897,
   2026-10-10 04:00 UTC). Supersedes the drive until `STOPPED` of
   https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6091519998.
-  `connection::Manager::delete_server` does that drive and the delete with no call
-  between. It is behind `cfg(any(test, feature = "sim"))` until a server that serves
-  users calls it. The one function: asked by `laptop.architect-2`
+  `connection::Manager::close_server` calls `UA_Server_run_shutdown`, does that drive,
+  and deletes the server, with no call between: decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6099099141,
+  2026-10-10 15:28 UTC). It is behind `cfg(any(test, feature = "sim"))` until a
+  server that serves users calls it. The one function: asked by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089865399,
   2026-10-09 21:51 UTC), with these words approved at `3b508e494`
   (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338,
