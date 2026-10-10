@@ -68,6 +68,10 @@ impl Iterator for IntoIter {
     fn next(&mut self) -> Option<Waker> {
         self.0.next().map(|(_, waker)| waker)
     }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.0.size_hint()
+    }
 }
 
 #[cfg(test)]
@@ -138,5 +142,18 @@ mod tests {
             .map(|(task, _)| task.0.load(Ordering::Relaxed))
             .collect();
         assert_eq!(wakes, [1, 0, 1]);
+    }
+
+    #[test]
+    fn its_wakers_give_their_exact_count() {
+        let (_, waker) = task();
+        let mut set = Set::new();
+        for key in 0..3 {
+            assert!(set.insert(key, &waker).is_none());
+        }
+        let mut wakers = set.into_iter();
+        assert_eq!(wakers.size_hint(), (3, Some(3)));
+        wakers.next();
+        assert_eq!(wakers.size_hint(), (2, Some(2)));
     }
 }
