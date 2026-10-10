@@ -73,8 +73,8 @@
   (`os::memory::Error::Reserve`) is `node.memory` too: "the pool budget {budget}, which
   {data} keeps from its first start, needs more address space for shard-{core} than the
   system gives: {error}", with the same fix. Each other `Error::Memory` is
-  `node.failed`. Lost: `node.failed` for each case but the first, which leaves a kept 1
-  PiB budget with no fix that names the file; and a fix for a budget too large at each
-  origin, for cases that cannot happen. Decided by `laptop.architect-2`
+  `node.failed`. Lost: `node.failed` for each case but the first, which would leave a
+  kept 1 PiB budget with no fix that names the file; and a fix for a budget too large at
+  each origin, for cases that cannot happen. Decided by `laptop.architect-2`
   (2026-10-10T16:07:26Z,
   https://github.com/synnaxlabs/foundation/pull/2288#issuecomment-6099493909).
