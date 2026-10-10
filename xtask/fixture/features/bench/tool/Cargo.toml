@@ -1,0 +1,9 @@
+# A benchmark: `cargo xtask layers` skips it in the map check, not in the `sim` check.
+[package]
+name = "tool"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+own = { path = "../../own", features = ["sim"] }

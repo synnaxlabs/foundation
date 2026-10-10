@@ -1,0 +1,18 @@
+[package]
+name = "pass"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[features]
+sim = ["own/sim", "weak?/sim"]
+simulate = ["dep:sim", "dep:weak", "weak?/simulate"]
+
+[dependencies]
+own = { path = "../own", default-features = false }
+sim = { path = "../sim", optional = true }
+weak = { path = "../weak", optional = true }
+
+[dev-dependencies]
+strong = { path = "../strong", features = ["simulate"] }
+own = { path = "../own", features = ["sim"] }

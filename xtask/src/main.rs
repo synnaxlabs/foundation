@@ -17,6 +17,7 @@ mod oracles;
 mod review;
 mod sanitizers;
 mod select;
+mod sim;
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -68,13 +69,14 @@ fn main() -> ExitCode {
 }
 
 /// Checks every dependency of the workspace at `root` against the crate map in
-/// `map.rs`.
+/// `map.rs`, and that no local crate turns on a `sim` feature outside a `sim` feature
+/// or a dev-dependency.
 fn layers(root: &Path) -> Result<(), Vec<String>> {
     let metadata = metadata(root).map_err(|e| vec![e])?;
     let packages = metadata["packages"].as_array().cloned().unwrap_or_default();
     let members: BTreeSet<&str> =
         packages.iter().filter_map(|p| p["name"].as_str()).collect();
-    let mut problems = Vec::new();
+    let mut problems = sim::check(&graph(root).map_err(|e| vec![e])?);
     for package in &packages {
         let Some(name) = package["name"].as_str() else {
             continue;
@@ -222,6 +224,27 @@ mod tests {
             layers(&fixture()),
             Err(vec![missing("a"), missing("globals"), missing("model")])
         );
+    }
+
+    #[test]
+    fn layers_reports_sim_also_in_a_benchmark_and_a_path_crate_outside_the_members() {
+        let problems = layers(&fixture().join("features")).unwrap_err();
+        let rule = "A `sim` feature is test-only: only a dev-dependency, the fuzz \
+                    crate, or another `sim` feature turns it on. A product feature \
+                    turns on `dep:sim` and `simulate` features. See rule 9 in \
+                    docs/decisions/crate-map.md.";
+        let mut found = vec![format!(
+            "`own` turns on `sim` in its feature `default`. {rule}"
+        )];
+        found.extend(["tool", "outer"].map(|name| {
+            format!(
+                "`{name}` turns on the `sim` feature of its dependency `own`. Move it \
+                 to the dev-dependencies. {rule}"
+            )
+        }));
+        for problem in found {
+            assert!(problems.contains(&problem), "{problem}: {problems:?}");
+        }
     }
 
     #[test]
