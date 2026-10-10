@@ -57,8 +57,9 @@
   (file, function, symbol), read from `objdump -dr` as the clock check reads a call, so
   a listed symbol in a new function of that file fails. `FUNCTION_SYMBOLS` lists these
   triples, the clock calls among them. `FILE_SYMBOLS` keeps only pairs of a file that no
-  node runs. A reference from outside a function fails, as the address of a clock does.
-  Decided by `laptop.architect`
+  node runs. A reference from outside a function fails when neither `SYMBOLS` nor
+  `FILE_SYMBOLS` admits it, as the address of a clock does. Decided by
+  `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094336509,
   2026-10-10 05:46 UTC). The check fails on every reference to a clock function that
   is not a call, also one in code. A call relocation counts as a call only in a section
