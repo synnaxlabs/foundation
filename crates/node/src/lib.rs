@@ -174,17 +174,18 @@ impl Node {
     /// or the mesh's group stops, which stops the node. Returns once each shard runs or
     /// one has failed to start. When the disk budget holds no ring on each shard, no
     /// shard starts, and [`Node::join`] gives [`Error::Disk`] with the budget, the
-    /// shard count, and the least budget. A failed start, a shard with no memory, a
-    /// data directory that another node holds or that was made for another shard count,
-    /// a key file that is not valid, a file `name` that holds another name or that no
-    /// node wrote, or a buffer or a mesh that does not open stops the node, and
-    /// [`Node::join`] returns its error.
+    /// shard count, and the least budget. When a shard's part of the pool budget gives
+    /// a reservation of more than `usize::MAX` bytes, no shard starts either, and
+    /// [`Node::join`] gives [`Error::Pool`]. A failed start, a shard with no memory, a
+    /// data directory that another node holds or that was made for another shard
+    /// count, a key file that is not valid, a file `name` that holds another name or
+    /// that no node wrote, or a buffer or a mesh that does not open stops the node, and
+    /// [`Node::join`] returns its error. The `# Errors` of [`Node::join`] gives which
+    /// error comes first.
     ///
     /// # Panics
     ///
-    /// If the disk budget holds a ring on each shard, the port binds, and a shard's
-    /// part of the pool budget gives a reservation of more than `usize::MAX` bytes, or
-    /// if the disk budget holds a ring on each of more than `u32::MAX` cores.
+    /// If the disk budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let cores = config.shards.cores().get();
@@ -222,13 +223,12 @@ impl Node {
         };
         let parts = parts
             .into_iter()
-            .enumerate()
-            .map(|(core, (budget, layout))| {
-                let pool = block::Config::new(budget)
-                    .unwrap_or_else(|unfit| panic!("shard-{core}: {unfit}"));
-                (pool, layout)
-            })
-            .collect::<Vec<_>>();
+            .map(|(pool, layout)| Ok((block::Config::new(pool)?, layout)))
+            .collect::<Result<Vec<_>, block::Unfit>>();
+        let Ok(parts) = parts else {
+            let pool = config.budget.pool;
+            return Self::failed(Error::Pool { pool, cores }, regional);
+        };
         Self::launch(config, endpoint, parts.into_iter().zip(0..count))
     }
 
@@ -383,17 +383,18 @@ impl Node {
     /// # Errors
     ///
     /// The first failure: [`Error::Disk`] for a disk budget that holds no ring on each
-    /// shard, [`Error::Port`] for a port that did not bind, [`Error::Start`] for a
-    /// shard that could not start or pin, or [`Error::Memory`] for a shard with no
-    /// memory, else [`Error::Shards`] or [`Error::Directory`] for a data directory that
-    /// shard 0 could not claim, else [`Error::Buffer`] for the first shard by core
-    /// whose buffer, or the home over it, did not open, [`Error::Budget`] or
-    /// [`Error::Directory`] for a file `budget` that shard 0 could not read or write,
-    /// [`Error::Key`] or [`Error::Directory`] for a key file that shard 0 could not
-    /// read or write, [`Error::Blob`] for a chunk store or [`Error::Mesh`] for a mesh
-    /// that did not open, or [`Error::Transport`] or [`Error::Group`], whichever the
-    /// node sees stop first, else [`Error::Panicked`] for the first shard by core that
-    /// panicked. Any failed shard stops the node.
+    /// shard, [`Error::Port`] for a port that did not bind, [`Error::Pool`] for a part
+    /// of the pool budget that needs a reservation of more than `usize::MAX` bytes,
+    /// [`Error::Start`] for a shard that could not start or pin, or [`Error::Memory`]
+    /// for a shard with no memory, else [`Error::Shards`] or [`Error::Directory`] for a
+    /// data directory that shard 0 could not claim, else [`Error::Buffer`] for the
+    /// first shard by core whose buffer, or the home over it, did not open,
+    /// [`Error::Budget`] or [`Error::Directory`] for a file `budget` that shard 0 could
+    /// not read or write, [`Error::Key`] or [`Error::Directory`] for a key file that
+    /// shard 0 could not read or write, [`Error::Blob`] for a chunk store or
+    /// [`Error::Mesh`] for a mesh that did not open, or [`Error::Transport`] or
+    /// [`Error::Group`], whichever the node sees stop first, else [`Error::Panicked`]
+    /// for the first shard by core that panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
             // The shard sets `failed` on its own thread, so read it after the join.
@@ -1049,6 +1050,15 @@ pub enum Error {
         /// `Size`.
         min: types::byte::Size,
     },
+    /// The pool budget gives one of `cores` shards a pool whose reservation is more
+    /// than `usize::MAX` bytes, more address space than this host has. No shard
+    /// started.
+    Pool {
+        /// The pool budget that was given.
+        pool: types::byte::Size,
+        /// The count of shards.
+        cores: usize,
+    },
     /// The transport of the node's port stopped, as when the OS breaks its socket.
     /// The node stops.
     Transport(transport::Error),
@@ -1111,6 +1121,11 @@ impl fmt::Display for Error {
                 f,
                 "the disk budget {disk} holds no ring on each of {cores} shards; it \
                  needs at least {min}"
+            ),
+            Self::Pool { pool, cores } => write!(
+                f,
+                "the pool budget {pool} gives one of {cores} shards a pool that needs \
+                 more address space than this host has"
             ),
             Self::Transport(error) => {
                 write!(f, "the node's transport stopped: {error}")

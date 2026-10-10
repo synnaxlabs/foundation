@@ -63,4 +63,18 @@
   2026-10-09T22:37:18Z, the text of `Refused`, which names the part of the shard and
   supersedes item 2, the text of `Refused`, of
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6089651601,
-  https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6090424579).
+  https://github.com/synnaxlabs/foundation/pull/2191#issuecomment-6090424579). A part of
+  the pool budget whose reservation is more than `usize::MAX` bytes stops the start with
+  `node::Error::Pool` (SHARD POOLS). From the file `budget` it is `node.memory`, with
+  the message "the pool budget {pool}, which {data} keeps from its first start, gives
+  one of {cores} shards a pool that needs more address space than this host has" and the
+  fix of a kept budget. A first start gives at most 1 GiB, so from another origin it is
+  `node.failed` with its text. A kept pool budget that the system cannot reserve
+  (`os::memory::Error::Reserve`) is `node.memory` too: "the pool budget {budget}, which
+  {data} keeps from its first start, needs more address space for shard-{core} than the
+  system gives: {error}", with the same fix. Each other `Error::Memory` is
+  `node.failed`. Lost: `node.failed` for each case but the first, which would leave a
+  kept 1 PiB budget with no fix that names the file; and a fix for a budget too large at
+  each origin, for cases that cannot happen. Decided by `laptop.architect-2`
+  (2026-10-10T16:07:26Z,
+  https://github.com/synnaxlabs/foundation/pull/2288#issuecomment-6099493909).

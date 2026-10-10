@@ -260,6 +260,25 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
                 fix,
             }
         }
+        node::Error::Pool { pool, cores } => match known.from.pool {
+            Origin::Kept => kept_pool(dir, *pool, *cores),
+            Origin::Most | Origin::Quarter => failed(error),
+        },
+        node::Error::Memory {
+            core,
+            error: error @ os::memory::Error::Reserve { .. },
+        } if known.from.pool == Origin::Kept => {
+            let budget = known.budget.pool;
+            let (from, fix) = kept(dir);
+            Failure {
+                code: MEMORY,
+                message: format!(
+                    "the pool budget {budget}, {from}, needs more address space for \
+                     shard-{core} than the system gives: {error}"
+                ),
+                fix,
+            }
+        }
         node::Error::Buffer {
             core,
             error: error @ buffer::Error::Pool(pool),
@@ -289,6 +308,20 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
             }
         }
         error => failure(dir, error),
+    }
+}
+
+/// The failure of a pool budget `pool`, kept in the data directory `dir`, that gives
+/// one of `cores` shards a pool past the address space of the host.
+fn kept_pool(dir: &Path, pool: types::byte::Size, cores: usize) -> Failure {
+    let (from, fix) = kept(dir);
+    Failure {
+        code: MEMORY,
+        message: format!(
+            "the pool budget {pool}, {from}, gives one of {cores} shards a pool that \
+             needs more address space than this host has"
+        ),
+        fix,
     }
 }
 
@@ -337,18 +370,25 @@ fn failure(dir: &Path, error: &node::Error) -> Failure {
     Failure { code, message, fix }
 }
 
+/// That a budget comes from the file `budget` of the data directory `dir`, as text,
+/// and the fix of a kept budget that does not fit: remove the file.
+fn kept(dir: &Path) -> (String, String) {
+    let data = dir.display();
+    (
+        format!("which {data} keeps from its first start"),
+        format!(
+            "Remove the file `budget` in {data}, and the next start computes the \
+             budgets again from the free memory and disk"
+        ),
+    )
+}
+
 /// Where a budget of `resource` that gives the node too little comes from, `from`,
 /// as text, and its fix. `dir` is the data directory.
 fn source(dir: &Path, from: Origin, resource: Resource) -> (String, String) {
     let data = dir.display();
     match (from, resource) {
-        (Origin::Kept, _) => (
-            format!("which {data} keeps from its first start"),
-            format!(
-                "Remove the file `budget` in {data}, and the next start computes the \
-                 budgets again from the free memory and disk"
-            ),
-        ),
+        (Origin::Kept, _) => kept(dir),
         (Origin::Most, _) => (
             "the most that a first start gives".to_owned(),
             "Start the node on fewer cores: on Linux, give it a smaller CPU affinity \
@@ -605,6 +645,118 @@ mod tests {
                      gives shard-3 too little: {TOO_LARGE}"
                 ),
                 fix: "Free memory on this host".to_owned(),
+            }
+        );
+    }
+
+    /// A first start gives at most 1 GiB, so no process makes `Error::Pool` from it,
+    /// and only this test sees the arm of `stopped` for a first start.
+    #[test]
+    fn a_pool_budget_past_the_address_space_from_a_first_start_fails_with_its_text() {
+        let error = node::Error::Pool {
+            pool: POOL_MOST,
+            cores: 16,
+        };
+        let budget = Budget {
+            pool: POOL_MOST,
+            disk: Size::GIBIBYTE,
+        };
+        for from in [Origin::Most, Origin::Quarter] {
+            assert_eq!(
+                stopped(dir(), &error, &known(budget, from)),
+                Failure {
+                    code: FAILED,
+                    message: "the pool budget 1GiB gives one of 16 shards a pool that \
+                              needs more address space than this host has"
+                        .to_owned(),
+                    fix: "Fix the cause that the message states, then start the node \
+                          again"
+                        .to_owned(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_kept_pool_budget_that_the_system_cannot_reserve_tells_the_user_to_remove_it() {
+        let error = node::Error::Memory {
+            core: 3,
+            error: os::memory::Error::Reserve {
+                len: 1 << 46,
+                code: 12,
+            },
+        };
+        let budget = Budget {
+            pool: Size::from_bytes(1 << 50),
+            disk: Size::GIBIBYTE,
+        };
+        assert_eq!(
+            stopped(dir(), &error, &known(budget, Origin::Kept)),
+            Failure {
+                code: MEMORY,
+                message:
+                    "the pool budget 1024TiB, which foundation-data keeps from its \
+                          first start, needs more address space for shard-3 than the \
+                          system gives: a reserve of 70368744177664 bytes of address \
+                          space failed: Cannot allocate memory (os error 12); lower \
+                          the memory budget"
+                        .to_owned(),
+                fix: "Remove the file `budget` in foundation-data, and the next start \
+                      computes the budgets again from the free memory and disk"
+                    .to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_memory_error_but_a_reserve_of_a_kept_pool_budget_fails_with_its_text() {
+        let reserve = os::memory::Error::Reserve {
+            len: 1 << 46,
+            code: 12,
+        };
+        let budget = Budget {
+            pool: Size::from_bytes(1 << 50),
+            disk: Size::GIBIBYTE,
+        };
+        for (error, from) in [
+            (reserve, Origin::Most),
+            (reserve, Origin::Quarter),
+            (os::memory::Error::Refused, Origin::Kept),
+        ] {
+            let error = node::Error::Memory { core: 3, error };
+            assert_eq!(
+                stopped(dir(), &error, &known(budget, from)),
+                Failure {
+                    code: FAILED,
+                    message: error.to_string(),
+                    fix: "Fix the cause that the message states, then start the node \
+                          again"
+                        .to_owned(),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_kept_pool_budget_past_the_address_space_tells_the_user_to_remove_it() {
+        let pool = Size::from_bytes(u64::MAX);
+        let error = node::Error::Pool { pool, cores: 16 };
+        let budget = Budget {
+            pool,
+            disk: Size::GIBIBYTE,
+        };
+        assert_eq!(
+            stopped(dir(), &error, &known(budget, Origin::Kept)),
+            Failure {
+                code: MEMORY,
+                message:
+                    "the pool budget 18446744073709551615B, which foundation-data \
+                          keeps from its first start, gives one of 16 shards a pool \
+                          that needs more address space than this host has"
+                        .to_owned(),
+                fix: "Remove the file `budget` in foundation-data, and the next start \
+                      computes the budgets again from the free memory and disk"
+                    .to_owned(),
             }
         );
     }
