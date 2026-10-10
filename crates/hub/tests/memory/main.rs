@@ -19,14 +19,13 @@ mod node;
 #[expect(dead_code, reason = "the binary uses only some of the helpers")]
 mod sessions;
 
-use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use agent::{SUBJECT, name, reset_with};
 use hub::reader::{self, Mode};
 use hub::serve;
 use sessions::{closed_after, sessions};
-use transport::{Address, Class, Code};
+use transport::{Class, Code};
 use types::channel;
 use types::name::Selector;
 use types::time::Span;
@@ -60,12 +59,16 @@ const OPEN_MAX: usize = 4 << 20;
 fn holds_no_more_bytes_for_an_open_that_names_one_channel_many_times() {
     let measured = Arc::new(Mutex::new(None));
     let kept = Arc::clone(&measured);
-    let mut sim = sim::Sim::new(sim::Config::default());
-    let nodes = [1, 2].map(|_| sim.node(sim::node::Config::default()));
-    let at = Address::Udp(SocketAddr::new(nodes[0].addresses()[0], net::PORT));
-    start_home(&nodes[0]);
-    let node = nodes[1].clone();
-    let peer = move |tasks: env::tasks::Tasks| async move {
+    let home = |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let (hub, _) = common::hub(&node, tasks.clone()).await;
+        let transport =
+            net::transport(&node, &tasks, &net::own_pool(), net::HOME, 1 << 16);
+        let (session, incoming) = net::accept(&transport).await;
+        let link = hub.link(session.clone());
+        drop(link.serve(incoming).await);
+        drop(session.closed().await);
+    };
+    let peer = move |node: sim::node::Node, tasks: env::tasks::Tasks, at| async move {
         let transport =
             net::transport(&node, &tasks, &net::own_pool(), net::PEER, 1 << 16);
         let config = block::Config { budget: 8 << 20 };
@@ -96,27 +99,22 @@ fn holds_no_more_bytes_for_an_open_that_names_one_channel_many_times() {
         send(&run).await.expect("sends keys");
         node.clock().sleep(common::SETTLE).await;
         let before = ALLOCATOR.held();
-        let stopped = transport::Error::Stopped {
-            code: Code(wire::header::MALFORMED),
-        };
+        let mut failed = None;
         for _ in 1..MESSAGES {
             if let Err(error) = send(&run).await {
-                assert_eq!(error, stopped, "the home stops the stream");
+                failed = Some(error);
                 break;
             }
         }
+        let code = Code(wire::header::MALFORMED);
+        let stopped = transport::Error::Stopped { code };
+        assert_eq!(failed, Some(stopped), "the home stops the stream");
         node.clock().sleep(common::SETTLE).await;
         *kept.lock().expect("not poisoned") = Some((before, ALLOCATOR.held()));
         session.close(Code(0));
         node.clock().sleep(Span::MILLISECOND).await;
     };
-    drop(
-        nodes[1]
-            .shards()
-            .start(shard("peer"), peer)
-            .expect("starts"),
-    );
-    sim.run().expect("the run ends");
+    sessions::run_program(0, home, peer);
     let (before, after) = measured
         .lock()
         .expect("not poisoned")
@@ -127,30 +125,6 @@ fn holds_no_more_bytes_for_an_open_that_names_one_channel_many_times() {
         "the keys of one open of two channels raised the bytes held by {} from {before}",
         after - before,
     );
-}
-
-/// Starts a shard on `node` that serves one link of its hub.
-fn start_home(at: &sim::node::Node) {
-    let node = at.clone();
-    let home = move |tasks: env::tasks::Tasks| async move {
-        let (hub, _) = common::hub(&node, tasks.clone()).await;
-        let transport =
-            net::transport(&node, &tasks, &net::own_pool(), net::HOME, 1 << 16);
-        let (session, incoming) = net::accept(&transport).await;
-        let link = hub.link(session.clone());
-        drop(link.serve(incoming).await);
-        drop(session.closed().await);
-    };
-    let started = at.shards().start(shard("home"), home);
-    drop(started.expect("starts"));
-}
-
-/// The config of a shard named `name`.
-fn shard(name: &str) -> env::shards::Config {
-    env::shards::Config {
-        name: name.into(),
-        core: None,
-    }
 }
 
 /// While a request of 1 byte is open, a request of `BODY_BYTES_MAX` of the same

@@ -557,6 +557,14 @@ fn stops_an_open_that_names_a_channel_twice_as_malformed() {
     );
 }
 
+/// The index named twice, after its first listing set its position.
+#[test]
+fn stops_an_open_that_names_its_index_twice_as_malformed() {
+    let served = refused(94, &[2, 1, 1]);
+    let repeated = serve::Error::Repeated(channel::Key::from_u128(1));
+    assert_eq!(served, Some(Err(repeated)));
+}
+
 /// A channel that a later message of the keys run names again is refused too.
 #[test]
 fn stops_an_open_that_names_a_channel_again_in_a_later_message_as_malformed() {
