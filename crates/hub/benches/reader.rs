@@ -49,7 +49,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
-use common::{SETTLE, name};
+use common::{SETTLE, name, unnamed};
 use hub::home::Outcome;
 use hub::reader::{Mode, Reader};
 use hub::writer::{self, Writer};
@@ -107,10 +107,11 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
         channels: vec![name("value")],
     };
     let mut writer = hub.writer(config).await.expect("opens");
-    let channels = [name("value")];
-    let mut latest_reader = hub.reader(&channels, Mode::Latest).await.expect("opens");
-    let mut complete_reader =
-        hub.reader(&channels, Mode::Complete).await.expect("opens");
+    let channels = ["value"];
+    let latest = unnamed(&channels, Mode::Latest);
+    let mut latest_reader = hub.reader(latest).await.expect("opens");
+    let complete = unnamed(&channels, Mode::Complete);
+    let mut complete_reader = hub.reader(complete).await.expect("opens");
     let count = Arc::new(Count::default());
     let waker = Waker::from(Arc::clone(&count));
     let mut timer = Line::new("timer", FRAMES);

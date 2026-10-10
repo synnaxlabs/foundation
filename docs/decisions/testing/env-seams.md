@@ -74,11 +74,16 @@
   off on an IPv6 socket, and routes as `sim` does: a socket on `::` sends IPv4 as
   `::ffff:a.b.c.d`, and any other socket that gets a destination of the other family
   gives `Unreachable`. A `Transmit` goes out in one `sendmsg`, with GSO, or one per
-  datagram after the kernel refuses GSO; there is no `sendmmsg`. After `EIO` or
-  `EINVAL` on a GSO send, `noq-udp` sends the first datagram alone. Only when it goes
-  out does `noq-udp` store 1 as its `max_gso_segments`, and from then on each datagram
-  goes out alone; that is the only GSO flag (`laptop.architect-2`, 2026-10-08 21:15
-  UTC, https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130).
+  datagram after the kernel refuses GSO; there is no `sendmmsg`. A `Transmit` holds at
+  most `TRANSMIT_BYTES_MAX`, so a GSO batch gets `EMSGSIZE` only when its segment is
+  over the path MTU. Then each full segment is lost, and `os` sends the short last
+  datagram alone (`laptop.architect-2`, 2026-10-09 22:36 UTC,
+  https://github.com/synnaxlabs/foundation/pull/2193#issuecomment-6090406742).
+  After `EIO` or `EINVAL` on a GSO send, `noq-udp` sends the first datagram alone. Only
+  when it goes out does `noq-udp` store 1 as its `max_gso_segments`, and from then on
+  each datagram goes out alone; that is the only GSO flag (`laptop.architect-2`,
+  2026-10-08 21:15 UTC,
+  https://github.com/synnaxlabs/foundation/issues/1972#issuecomment-6069193130).
   Supersedes the store of 1 on `EIO` or `EINVAL` of item 1 of
   https://github.com/synnaxlabs/foundation/issues/119#issuecomment-6066429541. After
   `Pending` partway through a transmit sent one datagram at a time, the `os` sender

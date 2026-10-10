@@ -1334,3 +1334,111 @@ fn keeps_a_session_when_the_error_of_mesh_time_shrinks() {
     let got = got.lock().expect("not poisoned").take();
     assert_eq!(got, Some(Ok(b"etal".to_vec())), "the home gave {served:?}");
 }
+
+/// Polls `hello` beside `other` until `other` resolves.
+async fn beside<T>(
+    hello: &mut std::pin::Pin<
+        Box<impl Future<Output = Result<hub::Served, serve::Error>>>,
+    >,
+    other: impl Future<Output = T>,
+) -> T {
+    let mut other = pin!(other);
+    poll_fn(|cx| {
+        drop(hello.as_mut().poll(cx));
+        other.as_mut().poll(cx)
+    })
+    .await
+}
+
+/// The reply of a request that `Link::serve` gave holds the region after the hub, the
+/// link, and each future of serve drop, and the hub lets go once the reply drops.
+#[test]
+fn holds_the_transport_until_the_reply_of_a_request_drops() {
+    let (held, with_reply, without_reply) = reply_holds(End::Drop);
+    assert_eq!(with_reply, held, "the reply holds the hub");
+    assert_eq!(without_reply, 1, "no task holds the transport");
+}
+
+/// The hub lets go of the region once a reply, sent after the hub, the link, and each
+/// future of serve drop, ends its send.
+#[test]
+fn lets_go_of_the_transport_once_the_send_of_a_reply_ends() {
+    let (held, with_reply, without_reply) = reply_holds(End::Send);
+    assert_eq!(with_reply, held, "the reply holds the hub");
+    assert_eq!(without_reply, 1, "no task holds the transport");
+}
+
+/// How the test ends the reply of a served request.
+enum End {
+    Drop,
+    Send,
+}
+
+/// The count of the transport of a home with one served request: before the hub, its
+/// link, and the future of serve drop, after, and once the reply ends as `end` says and
+/// the region drops.
+fn reply_holds(end: End) -> (usize, usize, usize) {
+    let outcome = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&outcome);
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let transport = Rc::new(transport(&node, &tasks, &own_pool(), HOME, 1 << 16));
+        let region =
+            super::region::open(&node, &tasks, Rc::clone(&transport), Vec::new()).await;
+        let layout = buffer::Layout::new(super::AREA, super::BODY_MAX).expect("a ring");
+        let mut test =
+            super::Test::new(node.clone(), tasks.clone(), layout, POOL, Some(region))
+                .await;
+        test.sync().await;
+        test.hub.set_rules(rules());
+        let session = transport.accept().await.expect("a session");
+        let link = test.hub.link(session.clone());
+        let mut hello = session.accept().await.expect("a stream");
+        header(&mut hello).await;
+        let mut hello = Box::pin(link.serve(hello));
+        let mut incoming = beside(&mut hello, session.accept())
+            .await
+            .expect("a stream");
+        beside(&mut hello, header(&mut incoming)).await;
+        let served = beside(&mut hello, link.serve(incoming)).await;
+        let Ok(hub::Served::Request(request)) = served else {
+            panic!("a request: {served:?}");
+        };
+        let held = Rc::strong_count(&transport);
+        let super::Test {
+            clock, hub, region, ..
+        } = test;
+        drop((hub, link, hello));
+        clock.sleep(Span::SECOND).await;
+        let with_reply = Rc::strong_count(&transport);
+        match end {
+            End::Drop => drop(request),
+            End::Send => request
+                .reply
+                .send(b"cd")
+                .await
+                .expect("the response is sent"),
+        }
+        drop((region, session));
+        clock.sleep(Span::SECOND).await;
+        let without_reply = Rc::strong_count(&transport);
+        *kept.lock().expect("not poisoned") = Some((held, with_reply, without_reply));
+    };
+    run_program(139, home, |node, tasks, at| async move {
+        let client = connect(&node, tasks, at, AGENT).await.expect("connects");
+        let mut request = pin!(client.request(b"ab"));
+        let mut quiet = pin!(
+            node.clock()
+                .sleep(Span::from_nanos(3 * Span::SECOND.nanos()))
+        );
+        poll_fn(|cx| match request.as_mut().poll(cx) {
+            Poll::Ready(_) => Poll::Ready(()),
+            Poll::Pending => quiet.as_mut().poll(cx),
+        })
+        .await;
+    });
+    outcome
+        .lock()
+        .expect("not poisoned")
+        .take()
+        .expect("the home ran")
+}
