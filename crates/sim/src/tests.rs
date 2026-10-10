@@ -1668,6 +1668,23 @@ fn a_timer_due_at_the_end_of_true_time_wakes_early() {
     assert_eq!(*polls.lock().unwrap(), wakes);
 }
 
+/// An early wake past the last nanosecond of true time is the deadline.
+#[test]
+fn an_early_wake_past_the_last_nanosecond_wakes_at_the_deadline() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        monotonic: Monotonic(0),
+        wall: Stamp::from_nanos(i64::MIN),
+        ..node::Config::default()
+    });
+    sim.run_for(Span::from_nanos(i64::MAX)).unwrap();
+    sim.run_for(Span::from_nanos(i64::MAX - 1)).unwrap();
+    let (handle, polls) = timed_sleep(&node, "sleep", Span::from_nanos(2));
+    sim.run().unwrap();
+    handle.join().unwrap();
+    assert_eq!(*polls.lock().unwrap(), [Span::ZERO, Span::from_nanos(2)]);
+}
+
 /// The end of true time is the earliest end of any node, also for a timer of a node
 /// whose own clocks end later.
 #[test]
