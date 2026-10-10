@@ -890,7 +890,7 @@ fn references(
 struct Uses {
     /// Each pair of [`FILE_SYMBOLS`] with a reference.
     pairs: BTreeSet<(String, String)>,
-    /// Each (file, function, symbol, access) that [`FILE_SYMBOLS`] does not admit.
+    /// Each key of a reference that [`Uses::add`] gives to [`FUNCTION_SYMBOLS`].
     keys: BTreeSet<(String, String, String, Access)>,
 }
 
@@ -906,9 +906,13 @@ impl Uses {
             symbol,
         } = found;
         if CLOCKS.contains(&symbol.as_str()) && access == Access::Address {
+            let site = function
+                .map_or(format!("the section `{section}`"), |function| {
+                    format!("`{function}`")
+                });
             return Some(format!(
-                "{file}: the section `{section}` takes the address of `{symbol}`, so a \
-                 call through it escapes FUNCTION_SYMBOLS"
+                "{file}: {site} takes the address of `{symbol}`, so a call through it \
+                 escapes FUNCTION_SYMBOLS"
             ));
         }
         if SYMBOLS.contains(&symbol.as_str()) {
@@ -1724,17 +1728,17 @@ End of search list.
     #[test]
     fn uses_refuses_a_reference_that_no_function_holds_or_no_call_makes() {
         let mut uses = Uses::default();
-        let address = |section: &str| {
+        let address = |site: &str| {
             Some(format!(
-                "src/ua_types.c: the section `{section}` takes the address of \
-                 `UA_DateTime_now`, so a call through it escapes FUNCTION_SYMBOLS"
+                "src/ua_types.c: {site} takes the address of `UA_DateTime_now`, so a \
+                 call through it escapes FUNCTION_SYMBOLS"
             ))
         };
         let found = labeled(".text", "UA_new", Access::Address, CLOCKS[0]);
-        assert_eq!(uses.add("src/ua_types.c", found), address(".text"));
+        assert_eq!(uses.add("src/ua_types.c", found), address("`UA_new`"));
         assert_eq!(
             uses.add("src/ua_types.c", data(CLOCKS[0])),
-            address(".data.rel")
+            address("the section `.data.rel`")
         );
         assert_eq!(
             uses.add(
@@ -2086,7 +2090,7 @@ End of search list.
                 "src/more/ua_gen.c:1: holds a line directive, which moves the file \
                  that the include check reads"
                     .to_owned(),
-                "plugins/ua_config_default.c: the section `.text` takes the address of \
+                "plugins/ua_config_default.c: `UA_keep` takes the address of \
                  `UA_DateTime_now`, so a call through it escapes FUNCTION_SYMBOLS"
                     .to_owned(),
                 "src/more/ua_clock.c: the section `.data.rel` takes the address of \

@@ -55,20 +55,21 @@
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093780083,
   2026-10-10 04:30 UTC). The check keys each reference of a function by (file, function,
   symbol), read from `objdump -dr` as the clock check reads a call, so a listed symbol
-  in a new function of that file fails. `FUNCTION_SYMBOLS` lists these keys, the clock
+  in a new function of a file fails. `FUNCTION_SYMBOLS` lists these keys, the clock
   calls among them. A reference from outside a function fails when neither `SYMBOLS` nor
   `FILE_SYMBOLS` admits it, as the address of a clock does. Decided by
   `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094336509,
-  2026-10-10 05:46 UTC). Supersedes the (file, enclosing function) pairs of
-  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367. The
-  function is the whole label of the function symbol, such as `parse.0` for a nested
-  function. The key also holds the access, a call or an address, so the address of a
-  listed symbol that its function only calls fails. Approved by `laptop.architect`
+  2026-10-10 05:46 UTC). It refines the (file, enclosing function) list of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367 by
+  symbol and access. The function is the whole label of the function symbol, such as
+  `parse.0` for a nested function. The key also holds the access, a call or an
+  address, so the address of a listed symbol that its function only calls fails.
+  Approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094746609,
   2026-10-10 06:40 UTC).
-  A file that a node runs may hold keys of symbols that are not clocks:
-  `FUNCTION_SYMBOLS` holds 7. Approval owed by `laptop.architect-2`
+  A file that a node runs may hold keys of symbols that are not clocks, each with its
+  reason. Approval owed by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093686633,
   https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093808069).
   The check fails on every reference to a clock function that
