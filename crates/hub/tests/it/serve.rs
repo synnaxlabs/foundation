@@ -1042,6 +1042,30 @@ fn decoded(got: &Got, types: &[Type]) -> Vec<Vec<i64>> {
         .collect()
 }
 
+/// The open lists `other`, which the frame does not hold: `time` keeps place 2.
+#[test]
+fn sends_the_place_of_the_listing_past_a_channel_the_frame_lacks() {
+    let home = |test: Test, link: Link, incoming| async move {
+        test.define([(7, "other", DataType::Sample(I64), 1)]);
+        let mut writer = test.writer("a", &["value"]).await;
+        let (clock, now) = (test.clock.clone(), test.now());
+        test.tasks.spawn(async move {
+            clock.sleep(SETTLE).await;
+            write(&mut writer, &[now], &[10]);
+            clock.sleep(SETTLE).await;
+        });
+        assert_eq!(serve(&link, incoming).await, Ok(()));
+    };
+    session(95, Class::Complete, false, home, |mut peer| async move {
+        let mut reader = open_complete(&mut peer, &[2, 7, 1], 1 << 20).await;
+        let got = got(&mut peer, &mut reader).await.expect("a frame");
+        assert_eq!(got.head.series, 2);
+        assert_eq!(places(&got), [0, 2]);
+        peer.sender.finish().expect("finishes");
+        assert_eq!(peer.recv().await, Ok(None));
+    });
+}
+
 /// Each series has the place of its listing in the open: `value` 0 and `time` 1.
 #[test]
 fn sends_each_frame_through_the_places_of_the_open() {

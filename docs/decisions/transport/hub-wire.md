@@ -11,8 +11,12 @@
   `delivery::complete::Charge::Places` of the slots of its open (#1642, #1636; the
   architect, 2026-10-07T22:25:18Z,
   https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6048108229). A series
-  has the place of its listing in the open, from 0. The reader's `hub` lists the keys in
-  the entry order of its own frame (its slot order), the index too, so a place is an
+  has the place of its listing in the open, from 0 (`laptop.architect`,
+  2026-10-10T14:40:47Z,
+  https://github.com/synnaxlabs/foundation/issues/2273#issuecomment-6098651096;
+  supersedes "the place of its first listing" of
+  https://github.com/synnaxlabs/foundation/pull/1071). The reader's `hub` lists the keys
+  in the entry order of its own frame (its slot order), the index too, so a place is an
   entry of the reader's frame and a session has `channels` places. An open whose keys do
   not hold the index is not valid: the home's `hub` checks it and stops the session with
   `MALFORMED` (lost: `UNKNOWN`; the architect, 2026-10-07,
