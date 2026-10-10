@@ -32,7 +32,9 @@
   randomness, or process state. A symbol is outside the copy when no object exports it:
   a `static` function of one file does not hide a call of the OS function of its name
   from another. A key of `FUNCTION_SYMBOLS` with no reference fails, so a file that the
-  build leaves out loses its keys. A new outside symbol also goes in `OUTSIDE` in
+  build leaves out loses its keys. Changed by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099166264,
+  2026-10-10 15:36 UTC). A new outside symbol also goes in `OUTSIDE` in
   `connector-opcua`, which lists the outside symbols of the production build. A header
   list is not a check: a listed header can include another (`pthread.h` includes
   `time.h`). So the check refuses no system header, and each header that the copy
@@ -67,15 +69,14 @@
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094746609,
   2026-10-10 06:40 UTC). It refines the (file, enclosing function) list of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367 by symbol
-  and access. A key may name a symbol that is not a clock, with its reason. No list of
-  (file, symbol) pairs remains, so a new reference in any file needs its own key.
-  Decided by `laptop.architect-2`
+  and access. A key may name a symbol that is not a clock, with its reason. Decided by
+  `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099166264,
   2026-10-10 15:36 UTC). Supersedes the (file, symbol) pairs of
   https://github.com/synnaxlabs/foundation/issues/1884#issuecomment-6060989375. The text
   from "When `SYMBOLS` does not admit" to here: approved by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099166264); approved
-  by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099166264,
+  2026-10-10 15:36 UTC); approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099229278,
   2026-10-10 15:42 UTC). The check fails on every reference to a clock function that is
   not a call, also one in code. A call relocation counts as a call only in a section

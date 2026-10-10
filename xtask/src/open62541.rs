@@ -282,10 +282,9 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 /// outside both the copy and the system directories, a reference to a symbol outside
 /// the copy that neither [`SYMBOLS`] nor [`FUNCTION_SYMBOLS`] admits, a listed key
 /// with no reference, a reference outside a function that [`SYMBOLS`] does not admit,
-/// any reference to a clock
-/// function other than a call, such as its address in code or data, through which any
-/// code can call it, each inlined function, an `#include_next`, and a `#line`
-/// directive or line marker in a `.c` or `.h` file of the copy.
+/// any reference to a clock function other than a call, such as its address in code or
+/// data, through which any code can call it, each inlined function, an `#include_next`,
+/// and a `#line` directive or line marker in a `.c` or `.h` file of the copy.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     let out = root.join("target/open62541/check");
     inspect(&root.join(DEST), &out, Path::new("cc"))
@@ -913,7 +912,7 @@ fn references(
 }
 
 /// The references to symbols outside the copy that [`SYMBOLS`] does not list, read so
-/// far, as the lists key them.
+/// far, as [`FUNCTION_SYMBOLS`] keys them.
 #[derive(Default)]
 struct Uses {
     /// Each key of a reference that [`Uses::add`] gives to [`FUNCTION_SYMBOLS`].
@@ -921,9 +920,9 @@ struct Uses {
 }
 
 impl Uses {
-    /// Adds `found`, a reference of `file`, and gives its error when no list can admit
-    /// it: the address of a clock function, or a reference outside a function that
-    /// [`SYMBOLS`] does not admit.
+    /// Adds `found`, a reference of `file`, and gives its error when
+    /// [`FUNCTION_SYMBOLS`] cannot admit it: the address of a clock function, or a
+    /// reference outside a function that [`SYMBOLS`] does not admit.
     fn add(&mut self, file: &str, found: Reference) -> Option<String> {
         let Reference {
             section,
