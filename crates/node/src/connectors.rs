@@ -15,6 +15,8 @@ use crate::scope::Scope;
 /// supervisor. Dropped, it drops each run.
 pub(crate) struct Runs {
     supervisor: Rc<Supervisor>,
+    /// The name of the node in the region.
+    node: Name,
     scope: Scope,
     /// The last run of each name, also one whose connector is gone, until it ended.
     last: BTreeMap<Name, Run>,
@@ -30,31 +32,27 @@ struct Run {
 }
 
 impl Runs {
-    /// Runs no connector yet. Each run is a future on the tasks of `supervisor`, on a
-    /// supervisor made from it.
-    pub(crate) fn new(supervisor: supervisor::Config) -> Self {
+    /// Runs no connector of the node `node`, its name in the region, yet. Each run is
+    /// a future on the tasks of `supervisor`, on a supervisor made from it.
+    pub(crate) fn new(supervisor: supervisor::Config, node: Name) -> Self {
         Self {
             scope: Scope::new(supervisor.tasks.clone()),
             supervisor: Rc::new(Supervisor::new(supervisor)),
+            node,
             last: BTreeMap::new(),
         }
     }
 
-    /// Makes the runs match the connectors of `definitions` whose node is `node`, the
-    /// name of this node in the region, or none when `node` is `None`. Cancels the run
-    /// of each connector that is gone or changed, and starts a run of each one that is
-    /// new or changed. A run starts only after the last run of its name returned, so
-    /// no two runs of one name overlap, also across a removal and an addition. Each
-    /// other connector keeps its run.
-    pub(crate) fn apply(
-        &mut self,
-        node: Option<&Name>,
-        definitions: &BTreeMap<Name, Definition>,
-    ) {
+    /// Makes the runs match the connectors of `definitions` on the node. Cancels the
+    /// run of each connector that is gone or changed, and starts a run of each one
+    /// that is new or changed. A run starts only after the last run of its name
+    /// returned, so no two runs of one name overlap, also across a removal and an
+    /// addition. Each other connector keeps its run.
+    pub(crate) fn apply(&mut self, definitions: &BTreeMap<Name, Definition>) {
         let wanted: BTreeMap<&Name, &Connector> = definitions
             .iter()
             .filter_map(|(name, definition)| match definition {
-                Definition::Connector(connector) if Some(connector.node()) == node => {
+                Definition::Connector(connector) if *connector.node() == self.node => {
                     Some((name, connector))
                 }
                 _ => None,

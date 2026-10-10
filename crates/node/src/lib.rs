@@ -803,9 +803,11 @@ impl Serve {
     /// of [`end`]. A transport or a group that ends it goes into `failed` before it
     /// drops the tasks given that still run. Before it returns, it drops the tasks, the
     /// hub, `home`, `guard`, the runs of the connectors, each session and stream
-    /// future, the operations on the mesh, the mesh, and the transport, and waits for each task of the mesh to end, with a
-    /// mesh, and for the transport to free the port. Unless the socket broke, the port
-    /// is freed only after each task of a remote reader of the hub has ended. Runs no
+    /// future, the operations on the mesh, the mesh, and the transport, and waits for
+    /// each task of the mesh to end, with a mesh, and for the transport to free the
+    /// port. Unless the socket broke, the port is freed only after each task of a
+    /// remote reader of the hub, and each task that a connector's run spawned, has
+    /// ended. Runs no
     /// task and takes no session when a shard did not open, or when the budgets were
     /// not kept, the identity did not load, or the mesh did not open, which goes into
     /// `failed`.
@@ -843,8 +845,10 @@ impl Serve {
         let freed = transport.ended();
         let (inbox, time) = (self.inbox, self.time);
         // Each part that holds the transport or the node's stop drops as this block
-        // ends, on each path, or is a hub task of a remote reader, which ends at its
-        // next poll after its reader drops. So the port is freed before `lock` drops.
+        // ends, on each path, or is a task that ends at its next poll after its owner
+        // drops: a hub task of a remote reader, or a task that a connector's run
+        // spawned, which its kind ends at the cancel. So the port is freed before
+        // `lock` drops.
         let served = async move {
             let Ok(mesh) = mesh.map_err(&fail) else {
                 return None;
@@ -853,19 +857,18 @@ impl Serve {
                 mesh,
                 transport: Rc::clone(&transport),
             });
-            let kinds = mesh.as_ref().map(|_| Arc::new(kinds()));
-            let ops = mesh.as_ref().zip(kinds.clone());
-            let ops = ops.map(|(mesh, kinds)| operations(mesh, &time, &entropy, kinds));
             let hub = hub::Hub::new(hub::Config {
                 home,
                 interner,
                 tasks: tasks.clone(),
                 node: key,
-                time,
+                time: time.clone(),
                 entropy: entropy.clone(),
                 region,
             });
-            let runs = kinds.map(|kinds| {
+            let parts = mesh.as_ref().map(|mesh| {
+                let kinds = Arc::new(kinds());
+                let ops = operations(mesh, &time, &entropy, Arc::clone(&kinds));
                 let config = connector::supervisor::Config {
                     kinds,
                     clock: clock.clone(),
@@ -874,10 +877,11 @@ impl Serve {
                     tasks: tasks.clone(),
                     hub: hub.clone(),
                 };
-                connectors::Runs::new(config)
+                (ops, (mesh, runs(mesh, key, config)))
             });
+            let (ops, runs) = parts.unzip();
             let ended = mesh.as_ref().map(mesh::Mesh::ended);
-            let group = follow(mesh.as_ref().zip(runs), hub.clone(), key).await;
+            let group = follow(runs, hub.clone()).await;
             let port =
                 route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
             let stop = until(guard, port, group, fail);
@@ -926,6 +930,18 @@ fn operations(
     Rc::new(ops::Node::new(mesh.clone(), key, front_ends, kinds))
 }
 
+/// The runs of the connectors that the spec in use places on the node `key` of
+/// `mesh`, on a supervisor made from `config`.
+fn runs(
+    mesh: &mesh::Mesh,
+    key: types::node::Key,
+    config: connector::supervisor::Config,
+) -> connectors::Runs {
+    let member = mesh.member(key);
+    let member = member.expect("invariant: a mesh opens only on a member");
+    connectors::Runs::new(config, member.card.card().name.clone())
+}
+
 /// The connector kinds of this binary.
 fn kinds() -> connector::kind::Table {
     connector::kind::Table::new().with("influx", connector_influx::Kind::default())
@@ -937,34 +953,26 @@ fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
         .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
 }
 
-/// Gives `hub` what the spec that `mesh` uses defines and makes `runs` match it for
-/// the node `key`, then returns a future that does so for each later spec in use and
+/// Gives `hub` what the spec that `mesh` uses defines and makes `runs` match it, then
+/// returns a future that does so for each later spec in use and
 /// resolves with the stop of the group, or never resolves when the node has no mesh.
 /// The hub knows each spec before the runs do, so a run finds its status channels.
 /// The future holds the runs.
 async fn follow(
     mesh: Option<(&mesh::Mesh, connectors::Runs)>,
     hub: hub::Hub,
-    key: types::node::Key,
 ) -> impl Future<Output = mesh::Stopped> + use<> {
-    let define = move |spec: mesh::used::Spec,
-                       mesh: &mesh::Mesh,
-                       runs: &mut connectors::Runs| {
+    let define = move |spec: mesh::used::Spec, runs: &mut connectors::Runs| {
         hub.set_definitions(&*spec.definitions);
-        let node = mesh
-            .member(key)
-            .map(|member| member.card.card().name.clone());
-        runs.apply(node.as_ref(), &spec.definitions);
+        runs.apply(&spec.definitions);
     };
-    let mut followed = mesh.map(|(mesh, runs)| (mesh.watch_spec(), mesh.clone(), runs));
+    let mut followed = mesh.map(|(mesh, runs)| (mesh.watch_spec(), runs));
     let first = match &mut followed {
-        Some((watch, mesh, runs)) => {
-            watch.next().await.map(|spec| define(spec, mesh, runs))
-        }
+        Some((watch, runs)) => watch.next().await.map(|spec| define(spec, runs)),
         None => Ok(()),
     };
     async move {
-        let Some((mut watch, mesh, mut runs)) = followed else {
+        let Some((mut watch, mut runs)) = followed else {
             return std::future::pending().await;
         };
         if let Err(stopped) = first {
@@ -972,7 +980,7 @@ async fn follow(
         }
         loop {
             let next = watch.next().await;
-            if let Err(stopped) = next.map(|spec| define(spec, &mesh, &mut runs)) {
+            if let Err(stopped) = next.map(|spec| define(spec, &mut runs)) {
                 return stopped;
             }
         }

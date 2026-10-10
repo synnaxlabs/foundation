@@ -18,7 +18,8 @@ use super::Runs;
 /// The node that the runs are on.
 const NODE: &str = "plant.cloud";
 
-/// Each connector name a test uses, in the order of the keys of its status channels.
+/// Each connector name a test uses, in the order of the keys of its status
+/// channels.
 const NAMES: [&str; 3] = ["plant.a", "plant.b", "plant.c"];
 
 /// Each start of a run: its connector, its time, and the version of its config.
@@ -75,13 +76,12 @@ impl Kind for Hold {
 /// config.
 type Placed = (&'static str, &'static str, &'static str, usize);
 
-/// One spec at its time: the name of this node in the region, or `None` when it is no
-/// member, and the connectors.
-type Step = (Span, Option<&'static str>, Vec<Placed>);
+/// One spec at its time.
+type Step = (Span, Vec<Placed>);
 
-/// The step of `spec` at `at` on [`NODE`].
+/// The step of `spec` at `at`.
 fn on(at: i64, spec: Vec<Placed>) -> Step {
-    (ms(at), Some(NODE), spec)
+    (ms(at), spec)
 }
 
 /// Applies each step at its time, with the kind `hold`, whose task ends `linger` after
@@ -113,12 +113,12 @@ fn starts(linger: Option<Span>, steps: Vec<Step>) -> Vec<(String, Span, usize)> 
         let hub = config.hub.clone();
         let clock = node.clock();
         let start = clock.now();
-        let mut runs = Runs::new(config);
-        for (at, node, spec) in steps {
+        let mut runs = Runs::new(config, name(NODE));
+        for (at, spec) in steps {
             clock.sleep_until(start + at).await;
             let definitions = definitions(&spec);
             hub.set_definitions(&definitions);
-            runs.apply(node.map(name).as_ref(), &definitions);
+            runs.apply(&definitions);
         }
         clock.sleep_until(start + ms(10_000)).await;
         let starts = starts.lock().expect("no panic");
@@ -241,14 +241,6 @@ fn a_connector_on_another_node_starts_no_run() {
     ];
     let starts = starts(None, vec![on(0, spec)]);
     assert_eq!(starts, [start("plant.b", 0, 0)]);
-}
-
-#[test]
-fn a_node_that_is_no_member_runs_no_connector() {
-    let spec = || vec![("plant.a", "quick", NODE, 0)];
-    let steps = vec![on(0, spec()), (ms(1_000), None, spec()), on(2_000, spec())];
-    let starts = starts(None, steps);
-    assert_eq!(starts, [start("plant.a", 0, 0), start("plant.a", 2_000, 0)]);
 }
 
 #[test]

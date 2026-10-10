@@ -5819,18 +5819,16 @@ mod port {
         fn status() -> String {
             use std::fmt::Write as _;
             let index = "plant.influx.status.time";
-            let mut text = format!(
-                "channel \"{index}\" {{ kind = \"index\" }}\n\
-                 placement \"plant\" {{\n  select = \"plant.**\"\n  home = \"plant.node{OWN}\"\n}}\n"
-            );
+            let mut text = format!("channel \"{index}\" {{ kind = \"index\" }}\n");
+            writeln!(text, "placement \"plant\" {{").unwrap();
+            writeln!(text, "  select = \"plant.**\"").unwrap();
+            writeln!(text, "  home = \"plant.node{OWN}\"\n}}").unwrap();
             for (name, data_type) in
                 [("state", "u8"), ("class", "u8"), ("restarts", "u64")]
             {
-                writeln!(
-                    text,
-                    "channel \"plant.influx.status.{name}\" {{\n  data_type = \"{data_type}\"\n  index = \"{index}\"\n}}"
-                )
-                .unwrap();
+                writeln!(text, "channel \"plant.influx.status.{name}\" {{").unwrap();
+                writeln!(text, "  data_type = \"{data_type}\"").unwrap();
+                writeln!(text, "  index = \"{index}\"\n}}").unwrap();
             }
             text
         }
