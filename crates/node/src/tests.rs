@@ -1955,12 +1955,15 @@ mod hub {
 
     /// The samples of channel `key` in `received`.
     pub(super) fn samples(received: &Received<'_>, key: u128) -> Vec<i64> {
-        let entry = entry(received.set, key);
-        let entries = received.set.entries();
-        let range = received.view.range(entries[entry].group).expect("a range");
+        let entry = entry(received.set(), key);
+        let entries = received.set().entries();
+        let range = received
+            .view()
+            .range(entries[entry].group)
+            .expect("a range");
         let count = usize::try_from(range.count).expect("a count");
         let (_, bytes) = received
-            .view
+            .view()
             .iter()
             .find(|&(present, _)| present == entry)
             .expect("the view holds the series");

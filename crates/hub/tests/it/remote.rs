@@ -253,7 +253,7 @@ fn a_reader_at_another_node_than_its_home_acks_each_position() {
             steps.open();
             let mut positions = Vec::new();
             for _ in 0..3 {
-                positions.push(reader.next().await.expect("a frame").position);
+                positions.push(reader.next().await.expect("a frame").position());
             }
             assert_ne!(positions[0], positions[1]);
             reader.ack(positions[2]);
@@ -1486,8 +1486,8 @@ fn a_reader_gets_the_seq_and_path_of_each_frame_from_the_home() {
         |test, _| async move {
             let mut reader = test.reader(&["value"], Mode::Latest).await;
             let frame = reader.next().await.expect("a frame");
-            assert_eq!(frame.view.path(), Path::Backfill);
-            assert_eq!(frame.view.range(0), Some(Range { seq: 41, count: 2 }));
+            assert_eq!(frame.view().path(), Path::Backfill);
+            assert_eq!(frame.view().range(0), Some(Range { seq: 41, count: 2 }));
         },
     );
 }

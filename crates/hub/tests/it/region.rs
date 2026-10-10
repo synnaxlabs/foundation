@@ -435,8 +435,8 @@ fn a_session_opens_on_the_new_type_of_a_channel_changed_while_it_waits_for_a_hom
         for received in [after.next().await, reader.next().await] {
             let received = received.expect("a frame");
             assert_eq!(keys(&received), [1, 2]);
-            let at = entry(received.set, 2);
-            assert_eq!(received.set.entries()[at].data_type, I32);
+            let at = entry(received.set(), 2);
+            assert_eq!(received.set().entries()[at].data_type, I32);
         }
     });
 }

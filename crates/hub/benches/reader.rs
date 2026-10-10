@@ -264,7 +264,7 @@ fn pending(reader: &mut Reader) {
 fn poll(reader: &mut Reader, waker: &Waker) -> Option<Position> {
     let mut cx = Context::from_waker(waker);
     match pin!(reader.next()).poll(&mut cx) {
-        Poll::Ready(Ok(received)) => Some(received.position),
+        Poll::Ready(Ok(received)) => Some(received.position()),
         Poll::Ready(Err(ended)) => panic!("the reader ended: {ended:?}"),
         Poll::Pending => None,
     }

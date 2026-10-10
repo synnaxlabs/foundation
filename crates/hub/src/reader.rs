@@ -71,13 +71,30 @@ pub struct Config {
 /// channels and their index.
 #[derive(Debug)]
 pub struct Received<'a> {
+    view: View<'a>,
+    set: &'a Arc<KeySet>,
+    position: Position,
+}
+
+impl<'a> Received<'a> {
     /// The frame through the mask. Its series are encoded.
-    pub view: View<'a>,
+    #[must_use]
+    pub fn view(&self) -> View<'a> {
+        self.view
+    }
+
     /// The key set that the view's entries index.
-    pub set: &'a Arc<KeySet>,
+    #[must_use]
+    pub fn set(&self) -> &'a Arc<KeySet> {
+        self.set
+    }
+
     /// The reader's position after this frame. Give it to [`Reader::ack`] when the
     /// frame is safe at its target.
-    pub position: Position,
+    #[must_use]
+    pub fn position(&self) -> Position {
+        self.position
+    }
 }
 
 /// A position on one index: a reader at it has each sample below it. Only
