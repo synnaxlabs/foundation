@@ -183,7 +183,7 @@ fn record(linger: Option<Span>, steps: Vec<Step>, dropped: Option<i64>) -> Recor
             let definitions = definitions(&spec);
             hub.set_definitions(&definitions);
             runs.apply(&definitions);
-            names.push(runs.last.keys().map(ToString::to_string).collect());
+            names.push(runs.loops.keys().map(ToString::to_string).collect());
         }
         if let Some(dropped) = dropped {
             clock.sleep_until(start + ms(dropped)).await;
@@ -337,8 +337,9 @@ fn a_drop_cancels_each_run() {
     );
 }
 
-/// A removed run that holds stays until an apply after it ended. An entry that ended
-/// holds no future and changes no start, so no caller sees it: the test reads `last`.
+/// A removed run that holds stays until an apply after its loop ended. An entry that
+/// ended holds no future and changes no start, so no caller sees it: the test reads
+/// `loops`.
 #[test]
 fn an_apply_drops_each_removed_run_that_ended() {
     let spec = vec![("plant.a", "hold", NODE, 0)];
@@ -366,24 +367,24 @@ fn a_third_change_starts_after_the_second_run_ended() {
     );
 }
 
-/// Each change while the old run holds changes the one run that waits for it.
+/// Each change while the old run holds changes what the loop of the name runs next.
 #[test]
-fn many_changes_while_the_old_run_holds_keep_one_run_that_waits() {
+fn many_changes_while_the_old_run_holds_keep_one_future() {
     let steps = (0..100_usize)
         .zip((0..).step_by(50))
         .map(|(version, at)| on(at, vec![("plant.a", "hold", NODE, version)]))
         .collect();
     let recorded = record(None, steps, None);
-    // The run that holds, the task of its kind, and the run that waits.
-    let mut live = vec![0, 2];
-    live.resize(100, 3);
+    // The loop of the name and the task of its kind.
+    let mut live = vec![0];
+    live.resize(100, 2);
     assert_eq!(recorded.live, live);
     assert_eq!(recorded.starts, [start("plant.a", 0, 0)]);
 }
 
 /// Changes with no poll of the runs between them.
 #[test]
-fn changes_at_one_instant_keep_one_run_that_waits() {
+fn changes_at_one_instant_keep_one_future() {
     let steps = (0..10_usize)
         .map(|version| {
             let at = if version == 0 { 0 } else { 1_000 };
@@ -391,9 +392,9 @@ fn changes_at_one_instant_keep_one_run_that_waits() {
         })
         .collect();
     let recorded = record(None, steps, None);
-    // The run that holds, the task of its kind, and the run that waits.
-    let mut live = vec![0, 2];
-    live.resize(10, 3);
+    // The loop of the name and the task of its kind.
+    let mut live = vec![0];
+    live.resize(10, 2);
     assert_eq!(recorded.live, live);
     assert_eq!(recorded.starts, [start("plant.a", 0, 0)]);
 }
