@@ -120,8 +120,9 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   `sim::Sim` panics in its `Drop` to report a panic of a future, when the thread is not
   already panicking (SIM DROP in `docs/decisions/testing/sim-drop.md`). A test helper
   under `tests/` may panic or block in its `Drop` only as TEST DROP says
-  (`docs/decisions/testing/test-drop.md`), and a test type whose `Drop` is the input
-  of its test is outside this bullet.
+  (`docs/decisions/testing/test-drop.md`), and a type in test code (under `tests/` or
+  in a `#[cfg(test)]` module) whose `Drop` panics or blocks as the input of its test
+  is outside this bullet.
 
 ## Unsafe
 
