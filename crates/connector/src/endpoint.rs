@@ -705,15 +705,16 @@ mod tests {
         assert_eq!(format!("{ports:?}"), "{}", "no slot left behind");
     }
 
-    /// An endpoint whose close reads the registry, so a close under the registry's lock
-    /// deadlocks.
+    /// An endpoint whose close polls an acquire of its key, so a close under the
+    /// registry's lock deadlocks.
     struct Probe(Arc<Registry<u8, (), Probe>>, Arc<AtomicUsize>);
 
     impl Drop for Probe {
         fn drop(&mut self) {
-            assert_eq!(
-                format!("{:?}", self.0),
-                "{0}",
+            let mut cx = std::task::Context::from_waker(Waker::noop());
+            let acquire = pin!(self.0.acquire(0, (), |(): &()| future::pending()));
+            assert!(
+                acquire.poll(&mut cx).is_pending(),
                 "the slot is busy at the close"
             );
             self.1.fetch_add(1, Relaxed);
@@ -728,11 +729,18 @@ mod tests {
         let open = |(): &()| future::ready(Ok(probe));
         drop(block_on(ports.acquire(0, (), open)).expect("opens"));
         assert_eq!(closes.load(Relaxed), 1);
-        assert_eq!(format!("{ports:?}"), "{}");
+        let probe = Probe(Arc::clone(&ports), Arc::clone(&closes));
+        let open = |(): &()| future::ready(Ok(probe));
+        let mut cx = std::task::Context::from_waker(Waker::noop());
+        let Poll::Ready(lease) = pin!(ports.acquire(0, (), open)).poll(&mut cx) else {
+            panic!("the slot is free after the close");
+        };
+        drop(lease.expect("opens again"));
+        assert_eq!(closes.load(Relaxed), 2);
     }
 
-    /// A waker that owns a waiting acquire of `tty0`. Its drop drops that acquire, which
-    /// takes the registry's lock, so a drop under the lock deadlocks.
+    /// A waker that owns a waiting acquire of `tty0`. Its drop drops that acquire,
+    /// which takes the registry's lock, so a drop under the lock deadlocks.
     struct Holder {
         _waiter: Mutex<Pending>,
     }
@@ -770,7 +778,7 @@ mod tests {
         let mut removed = Box::pin(busy(&ports));
         assert!(poll(removed.as_mut()).is_pending());
         drop(removed);
-        assert_eq!(format!("{ports:?}"), r#"{"tty0"}"#);
+        assert!(poll_with(pin!(busy(&ports)), &Arc::default()).is_pending());
     }
 
     /// Settings whose compare panics while the registry holds its lock.
