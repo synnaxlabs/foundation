@@ -202,13 +202,13 @@ impl Manager {
         .await
     }
 
-    /// Drives the manager until nothing is due on the loop, then deletes `server`,
-    /// after `UA_Server_run_shutdown`, with no call between. It checks after each run
-    /// of the loop, so a busy loop only makes the delete later.
+    /// Drives the manager until nothing is due on the loop, then deletes `server`. It
+    /// checks after each run of the loop, so a busy loop only makes the delete later.
     ///
     /// # Safety
     ///
-    /// `server` lives on the loop of the manager, and nothing uses it after the call.
+    /// `server` lives on the loop of the manager, `UA_Server_run_shutdown` was its last
+    /// call, and nothing uses it after the call.
     ///
     /// # Panics
     ///

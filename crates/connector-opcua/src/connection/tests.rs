@@ -2106,8 +2106,8 @@ fn a_server_with_a_host_in_its_url_has_that_url_alone_as_its_discovery_url() {
         .expect("the run ends");
 }
 
-/// A server that runs is not `STOPPED` when nothing is due, which a close never
-/// leaves.
+/// A server with no `UA_Server_run_shutdown` is not `STOPPED` when nothing is due. With
+/// the shutdown, only a close that does not queue its `CLOSING` leaves it so.
 #[test]
 #[should_panic(expected = "invariant: a close queues its `CLOSING` at once")]
 fn the_delete_of_a_server_that_is_not_stopped_panics() {
@@ -2129,7 +2129,8 @@ fn the_delete_of_a_server_that_is_not_stopped_panics() {
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
             assert_eq!(status, Status::GOOD);
-            // SAFETY: the server lives on the loop, and nothing uses it after.
+            // SAFETY: the server lives on the loop, and nothing uses it after. The
+            // missing shutdown breaks the contract, to reach the panic.
             unsafe { side.manager.delete_server(server) }.await;
         })
         .expect("the run ends");
