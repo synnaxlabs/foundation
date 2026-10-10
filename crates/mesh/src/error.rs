@@ -135,8 +135,8 @@ pub enum Error {
         /// `Config::founding`, with its members in key order.
         given: Box<region::Founding>,
     },
-    /// The log of the mesh directory holds a record, and the directory holds no
-    /// founding file that reads back whole.
+    /// The founding file of the mesh directory does not read back whole, or it is not
+    /// there while the log holds a record.
     Unfounded {
         /// The path of the founding file.
         path: PathBuf,
@@ -222,8 +222,8 @@ impl fmt::Display for Error {
             Self::Founding { stored, given } => founded(f, stored, given),
             Self::Unfounded { path } => write!(
                 f,
-                "the log of the mesh directory holds a record, but {} is not there or \
-                 does not read back whole",
+                "{} does not read back whole, or is not there while the log of the mesh \
+                 directory holds a record",
                 path.display()
             ),
         }

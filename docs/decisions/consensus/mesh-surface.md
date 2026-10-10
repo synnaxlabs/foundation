@@ -175,3 +175,13 @@
   than the one given: one type less, but the caller keeps the last pointer, and the two
   watches of `Mesh` have two forms. Decided by `laptop.architect` (2026-10-09T20:43:17Z:
   https://github.com/synnaxlabs/foundation/issues/2179#issuecomment-6088928607).
+  Amended (2026-10-10, #1744): the free function `mesh::founding(files, dir, pool)`
+  gives the founding that a mesh directory holds, or `None` when the directory is not
+  there or holds no founding file, so a node opens its region again at each start
+  with no copy of its own. It reads no log: a first open whose log holds no record
+  writes the same founding again. A founding file that does not read back whole gives
+  `Error::Unfounded`, whose text is "{path} does not read back whole, or is not there
+  while the log of the mesh directory holds a record". Lost: `Mesh::founding`, an
+  associated function that gives no `Mesh` and reads as a getter of an open mesh.
+  Decided by `laptop.architect` (2026-10-10T03:33:06Z:
+  https://github.com/synnaxlabs/foundation/issues/2225#issuecomment-6093336972).

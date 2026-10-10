@@ -83,6 +83,28 @@ fn refused(sim: &mut Sim, node: &sim::node::Node, founding: region::Founding) ->
     .unwrap()
 }
 
+/// What [`crate::founding`] gives for the mesh directory `dir` of node 1.
+fn read(
+    sim: &mut Sim,
+    node: &sim::node::Node,
+    dir: &'static str,
+) -> Option<region::Founding> {
+    sim.run_on(node, move |node, _| async move {
+        crate::founding(&node.files(), Path::new(dir), create_pool()).await
+    })
+    .unwrap()
+    .unwrap()
+}
+
+/// The error of [`crate::founding`] for the mesh directory of node 1.
+fn unread(sim: &mut Sim, node: &sim::node::Node) -> Error {
+    sim.run_on(node, |node, _| async move {
+        crate::founding(&node.files(), Path::new(""), create_pool()).await
+    })
+    .unwrap()
+    .unwrap_err()
+}
+
 /// What the log of node 1 holds.
 fn logged(sim: &mut Sim, node: &sim::node::Node) -> log::Stored {
     sim.run_on(node, |node, _| async move {
@@ -297,17 +319,48 @@ fn a_failed_call_on_the_founding_file_gives_the_files_error() {
     );
     let (mut sim, node, region) = founded(0);
     node.fail_file(Path::new(FILE), Operation::ReadAt);
-    let error = failed(&mut sim, &node, region);
     let path = PathBuf::from(FILE);
     let operation = Operation::ReadAt;
-    assert_eq!(
-        error,
-        files::Error::Io {
-            path,
-            operation,
-            code: 5
-        }
-    );
+    let io = files::Error::Io {
+        path,
+        operation,
+        code: 5,
+    };
+    assert_eq!(unread(&mut sim, &node), Error::Files(io.clone()));
+    node.fail_file(Path::new(FILE), Operation::ReadAt);
+    assert_eq!(failed(&mut sim, &node, region), io);
+}
+
+#[test]
+fn the_read_of_a_directory_with_no_founding_gives_none() {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    assert_eq!(read(&mut sim, &node, ""), None);
+    assert_eq!(read(&mut sim, &node, "absent"), None, "not there");
+}
+
+/// The read gives the founding of a first open, before and after the log holds a
+/// record, and an open with it opens.
+#[test]
+fn the_read_gives_the_founding_that_the_first_open_kept() {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let mut region = sim
+        .run_on(&node, |node, tasks| async move {
+            region::Founding {
+                definitions: super::create_founding(),
+                ..create_region(&node, &tasks).await
+            }
+        })
+        .unwrap();
+    run_with(&mut sim, &node, region.clone());
+    let first = read(&mut sim, &node, "");
+    write_record(&mut sim, &node);
+    let stored = read(&mut sim, &node, "").unwrap();
+    assert_eq!(first, Some(stored.clone()), "no record");
+    region.members.sort_by_key(|member| member.card.key());
+    assert_eq!(stored, region);
+    run_with(&mut sim, &node, stored);
 }
 
 #[test]
@@ -343,8 +396,8 @@ fn a_log_with_no_founding_is_refused() {
     let error = refused(&mut sim, &node, region);
     let path = PathBuf::from(FILE);
     assert_eq!(error, Error::Unfounded { path });
-    let text = "the log of the mesh directory holds a record, but founding is not \
-                there or does not read back whole";
+    let text = "founding does not read back whole, or is not there while the log of \
+                the mesh directory holds a record";
     assert_eq!(error.to_string(), text);
 }
 
@@ -375,6 +428,7 @@ fn a_founding_with_a_flipped_byte_is_refused() {
         let error = refused(&mut sim, &node, region.clone());
         let path = PathBuf::from(FILE);
         assert_eq!(error, Error::Unfounded { path }, "byte {at}");
+        assert_eq!(unread(&mut sim, &node), error, "read of byte {at}");
         flip(&mut sim, at);
     }
     run_with(&mut sim, &node, region);
@@ -406,6 +460,7 @@ fn a_founding_of_another_version_or_form_is_refused() {
         let error = refused(&mut sim, &node, region);
         let path = PathBuf::from(FILE);
         assert_eq!(error, Error::Unfounded { path }, "version {version}");
+        assert_eq!(unread(&mut sim, &node), error, "read of {version}");
     }
 }
 
@@ -520,6 +575,22 @@ fn memory_that_the_system_refuses_for_the_founding_read_gives_the_pool_error() {
         "the pool has no block for the mesh now: the system refused memory for a \
          block of 831 bytes"
     );
+}
+
+#[test]
+fn memory_that_the_system_refuses_for_the_read_gives_the_pool_error() {
+    let (mut sim, node, _) = founded(0);
+    let read = sim
+        .run_on(&node, |node, _| async move {
+            let budget = block::Config { budget: 4 << 20 };
+            let (memory, switch) = Scarce::new(budget.reservation());
+            let pool = Rc::new(Pool::new(budget, memory));
+            switch.refuse();
+            crate::founding(&node.files(), Path::new(""), pool).await
+        })
+        .unwrap();
+    let cause = block::Error::Refused { requested: 831 };
+    assert_eq!(read, Err(Error::Pool(cause)));
 }
 
 /// A power cut right after a first open keeps its founding, so an open after the
