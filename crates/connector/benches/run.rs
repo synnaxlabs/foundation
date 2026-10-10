@@ -7,6 +7,8 @@
 //! - `poll`: a step with no work.
 //! - `poll + set`: a step that sets a status count.
 //! - `set`: a set of a status count, with no poll.
+//! - `poll + set (closed)`: as `poll + set`, after a status channel was removed, so
+//!   the status writer writes no more.
 //!
 //! Each figure is ns per step, with the count of the allocations of the steps. Judge
 //! `poll` by its p50.
@@ -26,6 +28,7 @@ use document::Document;
 use document::diagnostic::Diagnostic;
 use types::channel;
 use types::name::Name;
+use types::time::Span;
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
@@ -33,9 +36,13 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 const STEPS: u64 = 10_000;
 const WARMUP: usize = 10;
 const ROUNDS: usize = 100;
+/// When the status channel `samples` is removed.
+const REMOVED: Span = Span::from_nanos(500_000_000);
+/// When a `Closed` kind starts its rounds, after the writer saw the removal.
+const CLOSED: Span = Span::from_nanos(3_000_000_000);
 
 fn main() {
-    let lines = [Step::Poll, Step::PollSet, Step::Set].map(run);
+    let lines = [Step::Poll, Step::PollSet, Step::Set, Step::Closed].map(run);
     print(&lines);
 }
 
@@ -45,6 +52,7 @@ enum Step {
     Poll,
     PollSet,
     Set,
+    Closed,
 }
 
 impl Step {
@@ -53,6 +61,7 @@ impl Step {
             Self::Poll => "poll",
             Self::PollSet => "poll + set",
             Self::Set => "set",
+            Self::Closed => "poll + set (closed)",
         }
     }
 }
@@ -94,6 +103,10 @@ impl Kind for Steps {
     #[expect(clippy::disallowed_methods, reason = "a benchmark reads a real clock")]
     async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
         let count = ctx.count("samples");
+        if matches!(self.step, Step::Closed) {
+            count.set(1);
+            ctx.clock().sleep(CLOSED).await;
+        }
         for round in 0..WARMUP + ROUNDS {
             let (start, mut allocations) = (Instant::now(), 0);
             for i in 0..STEPS {
@@ -152,13 +165,13 @@ fn run(step: Step) -> Line {
     };
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
-    let result = sim.run_on(&node, |node, tasks| async move {
+    let result = sim.run_on(&node, move |node, tasks| async move {
         let env = hub::testing::Env {
             files: node.files(),
             clock: node.clock(),
             wall: node.wall(),
             entropy: node.entropy(),
-            tasks,
+            tasks: tasks.clone(),
         };
         let kinds = Table::new().with("steps", kind);
         let config = testing::create_config(env, node.net(), kinds).await;
@@ -171,6 +184,16 @@ fn run(step: Step) -> Line {
         config
             .hub
             .set_definitions(status.iter().map(|(name, def)| (name, def)));
+        if matches!(step, Step::Closed) {
+            let (hub, clock) = (config.hub.clone(), node.clock());
+            let removed = format!("{connector}.status.samples");
+            let removed: Name = removed.parse().expect("a valid name");
+            tasks.spawn(async move {
+                clock.sleep(REMOVED).await;
+                let kept = status.iter().filter(|(name, _)| *name != removed);
+                hub.set_definitions(kept.map(|(name, def)| (name, def)));
+            });
+        }
         let (token, document) = (Token::new(), Document::default());
         Supervisor::new(config)
             .run("steps", connector, &document, &token)
@@ -190,7 +213,7 @@ fn run(step: Step) -> Line {
 fn print(lines: &[Line]) {
     println!("ns per step over {ROUNDS} rounds of {STEPS} steps");
     println!(
-        "{:<12} {:>7} {:>7} {:>7} {:>7}",
+        "{:<20} {:>7} {:>7} {:>7} {:>7}",
         "line", "p10", "p50", "p90", "allocs"
     );
     for line in lines {
@@ -198,7 +221,7 @@ fn print(lines: &[Line]) {
         nanos.sort_unstable();
         let at = |percent: usize| nanos[nanos.len() * percent / 100];
         println!(
-            "{:<12} {:>7} {:>7} {:>7} {:>7}",
+            "{:<20} {:>7} {:>7} {:>7} {:>7}",
             line.name,
             at(10),
             at(50),
