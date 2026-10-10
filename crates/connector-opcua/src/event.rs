@@ -61,6 +61,21 @@ impl Loop {
         ticks.max(0).unsigned_abs().checked_mul(100).map(Monotonic)
     }
 
+    /// Runs the timers and the delayed callbacks that are due, with no wait.
+    ///
+    /// # Panics
+    ///
+    /// If open62541 fails the run.
+    #[cfg_attr(
+        not(any(test, feature = "sim")),
+        expect(dead_code, reason = "the server of #435 calls it")
+    )]
+    pub(crate) fn run(&self) {
+        // SAFETY: the member takes its own loop.
+        let status = ffi::Status(unsafe { (self.members().run)(self.raw(), 0) });
+        assert_eq!(status, ffi::Status::GOOD, "open62541 failed a run");
+    }
+
     /// Gives whether a timer or a delayed callback is due now.
     #[cfg_attr(
         not(any(test, feature = "sim")),

@@ -198,7 +198,7 @@ impl Manager {
         };
         this.connections
             .drive(|_| {
-                this.run();
+                this.connections.events().run();
                 if this.activated() == this.clients.len() {
                     Poll::Ready(())
                 } else {
@@ -278,18 +278,11 @@ impl Manager {
             if let Some(first) = first.take() {
                 first();
             }
-            self.run();
+            self.connections.events().run();
             Poll::Ready(())
         }));
         let ready = drive.poll(&mut Context::from_waker(Waker::noop()));
         assert!(ready.is_ready(), "a drive whose run is ready ends");
-    }
-
-    fn run(&self) {
-        let events = self.connections.events();
-        // SAFETY: the member takes its own loop.
-        let status = Status(unsafe { (events.members().run)(events.raw(), 0) });
-        assert_eq!(status, Status::GOOD, "open62541 failed a run");
     }
 
     /// Gives the count of clients with an activated session.

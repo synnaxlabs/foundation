@@ -278,13 +278,6 @@ impl Side {
         assert_eq!(status, Status::GOOD);
     }
 
-    fn run(&self) {
-        let events = self.events();
-        // SAFETY: the member takes its own loop.
-        let status = Status(unsafe { (events.members().run)(events.raw(), 0) });
-        assert_eq!(status, Status::GOOD);
-    }
-
     /// Drives the manager and runs the loop until `span` passes, and gives the count
     /// of runs.
     async fn drive(&self, span: Span) -> usize {
@@ -292,7 +285,7 @@ impl Side {
         let mut end = self.clock.sleep(span);
         let mut drive = pin!(self.manager.drive(|_| {
             runs.set(runs.get() + 1);
-            self.run();
+            self.events().run();
             Poll::<Infallible>::Pending
         }));
         poll_fn(|cx| {
@@ -910,7 +903,7 @@ fn a_drive_ends_with_the_first_value_of_run() {
             let at = side
                 .manager
                 .drive(|_| {
-                    side.run();
+                    side.events().run();
                     if side.calls().len() == 2 {
                         Poll::Ready(side.clock.now())
                     } else {
@@ -1001,7 +994,7 @@ fn a_send_from_the_run_that_ends_a_drive_goes_out() {
             side.add_timer(act, 10.0, ptr::from_ref(&later).cast_mut().cast());
             side.manager
                 .drive(|_| {
-                    side.run();
+                    side.events().run();
                     if side.clock.now() >= due {
                         Poll::Ready(())
                     } else {
@@ -1120,7 +1113,7 @@ fn a_source_that_run_polls_wakes_the_drive() {
             let at = side
                 .manager
                 .drive(|cx| {
-                    side.run();
+                    side.events().run();
                     Pin::new(&mut source).poll(cx).map(|()| side.clock.now())
                 })
                 .await;
@@ -1253,7 +1246,7 @@ fn a_closing_with_no_stream_drops_the_connection_at_once() {
             assert_eq!(side.close(1), Status::GOOD);
             let mut end = side.clock.sleep(Span::SECOND);
             let mut drive = pin!(side.manager.drive(|_| {
-                side.run();
+                side.events().run();
                 if side.connections() == 0 {
                     Poll::Ready(side.clock.now())
                 } else {
@@ -1376,7 +1369,7 @@ fn a_close_drops_the_connection_when_the_peer_closes_its_side() {
             let dropped = side
                 .manager
                 .drive(|cx| {
-                    side.run();
+                    side.events().run();
                     if side.connections() == 0 {
                         Poll::Ready(Some(side.clock.now()))
                     } else {

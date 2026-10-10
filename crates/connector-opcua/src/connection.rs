@@ -225,9 +225,7 @@ impl Manager {
     pub(crate) async unsafe fn delete_server(&self, server: *mut ffi::test::Server) {
         let events = &self.events;
         self.drive(|_| {
-            // SAFETY: the member takes its own loop.
-            let status = Status(unsafe { (events.members().run)(events.raw(), 0) });
-            assert_eq!(status, Status::GOOD, "open62541 failed a run");
+            events.run();
             // SAFETY: the server lives.
             let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
             if state == ffi::test::Lifecycle::STOPPED && !events.due() {
