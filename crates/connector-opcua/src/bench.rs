@@ -300,7 +300,7 @@ impl Manager {
     async fn until(&self, reached: impl Fn((c_int, c_int)) -> bool) {
         let all = || {
             self.clients.iter().all(|client| {
-                let (mut channel, mut session) = (-1, -1);
+                let (mut channel, mut session) = (0, 0);
                 // SAFETY: the client lives.
                 unsafe {
                     ffi::test::UA_Client_getState(
@@ -410,6 +410,31 @@ mod tests {
             manager.drive();
             assert_eq!(manager.answers(), 1);
         });
+    }
+
+    /// The close of a scope frees the port and deletes each client before the next
+    /// scope, also when the close of a stream takes a long time to reach its peer.
+    #[test]
+    fn a_scope_closes_before_the_next_on_a_slow_link() {
+        let link = sim::link::Config {
+            delay: Span::from_nanos(100_000_000),
+            ..sim::link::Config::default()
+        };
+        let mut sim = Sim::new(sim::Config {
+            link,
+            ..sim::Config::default()
+        });
+        let node = sim.node(node::Config::default());
+        sim.run_on(&node, move |node, _| async move {
+            let address = node.addresses()[0];
+            for _ in 0..2 {
+                let body = async |manager: &Manager| manager.answers();
+                let answers =
+                    Manager::scope(node.clock(), node.net(), address, 3, body).await;
+                assert_eq!(answers, 0);
+            }
+        })
+        .expect("the run ends");
     }
 
     #[test]
