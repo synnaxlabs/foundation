@@ -100,6 +100,8 @@ struct Member {
     name: String,
     key: types::node::Key,
     private_key: PrivateKey,
+    /// The public seal key that `node::create_key` made.
+    seal_key: SealKey,
     host: sim::node::Node,
     /// The region that [`Lab::mesh`] gave the node.
     region: Option<Founding>,
@@ -208,16 +210,17 @@ impl Lab {
         let created = self.sim.run_on(&host, {
             let private_key = private_key.clone();
             move |host, _| async move {
-                node::create_key(&host.files(), key, private_key).await
+                node::create_key(&host.files(), &host.entropy(), key, private_key).await
             }
         });
-        created
+        let seal_key = created
             .expect("lab failure: the run ends")
             .expect("lab failure: the key of a new host");
         self.members.push(Member {
             name: name.into(),
             key,
             private_key,
+            seal_key,
             host,
             region: None,
             node: None,
@@ -299,15 +302,13 @@ impl Lab {
             .iter()
             .map(|&node| {
                 let member = &self.members[node.0];
-                let mut seal = [member.private_key.0[0]; 32];
-                seal[31] = 0;
                 let card = Card {
                     name: member
                         .name
                         .parse()
                         .expect("lab failure: a node name is a card name"),
                     public_key: member.private_key.public(),
-                    seal_key: SealKey::new(seal).unwrap(),
+                    seal_key: member.seal_key,
                     addresses: Addresses::new(vec![Address::Udp(listen(&member.host))])
                         .unwrap(),
                     version: 1,

@@ -391,9 +391,10 @@ impl Node {
 }
 
 /// Makes the file `node.key` in `files`, the data directory of a node that has not
-/// started, with `key` and `private_key`, and makes it durable. Each start of the node
-/// then uses them. For tests that must know a node's key before its first start; a
-/// node that starts with no file makes its own key.
+/// started, with `key`, `private_key`, and a new seal key from `entropy`, and makes it
+/// durable. Each start of the node then uses them. Gives the public seal key, for the
+/// node's card. For tests that must know a node's keys before its first start; a node
+/// that starts with no file makes its own keys.
 ///
 /// # Errors
 ///
@@ -403,10 +404,19 @@ impl Node {
 #[cfg(feature = "sim")]
 pub async fn create_key(
     files: &env::files::Files,
+    entropy: &env::entropy::Entropy,
     key: types::node::Key,
     private_key: types::ed25519::PrivateKey,
-) -> Result<(), Error> {
-    identity::store(files, &identity::Identity { key, private_key }).await
+) -> Result<types::node::SealKey, Error> {
+    let opener = secret::seal::Opener::generate(entropy);
+    let seal_key = opener.public();
+    let identity = identity::Identity {
+        key,
+        private_key,
+        opener,
+    };
+    identity::store(files, &identity).await?;
+    Ok(seal_key)
 }
 
 /// The name of the node of the data directory `files`: `given`, else the one that the

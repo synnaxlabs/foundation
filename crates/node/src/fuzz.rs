@@ -3,7 +3,7 @@
 use crate::identity::{self, BODY, LEN};
 use crate::sector;
 
-/// Decodes `data` as the bytes of `node.key`: 68 bytes as they are, or 64 bytes with
+/// Decodes `data` as the bytes of `node.key`: 100 bytes as they are, or 96 bytes with
 /// their CRC32C appended. Ignores any other length.
 ///
 /// # Panics

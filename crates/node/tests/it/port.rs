@@ -32,7 +32,9 @@ fn the_port_binds_at_once_when_the_lock_is_free() {
     run(&shards, "key", move |_| async move {
         let files = env::files::Files::new(disk);
         let own = types::node::Key::from_u128(1);
-        node::create_key(&files, own, KEY).await.unwrap();
+        node::create_key(&files, &os::entropy(), own, KEY)
+            .await
+            .unwrap();
     });
     let listen = free();
     let node = start_node(&rig, &shards, &threads, &io, listen);
