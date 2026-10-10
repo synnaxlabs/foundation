@@ -1,0 +1,15 @@
+connector "c" {
+  kind = "influx"
+  address = "http://influx:8086"
+  select = "edge.*"
+}
+connector "c" {
+  kind = "influx"
+  node = "edge"
+  address = "http://influx:8086"
+  select = "plant.*"
+}
+channel "c.status.state" {
+  data_type = "u8"
+  index = "a.time"
+}
