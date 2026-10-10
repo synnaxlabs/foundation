@@ -21,7 +21,7 @@ pub(crate) const FILE: &str = "node.key";
 /// The first bytes of the file; a new form gets a new tag.
 const TAG: &[u8; 16] = b"foundation/key/2";
 /// The length of the tag, the node key, the private key, and the seal key.
-pub(crate) const BODY: usize = 96;
+const BODY: usize = 96;
 /// The length of the file: the body and its CRC32C.
 pub(crate) const LEN: usize = BODY + 4;
 
@@ -201,9 +201,7 @@ mod tests {
             include_bytes!("../../../oracles/fuzz/node_identity/valid-2");
         let body: &[u8; BODY] =
             include_bytes!("../../../oracles/fuzz/node_identity/valid-body-2");
-        let mut summed = [0; LEN];
-        summed[..BODY].copy_from_slice(body);
-        sector::checksum(&mut summed);
+        let summed = sector::summed(body).expect("a body");
         for bytes in [valid, &summed] {
             let identity = decode(bytes).expect("decodes");
             assert_eq!(
