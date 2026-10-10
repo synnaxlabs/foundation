@@ -2964,6 +2964,30 @@ fn refuses_each_block_at_the_name_of_a_status_channel() {
     assert_eq!(found, expected);
 }
 
+/// A connector whose name repeats implies no channel, so the order of the files changes
+/// no problem.
+#[test]
+fn implies_no_channel_of_a_connector_whose_name_repeats() {
+    let uncounted = COUNTED.replace("  counts = [\"confirmed\"]\n", "");
+    let channel = "channel \"c.status.confirmed\" {\n  data_type = \"u8\"\n  \
+                   index = \"a.time\"\n}\n";
+    let documents = documents(&[COUNTED, &uncounted, PLANT, channel]);
+    let mut reversed = documents.clone();
+    reversed.reverse();
+    let codes = |documents: &[Document]| -> Vec<_> {
+        let found = config::check(documents, &kinds()).expect_err("problems");
+        (found.into_iter())
+            .map(|diagnostic| (diagnostic.code.as_str().to_owned(), diagnostic.span))
+            .collect()
+    };
+    let expected = [(
+        "config.duplicate-name".to_owned(),
+        documents[1].blocks[0].labels[0].span,
+    )];
+    assert_eq!(codes(&documents), expected);
+    assert_eq!(codes(&reversed), expected);
+}
+
 #[test]
 fn gives_writer_nodes_for_a_connector_that_writes_a_status_channel_on_another_node() {
     let text = format!(
