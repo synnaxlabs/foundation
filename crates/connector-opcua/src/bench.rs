@@ -155,8 +155,8 @@ impl Manager {
     }
 
     async fn new(clock: Clock, net: Net, address: IpAddr, idle: usize) -> Self {
-        let sessions =
-            u16::try_from(idle + 1).expect("open62541 counts sessions in 16 bits");
+        let sessions = u16::try_from(idle.saturating_add(1))
+            .expect("open62541 counts sessions in 16 bits");
         let local = SocketAddr::new(address, PORT);
         let rng = &mut Rng::from_seed(0);
         let manager = connection::Manager::listening(
@@ -469,6 +469,14 @@ mod tests {
     )]
     fn a_scope_with_more_sessions_than_16_bits_count_panics() {
         check(65_535, async |_, _| ());
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "open62541 counts sessions in 16 bits: TryFromIntError(PosOverflow)"
+    )]
+    fn a_scope_with_the_most_idle_clients_panics_at_the_sessions() {
+        check(usize::MAX, async |_, _| ());
     }
 
     /// A client tries a connect once, so its timeout must end the scope.
