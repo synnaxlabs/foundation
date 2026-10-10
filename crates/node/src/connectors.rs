@@ -100,7 +100,7 @@ impl Runs {
                 if let Some(after) = after {
                     cancel.race(after.wait()).await;
                 }
-                // A run cancelled before it starts writes no status.
+                // The run before it may not have returned yet.
                 if !cancel.cancelled() {
                     let kind = connector.kind().as_str();
                     let config = connector.config().document();

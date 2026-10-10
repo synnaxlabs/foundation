@@ -5,14 +5,14 @@
   name comes from a file. A run or a discovery fails with one of three classes:
   `Config`, `Device`, and `Retry` (restart with backoff). Decided by the `connector`
   builder in the plan on #338, after `/eb-review`; approved by the coordinator
-  (#338). After `Config`, the connector stops
-  until a spec change changes it (`laptop.architect-2`, 2026-10-09T05:10:43Z:
+  (#338). After `Config`, the connector stops until a spec change changes it
+  (`laptop.architect-2`, 2026-10-09T05:10:43Z:
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616).
-  Supersedes "stop until the spec changes" of the plan on #338
+  Supersedes "The supervisor stops; a spec change starts it again" of the plan on #338
   (https://github.com/synnaxlabs/foundation/issues/338#issuecomment-5994872059).
-  `Table::check` takes where the file
-  names the kind and puts `connector.unknown-kind` there; `discover` and `run` take
-  their kind from the spec, which has no spans (`laptop.architect-2`,
+  `Table::check` takes where the file names the kind and puts `connector.unknown-kind`
+  there; `discover` and `run` take their kind from the spec, which has no spans
+  (`laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/issues/1153#issuecomment-6051297152,
   2026-10-08 03:02 UTC). `Table::check` also puts there each diagnostic of the kind
   with no span, since a `Document` has none to place a missing attribute

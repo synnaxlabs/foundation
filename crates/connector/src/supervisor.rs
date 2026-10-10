@@ -120,7 +120,7 @@ impl Supervisor {
         });
         let (writer, status) = match opened.await {
             None | Some(Err(hub::writer::Error::Mesh(_))) => return Ok(()),
-            // The caller removes the status channels before it cancels.
+            // A cancelled call may find its status channels removed.
             Some(Err(hub::writer::Error::Unknown(_))) if cancel.cancelled() => {
                 return Ok(());
             }
