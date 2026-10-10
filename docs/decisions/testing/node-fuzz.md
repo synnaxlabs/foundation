@@ -8,7 +8,12 @@
   the CRC32C, and that identity encodes to the same bytes. `check` tests the first
   part as the bytes that `encode` writes from the fields of the input. The inputs of
   the form `foundation/key/1` stay, and reach only the length check since the form
-  `foundation/key/2` (NODE PORT, #1744). Lost: property
+  `foundation/key/2` (NODE PORT), and each one that decoded has a copy in the new form
+  that a test decodes. By `laptop.architect-2` (#1744, plan revision 3, item 6,
+  2026-10-10 03:30 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093320483.
+  Trigger: the PR of #1744 that adds `admin.key` adds its form to the target, by its
+  length, with its inputs. Lost: property
   tests only, with a sentence in `docs/security.md` that the decode needs no target.
   It breaks T1. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1994#issuecomment-6071757310,

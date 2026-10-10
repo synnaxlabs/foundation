@@ -93,7 +93,8 @@
   `node::create_key(files, entropy, key, private_key)` makes `node.key` in the data
   directory of a node that has not started, with a seal key from `entropy`, and gives
   the public seal key, so the `acceptance` lab knows each key before the first start
-  and puts it in the founding (amended by `laptop.architect-2`, #1744:
+  and puts it in the founding (amended by `laptop.architect-2`, #1744, 2026-10-10
+  03:42 UTC:
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093413533). It
   writes with the code of `identity`, so the file has one owner, and a file with no
   bytes or with 100 zero bytes counts as no key. A 100-byte file that holds other bytes

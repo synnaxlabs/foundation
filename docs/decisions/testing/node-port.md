@@ -130,9 +130,9 @@
   card whose seal key the node does not hold. The file `foundation/key/1`, with no seal
   key, gives `Error::Key`: no node ran outside a test. `create_key` makes the seal key
   from its `entropy` argument and gives its public half for the card. By
-  `laptop.architect-2` (#1744, plan revision 3):
+  `laptop.architect-2` (#1744, plan revision 3, 2026-10-10 03:30 UTC):
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093320483, with
-  the `create_key` shape of
+  the `create_key` shape of 03:42 UTC:
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093413533, and
   approved by `laptop.architect` (03:57 UTC):
   https://github.com/synnaxlabs/foundation/pull/2229#issuecomment-6093523453.
