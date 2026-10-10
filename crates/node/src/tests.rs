@@ -1803,6 +1803,50 @@ mod home {
             ]
         );
     }
+
+    /// A read of the ring that fails at a restart over a handoff record fails the
+    /// node with its error, in the open of the buffer and in the open of the home
+    /// over it: the fault lands at each step of 25 us until the opens are done.
+    #[test]
+    fn a_failed_read_at_a_restart_over_a_handoff_fails_the_node() {
+        use super::hub::{I64, data, define, index, write, writer};
+
+        let ring = Path::new("shard-0/ring");
+        let error = Error::Buffer {
+            core: 0,
+            error: ::buffer::Error::Files(env::files::Error::Io {
+                path: ring.to_owned(),
+                operation: env::files::Operation::ReadAt,
+                code: 5,
+            }),
+        };
+        for after in (0..).step_by(25_000).map(Span::from_nanos) {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 1);
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            node.spawn(move |hub| async move {
+                define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
+                let mut writer = writer(&hub, &["value"]).await;
+                let stamp = writer.now().nanos();
+                write(&mut writer, stamp, 7);
+                std::future::pending::<()>().await;
+            });
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+            sim.crash(&host, sim::Crash::Process);
+            drop(node);
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            assert_eq!(sim.run_for(after), Ok(()), "{after:?}");
+            host.fail_file(ring, env::files::Operation::ReadAt);
+            assert_eq!(sim.run_for(Span::SECOND), Ok(()), "{after:?}");
+            node.stop();
+            assert_eq!(sim.run(), Ok(()), "{after:?}");
+            match node.join() {
+                Ok(()) => break,
+                joined => assert_eq!(joined, Err(error.clone()), "{after:?}"),
+            }
+            assert!(after < Span::from_nanos(10_000_000), "the opens go on");
+        }
+    }
 }
 
 mod lock {
