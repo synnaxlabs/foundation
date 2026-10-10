@@ -864,6 +864,20 @@ mod tests {
         assert_eq!(text.capacity(), text.len());
     }
 
+    /// A constant spare capacity of the value cancels in each difference of held bytes
+    /// that a caller can measure, so only this test sees it.
+    #[test]
+    fn sets_a_text_with_no_spare_capacity() {
+        let form = Variable::of(Type::String).expect("a `String` has a form");
+        let len = form.len(&["busy"]).expect("a short text has a length");
+        let value = String::new();
+        let mut text = Text { value, at: 1, form };
+        let mut series = [(0, 0), (0, 0)];
+        text.set(&mut series, "busy".to_owned());
+        assert_eq!((text.value.as_str(), text.value.capacity()), ("busy", 4));
+        assert_eq!(series, [(0, 0), (0, len)]);
+    }
+
     #[test]
     fn debugs_each_value_but_the_waker() {
         let status = Status::new(vec![name("samples")]);
