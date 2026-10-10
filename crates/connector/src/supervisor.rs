@@ -3054,7 +3054,9 @@ mod tests {
     fn holds_the_reader_of_a_kind_for_the_hold_of_its_settings() {
         for (hold, want) in [
             (Span::SECOND, Err(hub::reader::Ended::Behind)),
-            (ms(50), Ok(vec![8])),
+            (ms(101), Err(hub::reader::Ended::Behind)),
+            (ms(100), Ok(vec![8])),
+            (ms(99), Ok(vec![8])),
             (Span::ZERO, Ok(vec![8])),
         ] {
             let writes = vec![(ms(100), 7), (ms(300), 8)];
@@ -3075,6 +3077,23 @@ mod tests {
             );
             assert_eq!(got, [want], "hold {hold:?}");
         }
+    }
+
+    #[test]
+    fn gives_a_kind_the_error_of_the_hub_for_a_reader_of_no_channel() {
+        let got = read_through(
+            |ctx, got| async move {
+                let none = reader::Settings {
+                    select: Selector::new(["plant.missing"]).expect("a selector"),
+                    ..settings(Span::ZERO)
+                };
+                let error = ctx.reader(&none).await.expect_err("no channel");
+                got.lock().expect("no panic").push(error.to_string());
+                Ok(())
+            },
+            |_, _| async {},
+        );
+        assert_eq!(got, ["the selector matches no channel"]);
     }
 
     /// Runs `write` as `plant.write` on a new shard, while a writer as
