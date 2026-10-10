@@ -3015,6 +3015,52 @@ fn implies_the_channels_of_the_first_connector_at_a_name_that_repeats() {
     assert_eq!(codes(&reversed), expected);
 }
 
+/// Of the connectors at a name that repeats, only the first in span order writes
+/// channels, so the order of the files changes no problem.
+#[test]
+fn refuses_the_writes_of_the_first_connector_at_a_name_that_repeats() {
+    let block = |writes: &str| {
+        format!(
+            "connector \"d\" {{\n  kind = \"writer\"\n  node = \"n\"\n  \
+             writes = [{writes}]\n}}\n"
+        )
+    };
+    let (writer, idle) = (block("\"c.status.state\""), block(""));
+    let documents = documents(&[COUNTED, &writer, &idle]);
+    let mut reversed = documents.clone();
+    reversed.reverse();
+    let codes = |documents: &[Document]| -> Vec<_> {
+        let found = config::check(documents, &kinds()).expect_err("problems");
+        (found.into_iter())
+            .map(|diagnostic| (diagnostic.code.as_str().to_owned(), diagnostic.span))
+            .collect()
+    };
+    let span = |document: &Document| document.blocks[0].labels[0].span;
+    let expected = [
+        ("config.implied-channel".to_owned(), span(&documents[1])),
+        ("config.duplicate-name".to_owned(), span(&documents[2])),
+    ];
+    assert_eq!(codes(&documents), expected);
+    assert_eq!(codes(&reversed), expected);
+}
+
+/// `plan` refuses a connector that writes a status channel of a connector on another
+/// node.
+#[test]
+fn refuses_a_connector_on_another_node_that_writes_a_status_channel() {
+    let writer = "connector \"d\" {\n  kind = \"writer\"\n  node = \"m\"\n  \
+                  writes = [\"c.status.state\"]\n}\n";
+    let found = problems(Spec::create_empty().plan(&[COUNTED, writer], &["n", "m"]));
+    let expected = problem(
+        "config.implied-channel",
+        (1, label(writer, "d")),
+        "the connector `c` implies the channel `c.status.state`, so the connector `d` \
+         cannot write it",
+        "Write another channel from the connector `d`",
+    );
+    assert_eq!(found, [expected]);
+}
+
 /// Only the connector writes its status channels, in any ASCII case.
 #[test]
 fn refuses_a_connector_that_writes_a_status_channel_of_another() {

@@ -102,7 +102,7 @@ pub struct Entry {
 /// [`Name::MAX_BYTES`]. `config.implied-channel` at the label of each block whose key
 /// in the map is, in any ASCII case, a status channel, and at the label of each
 /// connector whose kind writes one, with a note at the connector of the channel. Of
-/// the connectors at one key, only the first in span order has status channels.
+/// the connectors at one key, only the first in span order implies or writes channels.
 pub fn check(
     documents: &[Document],
     kinds: &Table,
