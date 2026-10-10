@@ -2733,6 +2733,23 @@ mod tests {
     }
 
     #[test]
+    fn restores_control_with_no_mesh_time_after_a_power_cut() {
+        let (mut sim, node) = cut_after(176, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let mut shard = test.unsynced().await;
+            assert_eq!(shard.now(), None);
+            shard.carry(Slot::new(0));
+            let a = control::Writer {
+                subject: "a".parse().expect("a valid name"),
+                authority: Authority(1),
+            };
+            assert_eq!(shard.indexes[0].gate.holder(), Some(&a));
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
     fn open_refuses_a_handoff_record_that_does_not_decode() {
         let (mut sim, node) = create_node(175);
         let ended = sim.run_on(&node, |node, tasks| async move {
