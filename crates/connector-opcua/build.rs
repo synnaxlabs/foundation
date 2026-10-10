@@ -6,13 +6,16 @@
 mod compiler;
 
 fn main() {
-    // The tests compile C for this target.
     #[expect(
         clippy::disallowed_methods,
         reason = "cargo gives a build script its target only in the environment"
     )]
-    let target = std::env::var("TARGET").expect("cargo sets TARGET");
+    let env = |name| std::env::var(name);
+    // The tests compile C for this target, and build the library with its features.
+    let target = env("TARGET").expect("cargo sets TARGET");
     println!("cargo::rustc-env=CONNECTOR_OPCUA_TARGET={target}");
+    let features = env("CARGO_CFG_TARGET_FEATURE").unwrap_or_default();
+    println!("cargo::rustc-env=CONNECTOR_OPCUA_TARGET_FEATURES={features}");
     // Set when the Rust and the C build with ASan: `src/alloc.rs` then poisons the
     // header of each block.
     println!("cargo::rustc-check-cfg=cfg(asan)");

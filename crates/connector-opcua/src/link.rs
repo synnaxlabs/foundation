@@ -481,15 +481,17 @@ fn named_outside_tests(
 }
 
 /// Each file that a build of the library of the crate at `root` reads, and the cfgs
-/// that the builds set, sorted. The builds are those on this host with each set of
-/// the cfgs that the crate tests and the host does not set (features among them), each
-/// with debug assertions on and off and with each panic strategy. rustc names each
-/// such cfg in a build that reads the file that tests it.
+/// that the builds set, sorted. The builds are those for the target of this build,
+/// with its target features, and with each set of the cfgs that the crate tests and
+/// rustc does not know (features among them), each with debug assertions on and off
+/// and with each panic strategy. rustc names each such cfg in a build that reads the
+/// file that tests it. A file under a known value of a target cfg that this build does
+/// not set, such as `target_os = "windows"`, is read by no build.
 ///
 /// # Panics
 ///
-/// On a cfg with a value, other than a feature, that the host does not set, since the
-/// scan cannot know which values a build gives it.
+/// On a value that rustc does not know of a cfg other than `feature`, since the scan
+/// cannot know which values a build gives it.
 fn built(root: &std::path::Path) -> (Vec<std::path::PathBuf>, Vec<String>) {
     let mut cfgs: Vec<String> = Vec::new();
     let mut runs = std::collections::BTreeSet::new();
@@ -533,13 +535,13 @@ fn on(cfgs: &[String]) -> Vec<String> {
 }
 
 /// Each file that rustc reads to expand the library of the crate at `root`, at
-/// `src/lib.rs`, with `flags`, and each cfg that the crate tests, the host does not
-/// set, and `known` does not hold, as `name` or `feature="name"`. No other crate is
+/// `src/lib.rs`, with `flags`, and each cfg that the crate tests, rustc does not know,
+/// and `known` does not hold, as `name` or `feature="name"`. No other crate is
 /// given, so its names fail to resolve, but rustc lists the files of the crate still.
 ///
 /// # Panics
 ///
-/// On a cfg with a value, other than a feature, that the host does not set.
+/// On a value that rustc does not know of a cfg other than `feature`.
 fn read_by_rustc(
     root: &std::path::Path,
     known: &[String],
@@ -556,6 +558,9 @@ fn read_by_rustc(
         format!("cfg(feature, values({}))", values.join(",")),
     ];
     checked.extend(names.iter().map(|name| format!("cfg({name})")));
+    let features = env!("CONNECTOR_OPCUA_TARGET_FEATURES").split(',');
+    let features: Vec<_> = features.map(|feature| format!("+{feature}")).collect();
+    let features = features.join(",");
     // rustc checks cfgs only when it emits more than dep-info, and each thread needs a
     // directory of its own for the metadata.
     let out = std::path::Path::new(env!("OUT_DIR"))
@@ -567,6 +572,7 @@ fn read_by_rustc(
         ));
     let output = std::process::Command::new("rustc")
         .args(["--edition", "2024", "--crate-type", "lib"])
+        .arg(format!("-Ctarget-feature={features}"))
         .args(["--emit", "dep-info=-,metadata", "--out-dir"])
         .arg(out)
         .args(checked.iter().flat_map(|cfg| ["--check-cfg", cfg]))
@@ -793,8 +799,8 @@ fn the_scan_reads_a_file_that_is_not_utf_8() {
     assert_eq!(named, [at(&root, "b.der")]);
 }
 
-/// The scan refuses a cfg with a value, other than a feature, that the host does not
-/// set: it cannot know which values a build gives it.
+/// The scan refuses a value that rustc does not know of a cfg other than a feature:
+/// it cannot know which values a build gives it.
 #[test]
 fn the_scan_refuses_a_cfg_value_that_it_cannot_build() {
     for (cfg, of, value) in [
@@ -858,8 +864,25 @@ fn the_scan_reads_no_cfg_from_a_quoted_comment() {
     assert_eq!(message, expected);
 }
 
-/// The builds of the library set each cfg that the crate tests and the host does not
-/// set.
+/// The builds of the library have the target features of this build, also those that
+/// a flag of the build turns on.
+#[test]
+fn the_scan_builds_with_the_target_features_of_the_build() {
+    let features = env!("CONNECTOR_OPCUA_TARGET_FEATURES").split(',');
+    let features: Vec<_> = features
+        .map(|feature| format!("target_feature = \"{feature}\""))
+        .collect();
+    let lib = format!("#[cfg(any(test, all({})))]\nmod f;\n", features.join(", "));
+    let root = create_tree(
+        "feature",
+        &[("src/lib.rs", &lib), ("src/f.rs", "fn named() {}")],
+    );
+    let named = named_outside_tests(&root, |name| name == "named");
+    assert_eq!(named, [at(&root, "src/f.rs")]);
+}
+
+/// The builds of the library set each cfg that the crate tests and rustc does not
+/// know.
 #[test]
 fn the_scan_builds_each_cfg_of_the_crate() {
     let (_, cfgs) = built(&root());
