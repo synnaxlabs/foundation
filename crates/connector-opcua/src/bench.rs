@@ -574,6 +574,27 @@ mod tests {
         });
     }
 
+    /// The connect takes 4 ms on the default link. The node pauses for 61 s at 3.9 ms,
+    /// while the last answer is in flight, so the connect ends after 1m of `clock`.
+    #[test]
+    #[should_panic(expected = "clients connected in 1m")]
+    fn a_scope_whose_connect_ends_after_its_deadline_in_a_pause_panics() {
+        let mut sim = Sim::new(sim::Config::default());
+        let node = sim.node(node::Config::default());
+        sim.run_on(&node, move |node, tasks| async move {
+            let (clock, address) = (node.clock(), node.addresses()[0]);
+            let start = clock.now();
+            let pauser = node.clone();
+            tasks.spawn(async move {
+                clock.sleep_until(start + Span::from_nanos(3_900_000)).await;
+                pauser.pause(Span::from_nanos(61_000_000_000));
+            });
+            let body = async |_: &Manager| {};
+            Manager::scope(node.clock(), node.net(), address, 0, body).await;
+        })
+        .expect("the run ends");
+    }
+
     #[test]
     fn the_debug_of_a_manager_gives_its_clients_and_answers() {
         check(2, async |manager, _| {
