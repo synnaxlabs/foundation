@@ -273,11 +273,25 @@ mod tests {
             .collect()
     }
 
+    /// The lines of the value of the output `models` of the job `changes` in the
+    /// lines `ci` of a workflow.
+    fn output<'a>(ci: &[&'a str]) -> Vec<&'a str> {
+        let changes = under(&under(ci, "jobs:"), "  changes:");
+        under(&under(&changes, "    outputs:"), "      models: >-")
+    }
+
     #[test]
-    fn models_reads_only_the_models_filter_of_the_step_filter() {
+    fn models_reads_only_the_filter_and_output_of_the_changes_job() {
         let ci = concat!(
             "jobs:\n",
+            "  notes:\n",
+            "    outputs:\n",
+            "      models: >-\n",
+            "        decoy\n",
             "  changes:\n",
+            "    outputs:\n",
+            "      models: >-\n",
+            "        real\n",
             "    steps:\n",
             "      - uses: actions/checkout@v4\n",
             "        env:\n",
@@ -298,6 +312,7 @@ mod tests {
         );
         let ci: Vec<&str> = ci.lines().collect();
         assert_eq!(models(&ci), ["'crates/env/**'"]);
+        assert_eq!(output(&ci), ["        real"]);
     }
 
     #[test]
@@ -306,12 +321,8 @@ mod tests {
         let ci = workflow(&root);
         let ci: Vec<&str> = ci.lines().collect();
         let (models, jobs) = (models(&ci), under(&ci, "jobs:"));
-        let output = under(
-            &under(&under(&jobs, "  changes:"), "    outputs:"),
-            "      models: >-",
-        );
         assert_eq!(
-            output,
+            output(&ci),
             ["        ${{ github.event_name == 'push' && 'false' || \
                  steps.filter.outputs.models }}"],
             "the models output of the changes job is not the models filter on each PR"
