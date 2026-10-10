@@ -473,7 +473,7 @@ fn error_codes_and_fixes_match_the_golden_file() {
     for error in &every {
         // A new variant fails this match, so it joins `every` and the golden file.
         // `Config` holds the codes of the front ends, of `config`, and the one below.
-        // `Node` holds the codes of `node`.
+        // `Start` holds the codes of `node`.
         match error {
             Error::Argument { .. }
             | Error::Unknown { .. }
