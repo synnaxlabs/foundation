@@ -852,28 +852,6 @@ fn a_client_runs_its_housekeeping_on_the_loop() {
 }
 
 unsafe extern "C" {
-    /// Gives the `UA_ClientConfig` of `client`, whose second word is `logging`.
-    fn UA_Client_getConfig(client: *mut ffi::Client) -> *const [*const c_void; 2];
-}
-
-/// `UA_ClientConfig_setDefault` gives a config with no logger the stdout logger, which
-/// reads the global clock.
-#[test]
-fn a_client_logs_through_its_loop() {
-    let f = Fixture::new();
-    // SAFETY: the loop lives until the client is deleted.
-    let client = unsafe { ffi::shim_client_new(f.events.raw()) };
-    assert!(!client.is_null());
-    // SAFETY: the client lives.
-    let config = unsafe { UA_Client_getConfig(client) };
-    // SAFETY: the config lives with the client, and `shim.c` asserts the offset.
-    let logging = unsafe { (*config)[1] };
-    assert_eq!(logging, f.members().logger);
-    // SAFETY: the client lives, and the loop outlives it.
-    unsafe { ffi::UA_Client_delete(client) };
-}
-
-unsafe extern "C" {
     fn UA_Client_addTimedCallback(
         client: *mut ffi::Client,
         callback: ffi::Callback,

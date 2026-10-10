@@ -445,74 +445,76 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the shim calls {drawn:?}");
 }
 
-/// Each `.rs` file of this crate but the paths in `skipped`, with its text.
-fn rust_files(skipped: &[&str]) -> Vec<(std::path::PathBuf, String)> {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let skipped: Vec<_> = skipped.iter().map(|path| root.join(path)).collect();
-    let mut dirs = vec![root.to_path_buf()];
-    let mut files = Vec::new();
+/// Each identifier for which `named` holds, as `path: identifier`, in the Rust of
+/// `src/` outside the files that hold only tests. Comments count.
+fn named_outside_tests(named: impl Fn(&str) -> bool) -> Vec<String> {
+    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let tests = ["link.rs", "child.rs", "ffi/test.rs"].map(|path| src.join(path));
+    let ffi = std::fs::read_to_string(src.join("ffi.rs")).unwrap();
+    assert!(
+        ffi.contains("\n#[cfg(test)]\npub(crate) mod test;\n"),
+        "`ffi::test` builds outside tests"
+    );
+    let mut dirs = vec![src];
+    let mut found = Vec::new();
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
-            if skipped.contains(&path) {
-                continue;
-            }
             if path.is_dir() {
                 dirs.push(path);
-            } else if path.extension() == Some("rs".as_ref()) {
+            } else if path.extension() == Some("rs".as_ref())
+                && !path.ends_with("tests.rs")
+                && !tests.contains(&path)
+            {
                 let text = std::fs::read_to_string(&path).unwrap();
-                files.push((path, text));
+                let words =
+                    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+                for word in words.filter(|word| named(word)) {
+                    found.push(format!("{}: {word}", path.display()));
+                }
             }
         }
     }
-    files
+    found
 }
 
 /// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
-/// cannot bind or call one. The scan skips only the paths that hold only tests.
+/// cannot bind or call one.
 #[test]
 fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
-    let mut drawn = Vec::new();
-    for (path, text) in rust_files(&["src/link.rs", "src/event/tests.rs"]) {
-        for draw in ["UA_UInt32_random", "UA_Guid_random"] {
-            if text.contains(draw) {
-                drawn.push(format!("{}: {draw}", path.display()));
-            }
-        }
-    }
+    let drawn = named_outside_tests(|name| {
+        ["UA_UInt32_random", "UA_Guid_random"].contains(&name)
+    });
     assert!(drawn.is_empty(), "the Rust names {drawn:?}");
 }
 
-/// Only `ffi::test` binds a function of a server, so only a test builds one, and only
-/// the test server reaches `setDefaultConfig`, which `cargo xtask open62541` lets call
-/// the global clock. The scan skips the paths that hold only tests.
+/// Only tests build a server, so only the test server reaches `setDefaultConfig`,
+/// `UA_random_seed`, and `interruptServer`, which `cargo xtask open62541` lets call
+/// the global clock.
 #[test]
-fn the_rust_outside_tests_binds_no_server() {
-    let skipped = ["src/link.rs", "src/connection/tests.rs"];
-    let mut bound = Vec::new();
-    for (path, text) in rust_files(&skipped) {
-        let text = if path.ends_with("src/ffi.rs") {
-            let test = "#[cfg(test)]\npub(crate) mod test {";
-            text.split_once(test).expect("ffi.rs holds `ffi::test`").0
-        } else {
-            &text
-        };
-        for name in ["UA_Server", "shim_server_new"] {
-            if text.contains(name) {
-                bound.push(format!("{}: {name}", path.display()));
-            }
-        }
-    }
-    assert!(bound.is_empty(), "the Rust outside tests names {bound:?}");
+fn the_rust_outside_tests_builds_no_server() {
+    let named = named_outside_tests(|name| {
+        name.starts_with("UA_Server")
+            || ["shim_server_new", "UA_random_seed"].contains(&name)
+    });
+    assert!(named.is_empty(), "the Rust outside tests names {named:?}");
+}
+
+/// `UA_Client_new` gives a client the stdout logger, which `cargo xtask open62541` lets
+/// call the global clock. `shim_client_new` gives it the logger of its loop, and the
+/// stderr tests of `event` check that.
+#[test]
+fn the_rust_outside_tests_makes_each_client_with_the_shim() {
+    let named = named_outside_tests(|name| name.starts_with("UA_Client_new"));
+    assert!(named.is_empty(), "the Rust outside tests names {named:?}");
 }
 
 /// The C builds with `-ffunction-sections`, and Rust links with `--gc-sections`, so
-/// this test binary keeps only the functions that some code, also a test, reaches.
-/// `cargo xtask open62541` lets each of these call the global clock because no code
-/// reaches it.
+/// this test binary keeps only the functions that the tests, the test server among
+/// them, reach.
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "needs GNU nm")]
-fn the_linker_drops_each_clock_call_that_no_code_reaches() {
+fn the_test_server_reaches_no_clock_call() {
     let kept = names(&[std::env::current_exe().unwrap()], "--defined-only");
     assert!(
         kept.contains("setDefaultConfig"),

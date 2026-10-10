@@ -79,9 +79,6 @@ _Static_assert(offsetof(UA_DecodeBinaryOptions, decodedLength) == 32,
 _Static_assert(UA_TYPES_COUNT == 388, "UA_TYPES changed");
 _Static_assert(UA_TYPES_BYTESTRING == 14, "UA_TYPES_BYTESTRING moved");
 _Static_assert(UA_TYPES_VARIANT == 23, "UA_TYPES_VARIANT moved");
-/* `src/event/tests.rs` reads it as the second word. */
-_Static_assert(offsetof(UA_ClientConfig, logging) == sizeof(void *),
-               "UA_ClientConfig.logging moved");
 
 /* `src/ffi.rs` mirrors the struct, in words of the size of a pointer, and asserts the
  * same offsets. */
@@ -404,7 +401,7 @@ struct shim_cm {
     void *state;
 };
 
-/* `src/ffi.rs` mirrors the struct for the tests, and asserts the same offsets. */
+/* `src/ffi/test.rs` mirrors the struct, and asserts the same offsets. */
 _Static_assert(sizeof(UA_ConnectionManager) == 18 * sizeof(void *),
                "UA_ConnectionManager changed");
 #define AT(member, word)                                                               \
