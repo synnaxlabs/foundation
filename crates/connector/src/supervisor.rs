@@ -1,17 +1,16 @@
 //! Runs connectors and restarts them after errors.
 
-use std::cell::Cell;
 use std::future::poll_fn;
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::task::{Poll, Waker};
+use std::task::Poll;
 
 use document::Document;
 use env::clock::Clock;
 use env::entropy::Entropy;
 use env::net::Net;
-use env::tasks::{Driver, Task, Tasks};
+use env::tasks::{Group, Tasks};
 use types::name::Name;
 use types::time::Span;
 
@@ -151,17 +150,13 @@ impl Supervisor {
         } = &*self.0;
         let mut backoff = retry::Backoff::new(clock, entropy.rng(), RESTART);
         while writer.start().await {
-            let token = Ended(cancel.child());
-            let live = Rc::new(Live::default());
-            let count = Count {
-                tasks: tasks.clone(),
-                live: Rc::clone(&live),
-            };
+            let token = Cancels(cancel.child());
+            let group = Group::new(tasks.clone());
             let ctx = Context::new(
                 name.clone(),
                 (),
                 token.0.clone(),
-                Tasks::new(count),
+                group.tasks().clone(),
                 status.share(),
                 Rc::clone(&self.0),
             );
@@ -173,7 +168,7 @@ impl Supervisor {
             // A device error can be large, and nothing after this needs it.
             let last = matches!(end, Ok(()) | Err(Error::Config(_))).then_some(end);
             ended.await;
-            live.ended().await;
+            group.ended().await;
             if let Some(end) = last {
                 writer.stop().await;
                 return end;
@@ -193,68 +188,18 @@ impl Supervisor {
 }
 
 /// A run's token, cancelled when the run returned or its future dropped.
-struct Ended(cancel::Token);
+struct Cancels(cancel::Token);
 
-impl Drop for Ended {
+impl Drop for Cancels {
     fn drop(&mut self) {
         self.0.cancel();
-    }
-}
-
-/// Spawns a run's tasks on the shard and counts those that have not ended.
-struct Count {
-    tasks: Tasks,
-    live: Rc<Live>,
-}
-
-impl Driver for Count {
-    fn spawn(&self, task: Task) {
-        self.live.n.set(self.live.n.get().strict_add(1));
-        let held = Held(Rc::clone(&self.live));
-        self.tasks.spawn(async move {
-            let _held = held;
-            task.await;
-        });
-    }
-}
-
-/// How many tasks of one run have not ended, and who waits for none.
-#[derive(Default)]
-struct Live {
-    n: Cell<usize>,
-    waiter: Cell<Option<Waker>>,
-}
-
-impl Live {
-    /// Returns when no task of the run is left.
-    async fn ended(&self) {
-        poll_fn(|cx| {
-            if self.n.get() == 0 {
-                return Poll::Ready(());
-            }
-            self.waiter.set(Some(cx.waker().clone()));
-            Poll::Pending
-        })
-        .await;
-    }
-}
-
-/// Counts one task until the task ends or the shard drops it.
-struct Held(Rc<Live>);
-
-impl Drop for Held {
-    fn drop(&mut self) {
-        self.0.n.set(self.0.n.get().strict_sub(1));
-        if let Some(waker) = self.0.waiter.take() {
-            waker.wake();
-        }
     }
 }
 
 #[cfg(test)]
 #[cfg(not(loom))]
 mod tests {
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::collections::VecDeque;
     use std::io::IoSlice;
     use std::net::SocketAddr;
@@ -262,6 +207,7 @@ mod tests {
     use std::pin::pin;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::Waker;
 
     use env::net::tcp;
 

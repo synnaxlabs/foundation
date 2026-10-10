@@ -360,8 +360,11 @@ state on `main`.
 - Each third-party crate needs a person's approval (`docs/dependencies.md`).
   `cargo deny check advisories bans licenses sources` runs in CI on each change to a
   manifest. aws-lc-rs is the only crypto provider, with one recorded exception.
-- `unsafe` is denied in the workspace. The crates that allow it (`block`, `ring`,
-  `counting`, `waker`) run under Miri in CI.
+- `unsafe` is denied in the workspace. Each use expects `unsafe_code` with a reason
+  (`docs/claude/rust.md`, "Unsafe"). `cargo xtask miri` runs each crate that names
+  `unsafe_code` under Miri, except `os` and `connector-opcua`, which Miri cannot run.
+  CI starts it on a change to a `models` path of `ci.yaml`, which names each crate
+  that it runs and each workspace crate that one of them depends on.
 - The `fuzz/` crate has its own lock file. The `deny` job of `ci.yaml` checks it with
   `cargo deny` on each change to it.
 - A local patch of a Rust crate (`patches/`) is a path package, which `cargo deny`

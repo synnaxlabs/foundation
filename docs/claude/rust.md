@@ -130,7 +130,10 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   `allocate` module of `os` on macOS (architect, #931,
   https://github.com/synnaxlabs/foundation/issues/931#issuecomment-6030986099), the
   `signal` module of `os` (architect, #1732,
-  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545), and
+  https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545), the
+  test module `tasks::tests::hooked` of `env` (laptop.architect-2, 2026-10-10 03:57
+  UTC, #2218,
+  https://github.com/synnaxlabs/foundation/pull/2218#issuecomment-6093523974), and
   later FFI connectors. Such a module uses `#[expect(unsafe_code, reason = "...")]`
   and runs under Miri (r16 24). Those modules of `os` only call the OS, which Miri
   cannot run, so tests on the real OS check them, and `cargo xtask miri` skips `os`

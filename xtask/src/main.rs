@@ -224,15 +224,287 @@ mod tests {
         );
     }
 
+    /// The lines of the YAML `text`, with no blank or comment line, which YAML skips.
+    fn yaml_lines(text: &str) -> Vec<&str> {
+        // YAML breaks a line at CR, NEL, LS, and PS too, and a parser can read other
+        // white space as text, so `str::lines` and `str::trim` would drop a line that
+        // YAML reads.
+        if let Some(c) = text.chars().find(|c| *c != '\n' && !matches!(c, ' '..='~')) {
+            panic!("ci.yaml has a character that is not printable ASCII or LF: {c:?}");
+        }
+        (text.lines())
+            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+            .collect()
+    }
+
+    /// `.github/workflows/ci.yaml` in the workspace at `root`, with no blank or comment
+    /// line.
+    fn workflow(root: &Path) -> String {
+        let text =
+            std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
+        let ci = yaml_lines(&text);
+        // A key such as `defaults`, `env`, or `run-name` can change what a job runs.
+        let keys: Vec<&str> = (ci.iter().copied())
+            .filter(|line| !line.starts_with(' '))
+            .collect();
+        assert_eq!(
+            keys,
+            ["name: CI", "on:", "concurrency:", "jobs:"],
+            "ci.yaml has a top-level key that the checks do not read"
+        );
+        ci.join("\n")
+    }
+
+    /// The spaces before the text of `line`.
+    fn indent(line: &str) -> usize {
+        line.len() - line.trim_start().len()
+    }
+
+    /// The lines under the first line of `lines` that is `key`: each line after it up
+    /// to the first that is not indented further, which is the value of `key` in YAML.
+    fn under<'a>(lines: &[&'a str], key: &str) -> Vec<&'a str> {
+        let start = (lines.iter().position(|line| *line == key))
+            .unwrap_or_else(|| panic!("ci.yaml has no `{}` in {lines:#?}", key.trim()));
+        (lines[start + 1..].iter().copied())
+            .take_while(|line| indent(line) > indent(key))
+            .collect()
+    }
+
+    /// The lines of the step `filter` of `ci.yaml` up to the text of its filters.
+    const FILTER: [&str; 7] = [
+        "      - if: github.event_name != 'push'",
+        concat!(
+            "        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad",
+            " # v3.0.4",
+        ),
+        "        id: filter",
+        "        with:",
+        "          base: ${{ github.event.merge_group.base_sha }}",
+        "          ref: ${{ github.event.merge_group.head_sha }}",
+        "          filters: |",
+    ];
+
+    /// The lines of the step `filter` of the job `changes` in the lines `ci` of a
+    /// workflow.
+    fn filter_step<'a>(ci: &[&'a str]) -> Vec<&'a str> {
+        let steps = under(&under(&under(ci, "jobs:"), "  changes:"), "    steps:");
+        // Text under a key is indented past it, so a line at the indent of a step key
+        // is one, and a line at the indent of the steps starts one.
+        let id = (steps.iter().position(|line| *line == "        id: filter"))
+            .expect("the changes job has a step `filter`");
+        let start = (steps[..id].iter())
+            .rposition(|line| indent(line) == 6)
+            .unwrap();
+        let step = under(&steps[start..], steps[start]);
+        std::iter::once(steps[start]).chain(step).collect()
+    }
+
+    /// The paths of the `models` filter of the step `filter` of the job `changes` in
+    /// the lines `ci` of a workflow.
+    fn models<'a>(ci: &[&'a str]) -> Vec<&'a str> {
+        let step = filter_step(ci);
+        let filters = under(&under(&step, "        with:"), "          filters: |");
+        let mut key = None;
+        let mut paths = Vec::new();
+        // Any other line continues a scalar, which can hold a key or a path that the
+        // filter does not have.
+        for line in filters {
+            let name = (line.strip_prefix("            "))
+                .and_then(|name| name.strip_suffix(':'))
+                .filter(|name| {
+                    name.chars().all(|c| c.is_ascii_lowercase() || c == '_')
+                });
+            // A quote that does not close here, or a double quote, continues the
+            // scalar on the next lines.
+            let path = (line.strip_prefix("              - ")).filter(|path| {
+                (path.strip_prefix('\''))
+                    .and_then(|path| path.strip_suffix('\''))
+                    .is_some_and(|inner| !inner.contains('\''))
+            });
+            match (name, path) {
+                (Some(name), _) => key = Some(name),
+                (_, Some(path)) if key == Some("models") => paths.push(path),
+                (_, Some(_)) => {}
+                (None, None) => panic!(
+                    "the filters text has a line that is not a key or one quoted path: \
+                     `{line}`"
+                ),
+            }
+        }
+        paths
+    }
+
+    /// The lines of the value of the output `models` of the job `changes` in the
+    /// lines `ci` of a workflow.
+    fn output<'a>(ci: &[&'a str]) -> Vec<&'a str> {
+        let changes = under(&under(ci, "jobs:"), "  changes:");
+        under(&under(&changes, "    outputs:"), "      models: >-")
+    }
+
+    #[test]
+    fn yaml_lines_skips_each_blank_and_comment_line() {
+        let text = "a:\n\n  \n  # x\n  b: 1 # c\n";
+        assert_eq!(yaml_lines(text), ["a:", "  b: 1 # c"]);
+    }
+
+    #[test]
+    fn yaml_lines_refuses_each_character_that_is_not_printable_ascii_or_lf() {
+        for c in [
+            '\r', '\t', '\u{85}', '\u{a0}', '\u{2028}', '\u{2029}', '\u{7f}',
+        ] {
+            let text = format!("a:\n  #{c}  b:\n");
+            let panic =
+                std::panic::catch_unwind(|| yaml_lines(&text)).expect_err("refused");
+            assert_eq!(
+                panic.downcast_ref::<String>(),
+                Some(&format!(
+                    "ci.yaml has a character that is not printable ASCII or LF: {c:?}"
+                )),
+            );
+        }
+    }
+
+    #[test]
+    fn models_reads_only_the_filter_and_output_of_the_changes_job() {
+        let ci = concat!(
+            "jobs:\n",
+            "  notes:\n",
+            "    outputs:\n",
+            "      models: >-\n",
+            "        decoy\n",
+            "    steps:\n",
+            "      - uses: dorny/paths-filter\n",
+            "        id: filter\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
+            "  changes:\n",
+            "    outputs:\n",
+            "      notes: >-\n",
+            "        id: filter\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
+            "      models: >-\n",
+            "        real\n",
+            "    steps:\n",
+            "      - uses: actions/checkout@v4\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
+            "      -\n",
+            "        uses: dorny/paths-filter\n",
+            "        id: filter\n",
+            "        env:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            old_models:\n",
+            "              - 'crates/types/**'\n",
+            "            models:\n",
+            "              - 'crates/env/**'\n",
+            "            wait:\n",
+            "              - 'crates/types/**'\n",
+            "      - uses: actions/checkout@v4\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
+        );
+        let ci: Vec<&str> = ci.lines().collect();
+        assert_eq!(models(&ci), ["'crates/env/**'"]);
+        assert_eq!(output(&ci), ["        real"]);
+    }
+
+    #[test]
+    fn models_refuses_each_line_that_is_not_a_key_or_one_quoted_path() {
+        for line in [
+            "              - >-",
+            "              - \"crates/env/**",
+            "              - \"crates/env/**'",
+            "              - 'crates/env/**",
+            "              - 'crates/env/**''",
+            "            note: \"",
+            "            note: \"models:",
+        ] {
+            let ci = [
+                "jobs:",
+                "  changes:",
+                "    steps:",
+                "      - uses: dorny/paths-filter",
+                "        id: filter",
+                "        with:",
+                "          filters: |",
+                "            models:",
+                line,
+                "            wait:",
+                "              - 'crates/env/**'",
+            ];
+            let panic = std::panic::catch_unwind(|| models(&ci)).expect_err(line);
+            assert_eq!(
+                panic.downcast_ref::<String>(),
+                Some(&format!(
+                    "the filters text has a line that is not a key or one quoted path: \
+                     `{line}`"
+                )),
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "ci.yaml has no `with:`")]
+    fn models_reads_the_inputs_only_of_the_step_filter() {
+        let ci = concat!(
+            "jobs:\n",
+            "  changes:\n",
+            "    steps:\n",
+            "      - uses: dorny/paths-filter\n",
+            "        id: filter\n",
+            "        env:\n",
+            "          INPUT_FILTERS: |\n",
+            "            models:\n",
+            "              - 'crates/env/**'\n",
+            "      - uses: actions/checkout@v4\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
+        );
+        let ci: Vec<&str> = ci.lines().collect();
+        models(&ci);
+    }
+
     #[test]
     fn models_filter_names_each_crate_that_a_model_task_selects() {
         let root = fixture().join("../..");
-        let ci =
-            std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
-        let models = ci
-            .split("models:\n")
-            .nth(1)
-            .expect("ci.yaml has a models filter");
+        let ci = workflow(&root);
+        let ci: Vec<&str> = ci.lines().collect();
+        let (models, jobs) = (models(&ci), under(&ci, "jobs:"));
+        // An input such as `predicate-quantifier` or `ref` can make the filter skip a
+        // change.
+        let step = filter_step(&ci);
+        assert_eq!(
+            step[..FILTER.len()],
+            FILTER,
+            "the step filter of .github/workflows/ci.yaml has inputs that the checks \
+             do not read"
+        );
+        assert_eq!(
+            step[FILTER.len()..],
+            under(&step, "          filters: |"),
+            "the step filter of .github/workflows/ci.yaml has a key after `filters`"
+        );
+        assert_eq!(
+            output(&ci),
+            ["        ${{ github.event_name == 'push' && 'false' || \
+                 steps.filter.outputs.models }}"],
+            "the models output of the changes job is not the models filter on each PR"
+        );
         let metadata = metadata(&root).unwrap();
         let by_cfg = |name| select::packages(&metadata, |s| select::names_cfg(s, name));
         let tasks = [
@@ -241,12 +513,75 @@ mod tests {
             ("miri", miri::packages(&metadata).unwrap()),
         ];
         for (task, packages) in tasks {
+            let job = under(&jobs, &format!("  {task}:"));
+            let on_models =
+                "    if: \"!cancelled() && needs.changes.outputs.models != 'false'\"";
+            let run = format!("run: cargo xtask {task}");
+            // The job has no key past these, and the step that runs the task holds
+            // only its name.
+            let keys: Vec<&str> = (job.iter().copied())
+                .filter(|line| {
+                    !line.starts_with("     ") && !line.starts_with("    runs-on:")
+                })
+                .collect();
+            let end = job.iter().position(|line| line.trim() == run);
+            let alone = end.is_some_and(|end| {
+                end > 0
+                    && job[end - 1].starts_with("      - name: ")
+                    && (job.get(end + 1))
+                        .is_none_or(|next| !next.starts_with("        "))
+            });
+            assert!(
+                keys == ["    needs: changes", on_models, "    steps:"] && alone,
+                "the {task} job of .github/workflows/ci.yaml does not run `cargo xtask \
+                 {task}` on the models output: {job:#?}"
+            );
             for select::Package { name, .. } in packages {
                 assert!(
-                    models.contains(&format!("'crates/{name}/**'")),
+                    models.contains(&format!("'crates/{name}/**'").as_str()),
                     "`cargo xtask {task}` runs `{name}`, but the `models` filter in \
                      .github/workflows/ci.yaml lacks 'crates/{name}/**'"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn models_filter_names_each_workspace_crate_that_miri_runs() {
+        let root = fixture().join("../..");
+        let (ci, metadata) = (workflow(&root), metadata(&root).unwrap());
+        let ci: Vec<&str> = ci.lines().collect();
+        let models = models(&ci);
+        let workspace = metadata["packages"].as_array().unwrap();
+        // Each entry is a crate whose code Miri runs, and the crate that Miri tests.
+        let mut open: Vec<(String, String)> = (miri::packages(&metadata).unwrap())
+            .into_iter()
+            .map(|select::Package { name, .. }| (name.clone(), name))
+            .collect();
+        let mut seen = BTreeSet::new();
+        while let Some((name, tested)) = open.pop() {
+            let package = (workspace.iter())
+                .find(|p| p["name"] == name.as_str())
+                .unwrap();
+            for dep in package["dependencies"].as_array().unwrap() {
+                let kind = dep["kind"].as_str();
+                // Only the tested crate builds its dev dependencies.
+                if dep["path"].is_null()
+                    || kind == Some("build")
+                    || (kind == Some("dev") && name != tested)
+                {
+                    continue;
+                }
+                let dep = dep["name"].as_str().unwrap().to_string();
+                assert!(
+                    models.contains(&format!("'crates/{dep}/**'").as_str()),
+                    "`cargo xtask miri` runs `{tested}`, which builds `{dep}`, but the \
+                     `models` filter in .github/workflows/ci.yaml lacks \
+                     'crates/{dep}/**'"
+                );
+                if seen.insert(dep.clone()) {
+                    open.push((dep, tested.clone()));
+                }
             }
         }
     }

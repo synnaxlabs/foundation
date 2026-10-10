@@ -31,6 +31,6 @@ pub mod testing;
 pub mod ticket;
 pub mod used;
 
-pub use driver::{Config, Ended, Mesh, Watch, founding};
+pub use driver::{Config, Mesh, Watch, founding};
 pub use error::{Error, Stopped};
 pub use member::Member;
