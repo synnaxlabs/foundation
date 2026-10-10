@@ -363,6 +363,18 @@ fn the_read_gives_the_founding_that_the_first_open_kept() {
     run_with(&mut sim, &node, stored);
 }
 
+#[test]
+fn a_failed_list_of_the_mesh_directory_gives_the_files_error() {
+    let (mut sim, node, _) = founded(0);
+    node.fail_file(Path::new(""), Operation::List);
+    let io = files::Error::Io {
+        path: PathBuf::new(),
+        operation: Operation::List,
+        code: 5,
+    };
+    assert_eq!(unread(&mut sim, &node), Error::Files(io));
+}
+
 /// A reopen whose log holds no record writes the founding again, so a failed write
 /// leaves none, and the next open is a first open.
 #[test]
