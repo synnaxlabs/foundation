@@ -25,4 +25,6 @@
   change 4 and answer 2; `laptop.architect-2`, 2026-10-09T13:37:08Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6082035824;
   `laptop.architect-2`, 2026-10-09T13:58:16Z:
-  https://github.com/synnaxlabs/foundation/pull/2150#issuecomment-6082402451).
+  https://github.com/synnaxlabs/foundation/pull/2150#issuecomment-6082402451; for
+  `backoff` and `error`, `laptop.architect-2`, 2026-10-08T06:29:21Z:
+  https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6053869186).

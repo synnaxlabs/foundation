@@ -64,9 +64,16 @@
   the next run by the node's clock at the write, less the time by which the frame is
   stamped after the hub's time (below). So a frame written again later gives the wait
   that is left, a frame stamped ahead gives a wait that ends at the next run, and a step
-  of the hub's time during the wait does not change it. Decided by the `connector`
-  builder in the plan on #420 (2026-10-10T03:22:36Z:
-  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074). The cut
+  of the hub's time during the wait does not change it. The wait is by the node's
+  clock, so while the hub's time slews, the next run is up to 500 ppm of the wait from
+  the frame's time plus `backoff`. Decided by the `connector` builder in the plan on
+  #420 (2026-10-10T03:22:36Z:
+  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074),
+  measured from the frame's time after round 1 of PR #2227 (finding 2,
+  2026-10-10T03:55:58Z:
+  https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6093511014), and by
+  the node's clock after round 2 (finding 1:
+  https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6094269805). The cut
   and the join are approved by `laptop.architect-2` (2026-10-10T04:00:21Z:
   https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6093545130).
 
@@ -95,7 +102,9 @@
   `state` 3 marks the end of the run (`laptop.architect-2`, 2026-10-09T19:51:38Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6088160535).
   `status::Writer` holds the rules of each channel but the counts, and the
-  supervisor calls its `start`, `end`, `wait`, and `stop` (same ruling). A frame that
+  supervisor calls its `start`, `end`, `wait`, and `stop` (same ruling, for `class`
+  and `restarts`; for `backoff` and `error`, the #1735 ruling and the plan on #420
+  above). A frame that
   the home does not apply (`Waiting`, `Reserved`, `Order`, or `Lost`), or for which the
   shard's pool has no block now (`block::Error::Exhausted` or `Refused` in
   `frame::Error::Pool`), leaves the status staged, so it is written again one second
