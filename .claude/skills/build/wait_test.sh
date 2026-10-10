@@ -59,6 +59,7 @@ cat > "$tmp/live/gh" <<STUB
 #!/bin/sh
 PATH='$PATH'
 "$gh" api graphql -F n=1428 -f "\$6" < /dev/null > "$tmp/live/1428.json"
+printf %s "\$6" > "$tmp/live/query"
 printf %s "\$8" > "$tmp/live/filter"
 exec "$gh" "\$@"
 STUB
@@ -265,9 +266,10 @@ run "waits at most five times" 143 "" 5 "$(pr OPEN)" "$(pr OPEN)" "$(pr OPEN)" \
 
 got=$(STUB=$tmp/live PATH="$tmp/live:$PATH" sh "$here/wait.sh" 1428)
 check "API on #1428" $? "$got" 1 0 "#1428 merged" 1
-# The API's answer for #1428, put back in the queue: its last `gate` run was canceled,
-# which makes GitHub give FAILURE as its rollup state.
-replay=$(jq -c '.data.repository.pullRequest += {state: "OPEN", isInMergeQueue: true}' \
+# The API's answer for #1428, put back in the queue with no removal: its last `gate`
+# run was canceled, which makes GitHub give FAILURE as its rollup state.
+replay=$(jq -c '.data.repository.pullRequest
+  += {state: "OPEN", isInMergeQueue: true, timelineItems: {nodes: []}}' \
   "$tmp/live/1428.json")
 run "#1428 in the queue waits" 0 "#7 merged" 2 "$replay" "$merged"
 # The case above holds only while the last Review run of #1428 is a canceled `gate`.
@@ -292,6 +294,10 @@ fields=$(jq '.data.repository.pullRequest | . as $pr
   and all(.[]; .__typename != "StatusContext" or (.state | type) == "string"))' \
   "$tmp/live/1428.json")
 check "API on #1428 gives each field" 0 "$fields" 1 0 true 1
+# The queue removed #2216 for a failed check, then because it merged.
+last=$("$gh" api graphql -F n=2216 -f "$(cat "$tmp/live/query")" \
+  --jq '.data.repository.pullRequest.timelineItems.nodes[0].reason')
+check "API on #2216 gives the last removal" $? "$last" 1 0 merged 1
 # The stub runs the filter with this jq, and gh with its own engine.
 same=$(jq -r "$(cat "$tmp/live/filter")" "$tmp/live/1428.json")
 check "this jq reads #1428 as gh does" $? "$same" 1 0 merged 1
