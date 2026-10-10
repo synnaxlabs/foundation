@@ -204,10 +204,8 @@ impl<C> Context<C> {
         self.inputs.hub.writer(config).await
     }
 
-    /// Opens the connector's reader on `settings`: a reader session whose subject and
-    /// name are the connector's name. Each open takes over the last session of the
-    /// connector's reader on its index, and a complete one resumes at its acks while
-    /// `settings.hold` holds them.
+    /// Opens a reader session with `settings`, as this connector: its subject and its
+    /// name are the connector's name.
     ///
     /// # Errors
     ///
