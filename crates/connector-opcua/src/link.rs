@@ -453,7 +453,7 @@ fn src() -> std::path::PathBuf {
 /// Each identifier for which `named` holds, as `path: identifier`, in each `.rs`
 /// file under `src` that a `#[cfg(test)]` module declaration does not cut off.
 /// Comments and inline modules count. A declaration with a `path` attribute, or with
-/// a name that another declaration of its file also has, cuts off nothing.
+/// a name that another `mod` at column 0 of its file also has, cuts off nothing.
 ///
 /// # Panics
 ///
@@ -480,9 +480,13 @@ fn named_outside_tests(
         for &(at, module) in &declared {
             let pathed = attributes_above(&lines, at)
                 .any(|line| words(line).any(|word| word == "path"));
-            let shared = declared
-                .iter()
-                .any(|&(other, name)| other != at && name == module);
+            let shared = lines.iter().enumerate().any(|(other, line)| {
+                let mut words = words(line).filter(|word| !word.is_empty());
+                other != at
+                    && !line.starts_with(char::is_whitespace)
+                    && words.by_ref().any(|word| word == "mod")
+                    && words.next() == Some(module)
+            });
             if under_cfg_test(&lines, at) && !pathed && !shared {
                 cut.extend([dir.join(format!("{module}.rs")), dir.join(module)]);
             }
@@ -708,6 +712,28 @@ fn the_scan_reads_a_module_that_two_declarations_share() {
         named,
         [format!("{}: named", src.join("clock.rs").display())]
     );
+}
+
+/// A `#[cfg(test)]` declaration cuts off nothing when an inline module or another
+/// visibility has its name.
+#[test]
+fn the_scan_reads_a_module_that_an_inline_or_pub_super_module_shares() {
+    let src = create_tree(
+        "inline",
+        &[
+            (
+                "lib.rs",
+                "#[cfg(test)]\nmod clock;\n#[cfg(not(test))]\nmod clock {\n    mod real;\n}\n\
+                 #[cfg(test)]\npub mod time;\n#[cfg(not(test))]\npub(super) mod time;\n",
+            ),
+            ("clock.rs", ""),
+            ("clock/real.rs", "named"),
+            ("time.rs", "named"),
+        ],
+    );
+    let named = named_outside_tests(&src, |name| name == "named");
+    let at = |file: &str| format!("{}: named", src.join(file).display());
+    assert_eq!(named, [at("clock/real.rs"), at("time.rs")]);
 }
 
 /// A directory under `OUT_DIR` named `name` that holds only `files`.
