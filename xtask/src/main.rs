@@ -244,10 +244,14 @@ mod tests {
         ci.join("\n")
     }
 
+    /// The spaces before the text of `line`.
+    fn indent(line: &str) -> usize {
+        line.len() - line.trim_start().len()
+    }
+
     /// The lines under the first line of `lines` that is `key`: each line after it up
     /// to the first that is not indented further, which is the value of `key` in YAML.
     fn under<'a>(lines: &[&'a str], key: &str) -> Vec<&'a str> {
-        let indent = |line: &str| line.len() - line.trim_start().len();
         let start = (lines.iter().position(|line| *line == key))
             .unwrap_or_else(|| panic!("ci.yaml has no `{}` in {lines:#?}", key.trim()));
         (lines[start + 1..].iter().copied())
@@ -260,11 +264,11 @@ mod tests {
     fn models<'a>(ci: &[&'a str]) -> Vec<&'a str> {
         let steps = under(&under(&under(ci, "jobs:"), "  changes:"), "    steps:");
         // Text under a key is indented past it, so a line at the indent of a step key
-        // is one.
+        // is one, and a line at the indent of the steps starts one.
         let id = (steps.iter().position(|line| *line == "        id: filter"))
             .expect("the changes job has a step `filter`");
         let start = (steps[..id].iter())
-            .rposition(|line| line.starts_with("      - "))
+            .rposition(|line| indent(line) == 6)
             .unwrap();
         let step = under(&steps[start..], steps[start]);
         let filters = under(&under(&step, "        with:"), "          filters: |");
@@ -304,18 +308,30 @@ mod tests {
             "    outputs:\n",
             "      models: >-\n",
             "        decoy\n",
+            "    steps:\n",
+            "      - uses: dorny/paths-filter\n",
+            "        id: filter\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
             "  changes:\n",
             "    outputs:\n",
             "      models: >-\n",
             "        real\n",
             "    steps:\n",
             "      - uses: actions/checkout@v4\n",
-            "        env:\n",
-            "          NOTE: |\n",
+            "        with:\n",
+            "          filters: |\n",
             "            models:\n",
             "              - 'crates/types/**'\n",
-            "      - uses: dorny/paths-filter\n",
+            "      -\n",
+            "        uses: dorny/paths-filter\n",
             "        id: filter\n",
+            "        env:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/types/**'\n",
             "        with:\n",
             "          filters: |\n",
             "            old_models:\n",
