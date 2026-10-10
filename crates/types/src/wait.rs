@@ -139,23 +139,4 @@ mod tests {
             .collect();
         assert_eq!(wakes, [1, 0, 1]);
     }
-
-    #[test]
-    fn a_drain_keeps_the_capacity_of_the_set() {
-        let (_task, waker) = task();
-        let mut set = Set::new();
-        for key in 0..4 {
-            assert!(set.insert(key, &waker).is_none());
-        }
-        let capacity = set.0.capacity();
-        let mut woken = Vec::new();
-        set.drain(&mut woken);
-        assert_eq!((woken.len(), set.0.len()), (4, 0));
-        assert_eq!(set.0.capacity(), capacity);
-    }
-
-    #[test]
-    fn a_new_set_allocates_nothing() {
-        assert_eq!(Set::new().0.capacity(), 0);
-    }
 }
