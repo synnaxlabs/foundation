@@ -217,9 +217,9 @@ fn lines<'a>(
 ) -> impl Iterator<Item = (&'a Name, Line<'a>)> {
     planned.changes.iter().flat_map(|(name, change)| {
         let stored = || {
-            applied.get(name).expect(
-                "invariant: a plan changes or removes only an applied definition",
-            )
+            applied
+                .get(name)
+                .unwrap_or_else(|| panic!("invariant: no applied definition at {name}"))
         };
         let lines = match (&change.old, &change.new) {
             (None, Some(new)) => vec![Line::Add(new)],
