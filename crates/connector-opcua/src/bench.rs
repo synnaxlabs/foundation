@@ -278,12 +278,12 @@ impl Manager {
         self.answers.count.get()
     }
 
-    /// Closes the channel of each client, stops the server, deletes it with
-    /// `delete_server`, then deletes the clients.
+    /// Closes the channel of each client, closes the server with `close_server`, then
+    /// deletes the clients.
     ///
     /// # Panics
     ///
-    /// If a channel is not closed after the drive of `delete_server`, as the delete of
+    /// If a channel is not closed after the drive of `close_server`, as the delete of
     /// its client would then wait for a close that nothing drives.
     async fn close(mut self) {
         for client in &self.clients {
@@ -293,18 +293,14 @@ impl Manager {
             });
             assert_eq!(status, Status::GOOD, "open62541 refused a disconnect");
         }
-        let server = self.server.as_ptr();
-        // SAFETY: the server lives.
-        let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
-        assert_eq!(status, Status::GOOD, "open62541 refused the server stop");
         // SAFETY: the server lives on the loop, and nothing uses it after.
-        unsafe { self.connections.delete_server(server) }.await;
+        unsafe { self.connections.close_server(self.server.as_ptr()) }.await;
         for client in self.clients.drain(..) {
             assert_eq!(
                 // SAFETY: the client lives.
                 unsafe { state(client) }.channel,
                 ffi::test::Channel::CLOSED,
-                "invariant: the drive of `delete_server` closes each channel"
+                "invariant: the drive of `close_server` closes each channel"
             );
             // SAFETY: nothing uses the client after it.
             unsafe { ffi::UA_Client_delete(client.as_ptr()) };
