@@ -14,10 +14,15 @@ pub struct Set(Vec<(u64, Waker)>);
 /// Prints the keys only: the `Debug` of a waker prints pointers.
 impl fmt::Debug for Set {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_set()
-            .entries(self.0.iter().map(|(key, _)| key))
-            .finish()
+        keys(f, &self.0)
     }
+}
+
+/// Writes the keys of `entries` as a set.
+fn keys(f: &mut fmt::Formatter<'_>, entries: &[(u64, Waker)]) -> fmt::Result {
+    f.debug_set()
+        .entries(entries.iter().map(|(key, _)| key))
+        .finish()
 }
 
 impl Set {
@@ -67,8 +72,14 @@ impl IntoIterator for Set {
 }
 
 /// The wakers of a [`Set`], moved out of it.
-#[derive(Debug)]
 pub struct IntoIter(vec::IntoIter<(u64, Waker)>);
+
+/// Prints the keys of the wakers left only, as the `Debug` of [`Set`] does.
+impl fmt::Debug for IntoIter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        keys(f, self.0.as_slice())
+    }
+}
 
 impl Iterator for IntoIter {
     type Item = Waker;
@@ -160,6 +171,19 @@ mod tests {
             assert!(set.insert(key, &waker).is_none());
         }
         assert_eq!(format!("{set:?}"), "{4, 1}");
+    }
+
+    #[test]
+    fn its_wakers_print_only_the_keys_left() {
+        let (_, waker) = task();
+        let mut set = Set::new();
+        for key in [4, 1] {
+            assert!(set.insert(key, &waker).is_none());
+        }
+        let mut wakers = set.into_iter();
+        assert_eq!(format!("{wakers:?}"), "{4, 1}");
+        assert!(wakers.next().is_some());
+        assert_eq!(format!("{wakers:?}"), "{1}");
     }
 
     #[test]
