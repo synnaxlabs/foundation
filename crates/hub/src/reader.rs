@@ -12,7 +12,7 @@ use std::task::{Context, Poll, ready};
 use ::home::reader::Next;
 use types::channel;
 use types::frame::key_set::KeySet;
-use types::frame::{Frame, Mask, Range, View};
+use types::frame::{Frame, Mask, View};
 use types::name::{Name, Selector};
 use types::sample::Type;
 use types::time::Span;
@@ -72,11 +72,7 @@ pub struct Config {
 #[derive(Debug)]
 pub struct Received<'a> {
     view: View<'a>,
-    set: &'a Arc<KeySet>,
-    /// The group of the reader's index in `set`.
-    group: u32,
-    /// The slot of the reader's index.
-    index: channel::Slot,
+    lens: &'a Lens,
     /// The `given` of the reader.
     given: &'a Cell<u64>,
 }
@@ -91,14 +87,14 @@ impl<'a> Received<'a> {
     /// The key set that the view's entries index.
     #[must_use]
     pub fn set(&self) -> &'a Arc<KeySet> {
-        self.set
+        &self.lens.set
     }
 
     /// The reader's position after this frame. Give it to [`Reader::ack`] when the
     /// frame is safe at its target.
     #[must_use]
     pub fn position(&self) -> Position {
-        let position = Position::after(self.view.range(self.group), self.index);
+        let position = self.lens.after(&self.view);
         self.given.set(self.given.get().max(position.live));
         position
     }
@@ -113,24 +109,13 @@ pub struct Position {
     live: u64,
 }
 
-impl Position {
-    /// The position of a reader on the index at `index` after a frame whose range on
-    /// that index is `range`.
-    fn after(range: Option<Range>, index: channel::Slot) -> Self {
-        let range = range.expect("invariant: a frame holds the range of each group");
-        Self {
-            index,
-            live: range.seq + u64::from(range.count),
-        }
-    }
-}
-
-/// A key set, the mask of a reader's channels in it, and the group of the reader's
-/// index in it.
+/// A key set, the mask of a reader's channels in it, and the reader's index and its
+/// group in it.
 #[derive(Debug)]
 pub(crate) struct Lens {
     pub(crate) set: Arc<KeySet>,
     pub(crate) mask: Mask,
+    index: channel::Slot,
     group: u32,
 }
 
@@ -151,7 +136,19 @@ impl Lens {
         Self {
             set: Arc::clone(set),
             mask: Mask::new(set, slots),
+            index,
             group: set.entries()[entry].group,
+        }
+    }
+
+    /// The position of the reader after the frame of `view`, a view through this lens.
+    fn after(&self, view: &View<'_>) -> Position {
+        let range = view
+            .range(self.group)
+            .expect("invariant: a frame holds the range of each group");
+        Position {
+            index: self.index,
+            live: range.seq + u64::from(range.count),
         }
     }
 }
@@ -503,9 +500,7 @@ impl Reader {
             };
             Ok(Received {
                 view: View::new(self.frame.insert(frame), &lens.mask),
-                set: &lens.set,
-                group: lens.group,
-                index: self.index,
+                lens,
                 given: &self.given,
             })
         }
