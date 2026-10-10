@@ -386,6 +386,15 @@ pub(crate) mod test {
         pub(crate) const STOPPING: Self = Self(2);
     }
 
+    /// `UA_SessionState` of a client.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(transparent)]
+    pub(crate) struct Session(pub(crate) c_int);
+
+    impl Session {
+        pub(crate) const ACTIVATED: Self = Self(4);
+    }
+
     /// The members of `UA_ConnectionManager`. `shim.c` asserts the same size and
     /// offsets.
     #[repr(C)]
@@ -561,7 +570,7 @@ pub(crate) mod test {
         pub(crate) fn UA_Client_getState(
             client: *mut super::Client,
             channel: *mut c_int,
-            session: *mut c_int,
+            session: *mut Session,
             status: *mut u32,
         );
         pub(crate) fn shim_server_discovery_url(

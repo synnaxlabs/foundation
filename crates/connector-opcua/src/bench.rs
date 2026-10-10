@@ -5,7 +5,7 @@
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
 use std::cell::Cell;
-use std::ffi::{CString, c_int, c_void};
+use std::ffi::{CString, c_void};
 use std::future::Future as _;
 use std::mem::ManuallyDrop;
 use std::net::{IpAddr, SocketAddr};
@@ -20,7 +20,8 @@ use types::time::Monotonic;
 
 use crate::connection::{self, OPTIONS};
 use crate::event::Loop;
-use crate::ffi::{self, Status, test::Lifecycle};
+use crate::ffi::test::{Lifecycle, Session};
+use crate::ffi::{self, Status};
 
 /// A client of open62541 on its own event loop, which also runs a count of repeated
 /// timers that do nothing.
@@ -109,12 +110,12 @@ const PORT: u16 = 4840;
 /// The node of the current time of a server.
 const TIME: u32 = 2258;
 
-/// `UA_SESSIONSTATE_ACTIVATED`.
-const ACTIVATED: c_int = 4;
+/// The sessions that the server takes, from its minimal config.
+const SESSIONS: usize = 100;
 
 /// A connection manager over `env::net` with a test server of open62541 and `idle + 1`
-/// clients with an activated session on its loop. The first client reads; the others
-/// send nothing.
+/// clients, at most 100, with an activated session on its loop. The first client
+/// reads; the others send nothing.
 pub struct Manager {
     clients: Vec<NonNull<ffi::Client>>,
     server: NonNull<ffi::test::Server>,
@@ -139,8 +140,8 @@ impl Manager {
     ///
     /// # Panics
     ///
-    /// If open62541 refuses the server, a client, or a step of the close, or if the
-    /// port is taken.
+    /// If `idle` is 100 or more, as the server takes 100 sessions, if open62541 refuses
+    /// the server, a client, or a step of the close, or if the port is taken.
     pub async fn scope<T>(
         clock: Clock,
         net: Net,
@@ -155,6 +156,7 @@ impl Manager {
     }
 
     async fn new(clock: Clock, net: Net, address: IpAddr, idle: usize) -> Self {
+        assert!(idle < SESSIONS, "the server takes {SESSIONS} sessions");
         let local = SocketAddr::new(address, PORT);
         let listen = tcp::Listen {
             local,
@@ -197,7 +199,16 @@ impl Manager {
             answers: Box::default(),
             connections: ManuallyDrop::new(manager),
         };
-        this.until(|(_, session)| session == ACTIVATED).await;
+        this.connections
+            .drive(|_| {
+                this.run();
+                if this.activated() == this.clients.len() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
         this
     }
 
@@ -298,34 +309,22 @@ impl Manager {
         assert_eq!(status, Status::GOOD, "open62541 failed a run");
     }
 
-    /// Drives the manager until each client has a channel and a session state that
-    /// `reached` takes.
-    async fn until(&self, reached: impl Fn((c_int, c_int)) -> bool) {
-        let all = || {
-            self.clients.iter().all(|client| {
-                let (mut channel, mut session) = (0, 0);
-                // SAFETY: the client lives.
-                unsafe {
-                    ffi::test::UA_Client_getState(
-                        client.as_ptr(),
-                        &raw mut channel,
-                        &raw mut session,
-                        ptr::null_mut(),
-                    );
-                }
-                reached((channel, session))
-            })
+    /// Gives the count of clients with an activated session.
+    fn activated(&self) -> usize {
+        let activated = |client: &&NonNull<ffi::Client>| {
+            let mut session = Session(0);
+            // SAFETY: the client lives.
+            unsafe {
+                ffi::test::UA_Client_getState(
+                    client.as_ptr(),
+                    ptr::null_mut(),
+                    &raw mut session,
+                    ptr::null_mut(),
+                );
+            }
+            session == Session::ACTIVATED
         };
-        self.connections
-            .drive(|_| {
-                self.run();
-                if all() {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                }
-            })
-            .await;
+        self.clients.iter().filter(activated).count()
     }
 }
 
@@ -333,6 +332,7 @@ impl std::fmt::Debug for Manager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Manager")
             .field("clients", &self.clients.len())
+            .field("activated", &self.activated())
             .field("answers", &self.answers.count.get())
             .finish_non_exhaustive()
     }
@@ -446,6 +446,19 @@ mod tests {
         .expect("the run ends");
     }
 
+    /// The server takes 100 sessions, so a scope with more clients would wait for
+    /// ever.
+    #[test]
+    #[should_panic(expected = "the server takes 100 sessions")]
+    fn a_scope_with_more_clients_than_sessions_panics() {
+        check(100, async |_, _| ());
+    }
+
+    #[test]
+    fn a_scope_takes_as_many_clients_as_sessions() {
+        check(99, async |manager, _| assert_eq!(manager.activated(), 100));
+    }
+
     /// A read callback of open62541 gets `Good` also when the value has a bad status.
     #[test]
     fn a_read_of_an_unknown_node_fails_with_its_status() {
@@ -464,11 +477,11 @@ mod tests {
     }
 
     #[test]
-    fn the_debug_of_a_manager_gives_its_clients_and_answers() {
+    fn the_debug_of_a_manager_gives_its_clients_sessions_and_answers() {
         check(2, async |manager, _| {
             assert_eq!(
                 format!("{manager:?}"),
-                "Manager { clients: 3, answers: 0, .. }"
+                "Manager { clients: 3, activated: 3, answers: 0, .. }"
             );
         });
     }
