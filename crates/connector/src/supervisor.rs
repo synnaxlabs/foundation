@@ -1042,6 +1042,56 @@ mod tests {
     }
 
     #[test]
+    fn wakes_nothing_at_a_count_set_after_a_change_of_state_closed_the_writer() {
+        let polls = Arc::new(AtomicUsize::new(0));
+        let runs = Arc::new(AtomicUsize::new(0));
+        let (counted, started) = (Arc::clone(&polls), Arc::clone(&runs));
+        run_on(|node, tasks| async move {
+            let kind = Counted(move |ctx: Context<()>| {
+                let polls = Arc::clone(&counted);
+                let first = started.fetch_add(1, Ordering::Relaxed) == 0;
+                async move {
+                    if first {
+                        ctx.count("samples").set(1);
+                        ctx.clock().sleep(ms(2_000)).await;
+                        return Err(Error::Retry("busy".into()));
+                    }
+                    ctx.count("samples").set(2);
+                    let mut sleep = pin!(ctx.clock().sleep(ms(3_000)));
+                    poll_fn(|cx| {
+                        polls.fetch_add(1, Ordering::Relaxed);
+                        sleep.as_mut().poll(cx)
+                    })
+                    .await;
+                    Ok(())
+                }
+            });
+            let kinds = Table::new().with("tally", kind);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
+            let (connector, counts) = (name("plant.tally"), [name("samples")]);
+            let status = testing::create_status(&connector, &counts, STATUS);
+            inputs
+                .hub
+                .set_definitions(status.iter().map(|(name, def)| (name, def)));
+            let (hub, clock) = (inputs.hub.clone(), node.clock());
+            tasks.spawn(async move {
+                clock.sleep(ms(1_500)).await;
+                let samples = name("plant.tally.status.samples");
+                let kept = status.iter().filter(|(name, _)| *name != samples);
+                hub.set_definitions(kept.map(|(name, def)| (name, def)));
+            });
+            let result = Supervisor::new(inputs)
+                .run("tally", connector, &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+        });
+        assert_eq!(runs.load(Ordering::Relaxed), 2, "one restart");
+        let polls = polls.load(Ordering::Relaxed);
+        assert_eq!(polls, 2, "a poll to start the sleep, and one at its end");
+    }
+
+    #[test]
     fn waits_for_a_full_pool_after_its_status_channels_are_removed() {
         let returned = run_on(|node, tasks| async move {
             let kind = Counted(|ctx: Context<()>| async move {

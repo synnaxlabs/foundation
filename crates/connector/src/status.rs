@@ -183,7 +183,8 @@ impl Class {
 struct Values {
     counts: Box<[(Name, Cell<u64>)]>,
     staged: Cell<bool>,
-    /// The flush, while it waits for a staged count.
+    /// The flush, while it waits for a staged count of an open session, so that a set
+    /// after the close wakes nothing.
     waker: Cell<Option<Waker>>,
 }
 
@@ -359,8 +360,8 @@ impl Writer {
         output
     }
 
-    /// Writes the staged status until the session closed, then never again, so that a
-    /// set after the close wakes nothing. It ends when its call drops it.
+    /// Writes the staged status until the session closed, then never again. It ends
+    /// when its call drops it.
     async fn flush(&self) -> Infallible {
         let values = &self.values;
         while !self.session.borrow().closed {
@@ -481,6 +482,7 @@ impl Session {
             Ok([Outcome::Applied { .. }]) => {}
             Err(Failure::Removed(_) | Failure::Home(home::Error::Disk(_))) => {
                 self.closed = true;
+                values.waker.take();
             }
             Ok(
                 [
