@@ -1180,6 +1180,7 @@ dependencies = [
  "ops",
  "os",
  "proptest",
+ "secret",
  "sim",
  "spec",
  "transport",

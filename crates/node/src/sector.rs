@@ -126,6 +126,18 @@ pub(crate) fn checksum<const N: usize>(bytes: &mut [u8; N]) {
     sum.copy_from_slice(&crc32c::crc32c(body).to_le_bytes());
 }
 
+/// `body` with its CRC32C appended, or `None` when `body` is not `N - 4` bytes.
+#[cfg(any(test, feature = "sim"))]
+pub(crate) fn summed<const N: usize>(body: &[u8]) -> Option<[u8; N]> {
+    if body.len() != N - 4 {
+        return None;
+    }
+    let mut bytes = [0; N];
+    bytes[..N - 4].copy_from_slice(body);
+    checksum(&mut bytes);
+    Some(bytes)
+}
+
 /// The `N` bytes of `file`, which has `N` bytes.
 async fn bytes<const N: usize>(file: &File) -> Result<[u8; N], env::files::Error> {
     const { assert!(N <= env::files::SECTOR, "the file fits one sector") };
@@ -141,4 +153,22 @@ fn block<const N: usize>(bytes: &[u8; N]) -> block::Block {
     let pool = block::Pool::heap(POOL);
     pool.copy(bytes)
         .expect("invariant: the pool holds a sector")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sums_a_body_of_n_minus_4_bytes() {
+        let bytes: [u8; 8] = summed(&[1, 2, 3, 4]).expect("a body");
+        assert_eq!(bytes[..4], [1, 2, 3, 4]);
+        assert_eq!(bytes[4..], crc32c::crc32c(&[1, 2, 3, 4]).to_le_bytes());
+    }
+
+    #[test]
+    fn refuses_a_body_of_another_length() {
+        assert_eq!(summed::<8>(&[1, 2, 3]), None);
+        assert_eq!(summed::<8>(&[0; 5]), None);
+    }
 }
