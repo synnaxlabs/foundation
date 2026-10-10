@@ -20,19 +20,36 @@ mod write;
 
 use std::fmt;
 
-use document::Span;
 use document::diagnostic::{Code, Diagnostic, Note};
 use document::encoding::TooDeep;
+use document::{Document, Source, Span};
 use types::name;
 
-pub use parse::read;
 pub use unwritable::Unwritable;
 pub use update::{Refusal, update};
 pub use write::write;
 
+/// Reads HCL text as a Document. Each key, keyword, label, function name, and value
+/// has a span in `source`. A number written with digits only reads as an exact
+/// integer, and any other number as a float. A heredoc's lines end in `\n`, whatever
+/// the file uses. An integer key in an object reads as HCL reads it: its digits
+/// without leading zeros, after a `-` if it has one.
+///
+/// # Errors
+///
+/// A diagnostic for each problem in the text, at least one, in source order: a stable
+/// `hcl.*` code, or `document`'s own for a duplicate key and for nesting past the
+/// depth limit. A syntax error, an unclosed string, heredoc, or comment, a string
+/// escape that HCL does not have, a template, or nesting past the limit stops
+/// reading, so it is the last one.
+pub fn read(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
+    parse::read(source, text)
+        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
+}
+
 /// A problem in HCL text.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Error {
+pub(crate) enum Error {
     /// The text breaks the grammar.
     Syntax {
         /// What is there instead.
@@ -116,7 +133,7 @@ impl Error {
 }
 
 /// Gives each problem a diagnostic with a stable `hcl.*` code, or `document`'s own
-/// diagnostic for [`Error::Document`] and for nesting past the depth limit.
+/// diagnostic for a duplicate key and for nesting past the depth limit.
 impl From<&Error> for Diagnostic {
     fn from(error: &Error) -> Self {
         match error {
@@ -185,7 +202,7 @@ impl std::error::Error for Error {}
 
 /// An HCL form that a file cannot hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Form {
+pub(crate) enum Form {
     /// `null`.
     Null,
     /// An interpolation `${` or a directive `%{` in a string or a heredoc.
@@ -290,7 +307,7 @@ impl Form {
 
 /// What is wrong with a number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Number {
+pub(crate) enum Number {
     /// A number that a Document cannot hold: an integer outside `i128`, or a float
     /// that an `f64` cannot hold, past the largest or rounded to zero from digits that
     /// are not all zero.
@@ -319,7 +336,7 @@ impl Number {
 
 /// What the grammar needs at a syntax error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Expected {
+pub(crate) enum Expected {
     /// A key, a block keyword, or the end of the body.
     Item,
     /// `=`, a label, or `{` after a name in a body.
@@ -372,7 +389,7 @@ impl fmt::Display for Expected {
 
 /// A part of HCL text that needs a closer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unclosed {
+pub(crate) enum Unclosed {
     /// A quoted string, which ends at `"` on its line.
     String,
     /// A heredoc, which ends at its marker on a line of its own.
@@ -405,7 +422,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use document::{Position, Source};
+    use document::Position;
 
     fn span(offset: u32) -> Span {
         let at = Position {
@@ -421,6 +438,38 @@ mod tests {
             Diagnostic::new(Code::new(code), Some(span(7)), message.into(), fix.into());
         assert_eq!(Diagnostic::from(error), expected, "{error:?}");
         assert_eq!(error.to_string(), format!("{message}. {fix}"), "{error:?}");
+    }
+
+    #[test]
+    fn read_gives_the_diagnostic_of_each_problem_in_source_order() {
+        let at = |offset, line, column| Position {
+            offset,
+            line,
+            column,
+        };
+        let on = |start, end| Span::new(Source(0), start, end).unwrap();
+        let errors = [
+            Error::Form {
+                span: on(at(6, 0, 6), at(7, 0, 7)),
+                form: Form::Operator,
+            },
+            Error::Form {
+                span: on(at(16, 1, 6), at(17, 1, 7)),
+                form: Form::Conditional,
+            },
+            Error::Syntax {
+                span: on(at(28, 2, 4), at(29, 3, 0)),
+                expected: Expected::Value,
+            },
+        ];
+        let diagnostics =
+            read(Source(0), "a = 1 + 2\nb = c ? 4 : 5\nd = \n").unwrap_err();
+        let codes: Vec<_> = diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert_eq!(codes, ["hcl.operator", "hcl.conditional", "hcl.syntax"]);
+        assert_eq!(
+            diagnostics,
+            errors.iter().map(Diagnostic::from).collect::<Vec<_>>()
+        );
     }
 
     const EXPECTED: [(Expected, &str); 13] = [

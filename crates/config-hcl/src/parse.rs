@@ -6,18 +6,9 @@ use types::name::Name;
 use crate::lex::{self, Token, Tokens};
 use crate::{Error, Expected, Form, Number};
 
-/// Reads HCL text as a Document. Each key, keyword, label, function name, and value
-/// has a span in `source`. A number written with digits only reads as an exact
-/// integer, and any other number as a float. A heredoc's lines end in `\n`, whatever
-/// the file uses. An integer key in an object reads as HCL reads it: its digits
-/// without leading zeros, after a `-` if it has one.
-///
-/// # Errors
-///
-/// Returns each problem found, in source order. A syntax error, an unclosed string,
-/// heredoc, or comment, a string escape that HCL does not have, a template, or nesting
-/// past the limit stops reading, so it is the last one.
-pub fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
+/// Reads HCL text as a Document, as [`crate::read`] does, with each problem as an
+/// [`Error`].
+pub(crate) fn read(source: Source, text: &str) -> Result<Document, Vec<Error>> {
     let mut tokens = Tokens::new(source, text).map_err(|error| vec![error])?;
     let token = next(&mut tokens, Newlines::Kept);
     let mut parser = Parser {
