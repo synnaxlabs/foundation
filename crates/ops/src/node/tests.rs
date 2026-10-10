@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use connector::kind::Table;
 use document::diagnostic::{Code, Diagnostic};
+use document::{Position, Span};
 use mesh::Mesh;
 use serde_json::{Value, json};
 use types::channel::Key;
@@ -32,6 +33,8 @@ fn create_node_reading(mesh: Mesh, front_ends: FrontEnds) -> Node {
     };
     Node::new(mesh, key, front_ends, Arc::new(kinds()))
 }
+
+const REFUSED: Code = Code::new("test.refused");
 
 fn kinds() -> Table {
     Table::new().with("influx", Reader).with("opcua", Reader)
@@ -189,13 +192,17 @@ fn names_each_extension_of_the_table_in_the_fix() {
 fn reads_with_the_last_front_end_of_an_extension() {
     solo(|_, mesh| async move {
         let refuse = FrontEnd {
-            read: |_, _| {
-                let code = Code::new("test.refused");
+            read: |source, _| {
+                let start = Position {
+                    offset: 0,
+                    line: 0,
+                    column: 0,
+                };
                 Err(vec![Diagnostic::new(
-                    code,
-                    None,
-                    "refused".into(),
-                    "Fix it".into(),
+                    REFUSED,
+                    Span::new(source, start, start),
+                    "refused".to_owned(),
+                    "Fix it".to_owned(),
                 )])
             },
         };
