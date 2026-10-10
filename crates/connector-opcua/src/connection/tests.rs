@@ -2854,15 +2854,16 @@ unsafe extern "C" fn address(
 }
 
 /// Each read gives C its bytes in the one read buffer of the manager, which the
-/// manager makes only when a stream opens. It reads the private `State.read` for the
-/// buffer before the first open: C sees only the bytes of a read, no warning names
-/// it, and the counting-allocator tests make no manager.
+/// manager makes only when a stream opens, at 64 KiB. It reads the private
+/// `State.read` for the size of the buffer: C sees only the bytes of a read, which
+/// the 64 KiB stream buffers of `OPTIONS` also cap, no warning names it, and the
+/// counting-allocator tests make no manager.
 #[test]
 fn each_read_is_in_the_one_buffer_of_the_manager() {
     let mut network = Network::new();
     network.dial(Span::from_nanos(100_000_000), b"one");
     network.dial(Span::from_nanos(200_000_000), b"two");
-    let (before, calls) = network
+    let (sizes, calls) = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let mut side = Side::listening(&node, listener(&node));
@@ -2871,7 +2872,8 @@ fn each_read_is_in_the_one_buffer_of_the_manager() {
             side.drive(Span::from_nanos(50_000_000)).await;
             let before = side.manager.state().read.borrow().len();
             side.drive(Span::SECOND).await;
-            (before, side.calls())
+            let after = side.manager.state().read.borrow().len();
+            ((before, after), side.calls())
         })
         .expect("the run ends");
     let reads: Vec<(usize, Vec<u8>)> = calls
@@ -2884,11 +2886,11 @@ fn each_read_is_in_the_one_buffer_of_the_manager() {
         .into_iter()
         .map(|(id, at)| (id, Some(at) == first))
         .collect();
-    assert_eq!((before, same), (0, vec![(2, true), (3, true)]));
+    assert_eq!((sizes, same), ((0, 1 << 16), vec![(2, true), (3, true)]));
 }
 
-/// A read gives C up to the 64 KiB of the read buffer, so 70,000 bytes take two
-/// reads or more.
+/// A read gives C at most 64 KiB, the size of the read buffer and of the stream
+/// buffers of `OPTIONS`, so 70,000 bytes take two reads or more.
 #[test]
 fn a_read_fills_the_read_buffer_of_64_kib() {
     let mut network = Network::new();
