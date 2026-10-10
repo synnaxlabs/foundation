@@ -2,6 +2,7 @@
 
 use std::mem;
 use std::task::Waker;
+use std::vec;
 
 /// The wakers of the futures that wait for one event, by the key of each. A future
 /// keeps one waker, the waker of its last poll, and its drop takes it out. Each method
@@ -50,11 +51,22 @@ impl Set {
 
 impl IntoIterator for Set {
     type Item = Waker;
-    type IntoIter =
-        std::iter::Map<std::vec::IntoIter<(u64, Waker)>, fn((u64, Waker)) -> Waker>;
+    type IntoIter = IntoIter;
 
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter().map(|(_, waker)| waker)
+    fn into_iter(self) -> IntoIter {
+        IntoIter(self.0.into_iter())
+    }
+}
+
+/// The wakers of a [`Set`], moved out of it.
+#[derive(Debug)]
+pub struct IntoIter(vec::IntoIter<(u64, Waker)>);
+
+impl Iterator for IntoIter {
+    type Item = Waker;
+
+    fn next(&mut self) -> Option<Waker> {
+        self.0.next().map(|(_, waker)| waker)
     }
 }
 
