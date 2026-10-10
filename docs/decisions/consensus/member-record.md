@@ -147,3 +147,9 @@
   reserved" holds for every member, like "no key twice". Decided by `laptop.architect`
   (2026-10-07T10:14:51Z):
   https://github.com/synnaxlabs/foundation/pull/1322#issuecomment-6035813123.
+  Amended (2026-10-10, #1744): a founding member, which no ticket admitted, has 64
+  zero bytes as its admission. Only the apply of a `Join` checks an admission. Lost:
+  `admission: Option<[u8; 64]>`: no code reads an admission after the apply of its
+  `Join`, so a presence byte adds no check and changes the byte form of each member.
+  Decided by `laptop.architect` (2026-10-10T03:33:06Z:
+  https://github.com/synnaxlabs/foundation/issues/2225#issuecomment-6093336972).

@@ -310,6 +310,7 @@ version = "0.0.0"
 dependencies = [
  "block",
  "bytes",
+ "codec",
  "document",
  "env",
  "http",
@@ -879,6 +880,7 @@ dependencies = [
  "mesh",
  "ops",
  "os",
+ "secret",
  "spec",
  "transport",
  "types",

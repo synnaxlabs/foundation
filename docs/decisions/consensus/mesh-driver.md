@@ -331,7 +331,13 @@
   and syncs the directory, before `raft` writes a record. So a crash before the first
   record leaves a first open, also with another founding (`laptop.architect`,
   2026-10-09T23:35:56Z:
-  https://github.com/synnaxlabs/foundation/pull/2200#issuecomment-6091088392). This
+  https://github.com/synnaxlabs/foundation/pull/2200#issuecomment-6091088392). A first
+  open whose `founding` reads back whole and holds `Config::founding` writes nothing,
+  so a reopen with the founding that `mesh::founding` gave never loses it (amended by
+  `laptop.architect-2`, #1744, 2026-10-10T04:22:50Z, from review round 2 of #2234:
+  https://github.com/synnaxlabs/foundation/pull/2234#issuecomment-6093724129, and
+  approved by `laptop.architect`, 2026-10-10T04:24:20Z:
+  https://github.com/synnaxlabs/foundation/pull/2234#issuecomment-6093736250). This
   supersedes the later open of the plan
   (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063177321), which
   reads and compares `founding` at each open after the first. It also supersedes the

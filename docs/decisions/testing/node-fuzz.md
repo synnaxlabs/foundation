@@ -2,14 +2,25 @@
   of `node.key`, which T1 asks for, since the file is outside input. It calls
   `node::fuzz::identity`, a function in a `#[doc(hidden)]` public module behind the
   feature `sim`, as `bench` is, and `fuzz/Cargo.toml` turns `sim` on. The target takes
-  68 bytes as they are, or 64 bytes with their CRC32C appended, since a random input
+  100 bytes as they are, or 96 bytes with their CRC32C appended, since a random input
   almost never has the right CRC32C. The oracle is `identity::check`, which the
   property tests share: `decode` gives an identity exactly for bytes with the tag and
   the CRC32C, and that identity encodes to the same bytes. `check` tests the first
-  part as the bytes that `encode` writes from the fields of the input. Lost: property
-  tests only, with a sentence in `docs/security.md` that the decode needs no target.
-  It breaks T1, and `foundation/key/2` (NODE PORT) adds a second form. Decided by
-  `laptop.architect-2`
+  part as the bytes that `encode` writes from the fields of the input. The inputs of
+  the form `foundation/key/1` stay, and reach only the length check after the form
+  `foundation/key/2` (NODE PORT). By `laptop.architect-2` (#1744, plan revision 3,
+  item 6, 2026-10-10 03:30 UTC):
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093320483. Each
+  input of the form `foundation/key/1` that decoded has a copy in the new form that a
+  test decodes (`docs/claude/testing.md`, "Oracles", from item 33 of #1839 by
+  `laptop.director`, 2026-10-08 19:30 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1839#issuecomment-6067499161).
+  Trigger: the PR of #1744 that adds `admin.key` adds its form to the target, by its
+  length, with its inputs (moved from PR 1b-1 by `laptop.architect`, 2026-10-10 04:15
+  UTC: https://github.com/synnaxlabs/foundation/pull/2229#issuecomment-6093666647).
+  Lost: property tests only, with a sentence in `docs/security.md` that the decode
+  needs no target.
+  It breaks T1. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1994#issuecomment-6071757310,
   2026-10-09 00:28 UTC); the surface, in
   https://github.com/synnaxlabs/foundation/pull/2046#issuecomment-6071891219

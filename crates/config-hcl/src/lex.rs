@@ -638,7 +638,10 @@ mod tests {
         };
         let message = "the file needs `\"` to end the string here. Write it here, or \
                        correct the text here or before it";
-        assert_eq!(error.to_string(), message);
+        assert_eq!(
+            document::diagnostic::Diagnostic::from(error).to_string(),
+            message
+        );
     }
 
     #[test]

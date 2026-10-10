@@ -75,15 +75,18 @@ impl Backoff {
     ///
     /// On a thread that `env` did not start.
     pub async fn wait(&mut self, cancel: &cancel::Token) -> bool {
+        let span = self.next();
+        cancel.race(self.clock.sleep(span)).await.is_some()
+    }
+
+    /// Draws the next wait, and grows the ceiling.
+    pub(crate) fn next(&mut self) -> Span {
         let ceiling = u64::try_from(self.ceiling.nanos()).expect("at least zero");
         let span =
             i64::try_from(self.rng.below(ceiling + 1)).expect("at most i64::MAX");
         self.ceiling =
             Span::from_nanos(self.ceiling.nanos().saturating_mul(2)).min(self.cap);
-        cancel
-            .race(self.clock.sleep(Span::from_nanos(span)))
-            .await
-            .is_some()
+        Span::from_nanos(span)
     }
 
     /// Makes the next wait the first again. Call it after an attempt that worked.

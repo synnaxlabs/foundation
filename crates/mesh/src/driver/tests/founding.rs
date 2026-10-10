@@ -5,7 +5,7 @@ use env::files::{self, Mode};
 
 use super::*;
 
-use crate::driver::founding::FILE;
+use crate::driver::founding::{FILE, keep};
 
 /// The founding of node 1 with the members and voters `IDS`.
 async fn create_region(node: &sim::node::Node, tasks: &Tasks) -> region::Founding {
@@ -46,6 +46,19 @@ fn founded(seed: u64) -> (Sim, sim::node::Node, region::Founding) {
     founded_with(seed, BTreeMap::new(), BTreeMap::new())
 }
 
+/// A first open with the founding of [`create_region`], and no record in the log.
+fn first_open() -> (Sim, sim::node::Node, region::Founding) {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let region = sim
+        .run_on(&node, |node, tasks| async move {
+            create_region(&node, &tasks).await
+        })
+        .unwrap();
+    run_with(&mut sim, &node, region.clone());
+    (sim, node, region)
+}
+
 /// [`founded`], with the founding homes `homes`.
 fn founded_with(
     seed: u64,
@@ -81,6 +94,88 @@ fn refused(sim: &mut Sim, node: &sim::node::Node, founding: region::Founding) ->
         Mesh::start(config).await.err().unwrap()
     })
     .unwrap()
+}
+
+/// Flips one bit of byte `at` of the founding file of node 1, syncs it, and gives the
+/// length of the file.
+fn flip(sim: &mut Sim, node: &sim::node::Node, at: u64) -> u64 {
+    sim.run_on(node, move |node, _| async move {
+        let path = Path::new(FILE);
+        let file = node.files().open(path, Mode::Write).await.unwrap();
+        let pool = create_pool();
+        let byte = file.read_at(at, pool.alloc(1).unwrap()).await.unwrap();
+        let flipped = byte.first().unwrap() ^ 1;
+        let block = crate::bytes::block(&pool, &[flipped]).unwrap();
+        file.write_at(at, &[block]).await.unwrap();
+        file.sync().await.unwrap();
+        file.len()
+    })
+    .unwrap()
+}
+
+/// Runs a first open of node 1 with `founding` in the mesh directory `dir` for `span`,
+/// then crashes the node by `crash`. Gives whether `dir` then lists the founding file.
+fn crash_in_open(
+    sim: &mut Sim,
+    node: &sim::node::Node,
+    founding: region::Founding,
+    dir: &'static str,
+    span: Span,
+    crash: Crash,
+) -> bool {
+    let shard = env::shards::Config {
+        name: "open".into(),
+        core: None,
+    };
+    let own = node.clone();
+    let started = node.shards().start(shard, move |tasks| async move {
+        let config = Config {
+            founding,
+            dir: dir.into(),
+            ..config(&own, &tasks, 1, &IDS, &IDS).await
+        };
+        let _mesh = Mesh::start(config).await;
+        own.clock().sleep(TICK).await;
+    });
+    drop(started.unwrap());
+    sim.run_for(span).unwrap();
+    sim.crash(node, crash);
+    listed(sim, node, dir)
+}
+
+/// Whether the mesh directory `dir` of node 1 lists the founding file. A `dir` that
+/// does not exist lists none.
+fn listed(sim: &mut Sim, node: &sim::node::Node, dir: &'static str) -> bool {
+    sim.run_on(node, move |node, _| async move {
+        match node.files().list(Path::new(dir)).await {
+            Ok(names) => names.contains(&PathBuf::from(FILE)),
+            Err(files::Error::NotFound { .. }) => false,
+            Err(error) => panic!("{error}"),
+        }
+    })
+    .unwrap()
+}
+
+/// What [`crate::founding`] gives for the mesh directory `dir` of node 1.
+fn read(
+    sim: &mut Sim,
+    node: &sim::node::Node,
+    dir: &'static str,
+) -> Option<region::Founding> {
+    sim.run_on(node, move |node, _| async move {
+        crate::founding(&node.files(), Path::new(dir), create_pool()).await
+    })
+    .unwrap()
+    .unwrap()
+}
+
+/// The error of [`crate::founding`] for the mesh directory of node 1.
+fn unread(sim: &mut Sim, node: &sim::node::Node) -> Error {
+    sim.run_on(node, |node, _| async move {
+        crate::founding(&node.files(), Path::new(""), create_pool()).await
+    })
+    .unwrap()
+    .unwrap_err()
 }
 
 /// What the log of node 1 holds.
@@ -297,17 +392,85 @@ fn a_failed_call_on_the_founding_file_gives_the_files_error() {
     );
     let (mut sim, node, region) = founded(0);
     node.fail_file(Path::new(FILE), Operation::ReadAt);
-    let error = failed(&mut sim, &node, region);
     let path = PathBuf::from(FILE);
     let operation = Operation::ReadAt;
-    assert_eq!(
-        error,
-        files::Error::Io {
-            path,
-            operation,
-            code: 5
-        }
-    );
+    let io = files::Error::Io {
+        path,
+        operation,
+        code: 5,
+    };
+    assert_eq!(unread(&mut sim, &node), Error::Files(io.clone()));
+    node.fail_file(Path::new(FILE), Operation::ReadAt);
+    assert_eq!(failed(&mut sim, &node, region), io);
+}
+
+#[test]
+fn the_read_of_a_directory_with_no_founding_gives_none() {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    assert_eq!(read(&mut sim, &node, ""), None);
+    assert_eq!(read(&mut sim, &node, "absent"), None, "not there");
+}
+
+/// The read gives the founding of a first open, before and after the log holds a
+/// record, and an open with it opens.
+#[test]
+fn the_read_gives_the_founding_that_the_first_open_kept() {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let mut region = sim
+        .run_on(&node, |node, tasks| async move {
+            region::Founding {
+                definitions: super::create_founding(),
+                ..create_region(&node, &tasks).await
+            }
+        })
+        .unwrap();
+    run_with(&mut sim, &node, region.clone());
+    let first = read(&mut sim, &node, "");
+    write_record(&mut sim, &node);
+    let stored = read(&mut sim, &node, "").unwrap();
+    assert_eq!(first, Some(stored.clone()), "no record");
+    region.members.sort_by_key(|member| member.card.key());
+    assert_eq!(stored, region);
+    run_with(&mut sim, &node, stored);
+}
+
+/// A failed open of the founding file gives the files error, at a read and at an open
+/// of the mesh.
+#[test]
+fn a_failed_open_of_the_founding_file_gives_the_files_error() {
+    let (mut sim, node, region) = founded(0);
+    let io = files::Error::Io {
+        path: PathBuf::from(FILE),
+        operation: Operation::Open,
+        code: 5,
+    };
+    node.fail_file(Path::new(FILE), Operation::Open);
+    assert_eq!(unread(&mut sim, &node), Error::Files(io.clone()));
+    node.fail_file(Path::new(FILE), Operation::Open);
+    assert_eq!(refused(&mut sim, &node, region), Error::Files(io));
+}
+
+/// A reopen whose log holds no record writes nothing when its founding is the one in
+/// the directory, so a failed write cannot lose it. Another founding is written.
+#[test]
+fn a_reopen_before_a_record_writes_only_another_founding() {
+    let (mut sim, node, mut region) = first_open();
+    node.fail_file(Path::new("founding.new"), Operation::WriteAt);
+    run_with(&mut sim, &node, region.clone());
+    region.members.sort_by_key(|member| member.card.key());
+    assert_eq!(read(&mut sim, &node, ""), Some(region.clone()));
+    let other = region::Founding {
+        prefix: Prefix::ROOT,
+        ..region
+    };
+    let io = files::Error::Io {
+        path: PathBuf::from("founding.new"),
+        operation: Operation::WriteAt,
+        code: 5,
+    };
+    assert_eq!(refused(&mut sim, &node, other), Error::Files(io));
 }
 
 #[test]
@@ -343,8 +506,8 @@ fn a_log_with_no_founding_is_refused() {
     let error = refused(&mut sim, &node, region);
     let path = PathBuf::from(FILE);
     assert_eq!(error, Error::Unfounded { path });
-    let text = "the log of the mesh directory holds a record, but founding is not \
-                there or does not read back whole";
+    let text = "founding does not read back whole, or is not there while the log of \
+                the mesh directory holds a record";
     assert_eq!(error.to_string(), text);
 }
 
@@ -353,31 +516,39 @@ fn a_log_with_no_founding_is_refused() {
 #[test]
 fn a_founding_with_a_flipped_byte_is_refused() {
     let (mut sim, node, region) = founded(0);
-    let flip = |sim: &mut Sim, at: u64| {
-        sim.run_on(&node, move |node, _| async move {
-            let path = Path::new(FILE);
-            let file = node.files().open(path, Mode::Write).await.unwrap();
-            let pool = create_pool();
-            let byte = file.read_at(at, pool.alloc(1).unwrap()).await.unwrap();
-            let flipped = byte.first().unwrap() ^ 1;
-            let block = crate::bytes::block(&pool, &[flipped]).unwrap();
-            file.write_at(at, &[block]).await.unwrap();
-            file.sync().await.unwrap();
-            file.len()
-        })
-        .unwrap()
-    };
-    let len = flip(&mut sim, 0);
-    flip(&mut sim, 0);
+    let len = flip(&mut sim, &node, 0);
+    flip(&mut sim, &node, 0);
     let last = len.checked_sub(1).unwrap();
     for at in (0..16).chain([last]) {
-        flip(&mut sim, at);
+        flip(&mut sim, &node, at);
         let error = refused(&mut sim, &node, region.clone());
         let path = PathBuf::from(FILE);
         assert_eq!(error, Error::Unfounded { path }, "byte {at}");
-        flip(&mut sim, at);
+        assert_eq!(unread(&mut sim, &node), error, "read of byte {at}");
+        flip(&mut sim, &node, at);
     }
     run_with(&mut sim, &node, region);
+}
+
+#[test]
+fn a_reopen_before_a_record_writes_over_a_founding_with_a_flipped_byte() {
+    let (mut sim, node, mut region) = first_open();
+    flip(&mut sim, &node, 0);
+    run_with(&mut sim, &node, region.clone());
+    region.members.sort_by_key(|member| member.card.key());
+    assert_eq!(read(&mut sim, &node, ""), Some(region));
+}
+
+#[test]
+fn a_failed_read_of_the_founding_in_a_reopen_before_a_record_gives_the_files_error() {
+    let (mut sim, node, region) = first_open();
+    node.fail_file(Path::new(FILE), Operation::ReadAt);
+    let io = files::Error::Io {
+        path: PathBuf::from(FILE),
+        operation: Operation::ReadAt,
+        code: 5,
+    };
+    assert_eq!(refused(&mut sim, &node, region), Error::Files(io));
 }
 
 /// A founding whose check holds, with another version or a body that does not read.
@@ -406,6 +577,7 @@ fn a_founding_of_another_version_or_form_is_refused() {
         let error = refused(&mut sim, &node, region);
         let path = PathBuf::from(FILE);
         assert_eq!(error, Error::Unfounded { path }, "version {version}");
+        assert_eq!(unread(&mut sim, &node), error, "read of {version}");
     }
 }
 
@@ -425,31 +597,9 @@ fn a_power_cut_in_the_first_open_leaves_a_first_open() {
                 create_region(&node, &tasks).await
             })
             .unwrap();
-        let shard = env::shards::Config {
-            name: "open".into(),
-            core: None,
-        };
-        let (own, first) = (node.clone(), region.clone());
-        let started = node.shards().start(shard, move |tasks| async move {
-            let config = Config {
-                founding: first,
-                ..config(&own, &tasks, 1, &IDS, &IDS).await
-            };
-            let _mesh = Mesh::start(config).await;
-            own.clock().sleep(TICK).await;
-        });
-        drop(started.unwrap());
-        sim.run_for(Span::from_nanos(
-            i64::try_from(step).unwrap().saturating_mul(100_000),
-        ))
-        .unwrap();
-        sim.crash(&node, Crash::Power);
-        let kept = sim
-            .run_on(&node, |node, _| async move {
-                node.files().list(Path::new("")).await.unwrap()
-            })
-            .unwrap();
-        if kept.contains(&PathBuf::from(FILE)) {
+        let span =
+            Span::from_nanos(i64::try_from(step).unwrap().saturating_mul(100_000));
+        if crash_in_open(&mut sim, &node, region.clone(), "", span, Crash::Power) {
             cut_after = cut_after.saturating_add(1);
         } else {
             cut_before = cut_before.saturating_add(1);
@@ -470,6 +620,172 @@ fn a_power_cut_in_the_first_open_leaves_a_first_open() {
     }
     assert_ne!(cut_before, 0, "no cut came before the founding was kept");
     assert_ne!(cut_after, 0, "no cut came after the founding was kept");
+}
+
+/// The mesh directory of the tests of a founding that is not durable. It is not the
+/// root, which the blob store syncs.
+const MESH: &str = "mesh";
+
+/// Runs `then` with the step after each process crash in a first open in [`MESH`]
+/// that is after the rename of the founding file and before the sync of [`MESH`], with
+/// the founding of that open.
+fn after_each_crash_before_the_founding_is_durable(
+    mut then: impl FnMut(u64, &mut Sim, &sim::node::Node, region::Founding),
+) {
+    let mut unsynced = 0_usize;
+    for step in 0..960 {
+        let span = Span::from_nanos(i64::try_from(step).unwrap().saturating_mul(5_000));
+        let create = || {
+            let mut sim = Sim::new(sim::Config {
+                seed: step,
+                ..sim::Config::default()
+            });
+            let node = sim.node(sim::node::Config::default());
+            let region = sim
+                .run_on(&node, |node, tasks| async move {
+                    create_region(&node, &tasks).await
+                })
+                .unwrap();
+            let founding = region.clone();
+            let listed =
+                crash_in_open(&mut sim, &node, founding, MESH, span, Crash::Process);
+            (sim, node, region, listed)
+        };
+        // The same step gives the same state, so a power cut of a twin tells whether
+        // the founding file was durable.
+        let (mut twin, node, _, kept) = create();
+        twin.crash(&node, Crash::Power);
+        if !kept || listed(&mut twin, &node, MESH) {
+            continue;
+        }
+        unsynced = unsynced.saturating_add(1);
+        let (mut sim, node, region, _) = create();
+        then(step, &mut sim, &node, region);
+    }
+    assert_ne!(unsynced, 0, "no crash came between the rename and the sync");
+}
+
+/// A reopen with the same founding after such a crash writes nothing, and leaves that
+/// founding durable.
+#[test]
+fn a_reopen_after_a_crash_before_the_founding_is_durable_makes_it_durable() {
+    after_each_crash_before_the_founding_is_durable(|step, sim, node, mut region| {
+        let founding = region.clone();
+        sim.run_on(node, |node, tasks| async move {
+            let config = Config {
+                founding,
+                dir: MESH.into(),
+                ..config(&node, &tasks, 1, &IDS, &IDS).await
+            };
+            Mesh::start(config).await.unwrap();
+        })
+        .unwrap();
+        sim.crash(node, Crash::Power);
+        region.members.sort_by_key(|member| member.card.key());
+        assert_eq!(read(sim, node, MESH), Some(region), "step {step}");
+    });
+}
+
+/// `keep` alone, with no open of the log, makes the same founding durable. No open
+/// of the mesh shows this sync: `Log::open` syncs `dir` before `keep`, and
+/// `used::open` syncs it after.
+#[test]
+fn keep_makes_a_founding_that_it_does_not_write_durable() {
+    after_each_crash_before_the_founding_is_durable(|step, sim, node, mut region| {
+        let founding = region.clone();
+        sim.run_on(node, |node, _| async move {
+            let blocks = Blocks::new(create_pool()).unwrap();
+            let dir = Path::new(MESH);
+            keep(&node.files(), dir, &blocks, &founding, false)
+                .await
+                .unwrap();
+        })
+        .unwrap();
+        sim.crash(node, Crash::Power);
+        region.members.sort_by_key(|member| member.card.key());
+        assert_eq!(read(sim, node, MESH), Some(region), "step {step}");
+    });
+}
+
+/// A failed sync of the directory in `keep` gives the files error. It calls `keep`,
+/// not `Mesh::open`, because the open syncs the directory before `keep` (`open_log`,
+/// then `Log::open`), and a fault fails only the next call.
+#[test]
+fn a_failed_sync_of_the_directory_in_keep_gives_the_files_error() {
+    let (mut sim, node, region) = first_open();
+    let kept = sim
+        .run_on(&node, |node, _| async move {
+            let blocks = Blocks::new(create_pool()).unwrap();
+            node.fail_file(Path::new(""), Operation::SyncDir);
+            keep(&node.files(), Path::new(""), &blocks, &region, false).await
+        })
+        .unwrap();
+    let cause = files::Error::Io {
+        path: PathBuf::new(),
+        operation: Operation::SyncDir,
+        code: 5,
+    };
+    assert_eq!(kept, Err(Error::Files(cause)));
+}
+
+/// Runs `future` until it ends or `span` passes, and drops it then. Gives whether it
+/// ended.
+async fn until(clock: &env::clock::Clock, span: Span, future: impl Future) -> bool {
+    let mut future = std::pin::pin!(future);
+    let mut sleep = std::pin::pin!(clock.sleep(span));
+    std::future::poll_fn(|cx| {
+        if future.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(true);
+        }
+        sleep.as_mut().poll(cx).map(|()| false)
+    })
+    .await
+}
+
+/// A first open with the founding in the directory keeps it, also after a dropped
+/// first open with another founding whose remove of `founding` still runs. It calls
+/// `keep`, not `Mesh::open`: the second open's `Log::open` makes its file calls before
+/// `keep`, and those calls end after the dropped remove in each drop time that a scan
+/// of `Mesh::open` tried.
+#[test]
+fn a_keep_after_a_dropped_keep_of_another_founding_keeps_its_founding() {
+    let mut dropped = 0_usize;
+    for run in 0..800_u64 {
+        let (seed, step) = (run / 40, i64::try_from(run % 40).unwrap());
+        let mut sim = Sim::new(sim::Config {
+            seed,
+            ..sim::Config::default()
+        });
+        let node = sim.node(sim::node::Config::default());
+        let mut region = sim
+            .run_on(&node, |node, tasks| async move {
+                create_region(&node, &tasks).await
+            })
+            .unwrap();
+        run_with(&mut sim, &node, region.clone());
+        let other = region::Founding {
+            voters: [key(1)].into(),
+            ..region.clone()
+        };
+        let founding = region.clone();
+        let (ended, kept) = sim
+            .run_on(&node, move |node, _| async move {
+                let blocks = Blocks::new(create_pool()).unwrap();
+                let (files, dir) = (node.files(), Path::new(""));
+                let span = Span::from_nanos(step.saturating_mul(5_000));
+                let first = keep(&files, dir, &blocks, &other, false);
+                let ended = until(&node.clock(), span, first).await;
+                let kept = keep(&files, dir, &blocks, &founding, false).await;
+                node.clock().sleep(TICK).await;
+                (ended, kept)
+            })
+            .unwrap();
+        dropped = dropped.saturating_add(usize::from(!ended));
+        assert_eq!(kept, Ok(()), "run {run}");
+        region.members.sort_by_key(|member| member.card.key());
+        assert_eq!(read(&mut sim, &node, ""), Some(region), "run {run}");
+    }
+    assert_ne!(dropped, 0, "no keep dropped");
 }
 
 #[test]
@@ -522,8 +838,25 @@ fn memory_that_the_system_refuses_for_the_founding_read_gives_the_pool_error() {
     );
 }
 
+#[test]
+fn memory_that_the_system_refuses_for_the_read_gives_the_pool_error() {
+    let (mut sim, node, _) = founded(0);
+    let read = sim
+        .run_on(&node, |node, _| async move {
+            let budget = block::Config::new(4 << 20).expect("the budget fits");
+            let (memory, switch) = Scarce::new(budget.reservation());
+            let pool = Rc::new(Pool::new(budget, memory));
+            switch.refuse();
+            crate::founding(&node.files(), Path::new(""), pool).await
+        })
+        .unwrap();
+    let cause = block::Error::Refused { requested: 831 };
+    assert_eq!(read, Err(Error::Pool(cause)));
+}
+
 /// A power cut right after a first open keeps its founding, so an open after the
-/// next record checks it.
+/// next record checks it. No open of the mesh shows the sync of `keep`: `Log::open`
+/// syncs `dir` before `keep`, and `used::open` syncs it after.
 #[test]
 fn the_founding_is_durable_when_it_is_kept() {
     for seed in 0..16 {

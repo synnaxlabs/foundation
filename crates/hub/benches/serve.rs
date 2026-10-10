@@ -601,7 +601,7 @@ async fn create_shard(
     let buffer = buffer::Buffer::open(config, interner.slots())
         .await
         .expect("opens");
-    let shard = home::Shard::new(home::Config {
+    let shard = home::Shard::open(home::Config {
         shard: 0,
         buffer,
         clock: mesh.clone(),
@@ -609,7 +609,9 @@ async fn create_shard(
             earliest: Stamp::from_nanos(1),
             ahead: Span::from_nanos(1_000_000_000),
         },
-    });
+    })
+    .await
+    .expect("opens");
     loop {
         if let Some(now) = mesh.now().mesh {
             return (

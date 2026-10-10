@@ -16,13 +16,15 @@
   2026-10-08 03:59 UTC).
   `Channels::counts` names the count channels of the kind,
   `<connector>.status.<count>`. `connector::status` names the status index (`time`)
-  and the supervisor's channels (`state`, `class`, `restarts`) once, for the
-  supervisor and for `config`. `Table::check` panics when a kind names a count that
-  `connector::status` names in any case, a count of more than one segment, or one count
-  twice in any case, since the kind's code is wrong (`laptop.architect-2`,
+  and the supervisor's channels (`state`, `class`, `restarts`, `backoff`, `error`)
+  once, for the supervisor and for `config`. `Table::check` panics when a kind names a
+  count that `connector::status` names in any case, a count of more than one segment,
+  or one count twice in any case, since the kind's code is wrong (`laptop.architect-2`,
   2026-10-08T03:05:58Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6051331538,
   change 4 and answer 2; `laptop.architect-2`, 2026-10-09T13:37:08Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6082035824;
   `laptop.architect-2`, 2026-10-09T13:58:16Z:
-  https://github.com/synnaxlabs/foundation/pull/2150#issuecomment-6082402451).
+  https://github.com/synnaxlabs/foundation/pull/2150#issuecomment-6082402451; for
+  `backoff` and `error`, `laptop.architect-2`, 2026-10-08T06:29:21Z:
+  https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6053869186).

@@ -60,6 +60,7 @@
 | NODE PORT, test of the amendment (#1962, 6069568312): the port is free once `lock` is | NODE PORT (#1962, 6069829972, 6070247529, and 6070577797): under `sim` the port is free once `lock` is; under `os` the carrier's task can hold the socket until the runtime of shard 0 drops, until #2017 |
 | NODE PORT (#1962, 6069829972, 6070247529, and 6070577797): under `os` the carrier's task can hold the socket until the runtime of shard 0 drops | NODE PORT amendment (#2017): shard 0 drops `lock` only once the transport has freed the port |
 | NODE PORT (#1962, 6069568312): no test sees the drop of the transport, and the end of shard 0 frees the socket also when a clone of the transport leaks | NODE PORT amendment (#2017): unless the socket broke, a leaked clone of the transport holds the stop |
+| NODE PORT (#2089, 6089294422): the hub's task of a reader whose home is another node holds the transport until its next poll after the drop of the reader | NODE PORT amendment (#2244, 6095943720): a task of the hub holds it until its next poll after the hub and each value and future that it gave drop (`hub::Hub::new`) |
 | HOME TYPE REFUSAL (#963): `open_writer` refuses a series of a type the home does not write | HOME EVERY TYPE |
 | FIRST SLICE order, for ONE NODE work only; the order "after FIRST SLICE" of 6050540089 | FIRST SLICE amendment (2026-10-08) |
 | HUB SESSIONS (#340, 6066821273): `reader::Error::Remote` gives a reader of an index at another node | HUB SESSIONS amendment (#340 PR 4d-b, 6069259471): the reader reads from that home over one hub stream |
@@ -72,3 +73,4 @@
 | Code 19 in item 3 of #1946 6069496483: "the node had no memory for a reply or a request body" | HUB WIRE (6071260886), until #2012 (6071577074) |
 | "It is never less than the PTO base." of 6060065670 | PROBE GAP (6066780738): a probe of data in flight never comes before the PTO base; the client's probe in a dial with no data in flight keeps the release's rule |
 | "A stalled request holds its reservation until its stream or session ends; only an admitted subject can do this" of #1946 6069496483 | HUB LINK (#2121 6081223893): the share of a subject |
+| "`read` gives a list of `Error`" and "Nesting past the depth limit is `Error::TooDeep` from `read`" of HCL ERRORS (#330, 6007697466) | HCL DIAGNOSTICS (#2079, 6093002544): `read` gives `Vec<Diagnostic>` |

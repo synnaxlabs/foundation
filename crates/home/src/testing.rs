@@ -76,7 +76,7 @@ pub async fn unsynced_shard(env: Env, delay: Span) -> (Shard, Interner, clock::R
     let buffer = buffer::Buffer::open(config, interner.slots())
         .await
         .expect("opens");
-    let shard = Shard::new(crate::Config {
+    let shard = Shard::open(crate::Config {
         shard: 0,
         buffer,
         clock: mesh.clone(),
@@ -84,7 +84,9 @@ pub async fn unsynced_shard(env: Env, delay: Span) -> (Shard, Interner, clock::R
             earliest: Stamp::from_nanos(1),
             ahead: Span::from_nanos(1_000_000_000),
         },
-    });
+    })
+    .await
+    .expect("opens");
     (shard, interner, mesh)
 }
 

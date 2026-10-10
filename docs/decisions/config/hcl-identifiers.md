@@ -2,7 +2,7 @@
   does (Unicode `XID_Start` and `XID_Continue`, through `unicode-ident`), so
   `température = 1` reads. A new error for each such identifier lost: a valid HCL file
   would fail. The person decided on 2026-10-05 ("go with yes"), with low priority, #263.
-  A reference outside ASCII is still an `Error::Name`, because names are ASCII (A3).
+  A reference outside ASCII is still `hcl.name`, because names are ASCII (A3).
   Measured against HCL v2.25.0, two differences remain. HCL reads the 23 compatibility
   characters in `ID_Start` but not in `XID_Start` (U+037A, U+0E33, and others). The
   reader refuses them at the start of an identifier, and 19 of them after it. The

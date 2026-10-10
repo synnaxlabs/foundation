@@ -5,7 +5,15 @@
   call one; a list per file would pass a new call in a listed file. Decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
-  2026-10-08 02:27 UTC). The copy goes in `patches/open62541/`, and the `build.rs` of
+  2026-10-08 02:27 UTC). A test of `connector-opcua` names each pair and fails
+  when its reason becomes false. For example, `shim.c` fails the build with
+  `UA_ENABLE_ENCRYPTION`, and a test fails when the Rust or `shim.c` names a security
+  policy, so a client has only the policy `None`, and `encryptUserIdentityTokenEcc`
+  needs an ECC policy. Approved by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/2246#issuecomment-6094588326,
+  2026-10-10 06:19 UTC) and `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2246#issuecomment-6099193878,
+  2026-10-10 15:39 UTC). The copy goes in `patches/open62541/`, and the `build.rs` of
   `connector-opcua` reads its `sources.txt`. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057244538,
   2026-10-08 09:50 UTC). `cargo xtask open62541 <tag>` makes the copy. Each file from

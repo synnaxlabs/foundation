@@ -8,8 +8,8 @@ use std::rc::Rc;
 
 use connector::cancel;
 use connector::kind::{self, Channels, Context};
+use document::Document;
 use document::diagnostic::Diagnostic;
-use document::{Document, Source};
 use env::files::{self, Operation};
 use env::tasks::Tasks;
 use mesh::card::addresses::Addresses;
@@ -73,13 +73,13 @@ impl kind::Kind for Reader {
     }
 }
 
-pub(crate) fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
-    config_hcl::read(source, text)
-        .map_err(|errors| errors.iter().map(Diagnostic::from).collect())
-}
-
 pub(crate) fn front_ends() -> BTreeMap<&'static str, FrontEnd> {
-    BTreeMap::from([("hcl", FrontEnd { read: hcl })])
+    BTreeMap::from([(
+        "hcl",
+        FrontEnd {
+            read: config_hcl::read,
+        },
+    )])
 }
 
 pub(crate) fn name(text: &str) -> Name {

@@ -355,9 +355,9 @@ fn gives_a_latest_reader_of_a_changed_channel_no_series_of_the_removed_one() {
             .iter()
             .find(|&(present, _)| present == at)
             .expect("the view holds the series");
-        let mut out = [0; 4];
+        let mut out = Vec::new();
         codec::decode(I32, 1, bytes, &mut out).expect("decodes");
-        assert_eq!(i32::from_le_bytes(out), 20);
+        assert_eq!(out, 20_i32.to_le_bytes());
     });
 }
 
@@ -601,12 +601,14 @@ async fn reopen(
     let buffer = buffer::Buffer::open(ring, interner.slots())
         .await
         .expect("opens");
-    let home = home::Shard::new(home::Config {
+    let home = home::Shard::open(home::Config {
         shard: 0,
         buffer,
         clock: mesh.clone(),
         limits: super::LIMITS,
-    });
+    })
+    .await
+    .expect("opens");
     hub::Hub::new(hub::Config {
         home,
         interner,

@@ -12,7 +12,8 @@ use crate::status::Status;
 pub struct Member {
     /// What the node states about itself.
     pub card: card::Signed,
-    /// The join ticket's signature over the node's first card.
+    /// The join ticket's signature over the node's first card. A founding member, which
+    /// no ticket admitted, has 64 zero bytes.
     pub admission: [u8; 64],
     /// For an ephemeral node, the time offline after which the region removes it.
     pub ephemeral: Option<Span>,

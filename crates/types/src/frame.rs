@@ -116,6 +116,13 @@ pub struct Range {
 }
 
 impl Range {
+    /// The seq after the last sample of the range, or `None` when it would pass
+    /// `u64::MAX`.
+    #[must_use]
+    pub fn end(self) -> Option<u64> {
+        self.seq.checked_add(u64::from(self.count))
+    }
+
     /// The range of `group` in the frame `bytes`, or `None` when it is absent.
     fn find(bytes: &[u8], group: u32) -> Option<Self> {
         let (ranges, ..) = parts(bytes);
@@ -2216,5 +2223,30 @@ mod tests {
                 prop_assert_eq!(received.series(place), expected, "place {}", place);
             }
         }
+    }
+
+    proptest! {
+        #[test]
+        fn gives_the_seq_after_a_range_or_none_past_the_highest_seq(
+            seq in prop_oneof![
+                any::<u64>(),
+                (u64::MAX - u64::from(u32::MAX))..=u64::MAX,
+            ],
+            count in any::<u32>(),
+        ) {
+            let sum = u128::from(seq) + u128::from(count);
+            let expected = u64::try_from(sum).ok();
+            prop_assert_eq!(Range { seq, count }.end(), expected);
+        }
+    }
+
+    #[test]
+    fn ends_a_range_at_the_highest_seq_and_none_past_it() {
+        let range = |count| Range {
+            seq: u64::MAX,
+            count,
+        };
+        assert_eq!(range(0).end(), Some(u64::MAX));
+        assert_eq!(range(1).end(), None);
     }
 }

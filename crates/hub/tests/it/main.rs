@@ -143,12 +143,14 @@ impl Test {
         let buffer = buffer::Buffer::open(config, interner.slots())
             .await
             .expect("opens");
-        let home = home::Shard::new(home::Config {
+        let home = home::Shard::open(home::Config {
             shard: 0,
             buffer,
             clock: mesh.clone(),
             limits: LIMITS,
-        });
+        })
+        .await
+        .expect("opens");
         let commit = home.committed();
         let (ended, polls) = (Rc::new(Cell::new(0)), Rc::new(Cell::new(0)));
         let paused = Rc::new(Pause::default());
@@ -475,7 +477,7 @@ fn samples(received: &Received<'_>, key: u128) -> Vec<i64> {
         .find(|&(present, _)| present == entry)
         .expect("the view holds the series");
     let data_type = received.set().entries()[entry].data_type;
-    let mut out = vec![0; count * 8];
+    let mut out = Vec::new();
     codec::decode(data_type, count, bytes, &mut out).expect("decodes");
     let (chunks, _) = out.as_chunks::<8>();
     chunks
@@ -1112,17 +1114,14 @@ fn writes_and_reads_a_channel_of_a_variable_type() {
         let now = test.now();
         let set = Arc::clone(writer.set());
         let (index, text) = (entry(&set, 1), entry(&set, 6));
-        let raw = [&2_u32.to_le_bytes()[..], b"hi"].concat();
-        let series = [(index, 8), (text, raw.len())];
+        let form = codec::Variable::of(Type::String).expect("a variable type");
+        let series = [(index, 8), (text, form.len(&["hi"]).expect("a short text"))];
         let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
         draft
             .series_mut(index)
             .expect("the index")
             .copy_from_slice(&now.to_le_bytes());
-        draft
-            .series_mut(text)
-            .expect("the text")
-            .copy_from_slice(&raw);
+        form.write(&["hi"], draft.series_mut(text).expect("the text"));
         draft.set_count(0, 1);
         let written = writer
             .write(LIVE, draft)
@@ -1136,9 +1135,9 @@ fn writes_and_reads_a_channel_of_a_variable_type() {
             .iter()
             .find(|&(present, _)| present == text)
             .expect("the view holds the text");
-        let mut out = vec![0; raw.len()];
+        let mut out = Vec::new();
         codec::decode(Type::String, 1, bytes, &mut out).expect("decodes");
-        assert_eq!(out, raw);
+        assert!(form.samples(1, &out).eq([b"hi"]));
     });
 }
 
@@ -1150,17 +1149,18 @@ fn refuses_a_string_sample_that_is_not_utf8() {
         let now = test.now();
         let set = Arc::clone(writer.set());
         let (index, text) = (entry(&set, 1), entry(&set, 6));
-        let raw = [&2_u32.to_le_bytes()[..], &[0xff, 0xfe]].concat();
-        let series = [(index, 8), (text, raw.len())];
+        let form = codec::Variable::of(Type::String).expect("a variable type");
+        let samples = [[0xff, 0xfe]];
+        let series = [
+            (index, 8),
+            (text, form.len(&samples).expect("a short text")),
+        ];
         let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
         draft
             .series_mut(index)
             .expect("the index")
             .copy_from_slice(&now.to_le_bytes());
-        draft
-            .series_mut(text)
-            .expect("the text")
-            .copy_from_slice(&raw);
+        form.write(&samples, draft.series_mut(text).expect("the text"));
         draft.set_count(0, 1);
         let written = writer
             .write(LIVE, draft)

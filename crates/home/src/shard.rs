@@ -8,6 +8,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use buffer::{Buffer, Entry};
+use control::Gate;
+use control::lease::Lease;
 use delivery::Reader;
 use types::channel::Slot;
 use types::frame::key_set::{self, KeySet};
@@ -21,6 +23,9 @@ use crate::reader;
 use crate::split::Split;
 use crate::writer::{self, Writer};
 use crate::{handoff, order, split, stored};
+
+/// How long a holder that the open restored keeps control with no connected writer.
+const GRACE: Span = Span::from_nanos(10_000_000_000);
 
 /// The indexes of one shard, with their writers and readers. It is not `Send`: each
 /// call is on the shard's thread.
@@ -78,7 +83,7 @@ use crate::{handoff, order, split, stored};
 /// use types::frame::{Draft, Form, Label, Path, Range};
 /// use types::time::{Span, Stamp};
 ///
-/// let mut shard = Shard::new(Config {
+/// let mut shard = Shard::open(Config {
 ///     shard: 0,
 ///     buffer,
 ///     clock,
@@ -86,7 +91,8 @@ use crate::{handoff, order, split, stored};
 ///         earliest: Stamp::from_nanos(1),
 ///         ahead: Span::from_nanos(1_000_000_000),
 ///     },
-/// });
+/// })
+/// .await?;
 /// shard.carry(index);
 /// let charge = home::reader::complete::Charge::Whole;
 /// let reader = shard.open_complete(index, 1 << 20, charge);
@@ -152,6 +158,8 @@ pub struct Shard {
     scratch: Scratch,
     /// The readers of each index, by the same place as `indexes`.
     readers: reader::Set,
+    /// The gate that the open restored for each index not carried since.
+    recovered: hash::Map<Slot, Gate>,
 }
 
 /// What a shard is built from.
@@ -279,15 +287,35 @@ impl Future for Commit {
 }
 
 impl Shard {
-    /// A shard over `config.buffer` that carries no index yet.
-    pub fn new(config: Config) -> Self {
+    /// Opens a shard over `config.buffer` that carries no index yet. It restores the
+    /// control of each index from its newest handoff record: for a grace from the
+    /// open, a recorded holder holds control with no connected writer, and only a
+    /// writer of its subject or one with higher authority takes control. An index
+    /// with no record, or whose record names no holder, starts empty. It needs no
+    /// mesh time.
+    ///
+    /// # Errors
+    ///
+    /// The error of [`Buffer::newest`](buffer::Buffer::newest).
+    ///
+    /// # Panics
+    ///
+    /// When a handoff record does not decode: another version or a defect wrote it.
+    pub async fn open(config: Config) -> Result<Self, buffer::Error> {
         let Config {
             shard,
             buffer,
             clock,
             limits,
         } = config;
-        Self {
+        let holders = handoff::newest(&buffer).await?;
+        let now = clock.now().monotonic;
+        let grace = Lease::new(GRACE).expect("invariant: the grace is positive");
+        let recovered = holders
+            .into_iter()
+            .map(|(slot, last)| (slot, Gate::recover(last, now, grace)))
+            .collect();
+        Ok(Self {
             number: shard,
             buffer,
             clock,
@@ -298,12 +326,15 @@ impl Shard {
             next: 0,
             scratch: Scratch::default(),
             readers: reader::Set::default(),
-        }
+            recovered,
+        })
     }
 
-    /// Carries the index at `slot`, with no writer in control. Each path continues
-    /// from its tail in the buffer. It does nothing when the shard carries `slot`
-    /// already.
+    /// Carries the index at `slot`, with no connected writer. At the first carry of
+    /// `slot` after [`open`](Self::open), its gate starts from the handoff that the
+    /// open restored: until the grace from the open ends, the recorded holder holds
+    /// control. Each path continues from its tail in the buffer. It does nothing when
+    /// the shard carries `slot` already.
     pub fn carry(&mut self, slot: Slot) {
         if self.places.contains_key(&slot) {
             return;
@@ -316,7 +347,8 @@ impl Shard {
             }
         };
         let live = tail(Path::Live);
-        let index = Index::new(self.limits, live, tail(Path::Backfill));
+        let gate = self.recovered.remove(&slot).unwrap_or_default();
+        let index = Index::new(self.limits, gate, live, tail(Path::Backfill));
         let place = self.indexes.len();
         self.places.insert(slot, place);
         self.indexes.push(index);
@@ -952,7 +984,9 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, data_type, intern, key, values};
+    use crate::common::{
+        self, create_interner, create_pool, data_type, intern, key, values,
+    };
     use crate::reader::complete::Charge;
 
     const DIR: &str = "shard-0";
@@ -1024,7 +1058,7 @@ mod tests {
             while self.reader.now().mesh.is_none() {
                 self.clock.sleep(Span::from_nanos(1)).await;
             }
-            Self::with(shard, buffer, self.reader.clone())
+            Self::with(shard, buffer, self.reader.clone()).await
         }
 
         /// A shard over the ring of the node that never has mesh time, with no index
@@ -1033,17 +1067,18 @@ mod tests {
             let buffer = self.create_buffer(AREA, BODY_MAX, 4).await;
             // A clock that never runs never has mesh time.
             let (_, reader) = clock::Clock::new(self.clock.clone());
-            Self::with(0, buffer, reader)
+            Self::with(0, buffer, reader).await
         }
 
         /// A shard of the number `shard` over `buffer`, with the clocks of `reader`.
-        fn with(shard: u32, buffer: Buffer, reader: clock::Reader) -> Shard {
-            Shard::new(Config {
+        async fn with(shard: u32, buffer: Buffer, reader: clock::Reader) -> Shard {
+            let config = Config {
                 shard,
                 buffer,
                 clock: reader,
                 limits: LIMITS,
-            })
+            };
+            Shard::open(config).await.expect("opens")
         }
 
         /// Mesh time now: the midpoint of the clock's interval.
@@ -2561,6 +2596,316 @@ mod tests {
         });
     }
 
+    /// A sim whose node lost power after writer `a` took control of both indexes of
+    /// [`two_indexes`] and wrote one frame, and after it closed when `closed`.
+    fn cut_after(seed: u64, closed: bool) -> (sim::Sim, sim::node::Node) {
+        let (mut sim, node) = create_node(seed);
+        sim.run_on(&node, move |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let first = frame(&test.pool, &set, &[(0, &[10]), (1, &[1]), (2, &[10])]);
+            assert_eq!(
+                shard.write(a, LIVE, first),
+                Ok(&[applied(0, 0, 1), applied(2, 0, 1)][..])
+            );
+            if closed {
+                shard.close_writer(a);
+            }
+            shard.committed().await.expect("the commit ends");
+        })
+        .expect("the first run ends");
+        sim.crash(&node, sim::Crash::Power);
+        (sim, node)
+    }
+
+    #[test]
+    fn reserves_control_for_the_holder_from_before_a_power_cut_until_the_grace_ends() {
+        let (mut sim, node) = cut_after(170, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let b = shard
+                .open_writer(writer("subject-b", 1, &set))
+                .expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[refused(0, Refusal::Reserved), refused(2, Refusal::Reserved)][..])
+            );
+            test.clock.sleep(GRACE).await;
+            let next = frame(&test.pool, &set, &[(0, &[30]), (1, &[3]), (2, &[30])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            let handoffs = find(&test.ring().await, &handoff_to("subject-b"));
+            assert_eq!(handoffs.len(), 2);
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn gives_control_to_the_holder_from_before_a_power_cut_when_it_reopens() {
+        let (mut sim, node) = cut_after(171, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(a, LIVE, next),
+                Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn gives_control_to_a_higher_authority_in_the_grace_after_a_power_cut() {
+        let (mut sim, node) = cut_after(172, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let c = shard.open_writer(writer("c", 2, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(c, LIVE, next),
+                Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn starts_an_empty_gate_after_a_power_cut_when_the_handoff_names_no_holder() {
+        let (mut sim, node) = cut_after(173, true);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    /// The grace runs from the open, not from the first carry.
+    #[test]
+    fn gives_control_at_a_carry_after_the_grace_from_the_open_after_a_power_cut() {
+        let (mut sim, node) = cut_after(174, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.open(AREA, 4).await;
+            test.clock.sleep(GRACE).await;
+            shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn records_no_handoff_when_the_holder_reopens_after_the_grace() {
+        let (mut sim, node) = create_node(177);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            shard
+                .open_writer(writer("subject-a", 1, &set))
+                .expect("synced");
+            shard.committed().await.expect("the commit ends");
+        })
+        .expect("the first run ends");
+        sim.crash(&node, sim::Crash::Power);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.open(AREA, 4).await;
+            let before = find(&test.ring().await, &handoff_to("subject-a")).len();
+            test.clock.sleep(GRACE).await;
+            shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
+            shard
+                .open_writer(writer("subject-a", 1, &set))
+                .expect("synced");
+            shard.committed().await.expect("the commit ends");
+            let after = find(&test.ring().await, &handoff_to("subject-a")).len();
+            assert_eq!((before, after), (2, 2));
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn open_gives_the_error_of_a_failed_read_of_a_handoff() {
+        let (mut sim, node) = cut_after(182, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
+            test.node.fail_file(FilePath::new(RING), Operation::ReadAt);
+            let config = Config {
+                shard: 0,
+                buffer,
+                clock: test.reader.clone(),
+                limits: LIMITS,
+            };
+            let failed = env::files::Error::Io {
+                path: PathBuf::from(RING),
+                operation: Operation::ReadAt,
+                code: 5,
+            };
+            assert_eq!(
+                Shard::open(config).await.err(),
+                Some(buffer::Error::Files(failed))
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn restores_control_with_no_mesh_time_after_a_power_cut() {
+        let (mut sim, node) = cut_after(176, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
+            let (clock, reader) = clock::Clock::new(test.clock.clone());
+            let mut shard = Test::with(0, buffer, reader).await;
+            assert_eq!(shard.now(), None);
+            let wall = test.node.wall();
+            test.tasks.spawn(async move { clock.run(wall).await });
+            shard.carry(Slot::new(0));
+            shard.carry(Slot::new(2));
+            while shard.now().is_none() {
+                test.clock.sleep(Span::from_nanos(1)).await;
+            }
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[refused(0, Refusal::Reserved), refused(2, Refusal::Reserved)][..])
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn open_panics_on_a_handoff_record_that_does_not_decode() {
+        let (mut sim, node) = create_node(175);
+        let ended = sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
+            let mut body = test.pool.alloc(2).expect("the pool has a block");
+            body.copy_from_slice(&[1, 0xff]);
+            let record = Entry {
+                index: key(Slot::new(0)),
+                slot: Slot::new(0),
+                path: Path::Live,
+                first: 0,
+                len: 0,
+                stored_at: Stamp::from_nanos(1),
+                last: None,
+                tag: 1,
+                parts: Some(body.freeze()).into(),
+            };
+            buffer.append([record]).expect("the ring has room");
+            buffer.committed().await.expect("the commit ends");
+            test.over(buffer).await;
+        });
+        let Err(sim::Error::Panicked {
+            thread, message, ..
+        }) = ended
+        else {
+            panic!("the open panics: {ended:?}");
+        };
+        assert_eq!(thread, "run_on");
+        let invalid = "invalid utf-8 sequence of 1 bytes from index 0";
+        assert_eq!(
+            message,
+            format!("the handoff subject is not UTF-8: {invalid}")
+        );
+    }
+
+    #[test]
+    fn reserves_control_until_the_grace_ends_after_a_power_cut() {
+        let (mut sim, node) = cut_after(180, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            test.clock.sleep(Span::from_nanos(9_999_999_999)).await;
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[refused(0, Refusal::Reserved), refused(2, Refusal::Reserved)][..])
+            );
+            test.clock.sleep(Span::from_nanos(1)).await;
+            let next = frame(&test.pool, &set, &[(0, &[30]), (1, &[3]), (2, &[30])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn restores_the_waiter_that_took_control_from_a_reopened_holder_after_a_power_cut()
+    {
+        let (mut sim, node) = cut_after(181, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            shard.close_writer(a);
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+        })
+        .expect("the second run ends");
+        sim.crash(&node, sim::Crash::Power);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let c = shard.open_writer(writer("c", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[30]), (1, &[3]), (2, &[30])]);
+            assert_eq!(
+                shard.write(c, LIVE, next),
+                Ok(&[refused(0, Refusal::Reserved), refused(2, Refusal::Reserved)][..])
+            );
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4]), (2, &[40])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 2, 1), applied(2, 2, 1)][..])
+            );
+        })
+        .expect("the third run ends");
+    }
+
     #[test]
     fn continues_at_a_lost_range_after_a_power_cut_after_an_empty_group() {
         let (mut sim, node) = create_node(120);
@@ -2963,7 +3308,7 @@ mod tests {
             assert_eq!(data.len(), 1, "one data entry");
             let decoded: Vec<(channel::Key, Vec<u8>)> = stored::read(&data[0].1)
                 .map(|series| {
-                    let mut out = vec![0; 16];
+                    let mut out = Vec::new();
                     codec::decode(series.data_type, 2, series.bytes, &mut out)
                         .expect("decodes");
                     (series.channel, out)
@@ -3030,7 +3375,7 @@ mod tests {
             run(98, |test| async move {
                 let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
                 let (clock, mesh) = clock::Clock::new(test.clock.clone());
-                let mut shard = Test::with(0, buffer, mesh.clone());
+                let mut shard = Test::with(0, buffer, mesh.clone()).await;
                 shard.carry(Slot::new(0));
                 shard.carry(Slot::new(2));
                 let complete = complete(&mut shard, Slot::new(0));
@@ -4823,14 +5168,10 @@ mod tests {
         );
     }
 
-    /// An index type, then each kind of type, with the raw values of 3 samples. A
-    /// variable series is its ends, zeros to the start of its elements, then them.
+    /// An index type, then each kind of type, with the raw values of 3 samples.
     fn every_type() -> [(Type, Vec<u8>); 7] {
-        let le = |values: &[u32]| -> Vec<u8> {
-            values
-                .iter()
-                .flat_map(|value| value.to_le_bytes())
-                .collect()
+        let raw = |data_type: Type, samples: &[&[u8]]| {
+            (data_type, common::raw(data_type, samples))
         };
         let element = Scalar::U64;
         let sides = types::sample::Sides {
@@ -4842,15 +5183,15 @@ mod tests {
                 Type::Scalar(Scalar::Stamp),
                 [10_i64, 20, 30].map(i64::to_le_bytes).concat(),
             ),
-            (Type::String, [le(&[2, 2, 5]), b"abcde".to_vec()].concat()),
-            (Type::Bytes, [le(&[1, 3, 4]), vec![9, 8, 7, 6]].concat()),
-            (
+            raw(Type::String, &[b"ab", b"", b"cde"]),
+            raw(Type::Bytes, &[&[9], &[8, 7], &[6]]),
+            raw(
                 Type::List { element, max: 2 },
-                [
-                    le(&[1, 1, 3, 0]),
-                    [4_u64, 5, 6].map(u64::to_le_bytes).concat(),
-                ]
-                .concat(),
+                &[
+                    &4_u64.to_le_bytes(),
+                    &[],
+                    &[5_u64, 6].map(u64::to_le_bytes).concat(),
+                ],
             ),
             (
                 Type::Array {
@@ -4901,8 +5242,7 @@ mod tests {
             shard.committed().await.expect("the commit ends");
             let count = usize::try_from(count).expect("a small count");
             let decoded = |data_type: Type, bytes: &[u8]| -> (Type, Vec<u8>) {
-                let len = codec::validate(data_type, count, bytes).expect("valid");
-                let mut out = vec![0; len];
+                let mut out = Vec::new();
                 codec::decode(data_type, count, bytes, &mut out).expect("decodes");
                 (data_type, out)
             };
@@ -4984,12 +5324,14 @@ mod tests {
         run(68, |test| async move {
             let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
             let (clock, mesh) = clock::Clock::new(test.clock.clone());
-            let mut shard = Shard::new(Config {
+            let mut shard = Shard::open(Config {
                 shard: 0,
                 buffer,
                 clock: mesh.clone(),
                 limits: LIMITS,
-            });
+            })
+            .await
+            .expect("opens");
             shard.carry(Slot::new(0));
             shard.carry(Slot::new(2));
             let set = two_indexes();
@@ -5058,7 +5400,7 @@ mod tests {
             while mesh.now().mesh.is_none() {
                 test.clock.sleep(Span::from_nanos(1)).await;
             }
-            let mut shard = Test::with(0, buffer, mesh);
+            let mut shard = Test::with(0, buffer, mesh).await;
             shard.carry(Slot::new(0));
             shard.carry(Slot::new(2));
             let set = two_indexes();
