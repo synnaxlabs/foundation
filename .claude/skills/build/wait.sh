@@ -1,10 +1,11 @@
 #!/bin/sh
 # Waits until pull request $1 merges or needs its author, then prints why it stopped.
 # Exit 0: merged. Exit 1: closed, a failed check, a canceled required check, a
-# conflict, requested changes, the PR left the merge queue, or three failed gh calls
-# in a row, with gh's output. Exit 2: $1 is not a PR number. It waits through one or
-# two failed calls, so a network or HTTP error that clears in 4 minutes does not stop
-# it. A call that fails while the GraphQL rate limit is spent does not count.
+# conflict, requested changes, the PR left the merge queue for a reason other than
+# its merge, or three failed gh calls in a row, with gh's output. Exit 2: $1 is not a
+# PR number. It waits through one or two failed calls, so a network or HTTP error
+# that clears in 4 minutes does not stop it. A call that fails while the GraphQL rate
+# limit is spent does not count.
 #
 # Only the latest run of each workflow counts, and in it the latest run of each job,
 # so a new run or a rerun replaces the old one. A canceled run counts only on a
@@ -12,6 +13,8 @@
 # status, not `gate`, is the required check.
 # A failed check stops it also when the check is not required: a failed `gate` can
 # leave the required `review` status pending, so the PR never merges.
+# For a short time after the queue merges a PR, GitHub gives it as open and out of the
+# queue, with a last removal of reason `merged`. It waits for the next read.
 set -u
 case ${1-} in
   '' | *[!0-9]*) echo "usage: wait.sh <PR number>" >&2; exit 2 ;;
@@ -19,6 +22,8 @@ esac
 q='query($n:Int!){repository(owner:"synnaxlabs",name:"foundation"){
   pullRequest(number:$n){state mergeable reviewDecision isInMergeQueue
   autoMergeRequest{enabledAt}
+  timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{
+    ... on RemovedFromMergeQueueEvent{reason}}}
   commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{
     __typename
     ... on CheckRun{name databaseId conclusion isRequired(pullRequestNumber:$n)
@@ -37,6 +42,7 @@ jq='.data.repository.pullRequest |
   as $checks |
   if .state == "MERGED" then "merged"
   elif .state != "OPEN" then "closed"
+  elif .timelineItems.nodes[0].reason == "merged" then "waiting"
   elif any($checks[]; .conclusion
     | IN("FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED"))
     then "has a failed check"

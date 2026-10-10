@@ -656,7 +656,8 @@ impl Shard {
     ///
     /// # Errors
     ///
-    /// [`reader::Error::Ack`] when the reader is open and `position` moves back.
+    /// [`reader::Error::Ack`] when the reader is open and `position` drops a path or
+    /// adds one.
     ///
     /// # Panics
     ///
@@ -951,7 +952,9 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, data_type, intern, key, values};
+    use crate::common::{
+        self, create_interner, create_pool, data_type, intern, key, values,
+    };
     use crate::reader::complete::Charge;
 
     const DIR: &str = "shard-0";
@@ -4128,7 +4131,7 @@ mod tests {
 
         mod named {
             use super::*;
-            use crate::reader::{Error, Opened, Position, Unsynced, complete, named};
+            use crate::reader::{Opened, Position, Unsynced, complete, named};
 
             const HOLD: Span = Span::from_nanos(1_000_000_000);
             /// One nanosecond less than `HOLD`.
@@ -4232,11 +4235,10 @@ mod tests {
                     assert_eq!(woken, [first.key.into(), other.key.into()]);
                     assert_eq!(taken(&mut shard, first.key.into(), 0), [seq(2, 1)]);
                     assert_eq!(taken(&mut shard, other.key.into(), 0), [seq(2, 1)]);
-                    let error = Error::Ack {
-                        from: live(2),
-                        to: live(1),
-                    };
-                    assert_eq!(shard.ack(first.key, live(1)), Err(error));
+                    shard.ack(first.key, live(3)).expect("forward");
+                    assert_eq!(shard.ack(first.key, live(1)), Ok(()));
+                    let again = named(&mut shard, "a", "r");
+                    assert_eq!(taken(&mut shard, again.key.into(), 0), []);
                 });
             }
 
@@ -4826,11 +4828,8 @@ mod tests {
 
     /// An index type, then each kind of type, with the raw values of 3 samples.
     fn every_type() -> [(Type, Vec<u8>); 7] {
-        let raw = |data_type: Type, samples: &[&[u8]]| -> (Type, Vec<u8>) {
-            let form = codec::Variable::of(data_type).expect("a variable type");
-            let mut out = vec![0; form.len(samples).expect("3 samples")];
-            form.write(samples, &mut out);
-            (data_type, out)
+        let raw = |data_type: Type, samples: &[&[u8]]| {
+            (data_type, common::raw(data_type, samples))
         };
         let element = Scalar::U64;
         let sides = types::sample::Sides {

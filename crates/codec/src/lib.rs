@@ -175,7 +175,9 @@ fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, 
 /// Decodes `bytes`, an encoded series of `count` samples of `data_type`, into `out`,
 /// in place of what it held. It checks what [`validate`] checks, and it writes the
 /// padding of a variable series as zeros. It allocates only when `out` has less
-/// capacity than the raw length.
+/// capacity than the raw length, and it then reads `bytes` twice, so reuse `out`. The
+/// raw length of a variable series is not bounded by the length of `bytes`, and
+/// [`validate`] gives it before any allocation.
 ///
 /// # Errors
 ///
@@ -213,6 +215,7 @@ fn decode_shape(
         }
         Shape::Variable { element, max, utf8 } => {
             let front = element.front(count)?;
+            // A longer `out` keeps its length, so a reused `out` gets no zero fill.
             let held = out.len().max(front.start);
             resize(out, held, data_type, count, bytes)?;
             let (ends_out, padding) =
@@ -232,8 +235,8 @@ fn decode_shape(
 }
 
 /// Sets the length of `out` to `len`. Before `out` grows past its capacity, it checks
-/// `bytes` with [`validate`] and reserves their raw length, so that bytes that do not
-/// hold `count` samples allocate nothing.
+/// `bytes` with [`validate_shape`] and reserves their raw length, so that bytes that do
+/// not hold `count` samples allocate nothing.
 #[inline]
 fn resize(
     out: &mut Vec<u8>,
@@ -2528,6 +2531,49 @@ mod tests {
             assert_eq!((out.as_ptr(), out), (memory, values));
         }
 
+        /// A reused `out` of the raw length gets no zero fill and no second check
+        /// before the fill. The bytes past an error, which a caller must not rely on,
+        /// show both: the first vector is decoded, and the last byte is untouched.
+        #[test]
+        fn fills_no_zeros_into_a_reused_out() {
+            let ints: Vec<u8> = (0..2048_u32)
+                .map(|i| u8::try_from(i % 200).expect("small"))
+                .collect();
+            let (count, text) = variable(1, &vec!["a"; 2048]);
+            let truncated = |vector, needed| Error::Truncated {
+                vector,
+                needed,
+                available: needed - 1,
+            };
+            for (data_type, count, values, first, error) in [
+                (
+                    Type::Scalar(Scalar::U8),
+                    2048,
+                    &ints[..],
+                    VECTOR_LEN,
+                    truncated(1, 772),
+                ),
+                (
+                    Type::Array {
+                        element: Scalar::U8,
+                        len: 2,
+                    },
+                    1024,
+                    &ints[..],
+                    VECTOR_LEN,
+                    truncated(1, 772),
+                ),
+                (Type::Bytes, count, &text, 4 * VECTOR_LEN, truncated(3, 3)),
+            ] {
+                let mut encoded = encode_type(data_type, count, values);
+                encoded.pop();
+                let mut out = vec![0xa5; values.len()];
+                assert_eq!(decode(data_type, count, &encoded, &mut out), Err(error));
+                assert_eq!(out[..first], values[..first], "{data_type:?}");
+                assert_eq!(out.last(), Some(&0xa5), "{data_type:?} got a zero fill");
+            }
+        }
+
         /// A count or an end that the bytes do not hold must not size `out`: a
         /// count of 2^40 would take terabytes.
         #[test]
@@ -2764,7 +2810,8 @@ mod tests {
                 );
                 prop_assert_eq!(&decoded, &values);
                 let read: Vec<&[u8]> = form.samples(samples.len(), &decoded).collect();
-                prop_assert_eq!(read, samples.iter().map(Vec::as_slice).collect::<Vec<_>>());
+                let samples: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
+                prop_assert_eq!(read, samples);
             }
         }
     }

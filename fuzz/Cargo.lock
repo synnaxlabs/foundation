@@ -813,6 +813,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4050469837a6ff301cd14c1f8f24f88549e6d548f24f64e2148eb0f72cebc51f"
 
 [[package]]
+name = "mach2"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0d28e293f2b8c9d2b2d1c0193bd3c1cbdc0d2cf396888dc01162f7cf9d6c3f3"
+
+[[package]]
 name = "matchers"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -873,6 +879,7 @@ dependencies = [
  "mesh",
  "ops",
  "os",
+ "secret",
  "spec",
  "transport",
  "types",
@@ -959,6 +966,7 @@ dependencies = [
  "env",
  "getrandom 0.4.3",
  "libc",
+ "mach2",
  "noq-udp",
  "rustix",
  "tokio",

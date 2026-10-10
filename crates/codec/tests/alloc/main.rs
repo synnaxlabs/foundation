@@ -1,6 +1,8 @@
 //! Encoding, checking, and decoding a series, whole or one vector at a time, and
-//! writing and reading the raw form of a variable series, make no heap allocation. This binary has no test harness: the count covers each thread, and
-//! a harness allocates on its own thread at any time.
+//! writing and reading the raw form of a variable series, make no heap allocation.
+//! Decoding into an `out` that is too small makes one. This binary has no test
+//! harness: the count covers each thread, and a harness allocates on its own thread at
+//! any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -243,6 +245,18 @@ fn check(
         (Ok(()), values),
         "{case} reads back again"
     );
+    for mut grown in [Vec::new(), vec![0]] {
+        let held = grown.capacity();
+        let (result, allocations) =
+            ALLOCATOR.count(|| codec::decode(data_type, count, &series, &mut grown));
+        let wanted = u64::from(values.len() > held);
+        assert_eq!(allocations, wanted, "decoding {case} into {held} bytes");
+        assert_eq!(
+            (result, grown.capacity(), &grown[..]),
+            (Ok(()), values.len().max(held), values),
+            "{case} grows {held} bytes to its raw length"
+        );
+    }
     series
 }
 

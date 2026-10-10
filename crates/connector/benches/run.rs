@@ -242,13 +242,15 @@ async fn open_state(hub: &hub::Hub, connector: &Name) -> hub::reader::Reader {
 /// The last `state` sample of the newest status frame that `reader` holds.
 async fn last_state(reader: &mut hub::reader::Reader) -> Option<u8> {
     let received = reader.next().await.expect("a status frame");
-    let entries = received.set.entries();
+    let entries = received.set().entries();
     let at = entries.iter().position(|entry| entry.key == STATE);
     let at = at.expect("the set holds `state`");
-    let range = received.view.range(entries[at].group);
+    let range = received.view().range(entries[at].group);
     let count = range.expect("the group is present").count;
     let count = usize::try_from(count).expect("a count");
-    let (_, bytes) = (received.view.iter())
+    let (_, bytes) = received
+        .view()
+        .iter()
         .find(|&(present, _)| present == at)
         .expect("the view holds `state`");
     let mut samples = Vec::new();

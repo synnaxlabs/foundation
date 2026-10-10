@@ -91,9 +91,14 @@ fn variable(
             Some(&elements[*start - len..*start])
         })
         .collect();
-    let form = codec::Variable::of(Type::List { element, max }).expect("a list");
-    let mut out = vec![0; form.len(&samples).expect("small samples")];
-    form.write(&samples, &mut out);
+    raw(Type::List { element, max }, &samples)
+}
+
+/// The raw form of `samples` of `data_type`, a `String`, `Bytes`, or `List` type.
+pub(crate) fn raw(data_type: Type, samples: &[impl AsRef<[u8]>]) -> Vec<u8> {
+    let form = codec::Variable::of(data_type).expect("a variable type");
+    let mut out = vec![0; form.len(samples).expect("small samples")];
+    form.write(samples, &mut out);
     out
 }
 

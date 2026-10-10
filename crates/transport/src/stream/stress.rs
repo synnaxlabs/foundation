@@ -69,7 +69,7 @@ impl Plan {
         if scarce {
             bytes_max = bytes_max.min(scarce_pool().largest());
         }
-        let window = bytes_max * usize::try_from(1 + rng.below(4)).expect("small")
+        let window = bytes_max * usize::try_from(2 + rng.below(4)).expect("small")
             + usize::try_from(rng.below(4096)).expect("small");
         Self {
             case,

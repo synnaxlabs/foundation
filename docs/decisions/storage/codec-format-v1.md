@@ -38,12 +38,16 @@
   `decode` writes into a `&mut Vec<u8>` and sets its length to the raw length, so
   the caller does not compute the length of a variable series. It writes each byte
   of that length, padding included, and grows `out` only past its capacity, after a
-  `validate` of the bytes, so bytes that do not hold `count` samples allocate
-  nothing. `Variable` is the one place outside `codec` that knows the raw form:
-  `of` takes `String`, `Bytes`, and `List`, `len` gives the raw length of samples,
-  `write` writes them, and `samples` reads them back. `write` checks neither UTF-8
-  nor `max`, since `encode` checks both; a `List` sample is its elements as
-  little-endian bytes (#1826, `laptop.architect`,
+  `validate` of the bytes (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/pull/2243#issuecomment-6094152516,
+  2026-10-10T05:19:56Z), so bytes that do not hold `count` samples allocate nothing.
+  Growth reads the bytes twice, so a caller reuses `out` (`laptop.architect`,
+  https://github.com/synnaxlabs/foundation/pull/2243#issuecomment-6094291582,
+  2026-10-10T05:39:48Z). `Variable` is how code outside `codec` writes and reads the raw
+  form: `of` takes `String`, `Bytes`, and `List`, `len` gives the raw length of samples,
+  `write` writes them, and `samples` reads them back. `write` checks neither UTF-8 nor
+  `max`, because `encode` checks both; a `List` sample is its elements as little-endian
+  bytes (#1826, `laptop.architect`,
   https://github.com/synnaxlabs/foundation/issues/1826#issuecomment-6093515181,
   2026-10-10T03:56:34Z).
   `Decoder` decodes a scalar series one vector at a time, so a reader of a series from

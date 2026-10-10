@@ -13,13 +13,13 @@ use transport::stream::{Receiver, Sender};
 use transport::{Class, Code};
 use types::channel;
 use types::frame::key_set::{Group, KeySet};
-use types::frame::{Draft, Form, Frame, Layout, Mask};
+use types::frame::{Draft, Form, Frame, Layout};
 use types::hash;
 use types::sample::Type;
 use wire::Protocol;
 use wire::hub::{Credit, FromHome, Head, Open, Refusal, keys};
 
-use super::{Ended, Error, Mode, Streak, WINDOW};
+use super::{Ended, Error, Lens, Mode, Streak, WINDOW};
 use crate::State;
 
 /// The most opens of one [`connect`]. The home's node dials only when it has no open
@@ -37,10 +37,9 @@ pub(super) struct Remote {
     credit: Option<u64>,
     /// The grant that the reader last asked the task to send.
     asked: u64,
-    /// The reader's key set. Place `n` of the open is entry `n`.
-    set: Arc<KeySet>,
-    /// The mask of every entry of `set`.
-    mask: Mask,
+    /// The lens of the reader's key set, whose mask holds every entry. Place `n` of
+    /// the open is entry `n`.
+    lens: Lens,
     streak: Streak,
 }
 
@@ -122,14 +121,15 @@ impl Remote {
     /// and their index `index` at `home`, another node. Spawns the task of the
     /// session, which dials the home, opens the session, and then takes its frames,
     /// and waits until the home opened it. A removal of a channel during the open
-    /// ends the session at its first take.
+    /// ends the session at its first take. Returns the session and the slot of its
+    /// index.
     pub(super) async fn open(
         state: &Rc<RefCell<State>>,
         home: types::node::Key,
         data: Vec<(channel::Key, Type)>,
         index: channel::Key,
         mode: Mode,
-    ) -> Result<Self, Error> {
+    ) -> Result<(Self, channel::Slot), Error> {
         let keys = data.iter().map(|&(key, _)| key).chain([index]).collect();
         let queue = Rc::new(RefCell::new(Queue::default()));
         state.borrow_mut().remotes.add(keys, &queue);
@@ -149,17 +149,18 @@ impl Remote {
             Arc::clone(&set),
         );
         state.borrow().tasks.spawn(task);
-        let mask = Mask::new(&set, set.entries().iter().map(|entry| entry.slot));
+        let slot = set.entries()[set.groups()[0]].slot;
+        let slots = set.entries().iter().map(|entry| entry.slot);
+        let lens = Lens::new(&set, slots, slot);
         let remote = Self {
             queue,
             credit: (mode == Mode::Complete).then_some(0),
             asked: WINDOW,
-            set,
-            mask,
+            lens,
             streak: Streak::default(),
         };
         poll_fn(|cx| remote.queue.borrow_mut().poll_open(cx)).await?;
-        Ok(remote)
+        Ok((remote, slot))
     }
 
     /// Adds the charge of `frame`, which the reader gave back, to the credit.
@@ -169,14 +170,14 @@ impl Remote {
         }
     }
 
-    /// The next frame, its key set, and the mask of every entry in it. After
-    /// [`STREAK`](super::STREAK) frames in a row, it yields once.
+    /// The next frame, and the lens of its key set. After [`STREAK`](super::STREAK)
+    /// frames in a row, it yields once.
     ///
     /// # Errors
     ///
     /// The [`Ended`] that ended the session, after each frame that arrived before it,
     /// on this and every later call.
-    pub(super) async fn take(&mut self) -> Result<(Frame, &Arc<KeySet>, &Mask), Ended> {
+    pub(super) async fn take(&mut self) -> Result<(Frame, &Lens), Ended> {
         self.ask();
         let Self { queue, streak, .. } = &mut *self;
         let next = poll_fn(|cx| {
@@ -186,7 +187,7 @@ impl Remote {
             polled
         })
         .await;
-        next.map(|frame| (frame, &self.set, &self.mask))
+        next.map(|frame| (frame, &self.lens))
     }
 
     /// Asks the task to send a credit once the grant asked is half a window short of

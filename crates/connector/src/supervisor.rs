@@ -2784,15 +2784,15 @@ mod tests {
     /// The type, the count, and the encoded bytes of the series of `key` in
     /// `received`.
     fn encoded<'a>(received: &'a Received<'_>, key: u128) -> (Type, usize, &'a [u8]) {
-        let set = received.set;
+        let set = received.set();
         let key = channel::Key::from_u128(key);
         let entry = set.entries().iter().position(|entry| entry.key == key);
         let entry = entry.expect("the set holds the channel");
-        let range = received.view.range(set.entries()[entry].group);
+        let range = received.view().range(set.entries()[entry].group);
         let count = range.expect("the group is present").count;
         let count = usize::try_from(count).expect("a count");
         let (_, bytes) = received
-            .view
+            .view()
             .iter()
             .find(|&(present, _)| present == entry)
             .expect("the view holds the series");

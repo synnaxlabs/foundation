@@ -212,6 +212,8 @@ pub enum Error {
     Cores(std::io::Error),
     /// The OS could not open, make, or sync the data directory or its parent.
     Dir(std::io::Error),
+    /// The OS could not give the available memory.
+    Memory(std::io::Error),
     /// A thread of `os` could not start: the I/O thread of [`files`] or the thread
     /// of [`interrupt`].
     Thread(env::thread::Error),
@@ -229,6 +231,7 @@ impl fmt::Display for Error {
                     "cannot open, make, or sync the data directory or its parent: {e}"
                 )
             }
+            Self::Memory(e) => write!(f, "cannot read the available memory: {e}"),
             Self::Thread(e) => write!(f, "{e}"),
             Self::Wall(e) => write!(f, "cannot read the wall clock: {e}"),
         }
@@ -238,7 +241,7 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Cores(e) | Self::Dir(e) | Self::Wall(e) => Some(e),
+            Self::Cores(e) | Self::Dir(e) | Self::Memory(e) | Self::Wall(e) => Some(e),
             Self::Thread(e) => std::error::Error::source(e),
         }
     }
@@ -257,6 +260,17 @@ mod tests {
         );
         let source = std::error::Error::source(&e).map(ToString::to_string);
         assert_eq!(source.as_deref(), Some("no affinity"));
+    }
+
+    #[test]
+    fn a_memory_error_names_the_os_error_as_its_source() {
+        let e = Error::Memory(std::io::Error::other("no meminfo"));
+        assert_eq!(
+            e.to_string(),
+            "cannot read the available memory: no meminfo"
+        );
+        let source = std::error::Error::source(&e).map(ToString::to_string);
+        assert_eq!(source.as_deref(), Some("no meminfo"));
     }
 
     #[test]
