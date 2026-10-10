@@ -2796,6 +2796,29 @@ mod port {
         drop(held);
     }
 
+    /// The port binds before any shard's pool is built.
+    #[test]
+    fn a_port_that_does_not_bind_wins_over_a_pool_reservation_past_usize_max() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 1);
+        let listen = listen(&host);
+        let udp = env::net::udp::Config {
+            local: listen,
+            send_buffer_bytes: 1 << 16,
+            recv_buffer_bytes: 1 << 16,
+        };
+        let held = host.net().udp(&udp).expect("the port binds");
+        let node =
+            Node::start(config(&host, Size::from_bytes(u64::MAX), Box::new(heap)));
+        assert_eq!(sim.run(), Ok(()));
+        let error = Error::Port {
+            listen,
+            error: env::net::Error::AddressInUse { local: listen },
+        };
+        assert_eq!(node.join(), Err(error));
+        drop(held);
+    }
+
     /// A port that does not bind starts no shard, and `join` gives why.
     #[test]
     fn a_port_that_does_not_bind_starts_no_shard() {

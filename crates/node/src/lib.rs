@@ -184,9 +184,9 @@ impl Node {
     ///
     /// # Panics
     ///
-    /// If the disk budget holds a ring on each shard and a shard's part of the pool
-    /// budget gives a reservation of more than `usize::MAX` bytes, or if the disk
-    /// budget holds a ring on each of more than `u32::MAX` cores.
+    /// If the disk budget holds a ring on each shard, the port binds, and a shard's
+    /// part of the pool budget gives a reservation of more than `usize::MAX` bytes, or
+    /// if the disk budget holds a ring on each of more than `u32::MAX` cores.
     #[must_use = "a dropped Node leaves its shards running"]
     pub fn start<M: block::Memory + 'static>(config: Config<M>) -> Self {
         let cores = config.shards.cores().get();
@@ -222,6 +222,15 @@ impl Node {
             clock: config.clock.clone(),
             entropy: config.entropy.clone(),
         };
+        let parts = parts
+            .into_iter()
+            .enumerate()
+            .map(|(core, (budget, layout))| {
+                let pool = block::Config::new(budget)
+                    .unwrap_or_else(|unfit| panic!("shard-{core}: {unfit}"));
+                (pool, layout)
+            })
+            .collect::<Vec<_>>();
         Self::launch(config, endpoint, parts.into_iter().zip(0..count))
     }
 
@@ -532,26 +541,20 @@ impl Role {
     }
 }
 
-/// The pool of each shard from its part of `budget`, and the layout of its ring from
-/// its part of `disk`, in order of core, else the first part that holds no ring.
-///
-/// # Panics
-///
-/// If each part of `disk` holds a ring and a part of `budget` gives a reservation of
-/// more than `usize::MAX` bytes.
+/// The part of `budget` of each shard, and the layout of its ring from its part of
+/// `disk`, in order of core, else the first part that holds no ring.
 fn parts(
     budget: types::byte::Size,
     disk: types::byte::Size,
     cores: usize,
-) -> Result<Vec<(block::Config, buffer::Layout)>, buffer::Small> {
-    let layouts = (0..cores)
-        .map(|core| buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX))
-        .collect::<Result<Vec<_>, _>>()?;
-    let pools = (0..cores).map(|core| {
-        block::Config::new(part(budget.bytes(), cores, core))
-            .unwrap_or_else(|unfit| panic!("shard-{core}: {unfit}"))
-    });
-    Ok(pools.zip(layouts).collect())
+) -> Result<Vec<(u64, buffer::Layout)>, buffer::Small> {
+    (0..cores)
+        .map(|core| {
+            let layout =
+                buffer::Layout::fit(part(disk.bytes(), cores, core), BODY_MAX)?;
+            Ok((part(budget.bytes(), cores, core), layout))
+        })
+        .collect()
 }
 
 /// The part of `total` of the shard on `core` of `cores`: an even part, and the
