@@ -1,4 +1,6 @@
 //! The C functions of open62541 and `shim.c` that Rust calls, each declared once.
+//! `shim.c` asserts the size of each C enum that this module mirrors, and each value of
+//! such an enum that it names.
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
@@ -332,6 +334,7 @@ unsafe extern "C" {
 
     pub(crate) fn shim_loop_new(now: Now, clock: *mut c_void) -> *mut EventLoop;
     pub(crate) fn shim_loop_free(el: *mut EventLoop);
+    pub(crate) fn shim_loop_delayed(el: *mut EventLoop) -> bool;
     pub(crate) fn shim_log_warning(
         el: *mut EventLoop,
         message: *const u8,
@@ -361,8 +364,9 @@ unsafe extern "C" {
     );
 }
 
-/// Only tests use these.
-#[cfg(test)]
+/// Only tests and `bench` use these.
+#[cfg(any(test, feature = "sim"))]
+#[cfg_attr(not(test), expect(dead_code, reason = "`bench` uses only some"))]
 pub(crate) mod test {
     use std::ffi::{c_int, c_void};
     use std::mem::offset_of;
@@ -384,6 +388,20 @@ pub(crate) mod test {
         pub(crate) const STOPPED: Self = Self(0);
         pub(crate) const STOPPING: Self = Self(2);
     }
+
+    /// `UA_SecureChannelState` of a client.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(transparent)]
+    pub(crate) struct Channel(pub(crate) c_int);
+
+    impl Channel {
+        /// `UA_SECURECHANNELSTATE_CLOSED`.
+        pub(crate) const CLOSED: Self = Self(0);
+    }
+
+    /// `UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME`, the node of the current time of a
+    /// server. `shim.c` asserts it.
+    pub(crate) const TIME: u32 = 2258;
 
     /// The members of `UA_ConnectionManager`. `shim.c` asserts the same size and
     /// offsets.
@@ -445,6 +463,18 @@ pub(crate) mod test {
             "free_buffer moved"
         );
     };
+
+    /// `UA_ClientAsyncReadValueAttributeCallback`.
+    pub(crate) type Read = unsafe extern "C" fn(
+        client: *mut super::Client,
+        data: *mut c_void,
+        request: u32,
+        status: u32,
+        value: *mut c_void,
+    );
+
+    /// `UA_NODEIDTYPE_NUMERIC`.
+    pub(crate) const NUMERIC: c_int = 0;
 
     /// `UA_NodeId` with a numeric identifier.
     #[repr(C, align(8))]
@@ -530,17 +560,35 @@ pub(crate) mod test {
         ) -> *const c_void;
         pub(crate) fn UA_Client_disconnect(client: *mut super::Client) -> u32;
         pub(crate) fn UA_Client_disconnectAsync(client: *mut super::Client) -> u32;
+        pub(crate) fn UA_Client_disconnectSecureChannelAsync(
+            client: *mut super::Client,
+        ) -> u32;
 
         pub(crate) fn shim_server_new(
             el: *mut EventLoop,
             port: u16,
             url: *const std::ffi::c_char,
+            sessions: u16,
         ) -> *mut Server;
         pub(crate) fn UA_Server_run_startup(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_run_shutdown(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_getLifecycleState(server: *mut Server) -> Lifecycle;
         pub(crate) fn shim_response_result(response: *const c_void) -> u32;
+        pub(crate) fn shim_client_read(
+            client: *mut super::Client,
+            node: u32,
+            callback: Read,
+            data: *mut c_void,
+        ) -> u32;
+        pub(crate) fn shim_value_status(value: *const c_void) -> u32;
+        pub(crate) fn shim_client_namespaced(client: *mut super::Client) -> bool;
+        pub(crate) fn UA_Client_getState(
+            client: *mut super::Client,
+            channel: *mut Channel,
+            session: *mut c_int,
+            status: *mut u32,
+        );
         pub(crate) fn shim_server_discovery_url(
             server: *mut Server,
             index: usize,

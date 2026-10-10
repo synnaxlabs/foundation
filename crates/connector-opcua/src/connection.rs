@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::fmt;
 use std::future::poll_fn;
 use std::io::{IoSlice, Write as _};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
@@ -25,6 +25,7 @@ use types::time::Span;
 use crate::event::Loop;
 use crate::ffi::{self, Bytes, Status};
 
+/// The options of each stream.
 const OPTIONS: tcp::Options = tcp::Options {
     send_buffer_bytes: 1 << 16,
     recv_buffer_bytes: 1 << 16,
@@ -78,8 +79,12 @@ impl Manager {
         Self::make(clock, net, None, rng)
     }
 
-    /// As [`Manager::new`], and the manager also accepts on `listener`, where a server
-    /// finds it.
+    /// As [`Manager::new`], and the manager also accepts on a listener that it binds on
+    /// `local`, with a queue of `backlog` streams, where a server finds it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Net::listen`].
     ///
     /// # Panics
     ///
@@ -87,10 +92,16 @@ impl Manager {
     pub(crate) fn listening(
         clock: Clock,
         net: Net,
-        listener: Listener,
+        local: SocketAddr,
+        backlog: u32,
         rng: &mut Rng,
-    ) -> Self {
-        Self::make(clock, net, Some(listener), rng)
+    ) -> Result<Self, net::Error> {
+        let listener = net.listen(&tcp::Listen {
+            local,
+            backlog,
+            options: OPTIONS,
+        })?;
+        Ok(Self::make(clock, net, Some(listener), rng))
     }
 
     fn make(clock: Clock, net: Net, listener: Option<Listener>, rng: &mut Rng) -> Self {
@@ -166,8 +177,9 @@ impl Manager {
         let mut sleep: Option<Sleep> = None;
         poll_fn(|cx| {
             state.driving.set(true);
+            let _driving = Held(&state.driving);
             self.pass(cx);
-            let poll = loop {
+            loop {
                 let poll = run(cx);
                 let moved = state.move_on_again(cx);
                 if poll.is_ready() {
@@ -184,9 +196,7 @@ impl Manager {
                 if Pin::new(timer).poll(cx).is_pending() {
                     break Poll::Pending;
                 }
-            };
-            state.driving.set(false);
-            poll
+            }
         })
         .await
     }
@@ -471,7 +481,7 @@ impl State {
     }
 }
 
-/// Clears the flag of a drive when the drive drops.
+/// Clears a flag of a drive when it drops, also in a panic.
 struct Held<'a>(&'a Cell<bool>);
 
 impl Drop for Held<'_> {
@@ -979,5 +989,7 @@ unsafe extern "C" fn closed(application: *mut c_void, _: *mut c_void) {
     }
 }
 
+#[cfg(any(test, feature = "sim"))]
+mod server;
 #[cfg(test)]
 mod tests;
