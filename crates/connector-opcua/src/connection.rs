@@ -20,7 +20,7 @@ use std::task::{Context, Poll, Waker};
 use env::clock::{Clock, Sleep};
 use env::net::{self, Listener, Net, Tcp, tcp};
 use env::rng::Rng;
-use types::time::Span;
+use types::time::{Monotonic, Span};
 
 use crate::event::Loop;
 use crate::ffi::{self, Bytes, Status};
@@ -32,16 +32,8 @@ const OPTIONS: tcp::Options = tcp::Options {
     delayed: false,
 };
 
-/// The size of the read buffer of each open connection.
+/// The size of the read buffer of a manager.
 const READ_BYTES: usize = 1 << 16;
-
-/// The size of the buffer on the stack that a closing stream drops reads into.
-const DRAIN_BYTES: usize = 1 << 10;
-
-/// Gives a buffer for one read.
-fn read_buffer() -> Box<[u8]> {
-    vec![0; READ_BYTES].into_boxed_slice()
-}
 
 /// The most sends that wait on one connection. A send past it closes the connection.
 /// open62541 allocates each at most at the send buffer size of its channel. Sends wait
@@ -108,6 +100,7 @@ impl Manager {
             raw: Cell::new(ptr::null_mut()),
             events: events.raw(),
             table: RefCell::new(BTreeMap::new()),
+            read: RefCell::new(vec![0; READ_BYTES].into_boxed_slice()),
             next: Cell::new(1),
             waker: RefCell::new(None),
             driving: Cell::new(false),
@@ -253,6 +246,8 @@ struct State {
     raw: Cell<*mut ffi::ConnectionManager>,
     events: *mut ffi::EventLoop,
     table: RefCell<BTreeMap<usize, Connection>>,
+    /// The buffer of each read. open62541 copies what it keeps of the bytes it gets.
+    read: RefCell<Box<[u8]>>,
     /// The key of the next connection. open62541 reads 0 as no connection.
     next: Cell<usize>,
     /// The waker of the last pass.
@@ -334,7 +329,7 @@ impl State {
             connection.stream =
                 match std::mem::replace(&mut connection.stream, Stream::Closed) {
                     Stream::Connecting(_) | Stream::Listening(_) => Stream::Closed,
-                    Stream::Open { tcp, .. } => Stream::Closing {
+                    Stream::Open(tcp) => Stream::Closing {
                         tcp,
                         linger: self.clock.sleep_until(self.clock.now() + LINGER),
                         shut: false,
@@ -352,21 +347,19 @@ impl State {
 
     /// Drops the stream that has closed longest when more than [`CLOSES`] close.
     fn bound_closes(&self) {
-        let oldest = {
-            let table = self.table.borrow();
-            let closing = || {
-                table.iter().filter_map(|(id, c)| match &c.stream {
-                    Stream::Closing { linger, .. } => Some((linger.deadline(), *id)),
-                    _ => None,
-                })
-            };
-            if closing().count() <= CLOSES {
-                return;
+        let mut count = 0;
+        let mut oldest: Option<(Monotonic, usize)> = None;
+        for (id, connection) in self.table.borrow().iter() {
+            if let Stream::Closing { linger, .. } = &connection.stream {
+                count += 1;
+                let close = (linger.deadline(), *id);
+                oldest = Some(oldest.map_or(close, |o| o.min(close)));
             }
-            let (_, id) = closing().min().expect("invariant: more than CLOSES close");
-            id
+        }
+        let Some((_, oldest)) = oldest.filter(|_| count > CLOSES) else {
+            return;
         };
-        self.fail(oldest, &Failure::Closes);
+        self.fail(oldest, &Failure::Displaced);
         self.wake(oldest);
     }
 
@@ -381,7 +374,7 @@ impl State {
             .expect("invariant: only `Step::Gone` of this id removes it")
             .take_stream();
         match stream {
-            Stream::Connecting(_) | Stream::Listening(_) | Stream::Open { .. } => {
+            Stream::Connecting(_) | Stream::Listening(_) | Stream::Open(_) => {
                 self.queue_closing(id);
             }
             Stream::Closing { .. } | Stream::Closed => {}
@@ -402,9 +395,11 @@ impl State {
     fn move_on(&self, id: usize, cx: &mut Context<'_>) {
         #[cfg(feature = "sim")]
         self.moves.set(self.moves.get() + 1);
+        // No read callback moves a connection on, so this borrow never nests.
+        let mut read = self.read.borrow_mut();
         loop {
             let step = match self.table.borrow_mut().get_mut(&id) {
-                Some(connection) => connection.step(cx),
+                Some(connection) => connection.step(cx, &mut read),
                 None => return,
             };
             let step = match step {
@@ -423,16 +418,7 @@ impl State {
                 }
                 Step::Established => self.call(id, ffi::ESTABLISHED, &mut []),
                 Step::Accepted(tcp) => self.accept(id, tcp),
-                Step::Read(mut buffer, n) => {
-                    self.call(id, ffi::ESTABLISHED, &mut buffer[..n]);
-                    let mut table = self.table.borrow_mut();
-                    let connection = table
-                        .get_mut(&id)
-                        .expect("invariant: only `Step::Gone` of this id removes it");
-                    if let Stream::Open { buffer: slot, .. } = &mut connection.stream {
-                        *slot = buffer;
-                    }
-                }
+                Step::Read(n) => self.call(id, ffi::ESTABLISHED, &mut read[..n]),
             }
         }
     }
@@ -468,11 +454,7 @@ impl State {
                 "invariant: a listen connection keeps its callback while it listens",
             );
         let peer = tcp.peer();
-        let stream = Stream::Open {
-            tcp,
-            buffer: read_buffer(),
-        };
-        let id = self.insert(callback, stream);
+        let id = self.insert(callback, Stream::Open(tcp));
         let mut text = [0; ADDRESS_BYTES];
         self.establish(id, Params::Remote(ip_text(peer.ip(), &mut text)));
         self.wake(id);
@@ -613,11 +595,7 @@ fn ip_text(ip: IpAddr, text: &mut [u8; ADDRESS_BYTES]) -> &[u8] {
 enum Stream {
     Connecting(Pin<Box<dyn Future<Output = Result<Tcp, net::Error>>>>),
     Listening(Listener),
-    Open {
-        tcp: Tcp,
-        /// Empty while a read callback holds it.
-        buffer: Box<[u8]>,
-    },
+    Open(Tcp),
     /// It gives no more reads, drops what the peer sends while it writes what waits,
     /// closes its side, then reads until the peer closes its side, so the drop sends
     /// no reset.
@@ -650,7 +628,7 @@ enum Step {
     Waiting,
     Established,
     Accepted(Tcp),
-    Read(Box<[u8]>, usize),
+    Read(usize),
     Ended,
     Gone,
 }
@@ -662,7 +640,7 @@ enum Failure {
     /// The close took [`LINGER`].
     Lingered,
     /// More than [`CLOSES`] streams close, and this one has closed longest.
-    Closes,
+    Displaced,
 }
 
 impl fmt::Display for Failure {
@@ -672,7 +650,7 @@ impl fmt::Display for Failure {
             Self::Lingered => {
                 write!(f, "the close took {LINGER}, so it drops the stream")
             }
-            Self::Closes => {
+            Self::Displaced => {
                 write!(
                     f,
                     "more than {CLOSES} streams close, so it drops the oldest"
@@ -683,16 +661,14 @@ impl fmt::Display for Failure {
 }
 
 impl Connection {
-    /// Moves the connection on, or gives why it fails.
-    fn step(&mut self, cx: &mut Context<'_>) -> Result<Step, Failure> {
+    /// Moves the connection on with `read` as the buffer of its reads, or gives why it
+    /// fails. [`Step::Read`] gives the count of bytes read into `read`.
+    fn step(&mut self, cx: &mut Context<'_>, read: &mut [u8]) -> Result<Step, Failure> {
         match &mut self.stream {
             Stream::Connecting(connect) => match connect.as_mut().poll(cx) {
                 Poll::Pending => Ok(Step::Waiting),
                 Poll::Ready(Ok(tcp)) => {
-                    self.stream = Stream::Open {
-                        tcp,
-                        buffer: read_buffer(),
-                    };
+                    self.stream = Stream::Open(tcp);
                     Ok(Step::Established)
                 }
                 Poll::Ready(Err(e)) => Err(Failure::Net("connect", e)),
@@ -702,16 +678,12 @@ impl Connection {
                 Poll::Ready(Ok(tcp)) => Ok(Step::Accepted(tcp)),
                 Poll::Ready(Err(e)) => Err(Failure::Net("accept", e)),
             },
-            Stream::Open { tcp, buffer } => {
-                if !buffer.is_empty() {
-                    match tcp.poll_read(cx, buffer) {
-                        Poll::Ready(Ok(0)) => return Ok(Step::Ended),
-                        Poll::Ready(Ok(n)) => {
-                            return Ok(Step::Read(std::mem::take(buffer), n));
-                        }
-                        Poll::Ready(Err(e)) => return Err(Failure::Net("read", e)),
-                        Poll::Pending => {}
-                    }
+            Stream::Open(tcp) => {
+                match tcp.poll_read(cx, read) {
+                    Poll::Ready(Ok(0)) => return Ok(Step::Ended),
+                    Poll::Ready(Ok(n)) => return Ok(Step::Read(n)),
+                    Poll::Ready(Err(e)) => return Err(Failure::Net("read", e)),
+                    Poll::Pending => {}
                 }
                 write(tcp, &mut self.sends, &mut self.sent, cx)?;
                 Ok(Step::Waiting)
@@ -725,9 +697,8 @@ impl Connection {
                 if Pin::new(linger).poll(cx).is_ready() {
                     return Err(Failure::Lingered);
                 }
-                let mut drain = [0; DRAIN_BYTES];
                 while !*drained {
-                    match tcp.poll_read(cx, &mut drain) {
+                    match tcp.poll_read(cx, read) {
                         Poll::Ready(Ok(0)) => *drained = true,
                         Poll::Ready(Ok(_)) => {}
                         Poll::Ready(Err(e)) => return Err(Failure::Net("read", e)),
@@ -960,7 +931,7 @@ unsafe extern "C" fn send(state: *mut c_void, id: usize, buffer: *mut Bytes) -> 
     let Some(connection) = table.get_mut(&id) else {
         return Status::BAD_CONNECTION_CLOSED.0;
     };
-    if !matches!(connection.stream, Stream::Open { .. }) {
+    if !matches!(connection.stream, Stream::Open(_)) {
         return Status::BAD_CONNECTION_CLOSED.0;
     }
     if connection.sends.len() == SENDS {

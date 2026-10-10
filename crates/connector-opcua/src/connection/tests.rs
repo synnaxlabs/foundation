@@ -245,16 +245,13 @@ impl Side {
         self.manager.state().table.borrow().len()
     }
 
-    /// The length of the read buffer of each connection in the table. No call of
-    /// open62541 shows it, and `tests/memory.rs` cannot reach the private manager.
-    fn buffers(&self) -> Vec<(usize, usize)> {
+    /// The keys of the connections in the table whose streams close.
+    fn closing(&self) -> Vec<usize> {
         let table = self.manager.state().table.borrow();
         table
             .iter()
-            .map(|(id, c)| match &c.stream {
-                super::Stream::Open { buffer, .. } => (*id, buffer.len()),
-                _ => (*id, 0),
-            })
+            .filter(|(_, c)| matches!(c.stream, super::Stream::Closing { .. }))
+            .map(|(id, _)| *id)
             .collect()
     }
 
@@ -2053,30 +2050,6 @@ fn notes(
         .collect()
 }
 
-/// A read buffer for each listen and connecting connection costs 64 KiB each, which no
-/// call of open62541 shows, so the test reads the table.
-#[test]
-fn only_a_stream_that_reads_holds_a_read_buffer() {
-    let mut network = Network::new();
-    network.dial(Span::MILLISECOND, b"");
-    let peer = SocketAddr::new(network.peer.addresses()[0], PORT);
-    let buffers = network
-        .sim
-        .run_on(&network.local.clone(), move |node, _| async move {
-            let side = Side::listening(&node, listener(&node));
-            assert_eq!(side.listen(PORT), Status::GOOD);
-            assert_eq!(side.connect(peer), Status::GOOD);
-            let opened = side.buffers();
-            side.drive(Span::from_nanos(100_000_000)).await;
-            (opened, side.buffers())
-        })
-        .expect("the run ends");
-    assert_eq!(
-        buffers,
-        (vec![(1, 0), (2, 0)], vec![(1, 0), (3, READ_BYTES)])
-    );
-}
-
 #[test]
 fn a_listen_gives_its_address_and_port_and_an_accept_the_address_of_the_peer() {
     let network = Network::new();
@@ -2709,9 +2682,9 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
 
 /// Each purged stream of a peer that neither reads nor closes stays in the table for
 /// `LINGER`. The table must hold no more than the 100 secure channels of the minimal
-/// config with their read buffers, and [`CLOSES`] closing streams with none.
+/// config and [`CLOSES`] closing streams.
 #[test]
-fn streams_that_a_purge_closes_hold_no_read_buffer_and_no_more_than_the_bound() {
+fn streams_that_a_purge_closes_are_no_more_than_the_bound() {
     let mut network = Network::new();
     for i in 0..1000 {
         network.hold(Span::from_nanos((i + 1) * 1_000_000));
@@ -2723,13 +2696,12 @@ fn streams_that_a_purge_closes_hold_no_read_buffer_and_no_more_than_the_bound() 
             let server = side.start(c"opc.tcp://:4840");
             side.drive(Span::from_nanos(2_000_000_000)).await;
             // Less the listen connection.
-            let connections = side.connections() - 1;
-            let bytes: usize = side.buffers().iter().map(|(_, n)| n).sum();
+            let held = (side.connections() - 1, side.closing().len());
             side.stop(server).await;
-            (connections, bytes)
+            held
         })
         .expect("the run ends");
-    assert_eq!(held, (100 + CLOSES, 100 * READ_BYTES));
+    assert_eq!(held, (100 + CLOSES, CLOSES));
 }
 
 /// One more peer than the server holds channels and [`CLOSES`] closing streams
@@ -2745,23 +2717,20 @@ fn closes_past_the_bound() {
         let i = i64::try_from(i).expect("a small count");
         network.hold(Span::from_nanos((i + 1) * 1_000_000));
     }
-    let buffers = network
+    let held = network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
             let server = side.start(c"opc.tcp://:4840");
             side.drive(Span::SECOND).await;
-            let buffers = side.buffers();
+            let held = (side.connections(), side.closing());
             side.stop(server).await;
-            buffers
+            held
         })
         .expect("the run ends");
-    let closing = (3..=102).map(|id| (id, 0));
-    let open = (103..=202).map(|id| (id, READ_BYTES));
-    let expected: Vec<_> = [(1, 0)].into_iter().chain(closing).chain(open).collect();
-    assert_eq!(buffers, expected);
+    let closing: Vec<usize> = (3..=102).collect();
+    assert_eq!(held, (1 + 100 + CLOSES, closing));
 }
-
 /// A close past [`CLOSES`] drops the stream that has closed longest, with a warning:
 /// stream 2 at the last accept, then 3 to 102 as the shutdown closes each channel.
 #[test]

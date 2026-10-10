@@ -266,11 +266,11 @@
   peer sends while it writes what waits, closes its side, then reads until the peer
   closes its side, so that the drop sends no reset. It drops the stream with a warning
   10 s after the first close, so that a peer that reads slowly or never closes cannot
-  hold it. Only an open stream holds a read buffer (64 KiB). A close drops its reads
-  into 1 KiB on the stack. At most 100 streams close at once: a close past that drops
-  the stream that has closed longest, with a warning (#2262). So a server of the
-  minimal config holds at most its 100 secure channels with read buffers, and 100
-  closing streams with none, whatever the connect rate. Each connect, read, write, or
+  hold it. A manager reads each stream into its one buffer of 64 KiB, since open62541
+  copies what it keeps of a read. At most 100 streams close at once: a close past that
+  drops the stream that has closed longest, before its close ends, with a warning. So
+  a server of the minimal config holds at most its 100 secure channels and 100 closing
+  streams (#2262, approval of `laptop.architect-2` owed). Each connect, read, write, or
   close error gives a warning through the logger of the loop. The first close, or an
   error before it, gives `CLOSING` once, at the next run of the loop. The wake of a
   send on the thread of the drive: decided by `laptop.architect-2`
