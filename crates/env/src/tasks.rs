@@ -588,7 +588,8 @@ mod tests {
         pub(super) fn waker(hooks: &Hooks) -> Waker {
             let raw = RawWaker::new(ptr::from_ref(hooks).cast(), &VTABLE);
             // SAFETY: each function of `VTABLE` reads `data` as the `&Hooks` it is,
-            // which outlives the waker on one thread, as `waker` states.
+            // which outlives the waker. The waker and each clone stay on the thread of
+            // the test, so the thread-safety contract of `RawWaker` holds.
             unsafe { Waker::from_raw(raw) }
         }
 
