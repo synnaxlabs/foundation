@@ -108,6 +108,7 @@ impl Manager {
             held: Cell::new(false),
             ahead: Cell::new(usize::MAX),
             again: RefCell::new(Vec::new()),
+            accepted: Cell::new(None),
             #[cfg(feature = "sim")]
             moves: Cell::new(0),
             ends: RefCell::new(VecDeque::new()),
@@ -147,7 +148,8 @@ impl Manager {
     /// a close that `run` or another task asks for. After each call, also the one that
     /// gives the value, it moves on each connection again after each connect, send, or
     /// close on it that the call or such a step asks for, so it can also read and call
-    /// open62541 back after that call.
+    /// open62541 back after that call. It accepts at most one stream between two
+    /// calls: after an accept, the listen connection moves on only after the next call.
     ///
     /// # Panics
     ///
@@ -169,8 +171,14 @@ impl Manager {
             self.pass(cx);
             let poll = loop {
                 let poll = run(cx);
+                // Before `again`: an accept puts its new connection there.
+                state.resume(cx);
                 let moved = state.move_on_again(cx);
                 if poll.is_ready() {
+                    // After an accept, the listener holds no waker for the task.
+                    if state.accepted.get().is_some() {
+                        cx.waker().wake_by_ref();
+                    }
                     break poll;
                 }
                 if moved {
@@ -191,8 +199,8 @@ impl Manager {
         .await
     }
 
-    /// Connects, reads, and writes each connection until each waits, and has the task
-    /// of `cx` woken when one can go on.
+    /// Connects, reads, and writes each connection until each waits or accepts a
+    /// stream, and has the task of `cx` woken when one can go on.
     fn pass(&self, cx: &mut Context<'_>) {
         let state = self.state();
         state.park(cx.waker());
@@ -261,6 +269,11 @@ struct State {
     /// The connections that a hook asks to move on again during a drive, once the
     /// running pass has gone past them.
     again: RefCell<Vec<usize>>,
+    /// The listen connection that accepted a stream, which is paused until the next
+    /// run of the loop, so that run gives the `CLOSING` of a channel that the accept
+    /// purged. It holds the listen connection from an accept until the next run of the
+    /// loop, also when the loop closes it in between.
+    accepted: Cell<Option<usize>>,
     /// The calls of `move_on`, for tests of the work of a drive.
     #[cfg(feature = "sim")]
     moves: Cell<usize>,
@@ -298,8 +311,20 @@ impl State {
         }
     }
 
-    /// Moves on each connection in `again`, and each that those steps add, until
-    /// none is left, and gives whether it moved one.
+    /// Resumes and moves on the connection in `accepted`, if any.
+    fn resume(&self, cx: &mut Context<'_>) {
+        let Some(id) = self.accepted.take() else {
+            return;
+        };
+        if let Some(connection) = self.table.borrow_mut().get_mut(&id) {
+            connection.resume();
+        }
+        self.move_on(id, cx);
+    }
+
+    /// Moves on each connection in `again` and each that those steps add, until none
+    /// is left, and gives whether it moved one. An accept or a failed accept adds one
+    /// to `again`.
     fn move_on_again(&self, cx: &mut Context<'_>) -> bool {
         let mut moved = false;
         loop {
@@ -327,7 +352,7 @@ impl State {
             };
             connection.stream =
                 match std::mem::replace(&mut connection.stream, Stream::Closed) {
-                    Stream::Connecting(_) | Stream::Listening(_) => Stream::Closed,
+                    Stream::Connecting(_) | Stream::Listening { .. } => Stream::Closed,
                     Stream::Open(tcp) => Stream::Closing {
                         tcp,
                         linger: self.clock.sleep_until(self.clock.now() + LINGER),
@@ -354,7 +379,7 @@ impl State {
             .expect("invariant: only `Step::Gone` of this id removes it")
             .take_stream();
         match stream {
-            Stream::Connecting(_) | Stream::Listening(_) | Stream::Open(_) => {
+            Stream::Connecting(_) | Stream::Listening { .. } | Stream::Open(_) => {
                 self.queue_closing(id);
             }
             Stream::Closing { .. } | Stream::Closed => {}
@@ -371,7 +396,8 @@ impl State {
         self.wake(id);
     }
 
-    /// Moves connection `id` on until it waits, and calls C with no borrow held.
+    /// Moves connection `id` on until it waits or accepts a stream, and calls C with no
+    /// borrow held.
     fn move_on(&self, id: usize, cx: &mut Context<'_>) {
         #[cfg(feature = "sim")]
         self.moves.set(self.moves.get() + 1);
@@ -395,7 +421,11 @@ impl State {
                     return;
                 }
                 Step::Established => self.call(id, ffi::ESTABLISHED, &mut []),
-                Step::Accepted(tcp) => self.accept(id, tcp),
+                Step::Accepted(tcp) => {
+                    self.accept(id, tcp);
+                    self.accepted.set(Some(id));
+                    return;
+                }
                 Step::Read(mut buffer, n) => {
                     self.call(id, ffi::ESTABLISHED, &mut buffer[..n]);
                     self.table
@@ -584,7 +614,11 @@ fn ip_text(ip: IpAddr, text: &mut [u8; ADDRESS_BYTES]) -> &[u8] {
 
 enum Stream {
     Connecting(Pin<Box<dyn Future<Output = Result<Tcp, net::Error>>>>),
-    Listening(Listener),
+    Listening {
+        listener: Listener,
+        /// It accepted a stream, and accepts no more until the next run of the loop.
+        paused: bool,
+    },
     Open(Tcp),
     /// It gives no more reads, drops what the peer sends while it writes what waits,
     /// closes its side, then reads until the peer closes its side, so the drop sends
@@ -645,6 +679,14 @@ impl fmt::Display for Failure {
 }
 
 impl Connection {
+    /// Lets a paused listen stream accept again. A stream that the loop closed while
+    /// it was paused has nothing to resume.
+    fn resume(&mut self) {
+        if let Stream::Listening { paused, .. } = &mut self.stream {
+            *paused = false;
+        }
+    }
+
     /// Moves the connection on, or gives why it fails.
     fn step(&mut self, cx: &mut Context<'_>) -> Result<Step, Failure> {
         match &mut self.stream {
@@ -657,9 +699,13 @@ impl Connection {
                 }
                 Poll::Ready(Err(e)) => Err(Failure::Net("connect", e)),
             },
-            Stream::Listening(listener) => match listener.poll_accept(cx) {
+            Stream::Listening { paused: true, .. } => Ok(Step::Waiting),
+            Stream::Listening { listener, paused } => match listener.poll_accept(cx) {
                 Poll::Pending => Ok(Step::Waiting),
-                Poll::Ready(Ok(tcp)) => Ok(Step::Accepted(tcp)),
+                Poll::Ready(Ok(tcp)) => {
+                    *paused = true;
+                    Ok(Step::Accepted(tcp))
+                }
                 Poll::Ready(Err(e)) => Err(Failure::Net("accept", e)),
             },
             Stream::Open(tcp) => {
@@ -886,7 +932,13 @@ unsafe extern "C" fn listen(
         context: Rc::new(Cell::new(context)),
         function: callback,
     };
-    let id = state.insert(callback, Stream::Listening(listener));
+    let id = state.insert(
+        callback,
+        Stream::Listening {
+            listener,
+            paused: false,
+        },
+    );
     let mut text = [0; ADDRESS_BYTES];
     let host = if host.length == 0 {
         ip_text(local.ip(), &mut text)

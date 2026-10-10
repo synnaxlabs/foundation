@@ -7,8 +7,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::{Pin, pin};
 use std::ptr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Context, Poll, Wake, Waker};
 
 use env::clock::Clock;
 use env::net::{Listener, Tcp, tcp};
@@ -283,6 +284,27 @@ impl Side {
         // SAFETY: the member takes its own loop.
         let status = Status(unsafe { (events.members().run)(events.raw(), 0) });
         assert_eq!(status, Status::GOOD);
+    }
+
+    /// Makes the test server on the loop with the discovery URL `url`, and starts it.
+    fn start(&self, url: &CStr) -> *mut ffi::test::Server {
+        // SAFETY: the loop outlives the server, which the test deletes.
+        let server = unsafe {
+            ffi::test::shim_server_new(self.events().raw(), PORT, url.as_ptr())
+        };
+        assert!(!server.is_null());
+        // SAFETY: the server lives.
+        let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+        assert_eq!(status, Status::GOOD);
+        server
+    }
+
+    /// Shuts `server` down, then deletes it as [`Side::delete`] does.
+    async fn stop(&self, server: *mut ffi::test::Server) {
+        // SAFETY: the server lives.
+        let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+        assert_eq!(status, Status::GOOD);
+        self.delete(server).await;
     }
 
     /// Drives until `server` is `STOPPED` and nothing is due on the loop, then deletes
@@ -1914,7 +1936,7 @@ fn a_closing_from_a_run_in_a_callback_gets_the_context_it_wrote() {
 fn listener(node: &node::Node) -> Listener {
     let listen = tcp::Listen {
         local: SocketAddr::new(node.addresses()[0], PORT),
-        backlog: 4,
+        backlog: 512,
         options: OPTIONS,
     };
     node.net().listen(&listen).expect("the port is free")
@@ -2121,24 +2143,14 @@ fn a_server_with_a_host_in_its_url_has_that_url_alone_as_its_discovery_url() {
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
             let url = c"opc.tcp://plc.example:4840";
-            // SAFETY: the loop outlives the server, which the test deletes.
-            let server = unsafe {
-                ffi::test::shim_server_new(side.events().raw(), PORT, url.as_ptr())
-            };
-            assert!(!server.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-            assert_eq!(status, Status::GOOD);
+            let server = side.start(url);
             // SAFETY: the server lives.
             let first = unsafe { ffi::test::shim_server_discovery_url(server, 0) };
             assert_eq!(string(first), url.to_bytes());
             // SAFETY: the server lives.
             let second = unsafe { ffi::test::shim_server_discovery_url(server, 1) };
             assert!(second.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
-            assert_eq!(status, Status::GOOD);
-            side.delete(server).await;
+            side.stop(server).await;
         })
         .expect("the run ends");
 }
@@ -2263,7 +2275,7 @@ fn a_listen_from_a_run_accepts_and_reads_in_that_drive() {
 }
 
 #[test]
-fn a_pass_accepts_each_stream_that_waits() {
+fn a_drive_accepts_each_stream_that_waits() {
     let mut network = Network::new();
     for say in [b"a", b"b", b"c", b"d"] {
         network.dial(Span::ZERO, say);
@@ -2434,18 +2446,7 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
-            // SAFETY: the loop outlives the server, which the test deletes.
-            let server = unsafe {
-                ffi::test::shim_server_new(
-                    side.events().raw(),
-                    PORT,
-                    c"opc.tcp://:4840".as_ptr(),
-                )
-            };
-            assert!(!server.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-            assert_eq!(status, Status::GOOD);
+            let server = side.start(c"opc.tcp://:4840");
             // SAFETY: the server lives.
             let url = unsafe { ffi::test::shim_server_discovery_url(server, 0) };
             assert_eq!(string(url), b"opc.tcp://10.0.0.1:4840");
@@ -2486,18 +2487,7 @@ fn a_stopped_server_with_a_session_is_deleted_with_its_session() {
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
-            // SAFETY: the loop outlives the server, which the test deletes.
-            let server = unsafe {
-                ffi::test::shim_server_new(
-                    side.events().raw(),
-                    PORT,
-                    c"opc.tcp://:4840".as_ptr(),
-                )
-            };
-            assert!(!server.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-            assert_eq!(status, Status::GOOD);
+            let server = side.start(c"opc.tcp://:4840");
             // SAFETY: the loop outlives the client, which the test deletes.
             let client = unsafe { ffi::shim_client_new(side.events().raw()) };
             assert!(!client.is_null());
@@ -2508,10 +2498,7 @@ fn a_stopped_server_with_a_session_is_deleted_with_its_session() {
             });
             assert_eq!(status, Status::GOOD);
             side.drive(Span::SECOND).await;
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
-            assert_eq!(status, Status::GOOD);
-            side.delete(server).await;
+            side.stop(server).await;
             // A client that has not seen the close waits in its delete for the answer
             // of `CloseSession`, while the sim clock stands still.
             side.drive(Span::SECOND).await;
@@ -2531,18 +2518,7 @@ fn a_session_that_its_client_closes_is_removed_after_the_service() {
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
-            // SAFETY: the loop outlives the server, which the test deletes.
-            let server = unsafe {
-                ffi::test::shim_server_new(
-                    side.events().raw(),
-                    PORT,
-                    c"opc.tcp://:4840".as_ptr(),
-                )
-            };
-            assert!(!server.is_null());
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-            assert_eq!(status, Status::GOOD);
+            let server = side.start(c"opc.tcp://:4840");
             // SAFETY: the loop outlives the client, which the test deletes.
             let client = unsafe { ffi::shim_client_new(side.events().raw()) };
             assert!(!client.is_null());
@@ -2558,10 +2534,7 @@ fn a_session_that_its_client_closes_is_removed_after_the_service() {
                 Status(unsafe { ffi::test::UA_Client_disconnectAsync(client) });
             assert_eq!(status, Status::GOOD);
             side.drive(Span::SECOND).await;
-            // SAFETY: the server lives.
-            let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
-            assert_eq!(status, Status::GOOD);
-            side.delete(server).await;
+            side.stop(server).await;
             // SAFETY: nothing uses the client after it.
             unsafe { ffi::UA_Client_delete(client) };
             side.drive(Span::SECOND).await;
@@ -2598,19 +2571,7 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
             .sim
             .run_on(&network.local.clone(), move |node, _| async move {
                 let side = Side::listening(&node, listener(&node));
-                // SAFETY: the loop outlives the server, which the test deletes.
-                let server = unsafe {
-                    ffi::test::shim_server_new(
-                        side.events().raw(),
-                        PORT,
-                        c"opc.tcp://:4840".as_ptr(),
-                    )
-                };
-                assert!(!server.is_null());
-                // SAFETY: the server lives.
-                let status =
-                    Status(unsafe { ffi::test::UA_Server_run_startup(server) });
-                assert_eq!(status, Status::GOOD);
+                let server = side.start(c"opc.tcp://:4840");
                 // SAFETY: the loop outlives the client, which the test deletes.
                 let client = unsafe { ffi::shim_client_new(side.events().raw()) };
                 assert!(!client.is_null());
@@ -2644,15 +2605,150 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
                 side.drive(Span::SECOND).await;
                 assert_eq!(Status(result.get()), Status::GOOD, "the session is made");
                 side.clock.sleep(Span::from_nanos(offset)).await;
-                // SAFETY: the server lives.
-                let status =
-                    Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
-                assert_eq!(status, Status::GOOD);
-                side.delete(server).await;
+                side.stop(server).await;
                 // SAFETY: nothing uses the client after it.
                 unsafe { ffi::UA_Client_delete(client) };
                 side.drive(Span::SECOND).await;
             })
             .expect("the run ends");
     }
+}
+
+/// The minimal config holds at most 100 secure channels. A burst of accepts must not
+/// hold more, and each accept moves on only the listen connection again.
+#[test]
+fn a_burst_of_accepts_holds_no_more_than_the_most_secure_channels() {
+    // A pass of the whole table after each accept makes more than 10,000.
+    assert_eq!(burst(1), (100, 100, 908));
+}
+
+/// A drive that ends after its first run accepts one stream, so the next drive does
+/// not accept before its run.
+#[test]
+fn drives_of_one_run_hold_no_more_than_the_most_secure_channels() {
+    let (connections, open, _) = burst(400);
+    assert_eq!((connections, open), (100, 100));
+}
+
+/// A drive that gives its value after an accept wakes its task, as the listener then
+/// holds no waker for it.
+#[test]
+fn a_drive_that_gives_a_value_after_an_accept_wakes_its_task() {
+    assert_eq!(
+        poll_once(3, &hel(URL), Poll::Ready(())),
+        (Poll::Ready(()), 1, 2, 1)
+    );
+}
+
+#[test]
+fn a_drive_that_gives_a_value_with_no_accept_does_not_wake_its_task() {
+    assert_eq!(
+        poll_once(0, &hel(URL), Poll::Ready(())),
+        (Poll::Ready(()), 0, 0, 1)
+    );
+}
+
+/// One poll of a drive accepts and answers each stream of a burst, one for each run,
+/// and needs no wake to go on.
+#[test]
+fn one_poll_of_a_drive_accepts_a_burst_with_no_wake() {
+    assert_eq!(
+        poll_once(150, &hel(URL), Poll::Pending),
+        (Poll::Pending, 0, 150, 151)
+    );
+}
+
+/// A run that accepts no stream and moves no connection ends the poll.
+#[test]
+fn a_poll_ends_after_a_run_that_accepts_and_moves_nothing() {
+    assert_eq!(poll_once(3, b"", Poll::Pending), (Poll::Pending, 0, 0, 3));
+}
+
+const URL: &str = "opc.tcp://10.0.0.1:4840";
+
+/// Dials `dials` streams that each send `say` to the minimal server, then polls once
+/// a drive whose `run` runs the loop and gives `give`. Gives the poll, the count of
+/// wakes of its task, the count of dials that the poll answered with `ACK`, and the
+/// count of runs.
+fn poll_once(
+    dials: usize,
+    say: &[u8],
+    give: Poll<()>,
+) -> (Poll<()>, usize, usize, usize) {
+    let mut network = Network::new();
+    let dials: Vec<_> = (0..dials)
+        .map(|_| network.dial(Span::MILLISECOND, say))
+        .collect();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            let server = side.start(c"opc.tcp://:4840");
+            side.clock.sleep(Span::from_nanos(2_000_000)).await;
+            let count = Arc::new(Wakes::default());
+            let waker = Waker::from(Arc::clone(&count));
+            let mut runs = 0;
+            let poll = pin!(side.manager.drive(|_| {
+                runs += 1;
+                side.run();
+                give
+            }))
+            .poll(&mut Context::from_waker(&waker));
+            let woken = count.0.load(Ordering::Relaxed);
+            side.clock.sleep(Span::from_nanos(10_000_000)).await;
+            let acks = dials
+                .iter()
+                .filter(|r| r.lock().expect("no panic").bytes().starts_with(b"ACKF"))
+                .count();
+            side.stop(server).await;
+            (poll, woken, acks, runs)
+        })
+        .expect("the run ends")
+}
+
+/// Counts the wakes of a task.
+#[derive(Default)]
+struct Wakes(AtomicUsize);
+
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Dials 150 streams at once to the minimal server, then has `drives` drives each
+/// end after one run, then drives for a second. Gives the count of accepted
+/// connections in the table, the count of dials that the server has not closed, and
+/// the count of moves.
+fn burst(drives: usize) -> (usize, usize, usize) {
+    let mut network = Network::new();
+    let dials: Vec<_> = (0..150)
+        .map(|_| network.dial(Span::MILLISECOND, b""))
+        .collect();
+    network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            let server = side.start(c"opc.tcp://:4840");
+            side.clock.sleep(Span::from_nanos(2_000_000)).await;
+            for _ in 0..drives {
+                side.manager
+                    .drive(|_| {
+                        side.run();
+                        Poll::Ready(())
+                    })
+                    .await;
+            }
+            side.drive(Span::SECOND).await;
+            // Less the listen connection.
+            let connections = side.connections() - 1;
+            let open = dials
+                .iter()
+                .filter(|r| r.lock().expect("no panic").ended.is_none())
+                .count();
+            let moves = side.manager.state().moves.get();
+            side.stop(server).await;
+            (connections, open, moves)
+        })
+        .expect("the run ends")
 }
