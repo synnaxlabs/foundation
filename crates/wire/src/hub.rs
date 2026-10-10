@@ -287,8 +287,7 @@ impl Reply {
                 assert!(head.series > 0, "a head names at least one series");
                 assert!(
                     end(head.range).is_some(),
-                    "a head's range ends at or below the highest seq: {} samples from \
-                     seq {}",
+                    "a head's range ends past the highest seq: {} samples from seq {}",
                     head.range.count,
                     head.range.seq
                 );
@@ -1031,7 +1030,10 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "a head's range ends at or below the highest seq")]
+        #[should_panic(
+            expected = "a head's range ends past the highest seq: 1 samples from seq \
+                        18446744073709551615"
+        )]
         fn panics_on_a_head_whose_range_ends_past_the_highest_seq() {
             head(Path::Live, u64::MAX, 1, 1).encode(&mut [0; 18]);
         }
