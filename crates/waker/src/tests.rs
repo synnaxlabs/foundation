@@ -123,11 +123,14 @@ fn a_drop_on_another_thread_aborts() {
 }
 
 /// Printed by the drop of [`Loud`].
+#[cfg(unix)]
 const DROPPED: &str = "the value of the waker dropped";
 
 /// Prints [`DROPPED`] when it drops.
+#[cfg(unix)]
 struct Loud;
 
+#[cfg(unix)]
 impl Drop for Loud {
     #[expect(clippy::print_stderr, reason = "the parent reads it from the child")]
     fn drop(&mut self) {

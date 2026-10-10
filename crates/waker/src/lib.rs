@@ -61,7 +61,7 @@ unsafe extern "C" fn check<T>(data: *const ()) {
     );
 }
 
-/// A clone.
+/// Adds a count, after the thread check.
 ///
 /// # Safety
 ///

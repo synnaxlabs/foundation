@@ -3690,8 +3690,8 @@ fn a_waker_drops_after_the_borrow_of_the_state() {
     .expect("the buffer ends");
 }
 
-/// Polls `waiter` with a waker that holds an `End` of `buffer`, so that a poll with
-/// another waker replaces it, then polls with one more and drops `waiter` with it.
+/// Polls `waiter` with a waker that holds an `End` of `buffer`, then with a no-op
+/// waker, then with one more such waker, and drops `waiter`.
 fn drop_wakers<F: Future>(buffer: &Buffer, waiter: F) {
     let mut waiter = pin!(waiter);
     let waker = waker::holding(buffer.ended());
