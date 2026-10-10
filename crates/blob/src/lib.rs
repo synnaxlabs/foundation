@@ -183,10 +183,7 @@ impl Store {
                 Peek::Writing => self.wait(digest).await,
             }
         }
-        let mut flight = Flight::new(self, digest);
-        let written = flight.write(chunk).await;
-        flight.after = written.is_ok().then_some(State::Held(flight.serial));
-        written
+        Flight::new(self, digest).put(chunk).await
     }
 
     /// The chunk stored under `digest`, or `None` when the store does not hold it or
@@ -364,6 +361,14 @@ impl<'a> Flight<'a> {
             serial,
             after: Some(State::Listed(serial)),
         }
+    }
+
+    /// Writes `chunk`, as [`Flight::write`]. The digest is `Held` after it, or absent
+    /// after an error.
+    async fn put(mut self, chunk: &Block) -> Result<(), Error> {
+        let written = self.write(chunk).await;
+        self.after = written.is_ok().then_some(State::Held(self.serial));
+        written
     }
 
     /// Writes `chunk` to the file of the digest, durably.
