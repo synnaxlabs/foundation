@@ -237,9 +237,10 @@ mod tests {
         let output = (ci.split("      models: >-\n").nth(1))
             .and_then(|rest| rest.lines().next())
             .expect("the changes job has a models output");
-        assert!(
-            output.ends_with("steps.filter.outputs.models }}"),
-            "the models output of the changes job reads another filter: {output}"
+        assert_eq!(
+            output.trim(),
+            "${{ github.event_name == 'push' && 'false' || steps.filter.outputs.models }}",
+            "the models output of the changes job is not the models filter on each PR"
         );
         let metadata = metadata(&root).unwrap();
         let by_cfg = |name| select::packages(&metadata, |s| select::names_cfg(s, name));
@@ -250,18 +251,18 @@ mod tests {
         ];
         for (task, packages) in tasks {
             let job: Vec<&str> = (ci.split(&format!("\n  {task}:\n")).nth(1))
-                .expect("ci.yaml has a job for each model task")
+                .unwrap_or_else(|| panic!("ci.yaml has no job `{task}`"))
                 .lines()
                 .take_while(|line| line.is_empty() || line.starts_with("    "))
-                .map(str::trim)
                 .collect();
             let on_models =
-                "if: \"!cancelled() && needs.changes.outputs.models != 'false'\"";
+                "    if: \"!cancelled() && needs.changes.outputs.models != 'false'\"";
             assert!(
-                job.contains(&format!("run: cargo xtask {task}").as_str())
+                job.iter()
+                    .any(|line| line.trim() == format!("run: cargo xtask {task}"))
                     && job.contains(&on_models),
                 "the {task} job of .github/workflows/ci.yaml does not run `cargo xtask \
-                 {task}` on the models output"
+                 {task}` on the models output: {job:#?}"
             );
             for select::Package { name, .. } in packages {
                 assert!(
