@@ -386,6 +386,10 @@ pub(crate) mod test {
         pub(crate) const STOPPING: Self = Self(2);
     }
 
+    /// `UA_SECURECHANNELSTATE_CLOSED`, the state of a closed channel. `shim.c`
+    /// asserts it.
+    pub(crate) const CHANNEL_CLOSED: c_int = 0;
+
     /// `UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME`, the node of the current time of a
     /// server. `shim.c` asserts it.
     pub(crate) const TIME: u32 = 2258;

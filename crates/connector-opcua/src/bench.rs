@@ -276,6 +276,11 @@ impl Manager {
 
     /// Closes the channel of each client, stops the server, deletes it with
     /// `delete_server`, then deletes the clients.
+    ///
+    /// # Panics
+    ///
+    /// If a channel is not closed after the drive of `delete_server`, as the delete of
+    /// its client would then wait for a close that nothing drives.
     async fn close(mut self) {
         for client in &self.clients {
             // SAFETY: the client lives.
@@ -291,8 +296,22 @@ impl Manager {
         // SAFETY: the server lives on the loop, and nothing uses it after.
         unsafe { self.connections.delete_server(server) }.await;
         for client in self.clients.drain(..) {
-            // SAFETY: nothing uses the client after it. The drive of `delete_server`
-            // ran the close of its channel, so the delete waits for nothing.
+            let mut channel = -1;
+            // SAFETY: the client lives.
+            unsafe {
+                ffi::test::UA_Client_getState(
+                    client.as_ptr(),
+                    &raw mut channel,
+                    ptr::null_mut(),
+                    ptr::null_mut(),
+                );
+            }
+            assert_eq!(
+                channel,
+                ffi::test::CHANNEL_CLOSED,
+                "a channel is not closed"
+            );
+            // SAFETY: nothing uses the client after it.
             unsafe { ffi::UA_Client_delete(client.as_ptr()) };
         }
         // SAFETY: nothing is on its loop, and nothing uses it after it.
