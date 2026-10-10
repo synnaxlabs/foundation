@@ -37,5 +37,8 @@
   `Number` and the `# Errors` text of `read` approved by `laptop.architect-2`
   (2026-10-10T03:09:27Z,
   https://github.com/synnaxlabs/foundation/pull/2222#issuecomment-6093159318); the
+  removed `document` dependency of `node` and the `write` doc approved by
+  `laptop.architect-2` (2026-10-10T04:00:01Z,
+  https://github.com/synnaxlabs/foundation/pull/2222#issuecomment-6093542243); the
   oracle edit approved by the person (2026-10-10T02:58:30Z,
   https://github.com/synnaxlabs/foundation/issues/2079#issuecomment-6093074742).
