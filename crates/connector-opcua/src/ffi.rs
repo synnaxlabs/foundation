@@ -386,9 +386,15 @@ pub(crate) mod test {
         pub(crate) const STOPPING: Self = Self(2);
     }
 
-    /// `UA_SECURECHANNELSTATE_CLOSED`, the state of a closed channel. `shim.c`
-    /// asserts it.
-    pub(crate) const CHANNEL_CLOSED: c_int = 0;
+    /// `UA_SecureChannelState` of a client.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[repr(transparent)]
+    pub(crate) struct Channel(pub(crate) c_int);
+
+    impl Channel {
+        /// `UA_SECURECHANNELSTATE_CLOSED`. `shim.c` asserts it.
+        pub(crate) const CLOSED: Self = Self(0);
+    }
 
     /// `UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME`, the node of the current time of a
     /// server. `shim.c` asserts it.
@@ -573,7 +579,7 @@ pub(crate) mod test {
         pub(crate) fn shim_client_namespaced(client: *mut super::Client) -> bool;
         pub(crate) fn UA_Client_getState(
             client: *mut super::Client,
-            channel: *mut c_int,
+            channel: *mut Channel,
             session: *mut c_int,
             status: *mut u32,
         );

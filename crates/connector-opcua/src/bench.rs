@@ -7,7 +7,7 @@
 use std::cell::Cell;
 use std::ffi::{CString, c_void};
 use std::future::{Future as _, poll_fn};
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::net::{IpAddr, SocketAddr};
 use std::panic::{self, AssertUnwindSafe};
 use std::pin::{Pin, pin};
@@ -296,20 +296,11 @@ impl Manager {
         // SAFETY: the server lives on the loop, and nothing uses it after.
         unsafe { self.connections.delete_server(server) }.await;
         for client in self.clients.drain(..) {
-            let mut channel = -1;
-            // SAFETY: the client lives.
-            unsafe {
-                ffi::test::UA_Client_getState(
-                    client.as_ptr(),
-                    &raw mut channel,
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                );
-            }
             assert_eq!(
-                channel,
-                ffi::test::CHANNEL_CLOSED,
-                "a channel is not closed"
+                // SAFETY: the client lives.
+                unsafe { state(client) }.0,
+                ffi::test::Channel::CLOSED,
+                "invariant: the drive of `delete_server` closes each channel"
             );
             // SAFETY: nothing uses the client after it.
             unsafe { ffi::UA_Client_delete(client.as_ptr()) };
@@ -339,22 +330,36 @@ impl Manager {
     /// If the connect of a client failed, as a client does not try it again.
     fn connected(&self) -> usize {
         let connected = |client: &&NonNull<ffi::Client>| {
-            let mut status = Status::GOOD;
             // SAFETY: the client lives.
-            unsafe {
-                ffi::test::UA_Client_getState(
-                    client.as_ptr(),
-                    ptr::null_mut(),
-                    ptr::null_mut(),
-                    &raw mut status.0,
-                );
-            }
+            let status = unsafe { state(**client) }.1;
             assert!(status == Status::GOOD, "a connect failed: {status:?}");
             // SAFETY: the client lives.
             unsafe { ffi::test::shim_client_namespaced(client.as_ptr()) }
         };
         self.clients.iter().filter(connected).count()
     }
+}
+
+/// Gives the state of the channel of `client`, and its connect status.
+///
+/// # Safety
+///
+/// `client` lives.
+unsafe fn state(client: NonNull<ffi::Client>) -> (ffi::test::Channel, Status) {
+    let (mut channel, mut status) = (MaybeUninit::uninit(), MaybeUninit::uninit());
+    // SAFETY: the client lives.
+    unsafe {
+        ffi::test::UA_Client_getState(
+            client.as_ptr(),
+            channel.as_mut_ptr(),
+            ptr::null_mut(),
+            status.as_mut_ptr(),
+        );
+    }
+    // SAFETY: the call writes each output that is not null.
+    let channel = unsafe { channel.assume_init() };
+    // SAFETY: as above.
+    (channel, Status(unsafe { status.assume_init() }))
 }
 
 impl std::fmt::Debug for Manager {
