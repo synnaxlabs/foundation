@@ -327,4 +327,6 @@
   `UA_Server_delete` then frees the server and each session at once. Between that drive
   and the delete, the owner calls nothing that queues a delayed callback on the server,
   such as `UA_Server_addCertificates`: the next run of the loop would read the freed
-  server.
+  server. Approved by `laptop.architect-2` at `5ebf60ae2`
+  (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6091519998,
+  2026-10-10 00:19 UTC).
