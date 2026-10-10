@@ -22,6 +22,7 @@ use env::tasks::Tasks;
 use types::channel::{Slot, Slots};
 use types::frame::Path;
 use types::time::Span;
+use types::wait;
 
 use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{self, Closed, Group, META_LEN, Sealed};
@@ -283,12 +284,11 @@ struct State {
     /// How many deadlines ended with no error.
     commits: u64,
     /// The waiting [`Commit`]s, which the end of each commit and of the task wakes.
-    wakers: Vec<Waker>,
-    /// The waker of each waiting [`End`] by its key. Only the end of the task wakes
-    /// them, and the drop of an `End` takes its waker out.
-    ending: Vec<(u64, Waker)>,
-    /// The key of the next [`End`].
-    next_end: u64,
+    wakers: wait::Set,
+    /// The waiting [`End`]s. Only the end of the task wakes them.
+    ending: wait::Set,
+    /// The key of the next [`Commit`] or [`End`] in its set.
+    next_key: u64,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
     parked: Option<Waker>,
     /// Whether the handle dropped. The task ends when it next idles.
@@ -319,14 +319,15 @@ impl State {
     /// Marks the task ended and moves each waiter into `woken`.
     fn end(&mut self, woken: &mut Vec<Waker>) {
         self.ended = true;
-        woken.append(&mut self.wakers);
-        woken.extend(self.ending.drain(..).map(|(_, waker)| waker));
+        self.wakers.drain(woken);
+        self.ending.drain(woken);
     }
 
-    /// Takes the waker of the [`End`] with `key` out of `ending`.
-    fn forget(&mut self, key: u64) -> Option<Waker> {
-        let at = self.ending.iter().position(|(held, _)| *held == key)?;
-        Some(self.ending.swap_remove(at).1)
+    /// The key of the next [`Commit`] or [`End`].
+    fn key(&mut self) -> u64 {
+        let key = self.next_key;
+        self.next_key += 1;
+        key
     }
 
     /// Closes the open group into the queue and opens a spare.
@@ -413,9 +414,9 @@ impl Buffer {
                 logs,
                 taken: 0,
                 commits: 0,
-                wakers: Vec::new(),
-                ending: Vec::new(),
-                next_end: 0,
+                wakers: wait::Set::new(),
+                ending: wait::Set::new(),
+                next_key: 0,
                 parked: None,
                 closed: false,
                 ended: false,
@@ -594,9 +595,11 @@ impl Buffer {
     /// durable. [`Commit`] says what one held past the drop gives.
     #[must_use]
     pub fn committed(&self) -> Commit {
+        let mut state = self.shared.state.borrow_mut();
         Commit {
+            until: state.durable_at(),
+            key: state.key(),
             shared: Rc::clone(&self.shared),
-            until: self.shared.state.borrow().durable_at(),
         }
     }
 
@@ -605,12 +608,9 @@ impl Buffer {
     /// each entry appended before the drop is durable.
     #[must_use]
     pub fn ended(&self) -> End {
-        let mut state = self.shared.state.borrow_mut();
-        let key = state.next_end;
-        state.next_end += 1;
         End {
+            key: self.shared.state.borrow_mut().key(),
             shared: Rc::clone(&self.shared),
-            key,
         }
     }
 }
@@ -905,7 +905,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
                 state.end(&mut woken);
             }
         }
-        woken.append(&mut state.wakers);
+        state.wakers.drain(&mut woken);
         drop(state);
         for waker in woken.drain(..) {
             waker.wake();
@@ -935,6 +935,8 @@ pub struct Commit {
     shared: Rc<Shared>,
     /// The count of `commits` that resolves it.
     until: u64,
+    /// Its key in `wakers`.
+    key: u64,
 }
 
 impl Future for Commit {
@@ -949,10 +951,21 @@ impl Future for Commit {
         if let Some(error) = &state.failed {
             return Poll::Ready(Err(error.clone()));
         }
-        if !state.wakers.iter().any(|waker| waker.will_wake(cx.waker())) {
-            state.wakers.push(cx.waker().clone());
-        }
+        let replaced = state.wakers.insert(self.key, cx.waker());
+        // A waker's drop can drop another `Commit`, which borrows the state.
+        drop(state);
+        drop(replaced);
         Poll::Pending
+    }
+}
+
+impl Drop for Commit {
+    fn drop(&mut self) {
+        let mut state = self.shared.state.borrow_mut();
+        let held = state.wakers.remove(self.key);
+        // A waker's drop can drop another `Commit`, which borrows the state.
+        drop(state);
+        drop(held);
     }
 }
 
@@ -973,8 +986,7 @@ impl Future for End {
         if state.ended {
             return Poll::Ready(state.failed.clone().map_or(Ok(()), Err));
         }
-        let replaced = state.forget(self.key);
-        state.ending.push((self.key, cx.waker().clone()));
+        let replaced = state.ending.insert(self.key, cx.waker());
         // A waker's drop can drop another `End`, which borrows the state.
         drop(state);
         drop(replaced);
@@ -985,7 +997,7 @@ impl Future for End {
 impl Drop for End {
     fn drop(&mut self) {
         let mut state = self.shared.state.borrow_mut();
-        let held = state.forget(self.key);
+        let held = state.ending.remove(self.key);
         // A waker's drop can drop another `End`, which borrows the state.
         drop(state);
         drop(held);
