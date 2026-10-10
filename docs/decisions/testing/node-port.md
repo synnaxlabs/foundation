@@ -128,12 +128,14 @@
   `node` reads it. The seal key is in `node.key`, not in a file of its own, because S8
   rotates it with the Ed25519 key, and a restore of `node.key` alone must not give a
   card whose seal key the node does not hold. The file `foundation/key/1`, with no seal
-  key, gives `Error::Key`: no node ran outside a test. By `laptop.architect-2` (#1744,
-  plan revision 3):
-  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093320483.
-  `create_key` makes the seal key from its `entropy` argument and gives its public half
-  for the card. By `laptop.architect-2` (#1744):
-  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093413533.
+  key, gives `Error::Key`: no node ran outside a test. `create_key` makes the seal key
+  from its `entropy` argument and gives its public half for the card. By
+  `laptop.architect-2` (#1744, plan revision 3):
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093320483, with
+  the `create_key` shape of
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093413533, and
+  approved by `laptop.architect` (03:57 UTC):
+  https://github.com/synnaxlabs/foundation/pull/2229#issuecomment-6093523453.
   `admin.key` (#1744 PR 1b) shares this code when it lands. `os` gives each new file
   the mode `0600` and each new directory `0700`, and on Linux a new directory takes
   the setgid bit of its parent; the umask can clear more bits. It does not change the
