@@ -85,6 +85,7 @@ impl Timer {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use proptest::prelude::*;
 
