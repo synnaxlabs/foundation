@@ -452,11 +452,13 @@ fn src() -> std::path::PathBuf {
 
 /// Each identifier for which `named` holds, as `path: identifier`, in each `.rs`
 /// file under `src` that a `#[cfg(test)]` module declaration does not cut off.
-/// Comments and inline modules count.
+/// Comments and inline modules count. A declaration with a `path` attribute, or with
+/// a name that another declaration of its file also has, cuts off nothing.
 ///
 /// # Panics
 ///
-/// When a `#[path]` attribute outside tests names a file that the scan may not read.
+/// When a file that the scan reads has a `path` attribute that is not alone on its
+/// line over a `#[cfg(test)]` declaration, as it can name a file outside `src/`.
 fn named_outside_tests(
     src: &std::path::Path,
     named: impl Fn(&str) -> bool,
@@ -470,48 +472,95 @@ fn named_outside_tests(
             stem => path.with_file_name(stem),
         };
         let lines: Vec<_> = text.lines().collect();
-        for (at, line) in lines.iter().enumerate() {
+        let declared: Vec<_> = lines
+            .iter()
+            .enumerate()
+            .filter_map(|(at, line)| Some((at, declared(line)?)))
+            .collect();
+        for &(at, module) in &declared {
+            let pathed = attributes_above(&lines, at)
+                .any(|line| words(line).any(|word| word == "path"));
+            let shared = declared
+                .iter()
+                .any(|&(other, name)| other != at && name == module);
+            if under_cfg_test(&lines, at) && !pathed && !shared {
+                cut.extend([dir.join(format!("{module}.rs")), dir.join(module)]);
+            }
+        }
+    }
+    let kept: Vec<_> = files
+        .iter()
+        .filter(|path| !cut.iter().any(|cut| path.starts_with(cut)))
+        .collect();
+    for path in &kept {
+        let text = std::fs::read_to_string(path).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        for (at, attribute) in attributes(&text) {
             let item = at
                 + lines[at..]
                     .iter()
                     .take_while(|line| line.trim_start().starts_with("#["))
                     .count();
             assert!(
-                !line.trim_start().starts_with("#[path") || gated(&lines, item),
+                !words(attribute).any(|word| word == "path")
+                    || lines[at] == attribute && under_cfg_test(&lines, item),
                 "{}:{}: the scan does not follow `#[path]` outside tests",
                 path.display(),
                 at + 1
             );
-            let Some(module) = line
-                .trim_start_matches("pub(crate) ")
-                .trim_start_matches("pub ")
-                .strip_prefix("mod ")
-                .and_then(|rest| rest.strip_suffix(';'))
-            else {
-                continue;
-            };
-            if gated(&lines, at) {
-                cut.extend([dir.join(format!("{module}.rs")), dir.join(module)]);
-            }
         }
     }
-    let kept = files
-        .iter()
-        .filter(|path| !cut.iter().any(|cut| path.starts_with(cut)));
-    kept.flat_map(|path| named_in(path, &named)).collect()
+    kept.into_iter()
+        .flat_map(|path| named_in(path, &named))
+        .collect()
+}
+
+/// The module that `line` declares in a file of its own, such as `t` for `mod t;` at
+/// column 0.
+fn declared(line: &str) -> Option<&str> {
+    line.trim_start_matches("pub(crate) ")
+        .trim_start_matches("pub ")
+        .strip_prefix("mod ")?
+        .strip_suffix(';')
+}
+
+/// Each attribute of `text` from its `#[` to its closing `]`, also one over several
+/// lines or after another on its line, with the index of its first line.
+fn attributes(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    text.match_indices("#[").map(move |(start, _)| {
+        let mut depth = 0;
+        let end = text[start + 1..]
+            .char_indices()
+            .find_map(|(at, c)| {
+                match c {
+                    '[' => depth += 1,
+                    ']' => depth -= 1,
+                    _ => {}
+                }
+                (depth == 0).then_some(start + 1 + at + 1)
+            })
+            .unwrap_or(text.len());
+        (text[..start].matches('\n').count(), &text[start..end])
+    })
+}
+
+/// The lines of the attributes and doc comments above the item at line `at`.
+fn attributes_above<'a>(lines: &[&'a str], at: usize) -> impl Iterator<Item = &'a str> {
+    lines[..at].iter().rev().copied().take_while(|line| {
+        ["#[", "///", ")]", " "]
+            .iter()
+            .any(|start| line.starts_with(start))
+    })
 }
 
 /// Whether the attributes above the item at line `at` of `lines` hold `#[cfg(test)]`.
-fn gated(lines: &[&str], at: usize) -> bool {
-    lines[..at]
-        .iter()
-        .rev()
-        .take_while(|line| {
-            ["#[", "///", ")]", " "]
-                .iter()
-                .any(|start| line.starts_with(start))
-        })
-        .any(|line| *line == "#[cfg(test)]")
+fn under_cfg_test(lines: &[&str], at: usize) -> bool {
+    attributes_above(lines, at).any(|line| line == "#[cfg(test)]")
+}
+
+/// The identifiers and numbers of `text`.
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
 }
 
 /// Each file under `dir` with the extension `extension`, sorted.
@@ -535,8 +584,7 @@ fn files_under(dir: &std::path::Path, extension: &str) -> Vec<std::path::PathBuf
 /// Each identifier of `path` for which `named` holds, as `path: identifier`.
 fn named_in(path: &std::path::Path, named: impl Fn(&str) -> bool) -> Vec<String> {
     let text = std::fs::read_to_string(path).unwrap();
-    let words = text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
-    let found = words.filter(|word| named(word));
+    let found = words(&text).filter(|word| named(word));
     found
         .map(|word| format!("{}: {word}", path.display()))
         .collect()
@@ -552,17 +600,13 @@ fn the_scan_names_only_the_files_outside_tests() {
     assert_eq!(named, [at("bench.rs"), at("ffi.rs")]);
 }
 
-/// A file under `#[cfg(test)]` is cut off, also with `#[path]`, and the file declared
-/// after it is scanned.
+/// A file under `#[cfg(test)]` is cut off, and the file declared after it is scanned.
 #[test]
 fn the_scan_cuts_off_only_the_module_under_cfg_test() {
     let src = create_tree(
         "gated",
         &[
-            (
-                "lib.rs",
-                "#[cfg(test)]\n#[path = \"t.rs\"]\nmod t;\nmod p;\n",
-            ),
+            ("lib.rs", "#[cfg(test)]\n#[allow(unused)]\nmod t;\nmod p;\n"),
             ("t.rs", "named"),
             ("p.rs", "named"),
             ("t/u.rs", "named"),
@@ -579,6 +623,76 @@ fn the_scan_cuts_off_only_the_module_under_cfg_test() {
 fn the_scan_refuses_a_path_module_outside_tests() {
     let src = create_tree("path", &[("lib.rs", "#[path = \"../p.rs\"]\nmod p;\n")]);
     named_outside_tests(&src, |_| true);
+}
+
+/// A `path` inside `cfg_attr` is refused.
+#[test]
+#[should_panic(expected = "lib.rs:1: the scan does not follow `#[path]` outside tests")]
+fn the_scan_refuses_a_path_under_cfg_attr() {
+    let src = create_tree(
+        "cfg_attr",
+        &[(
+            "lib.rs",
+            "#[cfg_attr(not(test), path = \"../p.rs\")]\nmod p;\n",
+        )],
+    );
+    named_outside_tests(&src, |_| true);
+}
+
+/// A `path` after another attribute on its line is refused, also over a
+/// `#[cfg(test)]` declaration.
+#[test]
+#[should_panic(expected = "lib.rs:2: the scan does not follow `#[path]` outside tests")]
+fn the_scan_refuses_a_path_after_another_attribute() {
+    let src = create_tree(
+        "one_line",
+        &[(
+            "lib.rs",
+            "#[cfg(test)]\n#[allow(unused)] #[path = \"../p.rs\"]\nmod p;\n",
+        )],
+    );
+    named_outside_tests(&src, |_| true);
+}
+
+/// A `#[cfg(test)]` declaration with `#[path]` cuts off neither the file of its name
+/// nor the file that it names.
+#[test]
+fn the_scan_reads_the_module_that_a_test_mock_shadows() {
+    let src = create_tree(
+        "mock",
+        &[
+            (
+                "lib.rs",
+                "#[cfg(test)]\n#[path = \"mock.rs\"]\nmod clock;\n",
+            ),
+            ("mock.rs", "named"),
+            ("clock.rs", "named"),
+        ],
+    );
+    let named = named_outside_tests(&src, |name| name == "named");
+    let at = |file: &str| format!("{}: named", src.join(file).display());
+    assert_eq!(named, [at("clock.rs"), at("mock.rs")]);
+}
+
+/// A `#[cfg(test)]` declaration cuts off nothing when another declaration of its file
+/// has its name.
+#[test]
+fn the_scan_reads_a_module_that_two_declarations_share() {
+    let src = create_tree(
+        "shared",
+        &[
+            (
+                "lib.rs",
+                "#[cfg(test)]\nmod clock;\n#[cfg(not(test))]\nmod clock;\n",
+            ),
+            ("clock.rs", "named"),
+        ],
+    );
+    let named = named_outside_tests(&src, |name| name == "named");
+    assert_eq!(
+        named,
+        [format!("{}: named", src.join("clock.rs").display())]
+    );
 }
 
 /// A directory under `OUT_DIR` named `name` that holds only `files`.
