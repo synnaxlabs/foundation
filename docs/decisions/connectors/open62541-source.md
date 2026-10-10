@@ -27,41 +27,49 @@
   The check reads each undefined symbol of an object that a relocation in that object
   names (`nm -u` and `objdump -r`) and fails on each symbol outside the copy that is not
   on a closed list, with the file and the symbol. `SYMBOLS` admits a symbol for any
-  file, and `FILE_SYMBOLS` admits a (file, symbol) pair, such as a call of the stdout
-  logger, which we never run. Each entry has its reason. A symbol goes in `SYMBOLS` only
-  when it reads no clock, file, network, randomness, or process state: memory and string
-  functions, and the 5 constructors that `shim.c` defines to abort. One exception reads
-  process state: the allocator, whose addresses the OS places at random, so no result of
-  the copy may depend on an address. On x86-64 the assembler makes
-  `_GLOBAL_OFFSET_TABLE_` undefined in each object that reads the table, with no
-  relocation, so only a reference that the C makes counts. The 3 clock functions pass
-  this check, because the clock check reads each reference to one. The check builds with
-  no stack protector, so the compiler adds no reference to its random canary, and a
-  reference that the C makes fails. A symbol is outside the copy when no object exports
-  it: a `static` function of one file does not hide a call of the OS function of its
-  name from another. A pair of `FILE_SYMBOLS` with no reference fails, so a file that
-  the build leaves out loses its pairs. A new outside symbol also goes in `OUTSIDE` in
-  `connector-opcua`, which lists the outside symbols of the production build. A header
-  list is not a check: a listed header can include another (`pthread.h` includes
-  `time.h`). So the check refuses no system header, and each header that the copy
-  includes must be in the copy or in a system directory as `cc` finds it. Lost: a header
-  list, and a deny list of OS symbols, which passes a call that it does not name.
-  Decided by `laptop.architect-2`
+  file, and `FILE_SYMBOLS` admits a (file, symbol) pair of a file that no node runs,
+  such as a call of the stdout logger. Each entry has its reason. A symbol goes in
+  `SYMBOLS` only when it reads no clock, file, network, randomness, or process state. A
+  symbol is outside the copy when no object exports it: a `static` function of one file
+  does not hide a call of the OS function of its name from another. A pair of
+  `FILE_SYMBOLS` with no reference fails, so a file that the build leaves out loses its
+  pairs. A new outside symbol also goes in `OUTSIDE` in `connector-opcua`, which lists
+  the outside symbols of the production build. A header list is not a check: a listed
+  header can include another (`pthread.h` includes `time.h`). So the check refuses no
+  system header, and each header that the copy includes must be in the copy or in a
+  system directory as `cc` finds it. Lost: a header list, and a deny list of OS symbols,
+  which passes a call that it does not name. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1884#issuecomment-6060989375,
   2026-10-08 13:31 UTC). Supersedes the closed list of system headers of
-  https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715. A
+  https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715. `SYMBOLS`
+  holds memory and string functions, the 5 constructors that `shim.c` defines to abort,
+  and one exception that reads process state: the allocator, whose addresses the OS
+  places at random, so no result of the copy may depend on an address. On x86-64 the
+  assembler makes `_GLOBAL_OFFSET_TABLE_` undefined in each object that reads the table,
+  with no relocation, so only a reference that the C makes counts. The check builds with
+  no stack protector, so the compiler adds no reference to its random canary, and a
+  reference that the C makes fails. Approval owed by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093686633). A
   reference is an undefined symbol that a relocation names, and it is outside the copy
   when no object exports it: approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093780083,
-  2026-10-10 04:30 UTC). For a file that a node runs, the check keys each reference by
-  (file, function, symbol), read from `objdump -dr` as the clock check reads a call, so
-  a listed symbol in a new function of that file fails. `FUNCTION_SYMBOLS` lists these
-  triples, the clock calls among them. `FILE_SYMBOLS` keeps only pairs of a file that no
-  node runs. A reference from outside a function fails when neither `SYMBOLS` nor
+  2026-10-10 04:30 UTC). The check keys each reference of a function by (file, function,
+  symbol), read from `objdump -dr` as the clock check reads a call, so a listed symbol
+  in a new function of that file fails. `FUNCTION_SYMBOLS` lists these keys, the clock
+  calls among them. A reference from outside a function fails when neither `SYMBOLS` nor
   `FILE_SYMBOLS` admits it, as the address of a clock does. Decided by
   `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094336509,
-  2026-10-10 05:46 UTC). The check fails on every reference to a clock function that
+  2026-10-10 05:46 UTC). Supersedes the (file, enclosing function) pairs of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367. The
+  function is the whole label of the function symbol, such as `parse.0` for a nested
+  function. The key also holds the access, a call or an address, so the address of a
+  listed symbol that its function only calls fails. Approval owed by `laptop.architect`.
+  A file that a node runs may hold keys of symbols that are not clocks:
+  `FUNCTION_SYMBOLS` holds 7. Approval owed by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093686633,
+  https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093808069).
+  The check fails on every reference to a clock function that
   is not a call, also one in code. A call relocation counts as a call only in a section
   that `objdump -d` disassembles. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715,

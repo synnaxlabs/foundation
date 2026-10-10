@@ -40,58 +40,94 @@ const CLOCKS: [&str; 3] = [
     "UA_DateTime_localTimeUtcOffset",
 ];
 
-/// The only (file, function, symbol) triples in which a function references a symbol
-/// outside the copy that [`SYMBOLS`] does not list and, for a symbol other than a
-/// clock, [`FILE_SYMBOLS`] does not admit. A clock counts only as a call.
-const FUNCTION_SYMBOLS: [(&str, &str, &str); 13] = [
+/// The only (file, function, symbol, access) keys with which a function references a
+/// symbol outside the copy that neither [`SYMBOLS`] nor [`FILE_SYMBOLS`] admits. A clock
+/// counts only as a call.
+const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 13] = [
     // `isdigit` reads the locale, which stays C: nothing calls `setlocale`.
-    ("deps/musl_inet_pton.c", "musl_inet_pton", "__ctype_b_loc"),
+    (
+        "deps/musl_inet_pton.c",
+        "musl_inet_pton",
+        "__ctype_b_loc",
+        Access::Call,
+    ),
     // Writes `errno` and never reads it.
     (
         "deps/musl_inet_pton.c",
         "musl_inet_pton",
         "__errno_location",
+        Access::Call,
     ),
     // Sets `errno` to 0 before `strtod` and reads only the error of that call.
-    ("deps/parse_num.c", "parseDouble", "__errno_location"),
+    (
+        "deps/parse_num.c",
+        "parseDouble",
+        "__errno_location",
+        Access::Call,
+    ),
     // `strtod` reads the decimal point of the locale, which stays C.
-    ("deps/parse_num.c", "parseDouble", "strtod"),
+    ("deps/parse_num.c", "parseDouble", "strtod", Access::Call),
     // `UA_Server_runUntilInterrupt`, which we never call.
     (
         "plugins/ua_config_default.c",
         "interruptServer",
         "UA_DateTime_nowMonotonic",
+        Access::Call,
     ),
     // The build date of a server config, for the test server only.
     (
         "plugins/ua_config_default.c",
         "setDefaultConfig",
         "UA_DateTime_now",
+        Access::Call,
     ),
     // The stdout logger, which we replace with our own.
     (
         "plugins/ua_log_stdout.c",
         "UA_Log_Stdout_log",
         "UA_DateTime_localTimeUtcOffset",
+        Access::Call,
     ),
     (
         "plugins/ua_log_stdout.c",
         "UA_Log_Stdout_log",
         "UA_DateTime_now",
+        Access::Call,
     ),
     // ECC user tokens, which need encryption, which is off.
     (
         "src/util/ua_encryptedsecret.c",
         "encryptUserIdentityTokenEcc",
         "UA_DateTime_now",
+        Access::Call,
     ),
     // The start value of the random state, which `UA_ENABLE_DETERMINISTIC_RNG` keeps
     // from the clock.
-    ("src/util/ua_util.c", "UA_random_seed", "UA_DateTime_now"),
+    (
+        "src/util/ua_util.c",
+        "UA_random_seed",
+        "UA_DateTime_now",
+        Access::Call,
+    ),
     // Our change: a draw on a thread with no start value prints its name and aborts.
-    ("src/util/ua_util.c", "UA_rng_require", "abort"),
-    ("src/util/ua_util.c", "UA_rng_require", "fprintf"),
-    ("src/util/ua_util.c", "UA_rng_require", "stderr"),
+    (
+        "src/util/ua_util.c",
+        "UA_rng_require",
+        "abort",
+        Access::Call,
+    ),
+    (
+        "src/util/ua_util.c",
+        "UA_rng_require",
+        "fprintf",
+        Access::Call,
+    ),
+    (
+        "src/util/ua_util.c",
+        "UA_rng_require",
+        "stderr",
+        Access::Address,
+    ),
 ];
 
 /// The release files that the copy holds and the library of our options does not
@@ -217,7 +253,7 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 /// of [`CODE_FLAGS`], a build that fails, an `#include` or `#import` of a header
 /// outside both the copy and the system directories, a reference to a symbol outside
 /// the copy that neither [`SYMBOLS`], [`FILE_SYMBOLS`], nor [`FUNCTION_SYMBOLS`]
-/// admits, a listed pair or triple with no reference, a reference outside a function
+/// admits, a listed pair or key with no reference, a reference outside a function
 /// that [`SYMBOLS`] and [`FILE_SYMBOLS`] do not admit, any reference to a clock
 /// function other than a call, such as its address in code or data, through which any
 /// code can call it, each inlined function, an `#include_next`, and a `#line`
@@ -772,9 +808,27 @@ struct Reference {
     /// The function symbol that labels it in `objdump -d`, whole, such as `parse.0`
     /// for a nested function, or `None` when no function symbol labels it.
     function: Option<String>,
-    /// Its type is one of [`CALLS`].
-    call: bool,
+    access: Access,
     symbol: String,
+}
+
+/// How a reference uses its symbol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Access {
+    /// A relocation of a type of [`CALLS`].
+    Call,
+    /// Any other relocation, which takes the address of the symbol.
+    Address,
+}
+
+impl Access {
+    /// What a function does to the symbol, as the verb of an error.
+    fn verb(self) -> &'static str {
+        match self {
+            Access::Call => "calls",
+            Access::Address => "takes the address of",
+        }
+    }
 }
 
 /// Each relocation against a symbol of `outside` or a function of [`CLOCKS`]: from
@@ -797,7 +851,11 @@ fn references(
             found.insert(Reference {
                 section: section.to_owned(),
                 function: function.map(str::to_owned),
-                call: CALLS.contains(&kind),
+                access: if CALLS.contains(&kind) {
+                    Access::Call
+                } else {
+                    Access::Address
+                },
                 symbol: symbol.to_owned(),
             });
         }
@@ -832,71 +890,70 @@ fn references(
 struct Uses {
     /// Each pair of [`FILE_SYMBOLS`] with a reference.
     pairs: BTreeSet<(String, String)>,
-    /// Each (file, function, symbol) that [`FILE_SYMBOLS`] does not admit.
-    triples: BTreeSet<(String, String, String)>,
+    /// Each (file, function, symbol, access) that [`FILE_SYMBOLS`] does not admit.
+    keys: BTreeSet<(String, String, String, Access)>,
 }
 
 impl Uses {
     /// Adds `found`, a reference of `file`, and gives its error when no list can admit
-    /// it: a reference to a clock function other than a call from a function, or a
-    /// reference outside a function that [`FILE_SYMBOLS`] does not admit.
+    /// it: the address of a clock function, or a reference outside a function that
+    /// neither [`SYMBOLS`] nor [`FILE_SYMBOLS`] admits.
     fn add(&mut self, file: &str, found: Reference) -> Option<String> {
         let Reference {
             section,
             function,
-            call,
+            access,
             symbol,
         } = found;
+        if CLOCKS.contains(&symbol.as_str()) && access == Access::Address {
+            return Some(format!(
+                "{file}: the section `{section}` takes the address of `{symbol}`, so a \
+                 call through it escapes FUNCTION_SYMBOLS"
+            ));
+        }
         if SYMBOLS.contains(&symbol.as_str()) {
             return None;
         }
-        let clock = CLOCKS.contains(&symbol.as_str());
-        let pair = (file.to_owned(), symbol);
-        if !clock
-            && FILE_SYMBOLS
-                .iter()
-                .any(|&(f, s)| (f, s) == (&pair.0, &pair.1))
-        {
-            self.pairs.insert(pair);
+        if FILE_SYMBOLS.contains(&(file, &symbol)) {
+            self.pairs.insert((file.to_owned(), symbol));
             return None;
         }
-        let (file, symbol) = pair;
-        match function {
-            Some(function) if call || !clock => {
-                self.triples.insert((file, function, symbol));
-                None
-            }
-            _ if clock => Some(format!(
-                "{file}: the section `{section}` takes the address of `{symbol}`, so a \
-                 call through it escapes FUNCTION_SYMBOLS"
-            )),
-            _ => Some(format!(
+        let Some(function) = function else {
+            return Some(format!(
                 "{file}: the section `{section}` references `{symbol}` outside a \
                  function, so a use through it escapes FUNCTION_SYMBOLS"
-            )),
-        }
+            ));
+        };
+        self.keys
+            .insert((file.to_owned(), function, symbol, access));
+        None
     }
 
-    /// An error for each triple that [`FUNCTION_SYMBOLS`] does not list, for each
-    /// listed triple with no reference, and for each pair of [`FILE_SYMBOLS`] with no
-    /// reference.
+    /// An error for each key that [`FUNCTION_SYMBOLS`] does not list, for each listed
+    /// key with no reference, and for each pair of [`FILE_SYMBOLS`] with no reference.
     fn mismatches(&self) -> Vec<String> {
-        let listed: BTreeSet<(String, String, String)> = FUNCTION_SYMBOLS
+        let listed: BTreeSet<(String, String, String, Access)> = FUNCTION_SYMBOLS
             .iter()
-            .map(|&(file, function, symbol)| {
-                (file.to_owned(), function.to_owned(), symbol.to_owned())
+            .map(|&(file, function, symbol, access)| {
+                (
+                    file.to_owned(),
+                    function.to_owned(),
+                    symbol.to_owned(),
+                    access,
+                )
             })
             .collect();
-        let new = self.triples.difference(&listed).map(|(file, function, symbol)| {
+        let new = self.keys.difference(&listed).map(|(file, function, symbol, access)| {
+            let verb = access.verb();
             if CLOCKS.contains(&symbol.as_str()) {
                 format!(
-                    "{file}: `{function}` calls `{symbol}`, a global clock function. \
+                    "{file}: `{function}` {verb} `{symbol}`, a global clock function. \
                      Find whether a node runs it; if not, add it to FUNCTION_SYMBOLS \
                      with the reason"
                 )
             } else {
                 format!(
-                    "{file}: `{function}` references `{symbol}`, which no list admits. \
+                    "{file}: `{function}` {verb} `{symbol}`, which no list admits. \
                      Find whether a node runs it; if it reads no clock, file, network, \
                      randomness, or process state, add it with the reason, to \
                      FILE_SYMBOLS for a file that no node runs, else to \
@@ -904,12 +961,16 @@ impl Uses {
                 )
             }
         });
-        let gone = listed.difference(&self.triples).map(|(file, function, symbol)| {
-            format!(
-                "{file}: `{function}` no longer references `{symbol}`. Remove it from \
-                 FUNCTION_SYMBOLS"
-            )
-        });
+        let gone =
+            listed
+                .difference(&self.keys)
+                .map(|(file, function, symbol, access)| {
+                    format!(
+                        "{file}: `{function}` no longer {} `{symbol}`. Remove it from \
+                 FUNCTION_SYMBOLS",
+                        access.verb()
+                    )
+                });
         let files = FILE_SYMBOLS
             .iter()
             .filter(|&&(file, symbol)| {
@@ -1037,16 +1098,25 @@ fn wait((name, child): (String, Child)) -> Result<(String, String), String> {
 mod tests {
     use super::*;
 
-    fn reference(
+    /// A reference of `function` from `section`.
+    fn labeled(
         section: &str,
-        function: Option<&str>,
-        call: bool,
+        function: &str,
+        access: Access,
         symbol: &str,
     ) -> Reference {
         Reference {
+            function: Some(function.to_owned()),
+            ..unlabeled(section, access, symbol)
+        }
+    }
+
+    /// A reference from `section` that no function labels.
+    fn unlabeled(section: &str, access: Access, symbol: &str) -> Reference {
+        Reference {
             section: section.to_owned(),
-            function: function.map(str::to_owned),
-            call,
+            function: None,
+            access,
             symbol: symbol.to_owned(),
         }
     }
@@ -1096,34 +1166,22 @@ RELOCATION RECORDS FOR [.data.rel.ro]:
 0000000000000000 R_X86_64_PLT32    UA_DateTime_now
 ";
         let outside = BTreeSet::from(["strtod".to_owned()]);
+        let config = |function, access, symbol| {
+            labeled(".text.setDefaultConfig", function, access, symbol)
+        };
         assert_eq!(
             Vec::from_iter(references(disassembly, relocations, &outside)),
             [
-                reference(".data.rel", None, false, "UA_DateTime_now"),
-                reference(".data.rel", None, false, "strtod"),
-                reference(".data.rel.ro", None, true, "UA_DateTime_now"),
-                reference(".rodata", None, false, "UA_DateTime_localTimeUtcOffset"),
-                reference(".text", None, false, "strtod"),
-                reference(
-                    ".text.setDefaultConfig",
-                    Some("log"),
-                    true,
-                    "UA_DateTime_localTimeUtcOffset"
-                ),
-                reference(".text.setDefaultConfig", Some("other"), false, CLOCKS[0]),
-                reference(".text.setDefaultConfig", Some("other"), true, "strtod"),
-                reference(
-                    ".text.setDefaultConfig",
-                    Some("seed.0"),
-                    true,
-                    "UA_DateTime_nowMonotonic"
-                ),
-                reference(
-                    ".text.setDefaultConfig",
-                    Some("setDefaultConfig"),
-                    true,
-                    CLOCKS[0]
-                ),
+                unlabeled(".data.rel", Access::Address, "UA_DateTime_now"),
+                unlabeled(".data.rel", Access::Address, "strtod"),
+                unlabeled(".data.rel.ro", Access::Call, "UA_DateTime_now"),
+                unlabeled(".rodata", Access::Address, "UA_DateTime_localTimeUtcOffset"),
+                unlabeled(".text", Access::Address, "strtod"),
+                config("log", Access::Call, "UA_DateTime_localTimeUtcOffset"),
+                config("other", Access::Call, "strtod"),
+                config("other", Access::Address, CLOCKS[0]),
+                config("seed.0", Access::Call, "UA_DateTime_nowMonotonic"),
+                config("setDefaultConfig", Access::Call, CLOCKS[0]),
             ]
         );
     }
@@ -1551,21 +1609,21 @@ End of search list.
         );
     }
 
-    /// A reference of `function` in a section of code, as a call when `symbol` is a
-    /// clock.
-    fn code(function: &str, symbol: &str) -> Reference {
-        reference(".text", Some(function), CLOCKS.contains(&symbol), symbol)
+    /// A call of `symbol` from `function`.
+    fn call(function: &str, symbol: &str) -> Reference {
+        labeled(".text", function, Access::Call, symbol)
     }
 
-    /// A reference to `symbol` from the section `.data.rel`, with the type `call`.
-    fn data(call: bool, symbol: &str) -> Reference {
-        reference(".data.rel", None, call, symbol)
+    /// The address of `symbol` in the section `.data.rel`.
+    fn data(symbol: &str) -> Reference {
+        unlabeled(".data.rel", Access::Address, symbol)
     }
 
     /// The error of [`Uses::mismatches`] for a reference that no list admits.
-    fn unlisted(file: &str, function: &str, symbol: &str) -> String {
+    fn unlisted(file: &str, function: &str, access: Access, symbol: &str) -> String {
+        let verb = access.verb();
         format!(
-            "{file}: `{function}` references `{symbol}`, which no list admits. Find \
+            "{file}: `{function}` {verb} `{symbol}`, which no list admits. Find \
              whether a node runs it; if it reads no clock, file, network, randomness, \
              or process state, add it with the reason, to FILE_SYMBOLS for a file \
              that no node runs, else to FUNCTION_SYMBOLS"
@@ -1585,14 +1643,15 @@ End of search list.
     /// `left_out`.
     fn listed(left_out: &[&str]) -> Uses {
         let mut uses = Uses::default();
-        for &(file, function, symbol) in &FUNCTION_SYMBOLS {
+        for &(file, function, symbol, access) in &FUNCTION_SYMBOLS {
             if !left_out.contains(&function) {
-                assert_eq!(uses.add(file, code(function, symbol)), None);
+                let found = labeled(".text", function, access, symbol);
+                assert_eq!(uses.add(file, found), None);
             }
         }
         for &(file, symbol) in &FILE_SYMBOLS {
             if !left_out.contains(&symbol) {
-                assert_eq!(uses.add(file, data(false, symbol)), None);
+                assert_eq!(uses.add(file, data(symbol)), None);
             }
         }
         uses
@@ -1601,15 +1660,15 @@ End of search list.
     #[test]
     fn uses_names_a_new_reference_and_a_listed_one_that_is_gone() {
         let mut uses = listed(&[]);
-        assert_eq!(uses.add("src/ua_types.c", code("UA_new", "memcpy")), None);
-        assert_eq!(uses.add("src/ua_types.c", data(false, "memcpy")), None);
+        assert_eq!(uses.add("src/ua_types.c", call("UA_new", "memcpy")), None);
+        assert_eq!(uses.add("src/ua_types.c", data("memcpy")), None);
         assert_eq!(uses.mismatches(), Vec::<String>::new());
         let mut uses = listed(&["UA_random_seed", "syslog"]);
         let found = [
-            ("deps/parse_num.c", code("UA_parse", "__errno_location")),
-            ("plugins/ua_log_stdout.c", code("UA_print", "puts")),
-            ("src/ua_types.c", code("UA_new", CLOCKS[0])),
-            ("src/ua_types.c", code("UA_open", "socket")),
+            ("deps/parse_num.c", call("UA_parse", "__errno_location")),
+            ("plugins/ua_log_stdout.c", call("UA_print", "puts")),
+            ("src/ua_types.c", call("UA_new", CLOCKS[0])),
+            ("src/ua_types.c", call("UA_open", "socket")),
         ];
         for (file, found) in found {
             assert_eq!(uses.add(file, found), None);
@@ -1617,10 +1676,15 @@ End of search list.
         assert_eq!(
             uses.mismatches(),
             [
-                unlisted("deps/parse_num.c", "UA_parse", "__errno_location"),
+                unlisted(
+                    "deps/parse_num.c",
+                    "UA_parse",
+                    Access::Call,
+                    "__errno_location"
+                ),
                 unlisted_clock("src/ua_types.c", "UA_new"),
-                unlisted("src/ua_types.c", "UA_open", "socket"),
-                "src/util/ua_util.c: `UA_random_seed` no longer references \
+                unlisted("src/ua_types.c", "UA_open", Access::Call, "socket"),
+                "src/util/ua_util.c: `UA_random_seed` no longer calls \
                  `UA_DateTime_now`. Remove it from FUNCTION_SYMBOLS"
                     .to_owned(),
                 "plugins/ua_log_syslog.c: no longer references `syslog`. Remove it \
@@ -1628,6 +1692,33 @@ End of search list.
                     .to_owned(),
             ]
         );
+    }
+
+    /// A listed function that takes the address of a symbol that it calls lets other
+    /// code call the symbol through that address.
+    #[test]
+    fn uses_names_the_address_of_a_symbol_that_its_function_may_only_call() {
+        let mut uses = listed(&[]);
+        let found = labeled(".text", "parseDouble", Access::Address, "strtod");
+        assert_eq!(uses.add("deps/parse_num.c", found), None);
+        assert_eq!(
+            uses.mismatches(),
+            [unlisted(
+                "deps/parse_num.c",
+                "parseDouble",
+                Access::Address,
+                "strtod"
+            )]
+        );
+    }
+
+    /// [`Uses::add`] reads a clock only as a key of [`FUNCTION_SYMBOLS`].
+    #[test]
+    fn no_list_but_function_symbols_admits_a_clock() {
+        for clock in CLOCKS {
+            assert!(!SYMBOLS.contains(&clock));
+            assert!(FILE_SYMBOLS.iter().all(|&(_, symbol)| symbol != clock));
+        }
     }
 
     #[test]
@@ -1639,26 +1730,34 @@ End of search list.
                  `UA_DateTime_now`, so a call through it escapes FUNCTION_SYMBOLS"
             ))
         };
-        let mut no_call = code("UA_new", CLOCKS[0]);
-        no_call.call = false;
-        assert_eq!(uses.add("src/ua_types.c", no_call), address(".text"));
+        let found = labeled(".text", "UA_new", Access::Address, CLOCKS[0]);
+        assert_eq!(uses.add("src/ua_types.c", found), address(".text"));
         assert_eq!(
-            uses.add("src/ua_types.c", data(true, CLOCKS[0])),
+            uses.add("src/ua_types.c", data(CLOCKS[0])),
             address(".data.rel")
         );
         assert_eq!(
-            uses.add("deps/parse_num.c", data(false, "strtod")),
+            uses.add(
+                "src/ua_types.c",
+                unlabeled(".data.rel.ro", Access::Call, CLOCKS[0])
+            ),
+            Some(
+                "src/ua_types.c: the section `.data.rel.ro` references \
+                 `UA_DateTime_now` outside a function, so a use through it escapes \
+                 FUNCTION_SYMBOLS"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            uses.add("deps/parse_num.c", data("strtod")),
             Some(
                 "deps/parse_num.c: the section `.data.rel` references `strtod` outside \
                  a function, so a use through it escapes FUNCTION_SYMBOLS"
                     .to_owned()
             )
         );
-        assert_eq!(
-            uses.add("plugins/ua_log_syslog.c", data(false, "syslog")),
-            None
-        );
-        assert_eq!(uses.add("src/ua_types.c", data(false, "memcpy")), None);
+        assert_eq!(uses.add("plugins/ua_log_syslog.c", data("syslog")), None);
+        assert_eq!(uses.add("src/ua_types.c", data("memcpy")), None);
     }
 
     /// A directory of the test `name`, empty, in the temporary directory, with a
@@ -1717,7 +1816,7 @@ End of search list.
     /// function of its own.
     fn uses(file: &str) -> String {
         let mut functions = std::collections::BTreeMap::<_, Vec<_>>::new();
-        for &(f, function, symbol) in &FUNCTION_SYMBOLS {
+        for &(f, function, symbol, _) in &FUNCTION_SYMBOLS {
             if f == file {
                 functions
                     .entry(function)
@@ -2000,7 +2099,7 @@ End of search list.
                  which is outside the copy"
                     .to_owned(),
                 unlisted_clock("src/more/ua_types.c", "UA_new"),
-                unlisted("src/more/ua_types.c", "UA_stat", "stat"),
+                unlisted("src/more/ua_types.c", "UA_stat", Access::Call, "stat"),
             ])
         );
         assert!(root.join("patches/open62541/kept.c").exists());
@@ -2215,8 +2314,18 @@ End of search list.
         assert_eq!(
             check(&root),
             Err(vec![
-                unlisted("src/util/ua_encryptedsecret.c", "UA_time", "time"),
-                unlisted("src/util/ua_util.c", "UA_lock", "pthread_mutex_lock"),
+                unlisted(
+                    "src/util/ua_encryptedsecret.c",
+                    "UA_time",
+                    Access::Call,
+                    "time"
+                ),
+                unlisted(
+                    "src/util/ua_util.c",
+                    "UA_lock",
+                    Access::Call,
+                    "pthread_mutex_lock"
+                ),
             ])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
@@ -2247,7 +2356,12 @@ End of search list.
         );
         assert_eq!(
             check(&root),
-            Err(vec![unlisted("src/util/ua_util.c", "UA_connect", "socket")])
+            Err(vec![unlisted(
+                "src/util/ua_util.c",
+                "UA_connect",
+                Access::Call,
+                "socket"
+            )])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
@@ -2274,6 +2388,7 @@ End of search list.
             Err(vec![unlisted(
                 "src/util/ua_encryptedsecret.c",
                 "UA_lastError",
+                Access::Call,
                 "__errno_location"
             )])
         );
@@ -2304,7 +2419,12 @@ End of search list.
                 "src/util/ua_util.c: the section `.data.rel` references `abort` \
                  outside a function, so a use through it escapes FUNCTION_SYMBOLS"
                     .to_owned(),
-                unlisted("deps/parse_num.c", "UA_lastError", "__errno_location"),
+                unlisted(
+                    "deps/parse_num.c",
+                    "UA_lastError",
+                    Access::Call,
+                    "__errno_location"
+                ),
             ])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
@@ -2338,10 +2458,65 @@ End of search list.
         assert_eq!(
             check(&root),
             Err(vec![
-                unlisted("deps/parse_num.c", "parseDouble.0", "__errno_location"),
-                unlisted("src/util/ua_util.c", "UA_rng_require.0", "fprintf"),
-                unlisted("src/util/ua_util.c", "UA_rng_require.0", "stderr"),
+                unlisted(
+                    "deps/parse_num.c",
+                    "parseDouble.0",
+                    Access::Call,
+                    "__errno_location"
+                ),
+                unlisted(
+                    "src/util/ua_util.c",
+                    "UA_rng_require.0",
+                    Access::Call,
+                    "fprintf"
+                ),
+                unlisted(
+                    "src/util/ua_util.c",
+                    "UA_rng_require.0",
+                    Access::Address,
+                    "stderr"
+                ),
             ])
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    /// A listed function that stores the address of a symbol that it may only call
+    /// lets a new function call the symbol with no reference to it.
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
+    fn check_finds_the_address_of_a_listed_symbol_in_its_function() {
+        let (root, repo, result) = run_after("address", |_| {}, &[]);
+        assert_eq!(result, Ok(()));
+        let copy = root.join("patches/open62541");
+        let replace = |path: &str, from: &str, to: &str| {
+            let old = std::fs::read_to_string(copy.join(path)).unwrap();
+            assert_eq!(old.matches(from).count(), 1, "{path}: {from}");
+            std::fs::write(copy.join(path), old.replace(from, to)).unwrap();
+        };
+        replace(
+            "deps/parse_num.c",
+            "size_t parseDouble(",
+            "double (*UA_conv)(const char *, char **);\n\
+             double UA_parseOther(const char *s) { return UA_conv(s, 0); }\n\
+             size_t parseDouble(",
+        );
+        replace(
+            "deps/parse_num.c",
+            "*result = strtod(",
+            "UA_conv = strtod;\n*result = strtod(",
+        );
+        assert_eq!(
+            check(&root),
+            Err(vec![unlisted(
+                "deps/parse_num.c",
+                "parseDouble",
+                Access::Address,
+                "strtod"
+            )])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
@@ -2386,6 +2561,7 @@ End of search list.
             Err(vec![unlisted(
                 "src/util/ua_encryptedsecret.c",
                 "UA_now",
+                Access::Address,
                 "_GLOBAL_OFFSET_TABLE_"
             )])
         );
