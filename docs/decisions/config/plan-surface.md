@@ -225,8 +225,11 @@
   on `config::plan::Change`, which still needs that lookup and changes the plan file
   (`laptop.architect-2`, 2026-10-10T02:45:50Z,
   https://github.com/synnaxlabs/foundation/issues/1914#issuecomment-6092943513).
-  A change at a tree key whose stored definition is of another kind shows as a
+  `ops` shows a change at a tree key whose stored definition is of another kind as a
   removal of the stored definition and an add of the new one, in the text and in the
-  JSON. Lost: a diagnostic that refuses the kind change, which refuses a target that
-  the files can state (`laptop.architect-2`, 2026-10-10T03:03:43Z,
+  JSON, and the plan and the apply count it as one add and one removal. Only a
+  connector and a channel can share a tree key. `config::plan::Change` and the plan
+  file do not change: the change already holds the digest of the stored definition
+  and the new entry. Lost: a diagnostic in `config` that refuses the kind change,
+  which refuses a target that the files can state (`laptop.architect-2`, 2026-10-10T03:03:43Z,
   https://github.com/synnaxlabs/foundation/issues/2220#issuecomment-6093114188).
