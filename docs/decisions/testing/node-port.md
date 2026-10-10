@@ -91,14 +91,11 @@
   then waits for its idle time, as when the link loses the close. Each clone of the
   transport and each session lives in a future that shard 0 drops before it waits for
   the port, in a task of the mesh that it waits for, or in a task of the hub, which ends
-  at its next poll after the hub and each value and future that it gave drop (the doc
-  of `hub::Hub::new`; `laptop.architect`, 2026-10-10T09:04:25Z:
-  https://github.com/synnaxlabs/foundation/issues/2244#issuecomment-6095943720).
-  Supersedes the hub clause of
-  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6089294422
-  (2026-10-09T21:08:50Z). So, unless the socket broke, a leak holds the stop. The drop
-  of each session closes it. The drop of the transport closes each session that no
-  caller accepted and each
+  at its next poll after the hub and each value and future that it gave drop (the doc of
+  `hub::Hub::new`; `laptop.architect`, 2026-10-10T09:04:25Z:
+  https://github.com/synnaxlabs/foundation/issues/2244#issuecomment-6095943720). So,
+  unless the socket broke, a leak holds the stop. The drop of each session closes it.
+  The drop of the transport closes each session that no caller accepted and each
   handshake in flight, its own dials too (#2084, by `laptop.architect-2`, 02:57 UTC:
   https://github.com/synnaxlabs/foundation/issues/2084). The stop waits for each to
   drain, in about 3 PTO, and at most 3 s after the last one ended, because a peer's
@@ -106,9 +103,11 @@
   https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6073847772). The
   `transport` surface, by `laptop.architect` (02:19 UTC):
   https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072912165.
-  Supersedes the `os` sentences of that port rule, and the sentence of
+  Supersedes the `os` sentences of that port rule, the sentence of
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312 that no
-  test sees the drop of the transport.
+  test sees the drop of the transport, and the hub clause of
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6089294422
+  (2026-10-09T21:08:50Z).
   Amended (2026-10-08, #1660, by `laptop.architect-2`, 19:52 UTC): `Config` has no key.
   Once each buffer has opened, shard 0 reads the node's key and private key from the
   file `node.key` in the data directory, before the hub, the transport, and the mesh
