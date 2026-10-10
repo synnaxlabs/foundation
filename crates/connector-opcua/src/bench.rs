@@ -224,17 +224,16 @@ impl Manager {
                 Poll::Pending
             }
         }));
+        // The deadline goes first, so a connect that a jump of the clock ends late
+        // still panics.
         poll_fn(|cx| {
-            if connect.as_mut().poll(cx).is_ready() {
-                return Poll::Ready(());
-            }
             if Pin::new(&mut deadline).poll(cx).is_ready() {
                 let connected = self.connected();
                 panic!(
                     "{connected} of {clients} clients connected in {CONNECT_TIMEOUT}"
                 );
             }
-            Poll::Pending
+            connect.as_mut().poll(cx)
         })
         .await;
     }
