@@ -200,8 +200,8 @@ struct Found<'a> {
     labels: duplicate::Labels<'a>,
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
-    /// The label of the first connector in [`order`] that a `connector` block in any
-    /// Document defines at each name, by the name in lowercase.
+    /// The label of the first connector in span order, no span first, that a
+    /// `connector` block in any Document defines at each name, by the name in lowercase.
     connectors: BTreeMap<Box<str>, &'a Label>,
     /// The kinds that check each `connector` block's config.
     kinds: &'a Table,
@@ -218,7 +218,7 @@ struct Reported;
 
 impl<'a> Found<'a> {
     /// Reads the one label of a block of `kind` as its name, and gives the tree key and
-    /// the label's span. [`Found::repeats`] reports a key that repeats.
+    /// the label's span. [`duplicate::in_labels`] reports a key that repeats.
     fn key(&mut self, block: &'a Block, kind: Kind) -> Option<(Name, Option<Span>)> {
         let keyword = kind.as_str();
         let fix = "Give the block one label, its name, such as \"site_a.budget\"";
@@ -493,6 +493,44 @@ mod tests {
 
     fn key(text: &str) -> Name {
         text.parse().unwrap()
+    }
+
+    #[test]
+    fn sorts_diagnostics_with_no_span_first_then_by_span() {
+        let (Some(start), Some(other)) = (at(0, 5), at(1, 0)) else {
+            unreachable!("valid spans")
+        };
+        let longer = Span::new(Source(0), start.start(), position(9));
+        let problem = |span| refused("config.test", span, "a problem", "Fix it");
+        let mut diagnostics = [
+            problem(Some(other)),
+            problem(longer),
+            problem(Some(start)),
+            problem(None),
+        ];
+        sort(&mut diagnostics);
+        let spans = diagnostics.map(|diagnostic| diagnostic.span);
+        assert_eq!(spans, [None, Some(start), longer, Some(other)]);
+    }
+
+    #[test]
+    fn gives_the_repeat_at_the_label_with_a_span_after_one_with_none() {
+        let spanless = document::Label {
+            text: "a".into(),
+            span: None,
+        };
+        let spanned = document::Label {
+            text: "A".into(),
+            span: at(0, 5),
+        };
+        let mut labels = duplicate::Labels::new();
+        for label in [&spanned, &spanless] {
+            let kind = definition::Kind::NodeSettings;
+            duplicate::add(&mut labels, &key(&label.text), label, kind);
+        }
+        let repeats = duplicate::in_labels(&mut labels);
+        let spans: Vec<_> = repeats.iter().map(|diagnostic| diagnostic.span).collect();
+        assert_eq!(spans, [at(0, 5)]);
     }
 
     #[test]
