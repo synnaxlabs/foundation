@@ -1,6 +1,8 @@
 //! The simulated servers of ONE NODE, served by the test process over `os` on
 //! loopback. Each method with a `todo!` waits on the issue it names.
 
+#![expect(clippy::todo, reason = "methods that wait on their issues")]
+
 use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZeroUsize;

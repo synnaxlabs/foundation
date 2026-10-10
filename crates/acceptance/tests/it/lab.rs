@@ -2,6 +2,8 @@
 //! can be cut, simulated devices and stores, and the operator's front ends. Each
 //! method with a `todo!` waits on the issue it names.
 
+#![expect(clippy::todo, reason = "methods that wait on their issues")]
+
 mod influx;
 
 use std::collections::BTreeMap;

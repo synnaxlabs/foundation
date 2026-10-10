@@ -1,6 +1,8 @@
 //! A bench for process tests: one `foundation` node in a temporary directory. Each
 //! method with a `todo!` waits on the issue it names.
 
+#![expect(clippy::todo, reason = "methods that wait on their issues")]
+
 use std::collections::BTreeMap;
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;

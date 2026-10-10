@@ -132,7 +132,7 @@ impl Session {
     /// async fn serve(session: &Session) -> Result<(), Error> {
     ///     loop {
     ///         let incoming = session.accept().await?;
-    ///         let _ = incoming.class;
+    ///         let _: transport::Class = incoming.class;
     ///     }
     /// }
     /// ```
