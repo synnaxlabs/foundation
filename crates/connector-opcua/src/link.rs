@@ -445,34 +445,50 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the shim calls {drawn:?}");
 }
 
-/// Each identifier for which `named` holds, as `path: identifier`, in the Rust of
-/// `src/` outside the files that hold only tests. Comments count.
+/// Each identifier for which `named` holds, as `path: identifier`, in each file of the
+/// module tree of `lib.rs` that a `#[cfg(test)]` declaration does not cut off. Comments
+/// and inline modules count.
 fn named_outside_tests(named: impl Fn(&str) -> bool) -> Vec<String> {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let tests = ["link.rs", "child.rs", "ffi/test.rs"].map(|path| src.join(path));
-    let ffi = std::fs::read_to_string(src.join("ffi.rs")).unwrap();
-    assert!(
-        ffi.contains("\n#[cfg(test)]\npub(crate) mod test;\n"),
-        "`ffi::test` builds outside tests"
-    );
-    let mut dirs = vec![src];
+    let mut files = vec![src.join("lib.rs")];
     let mut found = Vec::new();
-    while let Some(dir) = dirs.pop() {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                dirs.push(path);
-            } else if path.extension() == Some("rs".as_ref())
-                && !path.ends_with("tests.rs")
-                && !tests.contains(&path)
-            {
-                let text = std::fs::read_to_string(&path).unwrap();
-                let words =
-                    text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
-                for word in words.filter(|word| named(word)) {
-                    found.push(format!("{}: {word}", path.display()));
-                }
+    while let Some(path) = files.pop() {
+        let text = std::fs::read_to_string(&path).unwrap();
+        let dir = match path.file_stem().unwrap().to_str().unwrap() {
+            "lib" | "mod" => path.parent().unwrap().to_path_buf(),
+            stem => path.with_file_name(stem),
+        };
+        let lines: Vec<_> = text.lines().collect();
+        for (at, line) in lines.iter().enumerate() {
+            let Some(module) = line
+                .trim_start_matches("pub(crate) ")
+                .trim_start_matches("pub ")
+                .strip_prefix("mod ")
+                .and_then(|rest| rest.strip_suffix(';'))
+            else {
+                continue;
+            };
+            let gated = lines[..at]
+                .iter()
+                .rev()
+                .take_while(|line| {
+                    ["#[", "///", ")]", " "]
+                        .iter()
+                        .any(|start| line.starts_with(start))
+                })
+                .any(|line| *line == "#[cfg(test)]");
+            if !gated {
+                let file = dir.join(format!("{module}.rs"));
+                files.push(if file.exists() {
+                    file
+                } else {
+                    dir.join(module).join("mod.rs")
+                });
             }
+        }
+        let words = text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+        for word in words.filter(|word| named(word)) {
+            found.push(format!("{}: {word}", path.display()));
         }
     }
     found
@@ -488,9 +504,9 @@ fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the Rust names {drawn:?}");
 }
 
-/// Only tests build a server, so only the test server reaches `setDefaultConfig`,
-/// `UA_random_seed`, and `interruptServer`, which `cargo xtask open62541` lets call
-/// the global clock.
+/// Outside tests, the Rust builds no server and names no `UA_random_seed`, so it
+/// reaches none of `setDefaultConfig`, `interruptServer`, and `UA_random_seed`, which
+/// `cargo xtask open62541` lets call the global clock.
 #[test]
 fn the_rust_outside_tests_builds_no_server() {
     let named = named_outside_tests(|name| {
@@ -500,8 +516,8 @@ fn the_rust_outside_tests_builds_no_server() {
     assert!(named.is_empty(), "the Rust outside tests names {named:?}");
 }
 
-/// `UA_Client_new` gives a client the stdout logger, which `cargo xtask open62541` lets
-/// call the global clock. `shim_client_new` gives it the logger of its loop, and the
+/// `UA_Client_new` gives a client the stdout logger, whose `UA_Log_Stdout_log`
+/// `cargo xtask open62541` lets call the global clock. `shim_client_new` gives it the logger of its loop, and the
 /// stderr tests of `event` check that.
 #[test]
 fn the_rust_outside_tests_makes_each_client_with_the_shim() {
@@ -509,12 +525,13 @@ fn the_rust_outside_tests_makes_each_client_with_the_shim() {
     assert!(named.is_empty(), "the Rust outside tests names {named:?}");
 }
 
-/// The C builds with `-ffunction-sections`, and Rust links with `--gc-sections`, so
-/// this test binary keeps only the functions that the tests, the test server among
-/// them, reach.
+/// `cargo xtask open62541` lets `interruptServer` and `UA_random_seed` call the global
+/// clock. The C builds with `-ffunction-sections`, and Rust links with
+/// `--gc-sections`, so this test binary keeps only the functions that the tests reach,
+/// and the test server reaches neither.
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "needs GNU nm")]
-fn the_test_server_reaches_no_clock_call() {
+fn the_tests_reach_neither_interrupt_server_nor_random_seed() {
     let kept = names(&[std::env::current_exe().unwrap()], "--defined-only");
     assert!(
         kept.contains("setDefaultConfig"),
@@ -527,8 +544,8 @@ fn the_test_server_reaches_no_clock_call() {
     assert!(reached.is_empty(), "the test binary keeps {reached:?}");
 }
 
-/// `cargo xtask open62541` lets the encryption of an ECC user token call the global
-/// clock because encryption is off.
+/// `cargo xtask open62541` lets `encryptUserIdentityTokenEcc` call the global clock
+/// because encryption is off.
 #[test]
 fn the_shim_refuses_encryption() {
     let errors =

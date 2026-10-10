@@ -5,8 +5,8 @@
   call one; a list per file would pass a new call in a listed file. Decided by
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
-  2026-10-08 02:27 UTC). The reason of each pair names a test of `connector-opcua`
-  that fails when the reason becomes false. So `shim.c` fails the build with
+  2026-10-08 02:27 UTC). A test of `connector-opcua` names each pair and fails
+  when its reason becomes false. So `shim.c` fails the build with
   `UA_ENABLE_ENCRYPTION`, because the reason of `encryptUserIdentityTokenEcc` is that
   encryption is off. The copy goes in `patches/open62541/`, and the `build.rs` of
   `connector-opcua` reads its `sources.txt`. Decided by `laptop.architect-2`

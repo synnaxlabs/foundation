@@ -40,29 +40,22 @@ const CLOCKS: [&str; 3] = [
     "UA_DateTime_localTimeUtcOffset",
 ];
 
-/// The only (file, function) pairs that may call a function of [`CLOCKS`]. Each
-/// reason names the test of `connector-opcua` that fails when it becomes false.
+/// The only (file, function) pairs that may call a function of [`CLOCKS`]. A test of
+/// `connector-opcua` names each pair and fails when its reason becomes false.
 const CLOCK_CALLS: [(&str, &str); 5] = [
-    // The build date of a server config, for the test server only
-    // (`the_rust_outside_tests_builds_no_server`).
+    // The build date of a server config, for the test server only.
     ("plugins/ua_config_default.c", "setDefaultConfig"),
-    // `UA_Server_runUntilInterrupt`, which we never call
-    // (`the_rust_outside_tests_builds_no_server`,
-    // `the_test_server_reaches_no_clock_call`).
+    // `UA_Server_runUntilInterrupt`, which we never call.
     ("plugins/ua_config_default.c", "interruptServer"),
-    // The stdout logger, which we replace with our own
-    // (`the_rust_outside_tests_makes_each_client_with_the_shim`,
-    // `an_error_goes_to_stderr`).
+    // The stdout logger, which we replace with our own.
     ("plugins/ua_log_stdout.c", "UA_Log_Stdout_log"),
-    // ECC user tokens, which need encryption, which is off
-    // (`the_shim_refuses_encryption`).
+    // ECC user tokens, which need encryption, which is off.
     (
         "src/util/ua_encryptedsecret.c",
         "encryptUserIdentityTokenEcc",
     ),
     // The start value of the random state, which `UA_ENABLE_DETERMINISTIC_RNG` keeps
-    // from the clock (`the_rust_outside_tests_builds_no_server`,
-    // `the_test_server_reaches_no_clock_call`).
+    // from the clock.
     ("src/util/ua_util.c", "UA_random_seed"),
 ];
 
