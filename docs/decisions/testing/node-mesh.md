@@ -126,7 +126,7 @@
   (`Measurement::time`), which never goes back, and 0 before the node has mesh time or
   before 1970: the time only orders keys, and the random bits make each key unique.
   `ops::Node::mesh` gives the mesh, so the lab reads the home of a channel. `node` also
-  takes `connector`. The trigger above also makes `ops::Node::plan`,
+  takes `document` and `connector`. The trigger above also makes `ops::Node::plan`,
   `apply`, and `mesh` crate-private. Approved by `laptop.architect` for the key time
   rule and `ops::Node::mesh` (2026-10-09T03:33:40Z,
   https://github.com/synnaxlabs/foundation/pull/2078#issuecomment-6073726053). Approved
