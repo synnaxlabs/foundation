@@ -217,7 +217,7 @@ struct Waiter<'a, K: Ord, S, T> {
     table: &'a Locked<K, S, T>,
     key: &'a K,
     settings: &'a S,
-    /// The place of its waker in a busy slot, from its first wait to its end.
+    /// The place of its waker in a busy slot, from its first wait until it drops.
     place: Option<u64>,
 }
 
@@ -231,7 +231,6 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Future for Waiter<'_, K, S, T
         let slot = match table.slots.entry(this.key.clone()) {
             Entry::Vacant(vacant) => {
                 vacant.insert(Slot::Busy(wait::Set::new()));
-                this.place = None;
                 return Poll::Ready(Ok(Claim::Mine));
             }
             Entry::Occupied(occupied) => occupied.into_mut(),
@@ -252,7 +251,6 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Future for Waiter<'_, K, S, T
                 let endpoint = endpoint
                     .upgrade()
                     .expect("a lease removes its slot before its endpoint drops");
-                this.place = None;
                 if settings == this.settings {
                     Poll::Ready(Ok(Claim::Shared(endpoint)))
                 } else {
