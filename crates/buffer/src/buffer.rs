@@ -261,13 +261,14 @@ struct Shared {
 impl Shared {
     /// Ends the task's idle span. The caller holds no borrow of `state`.
     fn unpark(&self) {
-        let parked = self.state.borrow_mut().parked.take();
+        let parked = self.state.borrow_mut().parked.0.take();
         if let Some(waker) = parked {
             waker.wake();
         }
     }
 }
 
+#[derive(Debug)]
 struct State {
     writer: Writer,
     /// The group that takes the next batch.
@@ -289,7 +290,7 @@ struct State {
     /// The key of the next [`Commit`] or [`End`] in its set.
     next_key: u64,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
-    parked: Option<Waker>,
+    parked: Parked,
     /// Whether the handle dropped. The task ends when it next idles.
     closed: bool,
     /// Whether the task ended. An [`End`], and a [`Commit`] held past the drop, wait
@@ -299,41 +300,13 @@ struct State {
     failed: Option<files::Error>,
 }
 
+/// The task's waker, while it idles.
+struct Parked(Option<Waker>);
+
 /// Prints whether the task idles in place of its waker, whose `Debug` prints pointers.
-impl fmt::Debug for State {
+impl fmt::Debug for Parked {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let Self {
-            writer,
-            open,
-            spares,
-            queue,
-            logs,
-            taken,
-            commits,
-            committing,
-            ending,
-            next_key,
-            parked,
-            closed,
-            ended,
-            failed,
-        } = self;
-        f.debug_struct("State")
-            .field("writer", writer)
-            .field("open", open)
-            .field("spares", spares)
-            .field("queue", queue)
-            .field("logs", logs)
-            .field("taken", taken)
-            .field("commits", commits)
-            .field("committing", committing)
-            .field("ending", ending)
-            .field("next_key", next_key)
-            .field("parked", &parked.is_some())
-            .field("closed", closed)
-            .field("ended", ended)
-            .field("failed", failed)
-            .finish()
+        self.0.is_some().fmt(f)
     }
 }
 
@@ -454,7 +427,7 @@ impl Buffer {
                 committing: wait::Set::new(),
                 ending: wait::Set::new(),
                 next_key: 0,
-                parked: None,
+                parked: Parked(None),
                 closed: false,
                 ended: false,
                 failed: None,
@@ -896,7 +869,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
             if state.closed {
                 return Poll::Ready(true);
             }
-            state.parked = Some(cx.waker().clone());
+            state.parked = Parked(Some(cx.waker().clone()));
             idled = true;
             Poll::Pending
         })

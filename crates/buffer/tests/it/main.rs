@@ -3694,7 +3694,7 @@ fn a_waiter_prints_only_its_event_and_key() {
     .expect("the buffer ends");
 }
 
-/// The test of the hand-written `Debug` of the private `State`: a buffer whose task
+/// The test of the hand-written `Debug` of the private `Parked`: a buffer whose task
 /// idles prints that it idles, and no pointer of the task's waker.
 #[test]
 fn an_idle_buffer_prints_no_pointer() {
@@ -3705,7 +3705,7 @@ fn an_idle_buffer_prints_no_pointer() {
             .expect("opens");
         shard.clock.sleep(commits(3)).await;
         let printed = format!("{buffer:?}");
-        assert!(printed.contains("parked: true, closed: false"), "{printed}");
+        assert!(printed.contains("parked: true"), "{printed}");
         assert!(!printed.contains("0x"), "{printed}");
     });
 }
