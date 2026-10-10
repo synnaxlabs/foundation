@@ -91,11 +91,11 @@ const LEFT_OUT: [&str; 4] = [
 ];
 
 /// The symbols outside the copy that any file of it may reference. Each reads no clock,
-/// file, network, randomness, or process state, except the allocator, `errno`, and the
-/// table of the linker, each with its reason. The functions of [`CLOCKS`] pass too:
-/// [`CLOCK_CALLS`] checks each call of one. `OUTSIDE` in `connector-opcua` lists the symbols of the production build, so a
-/// new symbol outside the copy changes both lists.
-const SYMBOLS: [&str; 18] = [
+/// file, network, randomness, or process state, except the allocator, with its reason.
+/// The functions of [`CLOCKS`] pass too: [`CLOCK_CALLS`] checks each call of one. A new
+/// symbol outside the copy also goes in `OUTSIDE` in `connector-opcua`, which lists the
+/// symbols of the production build.
+const SYMBOLS: [&str; 16] = [
     // The allocator of libc, since the check builds without `alloc.h`. It returns
     // addresses that the OS places at random, so no result of the copy may depend on
     // an address.
@@ -111,11 +111,6 @@ const SYMBOLS: [&str; 18] = [
     "strcmp",
     "strlen",
     "strncmp",
-    // The `errno` of the thread, which the copy reads only for the error of its own
-    // call.
-    "__errno_location",
-    // The table of the linker, which position-independent code reads for addresses.
-    "_GLOBAL_OFFSET_TABLE_",
     // `shim.c` defines each to print its name and abort.
     "UA_ConnectionManager_new_POSIX_Ethernet",
     "UA_ConnectionManager_new_POSIX_TCP",
@@ -126,12 +121,16 @@ const SYMBOLS: [&str; 18] = [
 
 /// The only (file, symbol) pairs that may reference a symbol outside the copy that
 /// [`SYMBOLS`] does not list.
-const FILE_SYMBOLS: [(&str, &str); 12] = [
+const FILE_SYMBOLS: [(&str, &str); 14] = [
     // `isdigit` and `isxdigit` read the locale, which stays C: nothing calls
     // `setlocale`.
     ("deps/musl_inet_pton.c", "__ctype_b_loc"),
+    // Writes `errno` and never reads it.
+    ("deps/musl_inet_pton.c", "__errno_location"),
     // `strtod` reads the decimal point of the locale, which stays C.
     ("deps/parse_num.c", "strtod"),
+    // Sets `errno` to 0 before `strtod` and reads only the error of that call.
+    ("deps/parse_num.c", "__errno_location"),
     // The stdout logger, which we replace with our own.
     ("plugins/ua_log_stdout.c", "fflush"),
     ("plugins/ua_log_stdout.c", "printf"),
@@ -354,6 +353,20 @@ impl Trees<'_> {
     }
 }
 
+/// An error for each line of `flags`, the text of `flags.txt`, that [`kept`] refuses.
+fn unkept(flags: &str) -> Vec<String> {
+    flags
+        .lines()
+        .filter(|flag| !kept(flag))
+        .map(|flag| {
+            format!(
+                "flags.txt: `{flag}` is not a -D, -I, or -std flag with its value, or \
+                 one of CODE_FLAGS"
+            )
+        })
+        .collect()
+}
+
 /// Whether `flags.txt` may hold `flag`: a `-D`, `-I`, or `-std` flag with its value,
 /// or one of [`CODE_FLAGS`].
 fn kept(flag: &str) -> bool {
@@ -444,16 +457,7 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
             .map_err(|e| vec![format!("{}: {e}", copy.join(name).display())])
     };
     let (sources, flags) = (read("sources.txt")?, read("flags.txt")?);
-    let other: Vec<String> = flags
-        .lines()
-        .filter(|flag| !kept(flag))
-        .map(|flag| {
-            format!(
-                "flags.txt: `{flag}` is not a -D, -I, or -std flag with its value, or \
-                 one of CODE_FLAGS"
-            )
-        })
-        .collect();
+    let other = unkept(&flags);
     if !other.is_empty() {
         return Err(other);
     }
@@ -467,7 +471,12 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
     gcc(&macros).map_err(|e| vec![e])?;
     let dirs = system_dirs(&verbose);
     let objects = build(copy, &sources, &flags, out, cc).map_err(|e| vec![e])?;
-    let references = outside(&objects).map_err(|e| vec![e])?;
+    let exported = symbols(
+        objects.iter().map(|(_, object, _)| object.as_path()),
+        &["--defined-only", "--extern-only"],
+    )
+    .map_err(|e| vec![e])?;
+    let mut references = BTreeSet::new();
     let mut calls = BTreeSet::new();
     let mut problems = line_directives(copy, Path::new("")).map_err(|e| vec![e])?;
     for (source, object, preprocessed) in objects {
@@ -478,6 +487,9 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
         }
         let relocations = exec(Command::new("objdump").arg("-r").arg(&object));
         let relocations = relocations.map_err(|e| vec![e])?;
+        for symbol in outside(&object, &relocations, &exported).map_err(|e| vec![e])? {
+            references.insert((source.to_owned(), symbol));
+        }
         for (section, symbol) in clock_addresses(&relocations, &disassembly) {
             problems.push(format!(
                 "{source}: the section `{section}` takes the address of `{symbol}`, \
@@ -504,22 +516,25 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
     }
 }
 
-/// Each (source, symbol) pair where the object of the source in `objects` references
-/// a symbol that no object exports, so the linker takes it from outside the copy.
+/// Each symbol that `object` references and that no object of `exported` defines, so
+/// the linker takes it from outside the copy. A reference is a relocation, in
+/// `relocations`, the output of `objdump -r`: on x86-64 the assembler makes
+/// `_GLOBAL_OFFSET_TABLE_` undefined in each object that reads the table, with no
+/// relocation against it.
 fn outside(
-    objects: &[(&str, PathBuf, String)],
-) -> Result<BTreeSet<(String, String)>, String> {
-    let exported = symbols(
-        objects.iter().map(|(_, object, _)| object),
-        &["--defined-only", "--extern-only"],
-    )?;
-    let mut references = BTreeSet::new();
-    for (source, object, _) in objects {
-        for symbol in symbols([object], &["--undefined-only"])?.difference(&exported) {
-            references.insert(((*source).to_owned(), symbol.clone()));
-        }
-    }
-    Ok(references)
+    object: &Path,
+    relocations: &str,
+    exported: &BTreeSet<String>,
+) -> Result<Vec<String>, String> {
+    let relocated: BTreeSet<&str> = relocations
+        .lines()
+        .filter_map(|line| Some(relocation(line)?.1))
+        .collect();
+    Ok(symbols([object], &["--undefined-only"])?
+        .difference(exported)
+        .filter(|symbol| relocated.contains(symbol.as_str()))
+        .cloned()
+        .collect())
 }
 
 /// An error for each `#line` directive or line marker in a `.c` or `.h` file under
@@ -798,13 +813,18 @@ fn clock_addresses(
 
 /// The type and the clock function of a relocation line that refers to one.
 fn clock(line: &str) -> Option<(&str, &'static str)> {
-    let mut words = line.split_whitespace();
-    let kind = words.find(|word| word.starts_with("R_"))?;
-    let symbol = words.next_back()?.split(['+', '-']).next()?;
+    let (kind, symbol) = relocation(line)?;
     CLOCKS
         .into_iter()
         .find(|&clock| clock == symbol)
         .map(|clock| (kind, clock))
+}
+
+/// The type and the symbol of a line of `objdump -r` that holds a relocation.
+fn relocation(line: &str) -> Option<(&str, &str)> {
+    let mut words = line.split_whitespace();
+    let kind = words.find(|word| word.starts_with("R_"))?;
+    Some((kind, words.next_back()?.split(['+', '-']).next()?))
 }
 
 /// Each header that a Make depfile names, with its escapes read: `\ ` for a space,
@@ -896,21 +916,15 @@ fn mismatches(
 
 /// The names of the symbols that `nm -P` with `flags` gives for `objects`.
 fn symbols<'a>(
-    objects: impl IntoIterator<Item = &'a PathBuf>,
+    objects: impl IntoIterator<Item = &'a Path>,
     flags: &[&str],
 ) -> Result<BTreeSet<String>, String> {
     let text = exec(Command::new("nm").arg("-P").args(flags).args(objects))?;
-    Ok(names(&text))
-}
-
-/// The names of the symbols in `text`, the output of `nm -P`.
-fn names(text: &str) -> BTreeSet<String> {
-    text.lines()
-        // A line that names an object ends with `:`, and its path can hold a space.
-        .filter(|line| !line.ends_with(':'))
+    Ok(text
+        .lines()
         .filter_map(|line| line.split_whitespace().next())
         .map(str::to_owned)
-        .collect()
+        .collect())
 }
 
 /// Writes the copy of `found` to `stage`, with `LICENSE` from `src`.
@@ -1482,15 +1496,6 @@ End of search list.
         );
     }
 
-    #[test]
-    fn names_skips_each_line_that_names_an_object() {
-        let text = "/tmp/a b/0.o:\nmalloc U\nUA_new T 0 10\n\n/tmp/a b/1.o:\ntime U\n";
-        assert_eq!(
-            names(text),
-            BTreeSet::from(["UA_new", "malloc", "time"].map(str::to_owned))
-        );
-    }
-
     /// The error of [`symbol_mismatches`] for a reference that no list holds.
     fn unlisted(file: &str, symbol: &str) -> String {
         format!(
@@ -1573,11 +1578,13 @@ End of search list.
     fn references(file: &str) -> &'static str {
         match file {
             "deps/musl_inet_pton.c" => {
-                "#include <ctype.h>\nint UA_digit(int c) { return isdigit(c); }\n"
+                "#include <ctype.h>\n#include <errno.h>\n\
+                 int UA_digit(int c) {\nerrno = EAFNOSUPPORT;\nreturn isdigit(c);\n}\n"
             }
             "deps/parse_num.c" => {
-                "#include <stdlib.h>\n\
-                 double UA_parse(const char *s) { return strtod(s, 0); }\n"
+                "#include <errno.h>\n#include <stdlib.h>\n\
+                 double UA_parse(const char *s) {\n\
+                 errno = 0;\nreturn strtod(s, 0);\n}\n"
             }
             "plugins/ua_log_stdout.c" => {
                 "#include <stdio.h>\nvoid UA_print(const char *s, int n) {\n\
@@ -2134,6 +2141,78 @@ End of search list.
         assert_eq!(
             check(&root),
             Err(vec![unlisted("src/util/ua_util.c", "socket")])
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
+    fn check_finds_a_read_of_errno_that_no_call_of_the_copy_set() {
+        // `errno` holds the error of the last OS call of the thread, also one that
+        // code outside the copy made.
+        let (root, repo, result) = run_after("errno", |_| {}, &[]);
+        assert_eq!(result, Ok(()));
+        let path = root.join("patches/open62541/src/util/ua_encryptedsecret.c");
+        let old = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            old + "#include <errno.h>\nint UA_lastError(void) { return errno; }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            check(&root),
+            Err(vec![unlisted(
+                "src/util/ua_encryptedsecret.c",
+                "__errno_location"
+            )])
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
+    fn check_passes_an_undefined_symbol_that_no_relocation_names() {
+        // As the assembler of x86-64 makes `_GLOBAL_OFFSET_TABLE_` for each object
+        // that reads the table.
+        let (root, repo, result) = run_after("unnamed", |_| {}, &[]);
+        assert_eq!(result, Ok(()));
+        let path = root.join("patches/open62541/src/util/ua_encryptedsecret.c");
+        let old = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, old + "__asm__(\".globl UA_outside\");\n").unwrap();
+        assert_eq!(check(&root), Ok(()));
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
+    fn check_finds_a_read_of_the_table_of_the_linker_that_the_c_makes() {
+        // Its entries are addresses of imported functions, so a call through one
+        // names no symbol.
+        let (root, repo, result) = run_after("got", |_| {}, &[]);
+        assert_eq!(result, Ok(()));
+        let path = root.join("patches/open62541/src/util/ua_encryptedsecret.c");
+        let old = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            &path,
+            old + "extern long long (*_GLOBAL_OFFSET_TABLE_[])(void);\n\
+                   long long UA_now(int i) { return _GLOBAL_OFFSET_TABLE_[i](); }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            check(&root),
+            Err(vec![unlisted(
+                "src/util/ua_encryptedsecret.c",
+                "_GLOBAL_OFFSET_TABLE_"
+            )])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }

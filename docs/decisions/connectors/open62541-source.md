@@ -24,27 +24,29 @@
   `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058025302,
   2026-10-08 10:37 UTC). #1860 makes CI run it on a PR that changes only `patches/`.
-  The check reads the undefined symbols of each object (`nm -u`) and fails on each
-  symbol outside the copy that is not on a closed list, with the file and the symbol.
-  `SYMBOLS` admits a symbol for any file, and `FILE_SYMBOLS` admits a (file, symbol)
-  pair, such as a call of the stdout logger, which we never run. Each entry has its
-  reason. A symbol goes in `SYMBOLS` only when it reads no clock, file, network,
-  randomness, or process state: memory and string functions, and the 5 constructors that
-  `shim.c` defines to abort. Three exceptions read process state: the allocator, whose
-  addresses the OS places at random, so no result of the copy may depend on an address;
-  `errno`, which the copy reads only for the error of its own call; and the table of the
-  linker. The 3 clock functions pass this check, because the clock check reads each
-  reference to one. The check builds with no stack protector, so the compiler adds no
-  reference to its random canary, and a reference that the C makes fails. A symbol is
-  outside the copy when no object exports it: a `static` function of one file does not
-  hide a call of the OS function of its name from another. A pair of `FILE_SYMBOLS` with
-  no reference fails, so a file that the build leaves out loses its pairs. `OUTSIDE` in
-  `connector-opcua` lists the outside symbols of the production build, so a new outside
-  symbol changes both lists. A header list is not a check: a listed header can include
-  another (`pthread.h` includes `time.h`). So the check refuses no system header, and
-  each header that the copy includes must be in the copy or in a system directory as
-  `cc` finds it. Lost: a header list, and a deny list of OS symbols, which passes a call
-  that it does not name. Decided by `laptop.architect-2`
+  The check reads the undefined symbols of each object that a relocation names (`nm -u`
+  and `objdump -r`) and fails on each symbol outside the copy that is not on a closed
+  list, with the file and the symbol. `SYMBOLS` admits a symbol for any file, and
+  `FILE_SYMBOLS` admits a (file, symbol) pair, such as a call of the stdout logger,
+  which we never run. Each entry has its reason. A symbol goes in `SYMBOLS` only when it
+  reads no clock, file, network, randomness, or process state: memory and string
+  functions, and the 5 constructors that `shim.c` defines to abort. One exception reads
+  process state: the allocator, whose addresses the OS places at random, so no result of
+  the copy may depend on an address. On x86-64 the assembler makes
+  `_GLOBAL_OFFSET_TABLE_` undefined in each object that reads the table, with no
+  relocation, so only a reference that the C makes counts. The 3 clock functions pass
+  this check, because the clock check reads each reference to one. The check builds with
+  no stack protector, so the compiler adds no reference to its random canary, and a
+  reference that the C makes fails. A symbol is outside the copy when no object exports
+  it: a `static` function of one file does not hide a call of the OS function of its
+  name from another. A pair of `FILE_SYMBOLS` with no reference fails, so a file that
+  the build leaves out loses its pairs. A new outside symbol also goes in `OUTSIDE` in
+  `connector-opcua`, which lists the outside symbols of the production build. A header
+  list is not a check: a listed header can include another (`pthread.h` includes
+  `time.h`). So the check refuses no system header, and each header that the copy
+  includes must be in the copy or in a system directory as `cc` finds it. Lost: a header
+  list, and a deny list of OS symbols, which passes a call that it does not name.
+  Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1884#issuecomment-6060989375,
   2026-10-08 13:31 UTC). Supersedes the closed list of system headers of
   https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715. The
