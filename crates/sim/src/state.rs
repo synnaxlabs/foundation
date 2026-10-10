@@ -297,13 +297,14 @@ impl State {
         let Some(at) = self.now.0.checked_add(deadline.0 - now.0) else {
             return Due::Never;
         };
-        match self.nodes[node].arm_max {
-            Some(max) if at <= self.last().0 => {
-                let early = self.now.0.saturating_add(max.nanos().unsigned_abs());
-                Due::At(Monotonic(at.min(early)))
-            }
-            _ => Due::At(Monotonic(at)),
+        let Some(max) = self.nodes[node].arm_max else {
+            return Due::At(Monotonic(at));
+        };
+        let early = self.now.0.saturating_add(max.nanos().unsigned_abs());
+        if at <= early || at > self.last().0 {
+            return Due::At(Monotonic(at));
         }
+        Due::At(Monotonic(early))
     }
 
     /// Adds timer `key` of `thread`, which wakes `waker` at true time `at`. A timer of
