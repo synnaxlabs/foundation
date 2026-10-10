@@ -483,6 +483,60 @@ fn the_rust_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the Rust names {drawn:?}");
 }
 
+/// Only `ffi::test` binds a function of a server, so only a test builds one, and only
+/// the test server reaches `setDefaultConfig`, which `cargo xtask open62541` lets call
+/// the global clock. The scan skips the paths that hold only tests.
+#[test]
+fn the_rust_outside_tests_binds_no_server() {
+    let skipped = ["src/link.rs", "src/connection/tests.rs"];
+    let mut bound = Vec::new();
+    for (path, text) in rust_files(&skipped) {
+        let text = if path.ends_with("src/ffi.rs") {
+            let test = "#[cfg(test)]\npub(crate) mod test {";
+            text.split_once(test).expect("ffi.rs holds `ffi::test`").0
+        } else {
+            &text
+        };
+        for name in ["UA_Server", "shim_server_new"] {
+            if text.contains(name) {
+                bound.push(format!("{}: {name}", path.display()));
+            }
+        }
+    }
+    assert!(bound.is_empty(), "the Rust outside tests names {bound:?}");
+}
+
+/// The C builds with `-ffunction-sections`, and Rust links with `--gc-sections`, so
+/// this test binary keeps only the functions that some code, also a test, reaches.
+/// `cargo xtask open62541` lets each of these call the global clock because no code
+/// reaches it.
+#[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "needs GNU nm")]
+fn the_linker_drops_each_clock_call_that_no_code_reaches() {
+    let kept = names(&[std::env::current_exe().unwrap()], "--defined-only");
+    assert!(
+        kept.contains("setDefaultConfig"),
+        "nm gives no local symbol"
+    );
+    let reached: Vec<_> = ["interruptServer", "UA_random_seed"]
+        .into_iter()
+        .filter(|name| kept.contains(*name))
+        .collect();
+    assert!(reached.is_empty(), "the test binary keeps {reached:?}");
+}
+
+/// `cargo xtask open62541` lets the encryption of an ECC user token call the global
+/// clock because encryption is off.
+#[test]
+fn the_shim_refuses_encryption() {
+    let errors =
+        check_shim("#pragma GCC diagnostic pop", "#define UA_ENABLE_ENCRYPTION");
+    assert!(
+        errors.contains("connector-opcua builds open62541 with encryption off"),
+        "{errors}"
+    );
+}
+
 /// When this test binary links the address sanitizer, the sanitizer instruments the C
 /// and `build.rs` sets `cfg(asan)`, so neither the C checks nor the tests of the
 /// poisoning in `alloc` can turn off unseen.
