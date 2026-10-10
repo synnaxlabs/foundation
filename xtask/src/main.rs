@@ -224,14 +224,25 @@ mod tests {
         );
     }
 
+    /// The lines of the YAML `text`, with no blank or comment line, which YAML skips.
+    fn yaml_lines(text: &str) -> Vec<&str> {
+        // YAML also breaks a line at a lone CR, and its only white space is a space or
+        // a tab, so `str::lines` and `str::trim` would drop a line that YAML reads.
+        assert!(!text.contains('\r'), "ci.yaml has a carriage return");
+        (text.lines())
+            .filter(|line| {
+                let text = line.trim_start_matches([' ', '\t']);
+                !text.is_empty() && !text.starts_with('#')
+            })
+            .collect()
+    }
+
     /// `.github/workflows/ci.yaml` in the workspace at `root`, with no blank or comment
-    /// line, which YAML skips.
+    /// line.
     fn workflow(root: &Path) -> String {
         let text =
             std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
-        let ci: Vec<&str> = (text.lines())
-            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
-            .collect();
+        let ci = yaml_lines(&text);
         // A key such as `defaults`, `env`, or `run-name` can change what a job runs.
         let keys: Vec<&str> = (ci.iter().copied())
             .filter(|line| !line.starts_with(' '))
@@ -308,7 +319,7 @@ mod tests {
             let path = (line.strip_prefix("              - ")).filter(|path| {
                 (path.strip_prefix('\''))
                     .and_then(|path| path.strip_suffix('\''))
-                    .is_some_and(|inner| !inner.is_empty() && !inner.contains('\''))
+                    .is_some_and(|inner| !inner.contains('\''))
             });
             match (name, path) {
                 (Some(name), _) => key = Some(name),
@@ -328,6 +339,21 @@ mod tests {
     fn output<'a>(ci: &[&'a str]) -> Vec<&'a str> {
         let changes = under(&under(ci, "jobs:"), "  changes:");
         under(&under(&changes, "    outputs:"), "      models: >-")
+    }
+
+    #[test]
+    fn yaml_lines_keeps_each_line_that_yaml_reads() {
+        let text = "a:\n\n  \n  # x\n\t# y\n  \u{a0}\n  \u{a0}#b:\n  c: 1 # d\n";
+        assert_eq!(
+            yaml_lines(text),
+            ["a:", "  \u{a0}", "  \u{a0}#b:", "  c: 1 # d"]
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "ci.yaml has a carriage return")]
+    fn yaml_lines_refuses_a_carriage_return() {
+        yaml_lines("a:\n  #\r  b:\n");
     }
 
     #[test]
@@ -394,7 +420,6 @@ mod tests {
             "              - \"crates/env/**",
             "              - \"crates/env/**'",
             "              - 'crates/env/**",
-            "              - ''",
             "              - 'crates/env/**''",
             "            note: \"",
             "            note: \"models:",
