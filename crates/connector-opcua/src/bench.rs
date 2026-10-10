@@ -277,8 +277,8 @@ impl Manager {
         self.answers.count.get()
     }
 
-    /// Asks each client to close its session, drives the manager until the server is
-    /// stopped with nothing due on the loop, then deletes them all.
+    /// Asks each client to close its session, stops the server, deletes it with
+    /// `delete_server`, then deletes the clients.
     async fn close(mut self) {
         for client in &self.clients {
             // SAFETY: the client lives.
