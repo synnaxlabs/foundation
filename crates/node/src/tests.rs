@@ -3799,7 +3799,7 @@ mod port {
         const OPEN: Span = Span::from_nanos(10_000_000);
         /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
         /// fails from [`OPEN`] stops the group in the sim.
-        const WRITE: i64 = 1_793_836_019;
+        const WRITE: i64 = 1_793_874_296;
 
         /// Why the group stops when a write of [`LOG`] fails.
         fn write_failed() -> ::mesh::Stopped {
@@ -4752,8 +4752,9 @@ mod port {
         }
 
         /// A task that panics after the group stops, before the node sees the stop:
-        /// `join` gives the panic. At [`WRITE`], three idle tasks that wake at that
-        /// instant make the sim run the group's stop first.
+        /// `join` gives the panic. At [`WRITE`], four idle tasks that wake at that
+        /// instant make the sim run the group's stop, then this task, before the node
+        /// sees the stop. The task asserts that the group stopped before it panics.
         #[test]
         fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -4761,7 +4762,7 @@ mod port {
             let node = start_alone(&host);
             let at =
                 sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let own = host.clone();
                 node.spawn(move |_| async move {
                     own.clock().sleep_until(at).await;
@@ -4769,8 +4770,12 @@ mod port {
                 });
             }
             let own = host.clone();
-            node.spawn(move |_| async move {
+            node.operate(move |ops| async move {
+                let mut watch = ops.mesh().watch(INDEX);
                 own.clock().sleep_until(at).await;
+                let mut next = pin!(watch.next());
+                let polled = poll_fn(|cx| Poll::Ready(next.as_mut().poll(cx))).await;
+                assert_eq!(polled, Poll::Ready(Err(write_failed())));
                 panic!("a task panics");
             });
             assert_eq!(sim.run_for(OPEN), Ok(()));
