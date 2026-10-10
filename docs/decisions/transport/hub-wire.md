@@ -30,11 +30,16 @@
   no series is not valid, since a frame holds its index. Nor is a head whose range ends
   past `u64::MAX`, because the position after it does not fit (`laptop.architect`,
   2026-10-10T03:45:10Z,
-  https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6093432445). Nor is a
-  head of a reader session on the backfill path, since a session gets only live frames,
-  or one that starts before the end of the head before it, since the heads of a session
-  rise. `wire::hub::Reader` checks these two after the places, so `hub` takes the frames
-  of a session in seq order (`laptop.architect`, 2026-10-10T03:41:52Z,
+  https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6093432445).
+  `types::frame::Range::end` gives that position, or `None` past `u64::MAX`, and `wire`
+  and `hub` call it, so the rule is in one place (`laptop.architect`,
+  2026-10-10T09:04:25Z,
+  https://github.com/synnaxlabs/foundation/issues/2244#issuecomment-6095943720; lost:
+  private fields and a checked `Range::new`, since callers build `Range` as a literal).
+  Nor is a head of a reader session on the backfill path, since a session gets only live
+  frames, or one that starts before the end of the head before it, since the heads of a
+  session rise. `wire::hub::Reader` checks these two after the places, so `hub` takes
+  the frames of a session in seq order (`laptop.architect`, 2026-10-10T03:41:52Z,
   https://github.com/synnaxlabs/foundation/pull/2208#issuecomment-6093407122; lost: a
   `max` and a saturating add in `hub`, which let such a frame reach the user). The home
   checks each key as it arrives and never allocates by the peer's count. A head with

@@ -91,9 +91,9 @@
   then waits for its idle time, as when the link loses the close. Each clone of the
   transport and each session lives in a future that shard 0 drops before it waits for
   the port, in a task of the mesh that it waits for, or in a task of the hub, which ends
-  at its next poll after the hub lets go of the region, as the doc of `hub::Hub::new`
-  states (#2185, by `laptop.architect`:
-  https://github.com/synnaxlabs/foundation/issues/2185#issuecomment-6089685674). So,
+  at its next poll after the hub and each value and future that it gave drop (the doc
+  of `hub::Hub::new`; `laptop.architect`, 2026-10-10T09:04:25Z:
+  https://github.com/synnaxlabs/foundation/issues/2244#issuecomment-6095943720). So,
   unless the socket broke, a leak holds the stop. The drop of each session closes it.
   The drop of the transport closes each session that no caller accepted and each
   handshake in flight, its own dials too (#2084, by `laptop.architect-2`, 02:57 UTC:
