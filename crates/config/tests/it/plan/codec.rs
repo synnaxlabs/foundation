@@ -628,8 +628,9 @@ proptest! {
 
 #[test]
 fn decodes_the_fuzz_inputs_to_the_fixture_plans() {
-    let added = include_bytes!("../../../../../oracles/fuzz/config_plan/added");
-    let changed = include_bytes!("../../../../../oracles/fuzz/config_plan/changed");
+    let added = include_bytes!("../../../../../oracles/fuzz/config_plan/added_status");
+    let changed =
+        include_bytes!("../../../../../oracles/fuzz/config_plan/changed_status");
     let empty = include_bytes!("../../../../../oracles/fuzz/config_plan/empty");
     let found = [added.as_slice(), changed].map(Plan::decode);
     assert_eq!(found, plans().map(|plan| Ok(spanless(plan))));
@@ -637,4 +638,18 @@ fn decodes_the_fuzz_inputs_to_the_fixture_plans() {
         Plan::decode(empty).map(|plan| plan.encode()),
         Ok(bytes(&[]))
     );
+}
+
+/// The fixture plans from before connectors had status channels still decode.
+#[test]
+fn decodes_the_fuzz_inputs_from_before_the_status_channels() {
+    let added = include_bytes!("../../../../../oracles/fuzz/config_plan/added");
+    let changed = include_bytes!("../../../../../oracles/fuzz/config_plan/changed");
+    let [mut plan, _] = plans();
+    let kept = |name: &types::name::Name| !name.as_str().contains(".status.");
+    plan.changes.retain(|name, _| kept(name));
+    plan.homes.retain(|name, _| kept(name));
+    assert_eq!(Plan::decode(added), Ok(spanless(plan)));
+    let decoded = Plan::decode(changed).map(|plan| plan.encode());
+    assert_eq!(decoded.as_deref(), Ok(changed.as_slice()));
 }
