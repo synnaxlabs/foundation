@@ -9,6 +9,7 @@ use std::ffi::{CString, c_void};
 use std::future::{Future as _, poll_fn};
 use std::mem::ManuallyDrop;
 use std::net::{IpAddr, SocketAddr};
+use std::panic::{self, AssertUnwindSafe};
 use std::pin::{Pin, pin};
 use std::ptr::{self, NonNull};
 use std::task::{Context, Poll, Waker};
@@ -132,8 +133,8 @@ struct Answers {
 impl Manager {
     /// Makes the manager on `clock` and `net`, with its listener on `address` and port
     /// 4840, and drives it until each client is connected. Then it runs `body` on the
-    /// manager, and closes each session and deletes the server and the clients. A
-    /// panic in `body` leaks them.
+    /// manager, and closes each session and deletes the server and the clients, also
+    /// after a panic in the connect or in `body`, which it then resumes.
     ///
     /// # Panics
     ///
@@ -147,25 +148,24 @@ impl Manager {
         idle: usize,
         body: impl AsyncFnOnce(&Self) -> T,
     ) -> T {
-        let this = Self::new(clock, net, address, idle).await;
-        let value = body(&this).await;
+        let this = Self::new(Clock::clone(&clock), net, address, idle);
+        let value = caught(async {
+            this.connect(&clock).await;
+            body(&this).await
+        })
+        .await;
         this.close().await;
-        value
+        value.unwrap_or_else(|panic| panic::resume_unwind(panic))
     }
 
-    async fn new(clock: Clock, net: Net, address: IpAddr, idle: usize) -> Self {
+    fn new(clock: Clock, net: Net, address: IpAddr, idle: usize) -> Self {
         let sessions = u16::try_from(idle.saturating_add(1))
             .expect("open62541 counts sessions in 16 bits");
         let local = SocketAddr::new(address, PORT);
         let rng = &mut Rng::from_seed(0);
-        let manager = connection::Manager::listening(
-            Clock::clone(&clock),
-            net,
-            local,
-            u32::from(sessions),
-            rng,
-        )
-        .expect("the port is free");
+        let manager =
+            connection::Manager::listening(clock, net, local, u32::from(sessions), rng)
+                .expect("the port is free");
         let events = manager.events();
         // SAFETY: the member takes its own loop.
         let status = Status(unsafe { (events.members().start)(events.raw()) });
@@ -198,14 +198,12 @@ impl Manager {
                 client
             })
             .collect();
-        let this = Self {
+        Self {
             clients,
             server,
             answers: Box::default(),
             connections: ManuallyDrop::new(manager),
-        };
-        this.connect(&clock).await;
-        this
+        }
     }
 
     /// Drives the manager until each client is connected.
@@ -375,6 +373,18 @@ unsafe extern "C" fn answer(
     }
 }
 
+/// Runs `future` to its end, and gives the panic of a poll in place of a value.
+async fn caught<F: Future>(future: F) -> std::thread::Result<F::Output> {
+    let mut future = pin!(future);
+    poll_fn(|cx| {
+        match panic::catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+            Ok(poll) => poll.map(Ok),
+            Err(panic) => Poll::Ready(Err(panic)),
+        }
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use std::panic::{self, AssertUnwindSafe};
@@ -383,7 +393,7 @@ mod tests {
     use sim::{Sim, node};
     use types::time::Span;
 
-    use super::{Client, Manager};
+    use super::{Client, Manager, caught};
     use crate::ffi;
 
     /// The delay of the default link.
@@ -399,6 +409,24 @@ mod tests {
             let (clock, address) = (node.clock(), node.addresses()[0]);
             let body = async |manager: &Manager| body(manager, clock).await;
             Manager::scope(node.clock(), node.net(), address, idle, body).await;
+        })
+        .expect("the run ends");
+    }
+
+    /// A scope closes after a panic in its body, so the next scope takes its port.
+    #[test]
+    fn a_scope_whose_body_panics_frees_its_port() {
+        let mut sim = Sim::new(sim::Config::default());
+        let node = sim.node(node::Config::default());
+        sim.run_on(&node, move |node, _| async move {
+            let address = node.addresses()[0];
+            let body = async |_: &Manager| panic!("the body panics");
+            let scope = Manager::scope(node.clock(), node.net(), address, 0, body);
+            let panic = caught(scope).await.expect_err("the body panics");
+            assert_eq!(panic.downcast_ref(), Some(&"the body panics"));
+            let body = async |manager: &Manager| manager.connected();
+            let scope = Manager::scope(node.clock(), node.net(), address, 0, body);
+            assert_eq!(scope.await, 1);
         })
         .expect("the run ends");
     }
