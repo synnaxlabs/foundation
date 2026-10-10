@@ -84,8 +84,9 @@ impl Supervisor {
     ///
     /// # Panics
     ///
-    /// When the status channels of `name` do not open for a reason other than a
-    /// stopped mesh: `node` did not define them, or homed them on another node. When
+    /// When the status channels of `name` do not open, before a cancel, for a reason
+    /// other than a stopped mesh: `node` did not define them, or homed them on another
+    /// node. When
     /// a status name of `name` is longer than [`Name::MAX_BYTES`], which the plan
     /// refuses. When the home refuses a status frame for a cause that only a defect of
     /// `connector` gives. Or when a status frame is larger than the largest block of
@@ -113,10 +114,17 @@ impl Supervisor {
         ));
         let mut cancelled = pin!(cancel.wait());
         // An open that is ready at once wins, so a cancel before the call still
-        // writes `state` 2.
-        let opened = poll_fn(|cx| match open.as_mut().poll(cx) {
-            Poll::Ready(opened) => Poll::Ready(Some(opened)),
-            Poll::Pending => cancelled.as_mut().poll(cx).map(|()| None),
+        // writes `state` 2. Later a cancel wins, as the caller may then have removed
+        // the status channels.
+        let mut first = true;
+        let opened = poll_fn(|cx| {
+            if !std::mem::take(&mut first) && cancelled.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(None);
+            }
+            match open.as_mut().poll(cx) {
+                Poll::Ready(opened) => Poll::Ready(Some(opened)),
+                Poll::Pending => cancelled.as_mut().poll(cx).map(|()| None),
+            }
         });
         let (writer, status) = match opened.await {
             None | Some(Err(hub::writer::Error::Mesh(_))) => return Ok(()),

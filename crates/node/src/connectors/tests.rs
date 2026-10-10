@@ -250,3 +250,69 @@ fn a_connector_whose_run_returned_starts_no_run_until_it_changes() {
     let starts = starts(None, steps);
     assert_eq!(starts, [start("plant.a", 0, 0), start("plant.a", 2_000, 1)]);
 }
+
+/// A node gets its first mesh time 1 s after its hub opened, and the spec that the
+/// mesh uses at that time removes the connector whose run waits to open its status.
+#[test]
+fn a_removal_as_the_mesh_time_arrives_ends_the_run_that_waits_for_it() {
+    let mut sim = ::sim::Sim::new(::sim::Config::default());
+    let node = sim.node(::sim::node::Config::default());
+    let run = sim.run_on(&node, move |node, tasks| async move {
+        let starts = Starts::default();
+        let kinds = Table::new().with(
+            "quick",
+            Hold {
+                linger: Some(Span::ZERO),
+                brief: false,
+                starts: Arc::clone(&starts),
+            },
+        );
+        let env = hub::testing::Env {
+            files: node.files(),
+            clock: node.clock(),
+            wall: node.wall(),
+            entropy: node.entropy(),
+            tasks: tasks.clone(),
+        };
+        let clock = node.clock();
+        let start = clock.now();
+        let hub = hub::testing::open_unsynced(env, ms(1_000)).await;
+        let config = connector::supervisor::Config {
+            kinds: Arc::new(kinds),
+            clock: clock.clone(),
+            entropy: node.entropy(),
+            net: node.net(),
+            tasks: tasks.clone(),
+            hub: hub.clone(),
+        };
+        let runs =
+            std::rc::Rc::new(std::cell::RefCell::new(Runs::new(config, name(NODE))));
+        let mut placed = definitions(&[("plant.a", "quick", NODE, 0)]);
+        // The channels of `plant.b` let a probe learn when the mesh time arrives.
+        let probe = definitions(&[("plant.b", "quick", "plant.edge", 0)]);
+        placed.extend(probe);
+        hub.set_definitions(&placed);
+        // The probe waits for the mesh time before the run does, so it removes the
+        // connector in the instant that the time arrives, before the run polls again.
+        let (probe_hub, probe_runs) = (hub.clone(), std::rc::Rc::clone(&runs));
+        tasks.spawn(async move {
+            let config = hub::writer::Config {
+                subject: name("plant.probe"),
+                authority: types::authority::Authority::ABSOLUTE,
+                lease: None,
+                channels: vec![name("plant.b.status.state")],
+            };
+            let writer = probe_hub.writer(config).await.expect("the probe opens");
+            drop(writer);
+            let empty = definitions(&[]);
+            probe_hub.set_definitions(&empty);
+            probe_runs.borrow_mut().apply(&empty);
+        });
+        runs.borrow_mut().apply(&placed);
+        clock.sleep_until(start + ms(10_000)).await;
+        let started = starts.lock().expect("no panic").len();
+        drop(runs);
+        started
+    });
+    assert_eq!(run, Ok(0));
+}
