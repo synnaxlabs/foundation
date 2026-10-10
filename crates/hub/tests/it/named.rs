@@ -441,6 +441,32 @@ fn changes_nothing_on_the_ack_of_a_reader_that_ended_on_a_failed_sync() {
 }
 
 #[test]
+fn changes_nothing_on_an_ack_after_a_failed_sync_of_another_index() {
+    run(44, |test| async move {
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        let mut writer = test.writer("w", &["value"]).await;
+        let mut other = test.writer("o", &["value-b"]).await;
+        let now = test.now();
+        write(&mut writer, &[now], &[7]);
+        write(&mut writer, &[now + 1], &[8]);
+        test.clock.sleep(SETTLE).await;
+        reader.next().await.expect("a frame");
+        let last = reader.next().await.expect("a frame").position();
+        test.node.fail_file(FilePath::new(RING), Operation::Sync);
+        write_series(&mut other, &[(3, &[now + 2]), (4, &[9])]);
+        test.clock.sleep(SETTLE).await;
+        let ended = reader.next().await.expect_err("the sync failed");
+        assert!(matches!(ended, Ended::Buffer(_)), "{ended:?}");
+        reader.ack(last);
+        drop(reader);
+        let open = named("a", "r", Mode::Complete, Span::SECOND);
+        let mut reader = test.hub.reader(open).await.expect("opens");
+        assert_eq!(reader.next().await.expect_err("behind"), Ended::Behind);
+    });
+}
+
+#[test]
 fn changes_nothing_on_the_ack_of_a_replaced_reader() {
     run(28, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);

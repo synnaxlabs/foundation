@@ -329,12 +329,13 @@ enum Source {
     Remote(Box<Remote>),
 }
 
-/// A reader session at this node's home, with the grant and ack of a complete one, and
-/// the charge of each frame it gave back.
+/// A reader session at this node's home, with the grant and ack of a complete one
+/// until it gave an end, and the charge of each frame it gave back.
 #[derive(Debug)]
 struct Local {
     session: Session,
-    /// `None` for a latest reader.
+    /// `None` for a latest reader, and once `next` gave an end, so no later ack moves
+    /// the home position.
     complete: Option<(Complete, u64)>,
 }
 
@@ -491,7 +492,13 @@ impl Reader {
         }
         async move {
             let (frame, lens) = match &mut self.source {
-                Source::Local(local) => local.session.take().await?,
+                Source::Local(local) => match local.session.take().await {
+                    Ok(taken) => taken,
+                    Err(stop) => {
+                        local.complete = None;
+                        return Err(stop.into());
+                    }
+                },
                 Source::Remote(remote) => remote.take().await?,
             };
             Ok(Received {
