@@ -285,7 +285,7 @@ impl Reply {
             Self::Head(head) => {
                 assert!(head.series > 0, "a head names at least one series");
                 assert!(
-                    ends(head.range),
+                    end(head.range).is_some(),
                     "a head's range ends at or below the highest seq"
                 );
                 out.put(&[HEAD, path_byte(head.path)]);
@@ -327,7 +327,7 @@ impl Reply {
                     return Err(Error::Series);
                 }
                 let range = Range { seq, count };
-                if !ends(range) {
+                if end(range).is_none() {
                     return Err(Error::Range { seq, count });
                 }
                 Ok(Self::Head(Head {
@@ -724,9 +724,9 @@ fn run<const N: usize>(message: &[u8]) -> Result<&[[u8; N]], Error> {
     }
 }
 
-/// Whether `range` ends at or below `u64::MAX`.
-fn ends(range: Range) -> bool {
-    range.seq.checked_add(u64::from(range.count)).is_some()
+/// The seq after `range`, or `None` past `u64::MAX`.
+fn end(range: Range) -> Option<u64> {
+    range.seq.checked_add(u64::from(range.count))
 }
 
 fn path_byte(path: Path) -> u8 {

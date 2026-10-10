@@ -1,4 +1,4 @@
-use types::frame::{Path, Range};
+use types::frame::Path;
 
 use super::{BEHIND, Error, HEAD, Head, Mode, OPENED, Open, Reply, ends, rest_of_run};
 use crate::common::body;
@@ -178,12 +178,11 @@ impl Reader {
         if head.path == Path::Backfill {
             return Err(Error::Backfill);
         }
-        let Range { seq, count } = head.range;
+        let seq = head.range.seq;
         if seq < self.end {
             return Err(Error::Seq { seq, end: self.end });
         }
-        Ok(seq
-            .checked_add(u64::from(count))
+        Ok(super::end(head.range)
             .expect("Reply::decode refuses a range past the highest seq"))
     }
 }
@@ -197,6 +196,7 @@ mod tests {
     use super::*;
     use crate::hub::tests::{cut, encode_ends, encode_reply};
     use proptest::prelude::*;
+    use types::frame::Range;
 
     fn open(channels: u32) -> Open {
         Open {
