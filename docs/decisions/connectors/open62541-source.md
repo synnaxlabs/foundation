@@ -225,7 +225,8 @@
   certificate runs before. Its drop runs the queued delayed callbacks in at most 64
   passes, then aborts: a callback that queues itself at each pass is a defect. The
   hidden module `bench`, behind the feature `sim`, gives the benchmark and the
-  allocation test a client on the loop. Decided by `laptop.architect-2`
+  allocation test a client on the loop, and a connection manager with the test server
+  and its clients on the loop of the manager. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211,
   2026-10-08 19:05 UTC); the abort supersedes "panics" in that comment
   (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
@@ -301,16 +302,16 @@
   closes the listen connection with a warning, also an error of one stream after which
   the listener stays usable, because `env` gives both as `Error::Io`. This holds only
   while the one server is the test server: before a server serves users, the manager
-  must keep listening after an error of one stream (#2005), and a pass must move only
-  the connections that are woken, since a pass moves each connection (about 107 ns
-  each on the bench of #435 6b3, on box2, an Intel Xeon Platinum 8488C). Deferred by
-  `laptop.architect-2`
+  must keep listening after an error of one stream (#2005). Also before a server serves
+  users, a pass must move only the connections that are woken: a pass moves each
+  connection, about 63 to 107 ns each by the load of the host on the bench of #435 6b3,
+  on box2, an Intel Xeon Platinum 8488C. Deferred by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6092329880,
   2026-10-10 01:45 UTC). Lost: the manager binds its own listener with `Net::listen`
   from the parameters. `address` is a host name and `Net::listen` takes a socket
-  address, so the open would resolve in a hook that must
-  give `ESTABLISHED` before it returns, and an owner that binds port 0 could not learn
-  the port before it builds the URL of its server. Also lost: one constructor with an
+  address, so the open would resolve in a hook that must give `ESTABLISHED` before it
+  returns, and an owner that binds port 0 could not learn the port before it builds the
+  URL of its server. Also lost: one constructor with an
   `Option<Listener>`, which a client gives as a literal `None` (`docs/claude/rust.md`;
   `laptop.director`,
   https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089322178,
