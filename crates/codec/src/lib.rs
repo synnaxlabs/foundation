@@ -2553,6 +2553,16 @@ mod tests {
                     VECTOR_LEN,
                     truncated(1, 772),
                 ),
+                (
+                    Type::Array {
+                        element: Scalar::U8,
+                        len: 2,
+                    },
+                    1024,
+                    &ints[..],
+                    VECTOR_LEN,
+                    truncated(1, 772),
+                ),
                 (Type::Bytes, count, &text, 4 * VECTOR_LEN, truncated(3, 3)),
             ] {
                 let mut encoded = encode_type(data_type, count, values);
