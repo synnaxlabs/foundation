@@ -442,6 +442,35 @@ mod tests {
         assert_eq!(under, None, "(held, peak) with the peak under a count held");
     }
 
+    /// Holds the lock through the private field, as no public call holds it while a
+    /// test runs. The loom model runs [`Counts`], so this test pins that each call of
+    /// [`Bytes`] that reads or sets the peak takes the lock.
+    #[test]
+    fn reads_and_resets_the_peak_only_under_the_lock() {
+        let bytes = Bytes::new();
+        bytes.counts.locked.store(true, Relaxed);
+        let calls: [&(dyn Fn() + Sync); 3] =
+            [&|| _ = bytes.peak(), &|| bytes.reset_peak(), &|| {
+                drop(format!("{bytes:?}"));
+            }];
+        let finished = thread::scope(|scope| {
+            #[expect(clippy::disallowed_methods, reason = "a test owns its threads")]
+            let threads = calls.map(|call| scope.spawn(call));
+            for _ in 0..10_000 {
+                thread::yield_now();
+            }
+            let finished = threads
+                .each_ref()
+                .map(thread::ScopedJoinHandle::is_finished);
+            bytes.counts.locked.store(false, Release);
+            finished
+        });
+        assert_eq!(
+            finished, [false; 3],
+            "(peak, reset_peak, Debug) finished while the lock was held"
+        );
+    }
+
     #[test]
     fn shows_the_bytes_held() {
         let bytes = Bytes::default();
@@ -482,6 +511,8 @@ mod model {
         }
     }
 
+    /// Runs [`Counts`], not [`Bytes`]: `Bytes` keeps std's atomics for its `const`
+    /// `new`, and a stress test on std threads makes the race only with enough cores.
     #[test]
     fn peaks_at_or_over_each_count_held_while_another_thread_allocates() {
         loom::model(|| {
