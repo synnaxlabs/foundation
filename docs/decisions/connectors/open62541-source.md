@@ -287,7 +287,13 @@
   2026-10-09 17:51 UTC). The moves after each `run`, and the `CLOSING` of the first
   close or an error before it: approved by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086768731,
-  2026-10-09 18:21 UTC).
+  2026-10-09 18:21 UTC). The listen connection after an accept, and one accept between
+  two runs of the loop: approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2258#issuecomment-6099177882,
+  2026-10-10 15:37 UTC). Supersedes
+  https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086285343 and
+  https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086768731 for the
+  listen connection after an accept.
   A server listens on the listener that its owner gives the manager at
   `Manager::listening`. Each accepted stream is a new connection that gets
   `ESTABLISHED`, with the context of the listen connection at the accept. A drive
@@ -300,11 +306,10 @@
   burst of 150 accepts in one pass held 149 secure channels against the limit of 100 in
   the `sim` test of #2255. After an accept, the drive moves the listen connection on
   only after the next run, so an accept costs one move of the listen connection, not a
-  pass of the table. Lost:
-  a wake and a full pass after each accept, so a burst of n streams cost n passes; and
-  the manager gives each queued `CLOSING` after an accept, so it would run work of the
-  loop, and a `CLOSING` would come by two paths. As the POSIX manager does, the first
-  `ESTABLISHED` of the listen gives `listen-address`, the host
+  pass of the table. Lost: a wake and a full pass after each accept, so a burst of n
+  streams cost n passes; and the manager gives each queued `CLOSING` after an accept, so
+  it would run work of the loop, and a `CLOSING` would come by two paths. As the POSIX
+  manager does, the first `ESTABLISHED` of the listen gives `listen-address`, the host
   of its `address` param, and `listen-port`, from which the server makes its discovery
   URL, and that of an accepted connection gives `remote-address`. A listen with no
   `address` gives the address of the listener as `listen-address`, where the POSIX
