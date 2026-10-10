@@ -43,7 +43,9 @@ it. Report a gap in a rule only when the rule on `main` today still lets it thro
 
 Check, with file and line at the merge commit:
 
-1. **Tests.** Each fails when the change is reverted. Reason from the diff first. Only
+1. **Tests.** Each fails when the change is reverted. Work that no test can count has
+   the bench line of `testing.md` ("Test what the change is for") in its place.
+   Reason from the diff first. Only
    when you cannot settle it, revert the change that is not a test and run one
    `cargo test -p <crate> <filter>`. Build only with `-p <crate>`, with no lock. Never
    run `--workspace`, Miri, loom, or shuttle. Run `cargo mutants` or a bench only in
