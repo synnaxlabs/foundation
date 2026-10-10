@@ -891,6 +891,28 @@ mod buffer {
         assert_eq!(run_on_disk(&mut sim, &host, 2 * smallest), Ok(()));
     }
 
+    /// The test rig of `tests/it` gives each core 8 MiB of disk.
+    #[test]
+    fn a_disk_budget_of_8_mib_for_each_core_starts_a_host_of_any_size() {
+        for cores in [1, 64, 1024] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, cores);
+            let per_core =
+                |bytes: u64| Size::from_bytes(u64::try_from(cores).unwrap() * bytes);
+            let node = Node::start(Config {
+                budget: Budget {
+                    pool: per_core(1 << 20),
+                    disk: per_core(8 << 20),
+                },
+                ..config(&host, Size::MEBIBYTE, Box::new(heap))
+            });
+            assert_eq!(host.shard_starts().len(), cores, "{cores} cores");
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()), "{cores} cores");
+        }
+    }
+
     /// The core count comes from the host. With 2^43 cores no `u64` budget holds a
     /// ring on each shard, the largest too, so `min` is the largest budget.
     #[test]
