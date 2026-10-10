@@ -77,7 +77,7 @@ fn config(block: &Block) -> Document {
 pub(crate) struct Writes {
     /// The channels that its kind writes.
     channels: Vec<Name>,
-    /// The channels that it implies, by name. Only it writes them.
+    /// The channels that it implies, by name.
     implied: Vec<(Name, Kind<Name>)>,
 }
 
