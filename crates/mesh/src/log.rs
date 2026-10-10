@@ -205,11 +205,7 @@ impl Log {
         dir: PathBuf,
         pool: Rc<Pool>,
     ) -> Result<(Self, Stored), Error> {
-        let largest = pool.largest();
-        if largest < SECTOR {
-            let requested = SECTOR;
-            return Err(Error::Pool(block::Error::TooLarge { requested, largest }));
-        }
+        chunk(&pool)?;
         files.create_dir(&dir).await?;
         let lock = files.open(&dir.join(LOCK), Mode::Create { len: 0 }).await?;
         let names = files.list(&dir).await?;
@@ -405,7 +401,7 @@ async fn write_in_blocks(
     at: u64,
     bytes: &mut &[u8],
 ) -> Result<(), Error> {
-    let chunk = chunk(pool);
+    let chunk = chunk(pool)?;
     while !bytes.is_empty() {
         let end = narrow(at).saturating_add(bytes.len());
         let over = end
@@ -1299,8 +1295,8 @@ mod tests {
 
     #[test]
     fn a_block_is_the_most_whole_sectors_that_the_pool_gives() {
-        assert_eq!(chunk(&odd_pool()), 3 * SECTOR);
-        assert_eq!(chunk(&create_pool()), CHUNK);
+        assert_eq!(chunk(&odd_pool()), Ok(3 * SECTOR));
+        assert_eq!(chunk(&create_pool()), Ok(CHUNK));
     }
 
     // The header of the second record is at bytes 1,770 to 1,804, in one sector and
@@ -2544,7 +2540,7 @@ mod tests {
                 let memory = block::Heap::new(config.reservation());
                 let pool = Rc::new(Pool::new(config, memory));
                 let held = pool.alloc(pool.largest()).unwrap();
-                let expected = pool.alloc(chunk(&pool)).unwrap_err();
+                let expected = pool.alloc(chunk(&pool).unwrap()).unwrap_err();
                 let error = Log::open(node.files(), DIR.into(), Rc::clone(&pool))
                     .await
                     .unwrap_err();

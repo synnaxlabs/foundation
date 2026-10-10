@@ -26,17 +26,23 @@ pub(crate) fn check(bytes: &[u8]) -> [u8; CHECK] {
 }
 
 /// The most bytes in one block of a read or a write: [`CHUNK`], or less when the pool
-/// has no such block. It is whole sectors, so 0 when the largest block of `pool` is
-/// under one sector.
-pub(crate) fn chunk(pool: &Pool) -> usize {
+/// has no such block. It is whole sectors.
+///
+/// # Errors
+///
+/// [`block::Error::TooLarge`] when the largest block of `pool` is under one sector.
+pub(crate) fn chunk(pool: &Pool) -> Result<usize, block::Error> {
     let largest = pool.largest();
-    largest.saturating_sub(largest % files::SECTOR).min(CHUNK)
+    if largest < files::SECTOR {
+        let requested = files::SECTOR;
+        return Err(block::Error::TooLarge { requested, largest });
+    }
+    Ok(largest.saturating_sub(largest % files::SECTOR).min(CHUNK))
 }
 
-/// The bytes of `file`, read one block of `pool` at a time. The largest block of
-/// `pool` is one sector or more.
+/// The bytes of `file`, read one block of `pool` at a time.
 pub(crate) async fn read(file: &File, pool: &Pool) -> Result<Vec<u8>, Failed> {
-    let chunk = chunk(pool);
+    let chunk = chunk(pool).map_err(Failed::Pool)?;
     let mut bytes = Vec::new();
     while wide(bytes.len()) < file.len() {
         let offset = wide(bytes.len());

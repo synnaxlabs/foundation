@@ -24,14 +24,14 @@ const VERSION: u16 = 1;
 
 /// Writes `given` to `dir` when `logged` is false, or checks it against the founding
 /// in `dir`. `logged` states that the log of `dir` holds a record. The caller holds
-/// the lock of the log, and the largest block of `pool` is one sector or more.
+/// the lock of the log.
 ///
 /// # Errors
 ///
 /// - [`Error::Founding`] when `dir` holds another founding.
 /// - [`Error::Unfounded`] when the log holds a record and `dir` holds no founding, or
 ///   a founding that does not read back whole.
-/// - [`Error::Pool`] when the pool has no block.
+/// - [`Error::Pool`] when the pool has no block, or no block of one sector.
 /// - [`Error::Files`] when a file call fails.
 pub(super) async fn keep(
     files: &Files,
@@ -49,9 +49,9 @@ pub(super) async fn keep(
     if !names.iter().any(|name| name == Path::new(FILE)) {
         return Err(unfounded());
     }
-    let file = files.open(&path, Mode::Read).await.map_err(Error::Files)?;
-    let stored = file::read(&file, pool).await;
-    file.close().await;
+    let opened = files.open(&path, Mode::Read).await.map_err(Error::Files)?;
+    let stored = file::read(&opened, pool).await;
+    opened.close().await;
     let stored = stored?;
     let (check, rest) = stored.split_first_chunk::<CHECK>().ok_or_else(unfounded)?;
     let (version, body) = rest.split_first_chunk::<2>().ok_or_else(unfounded)?;
@@ -90,7 +90,7 @@ async fn write(
         .await
         .map_err(Error::Files)?;
     let mut at = 0;
-    for part in bytes.chunks(file::chunk(pool)) {
+    for part in bytes.chunks(file::chunk(pool).map_err(Error::Pool)?) {
         let block = block(pool, part).map_err(Error::Pool)?;
         file.write_at(at, &[block]).await.map_err(Error::Files)?;
         at = at.saturating_add(file::wide(part.len()));
