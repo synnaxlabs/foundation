@@ -305,7 +305,6 @@ impl std::fmt::Debug for Manager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Manager")
             .field("clients", &self.clients.len())
-            .field("activated", &self.activated())
             .field("answers", &self.answers.count.get())
             .finish_non_exhaustive()
     }
@@ -452,11 +451,12 @@ mod tests {
     }
 
     #[test]
-    fn the_debug_of_a_manager_gives_its_clients_sessions_and_answers() {
+    fn the_debug_of_a_manager_gives_its_clients_and_answers() {
         check(2, async |manager, _| {
+            assert_eq!(manager.activated(), 3);
             assert_eq!(
                 format!("{manager:?}"),
-                "Manager { clients: 3, activated: 3, answers: 0, .. }"
+                "Manager { clients: 3, answers: 0, .. }"
             );
         });
     }
