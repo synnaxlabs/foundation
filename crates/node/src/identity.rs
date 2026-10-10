@@ -193,7 +193,8 @@ mod tests {
         );
     }
 
-    /// The inputs of the fuzz corpus in this form decode, as their old forms did.
+    /// The inputs of the fuzz corpus in this form decode, as their old forms did. Reads
+    /// `decode`, since no public call shows the seal key yet.
     #[test]
     fn decodes_the_inputs_of_the_corpus() {
         let valid: &[u8; LEN] =
