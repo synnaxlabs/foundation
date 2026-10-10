@@ -264,8 +264,8 @@ state on `main`.
   `document_encoding`. Fixed: #446 (`update` put a new block after a kept block
   it must come before); the `block_before_kept` inputs hold it. `config::check`
   reads the documents into definitions, and the influx kind reads the config of each
-  `connector` block of kind `influx`. Fuzzed: `config_check`, which no input yet
-  takes to the influx kind (#1817).
+  `connector` block of kind `influx`. Fuzzed: `config_check`, which only the input
+  `influx_connector` takes to the influx kind (#1817).
 - A person or an agent reviews the files and the plan before `apply` (K3). Text
   that shows one thing and reads as another defeats that review. Questions for a
   decision, with no `security` label yet: #360 (a lone `\r` in a comment,
@@ -406,7 +406,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
 | `config_plan` | `config::plan::Plan::decode` | Encodes to the same bytes |
-| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
+| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block and one for each status channel of each connector, and no other, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES` | No memory fault or leak; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. Until #435 is fixed, the encoding decodes with as many zeros after it as its length. |

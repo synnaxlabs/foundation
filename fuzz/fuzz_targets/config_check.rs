@@ -39,7 +39,7 @@ fuzz_target!(|text: &str| {
                 Ok(entries),
                 "the order of the files changed it"
             );
-            entries_match(&documents, entries);
+            entries_match(&documents, entries, &kinds);
         }
         Err(diagnostics) => {
             assert!(other.is_err(), "the order of the files made it pass");
@@ -87,21 +87,21 @@ fn passing_files_pass_together(documents: &[Document], kinds: &Table) {
 }
 
 /// Each block gives one entry, keyed by its label for a channel or a connector, or
-/// `<label>.@<keyword>` for each other block, and unique in any case. A policy or a
-/// connector has a definition that the spec tree reads back, and each edge of a channel
-/// names a channel entry.
-fn entries_match(documents: &[Document], entries: &BTreeMap<Name, config::Entry>) {
+/// `<label>.@<keyword>` for each other block. Each connector also gives the status
+/// channels that `connector::status::channels` names, and no other entry is there.
+/// Keys are unique in any case. A policy or a connector has a definition that the spec
+/// tree reads back, and each edge of a channel names a channel entry.
+fn entries_match(
+    documents: &[Document],
+    entries: &BTreeMap<Name, config::Entry>,
+    kinds: &Table,
+) {
     let by_key: BTreeMap<String, &config::Entry> = entries
         .iter()
         .map(|(name, entry)| (name.as_str().to_ascii_lowercase(), entry))
         .collect();
     assert_eq!(by_key.len(), entries.len(), "two keys differ only in case");
-    let blocks: usize = documents.iter().map(|document| document.blocks.len()).sum();
-    assert_eq!(
-        entries.len(),
-        blocks,
-        "a block with no problem gave no entry"
-    );
+    let mut keys = BTreeSet::new();
     for block in documents.iter().flat_map(|document| &document.blocks) {
         let [label] = block.labels.as_slice() else {
             panic!("a block with {} labels passed", block.labels.len());
@@ -109,13 +109,11 @@ fn entries_match(documents: &[Document], entries: &BTreeMap<Name, config::Entry>
         let key = match &*block.keyword {
             "channel" | "connector" => label.text.to_string(),
             keyword => format!("{}.@{keyword}", label.text),
-        }
-        .to_ascii_lowercase();
-        let definition = &by_key
-            .get(&key)
-            .unwrap_or_else(|| panic!("no entry for {key}"))
-            .definition;
-        match definition {
+        };
+        keys.insert(key.to_ascii_lowercase());
+    }
+    for (key, entry) in entries {
+        match &entry.definition {
             config::Definition::Spec(definition) => assert_eq!(
                 Definition::decode(&definition.encode()).as_ref(),
                 Ok(definition),
@@ -134,7 +132,25 @@ fn entries_match(documents: &[Document], entries: &BTreeMap<Name, config::Entry>
             }
             _ => panic!("{key} gave a definition that this target does not know"),
         }
+        if let config::Definition::Spec(Definition::Connector(connector)) =
+            &entry.definition
+        {
+            let config = connector.config().document();
+            let channels = kinds
+                .check(connector.kind().as_str(), None, config)
+                .expect("the kind of a connector that passed takes its config");
+            let (time, status) = connector::status::channels(key, &channels.counts)
+                .expect("the status names of a connector that passed fit");
+            let status = status.into_iter().map(|(name, _)| name);
+            let implied = std::iter::once(time).chain(status);
+            keys.extend(implied.map(|name| name.as_str().to_ascii_lowercase()));
+        }
     }
+    assert_eq!(
+        by_key.keys().cloned().collect::<BTreeSet<_>>(),
+        keys,
+        "the entries are not those of the blocks and the status channels"
+    );
 }
 
 /// Each problem with a span is in its file, in the order of the files, then of the
