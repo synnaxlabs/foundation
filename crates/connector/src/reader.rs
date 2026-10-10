@@ -23,8 +23,9 @@ pub struct Settings {
     pub select: Selector,
     /// Which frames it gets.
     pub mode: Mode,
-    /// How long the buffer keeps samples it has not received after it closes. Zero or
-    /// more, and zero when `mode` is `Latest`.
+    /// How long the home holds the reader's position after its session closes, as
+    /// [`hub::reader::Config::hold`] says. Zero or more, and zero when `mode` is
+    /// `Latest`.
     pub hold: Span,
 }
 
