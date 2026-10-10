@@ -1,11 +1,13 @@
-//! After a device error of 1 MiB, the run and the wait after it hold no more than 32
-//! KiB over what they hold after a short one. A run adds about 16 KiB more every few
-//! runs, so the test cannot see a smaller excess; the unit tests of `status` pin the
-//! capacity of the text. This binary has no test harness: the count covers each
+//! A run that ends with a device error of 1 MiB, or with one whose text comes in two
+//! pieces of 1023 and 1 bytes, and the wait after it, hold no more than 2.25 KiB over
+//! the same run in a twin sim, where it ends with an error of 1 byte: room for the cut
+//! text twice, plus 256 bytes. The twins add their larger steps of memory at the same
+//! runs, so the steps cancel. This binary has no test harness: the count covers each
 //! thread, and a harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::fmt;
 use std::future::poll_fn;
 use std::pin::pin;
 use std::sync::Arc;
@@ -27,15 +29,39 @@ static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 
 const MIB: usize = 1 << 20;
 
-/// The runs that end with a short error, so that the bytes a run adds settle.
+/// The runs before the one that the test measures, so that the bytes a run adds
+/// settle.
 const SHORT: usize = 3;
 
 /// The most bytes held while a count of runs had started, by that count.
 type Peaks = [AtomicUsize; SHORT + 3];
 
+/// How run [`SHORT`] ends.
+#[derive(Clone, Copy, Debug)]
+enum Last {
+    Short,
+    Large,
+    Pieces,
+}
+
+/// An error whose text comes in two pieces, of 1023 bytes then 1, so that the string
+/// it gives grows past its length.
+#[derive(Debug)]
+struct Pieces(String);
+
+impl fmt::Display for Pieces {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)?;
+        f.write_str("b")
+    }
+}
+
+impl std::error::Error for Pieces {}
+
 /// A kind whose first [`SHORT`] runs end with a device error of 1 byte, whose next run
-/// ends with one of 1 MiB, and whose last run ends `Ok`.
+/// ends as `last` gives, and whose last run ends `Ok`.
 struct Large {
+    last: Last,
     runs: Arc<AtomicUsize>,
     peaks: Arc<Peaks>,
 }
@@ -61,18 +87,25 @@ impl Kind for Large {
     fn run(&self, _: Context<()>) -> impl Future<Output = Result<(), Error>> {
         let run = self.runs.fetch_add(1, Relaxed);
         self.peaks[run].fetch_max(ALLOCATOR.held(), Relaxed);
-        let end = match run {
-            ..SHORT => Err(Error::Device("a".into())),
-            SHORT => Err(Error::Device("a".repeat(MIB).into())),
+        let end = match (run, self.last) {
+            (..SHORT, _) | (SHORT, Last::Short) => Err(Error::Device("a".into())),
+            (SHORT, Last::Large) => Err(Error::Device("a".repeat(MIB).into())),
+            (SHORT, Last::Pieces) => {
+                Err(Error::Device(Box::new(Pieces("a".repeat(1_023)))))
+            }
             _ => Ok(()),
         };
         std::future::ready(end)
     }
 }
 
-fn main() {
+/// The most bytes held over run [`SHORT`] and the wait after it, less those held
+/// before the sim, when that run ends as `last` gives.
+fn held(last: Last) -> usize {
+    let before = ALLOCATOR.held();
     let (runs, peaks) = (Arc::new(AtomicUsize::new(0)), Arc::new(Peaks::default()));
     let kind = Large {
+        last,
         runs: Arc::clone(&runs),
         peaks: Arc::clone(&peaks),
     };
@@ -98,14 +131,13 @@ fn main() {
             .set_definitions(status.iter().map(|(name, def)| (name, def)));
         let supervisor = Supervisor::new(config);
         let (token, config) = (Token::new(), Document::default());
-        let run = pin!(supervisor.run("large", connector, &config, &token));
-        let sample = pin!(async {
+        let mut run = pin!(supervisor.run("large", connector, &config, &token));
+        let mut sample = pin!(async {
             loop {
                 clock.sleep(Span::from_nanos(10_000_000)).await;
                 seen[runs.load(Relaxed)].fetch_max(ALLOCATOR.held(), Relaxed);
             }
         });
-        let (mut run, mut sample) = (run, sample);
         poll_fn(|cx| {
             assert!(sample.as_mut().poll(cx).is_pending(), "the sample loops");
             run.as_mut().poll(cx)
@@ -115,11 +147,19 @@ fn main() {
     result
         .expect("the run ends")
         .expect("the connector ends ok");
-    let at = |runs: usize| peaks[runs].load(Relaxed);
-    let (short, long) = (at(SHORT), at(SHORT + 1));
-    assert!(
-        long <= short + 32 * 1_024,
-        "a run and its wait hold {short} bytes after a short error, {long} after one \
-         of 1 MiB"
-    );
+    peaks[SHORT + 1].load(Relaxed) - before
+}
+
+fn main() {
+    // The first sim makes the allocations that a process makes once.
+    held(Last::Short);
+    let short = held(Last::Short);
+    for last in [Last::Large, Last::Pieces] {
+        let held = held(last);
+        assert!(
+            held <= short + 2 * 1_024 + 256,
+            "run {SHORT} and its wait hold {short} bytes after a short error, {held} \
+             after {last:?}"
+        );
+    }
 }
