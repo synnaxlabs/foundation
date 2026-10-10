@@ -85,8 +85,8 @@ impl Default for Bytes {
 impl fmt::Debug for Bytes {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Bytes")
-            .field("held", &self.held)
-            .field("peak", &self.peak)
+            .field("held", &self.held())
+            .field("peak", &self.peak())
             .finish()
     }
 }
@@ -182,7 +182,7 @@ mod tests {
         assert!(!ptr.is_null(), "the system has no memory for 64 bytes");
         assert_eq!((bytes.held(), read(ptr, 64)), (64, vec![0; 64]));
         free(&bytes, ptr, LAYOUT);
-        assert_eq!(bytes.held(), 0);
+        assert_eq!((bytes.held(), bytes.peak()), (0, 64));
     }
 
     #[test]
