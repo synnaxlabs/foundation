@@ -86,7 +86,9 @@ fn a_failed_decode_stops_the_round_trip() {
 }
 
 /// The delay of the default link.
-const DELAY: Span = Span::from_nanos(250_000);
+fn delay() -> Span {
+    sim::link::Config::default().delay
+}
 
 /// The allocations of each drive of reads 2 to 100 with `idle` idle clients: the ask,
 /// the answer of the server, the read of the answer, and a drive with nothing ready.
@@ -99,9 +101,9 @@ fn reads(idle: usize) -> Vec<[u64; 4]> {
             let mut counts = Vec::new();
             for read in 1..=100 {
                 let ((), ask) = ALLOCATOR.count(|| manager.ask());
-                clock.sleep(DELAY).await;
+                clock.sleep(delay()).await;
                 let ((), answer) = ALLOCATOR.count(|| manager.drive());
-                clock.sleep(DELAY).await;
+                clock.sleep(delay()).await;
                 let ((), receive) = ALLOCATOR.count(|| manager.drive());
                 let ((), pass) = ALLOCATOR.count(|| manager.drive());
                 assert_eq!(manager.answers(), read, "{idle} idle");

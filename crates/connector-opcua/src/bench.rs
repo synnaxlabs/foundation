@@ -372,7 +372,9 @@ mod tests {
     use super::{Client, Manager};
 
     /// The delay of the default link.
-    const DELAY: Span = Span::from_nanos(250_000);
+    fn delay() -> Span {
+        sim::link::Config::default().delay
+    }
 
     /// Runs `body` in the scope of a manager with `idle` idle clients.
     fn check(idle: usize, body: impl AsyncFnOnce(&Manager, Clock) + Send + 'static) {
@@ -392,10 +394,10 @@ mod tests {
             check(idle, async move |manager, clock| {
                 for read in 1..=3 {
                     manager.ask();
-                    clock.sleep(DELAY).await;
+                    clock.sleep(delay()).await;
                     manager.drive();
                     assert_eq!(manager.answers(), read - 1, "the server answered");
-                    clock.sleep(DELAY).await;
+                    clock.sleep(delay()).await;
                     manager.drive();
                     assert_eq!(manager.answers(), read, "{idle} idle, read {read}");
                 }
@@ -408,11 +410,11 @@ mod tests {
         check(0, async |manager, clock| {
             manager.ask();
             manager.drive();
-            clock.sleep(DELAY).await;
+            clock.sleep(delay()).await;
             manager.drive();
             manager.drive();
             assert_eq!(manager.answers(), 0);
-            clock.sleep(DELAY).await;
+            clock.sleep(delay()).await;
             manager.drive();
             assert_eq!(manager.answers(), 1);
         });
@@ -461,9 +463,9 @@ mod tests {
     fn a_read_of_an_unknown_node_fails_with_its_status() {
         check(0, async |manager, clock| {
             manager.drive_after(|| manager.read(999_999));
-            clock.sleep(DELAY).await;
+            clock.sleep(delay()).await;
             manager.drive();
-            clock.sleep(DELAY).await;
+            clock.sleep(delay()).await;
             manager.drive();
             let failed = panic::catch_unwind(AssertUnwindSafe(|| manager.answers()))
                 .expect_err("the read failed");

@@ -23,7 +23,9 @@ use types::time::Span;
 /// The idle clients of each run.
 const IDLE: [usize; 3] = [0, 15, 63];
 /// The delay of the default link.
-const DELAY: Span = Span::from_nanos(250_000);
+fn delay() -> Span {
+    sim::link::Config::default().delay
+}
 const WARMUP: usize = 10;
 const ROUNDS: usize = 1000;
 /// The lines of each run, in the order of a round.
@@ -53,9 +55,9 @@ async fn bench(node: sim::node::Node, idle: usize) -> [Vec<u64>; 4] {
         let mut nanos: [Vec<u64>; 4] = Default::default();
         for round in 0..WARMUP + ROUNDS {
             let ask = timed(|| manager.ask());
-            clock.sleep(DELAY).await;
+            clock.sleep(delay()).await;
             let answer = timed(|| manager.drive());
-            clock.sleep(DELAY).await;
+            clock.sleep(delay()).await;
             let receive = timed(|| manager.drive());
             let pass = timed(|| manager.drive());
             assert_eq!(manager.answers(), round + 1, "each round reads once");
