@@ -49,8 +49,8 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
     ("plugins/ua_config_default.c", "interruptServer"),
     // The stdout logger, which we replace with our own.
     ("plugins/ua_log_stdout.c", "UA_Log_Stdout_log"),
-    // ECC user tokens, which need an ECC policy. Encryption is off, so a client has
-    // only the policy `None`.
+    // ECC user tokens, which need an ECC policy. Encryption is off and
+    // `connector-opcua` adds no policy, so a client has only the policy `None`.
     (
         "src/util/ua_encryptedsecret.c",
         "encryptUserIdentityTokenEcc",
@@ -1356,6 +1356,16 @@ End of search list.
                  {\"file\":\"a.c\",\"output\":\"a.o\"}"
                 .to_owned())
         );
+    }
+
+    #[test]
+    fn a_test_of_connector_opcua_names_each_function_of_clock_calls() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let link = workspace.join("crates/connector-opcua/src/link.rs");
+        let text = std::fs::read_to_string(link).unwrap();
+        for (_, function) in CLOCK_CALLS {
+            assert!(text.contains(&format!("`{function}`")), "{function}");
+        }
     }
 
     #[test]

@@ -21,8 +21,8 @@
 #include <string.h>
 #include <unistd.h>
 
-/* `cargo xtask open62541` lets the encryption of an ECC user token call the global
- * clock because encryption is off. */
+/* The reason of `encryptUserIdentityTokenEcc` in `CLOCK_CALLS` of `cargo xtask
+ * open62541` needs encryption off. */
 #ifdef UA_ENABLE_ENCRYPTION
 #error "connector-opcua builds open62541 with encryption off"
 #endif

@@ -448,9 +448,15 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
 /// Each identifier for which `named` holds, as `path: identifier`, in each file of the
 /// module tree of `lib.rs` that a `#[cfg(test)]` declaration does not cut off. Comments
 /// and inline modules count.
+///
+/// # Panics
+///
+/// When a `.rs` file under `src/` is neither in that tree nor cut off, as a module
+/// declared in a form that the scan does not read is.
 fn named_outside_tests(named: impl Fn(&str) -> bool) -> Vec<String> {
     let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
     let mut files = vec![src.join("lib.rs")];
+    let (mut read, mut cut) = (Vec::new(), Vec::new());
     let mut found = Vec::new();
     while let Some(path) = files.pop() {
         let text = std::fs::read_to_string(&path).unwrap();
@@ -477,21 +483,54 @@ fn named_outside_tests(named: impl Fn(&str) -> bool) -> Vec<String> {
                         .any(|start| line.starts_with(start))
                 })
                 .any(|line| *line == "#[cfg(test)]");
-            if !gated {
-                let file = dir.join(format!("{module}.rs"));
-                files.push(if file.exists() {
-                    file
-                } else {
-                    dir.join(module).join("mod.rs")
-                });
+            let file = dir.join(format!("{module}.rs"));
+            let file = if file.exists() {
+                file
+            } else {
+                dir.join(module).join("mod.rs")
+            };
+            if gated {
+                cut.extend([file, dir.join(module)]);
+            } else {
+                files.push(file);
             }
         }
         let words = text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
         for word in words.filter(|word| named(word)) {
             found.push(format!("{}: {word}", path.display()));
         }
+        read.push(path);
     }
+    let mut dirs = vec![src];
+    let mut unread = Vec::new();
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && !read.contains(&path)
+                && !cut.iter().any(|cut| path.starts_with(cut))
+            {
+                unread.push(path);
+            }
+        }
+    }
+    assert!(
+        unread.is_empty(),
+        "the scan reads no declaration of {unread:?}"
+    );
     found
+}
+
+/// The scan names `shim_client_new` in each file outside tests that names it, and in
+/// no test file.
+#[test]
+fn the_scan_names_only_the_files_outside_tests() {
+    let src = std::path::Path::new(ROOT).join("src");
+    let named = named_outside_tests(|name| name == "shim_client_new");
+    let at = |file: &str| format!("{}: shim_client_new", src.join(file).display());
+    assert_eq!(named, [at("ffi.rs"), at("bench.rs")]);
 }
 
 /// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
@@ -547,8 +586,8 @@ fn the_tests_reach_neither_interrupt_server_nor_random_seed() {
     assert!(reached.is_empty(), "the test binary keeps {reached:?}");
 }
 
-/// `cargo xtask open62541` lets `encryptUserIdentityTokenEcc` call the global clock
-/// because encryption is off.
+/// Checks the reason of `encryptUserIdentityTokenEcc` in `CLOCK_CALLS` of `cargo xtask
+/// open62541`, with [`the_rust_and_the_shim_give_a_client_no_security_policy`].
 #[test]
 fn the_shim_refuses_encryption() {
     let errors =
@@ -557,6 +596,27 @@ fn the_shim_refuses_encryption() {
         errors.contains("connector-opcua builds open62541 with encryption off"),
         "{errors}"
     );
+}
+
+/// Checks the reason of `encryptUserIdentityTokenEcc` in `CLOCK_CALLS` of `cargo xtask
+/// open62541`: the default config of a client with encryption off has only the policy
+/// `None`, and outside tests, neither the Rust nor `shim.c` names a security policy.
+#[test]
+fn the_rust_and_the_shim_give_a_client_no_security_policy() {
+    let policy = |name: &str| {
+        name.starts_with("UA_SecurityPolicy")
+            || ["securityPolicies", "authSecurityPolicies"].contains(&name)
+    };
+    let mut named = named_outside_tests(policy);
+    let shim =
+        std::fs::read_to_string(std::path::Path::new(ROOT).join("src/shim.c")).unwrap();
+    let words = shim.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+    named.extend(
+        words
+            .filter(|word| policy(word))
+            .map(|word| format!("shim.c: {word}")),
+    );
+    assert!(named.is_empty(), "names {named:?}");
 }
 
 /// When this test binary links the address sanitizer, the sanitizer instruments the C
