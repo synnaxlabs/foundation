@@ -48,8 +48,8 @@ pub async fn founding(
 
 /// Writes `given` to `dir` when `logged` is false and `dir` holds another founding or
 /// none, or checks it against the founding in `dir`. `logged` states that the log of
-/// `dir` holds a record. The caller opened the log, which synced `dir`, and holds its
-/// lock. So the founding in `dir` is durable when it returns `Ok`.
+/// `dir` holds a record. The caller holds the lock of the log. The founding in `dir` is
+/// durable when it returns `Ok`.
 ///
 /// # Errors
 ///
@@ -71,11 +71,16 @@ pub(super) async fn keep(
         Err(Error::Unfounded { .. }) => None,
         body => body?,
     };
+    if !logged {
+        if body.as_ref() != Some(&encoded) {
+            write(files, dir, blocks, &encoded).await?;
+        }
+        // Also for the same founding: a crash after the rename of an earlier open can
+        // leave its name not durable.
+        return files.sync_dir(dir).await.map_err(Error::Files);
+    }
     if body.as_ref() == Some(&encoded) {
         return Ok(());
-    }
-    if !logged {
-        return write(files, dir, blocks, &encoded).await;
     }
     let body = body.ok_or_else(|| unfounded(dir))?;
     let stored = Founding::decode(&body).ok_or_else(|| unfounded(dir))?;
@@ -127,7 +132,8 @@ fn unfounded(dir: &Path) -> Error {
     }
 }
 
-// `File::rename` refuses an existing target, so the old `founding` goes first.
+// `File::rename` refuses an existing target, so the old `founding` goes first. The
+// caller syncs `dir`.
 async fn write(
     files: &Files,
     dir: &Path,
@@ -149,5 +155,5 @@ async fn write(
     blocks.write(&opened, 0, &mut &bytes[..]).await?;
     opened.rename(&path).await.map_err(Error::Files)?;
     opened.close().await;
-    files.sync_dir(dir).await.map_err(Error::Files)
+    Ok(())
 }
