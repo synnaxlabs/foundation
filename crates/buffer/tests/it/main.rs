@@ -18,8 +18,8 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Heap, Pool};
 use buffer::{
-    Buffer, Config, End, Entry, Error, Layout, Limit, Mark, Parts, Read, Rejected,
-    Stored, Tail, Unfit,
+    Buffer, Commit, Config, End, Entry, Error, Layout, Limit, Mark, Parts, Read,
+    Rejected, Stored, Tail, Unfit,
 };
 use env::clock::Clock;
 use env::entropy::Entropy;
@@ -846,6 +846,39 @@ fn idle_with_wakes(empty: usize) -> u64 {
 #[test]
 fn empty_appends_wake_no_task() {
     assert_eq!(idle_with_wakes(2), idle_with_wakes(0));
+}
+
+/// Runs a buffer whose task waits for the deadline of one entry, with `empty` empty
+/// appends meanwhile. Returns the digest of the run.
+fn busy_with_appends(empty: usize) -> u64 {
+    let (mut sim, handle) = start(28, move |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        shard.clock.sleep(commits(3)).await;
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(3)).await;
+        for _ in 0..empty {
+            buffer.append(Vec::new()).expect("takes an empty batch");
+        }
+        assert_eq!(buffer.committed().await, Ok(()));
+        drop(buffer);
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    sim.digest()
+}
+
+/// Appends to a buffer whose task does not idle wake no task: the waker that the
+/// first append takes is gone.
+#[test]
+fn appends_to_a_busy_buffer_wake_no_task() {
+    assert_eq!(busy_with_appends(2), busy_with_appends(0));
 }
 
 /// A `committed` with nothing appended before it waits on nothing: it resolves at
@@ -3670,6 +3703,54 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
     .expect("the buffer ends");
 }
 
+/// The test of the hand-written `Debug` of the private `Waiter` that a `Commit` and an
+/// `End` hold: it prints only its event and its key.
+#[test]
+fn a_waiter_prints_only_its_event_and_key() {
+    let (mut sim, node) = create_node(142);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let buffer = Buffer::open(config, &mut Slots::new())
+            .await
+            .expect("opens");
+        let mut polled = pin!(buffer.ended());
+        let polled = polled
+            .as_mut()
+            .poll(&mut Context::from_waker(Waker::noop()));
+        assert_eq!(polled, Poll::Pending);
+        let commit = format!("{:?}", buffer.committed());
+        let end = format!("{:?}", buffer.ended());
+        let waiter = "Waiter { event: Commit, key: 1, .. }";
+        assert!(commit.contains(waiter), "{commit}");
+        let waiter = "Waiter { event: End, key: 2, .. }";
+        assert!(end.contains(waiter), "{end}");
+    })
+    .expect("the buffer ends");
+}
+
+/// The test of the hand-written `Debug` of the private `Parked`: a buffer prints
+/// whether its task idles, and no pointer of the task's waker.
+#[test]
+fn a_buffer_prints_whether_it_idles_and_no_pointer() {
+    run_on_memory(144, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        shard.clock.sleep(commits(3)).await;
+        let printed = format!("{buffer:?}");
+        assert!(printed.contains("parked: true"), "{printed}");
+        assert!(!printed.contains("0x"), "{printed}");
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let printed = format!("{buffer:?}");
+        assert!(printed.contains("parked: false"), "{printed}");
+    });
+}
+
 /// `End`s polled from other tasks and dropped while the buffer is held keep no
 /// waker.
 #[test]
@@ -3733,6 +3814,103 @@ fn the_end_of_the_task_wakes_the_last_waker_of_each_end() {
         assert_eq!(woken, [false, true, true]);
         assert_eq!(first.await, Ok(()));
         assert_eq!(second.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// `Commit`s polled once while an entry waits and dropped keep no waker.
+#[test]
+fn a_dropped_commit_keeps_no_waker() {
+    let (mut sim, node) = create_node(132);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let flag = Arc::new(Flag(AtomicBool::new(false)));
+        for _ in 0..1000 {
+            let commit = pin!(buffer.committed());
+            let waker = Waker::from(Arc::clone(&flag));
+            let polled = commit.poll(&mut Context::from_waker(&waker));
+            assert_eq!(polled, Poll::Pending);
+        }
+        assert_eq!(Arc::strong_count(&flag), 1, "the drop takes its waker out");
+        assert_eq!(buffer.committed().await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// A `Commit` keeps only the waker of its last poll, and the commit wakes it.
+#[test]
+fn a_commit_polled_with_new_wakers_keeps_the_last_one() {
+    let (mut sim, node) = create_node(133);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let mut commit = pin!(buffer.committed());
+        let flags: Vec<Arc<Flag>> = (0..1000)
+            .map(|_| Arc::new(Flag(AtomicBool::new(false))))
+            .collect();
+        for flag in &flags {
+            let waker = Waker::from(Arc::clone(flag));
+            let polled = commit.as_mut().poll(&mut Context::from_waker(&waker));
+            assert_eq!(polled, Poll::Pending);
+        }
+        let held: Vec<usize> = flags.iter().map(Arc::strong_count).collect();
+        let mut expected = vec![1; 1000];
+        expected[999] = 2;
+        assert_eq!(held, expected);
+        assert_eq!(buffer.committed().await, Ok(()));
+        let woken: Vec<bool> = flags
+            .iter()
+            .map(|flag| flag.0.load(Ordering::Relaxed))
+            .collect();
+        let mut expected = vec![false; 1000];
+        expected[999] = true;
+        assert_eq!(woken, expected);
+        assert_eq!(commit.await, Ok(()));
+    })
+    .expect("the buffer ends");
+}
+
+/// The drop of a polled `Commit` leaves the waker of another, and the commit wakes it.
+///
+/// No test checks that a `Commit` or an `End` drops a waker after the borrow of the
+/// state ends, in a poll or in its own drop. Only a waker that holds a `Commit` or an
+/// `End` can see the order, and such a waker is not `Send`, so safe code cannot make
+/// it.
+#[test]
+fn a_dropped_commit_keeps_the_wakers_of_others() {
+    let (mut sim, node) = create_node(134);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let mut slots = Slots::new();
+        let buffer = Buffer::open(config, &mut slots).await.expect("opens");
+        let a = slots.index(key(1));
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let poll = |commit: Pin<&mut Commit>, flag: &Arc<Flag>| {
+            let waker = Waker::from(Arc::clone(flag));
+            commit.poll(&mut Context::from_waker(&waker))
+        };
+        let kept = Arc::new(Flag(AtomicBool::new(false)));
+        let mut commit = pin!(buffer.committed());
+        assert_eq!(poll(commit.as_mut(), &kept), Poll::Pending);
+        let dropped = Arc::new(Flag(AtomicBool::new(false)));
+        assert_eq!(poll(pin!(buffer.committed()), &dropped), Poll::Pending);
+        assert_eq!(Arc::strong_count(&kept), 2);
+        assert_eq!(buffer.committed().await, Ok(()));
+        assert!(kept.0.load(Ordering::Relaxed), "the commit wakes it");
+        assert_eq!(commit.await, Ok(()));
     })
     .expect("the buffer ends");
 }
