@@ -95,7 +95,9 @@
   the public seal key, so the `acceptance` lab knows each key before the first start
   and puts it in the founding (amended by `laptop.architect-2`, #1744, 2026-10-10
   03:42 UTC:
-  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093413533). It
+  https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093413533, and
+  approved by `laptop.architect`, 2026-10-10T03:57:36Z:
+  https://github.com/synnaxlabs/foundation/pull/2229#issuecomment-6093523453). It
   writes with the code of `identity`, so the file has one owner, and a file with no
   bytes or with 100 zero bytes counts as no key. A 100-byte file that holds other bytes
   gives `Error::Directory` with `Exists`, and a file
