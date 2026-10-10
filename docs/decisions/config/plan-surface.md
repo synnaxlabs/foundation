@@ -221,7 +221,19 @@
   `config::Definition::kind()` gives the `spec::definition::Kind` of a definition,
   with an exhaustive match in `config`, so a new variant fails to compile where it is
   added. `ops` takes the kind of an add or a change from it, and keeps its lookup in
-  `applied` for a removal, whose fingerprints need the stored definition. Lost: `kind`
-  on `config::plan::Change`, which still needs that lookup and changes the plan file
-  (`laptop.architect-2`, 2026-10-10T02:45:50Z,
+  `applied` for a removal, whose fingerprints need the stored definition, and for a
+  change, whose stored kind it compares (`laptop.architect-2`, 2026-10-10T15:27:23Z,
+  https://github.com/synnaxlabs/foundation/pull/2237#issuecomment-6099088165). Lost:
+  `kind` on `config::plan::Change`, which still needs that lookup and changes the plan
+  file (`laptop.architect-2`, 2026-10-10T02:45:50Z,
   https://github.com/synnaxlabs/foundation/issues/1914#issuecomment-6092943513).
+  `ops` shows a change at a tree key whose stored definition is of another kind as a
+  removal of the stored definition and an add of the new one, in the text and in the
+  JSON. The plan and the apply count it as one add and one removal
+  (`laptop.architect-2`, 2026-10-10T15:27:23Z,
+  https://github.com/synnaxlabs/foundation/pull/2237#issuecomment-6099088165).
+  `config::plan::Change` and the plan file do not change: the change already holds
+  the digest of the stored definition and the new entry. Lost: a diagnostic in
+  `config` that refuses the kind change, which refuses a target that the files can
+  state (`laptop.architect-2`, 2026-10-10T03:03:43Z,
+  https://github.com/synnaxlabs/foundation/issues/2220#issuecomment-6093114188).

@@ -40,16 +40,14 @@ pub(crate) fn plan(
     let documents = front_end::read(files, front_ends).map_err(failed)?;
     let plan = config::plan::plan(&documents, base, applied, members, kinds)
         .map_err(failed)?;
-    let mut changes: Vec<(Order, Change)> = plan
-        .changes
-        .iter()
-        .map(|(name, change)| Change::of(name, change, applied, &paths))
+    let mut changes: Vec<(Order, Change)> = lines(&plan, applied)
+        .map(|(name, line)| Change::of(name, line, &paths))
         .collect();
     changes.sort_by(|(a, _), (b, _)| a.cmp(b));
     let changes: Vec<Change> = changes.into_iter().map(|(_, change)| change).collect();
     let output = Output {
         base: Pointer::from(plan.base),
-        counts: Counts::of(changes.iter().map(|change| change.action)),
+        counts: Counts::of(&plan, applied),
         homes: plan
             .homes
             .iter()
@@ -123,15 +121,24 @@ pub(crate) struct Counts {
 }
 
 impl Counts {
-    /// The count of each action in `actions`.
-    pub(crate) fn of(actions: impl Iterator<Item = Action>) -> Self {
+    /// The count of each action that `plan` shows for `planned` on `applied`, the
+    /// definitions at its base.
+    ///
+    /// # Panics
+    ///
+    /// When `planned` changes or removes a definition that `applied` does not hold,
+    /// which [`config::plan::Plan::definitions`] refuses.
+    pub(crate) fn of(
+        planned: &config::plan::Plan,
+        applied: &BTreeMap<Name, Definition>,
+    ) -> Self {
         let mut counts = Self {
             added: 0,
             changed: 0,
             removed: 0,
         };
-        for action in actions {
-            let count = match action {
+        for (_, line) in lines(planned, applied) {
+            let count = match line.action() {
                 Action::Add => &mut counts.added,
                 Action::Change => &mut counts.changed,
                 Action::Remove => &mut counts.removed,
@@ -181,27 +188,69 @@ pub(crate) struct Change {
 /// Adds and changes in file order, then removals in tree key order.
 type Order = (bool, Option<Span>, Name);
 
-impl Change {
-    fn of(
-        name: &Name,
-        change: &config::plan::Change,
-        applied: &BTreeMap<Name, Definition>,
-        paths: &[PathBuf],
-    ) -> (Order, Self) {
-        let (action, kind, span, definition) = if let Some(entry) = &change.new {
-            let definition =
-                if let config::Definition::Spec(definition) = &entry.definition {
-                    Some(definition)
-                } else {
-                    None
-                };
-            let kind = entry.definition.kind();
-            (Action::of(change), kind, entry.label_span, definition)
-        } else {
-            let stored = applied
+/// One line of a plan at a tree key.
+#[derive(Clone, Copy)]
+enum Line<'a> {
+    /// A new definition.
+    Add(&'a config::Entry),
+    /// A new value of a stored definition of the same kind.
+    Change(&'a config::Entry),
+    /// The removal of a stored definition.
+    Remove(&'a Definition),
+}
+
+impl Line<'_> {
+    const fn action(self) -> Action {
+        match self {
+            Self::Add(_) => Action::Add,
+            Self::Change(_) => Action::Change,
+            Self::Remove(_) => Action::Remove,
+        }
+    }
+}
+
+/// Each line of `planned` on `applied`, by tree key. A change that replaces a stored
+/// definition of another kind gives a removal and an add.
+fn lines<'a>(
+    planned: &'a config::plan::Plan,
+    applied: &'a BTreeMap<Name, Definition>,
+) -> impl Iterator<Item = (&'a Name, Line<'a>)> {
+    planned.changes.iter().flat_map(|(name, change)| {
+        let stored = || {
+            applied
                 .get(name)
-                .expect("invariant: a removal is of an applied definition");
-            (Action::of(change), stored.kind(), None, Some(stored))
+                .unwrap_or_else(|| panic!("invariant: no applied definition at {name}"))
+        };
+        let lines = match (&change.old, &change.new) {
+            (None, Some(new)) => vec![Line::Add(new)],
+            (Some(_), Some(new)) => {
+                let stored = stored();
+                if stored.kind() == new.definition.kind() {
+                    vec![Line::Change(new)]
+                } else {
+                    vec![Line::Remove(stored), Line::Add(new)]
+                }
+            }
+            (_, None) => vec![Line::Remove(stored())],
+        };
+        lines.into_iter().map(move |line| (name, line))
+    })
+}
+
+impl Change {
+    /// The output of `line` at the tree key `name`.
+    fn of(name: &Name, line: Line<'_>, paths: &[PathBuf]) -> (Order, Self) {
+        let (kind, span, definition) = match line {
+            Line::Add(entry) | Line::Change(entry) => {
+                let definition =
+                    if let config::Definition::Spec(definition) = &entry.definition {
+                        Some(definition)
+                    } else {
+                        None
+                    };
+                (entry.definition.kind(), entry.label_span, definition)
+            }
+            Line::Remove(stored) => (stored.kind(), None, Some(stored)),
         };
         let fingerprints = match definition {
             Some(Definition::Subject(subject)) => subject
@@ -216,7 +265,7 @@ impl Change {
             .expect("invariant: a planned change is at a tree key of its kind");
         let order = (span.is_none(), span, name.clone());
         let change = Self {
-            action,
+            action: line.action(),
             kind: kind.as_str().to_owned(),
             name: label.to_string(),
             place: span.map(|span| Place::of(span, paths)),
@@ -235,16 +284,6 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    /// What `change` does: it removes with no new definition, else changes with an
-    /// old one, else adds.
-    pub(crate) const fn of(change: &config::plan::Change) -> Self {
-        match (&change.old, &change.new) {
-            (_, None) => Self::Remove,
-            (Some(_), Some(_)) => Self::Change,
-            (None, Some(_)) => Self::Add,
-        }
-    }
-
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "the table entries of #1744 call it")

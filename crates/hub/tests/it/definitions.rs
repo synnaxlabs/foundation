@@ -601,12 +601,14 @@ async fn reopen(
     let buffer = buffer::Buffer::open(ring, interner.slots())
         .await
         .expect("opens");
-    let home = home::Shard::new(home::Config {
+    let home = home::Shard::open(home::Config {
         shard: 0,
         buffer,
         clock: mesh.clone(),
         limits: super::LIMITS,
-    });
+    })
+    .await
+    .expect("opens");
     hub::Hub::new(hub::Config {
         home,
         interner,

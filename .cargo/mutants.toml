@@ -103,6 +103,9 @@ exclude_re = [
   # An out connector has no device channel. `Ok(Channels::default())` is what the body
   # returns.
   'crates/connector-influx/src/lib\.rs:.*replace <impl kind::Kind for Kind>::check ->',
+  # `root::free_drops_by_the_bytes_of_a_created_file` kills both, in the `Root tests`
+  # step of the `check` job, which the mutants run does not see.
+  'crates/os/src/files\.rs:.*in <impl env::files::Driver for Disk>::free$',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
   # macOS only, as above. `this_host_has_whole_pages_available` and
