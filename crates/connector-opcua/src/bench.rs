@@ -465,6 +465,47 @@ mod tests {
         .expect("the run ends");
     }
 
+    /// A panic of the close replaces the panic of the body. The close then frees
+    /// nothing, so the child runs with no leak check.
+    #[test]
+    fn a_panic_of_the_close_replaces_a_panic_of_the_body() {
+        let name = "bench::tests::the_close_panics_after_the_body";
+        crate::child::run(name, &[("ASAN_OPTIONS", "detect_leaks=0")]);
+    }
+
+    /// Stops the server in a body that panics, so the close panics, when
+    /// `child::running()`.
+    #[test]
+    fn the_close_panics_after_the_body() {
+        if !crate::child::running() {
+            return;
+        }
+        let mut sim = Sim::new(sim::Config::default());
+        let node = sim.node(node::Config::default());
+        sim.run_on(&node, move |node, _| async move {
+            let body = async |manager: &Manager| {
+                // SAFETY: the server lives.
+                let status = unsafe {
+                    ffi::test::UA_Server_run_shutdown(manager.server.as_ptr())
+                };
+                assert_eq!(ffi::Status(status), ffi::Status::GOOD);
+                panic!("the body panics");
+            };
+            let address = node.addresses()[0];
+            let scope = Manager::scope(node.clock(), node.net(), address, 0, body);
+            let panic = caught(scope).await.expect_err("the close panics");
+            let message = panic.downcast_ref::<String>().map(String::as_str);
+            assert_eq!(
+                message,
+                Some(
+                    "assertion `left == right` failed: open62541 refused the server \
+                     stop\n  left: BadInternalError\n right: Good"
+                )
+            );
+        })
+        .expect("the run ends");
+    }
+
     #[test]
     fn a_read_is_answered_in_the_third_drive_after_two_hops() {
         for idle in [0, 3] {
