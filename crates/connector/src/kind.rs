@@ -15,7 +15,7 @@ use types::authority::Authority;
 use types::name::Name;
 use types::time;
 
-use crate::{cancel, status, supervisor};
+use crate::{cancel, reader, status, supervisor};
 
 /// The noun of the document that [`Kind::parse`] gets, for the text of a diagnostic.
 pub const NOUN: &str = "the connector";
@@ -202,6 +202,34 @@ impl<C> Context<C> {
             channels,
         };
         self.inputs.hub.writer(config).await
+    }
+
+    /// Opens the connector's reader on `settings`: a reader session whose subject and
+    /// name are the connector's name. Each open takes over the last session of the
+    /// connector's reader on its index, and a complete one resumes at its acks while
+    /// `settings.hold` holds them.
+    ///
+    /// # Errors
+    ///
+    /// As [`hub::Hub::reader`] for a named reader, never `Unsynced`: a run starts
+    /// only once the node has mesh time.
+    ///
+    /// # Panics
+    ///
+    /// As [`hub::Hub::reader`]: when `settings.hold` is negative, or is not zero in
+    /// `Latest` mode. [`reader::read`] gives neither.
+    pub async fn reader(
+        &self,
+        settings: &reader::Settings,
+    ) -> Result<hub::reader::Reader, hub::reader::Error> {
+        let config = hub::reader::Config {
+            select: settings.select.clone(),
+            mode: settings.mode,
+            subject: self.name.clone(),
+            name: Some(self.name.clone()),
+            hold: settings.hold,
+        };
+        self.inputs.hub.reader(config).await
     }
 
     /// The count `name` of the connector's status, `<connector>.status.<name>`, to

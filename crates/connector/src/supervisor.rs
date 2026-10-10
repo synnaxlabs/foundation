@@ -274,7 +274,7 @@ mod tests {
     use crate::cancel::Token;
     use crate::common::{STATUS, create_config, create_status, env, run_on, run_with};
     use crate::kind::{Channels, Kind, Table};
-    use crate::testing;
+    use crate::{reader, testing};
     use hub::home::Refusal;
     use hub::reader::{Mode, Received};
     use spec::channel::{Channel, Data};
@@ -2699,43 +2699,56 @@ mod tests {
                 .writer(channels, self.authority, self.lease)
                 .await
                 .expect("the writer opens");
-            let entries = writer.set().entries();
-            let entry = |key| {
-                let key = channel::Key::from_u128(key);
-                entries.iter().position(|entry| entry.key == key)
-            };
-            let (time, value) = (entry(1).expect("time"), entry(2).expect("value"));
-            let group = entries[time].group;
             let mut last = None;
-            for (i, sample) in self.values.iter().enumerate() {
+            for (i, &sample) in self.values.iter().enumerate() {
                 if i > 0 {
                     ctx.clock().sleep(self.gap).await;
                 }
                 let now = writer.now().nanos();
                 let stamp = last.map_or(now, |last: i64| now.max(last + 1));
                 last = Some(stamp);
-                let mut series = [(time, 8), (value, 8)];
-                series.sort_unstable();
-                let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
-                let time = draft.series_mut(time).expect("the index series");
-                time.copy_from_slice(&stamp.to_le_bytes());
-                let value = draft.series_mut(value).expect("the value series");
-                value.copy_from_slice(&sample.to_le_bytes());
-                draft.set_count(group, 1);
-                let outcomes = writer
-                    .write(Label::Path(Path::Live), draft)
-                    .expect("the home takes it");
-                let refusal = match outcomes {
-                    [hub::home::Outcome::Applied { .. }] => None,
-                    [hub::home::Outcome::Refused { refusal, .. }] => {
-                        Some(refusal.clone())
+                let refusal = match write_value(&mut writer, stamp, sample) {
+                    hub::home::Outcome::Applied { .. } => None,
+                    hub::home::Outcome::Refused { refusal, .. } => Some(refusal),
+                    outcome @ hub::home::Outcome::Lost { .. } => {
+                        panic!("one group applied or refused: {outcome:?}")
                     }
-                    _ => panic!("one group applied or refused: {outcomes:?}"),
                 };
                 self.refusals.lock().expect("no panic").push(refusal);
             }
             Ok(())
         }
+    }
+
+    /// Writes `sample` of `plant.value` at `stamp` through `writer`, which writes
+    /// `plant.time` and `plant.value`. Gives what the home made of it.
+    fn write_value(
+        writer: &mut hub::writer::Writer,
+        stamp: i64,
+        sample: i64,
+    ) -> hub::home::Outcome {
+        let entries = writer.set().entries();
+        let entry = |key| {
+            let key = channel::Key::from_u128(key);
+            entries.iter().position(|entry| entry.key == key)
+        };
+        let (time, value) = (entry(1).expect("time"), entry(2).expect("value"));
+        let group = entries[time].group;
+        let mut series = [(time, 8), (value, 8)];
+        series.sort_unstable();
+        let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+        let time = draft.series_mut(time).expect("the index series");
+        time.copy_from_slice(&stamp.to_le_bytes());
+        let value = draft.series_mut(value).expect("the value series");
+        value.copy_from_slice(&sample.to_le_bytes());
+        draft.set_count(group, 1);
+        let outcomes = writer
+            .write(Label::Path(Path::Live), draft)
+            .expect("the home takes it");
+        let [outcome] = outcomes else {
+            panic!("the outcome of one group: {outcomes:?}");
+        };
+        outcome.clone()
     }
 
     fn name(text: &str) -> Name {
@@ -2889,6 +2902,177 @@ mod tests {
             got
         });
         assert_eq!(got, [30, 10, 20]);
+    }
+
+    /// A kind with no count, whose run is the function it holds.
+    struct Plain<F>(F);
+
+    impl<F, R> Kind for Plain<F>
+    where
+        F: Fn(Context<()>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<(), Error>>,
+    {
+        type Config = ();
+
+        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
+            Ok(())
+        }
+
+        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
+            Ok(Channels::default())
+        }
+
+        fn discover(
+            &self,
+            _: &cancel::Token,
+        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
+            std::future::ready(Ok(Vec::new()))
+        }
+
+        fn run(&self, ctx: Context<()>) -> impl Future<Output = Result<(), Error>> {
+            (self.0)(ctx)
+        }
+    }
+
+    /// The reader settings of `plant.value`, complete, with a hold of `hold`.
+    fn settings(hold: Span) -> reader::Settings {
+        reader::Settings {
+            select: Selector::new(["plant.value"]).expect("a selector"),
+            mode: Mode::Complete,
+            hold,
+        }
+    }
+
+    /// Runs `kind` once as `plant.write`, while a hub writer as `plant.other` writes
+    /// each `(at, value)` of `writes` at `at` from the start. Gives what the kind
+    /// put in `got`.
+    fn read_through<F, R, T>(kind: F, writes: Vec<(Span, i64)>) -> Vec<T>
+    where
+        F: Fn(Context<()>, Arc<Mutex<Vec<T>>>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<(), Error>> + 'static,
+        T: Clone + Send + 'static,
+    {
+        run_on(move |node, tasks| async move {
+            let got = Arc::new(Mutex::new(Vec::new()));
+            let into = Arc::clone(&got);
+            let kind = Plain(move |ctx| kind(ctx, Arc::clone(&into)));
+            let kinds = Table::new().with("read", kind);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.write").await;
+            define(&inputs.hub);
+            let open = hub::writer::Config {
+                subject: name("plant.other"),
+                authority: Authority(1),
+                lease: None,
+                channels: vec![name("plant.value")],
+            };
+            let mut other = inputs.hub.writer(open).await.expect("opens");
+            let (clock, start) = (node.clock(), node.clock().now());
+            tasks.spawn(async move {
+                for (at, value) in writes {
+                    clock.sleep_until(start + at).await;
+                    let stamp = other.now().nanos();
+                    let outcome = write_value(&mut other, stamp, value);
+                    assert!(
+                        matches!(outcome, hub::home::Outcome::Applied { .. }),
+                        "{outcome:?}"
+                    );
+                }
+            });
+            let supervisor = Supervisor::new(inputs);
+            let result = supervisor
+                .run("read", name("plant.write"), &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            got.lock().expect("no panic").clone()
+        })
+    }
+
+    #[test]
+    fn gives_a_kind_a_reader_that_gets_the_frames_of_a_hub_writer_in_order() {
+        let writes = vec![(ms(100), 30), (ms(200), 10), (ms(300), 20)];
+        let got = read_through(
+            |ctx, got| async move {
+                let reader = ctx.reader(&settings(Span::ZERO)).await;
+                let mut reader = reader.expect("the reader opens");
+                for _ in 0..3 {
+                    let received = reader.next().await.expect("a frame");
+                    got.lock().expect("no panic").extend(values(&received));
+                }
+                Ok(())
+            },
+            writes,
+        );
+        assert_eq!(got, [30, 10, 20]);
+    }
+
+    #[test]
+    fn gives_a_kind_a_reader_that_an_open_of_the_connector_name_takes_over() {
+        let got = run_on(|node, tasks| async move {
+            let got: Arc<Mutex<Option<hub::reader::Ended>>> = Arc::default();
+            let into = Arc::clone(&got);
+            let kind = Plain(move |ctx: Context<()>| {
+                let into = Arc::clone(&into);
+                async move {
+                    let reader = ctx.reader(&settings(Span::ZERO)).await;
+                    let mut reader = reader.expect("the reader opens");
+                    let ended = reader.next().await.expect_err("the session ends");
+                    *into.lock().expect("no panic") = Some(ended);
+                    Ok(())
+                }
+            });
+            let kinds = Table::new().with("read", kind);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.write").await;
+            define(&inputs.hub);
+            let (hub, clock) = (inputs.hub.clone(), node.clock());
+            tasks.spawn(async move {
+                clock.sleep(ms(100)).await;
+                let open = hub::reader::Config {
+                    select: Selector::new(["plant.value"]).expect("a selector"),
+                    mode: Mode::Complete,
+                    subject: name("plant.write"),
+                    name: Some(name("plant.write")),
+                    hold: Span::ZERO,
+                };
+                let reader = hub.reader(open).await.expect("the reader opens");
+                clock.sleep(Span::SECOND).await;
+                drop(reader);
+            });
+            let supervisor = Supervisor::new(inputs);
+            let result = supervisor
+                .run("read", name("plant.write"), &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            got.lock().expect("no panic").take()
+        });
+        assert_eq!(got, Some(hub::reader::Ended::Replaced));
+    }
+
+    #[test]
+    fn holds_the_reader_of_a_kind_for_the_hold_of_its_settings() {
+        for (hold, want) in [
+            (Span::SECOND, Err(hub::reader::Ended::Behind)),
+            (Span::ZERO, Ok(vec![8])),
+        ] {
+            let writes = vec![(ms(100), 7), (ms(300), 8)];
+            let got = read_through(
+                move |ctx, got| async move {
+                    let reader = ctx.reader(&settings(hold)).await;
+                    let mut first = reader.expect("the reader opens");
+                    first.next().await.expect("a frame");
+                    drop(first);
+                    ctx.clock().sleep(ms(100)).await;
+                    let reader = ctx.reader(&settings(hold)).await;
+                    let mut reader = reader.expect("the reader opens");
+                    let next = reader.next().await.map(|received| values(&received));
+                    got.lock().expect("no panic").push(next);
+                    Ok(())
+                },
+                writes,
+            );
+            assert_eq!(got, [want], "hold {hold:?}");
+        }
     }
 
     /// Runs `write` as `plant.write` on a new shard, while a writer as
