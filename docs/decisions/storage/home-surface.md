@@ -8,12 +8,14 @@
   `Position`, `Error`, `named::Key`, and `complete::Charge` (`laptop.architect`,
   2026-10-08T11:12:45Z:
   https://github.com/synnaxlabs/foundation/pull/1863#issuecomment-6058607367).
-  `Shard::open` gives a `buffer::Error`: `node` puts it in `Error::Buffer`, as for
-  `Buffer::open`, and no caller matches its variants. Lost: `env::files::Error` with a
-  panic on `Error::Pool`, because the panic rests on how `buffer` reads; a `home` error
-  of `Files` and `Pool`, a third type that `node` puts in the same variant
-  (`laptop.architect`, #275, 2026-10-10T04:04:50Z:
-  https://github.com/synnaxlabs/foundation/issues/275#issuecomment-6093580361).
+  `Shard::open` gives a `buffer::Error`: `node` puts it in `Error::Buffer`, and
+  `foundation` reports its variants as it reports those of `Buffer::open`. Lost:
+  `env::files::Error` with a panic on `Error::Pool`, because the panic rests on how
+  `buffer` reads; a `home` error of `Files` and `Pool`, a third type that `node` puts in
+  the same variant (`laptop.architect`, #275, 2026-10-10T04:04:50Z and
+  2026-10-10T15:01:02Z:
+  https://github.com/synnaxlabs/foundation/issues/275#issuecomment-6093580361 and
+  https://github.com/synnaxlabs/foundation/pull/2274#issuecomment-6098836145).
   Supersedes the clause "apart from `Config`" of
   https://github.com/synnaxlabs/foundation/issues/963#issuecomment-6031464116, which the
   `Shard::pool` ruling above made two. `Config` takes no pool: the shard uses
