@@ -57,10 +57,10 @@ pub struct Config {
     /// The reader's name, or `None`. A named reader has at most one session on each
     /// index: an open takes over the session of the same subject and name on its index.
     /// A named complete reader that opens while the home holds its position resumes at
-    /// the last [`Reader::ack`] of its last complete session, or where that session
-    /// opened when it acked nothing. It ends with [`Ended::Behind`] when a frame after
-    /// that position was released, or dropped because no complete session on its index
-    /// was open.
+    /// the position that the acks of its last complete session recorded, or where that
+    /// session opened when they recorded none. It ends with [`Ended::Behind`] when a
+    /// frame after that position was released, or dropped because no complete session
+    /// on its index was open.
     pub name: Option<Name>,
     /// How long the home holds a named complete reader's position after its session
     /// closes. Zero or more. It must be zero when the reader is unnamed or latest.
@@ -80,7 +80,7 @@ pub struct Received<'a> {
     pub position: Position,
 }
 
-/// A position of a reader on one index: it has each sample below it. Only
+/// A position on one index: a reader at it has each sample below it. Only
 /// [`Received`] makes one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Position {
@@ -125,7 +125,7 @@ impl Lens {
     ) -> Self {
         let entry = set
             .find(index)
-            .expect("invariant: a reader's key set holds its index");
+            .expect("invariant: the key set of a frame on an index holds the index");
         Self {
             set: Arc::clone(set),
             mask: Mask::new(set, slots),
@@ -292,6 +292,8 @@ pub struct Reader {
     source: Source,
     /// The slot of the reader's index.
     index: channel::Slot,
+    /// The `live` of the position of the last [`Received`] that `next` gave, or 0.
+    given: u64,
     /// The frame that the last [`Received`] lends.
     frame: Option<Frame>,
 }
@@ -305,14 +307,14 @@ enum Source {
     Remote(Box<Remote>),
 }
 
-/// A reader session at this node's home, with the credit of a complete one until it
-/// gave an end, and the charge of each frame it gave back.
+/// A reader session at this node's home, with the grant and ack of a complete one
+/// until it gave an end, and the charge of each frame it gave back.
 #[derive(Debug)]
 struct Local {
     session: Session,
-    /// `None` for a latest session, and once `next` gave an end, so no later ack moves
+    /// `None` for a latest reader, and once `next` gave an end, so no later ack moves
     /// the home position.
-    credit: Option<(Credit, u64)>,
+    complete: Option<(Complete, u64)>,
 }
 
 impl Local {
@@ -358,13 +360,13 @@ impl Local {
         };
         Ok(Self {
             session,
-            credit: credit.map(|credit| (credit, 0)),
+            complete: credit.map(|credit| (credit, 0)),
         })
     }
 
     /// Raises the grant by the charge of `frame`, which the reader gave back.
     fn give_back(&mut self, frame: &Frame) {
-        if let Some((credit, taken_bytes)) = &mut self.credit {
+        if let Some((credit, taken_bytes)) = &mut self.complete {
             *taken_bytes += frame.charge();
             credit.grant(*taken_bytes + WINDOW);
         }
@@ -418,6 +420,7 @@ impl Reader {
                 return Ok(Self {
                     index: slot,
                     source: Source::Remote(Box::new(remote)),
+                    given: 0,
                     frame: None,
                 });
             }
@@ -437,6 +440,7 @@ impl Reader {
         Ok(Self {
             source: Source::Local(local),
             index: slot,
+            given: 0,
             frame: None,
         })
     }
@@ -469,15 +473,17 @@ impl Reader {
                 Source::Local(local) => match local.session.take().await {
                     Ok(taken) => taken,
                     Err(stop) => {
-                        local.credit = None;
+                        local.complete = None;
                         return Err(stop.into());
                     }
                 },
                 Source::Remote(remote) => remote.take().await?,
             };
             let frame = self.frame.insert(frame);
+            let position = Position::after(frame, lens, self.index);
+            self.given = position.live;
             Ok(Received {
-                position: Position::after(frame, lens, self.index),
+                position,
                 view: View::new(frame, &lens.mask),
                 set: &lens.set,
             })
@@ -485,31 +491,32 @@ impl Reader {
     }
 
     /// Records that the reader has each sample up to `position`. A named complete
-    /// reader that opens again starts there. A latest reader holds nothing, so its ack
-    /// changes nothing. Nor does the ack of a reader whose index has its home at
-    /// another node, or of a reader that ended: after `next` gave an [`Ended`], or once
-    /// the hub ended it with [`Ended::Removed`] or [`Ended::Replaced`]. Each of these
-    /// acks gives `Ok`.
-    ///
-    /// # Errors
-    ///
-    /// [`home::reader::Error::Ack`](crate::home::reader::Error::Ack) when `position`
-    /// moves back, for each other reader.
+    /// reader that opens again starts there. An ack at or below the reader's last ack
+    /// changes nothing. Nor does the ack of a latest reader, which holds nothing, of a
+    /// reader whose index has its home at another node, or of a reader that ended:
+    /// after `next` gave an [`Ended`], or once the hub ended it with
+    /// [`Ended::Removed`] or [`Ended::Replaced`].
     ///
     /// # Panics
     ///
-    /// If `position` is of another index than the reader's.
-    pub fn ack(&mut self, position: Position) -> Result<(), ::home::reader::Error> {
+    /// If `position` is of another index than the reader's, or is past the position
+    /// of the last [`Received`] that `next` gave. Before `next` gave one, each
+    /// `position` panics.
+    pub fn ack(&mut self, position: Position) {
         assert!(
             position.index == self.index,
             "the position is of another index than the reader's"
         );
+        assert!(
+            position.live <= self.given,
+            "the position is past the last frame that this reader gave"
+        );
         match &self.source {
             Source::Local(Local {
-                credit: Some((credit, _)),
+                complete: Some((credit, _)),
                 ..
             }) => credit.ack(position.live),
-            Source::Local(_) | Source::Remote(_) => Ok(()),
+            Source::Local(_) | Source::Remote(_) => {}
         }
     }
 }
@@ -604,14 +611,13 @@ pub(crate) struct Channels {
 
 impl Session {
     /// Opens a complete session on `channels`, with a grant of `limit_bytes` that each
-    /// frame spends as `charge` says. Returns the session and the credit that raises
-    /// its grant.
+    /// frame spends as `charge` says. Returns the session and its grant and ack.
     pub(crate) fn complete(
         state: &Rc<RefCell<State>>,
         channels: Channels,
         limit_bytes: u64,
         charge: ::home::reader::complete::Charge,
-    ) -> (Self, Credit) {
+    ) -> (Self, Complete) {
         let key =
             state
                 .borrow_mut()
@@ -630,9 +636,9 @@ impl Session {
         state: &Rc<RefCell<State>>,
         key: ::home::reader::complete::Key,
         channels: Channels,
-    ) -> (Self, Credit) {
+    ) -> (Self, Complete) {
         let session = Self::new(state, key.into(), channels);
-        let credit = Credit {
+        let credit = Complete {
             state: Rc::clone(state),
             key,
             ending: session.ending.clone(),
@@ -739,15 +745,15 @@ impl Streak {
     }
 }
 
-/// The credit of a complete [`Session`]: only a complete open gives one.
+/// The grant and the ack of a complete [`Session`]: only a complete open gives one.
 #[derive(Debug)]
-pub(crate) struct Credit {
+pub(crate) struct Complete {
     state: Rc<RefCell<State>>,
     key: ::home::reader::complete::Key,
     ending: Ending,
 }
 
-impl Credit {
+impl Complete {
     /// Raises the grant of the session to `limit_bytes` since the open. Changes
     /// nothing once the hub ended the session.
     pub(crate) fn grant(&self, limit_bytes: u64) {
@@ -758,15 +764,19 @@ impl Credit {
 
     /// Records that the session has each sample below seq `live`. Changes nothing
     /// once the hub ended the session.
-    fn ack(&self, live: u64) -> Result<(), ::home::reader::Error> {
+    fn ack(&self, live: u64) {
         if self.ending.get().is_some() {
-            return Ok(());
+            return;
         }
         let position = ::home::reader::Position {
             live,
             backfill: None,
         };
-        self.state.borrow_mut().home.ack(self.key, position)
+        self.state
+            .borrow_mut()
+            .home
+            .ack(self.key, position)
+            .expect("invariant: a hub position keeps the reader's paths");
     }
 }
 

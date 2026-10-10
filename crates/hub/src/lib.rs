@@ -36,11 +36,6 @@ pub mod home {
         pub use ::home::order::Error;
     }
 
-    /// Why the home refused the ack of a reader, and the position that it names.
-    pub mod reader {
-        pub use ::home::reader::{Error, Position};
-    }
-
     /// Why the home refused a writer.
     pub mod writer {
         pub use ::home::writer::Error;

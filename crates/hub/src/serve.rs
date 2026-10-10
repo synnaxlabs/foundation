@@ -24,7 +24,7 @@ use wire::hub::{
     BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends, keys,
 };
 
-use crate::reader::{Channels, Credit, Session, Stop};
+use crate::reader::{Channels, Complete, Session, Stop};
 use crate::{Away, Ending, State};
 
 pub use client::{Reply, Request};
@@ -319,7 +319,7 @@ enum Event<F> {
 async fn peer(
     receiver: &mut Receiver,
     mut home: Home,
-    credit: Option<&Credit>,
+    credit: Option<&Complete>,
 ) -> Result<(), Error> {
     while let Some(message) = receiver.recv().await? {
         let FromReader::Credit(grant) = home.decode(&message)? else {
@@ -336,7 +336,7 @@ async fn peer(
 struct Opened {
     session: Session,
     /// The credit of a complete session.
-    credit: Option<Credit>,
+    credit: Option<Complete>,
     layout: Layout,
 }
 

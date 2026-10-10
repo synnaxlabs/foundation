@@ -4129,7 +4129,7 @@ mod tests {
 
         mod named {
             use super::*;
-            use crate::reader::{Error, Opened, Position, Unsynced, complete, named};
+            use crate::reader::{Opened, Position, Unsynced, complete, named};
 
             const HOLD: Span = Span::from_nanos(1_000_000_000);
             /// One nanosecond less than `HOLD`.

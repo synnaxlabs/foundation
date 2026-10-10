@@ -170,8 +170,8 @@ impl Remote {
         }
     }
 
-    /// The next frame, and the lens of its key set. After
-    /// [`STREAK`](super::STREAK) frames in a row, it yields once.
+    /// The next frame, and the lens of its key set. After [`STREAK`](super::STREAK)
+    /// frames in a row, it yields once.
     ///
     /// # Errors
     ///

@@ -17,6 +17,8 @@
 //! - `complete next`: one poll of a complete reader's `next` after the round's commit,
 //!   which gives a frame. Each but the first of a round also grants the credit of the
 //!   frame before it.
+//! - `complete ack`: one `Reader::ack` of the position of each frame that
+//!   `complete next` gives.
 //! - `complete grant`: the first poll of `next` on the drained complete reader, once a
 //!   round: it grants the credit of the round's last frame, finds no frame, and gives
 //!   `Pending`.
@@ -34,7 +36,8 @@
 //! figure only with the control or with another build. The `timer` floor is a large
 //! part of a poll's figure, so judge a change in a poll by `net`, its p50 less the
 //! floor's. To compare two builds, run each several times in turn on one pinned core
-//! whose SMT sibling is idle: a busy sibling doubles `write`.
+//! whose SMT sibling is idle: a busy sibling doubles `write`. Last, it prints the
+//! bytes of a `Received` and its parts.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -51,11 +54,11 @@ use std::task::{Context, Poll, Wake, Waker};
 
 use common::{SETTLE, name, unnamed};
 use hub::home::Outcome;
-use hub::reader::{Mode, Reader};
+use hub::reader::{Mode, Position, Reader, Received};
 use hub::writer::{self, Writer};
 use table::Line;
 use types::authority::Authority;
-use types::frame::{Label, Path};
+use types::frame::{Label, Path, View};
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
@@ -69,12 +72,19 @@ const ROUNDS: usize = 200;
 /// More rounds than fill the ring.
 const FILL: usize = 1 << 10;
 
+#[expect(clippy::print_stdout, reason = "a benchmark prints its results")]
 fn main() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     let (timer, lines) = sim.run_on(&node, bench).expect("the run ends");
     let title = format!("ns per call over {ROUNDS} rounds of {FRAMES} frames");
     table::print(&title, &timer, &lines);
+    println!(
+        "bytes: Received {}, Position {}, View {}",
+        size_of::<Received<'_>>(),
+        size_of::<Position>(),
+        size_of::<View<'_>>()
+    );
 }
 
 /// A waker that counts its wakes.
@@ -122,18 +132,20 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
         Line::new("write wake", 1),
         Line::new("latest next", FRAMES),
         Line::new("complete next", FRAMES),
+        Line::new("complete ack", FRAMES),
         Line::new("complete grant", 1),
         Line::new("complete wait", FRAMES - 1),
     ];
     for round in 0..WARMUP + ROUNDS {
-        let [now, first, write, wake, latest, complete, grant, wait] = &mut lines;
+        let [now, first, write, wake, latest, complete, ack, grant, wait] = &mut lines;
         for frame in 0..FRAMES {
             let draft = common::draft(&writer, stamp);
             stamp += 1;
             timer.add(table::timed(&ALLOCATOR, || ()).1);
             now.add(table::timed(&ALLOCATOR, || writer.now()).1);
             if frame == FRAMES - 1 {
-                assert!(!poll(&mut latest_reader, &waker), "the latest reader waits");
+                let polled = poll(&mut latest_reader, &waker);
+                assert!(polled.is_none(), "the latest reader waits");
                 assert_eq!(count.wakes(), round, "the poll wakes nothing");
             }
             let line = match frame {
@@ -142,13 +154,15 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
                 _ => &mut *write,
             };
             line.add(table::timed(&ALLOCATOR, || common::write(&mut writer, draft)).1);
-            latest.add(take(&mut latest_reader));
+            latest.add(take(&mut latest_reader).0);
         }
         let woken = count.wakes();
         assert_eq!(woken, round + 1, "each round's last write wakes the reader");
         node.clock().sleep(SETTLE).await;
         for _ in 0..FRAMES {
-            complete.add(take(&mut complete_reader));
+            let (figures, position) = take(&mut complete_reader);
+            complete.add(figures);
+            ack.add(table::timed(&ALLOCATOR, || complete_reader.ack(position)).1);
         }
         grant.add(table::timed(&ALLOCATOR, || pending(&mut complete_reader)).1);
         for _ in 1..FRAMES {
@@ -205,22 +219,27 @@ async fn fill(
             }
         }
         node.clock().sleep(SETTLE).await;
-        while poll(complete, Waker::noop()) || poll(complete, Waker::noop()) {}
+        while poll(complete, Waker::noop())
+            .or_else(|| poll(complete, Waker::noop()))
+            .is_some()
+        {}
     }
     panic!("the ring fills");
 }
 
 /// The ns and allocations of the poll of `reader.next()` that gives the frame that
-/// waits. A first `Pending`, the yield after a run of frames, is not counted.
+/// waits, and the frame's position. A first `Pending`, the yield after a run of
+/// frames, is not counted.
 ///
 /// # Panics
 ///
 /// When no frame waits.
-fn take(reader: &mut Reader) -> (u64, u64) {
+fn take(reader: &mut Reader) -> ((u64, u64), Position) {
     for _ in 0..2 {
-        let (ready, figures) = table::timed(&ALLOCATOR, || poll(reader, Waker::noop()));
-        if ready {
-            return figures;
+        let (polled, figures) =
+            table::timed(&ALLOCATOR, || poll(reader, Waker::noop()));
+        if let Some(position) = polled {
+            return (figures, position);
         }
     }
     panic!("a frame waits for the reader");
@@ -232,20 +251,21 @@ fn take(reader: &mut Reader) -> (u64, u64) {
 ///
 /// When the poll gives a frame.
 fn pending(reader: &mut Reader) {
-    assert!(!poll(reader, Waker::noop()), "the reader has no frame left");
+    let polled = poll(reader, Waker::noop());
+    assert!(polled.is_none(), "the reader has no frame left");
 }
 
-/// One poll of `reader.next()` with `waker`: `true` for a frame, `false` for
-/// `Pending`.
+/// One poll of `reader.next()` with `waker`: the position of the frame it gives, or
+/// `None` for `Pending`.
 ///
 /// # Panics
 ///
 /// When the reader ends.
-fn poll(reader: &mut Reader, waker: &Waker) -> bool {
+fn poll(reader: &mut Reader, waker: &Waker) -> Option<Position> {
     let mut cx = Context::from_waker(waker);
     match pin!(reader.next()).poll(&mut cx) {
-        Poll::Ready(Ok(_)) => true,
+        Poll::Ready(Ok(received)) => Some(received.position),
         Poll::Ready(Err(ended)) => panic!("the reader ended: {ended:?}"),
-        Poll::Pending => false,
+        Poll::Pending => None,
     }
 }

@@ -256,8 +256,8 @@ fn a_reader_at_another_node_than_its_home_acks_each_position() {
                 positions.push(reader.next().await.expect("a frame").position);
             }
             assert_ne!(positions[0], positions[1]);
-            assert_eq!(reader.ack(positions[2]), Ok(()));
-            assert_eq!(reader.ack(positions[0]), Ok(()));
+            reader.ack(positions[2]);
+            reader.ack(positions[0]);
         },
     );
 }
