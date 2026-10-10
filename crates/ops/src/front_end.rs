@@ -1,6 +1,7 @@
 //! Reads config files into Documents through the front end of each syntax.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::{Path, PathBuf};
 
 use document::diagnostic::{Code, Diagnostic};
@@ -10,7 +11,7 @@ const UNKNOWN_EXTENSION: Code = Code::new("ops.unknown-extension");
 const PATH_NOT_UTF8: Code = Code::new("ops.path-not-utf8");
 
 /// One syntax of config files.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 pub struct FrontEnd {
     /// Reads the text of one file into a Document whose spans hold `source`.
     ///
@@ -21,7 +22,7 @@ pub struct FrontEnd {
 }
 
 /// The front end of each file extension that a node reads. It holds at least one.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FrontEnds(BTreeMap<&'static str, FrontEnd>);
 
 impl FrontEnds {
@@ -43,6 +44,20 @@ impl FrontEnds {
     /// Each extension, in order.
     pub(crate) fn extensions(&self) -> impl Iterator<Item = &'static str> {
         self.0.keys().copied()
+    }
+}
+
+impl fmt::Debug for FrontEnd {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrontEnd").finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for FrontEnds {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("FrontEnds")
+            .field(&self.extensions().collect::<Vec<_>>())
+            .finish()
     }
 }
 

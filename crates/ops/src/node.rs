@@ -91,10 +91,7 @@ impl Node {
 impl fmt::Debug for Node {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
-            .field(
-                "front_ends",
-                &self.front_ends.extensions().collect::<Vec<_>>(),
-            )
+            .field("front_ends", &self.front_ends)
             .finish_non_exhaustive()
     }
 }
