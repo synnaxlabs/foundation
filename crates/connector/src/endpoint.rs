@@ -838,6 +838,51 @@ mod tests {
         assert_eq!(format!("{ports:?}"), "{}");
     }
 
+    /// Settings whose drop panics when its flag is set.
+    struct Brittle(bool);
+
+    impl PartialEq for Brittle {
+        fn eq(&self, _: &Self) -> bool {
+            true
+        }
+    }
+
+    impl Drop for Brittle {
+        fn drop(&mut self) {
+            assert!(!self.0, "the settings drop failed");
+        }
+    }
+
+    #[test]
+    fn opens_again_after_settings_whose_drop_panicked() {
+        let ports = Registry::<u8, Brittle, Port>::new();
+        let closes = Arc::new(AtomicUsize::new(0));
+        let port = Port {
+            n: 0,
+            closes: Arc::clone(&closes),
+        };
+        let lease = block_on(ports.acquire(0, Brittle(true), |_| async { Ok(port) }))
+            .expect("opens");
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            drop(lease);
+        }));
+        assert!(
+            unwound.is_err(),
+            "the settings drop panics through the drop"
+        );
+        assert_eq!(closes.load(Relaxed), 1);
+        let port = Port {
+            n: 1,
+            closes: Arc::clone(&closes),
+        };
+        let mut cx = std::task::Context::from_waker(Waker::noop());
+        let mut again = pin!(ports.acquire(0, Brittle(false), |_| async { Ok(port) }));
+        let Poll::Ready(again) = again.as_mut().poll(&mut cx) else {
+            panic!("the acquire after the close waits forever: {ports:?}");
+        };
+        assert_eq!(again.expect("opens again").n, 1);
+    }
+
     #[test]
     fn shows_its_open_keys() {
         let shown = run(|clock, _, _| async move {
