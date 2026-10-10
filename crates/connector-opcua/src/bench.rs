@@ -143,8 +143,8 @@ impl Manager {
     /// connect fails or does not end in 60 s of `clock`, if open62541 refuses the
     /// server, a client, or a step of the close, if a channel of a client is not
     /// closed after the close, or if the port is taken. A panic of the close leaks the
-    /// manager and each server and client that it has not deleted, and replaces a panic
-    /// of the connect or `body`.
+    /// loop and its connections, and each server and client that it has not deleted,
+    /// and replaces a panic of the connect or `body`.
     pub async fn scope<T>(
         clock: Clock,
         net: Net,
@@ -468,7 +468,8 @@ mod tests {
     }
 
     /// A panic of the close replaces the panic of the body. The close then leaks the
-    /// manager, the server, and the clients, so the child runs with no leak check.
+    /// loop, its connections, the server, and the clients, so the child runs with no
+    /// leak check.
     #[test]
     fn a_panic_of_the_close_replaces_a_panic_of_the_body() {
         let name = "bench::tests::the_close_panics_after_the_body";
