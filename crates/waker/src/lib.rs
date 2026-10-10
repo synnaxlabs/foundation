@@ -1,5 +1,6 @@
-//! Makes wakers for tests that stay on the thread of their test, so a test can give a
-//! future a waker whose drop runs code ([`holding`]).
+//! Makes wakers for tests that own a value that is not `Send`, so a test can give a
+//! future a waker whose drop runs its code ([`holding`]). A waker used on another
+//! thread aborts the process.
 
 #![expect(
     unsafe_code,
