@@ -444,19 +444,21 @@ mod tests {
 
     /// Holds the lock through the private field, and asserts that no call that reads
     /// or sets the peak finishes. The loom model runs [`Counts`], and the stress test
-    /// sees a call of [`Bytes`] that skips the lock only on enough cores.
+    /// sees only an `alloc` of [`Bytes`] that skips the lock, and only on enough cores.
     #[test]
     fn reads_and_sets_the_peak_only_under_the_lock() {
         let bytes = Bytes::new();
         let grown = AtomicPtr::new(filled(&bytes));
         bytes.counts.locked.store(true, Relaxed);
-        let calls: [&(dyn Fn() + Sync); 5] = [
+        let calls: [&(dyn Fn() + Sync); 6] = [
             &|| _ = bytes.peak(),
             &|| bytes.reset_peak(),
             &|| {
                 drop(format!("{bytes:?}"));
             },
             &|| free(&bytes, filled(&bytes), LAYOUT),
+            // SAFETY: the layout is not empty.
+            &|| free(&bytes, unsafe { bytes.alloc_zeroed(LAYOUT) }, LAYOUT),
             &|| {
                 let ptr = grown.load(Relaxed);
                 // SAFETY: `bytes` returned `ptr` for `LAYOUT`, and only this call
@@ -487,8 +489,8 @@ mod tests {
             finished
         });
         assert_eq!(
-            finished, [false; 5],
-            "(peak, reset_peak, Debug, alloc, realloc) finished under the lock"
+            finished, [false; 6],
+            "(peak, reset_peak, Debug, alloc, alloc_zeroed, realloc) ended while locked"
         );
     }
 
