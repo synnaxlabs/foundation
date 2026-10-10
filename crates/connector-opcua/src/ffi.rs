@@ -334,6 +334,7 @@ unsafe extern "C" {
 
     pub(crate) fn shim_loop_new(now: Now, clock: *mut c_void) -> *mut EventLoop;
     pub(crate) fn shim_loop_free(el: *mut EventLoop);
+    pub(crate) fn shim_loop_delayed(el: *mut EventLoop) -> bool;
     pub(crate) fn shim_log_warning(
         el: *mut EventLoop,
         message: *const u8,

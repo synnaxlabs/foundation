@@ -6,9 +6,9 @@ use super::Manager;
 use crate::ffi::{self, Status};
 
 impl Manager {
-    /// Stops `server`, drives the manager until nothing is due on the loop, then
-    /// deletes `server`. It checks after each run of the loop, so a busy loop only
-    /// makes the delete later.
+    /// Stops `server`, drives the manager until no delayed callback waits on the
+    /// loop, then deletes `server`. It does not wait for a timer, so a loop whose
+    /// timers are always due does not hold back the delete.
     ///
     /// # Safety
     ///
@@ -27,7 +27,7 @@ impl Manager {
         let events = &self.events;
         self.drive(|_| {
             events.run();
-            if events.due() {
+            if events.delayed() {
                 Poll::Pending
             } else {
                 Poll::Ready(())

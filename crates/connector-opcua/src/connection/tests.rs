@@ -8,11 +8,12 @@ use std::panic::{self, AssertUnwindSafe};
 use std::pin::{Pin, pin};
 use std::ptr;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
+use std::time::Instant;
 
-use env::clock::Clock;
+use env::clock::{Clock, Driver, Sleep, Timer};
 use env::net::{self, Tcp, tcp};
 use env::rng::Rng;
 use sim::{Sim, node};
@@ -2579,6 +2580,140 @@ fn a_stopped_server_with_a_session_is_deleted_with_its_session() {
             side.drive(Span::SECOND).await;
         })
         .expect("the run ends");
+}
+
+/// The sim clock plus `extra`, the time that the callbacks of the loop take.
+struct Slow {
+    inner: Clock,
+    extra: Arc<AtomicU64>,
+}
+
+impl Driver for Slow {
+    fn now(&self) -> Monotonic {
+        Monotonic(self.inner.now().0 + self.extra.load(Ordering::SeqCst))
+    }
+
+    fn epoch(&self) -> Instant {
+        self.inner.epoch()
+    }
+
+    fn timer(&self) -> Pin<Box<dyn Timer>> {
+        Box::pin(Late {
+            sleep: self.inner.sleep_until(self.inner.now()),
+            extra: Arc::clone(&self.extra),
+        })
+    }
+}
+
+/// A sleep of the sim clock that ends `extra` early, so it ends at the time of
+/// [`Slow`].
+struct Late {
+    sleep: Sleep,
+    extra: Arc<AtomicU64>,
+}
+
+impl Timer for Late {
+    fn poll_until(
+        self: Pin<&mut Self>,
+        deadline: Monotonic,
+        cx: &mut Context<'_>,
+    ) -> Poll<()> {
+        let this = self.get_mut();
+        let extra = this.extra.load(Ordering::SeqCst);
+        this.sleep
+            .reset(Monotonic(deadline.0.saturating_sub(extra)));
+        Pin::new(&mut this.sleep).poll(cx)
+    }
+}
+
+/// The runs of [`busy`] and the time they take.
+struct Load {
+    extra: Arc<AtomicU64>,
+    runs: Cell<usize>,
+}
+
+/// The runs of [`busy`] that take time.
+const BUSY_RUNS: usize = 10_000;
+
+/// A timer callback that takes 1 ms of the clock, for `BUSY_RUNS` runs.
+///
+/// # Safety
+///
+/// `data` points at a live [`Load`].
+unsafe extern "C" fn busy(_: *mut c_void, data: *mut c_void) {
+    // SAFETY: the caller gives a live `Load`.
+    let load = unsafe { &*data.cast::<Load>() };
+    load.runs.set(load.runs.get() + 1);
+    if load.runs.get() < BUSY_RUNS {
+        load.extra.fetch_add(1_000_000, Ordering::SeqCst);
+    }
+}
+
+/// A 1 ms timer that takes 1 ms to run is always due, and the close waits only for
+/// the delayed callbacks.
+#[test]
+fn a_close_ends_while_a_timer_of_the_loop_takes_its_interval() {
+    let mut network = Network::new();
+    let runs = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let extra = Arc::new(AtomicU64::new(0));
+            let clock = Clock::new(Slow {
+                inner: node.clock(),
+                extra: Arc::clone(&extra),
+            });
+            let rng = &mut Rng::from_seed(0);
+            let manager = Manager::listening(
+                Clock::clone(&clock),
+                node.net(),
+                local(&node),
+                4,
+                rng,
+            )
+            .expect("the port is free");
+            let side = Side::of(clock, manager);
+            // SAFETY: the loop outlives the server, which the test deletes.
+            let server = unsafe {
+                ffi::test::shim_server_new(
+                    side.events().raw(),
+                    PORT,
+                    c"opc.tcp://:4840".as_ptr(),
+                    1,
+                )
+            };
+            assert!(!server.is_null());
+            // SAFETY: the server lives.
+            let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+            assert_eq!(status, Status::GOOD);
+            side.drive(Span::SECOND).await;
+            let load = Box::new(Load {
+                extra,
+                runs: Cell::new(0),
+            });
+            let events = side.events();
+            // SAFETY: the member takes its own loop, and `load` outlives the loop.
+            let status = Status(unsafe {
+                (events.members().add_timer)(
+                    events.raw(),
+                    busy,
+                    ptr::null_mut(),
+                    ptr::from_ref(&*load).cast_mut().cast(),
+                    1.0,
+                    ptr::null_mut(),
+                    ffi::CURRENT_TIME,
+                    ptr::null_mut(),
+                )
+            });
+            assert_eq!(status, Status::GOOD);
+            side.clock.sleep(Span::from_nanos(1_000_000)).await;
+            // SAFETY: the server lives on the loop, and nothing uses it after.
+            unsafe { side.manager.close_server(server) }.await;
+            let runs = load.runs.get();
+            drop(side);
+            runs
+        })
+        .expect("the run ends");
+    assert!(runs < 10, "the close ran the timer {runs} times");
 }
 
 /// The `CloseSession` service of a running server removes the session after the

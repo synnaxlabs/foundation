@@ -76,17 +76,14 @@ impl Loop {
         assert_eq!(status, ffi::Status::GOOD, "open62541 failed a run");
     }
 
-    /// Gives whether a timer or a delayed callback is due now.
+    /// Gives whether a delayed callback waits for the next run.
     #[cfg_attr(
         not(any(test, feature = "sim")),
         expect(dead_code, reason = "the stop of a server of #435 calls it")
     )]
-    pub(crate) fn due(&self) -> bool {
-        // SAFETY: the member takes its own loop.
-        let next = unsafe { (self.members().next_timer)(self.raw()) };
-        // SAFETY: the `Clock` at `clock` lives until `drop`. The loop gives the time
-        // of a delayed callback in the same ticks.
-        next <= unsafe { now(self.clock.as_ptr().cast()) }
+    pub(crate) fn delayed(&self) -> bool {
+        // SAFETY: the loop is one of `shim_loop_new`.
+        unsafe { ffi::shim_loop_delayed(self.raw()) }
     }
 }
 

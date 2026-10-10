@@ -382,6 +382,10 @@ UA_EventLoop *shim_loop_new(shim_now now, void *clock) {
     return el;
 }
 
+/* Whether a delayed callback of `el`, a loop of `shim_loop_new`, waits for the next
+ * run. */
+UA_Boolean shim_loop_delayed(UA_EventLoop *el) { return loop_of(el)->queued != NULL; }
+
 /* The most passes of delayed callbacks that a free runs. A callback that queues
  * itself at each pass is a defect. */
 #define FREE_PASSES 64

@@ -665,32 +665,35 @@ fn a_change_to_an_interval_out_of_range_is_refused_and_keeps_the_timer() {
 }
 
 #[test]
-fn a_delayed_callback_is_due_off_the_100_ns_grid() {
-    let mut f = Fixture::new();
+fn a_delayed_callback_waits_until_a_run() {
+    let f = Fixture::new();
     f.start();
-    f.advance(Span::from_nanos(50));
-    assert!(!f.events.due());
+    assert!(!f.events.delayed());
     let mut first = f.delayed(record, number(1));
     f.queue(&mut first);
-    assert!(f.events.due());
+    assert!(f.events.delayed());
     f.run();
     assert_eq!(f.ran(), [1]);
-    assert!(!f.events.due());
+    assert!(!f.events.delayed());
 }
 
 #[test]
-fn a_timer_is_due_from_its_time() {
+fn a_removed_delayed_callback_does_not_wait() {
+    let f = Fixture::new();
+    f.start();
+    let mut first = f.delayed(record, number(1));
+    f.queue(&mut first);
+    f.unqueue(&mut first);
+    assert!(!f.events.delayed());
+}
+
+#[test]
+fn a_due_timer_is_no_delayed_callback() {
     let mut f = Fixture::new();
     f.start();
     f.add(1, 1.0, ffi::ONCE);
-    f.advance(Span::from_nanos(999_999));
-    assert!(!f.events.due());
-    f.advance(Span::from_nanos(1));
-    assert!(f.events.due());
     f.advance(ms(1));
-    assert!(f.events.due(), "a timer stays due until a run");
-    f.run();
-    assert!(!f.events.due());
+    assert!(!f.events.delayed());
 }
 
 #[test]
