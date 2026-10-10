@@ -224,8 +224,10 @@ pub(crate) async fn newest(
         last.insert(header.index, (slot, header, offset));
     }
     drop(table);
+    let mut last: Vec<_> = last.into_values().collect();
+    last.sort_unstable_by_key(|&(.., offset)| offset);
     let mut found = Vec::with_capacity(last.len());
-    for (slot, header, offset) in last.into_values() {
+    for (slot, header, offset) in last {
         let bytes = bytes(file, pool, place, offset, header.bytes).await?;
         found.push((slot, stored(header, bytes)));
     }
