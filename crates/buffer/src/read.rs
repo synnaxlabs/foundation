@@ -159,7 +159,8 @@ impl<'a> Reading<'a> {
                 }
                 self.read.gap = Some(self.read.next.seq..header.first);
             }
-            let bytes = self.bytes(place, offset, header.bytes).await?;
+            let bytes =
+                bytes(self.file, self.pool, place, offset, header.bytes).await?;
             self.spent += block::footprint(bytes.len());
             self.read.entries.push(Stored {
                 first: header.first,
@@ -184,17 +185,9 @@ impl<'a> Reading<'a> {
         run: Run,
         wanted: &mut Vec<(Header, usize, Mark)>,
     ) -> Result<(), Error> {
-        let table = self.table(place).await?;
-        let head = record::head(&table).expect("invariant: a run names a record");
-        let body = table
-            .get(HEADER_LEN..)
-            .expect("invariant: the table holds the record header");
-        let start = body.get(..head.len).unwrap_or(body);
-        let headers =
-            entry::parse(start, head.len).expect("invariant: a run names a record");
+        let table = table(self.file, self.pool, place).await?;
         let mut at = run.start;
-        for header in headers {
-            let (header, offset) = header.expect("invariant: a run names a record");
+        for (header, offset) in headers(&table) {
             if (header.index, header.path) != (index, self.path) {
                 continue;
             }
@@ -205,34 +198,56 @@ impl<'a> Reading<'a> {
         }
         Ok(())
     }
+}
 
-    /// The header and entry table of the record at `place` in the ring file.
-    async fn table(&self, place: u64) -> Result<Unique, Error> {
-        let block = self.file.read_at(place, self.pool.alloc(ALIGN)?).await?;
-        let body = block
-            .get(HEADER_LEN..)
-            .expect("invariant: a block holds a record header");
-        let len = HEADER_LEN
-            + entry::table_end(body).expect("invariant: a run names a record");
-        if len <= block.len() {
-            return Ok(block);
-        }
-        drop(block);
-        Ok(self.file.read_at(place, self.pool.alloc(len)?).await?)
-    }
+/// Each entry header of the record whose header and entry table are `table`, with
+/// the body offset of its bytes.
+///
+/// # Panics
+///
+/// When `table` is not the table of a record that a run names.
+fn headers(table: &[u8]) -> impl Iterator<Item = (Header, usize)> {
+    let head = record::head(table).expect("invariant: a run names a record");
+    let body = table
+        .get(HEADER_LEN..)
+        .expect("invariant: the table holds the record header");
+    let start = body.get(..head.len).unwrap_or(body);
+    entry::parse(start, head.len)
+        .expect("invariant: a run names a record")
+        .map(|header| header.expect("invariant: a run names a record"))
+}
 
-    /// The `len` bytes at body offset `offset` of the record at `place` in the
-    /// ring file. No bytes make no file read.
-    async fn bytes(&self, place: u64, offset: usize, len: u32) -> Result<Block, Error> {
-        let len = usize::try_from(len).expect("invariant: a u32 fits usize");
-        let block = self.pool.alloc(len)?;
-        if len == 0 {
-            return Ok(block.freeze());
-        }
-        let at =
-            u64::try_from(HEADER_LEN + offset).expect("invariant: a body fits u64");
-        Ok(self.file.read_at(place + at, block).await?.freeze())
+/// The header and entry table of the record at `place` in the ring `file`.
+async fn table(file: &File, pool: &Pool, place: u64) -> Result<Unique, Error> {
+    let block = file.read_at(place, pool.alloc(ALIGN)?).await?;
+    let body = block
+        .get(HEADER_LEN..)
+        .expect("invariant: a block holds a record header");
+    let len =
+        HEADER_LEN + entry::table_end(body).expect("invariant: a run names a record");
+    if len <= block.len() {
+        return Ok(block);
     }
+    drop(block);
+    Ok(file.read_at(place, pool.alloc(len)?).await?)
+}
+
+/// The `len` bytes at body offset `offset` of the record at `place` in the ring
+/// `file`. No bytes make no file read.
+async fn bytes(
+    file: &File,
+    pool: &Pool,
+    place: u64,
+    offset: usize,
+    len: u32,
+) -> Result<Block, Error> {
+    let len = usize::try_from(len).expect("invariant: a u32 fits usize");
+    let block = pool.alloc(len)?;
+    if len == 0 {
+        return Ok(block.freeze());
+    }
+    let at = u64::try_from(HEADER_LEN + offset).expect("invariant: a body fits u64");
+    Ok(file.read_at(place + at, block).await?.freeze())
 }
 
 #[cfg(test)]
