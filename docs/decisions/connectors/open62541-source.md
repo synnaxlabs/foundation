@@ -299,7 +299,8 @@
   accept before the run that gives that `CLOSING` adds one channel past the limit. A
   burst of 150 accepts in one pass held 149 secure channels against the limit of 100 in
   the `sim` test of #2255. After an accept, the drive moves the listen connection on
-  only after the next run, so an accept costs one move, not a pass of the table. Lost:
+  only after the next run, so an accept costs one move of the listen connection, not a
+  pass of the table. Lost:
   a wake and a full pass after each accept, so a burst of n streams cost n passes; and
   the manager gives each queued `CLOSING` after an accept, so it would run work of the
   loop, and a `CLOSING` would come by two paths. As the POSIX manager does, the first
