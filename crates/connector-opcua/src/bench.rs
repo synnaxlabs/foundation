@@ -141,8 +141,8 @@ impl Manager {
     /// If `idle` is 65535 or more, as open62541 counts sessions in 16 bits, if a
     /// connect fails or does not end in 60 s of `clock`, if open62541 refuses the
     /// server, a client, or a step of the close, if a channel of a client is not
-    /// closed after the close, or if the port is taken. A panic of the close replaces
-    /// a panic of the connect or `body`.
+    /// closed after the close, or if the port is taken. A panic of the close frees
+    /// nothing after it, and replaces a panic of the connect or `body`.
     pub async fn scope<T>(
         clock: Clock,
         net: Net,
@@ -300,7 +300,7 @@ impl Manager {
         for client in self.clients.drain(..) {
             assert_eq!(
                 // SAFETY: the client lives.
-                unsafe { state(client) }.0,
+                unsafe { state(client) }.channel,
                 ffi::test::Channel::CLOSED,
                 "invariant: the drive of `delete_server` closes each channel"
             );
@@ -333,7 +333,7 @@ impl Manager {
     fn connected(&self) -> usize {
         let connected = |client: &&NonNull<ffi::Client>| {
             // SAFETY: the client lives.
-            let status = unsafe { state(**client) }.1;
+            let status = unsafe { state(**client) }.status;
             assert!(status == Status::GOOD, "a connect failed: {status:?}");
             // SAFETY: the client lives.
             unsafe { ffi::test::shim_client_namespaced(client.as_ptr()) }
@@ -342,12 +342,19 @@ impl Manager {
     }
 }
 
-/// Gives the state of the channel of `client`, and its connect status.
+/// The state of a client.
+struct State {
+    channel: ffi::test::Channel,
+    /// The status of the connect.
+    status: Status,
+}
+
+/// Gives the state of `client`.
 ///
 /// # Safety
 ///
 /// `client` lives.
-unsafe fn state(client: NonNull<ffi::Client>) -> (ffi::test::Channel, Status) {
+unsafe fn state(client: NonNull<ffi::Client>) -> State {
     let (mut channel, mut status) = (MaybeUninit::uninit(), MaybeUninit::uninit());
     // SAFETY: the client lives.
     unsafe {
@@ -361,7 +368,8 @@ unsafe fn state(client: NonNull<ffi::Client>) -> (ffi::test::Channel, Status) {
     // SAFETY: the call writes each output that is not null.
     let channel = unsafe { channel.assume_init() };
     // SAFETY: as above.
-    (channel, Status(unsafe { status.assume_init() }))
+    let status = Status(unsafe { status.assume_init() });
+    State { channel, status }
 }
 
 impl std::fmt::Debug for Manager {

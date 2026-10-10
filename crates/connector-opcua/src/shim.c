@@ -78,6 +78,8 @@ _Static_assert(UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME == 2258,
                "UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME moved");
 _Static_assert(UA_SECURECHANNELSTATE_CLOSED == 0,
                "UA_SECURECHANNELSTATE_CLOSED moved");
+_Static_assert(sizeof(UA_SecureChannelState) == sizeof(int),
+               "UA_SecureChannelState changed");
 
 /* `src/ffi.rs` mirrors the struct, in words of the size of a pointer, and asserts the
  * same offsets. */

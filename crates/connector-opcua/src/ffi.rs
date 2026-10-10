@@ -392,7 +392,8 @@ pub(crate) mod test {
     pub(crate) struct Channel(pub(crate) c_int);
 
     impl Channel {
-        /// `UA_SECURECHANNELSTATE_CLOSED`. `shim.c` asserts it.
+        /// `UA_SECURECHANNELSTATE_CLOSED`. `shim.c` asserts it and the size of the
+        /// type.
         pub(crate) const CLOSED: Self = Self(0);
     }
 
