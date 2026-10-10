@@ -74,7 +74,8 @@ impl Config {
         let Some(spans) = span.checked_mul(classes) else {
             return Err(unfit);
         };
-        // Past a budget of 2 GiB `classes` is 96, so `spans` is at most 2^64 - 4096.
+        // From a budget of 2 GiB + 64 bytes, `classes` is 96 and `spans` is a multiple
+        // of 6144, so at most 2^64 - 4096. Below that, `spans` is under 2^38.
         let reservation = spans + HEADER;
         Ok(Self {
             budget,
@@ -1076,7 +1077,7 @@ mod tests {
         const LAST: u64 = 192_153_584_101_141_120;
 
         #[test]
-        fn fits_up_to_the_last_span_below_the_address_space() {
+        fn fits_up_to_the_last_span_below_usize_max() {
             let config = Config::new(LAST).expect("the reservation fits");
             assert_eq!(config.reservation(), usize::MAX - 4031);
             let error = Config::new(LAST + 1).expect_err("the reservation is past it");
@@ -1095,6 +1096,8 @@ mod tests {
         }
 
         proptest! {
+            #![proptest_config(cases())]
+
             #[test]
             fn fits_up_to_the_last_budget_and_grows_with_it(
                 a in 0..2 * LAST,
@@ -1306,6 +1309,13 @@ mod tests {
 
     mod alloc {
         use super::*;
+
+        #[test]
+        fn gives_aligned_blocks_when_the_budget_is_not_a_multiple_of_64() {
+            let pool = Pool::heap(Config::new(200).expect("the budget fits"));
+            let block = pool.alloc(100).expect("the budget has room");
+            assert_eq!(block.as_ptr().addr() % ALIGN, 0);
+        }
 
         proptest! {
             #![proptest_config(cases())]

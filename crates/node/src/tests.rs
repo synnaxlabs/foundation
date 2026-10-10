@@ -420,7 +420,7 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
     expected = "shard-0: pool budget 18446744073709551615 bytes needs more address \
                 space than this host has"
 )]
-fn a_budget_past_the_address_space_panics_at_start() {
+fn a_reservation_past_usize_max_panics_at_start() {
     drop(start_with(
         7,
         1,
@@ -946,8 +946,7 @@ mod buffer {
     /// With two least rings less one byte, shard 0's part of the disk fits, and its
     /// part of the pool does not.
     #[test]
-    fn a_disk_budget_that_holds_no_ring_wins_over_a_pool_budget_past_the_address_space()
-    {
+    fn a_disk_budget_that_holds_no_ring_wins_over_a_pool_reservation_past_usize_max() {
         let smallest = ::buffer::Layout::fit(0, crate::BODY_MAX).unwrap_err().min;
         for (cores, bytes, min) in
             [(1, 1, smallest), (2, 2 * smallest - 1, 2 * smallest)]
