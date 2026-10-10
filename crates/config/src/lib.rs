@@ -496,42 +496,64 @@ mod tests {
         text.parse().unwrap()
     }
 
+    /// A `keyword` block labeled `label`, from a Document with no spans.
+    fn spanless(keyword: &str, label: &str) -> Document {
+        document(vec![Block {
+            keyword: keyword.into(),
+            keyword_span: None,
+            labels: vec![Label {
+                text: label.into(),
+                span: None,
+            }],
+            body: Document::default(),
+            span: None,
+        }])
+    }
+
     #[test]
-    fn sorts_diagnostics_with_no_span_first_then_by_span() {
-        let (Some(start), Some(other)) = (at(0, 5), at(1, 0)) else {
-            unreachable!("valid spans")
-        };
-        let longer = Span::new(Source(0), start.start(), position(9));
-        let problem = |span| refused("config.test", span, "a problem", "Fix it");
-        let mut diagnostics = [
-            problem(Some(other)),
-            problem(longer),
-            problem(Some(start)),
-            problem(None),
+    fn orders_problems_with_no_span_first_then_at_one_start_by_their_end() {
+        let short = settings(0, 0, "a", &[]);
+        let mut long = settings(0, 0, "b", &[]);
+        let wide = Span::new(Source(0), position(0), position(5));
+        long.keyword_span = wide;
+        let documents = [
+            document(vec![long]),
+            document(vec![short]),
+            spanless("node_settings", "c"),
         ];
-        sort(&mut diagnostics);
-        let spans = diagnostics.map(|diagnostic| diagnostic.span);
-        assert_eq!(spans, [None, Some(start), longer, Some(other)]);
+        let diagnostics = check(&documents).unwrap_err();
+        let spans: Vec<_> = diagnostics.iter().map(|problem| problem.span).collect();
+        assert_eq!(spans, [None, at(0, 0), wide]);
     }
 
     #[test]
     fn gives_the_repeat_at_the_label_with_a_span_after_one_with_none() {
-        let spanless = document::Label {
-            text: "a".into(),
-            span: None,
-        };
-        let spanned = document::Label {
-            text: "A".into(),
-            span: at(0, 5),
-        };
-        let mut labels = duplicate::Labels::new();
-        for label in [&spanned, &spanless] {
-            let kind = definition::Kind::NodeSettings;
-            duplicate::add(&mut labels, &key(&label.text), label, kind);
-        }
-        let repeats = duplicate::in_labels(&mut labels);
-        let spans: Vec<_> = repeats.iter().map(|diagnostic| diagnostic.span).collect();
-        assert_eq!(spans, [at(0, 5)]);
+        let documents = [
+            document(vec![settings(0, 0, "A", &[])]),
+            spanless("node_settings", "a"),
+        ];
+        let diagnostics = check(&documents).unwrap_err();
+        let spans: Vec<_> = diagnostics
+            .iter()
+            .filter(|problem| problem.code.as_str() == "config.duplicate-name")
+            .map(|problem| problem.span)
+            .collect();
+        assert_eq!(spans, [at(0, 1)]);
+    }
+
+    #[test]
+    fn notes_no_connector_when_the_first_of_a_name_has_no_span() {
+        let spanned = document(vec![
+            block(0, 0, "connector", &["PLC"], &[]),
+            block(0, 100, "subject", &["plc"], &[]),
+        ]);
+        let diagnostics = check(&[spanned, spanless("connector", "plc")]).unwrap_err();
+        let notes: Vec<_> = diagnostics
+            .iter()
+            .filter(|problem| problem.code.as_str() == "config.subject-is-connector")
+            .map(|problem| problem.notes.clone())
+            .collect();
+        assert_eq!(notes, [Vec::new()]);
     }
 
     #[test]
