@@ -225,12 +225,15 @@
   certificate runs before. Its drop runs the queued delayed callbacks in at most 64
   passes, then aborts: a callback that queues itself at each pass is a defect. The
   hidden module `bench`, behind the feature `sim`, gives the benchmark and the
-  allocation test a client on the loop, and a connection manager with the test server
-  and its clients on the loop of the manager. Decided by `laptop.architect-2`
+  allocation test a client on the loop. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211,
   2026-10-08 19:05 UTC); the abort supersedes "panics" in that comment
   (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
-  2026-10-08 20:22 UTC).
+  2026-10-08 20:22 UTC). `bench` also gives a connection manager with the test server
+  and its clients on the loop of the manager. Approved by `laptop.architect-2` at
+  `3b508e494`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338,
+  2026-10-10 03:05 UTC).
   The logger of the loop writes each message of level warning and up to fd 2, and
   drops the lower levels: it formats the line into a stack buffer of 512 bytes with
   `mp_vsnprintf` and sends it in one `write`, so a line allocates nothing, takes no
@@ -307,12 +310,14 @@
   connection, about 63 to 107 ns each by the load of the host on the bench of #435 6b3,
   on box2, an Intel Xeon Platinum 8488C. Deferred by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6092329880,
-  2026-10-10 01:45 UTC). Lost for the listener: the manager binds its own listener
-  with `Net::listen` from the parameters. `address` is a host name and `Net::listen`
-  takes a socket address, so the open would resolve in a hook that must give
-  `ESTABLISHED` before it returns, and an owner that binds port 0 could not learn the
-  port before it builds the URL of its server. Also lost: one constructor with an
-  `Option<Listener>`, which a client gives as a literal `None` (`docs/claude/rust.md`;
+  2026-10-10 01:45 UTC), with these words approved at `3b508e494`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338,
+  2026-10-10 03:05 UTC). Lost for the listener: the manager binds its own listener with
+  `Net::listen` from the parameters. `address` is a host name and `Net::listen` takes a
+  socket address, so the open would resolve in a hook that must give `ESTABLISHED`
+  before it returns, and an owner that binds port 0 could not learn the port before it
+  builds the URL of its server. Also lost: one constructor with an `Option<Listener>`,
+  which a client gives as a literal `None` (`docs/claude/rust.md`;
   `laptop.director`,
   https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089322178,
   2026-10-09 21:10 UTC), and one with an enum argument, a new type that holds one
@@ -338,4 +343,6 @@
   2026-10-10 00:19 UTC).
   `connection::Manager::delete_server` does that drive and the delete with no call
   between. It is behind `cfg(any(test, feature = "sim"))` until a server that serves
-  users calls it (#2212).
+  users calls it (#2212). Approved by `laptop.architect-2` at `3b508e494`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338,
+  2026-10-10 03:05 UTC).
