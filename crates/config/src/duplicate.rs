@@ -8,7 +8,8 @@ use types::name::Name;
 const DUPLICATE_NAME: Code = Code::new("config.duplicate-name");
 
 /// Each label of each tree key, with the kind of its block, by the key in ASCII lower
-/// case, so that keys that differ only in case collide.
+/// case, so that keys that differ only in case collide. Each key's labels are in the
+/// order that they are added.
 pub(crate) type Labels<'a> = BTreeMap<Box<str>, Vec<(&'a Label, Kind)>>;
 
 /// Adds `key`, whose label is `label`, to `labels`.
@@ -22,13 +23,10 @@ pub(crate) fn add<'a>(
     labels.entry(lower).or_default().push((label, kind));
 }
 
-/// `config.duplicate-name` at each label of a tree key of `labels` after the first in
-/// span order, no span first. Labels with no span keep the order that `labels` holds
-/// them in.
-pub(crate) fn in_labels(labels: &mut Labels<'_>) -> Vec<Diagnostic> {
+/// `config.duplicate-name` at each label of a tree key of `labels` after its first.
+pub(crate) fn in_labels(labels: &Labels<'_>) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
-    for labels in labels.values_mut() {
-        labels.sort_by_key(|(label, _)| label.span);
+    for labels in labels.values() {
         let (first, earlier) = labels[0];
         for &(label, later) in &labels[1..] {
             diagnostics.push(repeats((label, later), (first, earlier)));
@@ -54,7 +52,7 @@ pub(crate) fn in_definitions(
     for (key, label, kind) in &found {
         add(&mut labels, key, label, *kind);
     }
-    in_labels(&mut labels)
+    in_labels(&labels)
 }
 
 /// `config.duplicate-name` at `label`, whose tree key repeats the earlier `first` in

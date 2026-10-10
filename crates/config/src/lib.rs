@@ -101,9 +101,10 @@ pub struct Entry {
 /// `config.long-name` at the label of a connector with a status name longer than
 /// [`Name::MAX_BYTES`]. `config.implied-channel` at the label of each block whose key
 /// in the map is, in any ASCII case, a status channel, and at the label of each
-/// connector whose kind writes one, with a note at the connector of the channel. Of
-/// the connectors at one key, only the first in span order, no span first, then in the
-/// order of `documents`, implies or writes channels.
+/// connector whose kind writes one, with a note at the connector of the channel. At a
+/// key that repeats in any ASCII case, only the first block in span order, no span
+/// first, then in the order of `documents`, is checked as its definition, so a
+/// connector implies or writes channels only when it is that block.
 pub fn check(
     documents: &[Document],
     kinds: &Table,
@@ -126,7 +127,7 @@ fn checked<'a>(
         .flat_map(|document| &document.blocks)
         .collect();
     // At a repeated key, the first block in span order is kept, no span first, then in
-    // the order of `documents`.
+    // the order of `documents`. `duplicate::in_labels` relies on this order.
     blocks.sort_by_key(|block| block.labels.first().and_then(|label| label.span));
     let mut found = Found {
         entries: BTreeMap::new(),
@@ -160,7 +161,7 @@ fn checked<'a>(
             continue;
         };
         let key = found.key(block, *kind);
-        let key = key.filter(|(key, _)| keys.insert(key.clone()));
+        let key = key.filter(|(key, _)| keys.insert(key.as_str().to_ascii_lowercase()));
         let name = key.as_ref().map(|(name, _)| name);
         let definition = check_block(&mut found, block, name);
         if let (Some((key, label_span)), Some(definition)) = (key, definition) {
@@ -173,7 +174,7 @@ fn checked<'a>(
         }
     }
     connector::imply(&mut found);
-    let repeats = duplicate::in_labels(&mut found.labels);
+    let repeats = duplicate::in_labels(&found.labels);
     found.diagnostics.extend(repeats);
     if found.diagnostics.is_empty() {
         Ok(found)

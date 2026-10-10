@@ -3039,6 +3039,21 @@ fn implies_nothing_at_a_repeated_name_whose_first_connector_fails() {
     assert_eq!(found, expected);
 }
 
+/// A connector at the key of an earlier channel block implies nothing.
+#[test]
+fn implies_nothing_at_the_key_of_an_earlier_channel() {
+    let index = "channel \"c\" {\n  kind = \"index\"\n}\n";
+    let channel = "channel \"c.status.state\" {\n  data_type = \"u8\"\n  \
+                   index = \"a.time\"\n}\n";
+    let documents = documents(&[index, COUNTED, PLANT, channel]);
+    let found = config::check(&documents, &kinds()).expect_err("problems");
+    let found: Vec<_> = (found.iter())
+        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.span))
+        .collect();
+    let span = documents[1].blocks[0].labels[0].span;
+    assert_eq!(found, [("config.duplicate-name", span)]);
+}
+
 /// A later connector at the key of one whose check fails writes nothing.
 #[test]
 fn refuses_no_write_of_a_later_connector_at_the_key_of_one_that_fails() {
@@ -3060,6 +3075,50 @@ fn refuses_no_write_of_a_later_connector_at_the_key_of_one_that_fails() {
             "config.duplicate-name",
             documents[2].blocks[0].labels[0].span,
         ),
+    ];
+    assert_eq!(found, expected);
+}
+
+/// A later connector at the key of one that fails, in another case, writes nothing.
+#[test]
+fn refuses_no_write_of_a_later_connector_at_the_key_of_one_that_fails_in_any_case() {
+    let nodeless = "connector \"d\" {\n  kind = \"writer\"\n  \
+                    writes = [\"c.status.state\"]\n}\n";
+    let writer = "connector \"D\" {\n  kind = \"writer\"\n  node = \"n\"\n  \
+                  writes = [\"c.status.state\"]\n}\n";
+    let documents = documents(&[COUNTED, nodeless, writer]);
+    let found = config::check(&documents, &kinds()).expect_err("problems");
+    let found: Vec<_> = (found.iter())
+        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.span))
+        .collect();
+    let expected = [
+        (
+            "document.missing-attribute",
+            documents[1].blocks[0].keyword_span,
+        ),
+        (
+            "config.duplicate-name",
+            documents[2].blocks[0].labels[0].span,
+        ),
+    ];
+    assert_eq!(found, expected);
+}
+
+/// A later connector at the key of another in another case implies nothing.
+#[test]
+fn implies_nothing_at_a_repeated_name_in_another_case() {
+    let later = COUNTED.replace("connector \"c\"", "connector \"C\"");
+    let channel = "channel \"c.status.state\" {\n  data_type = \"u8\"\n  \
+                   index = \"a.time\"\n}\n";
+    let documents = documents(&[COUNTED, &later, PLANT, channel]);
+    let found = config::check(&documents, &kinds()).expect_err("problems");
+    let found: Vec<_> = (found.iter())
+        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.span))
+        .collect();
+    let span = |document: &Document| document.blocks[0].labels[0].span;
+    let expected = [
+        ("config.duplicate-name", span(&documents[1])),
+        ("config.implied-channel", span(&documents[3])),
     ];
     assert_eq!(found, expected);
 }
