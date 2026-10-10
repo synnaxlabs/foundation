@@ -3,7 +3,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use connector::kind::Table;
-use document::Source;
 use mesh::Mesh;
 use serde_json::{Value, json};
 use types::channel::Key;
@@ -13,7 +12,7 @@ use crate::apply::Applied;
 use crate::common::{
     NODE, PLANT, Reader, fail_sync, front_ends, hcl, placed_site, solo,
 };
-use crate::error::{Error, Problem};
+use crate::error::Error;
 use crate::front_end::{self, File, FrontEnd, FrontEnds};
 use crate::plan::{self, Counts};
 use crate::used;
@@ -131,13 +130,7 @@ fn plans_with_each_connector_kind_of_the_node() {
 #[test]
 fn gives_the_json_error_of_a_plan() {
     solo(|_, mesh| async move {
-        let node = create_node(mesh);
-        let files = vec![(PathBuf::from("site.txt"), placed_site())];
-        let error = node.plan(files).await.expect_err("an unknown extension");
-        let problem = front_end::unknown(Source(0), &front_ends());
-        let paths = [PathBuf::from("site.txt")];
-        let expected = Error::Config(vec![Problem::of(problem, &paths)]);
-        assert_eq!(error, expected.json());
+        assert_unknown(mesh, front_ends(), "`.hcl`").await;
     });
 }
 
@@ -195,7 +188,7 @@ fn names_each_extension_of_the_table_in_the_fix() {
 fn reads_with_the_last_front_end_of_an_extension() {
     solo(|_, mesh| async move {
         let refuse = FrontEnd {
-            read: |_, _| Err(Vec::new()),
+            read: |source, _| Err(vec![front_end::unknown(source, &front_ends())]),
         };
         let front_ends =
             FrontEnds::new("hcl", refuse).with("hcl", FrontEnd { read: hcl });
