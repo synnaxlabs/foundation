@@ -199,7 +199,7 @@ fn create_definitions(name: &str) -> BTreeMap<Name, Definition> {
 
 /// The config of the region `plant`, whose one member and one voter is the node `KEY`.
 async fn create_config(node: &Node, tasks: &Tasks) -> Config {
-    let budget = block::Config { budget: 1 << 20 };
+    let budget = block::Config::new(1 << 20).expect("the budget fits");
     let memory = block::Heap::new(budget.reservation());
     let pool = Rc::new(block::Pool::new(budget, memory));
     let at = SocketAddr::new(node.addresses()[0], 7000);

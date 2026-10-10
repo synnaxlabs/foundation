@@ -374,7 +374,7 @@ fn config(
     key: PrivateKey,
     limits: Limits,
 ) -> Config {
-    let pool = block::Config { budget: 1 << 22 };
+    let pool = block::Config::new(1 << 22).expect("the budget fits");
     let memory = Heap::new(pool.reservation());
     Config {
         message_bytes_max: NonZeroUsize::new(limits.message).expect("not zero"),

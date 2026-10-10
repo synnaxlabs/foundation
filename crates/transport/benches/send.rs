@@ -947,7 +947,7 @@ fn config(
     key: PrivateKey,
     room: Room,
 ) -> Config {
-    let pool = block::Config { budget: 1 << 24 };
+    let pool = block::Config::new(1 << 24).expect("the budget fits");
     let memory = Heap::new(pool.reservation());
     Config {
         private_key: key,

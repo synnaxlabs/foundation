@@ -733,7 +733,7 @@ fn serve_drops_the_block_of_the_proposal_before_the_group_writes() {
 fn serve_gives_no_answer_when_the_pool_has_no_block_for_it() {
     let ((served, taken, later, first), seen) = run(
         |node, tasks, incoming| async move {
-            let budget = block::Config { budget: 1 << 20 };
+            let budget = block::Config::new(1 << 20).expect("the budget fits");
             let (memory, switch) = Scarce::new(budget.reservation());
             let pool = Rc::new(Pool::new(budget, memory));
             let (mesh, first) = leader(&node, &tasks, pool).await;

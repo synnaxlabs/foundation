@@ -2433,7 +2433,10 @@ mod tests {
 
     /// `config` with a pool of 64 KiB on `memory`, and messages up to its largest.
     fn scarce(config: Config, memory: impl block::Memory + 'static) -> Config {
-        let pool = block::Pool::new(block::Config { budget: 1 << 16 }, memory);
+        let pool = block::Pool::new(
+            block::Config::new(1 << 16).expect("the budget fits"),
+            memory,
+        );
         Config {
             message_bytes_max: NonZeroUsize::new(pool.largest()).expect("not zero"),
             pool: Rc::new(pool),
@@ -2442,7 +2445,11 @@ mod tests {
     }
 
     fn heap() -> block::Heap {
-        block::Heap::new(block::Config { budget: 1 << 16 }.reservation())
+        block::Heap::new(
+            block::Config::new(1 << 16)
+                .expect("the budget fits")
+                .reservation(),
+        )
     }
 
     /// Opens a one-way stream of each of `classes` in order, sends a [`LARGE`]
@@ -2608,8 +2615,11 @@ mod tests {
 
     #[test]
     fn a_recv_whose_commit_the_system_refuses_counts_it_and_waits() {
-        let (memory, switch) =
-            Scarce::new(block::Config { budget: 1 << 16 }.reservation());
+        let (memory, switch) = Scarce::new(
+            block::Config::new(1 << 16)
+                .expect("the budget fits")
+                .reservation(),
+        );
         let (mut sim, ..) = testing::sessions(
             0,
             move |config| scarce(config, memory),

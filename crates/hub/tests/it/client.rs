@@ -34,7 +34,7 @@ async fn connect(
     at: Address,
     key: PrivateKey,
 ) -> Result<Client, Error> {
-    let config = block::Config { budget: 2 << 24 };
+    let config = block::Config::new(2 << 24).expect("the budget fits");
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     connect_with(node, tasks, at, key, Rc::new(pool)).await
 }
@@ -928,7 +928,7 @@ fn ends_the_life_of_a_hello_at_the_end_of_time() {
 
 /// A pool of 1 MiB over memory that a test can make refuse, and the switch for it.
 fn scarce() -> (Rc<block::Pool>, block::testing::Switch) {
-    let config = block::Config { budget: 1 << 20 };
+    let config = block::Config::new(1 << 20).expect("the budget fits");
     let (memory, switch) = block::testing::Scarce::new(config.reservation());
     (Rc::new(block::Pool::new(config, memory)), switch)
 }
@@ -1014,7 +1014,7 @@ fn refuses_to_connect_from_a_pool_with_no_block_for_the_header() {
         POOL,
         Some(rules()),
         |node, tasks, at| async move {
-            let config = block::Config { budget: 0 };
+            let config = block::Config::new(0).expect("the budget fits");
             let heap = block::Heap::new(config.reservation());
             let pool = Rc::new(block::Pool::new(config, heap));
             let refused = connect_with(&node, tasks, at, AGENT, pool).await.map(drop);
@@ -1043,7 +1043,7 @@ fn sends_a_body_over_the_largest_block_of_its_pool() {
         POOL,
         Some(rules()),
         |node, tasks, at| async move {
-            let config = block::Config { budget: 1 << 16 };
+            let config = block::Config::new(1 << 16).expect("the budget fits");
             let pool = block::Pool::new(
                 config.clone(),
                 block::Heap::new(config.reservation()),
@@ -1072,7 +1072,7 @@ fn sends_a_body_over_the_room_of_its_pool() {
         POOL,
         Some(rules()),
         |node, tasks, at| async move {
-            let config = block::Config { budget: 1 << 17 };
+            let config = block::Config::new(1 << 17).expect("the budget fits");
             let pool = block::Pool::new(
                 config.clone(),
                 block::Heap::new(config.reservation()),
@@ -1239,9 +1239,11 @@ fn sends_a_body_at_the_cap_from_a_pool_of_one_chunk_on_each_link() {
             POOL,
             Some(rules()),
             move |node, tasks, at| async move {
-                let config = block::Config {
-                    budget: block::footprint(1 << 16),
-                };
+                let config = block::Config::new(
+                    u64::try_from(block::footprint(1 << 16))
+                        .expect("a usize fits in a u64"),
+                )
+                .expect("the budget fits");
                 let pool = block::Pool::new(
                     config.clone(),
                     block::Heap::new(config.reservation()),

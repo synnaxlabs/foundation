@@ -1154,7 +1154,7 @@ mod tests {
         let handle = node
             .shards()
             .start(config, move |tasks| async move {
-                let config = block::Config { budget: 1 << 20 };
+                let config = block::Config::new(1 << 20).expect("the budget fits");
                 let pool =
                     Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
                 let config = Config {

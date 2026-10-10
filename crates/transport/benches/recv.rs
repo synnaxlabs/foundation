@@ -214,7 +214,7 @@ fn filled(pool: &Pool, bytes: usize) -> Block {
 }
 
 fn config(node: &Node, tasks: env::tasks::Tasks, key: PrivateKey) -> Config {
-    let pool = block::Config { budget: 1 << 26 };
+    let pool = block::Config::new(1 << 26).expect("the budget fits");
     let memory = Heap::new(pool.reservation());
     Config {
         private_key: key,

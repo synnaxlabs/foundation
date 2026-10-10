@@ -161,7 +161,7 @@ fn in_turn(interner: &mut Interner) -> Arc<KeySet> {
 }
 
 fn pool() -> block::Pool {
-    let config = block::Config { budget: 1 << 24 };
+    let config = block::Config::new(1 << 24).expect("the budget fits");
     let memory = block::Heap::new(config.reservation());
     block::Pool::new(config, memory)
 }

@@ -40,7 +40,7 @@ const BODY_MAX: usize = 4087;
 /// The two header blocks come before the area.
 const AREA_START: u64 = 2 * BLOCK;
 const COMMIT: Span = Span::from_nanos(10_000_000);
-const POOL: usize = 1 << 21;
+const POOL: u64 = 1 << 21;
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 /// Where a header block keeps its version, its `body_max`, its tail offset, its tail
@@ -497,7 +497,7 @@ where
 
 /// A pool with the budget of a test's shard.
 fn pool() -> Pool {
-    let config = block::Config { budget: POOL };
+    let config = block::Config::new(POOL).expect("the budget fits");
     Pool::new(config.clone(), Heap::new(config.reservation()))
 }
 
@@ -1823,7 +1823,7 @@ where
 
 /// A buffer config for the ring in `dir` on the files of `node`.
 fn node_config(node: &sim::node::Node, tasks: Tasks, dir: &str) -> Config {
-    let config = block::Config { budget: POOL };
+    let config = block::Config::new(POOL).expect("the budget fits");
     let pool = Pool::new(config.clone(), Heap::new(config.reservation()));
     Config {
         files: node.files(),
@@ -4419,7 +4419,7 @@ fn a_drop_during_a_commit_ends_the_task_after_the_next_commit() {
 fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
     run(101, |mut shard| async move {
         let parts_pool = Rc::clone(&shard.pool);
-        let config = block::Config { budget: 96 << 10 };
+        let config = block::Config::new(96 << 10).expect("the budget fits");
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 80 << 10);
@@ -4453,7 +4453,7 @@ fn a_record_over_the_largest_block_of_the_pool_is_recovered() {
 #[test]
 fn an_open_with_no_largest_block_free_fails_and_the_next_recovers() {
     run(143, |mut shard| async move {
-        let config = block::Config { budget: 640 << 10 };
+        let config = block::Config::new(640 << 10).expect("the budget fits");
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), 512 << 10);
@@ -4498,9 +4498,10 @@ fn an_entry_over_the_largest_pool_block_is_large() {
         let over = Parts::from([shard.block(largest), shard.block(1)]);
         let more = Parts::from([shard.block(largest), shard.block(2)]);
         let fits = Parts::from(shard.block(largest));
-        let config = block::Config {
-            budget: block::footprint(largest),
-        };
+        let config = block::Config::new(
+            u64::try_from(block::footprint(largest)).expect("a usize fits in a u64"),
+        )
+        .expect("the budget fits");
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         assert_eq!(shard.pool.largest(), largest);
@@ -4557,7 +4558,7 @@ fn an_open_with_an_entry_over_the_largest_pool_block_fails() {
         buffer.committed().await.expect("commits");
         drop(buffer);
         let larger = Rc::clone(&shard.pool);
-        let config = block::Config { budget: 1 << 17 };
+        let config = block::Config::new(1 << 17).expect("the budget fits");
         shard.pool =
             Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         let opened = shard.open(ring, &mut Slots::new()).await;

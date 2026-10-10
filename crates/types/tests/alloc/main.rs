@@ -40,7 +40,7 @@ fn main() {
     let mut interner = Interner::new();
     let set = interner.intern(&groups);
     let other = interner.intern(&groups[..1]);
-    let config = block::Config { budget: 1 << 16 };
+    let config = block::Config::new(1 << 16).expect("the budget fits");
     let pool = block::Pool::new(config.clone(), block::Heap::new(config.reservation()));
     read_a_frame(&pool, &set);
     read_a_view(&pool, &set);

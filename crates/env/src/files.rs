@@ -1431,9 +1431,10 @@ mod tests {
             let mut file = Stuck::file(Operation::Rename);
             drop_pending(file.rename(Path::new("ring/1")));
             assert_eq!(ready(file.write_at(0, &[])), poisoned("ring/0"));
-            let into = block::Pool::heap(block::Config { budget: 4_096 })
-                .alloc(0)
-                .expect("room");
+            let into =
+                block::Pool::heap(block::Config::new(4_096).expect("the budget fits"))
+                    .alloc(0)
+                    .expect("room");
             assert_eq!(ready(file.read_at(0, into)).map(drop), poisoned("ring/0"));
         }
 
