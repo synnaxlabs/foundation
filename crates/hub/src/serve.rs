@@ -287,8 +287,8 @@ async fn serve(
                 sender.finish()?;
                 return Ok(());
             }
-            Event::Frame(Ok((frame, set, _))) => {
-                layout.send(state, sender, &frame, set).await?;
+            Event::Frame(Ok((frame, lens))) => {
+                layout.send(state, sender, &frame, &lens.set).await?;
             }
             Event::Frame(Err(Stop::Behind)) => {
                 sender.send(reply(state, wire::hub::Reply::Behind)?).await?;

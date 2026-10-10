@@ -234,6 +234,34 @@ fn a_reader_gets_each_frame_that_the_home_of_another_node_wrote_in_order() {
     );
 }
 
+/// The ack of a reader whose home is at another node changes nothing, also when it
+/// moves back.
+#[test]
+fn a_reader_at_another_node_than_its_home_acks_each_position() {
+    remote(
+        31,
+        sim::link::Config::default(),
+        |node, tasks, transport, steps| async move {
+            let kept = Arc::clone(&steps);
+            hub_home(node, tasks, transport, steps, |test| {
+                write_three(test, kept)
+            })
+            .await;
+        },
+        |test, steps| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            steps.open();
+            let mut positions = Vec::new();
+            for _ in 0..3 {
+                positions.push(reader.next().await.expect("a frame").position);
+            }
+            assert_ne!(positions[0], positions[1]);
+            assert_eq!(reader.ack(positions[2]), Ok(()));
+            assert_eq!(reader.ack(positions[0]), Ok(()));
+        },
+    );
+}
+
 #[test]
 fn a_reader_gets_each_frame_in_order_over_a_link_that_loses_reorders_and_duplicates() {
     let link = sim::link::Config {

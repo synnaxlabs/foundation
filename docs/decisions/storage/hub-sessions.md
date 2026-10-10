@@ -323,7 +323,18 @@
   dropped because no complete session on its index was open (`laptop.architect`,
   2026-10-09T21:53:40Z:
   https://github.com/synnaxlabs/foundation/pull/2183#issuecomment-6089887271).
-  Trigger: #1742 PR 3 adds `Reader::ack`, and the reader then resumes past its last ack.
+  Amended (#1742 PR 3): `Received::position` gives the reader's position after each
+  frame, and `Reader::ack` records it at the home, so the reader resumes at its last
+  ack, and where its last complete session opened only when that session acked nothing
+  (`laptop.architect`, 2026-10-08T10:01:19Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). The
+  ack of a latest reader, of a reader whose index has its home at another node, or of a
+  reader that ended (after `next` gave an `Ended`, or once the hub ended it with
+  `Removed` or `Replaced`) changes nothing and gives `Ok`. `hub::home::reader` gives
+  the home's `Error` and `Position`, so a caller names the error of the ack and its
+  fields (`laptop.architect`, 2026-10-10T00:20:20Z:
+  https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6091530673).
+  Trigger: #1155 sends the ack of a reader to a home at another node.
   A named open before mesh time gives `Unsynced`. A hold on an unnamed or latest reader
   panics (`laptop.architect`, 2026-10-08T10:01:19Z:
   https://github.com/synnaxlabs/foundation/issues/1742#issuecomment-6057419592). A named
