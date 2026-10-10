@@ -120,8 +120,10 @@ true`. CI denies warnings. r16 gives the reason for each lint.
 ## Unsafe
 
 - `unsafe_code` is denied. Only the crates the crate map names may hold `unsafe`:
-  `block`, `ring`, `counting`, the `memory`, `clock`, and `wall` modules of `os`, the
-  `net::lowat` module of `os` (architect, #120,
+  `block`, `ring`, `counting`, `waker` (`laptop.architect`, 2026-10-10 06:25 UTC, #2254,
+  https://github.com/synnaxlabs/foundation/issues/2254#issuecomment-6094631943), the
+  `memory`, `clock`, and `wall` modules of `os`, the `net::lowat` module of `os`
+  (architect, #120,
   https://github.com/synnaxlabs/foundation/issues/120#issuecomment-6050971843), the
   `net::resolve` module of `os` (architect, 2026-10-08 16:52 UTC, #1095,
   https://github.com/synnaxlabs/foundation/issues/1095#issuecomment-6064802287), the

@@ -65,8 +65,7 @@ pub(crate) fn values(state: u64, count: u32, data_type: Type) -> Vec<u8> {
 }
 
 /// The raw values of `count` variable samples of `element`, each of at most `max`
-/// elements: their ends, zeros to the start of the elements, then the elements, each
-/// byte of which is cut by `mask`.
+/// elements, each byte of which is cut by `mask`.
 fn variable(
     mut state: u64,
     count: usize,
@@ -74,21 +73,32 @@ fn variable(
     max: u32,
     mask: u8,
 ) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut end = 0;
-    for _ in 0..count {
-        state = next(state);
-        end += u32::try_from(state % (u64::from(max) + 1)).expect("small");
-        out.extend(end.to_le_bytes());
-    }
-    out.resize(out.len().next_multiple_of(element.width().min(8)), 0);
     let width = element.width();
-    let len = usize::try_from(end).expect("a small end") * width;
-    out.extend(
-        elements(state, len, width)
-            .into_iter()
-            .map(|byte| byte & mask),
-    );
+    let lens: Vec<usize> = (0..count)
+        .map(|_| {
+            state = next(state);
+            usize::try_from(state % (u64::from(max) + 1)).expect("small") * width
+        })
+        .collect();
+    let elements: Vec<u8> = elements(state, lens.iter().sum(), width)
+        .into_iter()
+        .map(|byte| byte & mask)
+        .collect();
+    let samples: Vec<&[u8]> = lens
+        .iter()
+        .scan(0, |start, len| {
+            *start += len;
+            Some(&elements[*start - len..*start])
+        })
+        .collect();
+    raw(Type::List { element, max }, &samples)
+}
+
+/// The raw form of `samples` of `data_type`, a `String`, `Bytes`, or `List` type.
+pub(crate) fn raw(data_type: Type, samples: &[impl AsRef<[u8]>]) -> Vec<u8> {
+    let form = codec::Variable::of(data_type).expect("a variable type");
+    let mut out = vec![0; form.len(samples).expect("small samples")];
+    form.write(samples, &mut out);
     out
 }
 

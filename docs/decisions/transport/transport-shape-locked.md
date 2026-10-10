@@ -8,8 +8,14 @@
   key dials nodes through `transport::Client` on the same QUIC carrier: its TLS client
   sends no certificate and pins the node key, so the node sees `Peer::Client`. It
   accepts no session, and its limits are fixed: messages up to `pool.largest()`, a
-  window of that or 1 MiB, `streams_max` 1, and idle 30 s. Decided by
-  `laptop.architect-2` (#1754, 2026-10-08T09:52:31Z):
+  window of twice that or 1 MiB, whichever is larger, `streams_max` 1, and idle 30 s.
+  Decided by `laptop.architect-2` (#1754, 2026-10-08T09:52:31Z):
+  https://github.com/synnaxlabs/foundation/issues/1754#issuecomment-6057273348. The
+  window is at least twice the message limit, as each window is, so one message of each
+  class fits (STREAM WIRE). Decided by `laptop.architect-2` (#1998,
+  2026-10-09T03:45:09Z):
+  https://github.com/synnaxlabs/foundation/pull/1998#issuecomment-6073837407.
+  Changes the window of that or 1 MiB of
   https://github.com/synnaxlabs/foundation/issues/1754#issuecomment-6057273348.
   `Client::new` binds the program's UDP socket at `[::]` port 0 on
   `client::Config::net`, through the same private function in `port` as `Port::bind`,

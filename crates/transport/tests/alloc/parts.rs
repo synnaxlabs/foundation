@@ -106,10 +106,10 @@ const WIDE: Limits = Limits {
     message: 1 << 17,
     window: 1 << 20,
 };
-/// The window takes a message of the largest size only in part, after its header.
+/// The smallest window for the largest message: twice its size.
 const NARROW: Limits = Limits {
     message: 16_000,
-    window: 16_000,
+    window: 32_000,
 };
 
 impl Shape {
@@ -257,9 +257,9 @@ async fn measure(sender: &mut Sender, pool: &Pool, clock: &Clock, shape: &Shape)
 }
 
 /// Sends messages of one stretch of the largest size and of a single block of the same
-/// bytes, each after a message of half that size, so that the window takes each in
-/// parts. Checks the allocations of the first write of each, which noq-proto takes in
-/// part, and of the writes that follow it.
+/// bytes, each after messages of 1.5 times that size, so that the window takes each
+/// in parts. Checks the allocations of the first write of each, which noq-proto takes
+/// in part, and of the writes that follow it.
 ///
 /// # Panics
 ///
@@ -269,14 +269,13 @@ async fn measure(sender: &mut Sender, pool: &Pool, clock: &Clock, shape: &Shape)
 /// the block.
 async fn cut(sender: &mut Sender, pool: &Pool, clock: &Clock) {
     let parts = spaced(NARROW.message / 8, 8, 16);
-    let half = NARROW.message / 2;
     for round in 0..WARMUP + ROUNDS {
         clock.sleep(PAUSE).await;
-        poll(sender, filled(pool, half), &[]);
+        fill(sender, pool);
         let block = filled(pool, NARROW.message);
         let sent = cut_send(clock, pin!(sender.send(block))).await;
         clock.sleep(PAUSE).await;
-        poll(sender, filled(pool, half), &[]);
+        fill(sender, pool);
         let block = filled(pool, 2 * NARROW.message);
         let parted = cut_send(clock, pin!(sender.send_parts(block, &parts))).await;
         if round >= WARMUP {
@@ -288,6 +287,14 @@ async fn cut(sender: &mut Sender, pool: &Pool, clock: &Clock) {
                  copy of the rest"
             );
         }
+    }
+}
+
+/// Sends a message of the largest size, then one of half that size, so that the
+/// window has room for half of the next message.
+fn fill(sender: &mut Sender, pool: &Pool) {
+    for len in [NARROW.message, NARROW.message / 2] {
+        poll(sender, filled(pool, len), &[]);
     }
 }
 
