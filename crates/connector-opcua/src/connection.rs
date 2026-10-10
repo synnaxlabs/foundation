@@ -100,7 +100,7 @@ impl Manager {
             raw: Cell::new(ptr::null_mut()),
             events: events.raw(),
             table: RefCell::new(BTreeMap::new()),
-            read: RefCell::new(vec![0; READ_BYTES].into_boxed_slice()),
+            read: RefCell::new(Vec::new()),
             next: Cell::new(1),
             waker: RefCell::new(None),
             driving: Cell::new(false),
@@ -237,8 +237,8 @@ impl Drop for Manager {
     }
 }
 
-/// What the manager and its hooks share. No borrow of a `RefCell` spans a call into C,
-/// since C may call a hook again.
+/// What the manager and its hooks share. No borrow of a `RefCell` but `read` spans a
+/// call into C, since C may call a hook again. No hook touches `read`.
 struct State {
     net: Net,
     /// The listener until a listen open takes it.
@@ -247,8 +247,9 @@ struct State {
     raw: Cell<*mut ffi::ConnectionManager>,
     events: *mut ffi::EventLoop,
     table: RefCell<BTreeMap<usize, Connection>>,
-    /// The buffer of each read. open62541 copies what it keeps of the bytes it gets.
-    read: RefCell<Box<[u8]>>,
+    /// The buffer of each read, empty until a stream opens. open62541 copies what it
+    /// keeps of the bytes it gets.
+    read: RefCell<Vec<u8>>,
     /// The key of the next connection. open62541 reads 0 as no connection.
     next: Cell<usize>,
     /// The waker of the last pass.
@@ -395,7 +396,8 @@ impl State {
         self.wake(id);
     }
 
-    /// Moves connection `id` on until it waits, and calls C with no borrow held.
+    /// Moves connection `id` on until it waits. It holds only the `read` borrow across
+    /// a call into C.
     fn move_on(&self, id: usize, cx: &mut Context<'_>) {
         #[cfg(feature = "sim")]
         self.moves.set(self.moves.get() + 1);
@@ -669,7 +671,11 @@ impl fmt::Display for Failure {
 impl Connection {
     /// Moves the connection on with `read` as the buffer of its reads, or gives why it
     /// fails. [`Step::Read`] gives the count of bytes read into `read`.
-    fn step(&mut self, cx: &mut Context<'_>, read: &mut [u8]) -> Result<Step, Failure> {
+    fn step(
+        &mut self,
+        cx: &mut Context<'_>,
+        read: &mut Vec<u8>,
+    ) -> Result<Step, Failure> {
         match &mut self.stream {
             Stream::Connecting(connect) => match connect.as_mut().poll(cx) {
                 Poll::Pending => Ok(Step::Waiting),
@@ -685,6 +691,7 @@ impl Connection {
                 Poll::Ready(Err(e)) => Err(Failure::Net("accept", e)),
             },
             Stream::Open(tcp) => {
+                read.resize(READ_BYTES, 0);
                 match tcp.poll_read(cx, read) {
                     Poll::Ready(Ok(0)) => return Ok(Step::Ended),
                     Poll::Ready(Ok(n)) => return Ok(Step::Read(n)),
@@ -704,6 +711,7 @@ impl Connection {
                 if Pin::new(linger).poll(cx).is_ready() {
                     return Err(Failure::Lingered);
                 }
+                read.resize(READ_BYTES, 0);
                 while !*drained {
                     match tcp.poll_read(cx, read) {
                         Poll::Ready(Ok(0)) => *drained = true,

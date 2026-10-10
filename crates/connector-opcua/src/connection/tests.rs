@@ -2790,16 +2790,18 @@ fn a_stream_that_a_close_past_the_bound_drops_leaves_in_the_same_drive() {
     assert_eq!(counts, (102, 102, 101));
 }
 
-/// Of the streams that start to close at one instant, a close past [`CLOSES`] drops
-/// the first to close, not the one with the lowest key.
+/// Closes 102 down to 2 at one instant, when `child::running()`.
 #[test]
-fn a_close_past_the_bound_drops_the_first_to_close_at_one_instant() {
+fn closes_at_one_instant() {
+    if !child::running() {
+        return;
+    }
     let mut network = Network::new();
     for i in 0..=CLOSES {
         let i = i64::try_from(i).expect("a small count");
         network.hold(Span::from_nanos((i + 1) * 1_000_000));
     }
-    let closing = network
+    network
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
@@ -2808,8 +2810,130 @@ fn a_close_past_the_bound_drops_the_first_to_close_at_one_instant() {
             for id in (2..=102).rev() {
                 assert_eq!(side.close(id), Status::GOOD);
             }
-            side.closing()
         })
         .expect("the run ends");
-    assert_eq!(closing, (2..=101).collect::<Vec<_>>());
+}
+
+/// Of the streams that start to close at one instant, a close past [`CLOSES`] drops
+/// the first to close, not the one with the lowest key.
+#[test]
+fn a_close_past_the_bound_drops_the_first_to_close_at_one_instant() {
+    let stderr = stderr("closes_at_one_instant");
+    let dropped: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("streams close"))
+        .collect();
+    assert_eq!(
+        dropped,
+        [
+            "connector-opcua: open62541 warning: connection 102: more than 100 streams \
+             close, so it drops the oldest"
+        ]
+    );
+}
+
+/// Records a call as [`record`] does, with the address of the bytes of a read in
+/// place of the bytes.
+unsafe extern "C" fn address(
+    _: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    _: *mut *mut c_void,
+    state: ConnectionState,
+    _: *const KeyValueMap,
+    message: Bytes,
+) {
+    // SAFETY: `open` passes the calls of a live side.
+    let calls = unsafe { &*application.cast::<RefCell<Vec<Call>>>() };
+    let at = if message.length == 0 {
+        Vec::new()
+    } else {
+        message.data.addr().to_le_bytes().to_vec()
+    };
+    calls.borrow_mut().push((id, state, at));
+}
+
+/// Each read gives C its bytes in the one read buffer of the manager, which the
+/// manager makes only when a stream opens.
+#[test]
+fn each_read_is_in_the_one_buffer_of_the_manager() {
+    let mut network = Network::new();
+    network.dial(Span::from_nanos(100_000_000), b"one");
+    network.dial(Span::from_nanos(200_000_000), b"two");
+    let (before, after, calls) = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let mut side = Side::listening(&node, listener(&node));
+            side.callback = address;
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::from_nanos(50_000_000)).await;
+            let before = side.manager.state().read.borrow().len();
+            side.drive(Span::SECOND).await;
+            let after = {
+                let read = side.manager.state().read.borrow();
+                (read.len(), read.as_ptr().addr())
+            };
+            (before, after, side.calls())
+        })
+        .expect("the run ends");
+    let reads: Vec<(usize, usize)> = calls
+        .into_iter()
+        .filter(|(_, _, at)| !at.is_empty())
+        .map(|(id, _, at)| {
+            (id, usize::from_le_bytes(at.try_into().expect("an address")))
+        })
+        .collect();
+    assert_eq!(before, 0);
+    assert_eq!(after.0, READ_BYTES);
+    assert_eq!(reads, [(2, after.1), (3, after.1)]);
+}
+
+/// Records a call as [`record`] does, and closes a connection at the `ESTABLISHED`
+/// that opens it.
+unsafe extern "C" fn close_at_open(
+    cm: *mut ffi::ConnectionManager,
+    id: usize,
+    application: *mut c_void,
+    context: *mut *mut c_void,
+    state: ConnectionState,
+    params: *const KeyValueMap,
+    message: Bytes,
+) {
+    let opened = state == ffi::ESTABLISHED && message.length == 0;
+    // SAFETY: the manager gives the arguments that it gives `record`.
+    unsafe { record(cm, id, application, context, state, params, message) };
+    if opened {
+        // SAFETY: the manager is live for the call.
+        let members = unsafe { &*cm.cast::<Members>() };
+        // SAFETY: the member takes its own manager.
+        assert_eq!(Status(unsafe { (members.close)(cm, id) }), Status::GOOD);
+    }
+}
+
+/// A stream that closes before its first read still drains to the end of the peer,
+/// which closes 100 ms after the end of the stream.
+#[test]
+fn a_close_before_the_first_read_waits_for_the_end_of_the_peer() {
+    let mut network = Network::new();
+    network.accept(|mut stream, clock| async move {
+        write(&mut stream, b"unread").await;
+        let reads = Mutex::new(Reads::default());
+        read_all(&mut stream, &clock, &reads, Span::ZERO).await;
+        clock.sleep(Span::from_nanos(100_000_000)).await;
+        drop(poll_fn(|cx| stream.poll_close(cx)).await);
+    });
+    let remote = network.remote();
+    let connections = network
+        .sim
+        .run_on(&network.local.clone(), move |node, _| async move {
+            let mut side = Side::new(&node);
+            side.callback = close_at_open;
+            assert_eq!(side.connect(remote), Status::GOOD);
+            side.drive(Span::from_nanos(50_000_000)).await;
+            let closing = side.connections();
+            side.drive(Span::SECOND).await;
+            (closing, side.connections())
+        })
+        .expect("the run ends");
+    assert_eq!(connections, (1, 0));
 }
