@@ -257,7 +257,8 @@
   another task on that thread wakes the drive. After each `run`, also the one that gives
   the value, the drive moves on each connection again after each connect, send, or close
   on it that the `run` or such a step asks for, so it can also read and call open62541
-  back after that `run`. At most 256 sends wait on one connection: a send past them
+  back after that `run`, except the listen connection after an accept, which moves on
+  only after the next `run`. At most 256 sends wait on one connection: a send past them
   closes the connection. open62541 allocates each send at most at the send buffer size
   of its channel, so this bounds the memory of a connection at 256 send buffers. Sends
   wait from one pass to the next, and longer while a stream is full, so an owner keeps

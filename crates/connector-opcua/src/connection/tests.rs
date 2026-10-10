@@ -2630,8 +2630,8 @@ fn drives_of_one_run_hold_no_more_than_the_most_secure_channels() {
     assert_eq!((connections, open), (100, 100));
 }
 
-/// A drive that gives its value while a stream waits to be accepted wakes its task,
-/// so the next drive accepts the stream.
+/// A drive that gives its value after an accept wakes its task, as the listener then
+/// holds no waker for it.
 #[test]
 fn a_drive_that_gives_a_value_after_an_accept_wakes_its_task() {
     let mut network = Network::new();

@@ -149,7 +149,7 @@ impl Manager {
     /// gives the value, it moves on each connection again after each connect, send, or
     /// close on it that the call or such a step asks for, so it can also read and call
     /// open62541 back after that call. It accepts at most one stream between two
-    /// calls.
+    /// calls: after an accept, the listen connection moves on only after the next call.
     ///
     /// # Panics
     ///
@@ -173,7 +173,7 @@ impl Manager {
                 let poll = run(cx);
                 let moved = state.move_on_again(cx);
                 if poll.is_ready() {
-                    // Only a drive moves on the listen connection in `accepted`.
+                    // After an accept, the listener holds no waker for the task.
                     if state.accepted.get().is_some() {
                         cx.waker().wake_by_ref();
                     }
