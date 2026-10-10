@@ -3694,19 +3694,26 @@ fn a_waiter_prints_only_its_event_and_key() {
     .expect("the buffer ends");
 }
 
-/// The test of the hand-written `Debug` of the private `Parked`: a buffer whose task
-/// idles prints that it idles, and no pointer of the task's waker.
+/// The test of the hand-written `Debug` of the private `Parked`: a buffer prints
+/// whether its task idles, and no pointer of the task's waker.
 #[test]
-fn an_idle_buffer_prints_no_pointer() {
+fn a_buffer_prints_whether_it_idles_and_no_pointer() {
     run_on_memory(144, |shard| async move {
+        let mut slots = Slots::new();
         let buffer = shard
-            .open(layout(AREA, BODY_MAX), &mut Slots::new())
+            .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
+        let a = slots.index(key(1));
         shard.clock.sleep(commits(3)).await;
         let printed = format!("{buffer:?}");
         assert!(printed.contains("parked: true"), "{printed}");
         assert!(!printed.contains("0x"), "{printed}");
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        let printed = format!("{buffer:?}");
+        assert!(printed.contains("parked: false"), "{printed}");
     });
 }
 
