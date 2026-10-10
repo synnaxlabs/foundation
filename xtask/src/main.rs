@@ -226,14 +226,14 @@ mod tests {
 
     /// The lines of the YAML `text`, with no blank or comment line, which YAML skips.
     fn yaml_lines(text: &str) -> Vec<&str> {
-        // YAML also breaks a line at a lone CR, and its only white space is a space or
-        // a tab, so `str::lines` and `str::trim` would drop a line that YAML reads.
-        assert!(!text.contains('\r'), "ci.yaml has a carriage return");
+        // YAML breaks a line at CR, NEL, LS, and PS too, and a parser can read other
+        // white space as text, so `str::lines` and `str::trim` would drop a line that
+        // YAML reads.
+        if let Some(c) = text.chars().find(|c| *c != '\n' && !matches!(c, ' '..='~')) {
+            panic!("ci.yaml has a character that is not printable ASCII or LF: {c:?}");
+        }
         (text.lines())
-            .filter(|line| {
-                let text = line.trim_start_matches([' ', '\t']);
-                !text.is_empty() && !text.starts_with('#')
-            })
+            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
             .collect()
     }
 
@@ -342,18 +342,26 @@ mod tests {
     }
 
     #[test]
-    fn yaml_lines_keeps_each_line_that_yaml_reads() {
-        let text = "a:\n\n  \n  # x\n\t# y\n  \u{a0}\n  \u{a0}#b:\n  c: 1 # d\n";
-        assert_eq!(
-            yaml_lines(text),
-            ["a:", "  \u{a0}", "  \u{a0}#b:", "  c: 1 # d"]
-        );
+    fn yaml_lines_skips_each_blank_and_comment_line() {
+        let text = "a:\n\n  \n  # x\n  b: 1 # c\n";
+        assert_eq!(yaml_lines(text), ["a:", "  b: 1 # c"]);
     }
 
     #[test]
-    #[should_panic(expected = "ci.yaml has a carriage return")]
-    fn yaml_lines_refuses_a_carriage_return() {
-        yaml_lines("a:\n  #\r  b:\n");
+    fn yaml_lines_refuses_each_character_that_is_not_printable_ascii_or_lf() {
+        for c in [
+            '\r', '\t', '\u{85}', '\u{a0}', '\u{2028}', '\u{2029}', '\u{7f}',
+        ] {
+            let text = format!("a:\n  #{c}  b:\n");
+            let panic =
+                std::panic::catch_unwind(|| yaml_lines(&text)).expect_err("refused");
+            assert_eq!(
+                panic.downcast_ref::<String>(),
+                Some(&format!(
+                    "ci.yaml has a character that is not printable ASCII or LF: {c:?}"
+                )),
+            );
+        }
     }
 
     #[test]
