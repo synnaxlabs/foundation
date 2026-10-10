@@ -272,9 +272,9 @@ mod linux {
         io::Error::new(error.kind(), format!("{}: {error}", file.display()))
     }
 
-    /// `read`, with a file that does not exist as `None`.
-    fn optional<T>(read: io::Result<T>) -> io::Result<Option<T>> {
-        match read {
+    /// `result`, with `NotFound` as `None`.
+    fn optional<T>(result: io::Result<T>) -> io::Result<Option<T>> {
+        match result {
             Ok(content) => Ok(Some(content)),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
