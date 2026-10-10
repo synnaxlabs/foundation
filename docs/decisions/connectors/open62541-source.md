@@ -289,13 +289,20 @@
   2026-10-09 18:21 UTC).
   A server listens on the listener that its owner gives the manager at
   `Manager::listening`. Each accepted stream is a new connection that gets
-  `ESTABLISHED`, with the context of the listen connection at the accept. A pass accepts
-  one stream, as the POSIX manager accepts one for each run of its loop, so the run
-  before the next accept gives open62541 the `CLOSING` of a channel that the accept
-  purged: a burst of accepts in one pass held 149 secure channels against the limit of
-  100 (#2255). Lost: the manager gives each queued `CLOSING` after an accept, so it
-  would run work of the loop, and a `CLOSING` would come by two paths. As the POSIX
-  manager does, the first `ESTABLISHED` of the listen gives `listen-address`, the host
+  `ESTABLISHED`, with the context of the listen connection at the accept. A drive
+  accepts at most one stream between two runs of the loop, as the POSIX manager accepts
+  one for each run (`arch/posix/eventloop_posix_tcp.c:378-391` of v1.5.9). open62541
+  needs that run: at the limit, `purgeFirstChannelWithoutSession`
+  (`patches/open62541/src/server/ua_server_binary.c:586-598`) also picks a channel that
+  is already `CLOSING`, on which `UA_SecureChannel_shutdown` does nothing, so each
+  accept before the run that gives that `CLOSING` adds one channel past the limit. A
+  burst of 150 accepts in one pass held 149 secure channels against the limit of 100 in
+  the `sim` test of #2255. After an accept, the drive moves the listen connection on
+  only after the next run, so an accept costs one move, not a pass of the table. Lost:
+  a wake and a full pass after each accept, so a burst of n streams cost n passes; and
+  the manager gives each queued `CLOSING` after an accept, so it would run work of the
+  loop, and a `CLOSING` would come by two paths. As the POSIX manager does, the first
+  `ESTABLISHED` of the listen gives `listen-address`, the host
   of its `address` param, and `listen-port`, from which the server makes its discovery
   URL, and that of an accepted connection gives `remote-address`. A listen with no
   `address` gives the address of the listener as `listen-address`, where the POSIX
