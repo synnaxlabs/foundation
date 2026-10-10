@@ -448,22 +448,12 @@ where
     F: Future<Output = ()> + 'static,
 {
     let (sim, node) = create_node(seed);
-    (sim, start_on(node, main))
-}
-
-/// Starts one shard of `node` to run `main`, as [`start`] does.
-fn start_on<F>(
-    node: sim::node::Node,
-    main: impl FnOnce(Shard) -> F + Send + 'static,
-) -> env::thread::Handle
-where
-    F: Future<Output = ()> + 'static,
-{
     let config = env::shards::Config {
         name: DIR.into(),
         core: None,
     };
-    node.shards()
+    let handle = node
+        .shards()
         .start(config, move |tasks| {
             main(Shard {
                 files: node.files(),
@@ -474,7 +464,8 @@ where
                 disk: Disk::Sim(node),
             })
         })
-        .expect("the shard starts")
+        .expect("the shard starts");
+    (sim, handle)
 }
 
 /// Runs `main` as [`start`] does, until it returns.
@@ -790,30 +781,39 @@ fn durable_moves_only_at_a_commit() {
     });
 }
 
-/// The node's timers wake only when due, so the sleep of the test wakes no task.
+/// The shard waits on a gate with no timer, so only a task of the buffer can run in
+/// the idle window.
 #[test]
 fn an_idle_buffer_wakes_no_task() {
-    let mut sim = sim::Sim::new(sim::Config {
-        seed: 20,
-        ..sim::Config::default()
-    });
-    let node = sim.node(sim::node::Config {
-        arm_max: None,
-        ..sim::node::Config::default()
-    });
-    let handle = start_on(node, |shard| async move {
+    let gate = Arc::new(Mutex::new((false, None::<Waker>)));
+    let held = Arc::clone(&gate);
+    let (mut sim, handle) = start(20, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        shard.clock.sleep(commits(2000)).await;
+        poll_fn(|cx| {
+            let mut gate = held.lock().unwrap();
+            if gate.0 {
+                return Poll::Ready(());
+            }
+            gate.1 = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
         drop(buffer);
     });
     sim.run_for(COMMIT).expect("the open ends");
     let idle = sim.digest();
     sim.run_for(commits(200)).expect("the buffer idles");
     assert_eq!(sim.digest(), idle, "a task ran while the buffer idled");
+    let waker = {
+        let mut gate = gate.lock().unwrap();
+        gate.0 = true;
+        gate.1.take()
+    };
+    waker.expect("the shard waits on the gate").wake();
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
 }
