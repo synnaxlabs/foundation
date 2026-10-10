@@ -2,9 +2,18 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::fmt;
-use std::hint;
 use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+#[cfg(loom)]
+use loom::{
+    hint,
+    sync::atomic::{AtomicBool, AtomicUsize},
+};
+#[cfg(not(loom))]
+use std::{
+    hint,
+    sync::atomic::{AtomicBool, AtomicUsize},
+};
 
 /// A global allocator that counts the bytes it holds, so a test can bound the memory
 /// of a structure. It counts no allocations: to assert that code does not allocate,
@@ -35,8 +44,20 @@ pub struct Bytes {
 
 impl Bytes {
     /// Returns an allocator that holds no bytes.
+    #[cfg(not(loom))]
     #[must_use]
     pub const fn new() -> Self {
+        Self {
+            held: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            locked: AtomicBool::new(false),
+        }
+    }
+
+    /// Returns an allocator that holds no bytes. Loom's atomics have no `const` `new`.
+    #[cfg(loom)]
+    #[must_use]
+    pub fn new() -> Self {
         Self {
             held: AtomicUsize::new(0),
             peak: AtomicUsize::new(0),
@@ -58,12 +79,12 @@ impl Bytes {
     /// read it in a binary with no test harness, like [`Self::held`].
     #[must_use]
     pub fn peak(&self) -> usize {
-        self.locked(|| self.peak.load(Relaxed))
+        self.under_lock(|| self.peak.load(Relaxed))
     }
 
     /// Starts a new window of [`Self::peak`] at the bytes held now.
     pub fn reset_peak(&self) {
-        self.locked(|| self.peak.store(self.held(), Relaxed));
+        self.under_lock(|| self.peak.store(self.held(), Relaxed));
     }
 
     /// Counts `size` bytes for `ptr` unless it is null, and returns it.
@@ -75,15 +96,16 @@ impl Bytes {
     }
 
     fn grow(&self, size: usize) {
-        self.locked(|| {
+        self.under_lock(|| {
             let held = self.held.fetch_add(size, Relaxed) + size;
             self.peak.fetch_max(held, Relaxed);
         });
     }
 
     /// Runs `f` while no other thread grows `held` or uses `peak`. A spin lock, as a
-    /// `Mutex` can allocate on some targets.
-    fn locked<T>(&self, f: impl FnOnce() -> T) -> T {
+    /// `Mutex` can allocate on some targets. `f` must not allocate: the lock is not
+    /// reentrant, so an allocation in `f` spins forever.
+    fn under_lock<T>(&self, f: impl FnOnce() -> T) -> T {
         while self
             .locked
             .compare_exchange_weak(false, true, Acquire, Relaxed)
@@ -150,6 +172,7 @@ unsafe impl GlobalAlloc for Bytes {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use std::{slice, thread};
 
@@ -347,5 +370,57 @@ mod tests {
         let ptr = filled(&bytes);
         assert_eq!(format!("{bytes:?}"), "Bytes { held: 64, peak: 64 }");
         free(&bytes, ptr, LAYOUT);
+    }
+}
+
+#[cfg(test)]
+#[cfg(loom)]
+mod model {
+    use loom::sync::Arc;
+    use loom::thread;
+
+    use super::*;
+
+    const LAYOUT: Layout = Layout::new::<[u64; 8]>();
+
+    /// The two numbers of the `Debug` output of a [`Bytes`]: held, then peak.
+    fn shown(bytes: &Bytes) -> (usize, usize) {
+        let shown = format!("{bytes:?}");
+        let mut numbers = shown
+            .split(|c: char| !c.is_ascii_digit())
+            .filter(|number| !number.is_empty())
+            .map(|number| number.parse().expect("invariant: a run of digits"));
+        match (numbers.next(), numbers.next(), numbers.next()) {
+            (Some(held), Some(peak), None) => (held, peak),
+            _ => panic!("`{shown}` does not show two counts"),
+        }
+    }
+
+    #[test]
+    fn peaks_at_or_over_each_count_held_while_another_thread_allocates() {
+        loom::model(|| {
+            let bytes = Arc::new(Bytes::new());
+            let other = Arc::clone(&bytes);
+            let thread = thread::spawn(move || {
+                // SAFETY: the layout is not empty.
+                let ptr = unsafe { other.alloc(LAYOUT) };
+                assert!(!ptr.is_null(), "the system has no memory for 64 bytes");
+                // SAFETY: `other` returned `ptr` for `LAYOUT`.
+                unsafe { other.dealloc(ptr, LAYOUT) };
+            });
+            bytes.reset_peak();
+            let held = bytes.held();
+            let (shown_held, shown_peak) = shown(&bytes);
+            let peak = bytes.peak();
+            thread.join().expect("the allocating thread does not panic");
+            assert!(
+                peak >= held,
+                "the peak {peak} is under the {held} bytes held"
+            );
+            assert!(
+                shown_peak >= shown_held,
+                "`Debug` shows the peak {shown_peak} under the {shown_held} bytes held"
+            );
+        });
     }
 }

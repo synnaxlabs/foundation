@@ -507,6 +507,9 @@ dependencies = [
 [[package]]
 name = "counting"
 version = "0.0.0"
+dependencies = [
+ "loom",
+]
 
 [[package]]
 name = "cpufeatures"
