@@ -218,3 +218,10 @@
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062457087),
   approved by `laptop.architect` (2026-10-08T14:50:25Z,
   https://github.com/synnaxlabs/foundation/issues/1082#issuecomment-6062513561).
+  `config::Definition::kind()` gives the `spec::definition::Kind` of a definition,
+  with an exhaustive match in `config`, so a new variant fails to compile where it is
+  added. `ops` takes the kind of an add or a change from it, and keeps its lookup in
+  `applied` for a removal, whose fingerprints need the stored definition. Lost: `kind`
+  on `config::plan::Change`, which still needs that lookup and changes the plan file
+  (`laptop.architect-2`, 2026-10-10T02:45:50Z,
+  https://github.com/synnaxlabs/foundation/issues/1914#issuecomment-6092943513).
