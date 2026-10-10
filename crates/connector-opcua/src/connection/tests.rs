@@ -7,8 +7,9 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::pin::{Pin, pin};
 use std::ptr;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::task::{Context, Poll, Wake, Waker};
 
 use env::clock::Clock;
 use env::net::{Listener, Tcp, tcp};
@@ -2618,7 +2619,7 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
 #[test]
 fn a_burst_of_accepts_holds_no_more_than_the_most_secure_channels() {
     // A pass of the whole table after each accept makes more than 10,000.
-    assert_eq!(burst(1), (100, 100, 757));
+    assert_eq!(burst(1), (100, 100, 908));
 }
 
 /// A drive that ends after its first run accepts one stream, so the next drive does
@@ -2627,6 +2628,46 @@ fn a_burst_of_accepts_holds_no_more_than_the_most_secure_channels() {
 fn drives_of_one_run_hold_no_more_than_the_most_secure_channels() {
     let (connections, open, _) = burst(400);
     assert_eq!((connections, open), (100, 100));
+}
+
+/// A drive that gives its value while a stream waits to be accepted wakes its task,
+/// so the next drive accepts the stream.
+#[test]
+fn a_drive_that_gives_a_value_after_an_accept_wakes_its_task() {
+    let mut network = Network::new();
+    for _ in 0..3 {
+        network.dial(Span::MILLISECOND, b"");
+    }
+    let wakes = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            let server = side.start(c"opc.tcp://:4840");
+            side.clock.sleep(Span::from_nanos(2_000_000)).await;
+            let count = Arc::new(Wakes::default());
+            let waker = Waker::from(Arc::clone(&count));
+            let mut drive = pin!(side.manager.drive(|_| {
+                side.run();
+                Poll::Ready(())
+            }));
+            let poll = drive.as_mut().poll(&mut Context::from_waker(&waker));
+            assert_eq!(poll, Poll::Ready(()));
+            let woken = count.0.load(Ordering::Relaxed);
+            side.stop(server).await;
+            woken
+        })
+        .expect("the run ends");
+    assert_eq!(wakes, 1);
+}
+
+/// Counts the wakes of a task.
+#[derive(Default)]
+struct Wakes(AtomicUsize);
+
+impl Wake for Wakes {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 /// Dials 150 streams at once to the minimal server, then has `drives` drives each

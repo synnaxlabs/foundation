@@ -173,6 +173,10 @@ impl Manager {
                 let poll = run(cx);
                 let moved = state.move_on_again(cx);
                 if poll.is_ready() {
+                    // Only a drive moves on the listen connection in `accepted`.
+                    if state.accepted.get().is_some() {
+                        cx.waker().wake_by_ref();
+                    }
                     break poll;
                 }
                 if moved {
