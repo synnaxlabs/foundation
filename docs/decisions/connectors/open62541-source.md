@@ -11,7 +11,9 @@
   policy, so a client has only the policy `None`, and `encryptUserIdentityTokenEcc`
   needs an ECC policy. Approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2246#issuecomment-6094588326,
-  2026-10-10 06:19 UTC). The copy goes in `patches/open62541/`, and the `build.rs` of
+  2026-10-10 06:19 UTC) and `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2246#issuecomment-6099193878,
+  2026-10-10 15:39 UTC). The copy goes in `patches/open62541/`, and the `build.rs` of
   `connector-opcua` reads its `sources.txt`. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057244538,
   2026-10-08 09:50 UTC). `cargo xtask open62541 <tag>` makes the copy. Each file from
