@@ -2,7 +2,9 @@
 //! `node::kinds`, so a test of a spec change through `Node` cannot hold a run or
 //! end one at a chosen time.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use connector::cancel;
@@ -82,6 +84,32 @@ impl Kind for Hold {
     }
 }
 
+/// Spawns on `tasks` and counts the tasks that have not ended.
+struct Counted {
+    tasks: env::tasks::Tasks,
+    live: Rc<Cell<usize>>,
+}
+
+/// Counts one task down when it drops.
+struct Live(Rc<Cell<usize>>);
+
+impl Drop for Live {
+    fn drop(&mut self) {
+        self.0.set(self.0.get() - 1);
+    }
+}
+
+impl env::tasks::Driver for Counted {
+    fn spawn(&self, task: env::tasks::Task) {
+        self.live.set(self.live.get() + 1);
+        let live = Live(Rc::clone(&self.live));
+        self.tasks.spawn(async move {
+            let _live = live;
+            task.await;
+        });
+    }
+}
+
 /// One connector of a spec: its name, its kind, its node, and the version of its
 /// config.
 type Placed = (&'static str, &'static str, &'static str, usize);
@@ -108,8 +136,8 @@ struct Recorded {
     cancels: Events,
     /// The names that the runs hold after each step.
     held: Vec<Vec<String>>,
-    /// The futures of the runs at each step, before its apply.
-    futures: Vec<usize>,
+    /// The tasks of the supervisor that have not ended at each step, before its apply.
+    live: Vec<usize>,
 }
 
 /// Applies each step at its time, with the kind `hold`, whose task ends `linger` after
@@ -138,15 +166,20 @@ fn record(linger: Option<Span>, steps: Vec<Step>, dropped: Option<i64>) -> Recor
             entropy: node.entropy(),
             tasks: tasks.clone(),
         };
-        let config = testing::create_config(env, node.net(), kinds).await;
+        let mut config = testing::create_config(env, node.net(), kinds).await;
+        let counted = Rc::new(Cell::new(0));
+        config.tasks = env::tasks::Tasks::new(Counted {
+            tasks: config.tasks.clone(),
+            live: Rc::clone(&counted),
+        });
         let hub = config.hub.clone();
         let clock = node.clock();
         let start = clock.now();
         let mut runs = Runs::new(config, name(NODE));
-        let (mut names, mut futures) = (Vec::new(), Vec::new());
+        let (mut names, mut live) = (Vec::new(), Vec::new());
         for (at, spec) in steps {
             clock.sleep_until(start + at).await;
-            futures.push(runs.scope.len());
+            live.push(counted.get());
             let definitions = definitions(&spec);
             hub.set_definitions(&definitions);
             runs.apply(&definitions);
@@ -168,7 +201,7 @@ fn record(linger: Option<Span>, steps: Vec<Step>, dropped: Option<i64>) -> Recor
             starts: since(&starts),
             cancels: since(&cancels),
             held: names,
-            futures,
+            live,
         }
     });
     run.expect("the run ends")
@@ -304,7 +337,8 @@ fn a_drop_cancels_each_run() {
     );
 }
 
-/// A removed run that holds stays until an apply after it ended.
+/// A removed run that holds stays until an apply after it ended. An entry that ended
+/// holds no future and changes no start, so no caller sees it: the test reads `last`.
 #[test]
 fn an_apply_drops_each_removed_run_that_ended() {
     let spec = vec![("plant.a", "hold", NODE, 0)];
@@ -334,21 +368,22 @@ fn a_third_change_starts_after_the_second_run_ended() {
 
 /// Each change while the old run holds changes the one run that waits for it.
 #[test]
-fn many_changes_while_the_old_run_holds_keep_two_futures() {
+fn many_changes_while_the_old_run_holds_keep_one_run_that_waits() {
     let steps = (0..100_usize)
         .zip((0..).step_by(50))
         .map(|(version, at)| on(at, vec![("plant.a", "hold", NODE, version)]))
         .collect();
     let recorded = record(None, steps, None);
-    let mut futures = vec![0, 1];
-    futures.resize(100, 2);
-    assert_eq!(recorded.futures, futures);
+    // The run that holds, the task of its kind, and the run that waits.
+    let mut live = vec![0, 2];
+    live.resize(100, 3);
+    assert_eq!(recorded.live, live);
     assert_eq!(recorded.starts, [start("plant.a", 0, 0)]);
 }
 
 /// Changes with no poll of the runs between them.
 #[test]
-fn changes_at_one_instant_keep_two_futures() {
+fn changes_at_one_instant_keep_one_run_that_waits() {
     let steps = (0..10_usize)
         .map(|version| {
             let at = if version == 0 { 0 } else { 1_000 };
@@ -356,9 +391,10 @@ fn changes_at_one_instant_keep_two_futures() {
         })
         .collect();
     let recorded = record(None, steps, None);
-    let mut futures = vec![0, 1];
-    futures.resize(10, 2);
-    assert_eq!(recorded.futures, futures);
+    // The run that holds, the task of its kind, and the run that waits.
+    let mut live = vec![0, 2];
+    live.resize(10, 3);
+    assert_eq!(recorded.live, live);
     assert_eq!(recorded.starts, [start("plant.a", 0, 0)]);
 }
 

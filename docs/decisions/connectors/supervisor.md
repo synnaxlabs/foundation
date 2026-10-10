@@ -154,10 +154,12 @@
   defect of `node`, and gives `Ok` when the mesh stopped (`laptop.architect-2`,
   2026-10-09T18:46:26Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6087144669). An
-  unknown channel after the cancel of the call also gives `Ok`, since `node` removes
+  unknown channel after the cancel of the call also gives `Ok`, because `node` removes
   the status channels of a connector before it cancels its run. This departs from item
-  2 of 6087144669, and waits on the ruling of item 4 of
-  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098749526.
+  2 of 6087144669 (`laptop.architect`, 2026-10-10T15:07:08Z:
+  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098894431; it waits
+  on the ruling of `laptop.architect-2` on item 4 of
+  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098749526).
   `status::channels` replaces the public `status::TIME` and `status::CHANNELS`, so one
   call gives each name and type (same ruling). The tests define the status channels with
   `connector::testing::create_status`, behind `sim`, which gives their definitions with
