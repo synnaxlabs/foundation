@@ -2887,6 +2887,32 @@ fn each_read_is_in_the_one_buffer_of_the_manager() {
     assert_eq!((before, same), (0, vec![(2, true), (3, true)]));
 }
 
+/// A read gives C up to the 64 KiB of the read buffer, so 70,000 bytes take two
+/// reads or more.
+#[test]
+fn a_read_fills_the_read_buffer_of_64_kib() {
+    let mut network = Network::new();
+    network.dial(Span::from_nanos(100_000_000), &vec![7; 70_000]);
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            side.calls()
+        })
+        .expect("the run ends");
+    let reads: Vec<usize> = calls
+        .iter()
+        .filter(|(id, _, bytes)| *id == 2 && !bytes.is_empty())
+        .map(|(_, _, bytes)| bytes.len())
+        .collect();
+    assert_eq!(
+        (reads.iter().max(), reads.iter().sum::<usize>()),
+        (Some(&READ_BYTES), 70_000)
+    );
+}
+
 /// Records a call as [`record`] does, and closes a connection at the `ESTABLISHED`
 /// that opens it.
 unsafe extern "C" fn close_at_open(
