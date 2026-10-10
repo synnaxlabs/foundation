@@ -109,9 +109,6 @@ const PORT: u16 = 4840;
 /// `UA_SESSIONSTATE_ACTIVATED`.
 const ACTIVATED: c_int = 4;
 
-/// `UA_SECURECHANNELSTATE_CLOSED`.
-const CLOSED: c_int = 0;
-
 /// A connection manager over `env::net` with a test server of open62541 and `idle + 1`
 /// clients with an activated session on its loop. The first client reads; the others
 /// send nothing.
@@ -236,8 +233,8 @@ impl Manager {
         self.answers.count.get()
     }
 
-    /// Drives the manager until each channel is closed and until the server is stopped
-    /// with nothing due on the loop, then deletes them all.
+    /// Asks each client to close its session, drives the manager until the server is
+    /// stopped with nothing due on the loop, then deletes them all.
     async fn close(mut self) {
         for client in &self.clients {
             // SAFETY: the client lives.
@@ -246,7 +243,6 @@ impl Manager {
             });
             assert_eq!(status, Status::GOOD, "open62541 refused a disconnect");
         }
-        self.until(|(channel, _)| channel == CLOSED).await;
         let server = self.server.as_ptr();
         // SAFETY: the server lives.
         let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
@@ -268,7 +264,8 @@ impl Manager {
         let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
         assert_eq!(status, Status::GOOD, "open62541 refused the server delete");
         for client in self.clients.drain(..) {
-            // SAFETY: the channel is closed, and nothing uses the client after it.
+            // SAFETY: nothing uses the client after it. It asked to disconnect, so the
+            // delete waits for no answer.
             unsafe { ffi::UA_Client_delete(client.as_ptr()) };
         }
         // SAFETY: nothing is on its loop, and nothing uses it after it.
