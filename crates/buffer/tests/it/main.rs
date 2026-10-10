@@ -847,6 +847,39 @@ fn empty_appends_wake_no_task() {
     assert_eq!(idle_with_wakes(2), idle_with_wakes(0));
 }
 
+/// Runs a buffer whose task waits for the deadline of one entry, with `empty` empty
+/// appends meanwhile. Returns the digest of the run.
+fn busy_with_appends(empty: usize) -> u64 {
+    let (mut sim, handle) = start(28, move |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        shard.clock.sleep(commits(3)).await;
+        buffer
+            .append([entry(1, a, Path::Live, 0, 3, Some(30), Parts::default())])
+            .expect("queues");
+        shard.clock.sleep(tenths(3)).await;
+        for _ in 0..empty {
+            buffer.append(Vec::new()).expect("takes an empty batch");
+        }
+        assert_eq!(buffer.committed().await, Ok(()));
+        drop(buffer);
+    });
+    sim.run().expect("the run ends");
+    handle.join().expect("the shard ended");
+    sim.digest()
+}
+
+/// Appends to a buffer whose task does not idle wake no task: the waker that the
+/// first append takes is gone.
+#[test]
+fn appends_to_a_busy_buffer_wake_no_task() {
+    assert_eq!(busy_with_appends(2), busy_with_appends(0));
+}
+
 /// A `committed` with nothing appended before it waits on nothing: it resolves at
 /// once, and the task syncs nothing for it.
 #[test]
@@ -3696,10 +3729,6 @@ fn a_waiter_prints_only_its_event_and_key() {
 
 /// The test of the hand-written `Debug` of the private `Parked`: a buffer prints
 /// whether its task idles, and no pointer of the task's waker.
-///
-/// It is also the only kill of the hand mutant that clones the waker in `unpark` in
-/// place of taking it. That mutant only wakes a task that does not idle, an extra
-/// poll that no caller can see, and no driver counts wakes.
 #[test]
 fn a_buffer_prints_whether_it_idles_and_no_pointer() {
     run_on_memory(144, |shard| async move {
