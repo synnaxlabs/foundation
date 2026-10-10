@@ -136,7 +136,7 @@ pub(super) async fn create_config(
 
 /// Runs `mesh` on node 1 and `peer` on node 2 for 30 s, and gives what `peer`
 /// returned. Node 2 takes a message of at most `limit` bytes, and node 1 sends at
-/// most `limit` bytes that node 2 did not read.
+/// most twice `limit` bytes that node 2 did not read.
 pub(super) fn run<M, P>(
     limit: usize,
     mesh: impl FnOnce(sim::node::Node, Tasks) -> M + Send + 'static,
@@ -201,7 +201,7 @@ where
         let pool = create_pool();
         let config = transport::Config {
             message_bytes_max: NonZeroUsize::new(limit).unwrap(),
-            window_bytes: limit,
+            window_bytes: limit.checked_mul(2).unwrap(),
             ..transport_config(&node, &tasks, id, Rc::clone(&pool))
         };
         let transport = bind(&node, PORT, config);
@@ -623,7 +623,7 @@ fn assert_ends_in_a_send<E: Future<Output = ()> + 'static>(
             })
             .await;
         }
-        clock.sleep(seconds(10)).await;
+        clock.sleep(seconds(25)).await;
         for _ in 0..2 {
             assert!(!quiet(&mesh, 2).await, "the task of node 2 does not wait");
         }
@@ -740,7 +740,12 @@ fn a_proposal_whose_write_waits_gives_a_removed_stop() {
             now(call.as_mut()).await.is_pending(),
             "the write did not wait"
         );
-        assert_eq!(mesh.propose_data(vec![2]).await, Err(exhausted(61)));
+        // The sends that wait leave the budget fully carved.
+        let full = block::Error::Exhausted {
+            requested: 61,
+            available: 0,
+        };
+        assert_eq!(mesh.propose_data(vec![2]).await, Err(Error::Pool(full)));
         let proposed = within(&clock, seconds(20), call).await;
         let watched = mesh.watch(INDEX).next().await;
         *written.lock().unwrap() = Some((proposed, watched));

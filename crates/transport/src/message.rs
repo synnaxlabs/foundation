@@ -525,7 +525,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a message of 4611686018427387904 bytes")]
     fn prefix_panics_at_2_to_the_62() {
-        let _ = prefix(1 << 62);
+        let _: Varint = prefix(1 << 62);
     }
 
     mod reader {

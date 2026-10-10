@@ -1,6 +1,7 @@
 //! Byte-level values shared by every crate: time, byte sizes, sample types, keys, key
 //! sets, names, selectors, quality, control authority, and content digests. Frames and
-//! series join them here.
+//! series join them here. It also holds the wakers of the futures that wait for one
+//! event (`wait::Set`).
 //!
 //! These types describe layout only. What a value means (enum names, units) lives in
 //! `spec`.
@@ -21,6 +22,7 @@ mod quantity;
 pub mod sample;
 pub mod time;
 pub mod uuid;
+pub mod wait;
 
 #[cfg(test)]
 mod common {

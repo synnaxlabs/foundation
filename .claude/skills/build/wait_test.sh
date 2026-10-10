@@ -1,13 +1,14 @@
 #!/bin/sh
 # Runs wait.sh against fixed GraphQL answers, then once against the API on merged #1428
-# to check the query. A stub `gh` acts as gh does: on an answer with an error message,
-# an HTTP error, or no network, it exits 1, prints the body, if any, and prints the
-# error on stderr; with no login, it exits 4. After the answers run out, it fails with
-# "out of answers". `gh api rate_limit` gives the count in `$STUB/left.<n>` after call
-# <n>, else in `$STUB/left`, else 1. As gh does, it logs each request on stderr for a
-# true `GH_DEBUG`, or, when that is not set, for a true `DEBUG`. A stub `sleep` returns
-# at once, and stops the script on its fifth call; when `$STUB/slow` exists, it sleeps.
-# Needs `jq`. Exit 1 on a failure.
+# to check the query, and reads the last removal of merged #2216 with it. A stub `gh`
+# acts as gh does: on an answer with an error message, an HTTP error, or no network, it
+# exits 1, prints the body, if any, and prints the error on stderr; with no login, it
+# exits 4. After the answers run out, it fails with "out of answers". `gh api
+# rate_limit` gives the count in `$STUB/left.<n>` after call <n>, else in `$STUB/left`,
+# else 1. As gh does, it logs each request on stderr for a true `GH_DEBUG`, or, when
+# that is not set, for a true `DEBUG`. A stub `sleep` returns at once, and stops the
+# script on its fifth call; when `$STUB/slow` exists, it sleeps. Needs `jq`. Exit 1 on a
+# failure.
 set -u
 here=$(cd "$(dirname "$0")" && pwd)
 gh=$(command -v gh)
@@ -52,13 +53,14 @@ n=$(($(cat "$STUB/sleeps" 2>/dev/null || echo 0) + 1))
 echo "$n" > "$STUB/sleeps"
 [ "$n" -lt 5 ] || kill "$PPID"
 STUB
-# Records the answer body and the filter, then runs the real gh. $6 is `query=...` and
-# $8 the filter. The real gh can itself call gh from PATH, so it gets the PATH without
-# this stub.
+# Records the answer body, the query, and the filter, then runs the real gh. $6 is
+# `query=...` and $8 the filter. The real gh can itself call gh from PATH, so it gets
+# the PATH without this stub.
 cat > "$tmp/live/gh" <<STUB
 #!/bin/sh
 PATH='$PATH'
 "$gh" api graphql -F n=1428 -f "\$6" < /dev/null > "$tmp/live/1428.json"
+printf %s "\$6" > "$tmp/live/query"
 printf %s "\$8" > "$tmp/live/filter"
 exec "$gh" "\$@"
 STUB
@@ -192,6 +194,16 @@ run "auto-merge waits" 0 "#7 merged" 2 \
   "$merged"
 run "left the merge queue" 1 "#7 left the merge queue" 1 \
   "$(pr OPEN | with '{"isInMergeQueue":false}')"
+removed() {
+  printf '{"isInMergeQueue":false,"timelineItems":{"nodes":[{"reason":"%s"}]}}' "$1"
+}
+run "removal by the merge waits" 0 "#7 merged" 2 \
+  "$(pr OPEN | with "$(removed merged)")" "$merged"
+run "removal by the merge with a failed check waits" 0 "#7 merged" 2 \
+  "$(pr OPEN "$(job Review 1 gate 3 '"FAILURE"' false)" | with "$(removed merged)")" \
+  "$merged"
+run "removal for another reason" 1 "#7 left the merge queue" 1 \
+  "$(pr OPEN | with "$(removed manual)")"
 run offline 0 "#7 merged" 2 offline "$merged"
 run "not JSON" 0 "#7 merged" 2 "http <html>" "$merged"
 run "HTTP error" 0 "#7 merged" 2 'http {"message":"Bad credentials"}' "$merged"
@@ -255,9 +267,10 @@ run "waits at most five times" 143 "" 5 "$(pr OPEN)" "$(pr OPEN)" "$(pr OPEN)" \
 
 got=$(STUB=$tmp/live PATH="$tmp/live:$PATH" sh "$here/wait.sh" 1428)
 check "API on #1428" $? "$got" 1 0 "#1428 merged" 1
-# The API's answer for #1428, put back in the queue: its last `gate` run was canceled,
-# which makes GitHub give FAILURE as its rollup state.
-replay=$(jq -c '.data.repository.pullRequest += {state: "OPEN", isInMergeQueue: true}' \
+# The API's answer for #1428, put back in the queue with no removal: its last `gate`
+# run was canceled, which makes GitHub give FAILURE as its rollup state.
+replay=$(jq -c '.data.repository.pullRequest
+  += {state: "OPEN", isInMergeQueue: true, timelineItems: {nodes: []}}' \
   "$tmp/live/1428.json")
 run "#1428 in the queue waits" 0 "#7 merged" 2 "$replay" "$merged"
 # The case above holds only while the last Review run of #1428 is a canceled `gate`.
@@ -271,6 +284,7 @@ check "#1428 ends with a canceled gate" 0 "$premise" 1 0 true 1
 fields=$(jq '.data.repository.pullRequest | . as $pr
   | all("mergeable", "reviewDecision", "isInMergeQueue", "autoMergeRequest";
     . as $f | $pr | has($f))
+  and (.timelineItems.nodes[0].reason | type) == "string"
   and (.commits.nodes[0].commit.statusCheckRollup.contexts.nodes
   | any(.[]; .__typename == "CheckRun")
   and all(.[]; .__typename != "CheckRun" or ((.name | type) == "string"
@@ -281,6 +295,10 @@ fields=$(jq '.data.repository.pullRequest | . as $pr
   and all(.[]; .__typename != "StatusContext" or (.state | type) == "string"))' \
   "$tmp/live/1428.json")
 check "API on #1428 gives each field" 0 "$fields" 1 0 true 1
+# The queue removed #2216 for a failed check, then because it merged.
+last=$("$gh" api graphql -F n=2216 -f "$(cat "$tmp/live/query")" \
+  --jq '.data.repository.pullRequest.timelineItems.nodes[0].reason')
+check "API on #2216 gives the last removal" $? "$last" 1 0 merged 1
 # The stub runs the filter with this jq, and gh with its own engine.
 same=$(jq -r "$(cat "$tmp/live/filter")" "$tmp/live/1428.json")
 check "this jq reads #1428 as gh does" $? "$same" 1 0 merged 1

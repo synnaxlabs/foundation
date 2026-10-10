@@ -91,14 +91,16 @@ fn start_node(
         shards: shards.clone(),
         clock: os::clock(),
         wall: os::wall().unwrap(),
-        budget: Size::from_bytes(cores * (512 << 10)),
+        budget: node::Budget {
+            pool: Size::from_bytes(cores * (512 << 10)),
+            disk: Size::from_bytes(cores * (8 << 20)),
+        },
         memory: Box::new(|len| Ok(block::Heap::new(len))),
         files: Box::new(move || {
             let disk = files(&dir, &threads, &io);
             Box::new(move || env::files::Files::new(disk))
         }),
         entropy: os::entropy(),
-        disk: Size::from_bytes(cores * (8 << 20)),
         net: os::net(),
         listen,
         region: None,

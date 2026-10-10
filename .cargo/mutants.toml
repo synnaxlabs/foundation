@@ -105,6 +105,9 @@ exclude_re = [
   'crates/connector-influx/src/lib\.rs:.*replace <impl kind::Kind for Kind>::check ->',
   # macOS only. CI runs Linux and does not build it; its tests run on macOS.
   'crates/os/src/allocate\.rs:',
+  # macOS only, as above. `this_host_has_whole_pages_available` and
+  # `the_free_inactive_and_purgeable_pages_are_available` catch its mutants.
+  'crates/os/src/memory/available\.rs:.*macos::',
   # macOS only, as above. `a_write_takes_at_most_the_unsent_bound` catches its
   # mutants.
   'crates/os/src/net/unsent\.rs:.*Bound::new',
@@ -133,4 +136,8 @@ exclude_re = [
   'crates/hub/src/reader/remote\.rs:.*replace > with >= in Sessions::add',
   # Equal keys get no rule (ONE SESSION PER PEER, rule 4), so no test can pin `<`.
   'crates/transport/src/table\.rs:.*replace < with <= in Table::arrive',
+  # Only the `logs` bench calls `buffer::bench::Logs`, and `commit` gives nothing
+  # back. `each_commit_of_the_logs_syncs_one_entry_of_each_index` kills it through the
+  # private logs.
+  'crates/buffer/src/bench\.rs:.*replace Logs::commit with \(\)$',
 ]

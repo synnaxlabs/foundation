@@ -7,7 +7,9 @@ use std::rc::Rc;
 use types::ed25519::PublicKey;
 use types::time::Span;
 
-use crate::{Address, Error, MESSAGE_BYTES_MIN, POOL_RULE, Session, dial, port, quic};
+use crate::{
+    Address, Error, MESSAGE_BYTES_MIN, POOL_RULE, Session, dial, port, quic, window_min,
+};
 
 /// The smallest window of a program: 1 Gbit/s over a round trip of 8 ms.
 const WINDOW_BYTES_MIN: usize = 1 << 20;
@@ -30,9 +32,9 @@ pub struct Client {
 impl Client {
     /// Starts a program's transport on a UDP socket that it binds at `[::]` port 0,
     /// which takes IPv4 and IPv6. The limits are fixed: messages up to
-    /// `pool.largest()`, a window of that or 1 MiB, whichever is larger, and a 30 s
-    /// idle timeout. A node may open 1 two-way and 1 one-way stream to it at a time,
-    /// though it opens none.
+    /// `pool.largest()`, a window of twice that or 1 MiB, whichever is larger, and a
+    /// 30 s idle timeout. A node may open 1 two-way and 1 one-way stream to it at a
+    /// time, though it opens none.
     ///
     /// # Errors
     ///
@@ -139,7 +141,7 @@ impl Config {
         Ok(quic::Setup {
             role: quic::Role::Program,
             message_bytes_max,
-            window_bytes: message_bytes_max.max(WINDOW_BYTES_MIN),
+            window_bytes: window_min(message_bytes_max).max(WINDOW_BYTES_MIN),
             streams_max: NonZeroU32::MIN,
             idle: IDLE,
             clock: self.clock,
@@ -372,8 +374,8 @@ mod tests {
 
     #[test]
     fn a_node_may_fill_the_window_of_a_program_and_open_one_stream_of_each_kind() {
-        // The small pool gets the 1 MiB floor, and the large one its largest block.
-        for (budget, window) in [(1 << 16, 1 << 20), (1 << 24, 14_680_064)] {
+        // The small pool gets the 1 MiB floor, the large one twice its largest block.
+        for (budget, window) in [(1 << 16, 1 << 20), (1 << 24, 29_360_128)] {
             fill(budget, window);
         }
     }

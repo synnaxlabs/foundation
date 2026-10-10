@@ -31,6 +31,7 @@ pub(crate) struct Memory {
     opens: Arc<AtomicU64>,
     /// What every sync sleeps for, on a clock, before it ends.
     slow: Arc<Mutex<Option<(Clock, Span)>>>,
+    reads: Arc<AtomicU64>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -61,6 +62,11 @@ impl Memory {
     /// How many syncs were asked for, failed ones included.
     pub(crate) fn syncs(&self) -> u64 {
         self.syncs.load(Relaxed)
+    }
+
+    /// How many reads were asked for.
+    pub(crate) fn reads(&self) -> u64 {
+        self.reads.load(Relaxed)
     }
 
     /// How many descriptors are open now.
@@ -169,6 +175,7 @@ impl Driver for Memory {
                 syncs: Arc::clone(&self.syncs),
                 opens: Arc::clone(&self.opens),
                 slow: Arc::clone(&self.slow),
+                reads: Arc::clone(&self.reads),
             });
             open
         });
@@ -217,6 +224,7 @@ struct Open {
     syncs: Arc<AtomicU64>,
     opens: Arc<AtomicU64>,
     slow: Arc<Mutex<Option<(Clock, Span)>>>,
+    reads: Arc<AtomicU64>,
 }
 
 impl Drop for Open {
@@ -246,6 +254,7 @@ impl Descriptor for Open {
     }
 
     fn read_at(&self, offset: u64, mut into: Unique) -> Request<'_, Unique> {
+        self.reads.fetch_add(1, Relaxed);
         let bytes = lock(&self.bytes);
         let at = to_usize(offset);
         let len = into.len();

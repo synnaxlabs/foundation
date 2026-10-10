@@ -17,7 +17,7 @@ use crate::cancel;
 ///     let rate = types::time::Rate::new(100, 1).expect("100 Hz is a rate");
 ///     let mut timer = Timer::new(clock, rate);
 ///     while let Some(tick) = timer.tick(cancel).await {
-///         let _ = tick.n;
+///         let _: u64 = tick.n;
 ///     }
 /// }
 /// ```
@@ -213,10 +213,24 @@ mod tests {
         assert_eq!(elapsed, Span::SECOND, "at tick 1");
     }
 
+    /// Tick 1 is 158 years out, so its timer wakes only when due, to keep the run in
+    /// its step budget.
     #[test]
     #[should_panic(expected = "span overflow: 2 samples at 1/5000000000 Hz")]
     fn panics_past_i64_max_nanoseconds_from_the_start() {
-        ticks(rate(1, 5_000_000_000), vec![Span::ZERO; 3]);
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config {
+            arm_max: None,
+            ..sim::node::Config::default()
+        });
+        let ran = sim.run_on(&node, |node, _| async move {
+            let (clock, token) = (node.clock(), Token::new());
+            let mut timer = Timer::new(&clock, rate(1, 5_000_000_000));
+            for _ in 0..3 {
+                timer.tick(&token).await;
+            }
+        });
+        ran.expect("the run ends");
     }
 
     proptest! {

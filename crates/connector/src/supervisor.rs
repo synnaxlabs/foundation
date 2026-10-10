@@ -273,7 +273,7 @@ mod tests {
 
     use super::*;
     use crate::cancel::Token;
-    use crate::common::{STATUS, create_config, create_status, env, run_on};
+    use crate::common::{STATUS, create_config, create_status, env, run_on, run_with};
     use crate::kind::{Channels, Kind, Table};
     use crate::testing;
     use hub::home::Refusal;
@@ -870,6 +870,7 @@ mod tests {
         assert_eq!(returned, ms(3_000), "returns once the home applied state 2");
     }
 
+    /// It states one wake at the deadline, so its timers wake only when due.
     #[test]
     fn wakes_nothing_after_a_change_of_state_closed_the_writer_while_the_flush_slept() {
         let polls = Arc::new(AtomicUsize::new(0));
@@ -895,7 +896,7 @@ mod tests {
                 Ok(())
             }
         };
-        timed(run, |scene| async move {
+        timed_due(run, |scene| async move {
             scene.node.clock().sleep(ms(500)).await;
             scene.remove("samples");
         });
@@ -904,6 +905,7 @@ mod tests {
         assert_eq!(polls, 2, "a poll to start the sleep, and one at its end");
     }
 
+    /// It states one wake at the deadline, so its timers wake only when due.
     #[test]
     fn wakes_nothing_after_a_close_in_the_poll_that_staged_a_count() {
         let polls = Arc::new(AtomicUsize::new(0));
@@ -928,7 +930,7 @@ mod tests {
                 Ok(())
             }
         };
-        timed(run, |scene| async move {
+        timed_due(run, |scene| async move {
             scene.node.clock().sleep(ms(500)).await;
             scene.remove("samples");
         });
@@ -1069,6 +1071,7 @@ mod tests {
         assert_eq!(polls, 2, "a poll to start the sleep, and one at its end");
     }
 
+    /// It states one wake at the deadline, so its timers wake only when due.
     #[test]
     fn wakes_nothing_at_a_count_set_after_a_change_of_state_closed_the_writer() {
         let polls = Arc::new(AtomicUsize::new(0));
@@ -1093,7 +1096,7 @@ mod tests {
                 Ok(())
             }
         };
-        timed(run, |scene| async move {
+        timed_due(run, |scene| async move {
             scene.node.clock().sleep(ms(1_500)).await;
             scene.remove("samples");
         });
@@ -1874,7 +1877,34 @@ mod tests {
         S: FnOnce(Scene) -> T + Send + 'static,
         T: Future<Output = ()> + 'static,
     {
-        run_on(|node, tasks| async move {
+        timed_on(sim::node::Config::default(), run, scenario)
+    }
+
+    /// [`timed`] on a node whose timers wake only when due, so a test can count the
+    /// polls of a sleep.
+    fn timed_due<F, R, S, T>(run: F, scenario: S) -> Span
+    where
+        F: Fn(Context<()>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<(), Error>>,
+        S: FnOnce(Scene) -> T + Send + 'static,
+        T: Future<Output = ()> + 'static,
+    {
+        let node = sim::node::Config {
+            arm_max: None,
+            ..sim::node::Config::default()
+        };
+        timed_on(node, run, scenario)
+    }
+
+    /// [`timed`] on a node of `node`.
+    fn timed_on<F, R, S, T>(node: sim::node::Config, run: F, scenario: S) -> Span
+    where
+        F: Fn(Context<()>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<(), Error>>,
+        S: FnOnce(Scene) -> T + Send + 'static,
+        T: Future<Output = ()> + 'static,
+    {
+        run_with(node, |node, tasks| async move {
             let kinds = Table::new().with("tally", Counted(run));
             let inputs =
                 create_config(&node, tasks.clone(), kinds, "plant.tally").await;
@@ -2435,15 +2465,15 @@ mod tests {
 
     /// The samples of the channel of `key` in `received`, each widened to `i64`.
     fn series(received: &Received<'_>, key: u128) -> Vec<i64> {
-        let set = received.set;
+        let set = received.set();
         let key = channel::Key::from_u128(key);
         let entry = set.entries().iter().position(|entry| entry.key == key);
         let entry = entry.expect("the set holds the channel");
-        let range = received.view.range(set.entries()[entry].group);
+        let range = received.view().range(set.entries()[entry].group);
         let count = range.expect("the group is present").count;
         let count = usize::try_from(count).expect("a count");
         let (_, bytes) = received
-            .view
+            .view()
             .iter()
             .find(|&(present, _)| present == entry)
             .expect("the view holds the series");

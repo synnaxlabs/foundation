@@ -35,6 +35,8 @@ use types::time::{Span, Stamp};
 #[path = "../common/net.rs"]
 mod net;
 
+#[path = "../common/agent.rs"]
+mod agent;
 mod client;
 mod definitions;
 mod link;
@@ -44,9 +46,12 @@ mod node;
 mod region;
 mod remote;
 mod serve;
+#[path = "../common/sessions.rs"]
+mod sessions;
 
-/// The node key of the hub under test.
-const NODE: types::node::Key = types::node::Key::from_u128(1);
+use agent::name;
+use net::NODE;
+
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
 const AREA: u64 = 1 << 22;
@@ -349,10 +354,6 @@ fn unsynced_on<F>(
     .expect("the run ends");
 }
 
-fn name(name: &str) -> Name {
-    name.parse().expect("a valid name")
-}
-
 /// An unnamed reader of `reader` on the channels named `channels`.
 fn unnamed(channels: &[impl AsRef<str>], mode: Mode) -> reader::Config {
     reader::Config {
@@ -427,8 +428,8 @@ fn draft(writer: &Writer, channels: &[(u128, &[i64])]) -> frame::Draft {
 
 /// The entries of the view in `received`, as channel keys.
 fn keys(received: &Received<'_>) -> Vec<u128> {
-    let entries = received.set.entries();
-    let present = received.view.iter().map(|(entry, _)| entries[entry].key);
+    let entries = received.set().entries();
+    let present = received.view().iter().map(|(entry, _)| entries[entry].key);
     present.map(channel::Key::as_u128).collect()
 }
 
@@ -459,20 +460,20 @@ fn scrambled(stamps: &[i64]) -> Vec<i64> {
 
 /// The samples of the channel `key` in `received`.
 fn samples(received: &Received<'_>, key: u128) -> Vec<i64> {
-    let entry = entry(received.set, key);
-    let group = received.set.entries()[entry].group;
+    let entry = entry(received.set(), key);
+    let group = received.set().entries()[entry].group;
     let count = received
-        .view
+        .view()
         .range(group)
         .expect("the group is present")
         .count;
     let count = usize::try_from(count).expect("a count");
     let (_, bytes) = received
-        .view
+        .view()
         .iter()
         .find(|&(present, _)| present == entry)
         .expect("the view holds the series");
-    let data_type = received.set.entries()[entry].data_type;
+    let data_type = received.set().entries()[entry].data_type;
     let mut out = vec![0; count * 8];
     codec::decode(data_type, count, bytes, &mut out).expect("decodes");
     let (chunks, _) = out.as_chunks::<8>();
@@ -510,7 +511,7 @@ fn gives_a_complete_reader_each_frame_in_seq_order_with_the_samples_written() {
                 seq: n.cast_unsigned(),
                 count: 1,
             };
-            assert_eq!(received.view.range(0), Some(range));
+            assert_eq!(received.view().range(0), Some(range));
             assert_eq!(samples(&received, 1), [now + n]);
             assert_eq!(samples(&received, 2), [n * 10]);
         }
@@ -645,8 +646,8 @@ fn gives_a_latest_reader_a_frame_before_its_commit_and_a_complete_reader_after()
         assert_eq!(samples(&received.expect("a frame"), 2), [7]);
         let received = complete.next().await.expect("a frame");
         assert_eq!(samples(&received, 1), [now]);
-        let time = entry(received.set, 1);
-        let entries: Vec<_> = received.view.iter().map(|(entry, _)| entry).collect();
+        let time = entry(received.set(), 1);
+        let entries: Vec<_> = received.view().iter().map(|(entry, _)| entry).collect();
         assert_eq!(entries, [time], "the view holds only the reader's channels");
     });
 }
@@ -963,10 +964,10 @@ fn gives_a_complete_reader_frames_past_its_window_only_as_it_takes_them() {
         let (mut bytes, mut spent, mut first) = (0, 0, 0);
         for n in 0..400 {
             write_wide(&mut writer, now, n);
-            bytes += charge(&taker.next().await.expect("a frame").view);
+            bytes += charge(&taker.next().await.expect("a frame").view());
             // The call that takes the second frame grants credit for the first.
             if n < 2 {
-                let charge = charge(&lagger.next().await.expect("a frame").view);
+                let charge = charge(&lagger.next().await.expect("a frame").view());
                 if n == 0 {
                     first = charge;
                 }
@@ -1017,7 +1018,7 @@ fn gives_a_reader_the_index_of_a_frame_without_its_channels() {
         assert_eq!(keys(&received), [1]);
         assert_eq!(samples(&received, 1), [now]);
         let range = Range { seq: 0, count: 1 };
-        assert_eq!(received.view.range(0), Some(range));
+        assert_eq!(received.view().range(0), Some(range));
     });
 }
 
@@ -1044,20 +1045,20 @@ fn keeps_a_complete_reader_that_called_next_before_a_commit_under_a_window() {
         let mut writer = test.writer("a", &["value"]).await;
         let now = test.now();
         write_samples(&mut writer, now, 80_000);
-        let first = charge(&reader.next().await.expect("a frame").view);
+        let first = charge(&reader.next().await.expect("a frame").view());
         assert!(first < WINDOW, "{first} bytes are under the window");
         let a = {
             let next = reader.next();
             write_samples(&mut writer, now + 80_000, 50_000);
             write_samples(&mut writer, now + 130_000, 1);
             test.clock.sleep(SETTLE).await;
-            charge(&next.await.expect("a frame").view)
+            charge(&next.await.expect("a frame").view())
         };
         assert!(
             a + 4096 < WINDOW,
             "{a} bytes and one sample are under the window"
         );
-        let b = reader.next().await.map(|received| charge(&received.view));
+        let b = reader.next().await.map(|received| charge(&received.view()));
         assert_eq!(b.map(|b| b < 4096), Ok(true), "first {first}, a {a}");
     });
 }
@@ -1071,15 +1072,15 @@ fn keeps_a_complete_reader_that_takes_a_commit_of_more_than_a_window() {
         write_samples(&mut writer, now, 80_000);
         write_samples(&mut writer, now + 80_000, 80_000);
         test.clock.sleep(SETTLE).await;
-        let first = charge(&reader.next().await.expect("a frame").view);
-        let second = charge(&reader.next().await.expect("a frame").view);
+        let first = charge(&reader.next().await.expect("a frame").view());
+        let second = charge(&reader.next().await.expect("a frame").view());
         assert!(
             first + second > WINDOW,
             "{first} + {second} bytes pass a window"
         );
         write_samples(&mut writer, now + 160_000, 1);
         test.clock.sleep(SETTLE).await;
-        let third = reader.next().await.map(|received| charge(&received.view));
+        let third = reader.next().await.map(|received| charge(&received.view()));
         assert_eq!(third.map(|third| third < 4096), Ok(true));
     });
 }
@@ -1130,7 +1131,7 @@ fn writes_and_reads_a_channel_of_a_variable_type() {
         let received = reader.next().await.expect("a frame");
         assert_eq!(samples(&received, 1), [now]);
         let (_, bytes) = received
-            .view
+            .view()
             .iter()
             .find(|&(present, _)| present == text)
             .expect("the view holds the text");
@@ -1361,9 +1362,9 @@ fn gives_a_reader_the_key_set_of_each_frame() {
         draft.set_count(0, 1);
         b.write(LIVE, draft).expect("the home takes it");
         let received = reader.next().await.expect("a frame");
-        assert!(Arc::ptr_eq(received.set, &set));
+        assert!(Arc::ptr_eq(received.set(), &set));
         let received = reader.next().await.expect("a frame");
-        assert!(Arc::ptr_eq(received.set, b.set()));
+        assert!(Arc::ptr_eq(received.set(), b.set()));
         assert_eq!(samples(&received, 1), [now + 1]);
     });
 }
@@ -1415,7 +1416,7 @@ fn waits_for_no_commit_in_a_loop_after_the_only_complete_reader_closes() {
         let mut reader = test.reader(&["value"], Mode::Complete).await;
         write(&mut writer, &[now + 4], &[4]);
         let received = reader.next().await.expect("a frame");
-        assert_eq!(received.view.range(0), Some(Range { seq: 4, count: 1 }));
+        assert_eq!(received.view().range(0), Some(Range { seq: 4, count: 1 }));
     });
 }
 
@@ -1442,7 +1443,7 @@ fn waits_for_no_commit_in_a_loop_while_the_only_complete_reader_is_out_of_credit
             seq: frames.cast_unsigned() * 1000,
             count: 1000,
         };
-        assert_eq!(received.view.range(0), Some(range));
+        assert_eq!(received.view().range(0), Some(range));
     });
 }
 
@@ -1464,7 +1465,7 @@ async fn take_all(reader: &mut Reader) -> (Vec<u64>, Ended) {
     let mut charges = Vec::new();
     loop {
         match reader.next().await {
-            Ok(received) => charges.push(charge(&received.view)),
+            Ok(received) => charges.push(charge(&received.view())),
             Err(ended) => return (charges, ended),
         }
     }
@@ -1493,7 +1494,7 @@ fn ends_a_complete_reader_that_holds_a_frame_past_its_window_at_the_next_commit(
             let mut writer = test.writer("a", &["value"]).await;
             let now = test.now();
             write_samples(&mut writer, now, PAST_WINDOW);
-            let charge = charge(&reader.next().await.expect("a frame").view);
+            let charge = charge(&reader.next().await.expect("a frame").view());
             assert!(charge > WINDOW, "{charge} bytes spend the window");
             // The reader holds the frame, so the next waits for credit.
             for n in 0..commits {
@@ -1502,7 +1503,7 @@ fn ends_a_complete_reader_that_holds_a_frame_past_its_window_at_the_next_commit(
             }
             let next = reader.next().await;
             if commits == 1 {
-                let range = next.expect("the call gives credit").view.range(0);
+                let range = next.expect("the call gives credit").view().range(0);
                 let seq = PAST_WINDOW.cast_unsigned();
                 assert_eq!(range, Some(Range { seq, count: 1 }));
             } else {
@@ -1535,7 +1536,7 @@ fn gives_a_waiting_complete_reader_each_frame_of_a_commit_past_its_window() {
             let mut spent = 0;
             for n in 0..200 {
                 let received = reader.next().await.expect("a frame");
-                let range = received.view.range(0).expect("the index is present");
+                let range = received.view().range(0).expect("the index is present");
                 assert_eq!(
                     range,
                     Range {
@@ -1543,7 +1544,7 @@ fn gives_a_waiting_complete_reader_each_frame_of_a_commit_past_its_window() {
                         count: 1000
                     }
                 );
-                spent += charge(&received.view);
+                spent += charge(&received.view());
             }
             assert!(spent > WINDOW, "{spent} bytes pass the window");
             let (polled, _) = poll_flagged(pin!(reader.next()));
@@ -1741,7 +1742,7 @@ fn keeps_a_complete_reader_that_gave_back_each_frame_through_a_commit_under_a_wi
         let mut writer = test.writer("a", &["value"]).await;
         let now = test.now();
         write_samples(&mut writer, now, 80_000);
-        let first = charge(&reader.next().await.expect("a frame").view);
+        let first = charge(&reader.next().await.expect("a frame").view());
         assert!(first < WINDOW, "{first} bytes are under the window");
         let a = {
             let mut next = pin!(reader.next());
@@ -1749,13 +1750,13 @@ fn keeps_a_complete_reader_that_gave_back_each_frame_through_a_commit_under_a_wi
             write_samples(&mut writer, now + 80_000, 50_000);
             write_samples(&mut writer, now + 130_000, 1);
             test.clock.sleep(SETTLE).await;
-            charge(&next.await.expect("a frame").view)
+            charge(&next.await.expect("a frame").view())
         };
         assert!(
             a + 4096 < WINDOW,
             "{a} bytes and one sample are under the window"
         );
-        let b = reader.next().await.map(|received| charge(&received.view));
+        let b = reader.next().await.map(|received| charge(&received.view()));
         assert_eq!(b.map(|b| b < 4096), Ok(true), "first {first}, a {a}");
     });
 }
