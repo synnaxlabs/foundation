@@ -3039,6 +3039,31 @@ fn implies_nothing_at_a_repeated_name_whose_first_connector_fails() {
     assert_eq!(found, expected);
 }
 
+/// A later connector at the key of one whose check fails writes nothing.
+#[test]
+fn refuses_no_write_of_a_later_connector_at_the_key_of_one_that_fails() {
+    let nodeless = "connector \"d\" {\n  kind = \"writer\"\n  \
+                    writes = [\"c.status.state\"]\n}\n";
+    let writer = "connector \"d\" {\n  kind = \"writer\"\n  node = \"n\"\n  \
+                  writes = [\"c.status.state\"]\n}\n";
+    let documents = documents(&[COUNTED, nodeless, writer]);
+    let found = config::check(&documents, &kinds()).expect_err("problems");
+    let found: Vec<_> = (found.iter())
+        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.span))
+        .collect();
+    let expected = [
+        (
+            "document.missing-attribute",
+            documents[1].blocks[0].keyword_span,
+        ),
+        (
+            "config.duplicate-name",
+            documents[2].blocks[0].labels[0].span,
+        ),
+    ];
+    assert_eq!(found, expected);
+}
+
 /// Of the connectors at a name that repeats, only the first in span order writes
 /// channels, so the order of the files changes no problem.
 #[test]
