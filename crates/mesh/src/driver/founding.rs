@@ -48,8 +48,8 @@ pub async fn founding(
 
 /// Writes `given` to `dir` when `logged` is false and `dir` holds another founding or
 /// none, or checks it against the founding in `dir`. `logged` states that the log of
-/// `dir` holds a record. The caller holds the lock of the log. A founding that it
-/// writes is durable when it returns.
+/// `dir` holds a record. The caller opened the log, which synced `dir`, and holds its
+/// lock. So the founding in `dir` is durable when it returns `Ok`.
 ///
 /// # Errors
 ///
@@ -67,8 +67,8 @@ pub(super) async fn keep(
 ) -> Result<(), Error> {
     let encoded = given.encode();
     let body = match read(files, dir, blocks).await {
-        // A first open writes over a founding that does not read back whole.
-        Err(Error::Unfounded { .. }) if !logged => None,
+        // A first open writes over it, and an open with a record refuses it below.
+        Err(Error::Unfounded { .. }) => None,
         body => body?,
     };
     if body.as_ref() == Some(&encoded) {
