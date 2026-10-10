@@ -266,10 +266,14 @@
   peer sends while it writes what waits, closes its side, then reads until the peer
   closes its side, so that the drop sends no reset. It drops the stream with a warning
   10 s after the first close, so that a peer that reads slowly or never closes cannot
-  hold it. Each connect, read, write, or close error gives a warning through the logger
-  of the loop. The first close, or an error before it, gives `CLOSING` once, at the next
-  run of the loop. The wake of a send on the thread of the drive: decided by
-  `laptop.architect-2`
+  hold it. Only an open stream holds a read buffer (64 KiB). A close drops its reads
+  into 1 KiB on the stack. At most 100 streams close at once: a close past that drops
+  the stream that has closed longest, with a warning (#2262). So a server of the
+  minimal config holds at most its 100 secure channels with read buffers, and 100
+  closing streams with none, whatever the connect rate. Each connect, read, write, or
+  close error gives a warning through the logger of the loop. The first close, or an
+  error before it, gives `CLOSING` once, at the next run of the loop. The wake of a
+  send on the thread of the drive: decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6074418284,
   2026-10-09 04:43 UTC). The rest, before the send bound and the context of `run`:
   approved by `laptop.architect-2`

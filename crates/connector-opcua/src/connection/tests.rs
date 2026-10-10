@@ -16,7 +16,7 @@ use env::rng::Rng;
 use sim::{Sim, node};
 use types::time::{Monotonic, Span};
 
-use super::{LINGER, Manager, OPTIONS, READ_BYTES, SENDS};
+use super::{CLOSES, LINGER, Manager, OPTIONS, READ_BYTES, SENDS};
 use crate::child;
 use crate::event::Loop;
 use crate::ffi::test::{
@@ -249,7 +249,13 @@ impl Side {
     /// open62541 shows it, and `tests/memory.rs` cannot reach the private manager.
     fn buffers(&self) -> Vec<(usize, usize)> {
         let table = self.manager.state().table.borrow();
-        table.iter().map(|(id, c)| (*id, c.buffer.len())).collect()
+        table
+            .iter()
+            .map(|(id, c)| match &c.stream {
+                super::Stream::Open { buffer, .. } => (*id, buffer.len()),
+                _ => (*id, 0),
+            })
+            .collect()
     }
 
     fn states(&self) -> Vec<ConnectionState> {
@@ -283,6 +289,31 @@ impl Side {
         // SAFETY: the member takes its own loop.
         let status = Status(unsafe { (events.members().run)(events.raw(), 0) });
         assert_eq!(status, Status::GOOD);
+    }
+
+    /// Makes a server on the loop of the side with the minimal config, and starts it.
+    fn start(&self) -> *mut ffi::test::Server {
+        // SAFETY: the loop outlives the server, which `stop` deletes.
+        let server = unsafe {
+            ffi::test::shim_server_new(
+                self.events().raw(),
+                PORT,
+                c"opc.tcp://:4840".as_ptr(),
+            )
+        };
+        assert!(!server.is_null());
+        // SAFETY: the server lives.
+        let status = Status(unsafe { ffi::test::UA_Server_run_startup(server) });
+        assert_eq!(status, Status::GOOD);
+        server
+    }
+
+    /// Shuts `server` down and deletes it.
+    async fn stop(&self, server: *mut ffi::test::Server) {
+        // SAFETY: the server lives.
+        let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+        assert_eq!(status, Status::GOOD);
+        self.delete(server).await;
     }
 
     /// Drives until `server` is `STOPPED` and nothing is due on the loop, then deletes
@@ -468,6 +499,28 @@ impl Network {
         });
         drop(handle.expect("the shard starts"));
         reads
+    }
+
+    /// Dials the listener after `delay`, and holds the stream for 60 s with no read,
+    /// write, or close.
+    fn hold(&self, delay: Span) {
+        let net = self.peer.net();
+        let clock = self.peer.clock();
+        let config = tcp::Config {
+            remote: self.listening(),
+            options: OPTIONS,
+        };
+        let shard = env::shards::Config {
+            name: "hold".into(),
+            core: None,
+        };
+        let handle = self.peer.shards().start(shard, move |_| async move {
+            clock.sleep(delay).await;
+            let stream = net.connect(&config).await.expect("the listener accepts");
+            clock.sleep(Span::from_nanos(60_000_000_000)).await;
+            drop(stream);
+        });
+        drop(handle.expect("the shard starts"));
     }
 
     /// Accepts one stream on the peer, and runs `peer` on it with the clock of the
@@ -2655,4 +2708,79 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
             })
             .expect("the run ends");
     }
+}
+
+/// Each purged stream of a peer that neither reads nor closes stays in the table for
+/// `LINGER`. The table must hold no more than the 100 secure channels of the minimal
+/// config with their read buffers, and [`CLOSES`] closing streams with none.
+#[test]
+fn streams_that_a_purge_closes_hold_no_read_buffer_and_no_more_than_the_bound() {
+    let mut network = Network::new();
+    for i in 0..1000 {
+        network.hold(Span::from_nanos((i + 1) * 1_000_000));
+    }
+    let held = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            let server = side.start();
+            side.drive(Span::from_nanos(2_000_000_000)).await;
+            // Less the listen connection.
+            let connections = side.connections() - 1;
+            let bytes: usize = side.buffers().iter().map(|(_, n)| n).sum();
+            side.stop(server).await;
+            (connections, bytes)
+        })
+        .expect("the run ends");
+    assert_eq!(held, (100 + CLOSES, 100 * READ_BYTES));
+}
+
+/// One more peer than the server holds channels and [`CLOSES`] closing streams
+/// together, each of which neither reads nor closes, when `child::running()`. The
+/// server purges the oldest channel at each accept past 100.
+#[test]
+fn closes_past_the_bound() {
+    if !child::running() {
+        return;
+    }
+    let mut network = Network::new();
+    for i in 0..=100 + CLOSES {
+        let i = i64::try_from(i).expect("a small count");
+        network.hold(Span::from_nanos((i + 1) * 1_000_000));
+    }
+    let buffers = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            let server = side.start();
+            side.drive(Span::SECOND).await;
+            let buffers = side.buffers();
+            side.stop(server).await;
+            buffers
+        })
+        .expect("the run ends");
+    let closing = (3..=102).map(|id| (id, 0));
+    let open = (103..=202).map(|id| (id, READ_BYTES));
+    let expected: Vec<_> = [(1, 0)].into_iter().chain(closing).chain(open).collect();
+    assert_eq!(buffers, expected);
+}
+
+/// A close past [`CLOSES`] drops the stream that has closed longest, with a warning:
+/// stream 2 at the last accept, then 3 to 102 as the shutdown closes each channel.
+#[test]
+fn a_close_past_the_bound_drops_the_oldest_closing_stream() {
+    let stderr = stderr("closes_past_the_bound");
+    let dropped: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.contains("streams close"))
+        .collect();
+    let expected: Vec<String> = (2..=102)
+        .map(|id| {
+            format!(
+                "connector-opcua: open62541 warning: connection {id}: more than 100 \
+                 streams close, so it drops the oldest"
+            )
+        })
+        .collect();
+    assert_eq!(dropped, expected);
 }
