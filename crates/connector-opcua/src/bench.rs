@@ -506,7 +506,9 @@ mod tests {
         .expect("the run ends");
     }
 
-    /// With jitter, the sessions of a scope activate in different drives.
+    /// With jitter, the sessions of a scope activate in different drives. No public
+    /// call gives the count of clients that a scope waits for, and a later drive still
+    /// gets each answer, so the test reads `connected`.
     #[test]
     fn a_scope_on_a_link_with_jitter_connects_each_client() {
         let link = sim::link::Config {
@@ -550,6 +552,8 @@ mod tests {
     }
 
     /// A read callback of open62541 gets `Good` also when the value has a bad status.
+    /// `answers` panics after a failed read, so the test reads the count of answers in
+    /// the `Debug` of the manager.
     #[test]
     fn a_read_of_an_unknown_node_fails_with_its_status() {
         check(0, async |manager, clock| {
