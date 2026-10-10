@@ -466,7 +466,9 @@ mod tests {
     use types::sample::Sides;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, data_type, intern, key, values};
+    use crate::common::{
+        self, create_interner, create_pool, data_type, intern, key, values,
+    };
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -913,9 +915,7 @@ mod tests {
                     [&3_u32.to_le_bytes()[..], &1_u32.to_le_bytes(), b"abc"].concat();
                 let wide = Type::List { element, max: 5 };
                 let samples = [vec![], [4_u64, 5].map(u64::to_le_bytes).concat()];
-                let form = codec::Variable::of(wide).expect("a variable type");
-                let mut raw = vec![0; form.len(&samples).expect("two samples")];
-                form.write(&samples, &mut raw);
+                let raw = common::raw(wide, &samples);
                 let mut list = vec![0; codec::max_len(wide, raw.len())];
                 let len = codec::Encoder::new(wide)
                     .encode(2, &raw, &mut list)

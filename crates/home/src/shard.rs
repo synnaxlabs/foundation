@@ -951,7 +951,9 @@ mod tests {
     use types::time::Span;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, data_type, intern, key, values};
+    use crate::common::{
+        self, create_interner, create_pool, data_type, intern, key, values,
+    };
     use crate::reader::complete::Charge;
 
     const DIR: &str = "shard-0";
@@ -4826,11 +4828,8 @@ mod tests {
 
     /// An index type, then each kind of type, with the raw values of 3 samples.
     fn every_type() -> [(Type, Vec<u8>); 7] {
-        let raw = |data_type: Type, samples: &[&[u8]]| -> (Type, Vec<u8>) {
-            let form = codec::Variable::of(data_type).expect("a variable type");
-            let mut out = vec![0; form.len(samples).expect("3 samples")];
-            form.write(samples, &mut out);
-            (data_type, out)
+        let raw = |data_type: Type, samples: &[&[u8]]| {
+            (data_type, common::raw(data_type, samples))
         };
         let element = Scalar::U64;
         let sides = types::sample::Sides {
