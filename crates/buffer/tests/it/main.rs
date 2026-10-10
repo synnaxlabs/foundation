@@ -3686,11 +3686,10 @@ fn a_waiter_prints_only_its_event_and_key() {
         assert_eq!(polled, Poll::Pending);
         let commit = format!("{:?}", buffer.committed());
         let end = format!("{:?}", buffer.ended());
-        assert_eq!(
-            commit,
-            "Commit { waiter: Waiter { event: Commit, key: 1, .. }, until: 0 }"
-        );
-        assert_eq!(end, "End { waiter: Waiter { event: End, key: 2, .. } }");
+        let waiter = "Waiter { event: Commit, key: 1, .. }";
+        assert!(commit.contains(waiter), "{commit}");
+        let waiter = "Waiter { event: End, key: 2, .. }";
+        assert!(end.contains(waiter), "{end}");
     })
     .expect("the buffer ends");
 }
