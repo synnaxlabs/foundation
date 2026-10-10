@@ -99,18 +99,22 @@ type Events = Vec<(String, Span, usize)>;
 
 /// Each start of a run until 10 s, as [`record`] gives it.
 fn starts(linger: Option<Span>, steps: Vec<Step>) -> Events {
-    record(linger, steps, None).0
+    record(linger, steps, None).starts
+}
+
+/// What [`record`] gives.
+struct Recorded {
+    starts: Events,
+    cancels: Events,
+    /// The names that the runs hold after each step.
+    held: Vec<Vec<String>>,
 }
 
 /// Applies each step at its time, with the kind `hold`, whose task ends `linger` after
 /// the cancel, the kind `quick`, whose task ends at the cancel, and the kind `brief`,
 /// whose run returns at once, and drops the runs at `dropped`, if given. Gives each
 /// start of a run and each cancel until 10 s, from the time the hub opened.
-fn record(
-    linger: Option<Span>,
-    steps: Vec<Step>,
-    dropped: Option<i64>,
-) -> (Events, Events) {
+fn record(linger: Option<Span>, steps: Vec<Step>, dropped: Option<i64>) -> Recorded {
     let mut sim = ::sim::Sim::new(::sim::Config::default());
     let node = sim.node(::sim::node::Config::default());
     let run = sim.run_on(&node, move |node, tasks| async move {
@@ -137,11 +141,13 @@ fn record(
         let clock = node.clock();
         let start = clock.now();
         let mut runs = Runs::new(config, name(NODE));
+        let mut names = Vec::new();
         for (at, spec) in steps {
             clock.sleep_until(start + at).await;
             let definitions = definitions(&spec);
             hub.set_definitions(&definitions);
             runs.apply(&definitions);
+            names.push(runs.last.keys().map(ToString::to_string).collect());
         }
         if let Some(dropped) = dropped {
             clock.sleep_until(start + ms(dropped)).await;
@@ -155,7 +161,11 @@ fn record(
             let events = events.lock().expect("no panic");
             events.iter().map(since).collect()
         };
-        (since(&starts), since(&cancels))
+        Recorded {
+            starts: since(&starts),
+            cancels: since(&cancels),
+            held: names,
+        }
     });
     run.expect("the run ends")
 }
@@ -283,11 +293,26 @@ fn a_change_before_the_old_run_ended_then_a_removal_starts_no_run() {
 #[test]
 fn a_drop_cancels_each_run() {
     let spec = vec![("plant.a", "hold", NODE, 0), ("plant.b", "quick", NODE, 0)];
-    let (_, cancels) = record(None, vec![on(0, spec)], Some(1_000));
+    let cancels = record(None, vec![on(0, spec)], Some(1_000)).cancels;
     assert_eq!(
         cancels,
         [start("plant.a", 1_000, 0), start("plant.b", 1_000, 0)]
     );
+}
+
+/// A removed run that holds stays until an apply after it ended.
+#[test]
+fn an_apply_drops_each_removed_run_that_ended() {
+    let spec = vec![("plant.a", "hold", NODE, 0)];
+    let steps = vec![
+        on(0, spec),
+        on(1_000, vec![]),
+        on(2_000, vec![]),
+        on(5_000, vec![]),
+    ];
+    let held = record(Some(ms(2_000)), steps, None).held;
+    let held_a = vec!["plant.a"];
+    assert_eq!(held, [held_a.clone(), held_a.clone(), held_a, vec![]]);
 }
 
 #[test]

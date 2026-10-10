@@ -13,8 +13,8 @@ use crate::scope::Scope;
 
 /// The runs of the connectors that the spec in use places on one node, on one
 /// supervisor. Dropped, it drops each run. It holds one run for each connector of the
-/// spec on the node, and one for each name whose run was cancelled and has not
-/// ended.
+/// spec on the node, and one for each name whose run was cancelled and had not ended
+/// at the last apply.
 pub(crate) struct Runs {
     supervisor: Rc<Supervisor>,
     /// The name of the node in the region.
@@ -86,7 +86,7 @@ impl Runs {
                 if let Some(after) = after {
                     after.wait().await;
                 }
-                // A run cancelled before it starts may have no status channels left.
+                // A run cancelled before it starts writes no status.
                 if !cancel.cancelled() {
                     let kind = connector.kind().as_str();
                     let config = connector.config().document();
