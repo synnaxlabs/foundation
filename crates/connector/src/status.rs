@@ -261,24 +261,26 @@ impl Writer {
         let entries: Box<[usize]> = session.entries().into();
         let set = session.set();
         let error = entries[ERROR];
+        let form = Variable::of(set.entries()[error].data_type)
+            .expect("invariant: `error` is a `String`");
+        let empty = form
+            .len(&[""])
+            .expect("invariant: an empty text has a length");
         let mut series: Box<[_]> = entries
             .iter()
             .map(|&entry| {
-                // The length of `error` is set with its text.
                 let width = (entry != error).then(|| {
                     let width = set.entries()[entry].data_type.width();
                     width.expect("invariant: a status sample but `error` has one width")
                 });
-                (entry, width.unwrap_or(0))
+                (entry, width.unwrap_or(empty))
             })
             .collect();
         series.sort_unstable();
-        let error_series = series.partition_point(|&(entry, _)| entry < error);
-        let text = Variable::of(set.entries()[error].data_type)
-            .expect("invariant: `error` is a `String`");
+        let at = series.partition_point(|&(entry, _)| entry < error);
         let group = set.entries()[entries[0]].group;
         let status = Status::new(counts);
-        let mut session = Session {
+        let session = Session {
             hub: session,
             entries,
             series,
@@ -288,15 +290,16 @@ impl Writer {
             state: State::Running,
             class: Class::None,
             restarts: 0,
-            error: String::new(),
-            error_series,
-            text,
+            error: Text {
+                value: String::new(),
+                at,
+                form,
+            },
             next: Stamp::default(),
             started: false,
             unapplied: false,
             closed: false,
         };
-        session.set_error(String::new());
         let writer = Self {
             session: RefCell::new(session),
             values: Rc::clone(&status.0),
@@ -328,7 +331,7 @@ impl Writer {
         let (class, error) = Class::with_text(end);
         self.set(|session| {
             session.class = class;
-            session.set_error(error);
+            session.error.set(&mut session.series, error);
             session.state = State::Ending;
         })
         .await;
@@ -457,12 +460,7 @@ struct Session {
     state: State,
     class: Class,
     restarts: u64,
-    /// The text of `error`, at most [`ERROR_MAX`] bytes.
-    error: String,
-    /// The index in `series` of `error`, the one series whose length changes.
-    error_series: usize,
-    /// The raw form of `error`.
-    text: Variable,
+    error: Text,
     /// The time of the next run, by the hub's clock, while `state` is 1.
     next: Stamp,
     /// Set at the first start, after which each start is a restart.
@@ -476,15 +474,25 @@ struct Session {
     closed: bool,
 }
 
-impl Session {
-    /// Sets the text of `error`, and the length of its series.
-    fn set_error(&mut self, error: String) {
-        let len = self.text.len(&[&error]);
-        self.series[self.error_series].1 =
-            len.expect("invariant: at most ERROR_MAX bytes");
-        self.error = error;
-    }
+/// The text of `error`, and where and how a frame holds it.
+struct Text {
+    /// At most [`ERROR_MAX`] bytes.
+    value: String,
+    /// The index in `Session::series` of `error`, the one series whose length changes.
+    at: usize,
+    form: Variable,
+}
 
+impl Text {
+    /// Sets the text to `value`, and the length of its series in `series`.
+    fn set(&mut self, series: &mut [(usize, usize)], value: String) {
+        let len = self.form.len(&[&value]);
+        series[self.at].1 = len.expect("invariant: at most ERROR_MAX bytes");
+        self.value = value;
+    }
+}
+
+impl Session {
     /// Writes the last value of each status channel. A frame that the home refuses
     /// as `Backwards` is stamped after the stamp the refusal gives and written again,
     /// one time. A frame that the home does not apply, or for which the shard's pool
@@ -608,7 +616,7 @@ impl Session {
                 continue;
             }
             if i == ERROR {
-                self.text.write(&[&self.error], bytes);
+                self.error.form.write(&[&self.error.value], bytes);
                 continue;
             }
             let sample = samples.next().expect("invariant: a sample per channel");
