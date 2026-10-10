@@ -5885,6 +5885,7 @@ fn newest_gives_no_entry_that_is_not_durable() {
             ])
             .expect("queues");
         buffer.committed().await.expect("commits");
+        let appended = shard.clock.now();
         buffer
             .append([
                 tagged(1, a, Path::Live, 0, 1, shard.block(5)),
@@ -5892,8 +5893,10 @@ fn newest_gives_no_entry_that_is_not_durable() {
             ])
             .expect("queues");
         let found = newest(&buffer, Path::Live, 1).await;
-        let durable = buffer.durable(a, Path::Live);
-        assert_eq!(durable.seq, 0);
+        assert!(
+            shard.clock.now() - appended < COMMIT,
+            "the commit is pending"
+        );
         let first = vec![
             (a, stored_tagged(0, 1, shard.block(1))),
             (b, stored_tagged(0, 1, shard.block(2))),
@@ -5902,8 +5905,7 @@ fn newest_gives_no_entry_that_is_not_durable() {
             (a, stored_tagged(0, 1, shard.block(5))),
             (b, stored_tagged(0, 1, shard.block(6))),
         ];
-        let found = found.expect("reads");
-        assert!(found == first || found == second, "{found:?}");
+        assert_eq!(found, Ok(first));
         buffer.committed().await.expect("commits");
         assert_eq!(newest(&buffer, Path::Live, 1).await, Ok(second));
     });
