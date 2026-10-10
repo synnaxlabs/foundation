@@ -252,7 +252,7 @@ unsafe impl GlobalAlloc for Bytes {
 
 #[cfg(test)]
 mod tests {
-    use std::{slice, thread};
+    use std::{slice, sync::atomic::AtomicPtr, thread};
 
     use super::*;
 
@@ -442,21 +442,42 @@ mod tests {
         assert_eq!(under, None, "(held, peak) with the peak under a count held");
     }
 
-    /// Holds the lock through the private field, as no public call holds it while a
-    /// test runs. The loom model runs [`Counts`], so this test pins that each call of
-    /// [`Bytes`] that reads or sets the peak takes the lock.
+    /// Holds the lock through the private field, and asserts that no call that reads
+    /// or sets the peak finishes. The loom model runs [`Counts`], and the stress test
+    /// sees a call of [`Bytes`] that skips the lock only on enough cores.
     #[test]
-    fn reads_and_resets_the_peak_only_under_the_lock() {
+    fn reads_and_sets_the_peak_only_under_the_lock() {
         let bytes = Bytes::new();
+        let grown = AtomicPtr::new(filled(&bytes));
         bytes.counts.locked.store(true, Relaxed);
-        let calls: [&(dyn Fn() + Sync); 3] =
-            [&|| _ = bytes.peak(), &|| bytes.reset_peak(), &|| {
+        let calls: [&(dyn Fn() + Sync); 5] = [
+            &|| _ = bytes.peak(),
+            &|| bytes.reset_peak(),
+            &|| {
                 drop(format!("{bytes:?}"));
-            }];
+            },
+            &|| free(&bytes, filled(&bytes), LAYOUT),
+            &|| {
+                let ptr = grown.load(Relaxed);
+                // SAFETY: `bytes` returned `ptr` for `LAYOUT`, and only this call
+                // uses it.
+                let ptr = unsafe { bytes.realloc(ptr, LAYOUT, 200) };
+                free(&bytes, ptr, sized(200));
+            },
+        ];
+        let started = AtomicUsize::new(0);
         let finished = thread::scope(|scope| {
             #[expect(clippy::disallowed_methods, reason = "a test owns its threads")]
-            let threads = calls.map(|call| scope.spawn(call));
-            for _ in 0..10_000 {
+            let threads = calls.map(|call| {
+                scope.spawn(|| {
+                    started.fetch_add(1, Relaxed);
+                    call();
+                })
+            });
+            while started.load(Relaxed) < calls.len() {
+                thread::yield_now();
+            }
+            for _ in 0..100 {
                 thread::yield_now();
             }
             let finished = threads
@@ -466,8 +487,8 @@ mod tests {
             finished
         });
         assert_eq!(
-            finished, [false; 3],
-            "(peak, reset_peak, Debug) finished while the lock was held"
+            finished, [false; 5],
+            "(peak, reset_peak, Debug, alloc, realloc) finished under the lock"
         );
     }
 
