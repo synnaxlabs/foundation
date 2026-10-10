@@ -17,7 +17,8 @@ use sockets::{BIND, LISTEN};
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "needs SOCK_CLOEXEC")]
 fn no_child_holds_a_socket_that_another_thread_opens() {
-    let held = children::held_while(4, async |net| {
+    let baseline = children::Baseline::list();
+    let held = children::held_while(&baseline, 4, async |net| {
         drop(net.udp(&BIND).expect("bind on loopback"));
         drop(net.listen(&LISTEN).expect("listen on loopback"));
     });

@@ -12,6 +12,8 @@ mod children;
 #[path = "common/sockets.rs"]
 mod sockets;
 
+use std::os::fd::AsRawFd;
+
 use rustix::net::{AddressFamily, SocketType};
 
 #[test]
@@ -24,11 +26,20 @@ fn no_child_holds_a_socket_that_os_holds() {
     // leaves the socket of a download.
     let _left_open = rustix::net::socket(AddressFamily::INET, SocketType::DGRAM, None)
         .expect("a UDP socket opens");
-    let inherited = children::Inherited::list();
+    let baseline = children::Baseline::list();
+    let opened = rustix::net::socket(AddressFamily::INET, SocketType::DGRAM, None)
+        .expect("a UDP socket opens");
+    let path = format!("/dev/fd/{}", opened.as_raw_fd());
+    assert_eq!(
+        baseline.added(),
+        vec![path],
+        "a socket opened after the baseline"
+    );
+    drop(opened);
     let net = os::net();
     let held = runtime.block_on(async {
         let _sockets = sockets::open(&net).await;
-        inherited.held()
+        baseline.added()
     });
     assert_eq!(held, Vec::<String>::new());
 }

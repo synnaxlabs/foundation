@@ -9,23 +9,24 @@ use env::net::Net;
 
 const CHILDREN: usize = 500;
 
-/// The sockets that a new child holds before a test opens any: those that this process
+/// The sockets that a new child holds at the start of a test: those that this process
 /// got from its parent and that are not closed on exec. Cargo leaves the socket of a
 /// download open in each test binary that it then runs.
-pub(crate) struct Inherited(Vec<String>);
+pub(crate) struct Baseline(Vec<String>);
 
-impl Inherited {
-    /// The sockets that a new child holds now.
+impl Baseline {
+    /// The sockets that a new child holds now. Call it before the first call of the
+    /// test into `os`, so that no socket of `os` is in it.
     pub(crate) fn list() -> Self {
         Self(listed())
     }
 
-    /// Each socket that a new child holds after its exec and that is not inherited, by
-    /// its path in `/dev/fd`.
-    pub(crate) fn held(&self) -> Vec<String> {
-        let mut held = listed();
-        held.retain(|socket| !self.0.contains(socket));
-        held
+    /// Each socket that a new child holds after its exec and that the baseline does
+    /// not hold, by its path in `/dev/fd`.
+    pub(crate) fn added(&self) -> Vec<String> {
+        let mut added = listed();
+        added.retain(|socket| !self.0.contains(socket));
+        added
     }
 }
 
@@ -38,13 +39,13 @@ fn listed() -> Vec<String> {
     listed.lines().map(String::from).collect()
 }
 
-/// Each socket that is not inherited and that each of 500 new children holds, spawned
-/// while `threads` threads that `os` starts each run `work` in a loop.
+/// Each socket that `baseline` does not hold and that each of 500 new children holds,
+/// spawned while `threads` threads that `os` starts each run `work` in a loop.
 pub(crate) fn held_while(
+    baseline: &Baseline,
     threads: usize,
     work: impl AsyncFn(&Net) + Send + Sync + 'static,
 ) -> Vec<String> {
-    let inherited = Inherited::list();
     let start = os::threads().expect("the OS gives the cores of this process");
     let stop = Arc::new(AtomicBool::new(false));
     let work = Arc::new(work);
@@ -60,7 +61,7 @@ pub(crate) fn held_while(
             started.expect("the thread starts")
         })
         .collect();
-    let held = (0..CHILDREN).flat_map(|_| inherited.held()).collect();
+    let held = (0..CHILDREN).flat_map(|_| baseline.added()).collect();
     stop.store(true, Ordering::Relaxed);
     for worker in workers {
         worker.join().expect("the work runs with no panic");
