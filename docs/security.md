@@ -28,7 +28,7 @@ attacker can use is a GitHub issue with the `security` label and a failing test.
 | Subject | Sign hellos and session opens with a key in the spec | Go past its `access` allows |
 | Member node | Act as itself and as the connectors placed on it; read and change the traffic of subjects connected through it; use their open sessions until the hello expires; drop or delay what it forwards | Hold another node's key; change the spec |
 | Home of an index | Write any data into the index, run its gate, lie to its readers | Act outside its placement |
-| Voter | Vote and stall its region; break `raft` safety (Node to node) | Forge a spec change or move a home outside placement |
+| Voter | Vote and stall its region; break `raft` safety (Node to node); until #1273, commit a home that is not a member, so that each node that opens an unnamed reader of its index aborts | Forge a spec change, not built (#1213), or move a home outside placement, not built (#1273) |
 | Time source | Shift the clocks that follow it, within what the estimator accepts | |
 | Device | Send any bytes to a connector | Reach the core except through `hub` |
 | Local user that runs the node | Read and write the node's files and memory, and so hold its keys and cached secrets and become that member node | |
