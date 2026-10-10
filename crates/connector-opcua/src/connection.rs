@@ -108,6 +108,7 @@ impl Manager {
             held: Cell::new(false),
             ahead: Cell::new(usize::MAX),
             again: RefCell::new(Vec::new()),
+            accepted: Cell::new(None),
             #[cfg(feature = "sim")]
             moves: Cell::new(0),
             ends: RefCell::new(VecDeque::new()),
@@ -147,7 +148,8 @@ impl Manager {
     /// a close that `run` or another task asks for. After each call, also the one that
     /// gives the value, it moves on each connection again after each connect, send, or
     /// close on it that the call or such a step asks for, so it can also read and call
-    /// open62541 back after that call.
+    /// open62541 back after that call. It accepts at most one stream between two
+    /// calls.
     ///
     /// # Panics
     ///
@@ -191,8 +193,8 @@ impl Manager {
         .await
     }
 
-    /// Connects, reads, and writes each connection until each waits, accepts at most
-    /// one stream, and has the task of `cx` woken when one can go on.
+    /// Connects, reads, and writes each connection until each waits or accepts a
+    /// stream, and has the task of `cx` woken when one can go on.
     fn pass(&self, cx: &mut Context<'_>) {
         let state = self.state();
         state.park(cx.waker());
@@ -261,6 +263,10 @@ struct State {
     /// The connections that a hook asks to move on again during a drive, once the
     /// running pass has gone past them.
     again: RefCell<Vec<usize>>,
+    /// The listen connection that accepted a stream, which moves on only after the
+    /// next run of the loop, so that run gives the `CLOSING` of a channel that the
+    /// accept purged.
+    accepted: Cell<Option<usize>>,
     /// The calls of `move_on`, for tests of the work of a drive.
     #[cfg(feature = "sim")]
     moves: Cell<usize>,
@@ -298,10 +304,14 @@ impl State {
         }
     }
 
-    /// Moves on each connection in `again`, and each that those steps add, until
-    /// none is left, and gives whether it moved one.
+    /// Moves on the connection in `accepted`, then each connection in `again` and
+    /// each that those steps add, until none is left, and gives whether it moved one.
     fn move_on_again(&self, cx: &mut Context<'_>) -> bool {
         let mut moved = false;
+        if let Some(id) = self.accepted.take() {
+            self.move_on(id, cx);
+            moved = true;
+        }
         loop {
             let Some(id) = self.again.borrow_mut().pop() else {
                 return moved;
@@ -372,10 +382,13 @@ impl State {
     }
 
     /// Moves connection `id` on until it waits or accepts a stream, and calls C with no
-    /// borrow held.
+    /// borrow held. A connection in `accepted` does not move.
     fn move_on(&self, id: usize, cx: &mut Context<'_>) {
         #[cfg(feature = "sim")]
         self.moves.set(self.moves.get() + 1);
+        if self.accepted.get() == Some(id) {
+            return;
+        }
         loop {
             let step = match self.table.borrow_mut().get_mut(&id) {
                 Some(connection) => connection.step(cx),
@@ -398,9 +411,7 @@ impl State {
                 Step::Established => self.call(id, ffi::ESTABLISHED, &mut []),
                 Step::Accepted(tcp) => {
                     self.accept(id, tcp);
-                    // One accept for each pass, so the run between gives open62541
-                    // the `CLOSING` of a channel that the accept purged.
-                    cx.waker().wake_by_ref();
+                    self.accepted.set(Some(id));
                     return;
                 }
                 Step::Read(mut buffer, n) => {

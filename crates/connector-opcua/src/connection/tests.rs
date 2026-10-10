@@ -2614,25 +2614,54 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
 }
 
 /// The minimal config holds at most 100 secure channels. A burst of accepts must not
-/// hold more.
+/// hold more, and each accept moves on only the listen connection again.
 #[test]
 fn a_burst_of_accepts_holds_no_more_than_the_most_secure_channels() {
-    const DIALS: usize = 150;
+    // A pass of the whole table after each accept makes more than 10,000.
+    assert_eq!(burst(1), (100, 100, 757));
+}
+
+/// A drive that ends after its first run accepts one stream, so the next drive does
+/// not accept before its run.
+#[test]
+fn drives_of_one_run_hold_no_more_than_the_most_secure_channels() {
+    let (connections, open, _) = burst(400);
+    assert_eq!((connections, open), (100, 100));
+}
+
+/// Dials 150 streams at once to the minimal server, then has `drives` drives each
+/// end after one run, then drives for a second. Gives the count of accepted
+/// connections in the table, the count of dials that the server has not closed, and
+/// the count of moves.
+fn burst(drives: usize) -> (usize, usize, usize) {
     let mut network = Network::new();
-    for _ in 0..DIALS {
-        network.dial(Span::MILLISECOND, b"");
-    }
-    let open = network
+    let dials: Vec<_> = (0..150)
+        .map(|_| network.dial(Span::MILLISECOND, b""))
+        .collect();
+    network
         .sim
-        .run_on(&network.local.clone(), |node, _| async move {
+        .run_on(&network.local.clone(), move |node, _| async move {
             let side = Side::listening(&node, listener(&node));
             let server = side.start(c"opc.tcp://:4840");
+            side.clock.sleep(Span::from_nanos(2_000_000)).await;
+            for _ in 0..drives {
+                side.manager
+                    .drive(|_| {
+                        side.run();
+                        Poll::Ready(())
+                    })
+                    .await;
+            }
             side.drive(Span::SECOND).await;
             // Less the listen connection.
-            let open = side.connections() - 1;
+            let connections = side.connections() - 1;
+            let open = dials
+                .iter()
+                .filter(|r| r.lock().expect("no panic").ended.is_none())
+                .count();
+            let moves = side.manager.state().moves.get();
             side.stop(server).await;
-            open
+            (connections, open, moves)
         })
-        .expect("the run ends");
-    assert_eq!(open, 100);
+        .expect("the run ends")
 }
