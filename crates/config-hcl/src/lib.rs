@@ -192,14 +192,6 @@ fn syntax(span: Span, needed: impl fmt::Display) -> Diagnostic {
     )
 }
 
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Display::fmt(&Diagnostic::from(self), f)
-    }
-}
-
-impl std::error::Error for Error {}
-
 /// An HCL form that a file cannot hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Form {
@@ -437,7 +429,11 @@ mod tests {
         let expected =
             Diagnostic::new(Code::new(code), Some(span(7)), message.into(), fix.into());
         assert_eq!(Diagnostic::from(error), expected, "{error:?}");
-        assert_eq!(error.to_string(), format!("{message}. {fix}"), "{error:?}");
+        assert_eq!(
+            Diagnostic::from(error).to_string(),
+            format!("{message}. {fix}"),
+            "{error:?}"
+        );
     }
 
     #[test]
@@ -561,7 +557,11 @@ mod tests {
                 text: format!("the {noun} starts here"),
             });
             assert_eq!(Diagnostic::from(&error), expected, "{error:?}");
-            assert_eq!(error.to_string(), format!("{message}. {fix}"), "{error:?}");
+            assert_eq!(
+                Diagnostic::from(&error).to_string(),
+                format!("{message}. {fix}"),
+                "{error:?}"
+            );
         }
     }
 
@@ -728,7 +728,10 @@ mod tests {
             fix.into(),
         );
         assert_eq!(Diagnostic::from(&error), expected);
-        assert_eq!(error.to_string(), format!("{message}. {fix}"));
+        assert_eq!(
+            Diagnostic::from(&error).to_string(),
+            format!("{message}. {fix}")
+        );
     }
 
     #[test]
@@ -742,7 +745,7 @@ mod tests {
         );
         assert_eq!(Diagnostic::from(&error), expected);
         assert_eq!(
-            error.to_string(),
+            Diagnostic::from(&error).to_string(),
             "the document nests deeper than 64 levels. Make it flatter"
         );
     }
@@ -767,7 +770,7 @@ mod tests {
         });
         assert_eq!(Diagnostic::from(&error), expected);
         assert_eq!(Diagnostic::from(&document), expected);
-        assert_eq!(error.to_string(), document.to_string());
+        assert_eq!(Diagnostic::from(&error).to_string(), document.to_string());
     }
 
     /// One error of each variant, each `Expected`, each `Unclosed` part, and each

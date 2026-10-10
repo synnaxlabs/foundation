@@ -947,7 +947,10 @@ mod tests {
 
     fn check(text: &str, expected: &[(Error, &str)]) {
         let errors = read(Source(0), text).unwrap_err();
-        let messages: Vec<String> = errors.iter().map(ToString::to_string).collect();
+        let messages: Vec<String> = errors
+            .iter()
+            .map(|error| Diagnostic::from(error).to_string())
+            .collect();
         let (errors_expected, messages_expected): (Vec<Error>, Vec<&str>) =
             expected.iter().cloned().unzip();
         assert_eq!(errors, errors_expected);
@@ -968,10 +971,10 @@ mod tests {
 
     /// The text of an error for `form`.
     fn refused(form: Form) -> String {
-        Error::Form {
+        Diagnostic::from(&Error::Form {
             span: on(0, 0),
             form,
-        }
+        })
         .to_string()
     }
 
@@ -2704,7 +2707,7 @@ c = "°C # not a comment"
             let errors = read(Source(0), &text).unwrap_err();
             assert_eq!(errors, vec![Error::TooDeep { span: spans[64] }]);
             assert_eq!(
-                errors[0].to_string(),
+                Diagnostic::from(&errors[0]).to_string(),
                 "the document nests deeper than 64 levels. Make it flatter"
             );
         }
