@@ -578,6 +578,8 @@ mod tests {
             pub(super) woken: Cell<bool>,
         }
 
+        // Each function reads `data` only as the `&Hooks` that `waker` gave, and each
+        // clone gives the same `data` with this table.
         const VTABLE: RawWakerVTable =
             RawWakerVTable::new(clone, wake, wake_by_ref, drop);
 
