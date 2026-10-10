@@ -28,4 +28,9 @@
   https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094205375,
   2026-10-10T05:27:21Z, and
   https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094287815,
-  2026-10-10T05:39:15Z).
+  2026-10-10T05:39:15Z). The tags cost 22 to 35 B for each log and nonzero tag,
+  2.2 MB at 100k logs with a handoff. A change that writes a second nonzero tag on a
+  log states its bytes for each log and tag in its PR. Over 48 B, it needs a P1
+  judgment. Decided by `laptop.architect` (#2236,
+  https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094432871,
+  2026-10-10T05:58:44Z).
