@@ -1,6 +1,6 @@
 //! The C functions of open62541 and `shim.c` that Rust calls, each declared once.
-//! `shim.c` asserts the size of each C enum that this module mirrors, and each value
-//! that it names.
+//! `shim.c` asserts the size of each C enum that this module mirrors, and each value of
+//! such an enum that it names.
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
