@@ -479,7 +479,25 @@ mod linux {
             assert_eq!(root.available().unwrap(), MIB);
         }
 
-        /// A backslash and three octal digits over `\377` is no escape.
+        /// An escape with a first digit of 3, the largest that fits a byte, decodes.
+        #[test]
+        fn a_mount_point_with_an_escape_at_the_largest_first_digit_decodes() {
+            let root = Root::new("v2-largest-digit");
+            root.write("proc/meminfo", MEMINFO)
+                .write("proc/self/cgroup", "0::/a\n")
+                .write(
+                    "proc/self/mountinfo",
+                    "37 31 0:31 / /cg\\303\\251 rw - cgroup2 cgroup2 rw\n",
+                )
+                .write("cg\u{e9}/a/memory.max", &format!("{MIB}\n"))
+                .write("cg\u{e9}/a/memory.current", "0\n")
+                .write("cg\u{e9}/a/memory.stat", "inactive_file 0\n");
+            assert_eq!(root.available().unwrap(), MIB);
+        }
+
+        /// A backslash and three octal digits over `\377` is no escape. The kernel
+        /// never writes `\4xx`, and the public call reads the live `/proc`, so only a
+        /// test root can show this.
         #[test]
         fn a_mount_point_with_an_octal_over_a_byte_keeps_it() {
             let root = Root::new("v2-over-byte");
