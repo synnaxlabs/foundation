@@ -182,8 +182,13 @@ impl Reader {
         if seq < self.end {
             return Err(Error::Seq { seq, end: self.end });
         }
-        Ok(super::end(head.range)
-            .expect("invariant: Reply::decode refuses a range past u64::MAX"))
+        let count = head.range.count;
+        Ok(super::end(head.range).unwrap_or_else(|| {
+            panic!(
+                "invariant: a decoded head's range ends past u64::MAX: {count} samples \
+                 from seq {seq}"
+            )
+        }))
     }
 }
 
