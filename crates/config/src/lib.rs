@@ -99,8 +99,8 @@ pub struct Entry {
 /// `kinds` hides each problem of the connector's config, and so does a config nested
 /// deeper than `document::encoding::Checked` takes.
 /// `config.long-name` at the label of a connector with a status name longer than
-/// [`Name::MAX_BYTES`]. `config.implied-channel` at the label of each block whose
-/// name is the name of a status channel in any case, with a note at the connector.
+/// [`Name::MAX_BYTES`]. `config.implied-channel` at the label of each block whose key
+/// in the map is, in any ASCII case, a status channel, with a note at the connector.
 pub fn check(
     documents: &[Document],
     kinds: &Table,

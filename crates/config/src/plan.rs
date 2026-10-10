@@ -519,7 +519,8 @@ fn wrong(found: &Found<'_>, channels: &BTreeMap<Name, Channel>) -> Vec<Diagnosti
 struct Index<'f> {
     /// Each connector that writes the index or a channel on it, in name order.
     writers: Vec<&'f Connector<'f>>,
-    /// Where [`place`] puts the index, with the node of its first writer.
+    /// Where [`place`] puts the index, with the node of its first writer, or, for an
+    /// index that a connector implies, where it puts the connector.
     placed: Result<Placed<'f>, Tie>,
 }
 

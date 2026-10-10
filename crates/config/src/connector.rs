@@ -49,12 +49,11 @@ pub(crate) fn check(
     if let Some(key) = key {
         let at = block.labels.first().and_then(|label| label.span);
         match writes(key, channels, at) {
-            Ok(writes) => found.writes.insert(key.clone(), writes),
-            Err(diagnostic) => {
-                found.diagnostics.push(diagnostic);
-                return None;
+            Ok(writes) => {
+                found.writes.insert(key.clone(), writes);
             }
-        };
+            Err(diagnostic) => found.diagnostics.push(diagnostic),
+        }
     }
     let connector = Connector::new(kind, node, config);
     Some(Definition::Spec(definition::Definition::Connector(
@@ -141,8 +140,8 @@ pub(crate) fn writes(
 }
 
 /// Adds each channel that each connector implies to the entries, with the span of the
-/// connector's label. Reports `config.implied-channel` at each block whose name is,
-/// in any ASCII case, the name of an implied channel.
+/// connector's label. Reports `config.implied-channel` at each block whose key is, in
+/// any ASCII case, an implied channel.
 pub(crate) fn imply(found: &mut Found<'_>) {
     for (connector, writes) in &found.writes {
         let at = found.entries[connector].label_span;
