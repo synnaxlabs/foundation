@@ -16,9 +16,7 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use std::cell::RefCell;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{self, Poll};
 use std::time::Instant;
@@ -29,7 +27,6 @@ use connector::supervisor::Supervisor;
 use connector::testing;
 use document::Document;
 use document::diagnostic::Diagnostic;
-use env::tasks::Tasks;
 use hub::reader::Mode;
 use types::channel;
 use types::name::{Name, Selector};
@@ -199,13 +196,13 @@ fn run(step: Step) -> Line {
                 hub.set_definitions(kept.map(|(name, def)| (name, def)));
             });
         }
-        let written = read_states(&config.hub, &connector, &tasks).await;
+        let mut state = open_state(&config.hub, &connector).await;
         let (token, document) = (Token::new(), Document::default());
         let result = Supervisor::new(config)
             .run("steps", connector, &document, &token)
             .await;
         node.clock().sleep(Span::SECOND).await;
-        let last = written.borrow().last().copied();
+        let last = last_state(&mut state).await;
         (result, last)
     });
     let (result, last) = result.expect("the run ends");
@@ -228,42 +225,35 @@ fn run(step: Step) -> Line {
         .expect("no panic under the lock")
 }
 
-/// Reads the `state` sample of each status frame of `connector` into the vector it
-/// gives, in a task on `tasks`.
-async fn read_states(
-    hub: &hub::Hub,
-    connector: &Name,
-    tasks: &Tasks,
-) -> Rc<RefCell<Vec<u8>>> {
+/// Opens a latest reader of the `state` status channel of `connector`. It spawns no
+/// task, so the timed rounds poll only the supervisor.
+async fn open_state(hub: &hub::Hub, connector: &Name) -> hub::reader::Reader {
     let state = format!("{connector}.status.state");
     let open = hub::reader::Config {
         select: Selector::new([state.as_str()]).expect("a selector"),
-        mode: Mode::Complete,
+        mode: Mode::Latest,
         subject: "bench".parse().expect("a valid name"),
         name: None,
         hold: Span::ZERO,
     };
-    let mut reader = hub.reader(open).await.expect("the reader opens");
-    let states = Rc::new(RefCell::new(Vec::new()));
-    let into = Rc::clone(&states);
-    tasks.spawn(async move {
-        while let Ok(received) = reader.next().await {
-            let entries = received.set.entries();
-            let at = entries.iter().position(|entry| entry.key == STATE);
-            let at = at.expect("the set holds `state`");
-            let range = received.view.range(entries[at].group);
-            let count = range.expect("the group is present").count;
-            let count = usize::try_from(count).expect("a count");
-            let (_, bytes) = (received.view.iter())
-                .find(|&(present, _)| present == at)
-                .expect("the view holds `state`");
-            let mut samples = vec![0; count];
-            codec::decode(entries[at].data_type, count, bytes, &mut samples)
-                .expect("decodes");
-            into.borrow_mut().extend(samples);
-        }
-    });
-    states
+    hub.reader(open).await.expect("the reader opens")
+}
+
+/// The last `state` sample of the newest status frame that `reader` holds.
+async fn last_state(reader: &mut hub::reader::Reader) -> Option<u8> {
+    let received = reader.next().await.expect("a status frame");
+    let entries = received.set.entries();
+    let at = entries.iter().position(|entry| entry.key == STATE);
+    let at = at.expect("the set holds `state`");
+    let range = received.view.range(entries[at].group);
+    let count = range.expect("the group is present").count;
+    let count = usize::try_from(count).expect("a count");
+    let (_, bytes) = (received.view.iter())
+        .find(|&(present, _)| present == at)
+        .expect("the view holds `state`");
+    let mut samples = vec![0; count];
+    codec::decode(entries[at].data_type, count, bytes, &mut samples).expect("decodes");
+    samples.last().copied()
 }
 
 /// Prints p10, p50, and p90 of the ns per step of each line, and its allocations.
