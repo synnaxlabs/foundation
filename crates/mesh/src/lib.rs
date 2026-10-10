@@ -20,6 +20,7 @@ mod common;
 mod driver;
 mod entry;
 mod error;
+mod file;
 pub mod log;
 mod member;
 mod message;

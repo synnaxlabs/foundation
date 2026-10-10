@@ -109,3 +109,6 @@
   for the other. Decided by the coordinator and the advisor on 2026-10-06 (#659). After
   compaction a snapshot carries the configuration in force at its index, so the
   configuration before the last entry stays known (#253).
+  `mesh` keeps the founding voters with the rest of `Config::founding` at each open
+  whose log holds no record, and refuses another set at an open whose log holds a
+  record (MESH DRIVER, #1209).

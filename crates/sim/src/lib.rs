@@ -140,7 +140,14 @@ impl Sim {
 
     /// Adds a node. Its clocks read the values in `config` now, and its entropy is
     /// its own stream from the seed.
+    ///
+    /// # Panics
+    ///
+    /// When `config.arm_max` is zero or negative.
     pub fn node(&mut self, config: node::Config) -> Node {
+        if let Some(max) = config.arm_max {
+            assert!(max > Span::ZERO, "arm_max {max:?} is not positive");
+        }
         let entropy = Rng::from_seed(self.streams.next_u64());
         let node = lock(&self.shared).add(config, entropy);
         let shared = Arc::clone(&self.shared);

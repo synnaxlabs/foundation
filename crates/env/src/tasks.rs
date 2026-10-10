@@ -358,7 +358,7 @@ mod tests {
         // A `poll_fn` keeps the probe until the future drops, not only until it
         // completes.
         group.tasks().spawn(std::future::poll_fn(move |_| {
-            let _ = &probe;
+            let _: &Probe = &probe;
             if done.get() {
                 Poll::Ready(())
             } else {

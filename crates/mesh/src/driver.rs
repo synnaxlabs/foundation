@@ -41,6 +41,7 @@ use send::Senders;
 use used::{Opening, Used};
 
 mod apply;
+mod founding;
 mod home;
 mod propose;
 mod send;
@@ -73,12 +74,15 @@ pub struct Config {
     pub key: node::Key,
     /// This node's private key. It signs the node's claims.
     pub private_key: PrivateKey,
-    /// The region before the first entry of its log, the same at each open.
+    /// The region before the first entry of its log, the same at each open. An open
+    /// whose log holds no record keeps it in `dir`, and an open whose log holds a
+    /// record checks it.
     pub founding: region::Founding,
     /// The file seam. `os` or `sim` implements it.
     pub files: Files,
     /// The mesh's directory, relative to the data directory. The mesh makes it, and
-    /// the log goes in `log` in it. Its parent must be there and durable.
+    /// the log goes in `log` in it and the founding in `founding`. Its parent must be
+    /// there and durable.
     pub dir: PathBuf,
     /// Times the ticks of the group.
     pub clock: Clock,
@@ -155,13 +159,17 @@ impl Mesh {
     ///   or the node of a home.
     /// - [`Error::WrongKey`] when `config.private_key` is not the key of this node in
     ///   `config.founding.members`.
-    /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
-    ///   when a call of the store fails.
+    /// - [`Error::Pool`] when the pool has no block for a chunk or the founding file,
+    ///   and [`Error::Blob`] when a call of the store fails.
+    /// - [`Error::Founding`] when the log holds a record and `config.dir` holds another
+    ///   founding, with the members of each in key order.
+    /// - [`Error::Unfounded`] when the log holds a record, and `config.dir` holds no
+    ///   founding that reads back whole.
     /// - [`Error::Log`] when the log does not open.
     /// - [`Error::Raft`] when `raft` refuses the log.
-    /// - [`Error::Files`] when a call on `<config.dir>/spec` or its files fails, and
-    ///   [`Error::Stray`] when that directory holds a file that does not name a
-    ///   pointer.
+    /// - [`Error::Files`] when a call on the founding file, on `<config.dir>/spec`, or
+    ///   on its files fails, and [`Error::Stray`] when that directory holds a file
+    ///   that does not name a pointer.
     ///
     /// # Panics
     ///
@@ -196,7 +204,7 @@ impl Mesh {
             voters,
             definitions,
             homes,
-        } = config.founding;
+        } = config.founding.clone();
         let tree = spec::region::tree(&mut chunks, &definitions);
         let state =
             region::State::new(prefix, members, tree.root, voters.clone(), homes)
@@ -207,6 +215,9 @@ impl Mesh {
         let pool = Rc::clone(&config.pool);
         let files = config.files.clone();
         let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
+        let logged = stored != log::Stored::default();
+        let blocks = log.blocks();
+        founding::keep(&files, &config.dir, blocks, &config.founding, logged).await?;
         let used = used::open(Opening {
             files: &files,
             dir: &config.dir,
@@ -1244,6 +1255,7 @@ mod tests {
     use crate::card;
     use crate::change::{CHUNKS_MAX, Unknown};
     use crate::common::{self, create_pool, key, message, private, proven, public};
+    use crate::file::Blocks;
     use crate::region::Unfit;
     use crate::status::Many;
     use crate::ticket::Options;
@@ -2610,6 +2622,7 @@ mod tests {
     }
 
     mod apply;
+    mod founding;
     mod home;
     mod in_use;
     mod send;
@@ -5645,8 +5658,19 @@ mod tests {
         (sim, node)
     }
 
-    /// Writes one record that fills `log-0`, so the next write starts `log-1`.
-    async fn fill_first_file(node: &sim::node::Node) {
+    /// Writes the founding of `config` to its directory, as a first open does.
+    async fn found(config: &Config) {
+        let (files, dir) = (&config.files, &config.dir);
+        let blocks = Blocks::new(Rc::clone(&config.pool)).unwrap();
+        super::founding::keep(files, dir, &blocks, &config.founding, false)
+            .await
+            .unwrap();
+    }
+
+    /// Writes one record that fills `log-0` of node 1, so the next write starts
+    /// `log-1`.
+    async fn fill_first_file(node: &sim::node::Node, tasks: &Tasks) {
+        found(&config(node, tasks, 1, &[1], &[1]).await).await;
         let opened = Log::open(node.files(), LOG.into(), create_pool()).await;
         let (mut log, _) = opened.unwrap();
         let entries: Vec<Entry> = (1..=20_000)
@@ -5670,7 +5694,7 @@ mod tests {
             let (mut sim, node) = create_sim(run);
             let opens = sim.run_on(&node, move |node, tasks| async move {
                 if full {
-                    fill_first_file(&node).await;
+                    fill_first_file(&node, &tasks).await;
                 }
                 let first = open(&node, &tasks, 1, &[1], &[1]).await.unwrap();
                 let clock = node.clock();
@@ -5765,6 +5789,7 @@ mod tests {
     #[test]
     fn open_gives_the_error_of_raft() {
         solo(|node, tasks| async move {
+            found(&config(&node, &tasks, 1, &[1], &[1]).await).await;
             let (mut log, _) = Log::open(node.files(), LOG.into(), create_pool())
                 .await
                 .unwrap();
@@ -5890,7 +5915,7 @@ mod tests {
     }
 
     #[test]
-    fn a_power_cut_right_after_the_open_keeps_the_directory_and_its_log() {
+    fn a_power_cut_right_after_the_open_keeps_the_founding_and_the_log() {
         let names = |names: &[&str]| Ok(names.iter().map(PathBuf::from).collect());
         for seed in 0..32 {
             let mut sim = Sim::new(sim::Config {
@@ -5916,7 +5941,10 @@ mod tests {
                     )
                 })
                 .unwrap();
-            let kept = (names(&[BLOB, "region"]), names(&[LOG, used::SPEC]));
+            let kept = (
+                names(&[BLOB, "region"]),
+                names(&[super::founding::FILE, LOG, used::SPEC]),
+            );
             assert_eq!(listed, kept, "seed {seed}");
         }
     }
