@@ -139,7 +139,7 @@ impl Driver for Group {
         self.count.live.set(self.count.live.get().strict_add(1));
         self.tasks.spawn(Counted {
             task,
-            held: Held(Rc::clone(&self.count)),
+            _held: Held(Rc::clone(&self.count)),
         });
     }
 }
@@ -148,8 +148,7 @@ impl Driver for Group {
 // the shard drops it while it waits.
 struct Counted {
     task: Task,
-    #[expect(dead_code, reason = "held for its drop")]
-    held: Held,
+    _held: Held,
 }
 
 impl Future for Counted {
