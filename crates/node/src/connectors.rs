@@ -1,6 +1,8 @@
 //! Runs the connectors that the spec in use places on this node.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use connector::cancel;
 use connector::supervisor::{self, Supervisor};
@@ -14,7 +16,8 @@ use crate::scope::Scope;
 /// supervisor. Dropped, it drops each run. It holds one run for each connector of the
 /// spec on the node, and one for each name whose run was cancelled and had not ended
 /// at the last apply. Each name has at most two futures: a run that has not returned,
-/// and the last run, which waits for it.
+/// and the last run, which waits for it. A change of a run that waits changes the
+/// connector it starts with.
 pub(crate) struct Runs {
     supervisor: Supervisor,
     /// The name of the node in the region.
@@ -26,23 +29,20 @@ pub(crate) struct Runs {
 
 /// One run of a connector.
 struct Run {
-    /// The connector it runs, or `None` once the spec removed or changed it.
-    connector: Option<Connector>,
+    /// The connector it runs, or `None` once the spec removed or changed it. The run
+    /// reads it when it starts.
+    connector: Rc<RefCell<Option<Connector>>>,
     cancel: cancel::Token,
-    /// Cancelled once each earlier run of the name ended, or `None` for the first.
+    /// Cancelled once the run before it returned, or `None` for the first run.
     after: Option<cancel::Token>,
-    /// Cancelled once the run returned, or once it was cancelled before it started.
+    /// Cancelled once the run returned, or once it found no connector at its start.
     returned: cancel::Token,
 }
 
 impl Run {
-    /// Cancelled once this run and each earlier run of its name ended, when this run
-    /// is cancelled. A run cancelled before `after` never starts.
-    fn ended(&self) -> &cancel::Token {
-        match &self.after {
-            Some(after) if !after.cancelled() => after,
-            _ => &self.returned,
-        }
+    /// The run has not read its connector.
+    fn waiting(&self) -> bool {
+        self.after.as_ref().is_some_and(|after| !after.cancelled())
     }
 }
 
@@ -74,34 +74,42 @@ impl Runs {
             })
             .collect();
         self.last.retain(|name, run| {
-            if run.connector.as_ref() != wanted.get(name).copied() {
-                run.connector = None;
-                run.cancel.cancel();
+            let wanted = wanted.get(name).copied();
+            let mut connector = run.connector.borrow_mut();
+            if connector.as_ref() != wanted {
+                if run.waiting() {
+                    *connector = wanted.cloned();
+                } else {
+                    *connector = None;
+                    run.cancel.cancel();
+                }
             }
-            run.connector.is_some() || !run.ended().cancelled()
+            connector.is_some() || !run.returned.cancelled()
         });
         for (name, connector) in wanted {
             let after = match self.last.get(name) {
-                Some(run) if run.connector.is_some() => continue,
-                Some(run) => Some(run.ended().clone()),
+                Some(run) if run.connector.borrow().is_some() => continue,
+                Some(run) => Some(run.returned.clone()),
                 None => None,
             };
             let run = Run {
-                connector: Some(connector.clone()),
+                connector: Rc::new(RefCell::new(Some(connector.clone()))),
                 cancel: cancel::Token::new(),
                 after: after.clone(),
                 returned: cancel::Token::new(),
             };
             let supervisor = self.supervisor.clone();
             let (cancel, returned) = (run.cancel.clone(), run.returned.clone());
+            let read = Rc::clone(&run.connector);
             self.last.insert(name.clone(), run);
-            let (name, connector) = (name.clone(), connector.clone());
+            let name = name.clone();
             self.scope.spawn(Box::pin(async move {
                 if let Some(after) = after {
-                    cancel.race(after.wait()).await;
+                    after.wait().await;
                 }
-                // The run before it may not have returned yet.
-                if !cancel.cancelled() {
+                // `None` once a change removed the connector before the run started.
+                let connector = read.borrow().clone();
+                if let Some(connector) = connector {
                     let kind = connector.kind().as_str();
                     let config = connector.config().document();
                     match supervisor.run(kind, name, config, &cancel).await {

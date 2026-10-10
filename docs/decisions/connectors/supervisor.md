@@ -17,10 +17,11 @@
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072411231. A
   connector that a change adds starts at once, unless the last run of its name has
   not returned: then it starts after that run returned, so no two runs write one set
-  of status channels. A run that a change cancels before it starts ends at once, so a
-  name has at most one run that waits. This departs from "A connector that the change
-  adds: start its run at once" of 6074718616, item 3, and waits on the ruling of item 2
-  of https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098749526. After a
+  of status channels. A change of a connector whose run waits changes the connector
+  that the run starts with, so a name has at most one run that waits. This departs
+  from "A connector that the change adds: start its run at once" of 6074718616, item
+  3, and waits on the ruling of item 2 of
+  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098749526. After a
   run returns, the supervisor waits, with no timeout, until each task that the run
   spawned through `Context::tasks` ended, and only then starts its backoff. A task
   that does not end at the cancel is a defect of its kind (`laptop.architect-2`,

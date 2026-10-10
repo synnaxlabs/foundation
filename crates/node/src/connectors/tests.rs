@@ -332,7 +332,7 @@ fn a_third_change_starts_after_the_second_run_ended() {
     );
 }
 
-/// A run cancelled while it waits for a run that never ends ends at once.
+/// Each change while the old run holds changes the one run that waits for it.
 #[test]
 fn many_changes_while_the_old_run_holds_keep_two_futures() {
     let steps = (0..100_usize)
@@ -342,6 +342,22 @@ fn many_changes_while_the_old_run_holds_keep_two_futures() {
     let recorded = record(None, steps, None);
     let mut futures = vec![0, 1];
     futures.resize(100, 2);
+    assert_eq!(recorded.futures, futures);
+    assert_eq!(recorded.starts, [start("plant.a", 0, 0)]);
+}
+
+/// Changes with no poll of the runs between them.
+#[test]
+fn changes_at_one_instant_keep_two_futures() {
+    let steps = (0..10_usize)
+        .map(|version| {
+            let at = if version == 0 { 0 } else { 1_000 };
+            on(at, vec![("plant.a", "hold", NODE, version)])
+        })
+        .collect();
+    let recorded = record(None, steps, None);
+    let mut futures = vec![0, 1];
+    futures.resize(10, 2);
     assert_eq!(recorded.futures, futures);
     assert_eq!(recorded.starts, [start("plant.a", 0, 0)]);
 }
