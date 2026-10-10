@@ -291,15 +291,12 @@ impl Side {
         assert_eq!(status, Status::GOOD);
     }
 
-    /// Makes a server on the loop of the side with the minimal config, and starts it.
-    fn start(&self) -> *mut ffi::test::Server {
+    /// Makes a server on the loop of the side with the minimal config and the discovery
+    /// URL `url`, and starts it.
+    fn start(&self, url: &CStr) -> *mut ffi::test::Server {
         // SAFETY: the loop outlives the server, which `stop` deletes.
         let server = unsafe {
-            ffi::test::shim_server_new(
-                self.events().raw(),
-                PORT,
-                c"opc.tcp://:4840".as_ptr(),
-            )
+            ffi::test::shim_server_new(self.events().raw(), PORT, url.as_ptr())
         };
         assert!(!server.is_null());
         // SAFETY: the server lives.
@@ -2723,7 +2720,7 @@ fn streams_that_a_purge_closes_hold_no_read_buffer_and_no_more_than_the_bound() 
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
-            let server = side.start();
+            let server = side.start(c"opc.tcp://:4840");
             side.drive(Span::from_nanos(2_000_000_000)).await;
             // Less the listen connection.
             let connections = side.connections() - 1;
@@ -2752,7 +2749,7 @@ fn closes_past_the_bound() {
         .sim
         .run_on(&network.local.clone(), |node, _| async move {
             let side = Side::listening(&node, listener(&node));
-            let server = side.start();
+            let server = side.start(c"opc.tcp://:4840");
             side.drive(Span::SECOND).await;
             let buffers = side.buffers();
             side.stop(server).await;
