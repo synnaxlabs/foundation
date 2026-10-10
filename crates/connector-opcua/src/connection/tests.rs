@@ -2660,7 +2660,7 @@ fn one_poll_of_a_drive_accepts_a_burst_with_no_wake() {
 
 /// A run that accepts no stream and moves no connection ends the poll.
 #[test]
-fn one_poll_of_a_drive_runs_the_loop_once_for_each_accept() {
+fn a_poll_ends_after_a_run_that_accepts_and_moves_nothing() {
     assert_eq!(poll_once(3, b"", Poll::Pending), (Poll::Pending, 0, 0, 3));
 }
 
