@@ -22,7 +22,7 @@ const BUFFER_BYTES: usize = 1 << 21;
 ///
 /// fn bind(net: &Net, at: SocketAddr) -> Result<Vec<port::Part>, Error> {
 ///     let port = Port::bind(net, at)?;
-///     let _ = port.addresses();
+///     let _: Vec<transport::Address> = port.addresses();
 ///     Ok(port.split(NonZeroUsize::MIN))
 /// }
 /// ```

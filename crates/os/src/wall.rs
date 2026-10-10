@@ -137,7 +137,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "the OS wall clock is before the year 2262")]
     fn a_stamp_past_the_end_panics() {
-        let _ = stamp(i64::MAX, 0i64);
+        let _: Stamp = stamp(i64::MAX, 0i64);
     }
 
     proptest! {

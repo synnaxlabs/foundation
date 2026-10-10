@@ -84,4 +84,5 @@ fn reply(status: StatusCode, text: String) -> Response<Bytes> {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests;

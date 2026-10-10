@@ -41,3 +41,13 @@
   https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073190937, with its
   scope at 2026-10-09T02:50:37Z:
   https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073252079.
+  Amended (2026-10-10T00:24Z): each 5% in this record is now the cost limit of P1
+  (`docs/decisions/memory/p1.md`), and each "over 5%" is "at or over the cost limit". A
+  result is near the limit when it is at or over the limit and the noise of its run
+  could put it under. A slowdown under the limit needs no rerun, no judgment, and no
+  issue. The daily run stays: it finds small slowdowns that add up. The person decided
+  on 2026-10-10T00:24Z ("Yes, I approve it"; `laptop.monitor`'s record:
+  https://github.com/synnaxlabs/foundation/pull/2196#issuecomment-6091584600).
+  Supersedes the 5% of
+  https://github.com/synnaxlabs/foundation/issues/462#issuecomment-6074405652 and
+  https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073190937.

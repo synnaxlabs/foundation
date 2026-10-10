@@ -85,14 +85,14 @@ pub struct Config<M> {
     /// key, both from the file `node.key` in the data directory. Only `node` reads that
     /// file, so until the node founds its region itself (#1744), only the tests of
     /// `node`, and the `acceptance` lab, which writes the file first with
-    /// `create_key`, give `Some`. Give the same value at each start: the node keeps
-    /// no copy of it, and until the mesh stores it (#1209), a log opened with another
-    /// value checks proofs against the wrong voters and starts at another spec. A patch
-    /// until the node keeps its region in its data directory when it founds or joins
-    /// one, and reads it at each start (#1744). The hub of each task knows each channel
-    /// of the region's spec in use, at the open and after each spec change that takes
-    /// effect. At the first start, that is the founding's `definitions`, or no channel
-    /// when `spec::region::check` gives them problems.
+    /// `create_key`, give `Some`. A start whose mesh log holds no record keeps the
+    /// region in the data directory. A start whose log holds a record and that gives
+    /// another region stops the node, and [`Node::join`] gives [`Error::Mesh`] with
+    /// [`mesh::Error::Founding`]. A patch until the node reads its region from its data
+    /// directory at each start (#1744). The hub of each task knows each channel of the
+    /// region's spec in use, at the open and after each spec change that takes effect.
+    /// At a start whose log holds no record, that is the founding's `definitions`, or
+    /// no channel when `spec::region::check` gives them problems.
     pub region: Option<mesh::region::Founding>,
     /// The node's name. The first start on a data directory keeps it in the file
     /// `name`; a later start with another name stops with [`Error::Renamed`]. Get it
@@ -163,23 +163,24 @@ impl Node {
     /// `block::Pool` with an even part of the budget, and a ring with an even part of
     /// the disk budget; shard 0 also takes each remainder. Unless the node stops first,
     /// shard 0 locks the data directory with the file `lock`, which it holds until each
-    /// shard has closed its ring and each task of the mesh has ended, then records the
-    /// shard count and [`Config::name`] in the data directory, or checks the ones
-    /// there, and each shard opens its buffer in directory `shard-<i>` of its files,
-    /// and makes it there when it is not there. The shards open their buffers one after
-    /// another, in order of core. Once each buffer has opened, shard 0 reads the node's
-    /// key and private key from the file `node.key` in the data directory, and makes
-    /// the file at the first start once it has mesh time, unless `create_key` made it,
-    /// then opens the mesh of [`Config::region`] when it has one, then serves the port,
-    /// admits each member of the region and at most 256 sessions of other peers at
-    /// once, until its transport or the mesh's group stops, which stops the node.
-    /// Returns once each shard runs or one has failed to start. When the disk budget
-    /// holds no ring on each shard, no shard starts, and [`Node::join`] gives
-    /// [`Error::Disk`] with the budget, the shard count, and the least budget. A failed
-    /// start, a shard with no memory, a data directory that another node holds or that
-    /// was made for another shard count, a key file that is not valid, a file `name`
-    /// that holds another name or that no node wrote, or a buffer or a mesh that does
-    /// not open stops the node, and [`Node::join`] returns its error.
+    /// shard has closed its ring, each task of the mesh has ended, and the transport
+    /// has freed the port, then records the shard count and [`Config::name`] in the
+    /// data directory, or checks the ones there, and each shard opens its buffer in
+    /// directory `shard-<i>` of its files, and makes it there when it is not there. The
+    /// shards open their buffers one after another, in order of core. Once each buffer
+    /// has opened, shard 0 reads the node's key and private key from the file
+    /// `node.key` in the data directory, and makes the file at the first start once it
+    /// has mesh time, unless `create_key` made it, then opens the mesh of
+    /// [`Config::region`] when it has one, then serves the port, admits each member of
+    /// the region and at most 256 sessions of other peers at once, until its transport
+    /// or the mesh's group stops, which stops the node. Returns once each shard runs or
+    /// one has failed to start. When the disk budget holds no ring on each shard, no
+    /// shard starts, and [`Node::join`] gives [`Error::Disk`] with the budget, the
+    /// shard count, and the least budget. A failed start, a shard with no memory, a
+    /// data directory that another node holds or that was made for another shard count,
+    /// a key file that is not valid, a file `name` that holds another name or that no
+    /// node wrote, or a buffer or a mesh that does not open stops the node, and
+    /// [`Node::join`] returns its error.
     ///
     /// # Panics
     ///
@@ -362,6 +363,12 @@ impl Node {
         self.stop.set();
     }
 
+    /// A handle that stops this node from another thread.
+    #[must_use]
+    pub fn stopper(&self) -> Stopper {
+        Stopper(self.stop.clone())
+    }
+
     /// Blocks until every shard has ended. Call it on a thread that `env` did not
     /// start. Under `sim`, run the sim to its end first.
     ///
@@ -384,6 +391,18 @@ impl Node {
             (joined, shard.failed.get().cloned())
         });
         error(self.failed, shards.collect())
+    }
+}
+
+/// Stops its node from any thread, as [`Node::stop`] does. Clones stop one node. A
+/// stop after the node ended does nothing.
+#[derive(Clone, Debug)]
+pub struct Stopper(Stop);
+
+impl Stopper {
+    /// Asks every shard of the node to end, as [`Node::stop`] does.
+    pub fn stop(&self) {
+        self.0.set();
     }
 }
 
@@ -480,7 +499,7 @@ struct First {
 /// The part a shard plays in the node's start and stop.
 enum Role {
     /// Shard 0's: it runs the mesh clock, claims the data directory, and holds the
-    /// lock until each other shard's ring has closed.
+    /// lock until each other shard's ring has closed and the port is free.
     First(Box<First>),
     /// Each other shard's: the end it drops once its ring has closed.
     Next(Give<()>),
@@ -541,7 +560,8 @@ fn part(total: u64, cores: usize, core: usize) -> u64 {
 
 impl Open {
     /// Runs the shard to its end in its `role`. Shard 0 holds the lock until each
-    /// shard's ring has closed, so a node that takes the lock finds no ring open.
+    /// shard's ring has closed and the transport has freed the port, so a node that
+    /// takes the lock finds no ring open and the port free.
     async fn main(
         self,
         role: Role,
@@ -715,14 +735,14 @@ impl Endpoint {
     /// Opens the node's transport on `pool` and `tasks` with `identity`, then, when the
     /// node has a region, the chunk store in directory [`directory::blob`] of `files`,
     /// and the mesh of that region over both, in directory [`directory::mesh`]. Gives
-    /// the error of a store or a mesh that did not open.
+    /// the transport, also with the error of a store or a mesh that did not open.
     async fn open(
         self,
         identity: identity::Identity,
         files: env::files::Files,
         pool: Rc<block::Pool>,
         tasks: env::tasks::Tasks,
-    ) -> Result<(Rc<transport::Transport>, Option<mesh::Mesh>), Error> {
+    ) -> (Rc<transport::Transport>, Result<Option<mesh::Mesh>, Error>) {
         let config = transport::Config {
             private_key: identity.private_key.clone(),
             message_bytes_max: MESSAGE,
@@ -738,15 +758,17 @@ impl Endpoint {
             .expect("invariant: a buffer's pool holds a block of a whole UDP payload");
         let transport = Rc::new(transport);
         let Some(region) = self.region else {
-            return Ok((transport, None));
+            return (transport, Ok(None));
         };
         let store = blob::Store::open(blob::Config {
             files: files.clone(),
             dir: directory::blob(),
             pool: Rc::clone(&pool),
-        })
-        .await
-        .map_err(Error::Blob)?;
+        });
+        let store = match store.await {
+            Ok(store) => store,
+            Err(error) => return (transport, Err(Error::Blob(error))),
+        };
         let config = mesh::Config {
             key: identity.key,
             private_key: identity.private_key,
@@ -760,8 +782,8 @@ impl Endpoint {
             transport: Rc::clone(&transport),
             store: Rc::new(store),
         };
-        let mesh = mesh::Mesh::open(config).await.map_err(Error::Mesh)?;
-        Ok((transport, Some(mesh)))
+        let mesh = mesh::Mesh::open(config).await;
+        (transport, mesh.map(Some).map_err(Error::Mesh))
     }
 }
 
@@ -773,10 +795,12 @@ impl Serve {
     /// group stops, by the rank of [`end`]. A transport or a group that ends it goes
     /// into `failed` before it drops the tasks given that still run. Before it
     /// returns, it drops the tasks, the hub, `home`, `guard`, each session and stream
-    /// future, and the mesh, and, with a mesh, waits for each task of the mesh to end.
-    /// The transport drops with the last of the port's future and the tasks of the
-    /// mesh. Runs no task and takes no session when a shard did not open, or when the
-    /// identity did not load or the mesh did not open, which goes into `failed`.
+    /// future, the operations on the mesh, the mesh, and the transport, and waits for
+    /// each task of the mesh to end, with a mesh, and for the transport to free the
+    /// port. Unless the socket broke, the port is freed only after each task of a
+    /// remote reader of the hub has ended. Runs no task and takes no session when a
+    /// shard did not open, or when the identity did not load or the mesh did not open,
+    /// which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -801,56 +825,50 @@ impl Serve {
             };
         let (key, entropy) = (identity.key, self.endpoint.entropy.clone());
         let clock = self.endpoint.clock.clone();
-        let (transport, mesh) = match self
-            .endpoint
-            .open(identity, files, pool, tasks.clone())
-            .await
-        {
-            Ok(opened) => opened,
-            Err(error) => return fail(error),
-        };
-        let region = mesh.clone().map(|mesh| hub::Region {
-            mesh,
-            transport: Rc::clone(&transport),
-        });
-        let ops = mesh.as_ref().map(|mesh| {
-            Rc::new(operations(mesh.clone(), self.time.clone(), entropy.clone()))
-        });
-        let hub = hub::Hub::new(hub::Config {
-            home,
-            interner,
-            tasks: tasks.clone(),
-            node: key,
-            time: self.time,
-            entropy,
-            region,
-        });
-        let ended = mesh.as_ref().map(mesh::Mesh::ended);
-        let group = follow(mesh.as_ref(), hub.clone()).await;
-        // The port's future holds the mesh, so it drops before the wait.
-        {
+        let opened = self.endpoint.open(identity, files, pool, tasks.clone());
+        let (transport, mesh) = opened.await;
+        let freed = transport.ended();
+        let (inbox, time) = (self.inbox, self.time);
+        // Each part that holds the transport or the node's stop drops as this block
+        // ends, on each path, or is a hub task of a remote reader, which ends at its
+        // next poll after its reader drops. So the port is freed before `lock` drops.
+        let served = async move {
+            let mesh = match mesh {
+                Ok(mesh) => mesh,
+                Err(error) => {
+                    fail(error);
+                    return None;
+                }
+            };
+            let region = mesh.clone().map(|mesh| hub::Region {
+                mesh,
+                transport: Rc::clone(&transport),
+            });
+            let ops = mesh.as_ref().map(|mesh| {
+                Rc::new(operations(mesh.clone(), time.clone(), entropy.clone()))
+            });
+            let hub = hub::Hub::new(hub::Config {
+                home,
+                interner,
+                tasks: tasks.clone(),
+                node: key,
+                time,
+                entropy,
+                region,
+            });
+            let ended = mesh.as_ref().map(mesh::Mesh::ended);
+            let group = follow(mesh.as_ref(), hub.clone()).await;
             let port =
                 route::accept(transport, mesh, hub.clone(), clock, tasks.clone());
-            let mut port = pin!(port);
-            let mut group = pin!(group);
-            let mut guard = pin!(guard);
-            let stop = poll_fn(|cx| {
-                let ended = end(
-                    guard.as_mut().poll(cx),
-                    port.as_mut().poll(cx),
-                    group.as_mut().poll(cx),
-                );
-                // Set before the tasks drop, so that `join` ranks it above a panic in
-                // a task's drop.
-                ended.map(|error| error.map_or((), fail))
-            });
-            self.inbox
-                .serve(task::Handles { hub, ops }, tasks, stop)
-                .await;
-        }
+            let stop = until(guard, port, group, fail);
+            inbox.serve(task::Handles { hub, ops }, tasks, stop).await;
+            ended
+        };
+        let ended = served.await;
         if let Some(ended) = ended {
             ended.await;
         }
+        freed.await;
     }
 }
 
@@ -916,6 +934,29 @@ async fn follow(
             }
         }
     }
+}
+
+/// Ready when the node stops (`guard`), the transport stops (`port`), or the mesh's
+/// group stops, by the rank of [`end`]. A transport or a group that ends it goes into
+/// `fail` first.
+async fn until(
+    guard: Guard,
+    port: impl Future<Output = transport::Error>,
+    group: impl Future<Output = mesh::Stopped>,
+    fail: impl Fn(Error),
+) {
+    let (mut guard, mut port, mut group) = (pin!(guard), pin!(port), pin!(group));
+    poll_fn(|cx| {
+        let ended = end(
+            guard.as_mut().poll(cx),
+            port.as_mut().poll(cx),
+            group.as_mut().poll(cx),
+        );
+        // Set before the tasks drop, so that `join` ranks it above a panic in a
+        // task's drop.
+        ended.map(|error| error.map_or((), &fail))
+    })
+    .await;
 }
 
 /// How shard 0's serve ends, from one poll of each cause, in rank order: a stop of

@@ -358,14 +358,14 @@ mod tests {
         #[test]
         #[should_panic(expected = "invariant: low 1ns is above high 0ns")]
         fn panics_when_low_is_above_high() {
-            let _ = Measurement::between(Monotonic(0), 1, 0);
+            let _: Measurement = Measurement::between(Monotonic(0), 1, 0);
         }
 
         #[test]
         #[should_panic(expected = "is above high 9223372036854775812ns")]
         fn panics_when_low_is_above_high_past_a_span() {
             let top = i128::from(i64::MAX);
-            let _ = Measurement::between(Monotonic(0), top + 10, top + 5);
+            let _: Measurement = Measurement::between(Monotonic(0), top + 10, top + 5);
         }
     }
 

@@ -301,6 +301,31 @@ impl Connection {
         }
     }
 
+    /// Whether the handshake is in flight.
+    pub(super) fn handshaking(&self) -> bool {
+        matches!(self.state, State::Dialing { .. } | State::Accepting)
+    }
+
+    /// Closes with code 0 a connection whose handshake is in flight, in either
+    /// direction, and gives the [`Event::Closed`] of a dial.
+    ///
+    /// # Panics
+    ///
+    /// When the handshake is not in flight.
+    pub(super) fn abort(&mut self, now: Instant) -> Option<Event> {
+        match self.state {
+            State::Dialing { .. } => self.close(now, Code(0)),
+            State::Accepting => {
+                self.end();
+                self.inner.close(now, VarInt::from_u32(0), Bytes::new());
+                None
+            }
+            State::Open | State::Ended => {
+                panic!("invariant: the handshake is in flight")
+            }
+        }
+    }
+
     /// Ends a live connection after the socket broke, and gives its
     /// [`Event::Closed`] with [`Error::Network`] when the caller has the key.
     pub(super) fn fail(&mut self, error: &env::net::Error) -> Option<Event> {

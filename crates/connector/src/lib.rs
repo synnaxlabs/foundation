@@ -14,4 +14,5 @@ pub mod supervisor;
 pub mod testing;
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod common;

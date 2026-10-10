@@ -64,23 +64,46 @@
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069443456.
   Supersedes the #1780 clause of
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6068113010. Under
-  `sim`, the port is free once `lock` is, which a test pins. Under `os`, the carrier's
-  task can hold the socket after `lock` drops, until the runtime of shard 0 drops,
-  before `Node::join` returns: with a socket that works, the task ends only once each
-  connection drained and the runtime polls it. #2017 makes shard 0 wait for the task
-  before it drops `lock`, by `laptop.architect-2` (21:58 UTC, words of 22:23 UTC and
-  22:47 UTC):
+  `sim`, the port is free once `lock` is, which a test pins, by `laptop.architect-2`
+  (21:58 UTC, words of 22:23 UTC and 22:47 UTC):
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069829972,
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070247529,
   https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6070577797.
-  Supersedes the port clause of
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312. No test
-  sees the drop of the transport itself: the end of shard 0 drops the carrier's task,
-  which frees the socket also when a clone of the transport leaks, by
-  `laptop.architect-2` (21:39 UTC):
-  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312. Supersedes
-  the drop of the transport of
-  https://github.com/synnaxlabs/foundation/pull/1830#issuecomment-6054871235.
+  Amended (2026-10-09, #2017, by `laptop.architect-2`, 02:17 UTC:
+  https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072896717, on
+  https://github.com/synnaxlabs/foundation/issues/2017): shard 0 drops `lock` only once
+  the transport has freed the port (`transport::Transport::ended`), also when the mesh
+  does not open, so a restart at once binds the port under `os` too. Once the node
+  has confirmed the handshake of a session, the close of that session leaves at the
+  drop: a peer whose one-way delay is under 3 s gets it before `lock` is free, unless
+  the link loses it, and a peer with a delay of 4 s gets it after, which a test pins
+  for each (`laptop.architect`, 04:36 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6074355159; the
+  condition, 06:16 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6075490388; this
+  text, 06:41 and 06:42 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6075817836 and
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6075828783). The node
+  confirms a session that a peer dialed when the transport gives it, and one that the
+  node dialed one round trip or more later. A close before then can be paced (the
+  `noq-proto` patch in `docs/dependencies.md`), so it can leave after `lock` is free,
+  or not at all when the pacer holds it until the transport frees the port. The peer
+  then waits for its idle time, as when the link loses the close. Each clone of the
+  transport and each session lives in a future that shard 0 drops before it waits for
+  the port, in a task of the mesh that it waits for, or in the hub's task of a reader
+  whose home is another node, which ends at its next poll after the drop of the reader.
+  So, unless the socket broke, a leak holds the stop. The drop of each session closes
+  it. The drop of the transport closes each session that no caller accepted and each
+  handshake in flight, its own dials too (#2084, by `laptop.architect-2`, 02:57 UTC:
+  https://github.com/synnaxlabs/foundation/issues/2084). The stop waits for each to
+  drain, in about 3 PTO, and at most 3 s after the last one ended, because a peer's
+  round trip sets the PTO with no bound (`laptop.architect`, 03:46 UTC:
+  https://github.com/synnaxlabs/foundation/pull/2089#issuecomment-6073847772). The
+  `transport` surface, by `laptop.architect` (02:19 UTC):
+  https://github.com/synnaxlabs/foundation/issues/2017#issuecomment-6072912165.
+  Supersedes the `os` sentences of that port rule, and the sentence of
+  https://github.com/synnaxlabs/foundation/pull/1962#issuecomment-6069568312 that no
+  test sees the drop of the transport.
   Amended (2026-10-08, #1660, by `laptop.architect-2`, 19:52 UTC): `Config` has no key.
   Once each buffer has opened, shard 0 reads the node's key and private key from the
   file `node.key` in the data directory, before the hub, the transport, and the mesh

@@ -185,7 +185,7 @@ mod tests {
         let held = Rc::new(());
         let inner = Rc::clone(&held);
         scope.spawn(Box::pin(poll_fn(move |_| {
-            let _ = &inner;
+            let _: &Rc<()> = &inner;
             Poll::Ready(())
         })));
         let mut task = take(&queued);
@@ -257,7 +257,7 @@ mod tests {
         let owner = Rc::new(RefCell::new(Some(scope)));
         let guard = DropsScope(Rc::clone(&owner));
         let future: Task = Box::pin(poll_fn(move |_| {
-            let _ = &guard;
+            let _: &DropsScope = &guard;
             Poll::Ready(())
         }));
         owner.borrow_mut().as_mut().unwrap().spawn(future);
@@ -379,7 +379,7 @@ mod tests {
             polled: Rc::clone(&polled),
         };
         spawn(Box::pin(poll_fn(move |_| {
-            let _ = &guard;
+            let _: &PollsOnDrop = &guard;
             Poll::Ready(())
         })));
         let mut task = take(&queued);

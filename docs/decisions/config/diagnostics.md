@@ -40,3 +40,11 @@
   with `{:?}`, and #941 changes each such quote to `Quoted`. Decided by the architect
   at 2026-10-08T05:49:29Z
   (https://github.com/synnaxlabs/foundation/issues/941#issuecomment-6053293087).
+  `document::Position` and `document::Span` derive `PartialOrd` and `Ord`: a position
+  by offset, then by line and column, and a span by source, then by start, then by
+  end. This agrees with `Eq`. `config` sorts its diagnostics and labels by span, no
+  span first, and `ops` sorts its plan lines by span, so the rule has one home. Two
+  diagnostics at one start order by their end. Lost: a public `Span::order`, a key
+  that each caller must know, which does not agree with `Eq` (`laptop.architect-2`,
+  2026-10-10T02:45:50Z,
+  https://github.com/synnaxlabs/foundation/issues/1914#issuecomment-6092943513).

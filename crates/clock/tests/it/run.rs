@@ -102,7 +102,7 @@ fn keeps_a_narrow_measurement_when_the_os_bound_widens() {
 fn a_source_added_before_run_panics() {
     let (mut sim, host) = node();
     let (mut clock, _reader) = Clock::new(host.clock());
-    let _ = clock.add();
+    let _: clock::source::Key = clock.add();
     start(&host, clock, host.wall());
     assert_eq!(
         sim.run_for(Span::ZERO),

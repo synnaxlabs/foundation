@@ -146,8 +146,9 @@ fn read_ns(clock: libc::clockid_t) -> u64 {
 /// slews on Linux, so a sleep completes late by at most this much from either.
 const ARM_MAX: Duration = Duration::from_secs(1);
 
-/// A Tokio sleep that fires at or after a deadline on the boot clock. Each poll
-/// checks the boot clock and re-arms the sleep from it.
+/// A Tokio sleep that fires at or after a deadline on the boot clock. A poll for a new
+/// deadline, or after the sleep fired, checks the boot clock and arms the sleep from
+/// it.
 struct Timer {
     driver: Driver,
     sleep: Pin<Box<Sleep>>,
@@ -174,21 +175,25 @@ impl env::clock::Timer for Timer {
     ) -> Poll<()> {
         let this = self.get_mut();
         loop {
+            // Ends by the second pass: a sleep armed from Tokio's now is pending. While
+            // it is, the clock is not read, since the sleep fires late by at most
+            // `ARM_MAX`. The poll is outside the coop budget, since a spent budget
+            // makes it pending after the sleep fired.
+            let mut sleep = tokio::task::coop::unconstrained(this.sleep.as_mut());
+            if this.armed == Some(deadline)
+                && Pin::new(&mut sleep).poll(cx).is_pending()
+            {
+                return Poll::Pending;
+            }
             let now = env::clock::Driver::now(&this.driver);
             if now >= deadline {
                 return Poll::Ready(());
             }
-            if this.armed != Some(deadline) {
-                let wait = Duration::from_nanos(deadline.0 - now.0).min(ARM_MAX);
-                let at = tokio::time::Instant::now() + wait;
-                this.sleep.as_mut().reset(at);
-                this.armed = Some(deadline);
-            }
-            // Ends by the second pass: a sleep armed from Tokio's now is pending.
-            match this.sleep.as_mut().poll(cx) {
-                Poll::Ready(()) => this.armed = None,
-                Poll::Pending => return Poll::Pending,
-            }
+            let wait = Duration::from_nanos(deadline.0 - now.0).min(ARM_MAX);
+            this.sleep
+                .as_mut()
+                .reset(tokio::time::Instant::now() + wait);
+            this.armed = Some(deadline);
         }
     }
 }

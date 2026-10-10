@@ -68,6 +68,7 @@ struct Node {
     resumes: Option<Monotonic>,
     cores: NonZeroUsize,
     unpinnable: bool,
+    arm_max: Option<Span>,
     entropy: Rng,
     shards: shard::Starts,
     /// The monotonic reading at boot.
@@ -186,6 +187,7 @@ impl State {
             resumes: Some(self.now),
             cores: config.cores,
             unpinnable: config.unpinnable,
+            arm_max: config.arm_max,
             entropy,
             shards: shard::Starts::default(),
             boot: config.monotonic,
@@ -284,13 +286,18 @@ impl State {
             .filter(|&task| self.resumes(task).is_some_and(|at| at <= self.now))
     }
 
-    /// When a timer of `node` with `deadline` fires.
+    /// When a timer of `node` with `deadline` fires: at the deadline, or early at the
+    /// node's [`node::Config::arm_max`].
     pub(crate) fn due(&self, node: usize, deadline: Monotonic) -> Due {
         let now = self.monotonic(node);
         if deadline <= now {
             return Due::Passed;
         }
-        match self.now.0.checked_add(deadline.0 - now.0) {
+        let mut wait = deadline.0 - now.0;
+        if let Some(max) = self.nodes[node].arm_max {
+            wait = wait.min(max.nanos().unsigned_abs());
+        }
+        match self.now.0.checked_add(wait) {
             Some(at) => Due::At(Monotonic(at)),
             None => Due::Never,
         }

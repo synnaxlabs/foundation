@@ -5,11 +5,11 @@
 #![cfg(not(loom))]
 
 mod one_node;
+mod port;
 mod rig;
+#[cfg(unix)]
+mod start;
 mod status;
-
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
 
 use rig::Rig;
 
@@ -84,26 +84,26 @@ fn mcp_answers_each_request_on_its_own_line_until_input_closes() {
 
 #[test]
 fn mcp_replies_before_the_next_request_arrives() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_foundation"))
-        .arg("mcp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("spawn");
-    let mut stdin = child.stdin.take().expect("stdin");
-    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let rig = Rig::new();
+    let mut mcp = rig.talk(&["mcp"]);
+    let mut replies = String::new();
     for id in 1..=2 {
-        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":{id},"method":"ping"}}"#)
-            .expect("write");
-        let mut line = String::new();
-        stdout.read_line(&mut line).expect("read");
-        assert_eq!(
-            line,
-            format!("{{\"id\":{id},\"jsonrpc\":\"2.0\",\"result\":{{}}}}\n")
+        let reply = format!("{{\"id\":{id},\"jsonrpc\":\"2.0\",\"result\":{{}}}}\n");
+        replies.push_str(&reply);
+        mcp.ask(
+            &format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"ping\"}}\n"),
+            &replies,
         );
     }
-    drop(stdin);
-    assert_eq!(child.wait().expect("wait").code(), Some(0));
+    let output = mcp.close();
+    assert_eq!(
+        (
+            output.status.code(),
+            text(&output.stdout),
+            text(&output.stderr)
+        ),
+        (Some(0), replies.as_str(), "")
+    );
 }
 
 #[test]
