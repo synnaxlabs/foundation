@@ -308,15 +308,12 @@ impl Shard {
             clock,
             limits,
         } = config;
-        let handoffs = buffer.newest(Path::Live, handoff::TAG).await?;
+        let holders = handoff::newest(&buffer).await?;
         let now = clock.now().monotonic;
         let grace = Lease::new(GRACE).expect("invariant: the grace is positive");
-        let recovered = handoffs
+        let recovered = holders
             .into_iter()
-            .filter_map(|(slot, stored)| {
-                let last = handoff::read(&stored.bytes)?;
-                Some((slot, Gate::recover(last, now, grace)))
-            })
+            .filter_map(|(slot, last)| Some((slot, Gate::recover(last?, now, grace))))
             .collect();
         Ok(Self {
             number: shard,
@@ -2624,13 +2621,12 @@ mod tests {
 
     /// The holder that the newest handoff of `slot` on disk names.
     async fn recorded(shard: &Shard, slot: u32) -> Option<control::Writer> {
-        let handoffs = shard.buffer.newest(Path::Live, handoff::TAG).await;
-        let handoffs = handoffs.expect("reads");
-        let (_, stored) = handoffs
-            .iter()
+        let holders = handoff::newest(&shard.buffer).await.expect("reads");
+        let (_, last) = holders
+            .into_iter()
             .find(|(at, _)| *at == Slot::new(slot))
             .expect("a handoff of the slot");
-        handoff::read(&stored.bytes)
+        last
     }
 
     #[test]
@@ -2752,7 +2748,7 @@ mod tests {
                 len: 0,
                 stored_at: Stamp::from_nanos(1),
                 last: None,
-                tag: handoff::TAG.get(),
+                tag: 1,
                 parts: Some(body.freeze()).into(),
             };
             buffer.append([record]).expect("the ring has room");

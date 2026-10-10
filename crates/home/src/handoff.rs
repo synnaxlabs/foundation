@@ -5,15 +5,16 @@ use std::num::NonZeroU8;
 use std::str;
 
 use block::Block;
-use buffer::{Entry, Layout};
+use buffer::{Buffer, Entry, Layout};
 use control::{Handoff, Writer};
 use types::authority::Authority;
+use types::channel::Slot;
 use types::frame::{Path, key_set};
 use types::name::Name;
 use types::time::Stamp;
 
 /// The buffer tag of a handoff entry.
-pub(crate) const TAG: NonZeroU8 = NonZeroU8::MIN;
+const TAG: NonZeroU8 = NonZeroU8::MIN;
 
 /// The most bytes in the body of a handoff: the authority and the longest subject.
 pub(crate) const MAX_BYTES: usize = 1 + Name::MAX_BYTES;
@@ -69,6 +70,26 @@ fn body(
     Ok(Some(block.freeze()))
 }
 
+/// The holder that the newest durable handoff of each index in `buffer` names, with
+/// the index's slot, or `None` for a handoff that names no holder, in no order.
+///
+/// # Errors
+///
+/// The error of [`Buffer::newest`].
+///
+/// # Panics
+///
+/// When a handoff does not decode, as [`read`] says.
+pub(crate) async fn newest(
+    buffer: &Buffer,
+) -> Result<Vec<(Slot, Option<Writer>)>, buffer::Error> {
+    let found = buffer.newest(Path::Live, TAG).await?;
+    let holders = found
+        .into_iter()
+        .map(|(slot, stored)| (slot, read(&stored.bytes)));
+    Ok(holders.collect())
+}
+
 /// The holder that `body`, the bytes of a handoff record, names, or `None` when no
 /// writer holds control.
 ///
@@ -76,7 +97,7 @@ fn body(
 ///
 /// If the subject is not a valid name. Bytes from another node must be checked before
 /// they reach `read`.
-pub(crate) fn read(body: &[u8]) -> Option<Writer> {
+fn read(body: &[u8]) -> Option<Writer> {
     let (&authority, subject) = body.split_first()?;
     let subject = str::from_utf8(subject)
         .unwrap_or_else(|error| panic!("the handoff subject is not UTF-8: {error}"));
