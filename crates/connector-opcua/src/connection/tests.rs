@@ -2909,7 +2909,7 @@ fn a_read_fills_the_read_buffer_of_64_kib() {
         .collect();
     assert_eq!(
         (reads.iter().max(), reads.iter().sum::<usize>()),
-        (Some(&READ_BYTES), 70_000)
+        (Some(&(1 << 16)), 70_000)
     );
 }
 
