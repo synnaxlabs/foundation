@@ -63,12 +63,10 @@ impl Config {
         };
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "`TryFrom` is not const; the next line refuses a truncated budget"
+            reason = "`block` builds only where a `Unique` is 16 bytes, so a `usize` \
+                      holds a `u64`"
         )]
         let budget = budget_bytes as usize;
-        if budget as u64 != budget_bytes {
-            return Err(unfit);
-        }
         let Some(span) = budget.checked_next_multiple_of(ALIGN) else {
             return Err(unfit);
         };
@@ -76,9 +74,8 @@ impl Config {
         let Some(spans) = span.checked_mul(classes) else {
             return Err(unfit);
         };
-        let Some(reservation) = spans.checked_add(HEADER) else {
-            return Err(unfit);
-        };
+        // Past a budget of 2 GiB `classes` is 96, so `spans` is at most 2^64 - 4096.
+        let reservation = spans + HEADER;
         Ok(Self {
             budget,
             span,
@@ -1075,14 +1072,15 @@ mod tests {
             assert_eq!(classes(usize::MAX), CLASSES_MAX);
         }
 
+        /// The largest budget whose reservation fits in a `usize`.
+        const LAST: u64 = 192_153_584_101_141_120;
+
         #[test]
-        #[cfg(target_pointer_width = "64")]
         fn fits_up_to_the_last_span_below_the_address_space() {
-            let last = 192_153_584_101_141_120;
-            let config = Config::new(last).expect("the reservation fits");
+            let config = Config::new(LAST).expect("the reservation fits");
             assert_eq!(config.reservation(), usize::MAX - 4031);
-            let error = Config::new(last + 1).expect_err("the reservation is past it");
-            assert_eq!(error, Unfit { budget: last + 1 });
+            let error = Config::new(LAST + 1).expect_err("the reservation is past it");
+            assert_eq!(error, Unfit { budget: LAST + 1 });
         }
 
         #[test]
@@ -1098,14 +1096,18 @@ mod tests {
 
         proptest! {
             #[test]
-            fn is_the_wide_sum_when_it_fits(budget in any::<u64>()) {
-                let wide = usize::try_from(budget).ok().map(|narrow| {
-                    let span = u128::from(budget).next_multiple_of(64);
-                    span * u128::try_from(classes(narrow)).expect("at most 96") + 64
-                });
-                let fits = wide.and_then(|wide| usize::try_from(wide).ok());
-                let given = Config::new(budget).map(|config| config.reservation());
-                prop_assert_eq!(given, fits.ok_or(Unfit { budget }));
+            fn fits_up_to_the_last_budget_and_grows_with_it(
+                a in 0..2 * LAST,
+                b in 0..2 * LAST,
+            ) {
+                let (low, high) = (a.min(b), a.max(b));
+                for budget in [low, high] {
+                    let unfit = Config::new(budget).err();
+                    prop_assert_eq!(unfit, (budget > LAST).then_some(Unfit { budget }));
+                }
+                if let (Ok(low), Ok(high)) = (Config::new(low), Config::new(high)) {
+                    prop_assert!(low.reservation() <= high.reservation());
+                }
             }
         }
     }
