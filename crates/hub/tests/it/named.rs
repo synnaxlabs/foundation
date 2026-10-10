@@ -565,7 +565,9 @@ fn panics_on_an_ack_past_the_samples_that_it_received() {
 }
 
 #[test]
-#[should_panic(expected = "the position is past each position that this reader gave")]
+#[should_panic(
+    expected = "the position is past each position that this reader gave: it gave none"
+)]
 fn panics_on_an_ack_before_it_gave_a_frame() {
     run(33, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);

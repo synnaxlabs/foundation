@@ -74,7 +74,7 @@ pub struct Received<'a> {
     view: View<'a>,
     lens: &'a Lens,
     /// The `given` of the reader.
-    given: &'a Cell<u64>,
+    given: &'a Cell<Option<u64>>,
 }
 
 impl<'a> Received<'a> {
@@ -95,7 +95,7 @@ impl<'a> Received<'a> {
     #[must_use]
     pub fn position(&self) -> Position {
         let position = self.lens.after(&self.view);
-        self.given.set(self.given.get().max(position.live));
+        self.given.set(self.given.get().max(Some(position.live)));
         position
     }
 }
@@ -312,9 +312,9 @@ pub struct Reader {
     source: Source,
     /// The slot of the reader's index.
     index: channel::Slot,
-    /// The highest `live` of a position that [`Received::position`] gave, or 0. A home
-    /// at another node can send a frame of a lower seq.
-    given: Cell<u64>,
+    /// The highest `live` of a position that [`Received::position`] gave, or `None`
+    /// before it gave one. A home at another node can send a frame of a lower seq.
+    given: Cell<Option<u64>>,
     /// The frame that the last [`Received`] lends.
     frame: Option<Frame>,
 }
@@ -441,7 +441,7 @@ impl Reader {
                 return Ok(Self {
                     index: slot,
                     source: Source::Remote(Box::new(remote)),
-                    given: Cell::new(0),
+                    given: Cell::new(None),
                     frame: None,
                 });
             }
@@ -461,7 +461,7 @@ impl Reader {
         Ok(Self {
             source: Source::Local(local),
             index: slot,
-            given: Cell::new(0),
+            given: Cell::new(None),
             frame: None,
         })
     }
@@ -525,11 +525,16 @@ impl Reader {
             position.index == self.index,
             "the position is of another index than the reader's"
         );
+        let Some(given) = self.given.get() else {
+            panic!(
+                "the position is past each position that this reader gave: it gave none"
+            );
+        };
         assert!(
-            position.live <= self.given.get(),
+            position.live <= given,
             "the position is past each position that this reader gave: live {} past {}",
             position.live,
-            self.given.get()
+            given
         );
         match &self.source {
             Source::Local(Local {

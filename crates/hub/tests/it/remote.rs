@@ -3094,3 +3094,45 @@ fn a_reader_gives_the_highest_position_after_a_frame_that_ends_past_the_highest_
         },
     );
 }
+
+#[test]
+#[should_panic(
+    expected = "the position is past each position that this reader gave: it gave none"
+)]
+fn a_reader_panics_on_an_ack_of_a_position_at_zero_before_it_gave_one() {
+    remote(
+        16,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (session, mut sender, _receiver) = fake_open(&transport).await;
+            let head = Reply::Head(Head {
+                path: Path::Live,
+                range: Range { seq: 0, count: 0 },
+                series: 2,
+            });
+            send(&mut sender, head.encoded_len(), |out| head.encode(out)).await;
+            send(&mut sender, 2 * ends::LEN, |out| {
+                ends::encode([(0, 0), (1, 0)], out);
+            })
+            .await;
+            let mut incoming = session.accept().await.expect("a stream");
+            let mut second = incoming.sender.take().expect("a two-way stream");
+            for _ in 0..3 {
+                incoming
+                    .receiver
+                    .recv()
+                    .await
+                    .expect("a message")
+                    .expect("not finished");
+            }
+            send(&mut second, 1, |out| Reply::Opened.encode(out)).await;
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let mut first = test.reader(&["value"], Mode::Complete).await;
+            let position = first.next().await.expect("a frame").position();
+            let mut second = test.reader(&["value"], Mode::Complete).await;
+            second.ack(position);
+        },
+    );
+}
