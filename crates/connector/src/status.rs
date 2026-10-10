@@ -204,7 +204,7 @@ impl Class {
             Err(kind::Error::Device(source)) => (Self::Device, source.to_string()),
             Err(kind::Error::Retry(source)) => (Self::Retry, source.to_string()),
         };
-        (class, cut(text))
+        (class, cut(&text))
     }
 }
 
@@ -651,11 +651,8 @@ impl Session {
 }
 
 /// The longest prefix of `text` of at most [`ERROR_MAX`] bytes that ends at a char
-/// boundary, which holds no more than it needs when `text` is longer.
-fn cut(text: String) -> String {
-    if text.len() <= ERROR_MAX {
-        return text;
-    }
+/// boundary, in a string with no spare capacity.
+fn cut(text: &str) -> String {
     text[..text.floor_char_boundary(ERROR_MAX)].to_owned()
 }
 
@@ -850,15 +847,21 @@ mod tests {
         fn cuts_a_text_to_the_longest_prefix_that_fits(
             text in "(a|é|€|😀){0,1100}",
         ) {
-            let got = cut(text.clone());
+            let got = cut(&text);
             prop_assert!(text.starts_with(&got));
             prop_assert!(got.len() <= ERROR_MAX);
-            if text.len() > ERROR_MAX {
-                prop_assert!(got.capacity() <= ERROR_MAX, "holds {}", got.capacity());
-            }
+            prop_assert_eq!(got.capacity(), got.len());
             let next = text[got.len()..].chars().next();
             prop_assert!(next.is_none_or(|c| got.len() + c.len_utf8() > ERROR_MAX));
         }
+    }
+
+    #[test]
+    fn gives_the_text_of_an_error_with_no_spare_capacity() {
+        let device = Err(kind::Error::Device("busy".into()));
+        let (class, text) = Class::with_text(&device);
+        assert_eq!((class, text.as_str()), (Class::Device, "busy"));
+        assert_eq!(text.capacity(), text.len());
     }
 
     #[test]
