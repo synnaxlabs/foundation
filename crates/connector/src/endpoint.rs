@@ -18,14 +18,14 @@ const SETTINGS: Code = Code::new("connector.endpoint-settings");
 /// Keeps at most one open endpoint per key on a node, shared by every connector that
 /// names that key. `node` makes one for each kind that needs it and gives it to the
 /// kind. Any thread may use it.
-pub struct Registry<K, S, T>(Arc<Slots<K, S, T>>);
+pub struct Registry<K, S, T>(Arc<Locked<K, S, T>>);
 
-type Slots<K, S, T> = Mutex<Table<K, S, T>>;
+type Locked<K, S, T> = Mutex<Table<K, S, T>>;
 
 struct Table<K, S, T> {
     slots: BTreeMap<K, Slot<S, T>>,
-    /// The key of the next [`Waiter`]. It is unique in the registry, so a slot that
-    /// frees and goes busy again never holds two waiters with one key.
+    /// The place of the next [`Waiter`]. It is unique in the registry, so a slot that
+    /// frees and goes busy again never holds two waiters with one place.
     next: u64,
 }
 
@@ -80,7 +80,7 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Registry<K, S, T> {
         F: Future<Output = Result<T, Error>>,
     {
         let claim = Waiter {
-            slots: &self.0,
+            table: &self.0,
             key: &key,
             settings: &settings,
             place: None,
@@ -90,17 +90,17 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Registry<K, S, T> {
             Claim::Shared(endpoint) => endpoint,
             Claim::Mine => {
                 let guard = Free {
-                    slots: &self.0,
+                    table: &self.0,
                     key: Some(&key),
                 };
                 let endpoint = Arc::new(open(&settings).await?);
-                let mut slots = lock(&self.0);
+                let mut table = lock(&self.0);
                 let open = Slot::Open {
                     settings,
                     endpoint: Arc::downgrade(&endpoint),
                 };
-                let busy = slots.slots.insert(key.clone(), open);
-                drop(slots);
+                let busy = table.slots.insert(key.clone(), open);
+                drop(table);
                 wake(busy);
                 guard.disarm();
                 endpoint
@@ -109,7 +109,7 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Registry<K, S, T> {
         Ok(Lease {
             endpoint: Some(endpoint),
             key,
-            slots: Arc::clone(&self.0),
+            table: Arc::clone(&self.0),
         })
     }
 }
@@ -142,7 +142,7 @@ pub struct Lease<K: Ord, S, T> {
     /// `None` only inside `drop`.
     endpoint: Option<Arc<T>>,
     key: K,
-    slots: Arc<Slots<K, S, T>>,
+    table: Arc<Locked<K, S, T>>,
 }
 
 impl<K: Ord, S, T> Deref for Lease<K, S, T> {
@@ -157,7 +157,7 @@ impl<K: Ord, S, T> Deref for Lease<K, S, T> {
 
 impl<K: Ord, S, T> Drop for Lease<K, S, T> {
     fn drop(&mut self) {
-        let mut slots = lock(&self.slots);
+        let mut table = lock(&self.table);
         let Some(endpoint) = self.endpoint.take() else {
             return;
         };
@@ -168,12 +168,12 @@ impl<K: Ord, S, T> Drop for Lease<K, S, T> {
             drop(endpoint);
             return;
         }
-        if let Some(slot) = slots.slots.get_mut(&self.key) {
+        if let Some(slot) = table.slots.get_mut(&self.key) {
             *slot = Slot::Busy(wait::Set::new());
         }
-        drop(slots);
+        drop(table);
         let _free = Free {
-            slots: &self.slots,
+            table: &self.table,
             key: Some(&self.key),
         };
         drop(endpoint);
@@ -191,7 +191,7 @@ impl<K: Ord + fmt::Debug, S, T> fmt::Debug for Lease<K, S, T> {
 /// Frees a busy slot and wakes its waiters: after a close, even one that panicked, or
 /// after an open that failed or was dropped.
 struct Free<'a, K: Ord, S, T> {
-    slots: &'a Slots<K, S, T>,
+    table: &'a Locked<K, S, T>,
     /// `None` after the open succeeded.
     key: Option<&'a K>,
 }
@@ -205,7 +205,7 @@ impl<K: Ord, S, T> Free<'_, K, S, T> {
 impl<K: Ord, S, T> Drop for Free<'_, K, S, T> {
     fn drop(&mut self) {
         if let Some(key) = self.key {
-            let busy = lock(self.slots).slots.remove(key);
+            let busy = lock(self.table).slots.remove(key);
             wake(busy);
         }
     }
@@ -214,10 +214,10 @@ impl<K: Ord, S, T> Drop for Free<'_, K, S, T> {
 /// Waits while the slot of `key` is busy, then claims it. It keeps the waker of its
 /// last poll in the busy slot, and its drop takes that waker out.
 struct Waiter<'a, K: Ord, S, T> {
-    slots: &'a Slots<K, S, T>,
+    table: &'a Locked<K, S, T>,
     key: &'a K,
     settings: &'a S,
-    /// The key of its waker in a busy slot, from its first wait to its end.
+    /// The place of its waker in a busy slot, from its first wait to its end.
     place: Option<u64>,
 }
 
@@ -226,7 +226,7 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Future for Waiter<'_, K, S, T
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        let mut guard = lock(this.slots);
+        let mut guard = lock(this.table);
         let table = &mut *guard;
         let slot = match table.slots.entry(this.key.clone()) {
             Entry::Vacant(vacant) => {
@@ -238,12 +238,12 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Future for Waiter<'_, K, S, T
         };
         match slot {
             Slot::Busy(wakers) => {
-                let key = *this.place.get_or_insert_with(|| {
-                    let key = table.next;
+                let place = *this.place.get_or_insert_with(|| {
+                    let place = table.next;
                     table.next += 1;
-                    key
+                    place
                 });
-                let replaced = wakers.insert(key, cx.waker());
+                let replaced = wakers.insert(place, cx.waker());
                 drop(guard);
                 drop(replaced);
                 Poll::Pending
@@ -268,7 +268,7 @@ impl<K: Ord, S, T> Drop for Waiter<'_, K, S, T> {
         let Some(place) = self.place else {
             return;
         };
-        let mut table = lock(self.slots);
+        let mut table = lock(self.table);
         let removed = match table.slots.get_mut(self.key) {
             Some(Slot::Busy(wakers)) => wakers.remove(place),
             _ => None,
@@ -296,8 +296,8 @@ fn wake<S, T>(slot: Option<Slot<S, T>>) {
 
 /// Recovers a poisoned lock, so that a drop never panics. No code under the lock
 /// leaves the map half changed when it panics.
-fn lock<K, S, T>(slots: &Slots<K, S, T>) -> MutexGuard<'_, Table<K, S, T>> {
-    slots.lock().unwrap_or_else(PoisonError::into_inner)
+fn lock<K, S, T>(table: &Locked<K, S, T>) -> MutexGuard<'_, Table<K, S, T>> {
+    table.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 #[cfg(test)]
@@ -708,13 +708,18 @@ mod tests {
     }
 
     /// An endpoint that records whether the registry's lock was free at its close.
-    struct Probe(Arc<Slots<u8, (), Probe>>, Arc<AtomicUsize>);
+    struct Probe(Arc<Locked<u8, (), Probe>>, Arc<AtomicUsize>);
 
     impl Drop for Probe {
         fn drop(&mut self) {
-            if self.0.try_lock().is_ok() {
-                self.1.fetch_add(1, Relaxed);
-            }
+            count_if_free(&self.0, &self.1);
+        }
+    }
+
+    /// Adds one to `count` when `lock` is free.
+    fn count_if_free<M>(lock: &Mutex<M>, count: &AtomicUsize) {
+        if lock.try_lock().is_ok() {
+            count.fetch_add(1, Relaxed);
         }
     }
 
@@ -729,18 +734,16 @@ mod tests {
     }
 
     /// A waker that records whether the registry's lock was free at its drop.
-    struct Free(Arc<Slots<&'static str, u32, Port>>, Arc<AtomicUsize>);
+    struct WakerProbe(Arc<Locked<&'static str, u32, Port>>, Arc<AtomicUsize>);
 
     #[expect(clippy::manual_noop_waker, reason = "its drop is the probe")]
-    impl std::task::Wake for Free {
+    impl std::task::Wake for WakerProbe {
         fn wake(self: Arc<Self>) {}
     }
 
-    impl Drop for Free {
+    impl Drop for WakerProbe {
         fn drop(&mut self) {
-            if self.0.try_lock().is_ok() {
-                self.1.fetch_add(1, Relaxed);
-            }
+            count_if_free(&self.0, &self.1);
         }
     }
 
@@ -751,7 +754,7 @@ mod tests {
         assert!(poll_with(open.as_mut(), &Arc::default()).is_pending());
         let free = Arc::new(AtomicUsize::new(0));
         let poll = |waiter: Pin<&mut _>| {
-            let probe = Free(Arc::clone(&ports.0), Arc::clone(&free));
+            let probe = WakerProbe(Arc::clone(&ports.0), Arc::clone(&free));
             let waker = Waker::from(Arc::new(probe));
             Future::poll(waiter, &mut std::task::Context::from_waker(&waker))
         };
