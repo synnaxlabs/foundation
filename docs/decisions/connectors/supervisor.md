@@ -48,9 +48,10 @@
   `Ok` from `run` ends the connector.
   `Config` returns to the caller, which calls `run` again when the spec changes the
   connector (R12-4) (`laptop.architect-2`, 2026-10-09T05:10:43Z:
-  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616). The
-  class of each restart error reaches the connector's status (CONNECTOR STATUS), and
-  its text with #420.
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616).
+  Supersedes "`Config` returns to the caller, which starts a new supervisor when the
+  spec changes (R12-4)" of the plan on #338. The class of each restart error reaches
+  the connector's status (CONNECTOR STATUS), and its text with #420.
   Decided by the `connector` builder in the plan on #338, after `/eb-review`; approved
   by the coordinator (#338), with the reset after a long run approved on #338 later.
 - **CONNECTOR STATUS** `Supervisor::run` writes the status channels of its connector,
