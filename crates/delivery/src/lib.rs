@@ -134,13 +134,13 @@ mod tests {
             },
             to: Position {
                 live: 9,
-                backfill: Some(4),
+                backfill: None,
             },
         };
         assert_eq!(
             error.to_string(),
             "acknowledged position must keep the reader's paths: from live 10, backfill \
-             4 to live 9, backfill 4"
+             4 to live 9"
         );
     }
 }
