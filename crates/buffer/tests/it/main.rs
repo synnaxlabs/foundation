@@ -3669,9 +3669,9 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
     .expect("the buffer ends");
 }
 
-/// A `Commit` or an `End` drops a waker after the borrow of the state ends: in a
-/// poll that replaces it, and in its own drop. The waker holds an `End`, whose drop
-/// borrows the state.
+/// A waker drops after the borrow of the state ends: an `End` drops it in a poll that
+/// replaces it and in its own drop, and the commit task drops each waker of a `Commit`
+/// when it wakes it. The waker holds an `End`, whose drop borrows the state.
 #[test]
 fn a_waker_drops_after_the_borrow_of_the_state() {
     let (mut sim, node) = create_node(143);
