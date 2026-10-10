@@ -43,9 +43,9 @@ fn a_wake_by_reference_keeps_the_value() {
 }
 
 /// Runs `child` in a copy of this test in a child process, and asserts that the child
-/// aborts with the message of [`check`].
+/// aborts with the message of [`check`]. Returns the stderr of the child.
 #[cfg(unix)]
-fn assert_aborts(child: impl FnOnce()) {
+fn assert_aborts(child: impl FnOnce()) -> String {
     use std::os::unix::process::ExitStatusExt;
     use std::process;
     const CHILD: &str = "WAKER_TEST_CHILD";
@@ -56,7 +56,7 @@ fn assert_aborts(child: impl FnOnce()) {
     )]
     if std::env::var_os(CHILD).is_some() {
         child();
-        return;
+        return String::new();
     }
     let thread = thread::current();
     let test = thread.name().expect("invariant: libtest names the thread");
@@ -77,6 +77,7 @@ fn assert_aborts(child: impl FnOnce()) {
         "{stderr}"
     );
     assert_ne!(made, ran, "{stderr}");
+    stderr
 }
 
 /// Runs `call` with a waker of [`holding`] on another thread.
@@ -119,4 +120,34 @@ fn a_wake_by_reference_on_another_thread_aborts() {
 #[test]
 fn a_drop_on_another_thread_aborts() {
     assert_aborts(|| on_another_thread(drop));
+}
+
+/// Printed by the drop of [`Loud`].
+const DROPPED: &str = "the value of the waker dropped";
+
+/// Prints [`DROPPED`] when it drops.
+struct Loud;
+
+impl Drop for Loud {
+    #[expect(clippy::print_stderr, reason = "the parent reads it from the child")]
+    fn drop(&mut self) {
+        eprintln!("{DROPPED}");
+    }
+}
+
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "Miri cannot spawn a process")]
+#[test]
+fn a_last_drop_on_another_thread_aborts_before_the_value_drops() {
+    let stderr = assert_aborts(|| {
+        let waker = holding(Loud);
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test moves a waker to another thread, as safe code can"
+        )]
+        thread::spawn(move || drop(waker))
+            .join()
+            .expect("the process aborts first");
+    });
+    assert!(!stderr.contains(DROPPED), "{stderr}");
 }
