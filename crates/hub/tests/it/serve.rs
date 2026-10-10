@@ -587,7 +587,11 @@ fn stops_an_open_that_names_a_channel_again_in_a_later_message_as_malformed() {
         assert_eq!(stopped(&mut peer).await, transport::Error::Stopped { code });
     });
     let repeated = serve::Error::Repeated(channel::Key::from_u128(2));
-    assert_eq!(served, Some(Err(repeated)));
+    assert_eq!(served, Some(Err(repeated.clone())));
+    assert_eq!(
+        repeated.to_string(),
+        "the open names channel 00000000-0000-0000-0000-000000000002 more than once"
+    );
 }
 
 #[test]
