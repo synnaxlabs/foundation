@@ -2634,30 +2634,49 @@ fn drives_of_one_run_hold_no_more_than_the_most_secure_channels() {
 /// holds no waker for it.
 #[test]
 fn a_drive_that_gives_a_value_after_an_accept_wakes_its_task() {
+    assert_eq!(poll_once(3, Poll::Ready(())), (Poll::Ready(()), 1, 2));
+}
+
+#[test]
+fn a_drive_that_gives_a_value_with_no_accept_does_not_wake_its_task() {
+    assert_eq!(poll_once(0, Poll::Ready(())), (Poll::Ready(()), 0, 0));
+}
+
+/// One poll of a drive accepts each stream of a burst, one for each run, and needs
+/// no wake to go on.
+#[test]
+fn one_poll_of_a_drive_accepts_a_burst_with_no_wake() {
+    assert_eq!(poll_once(150, Poll::Pending), (Poll::Pending, 0, 150));
+}
+
+/// Dials `dials` streams to the minimal server, then polls once a drive whose `run`
+/// runs the loop and gives `give`. Gives the poll, the count of wakes of its task, and
+/// the count of accepted connections in the table.
+fn poll_once(dials: usize, give: Poll<()>) -> (Poll<()>, usize, usize) {
     let mut network = Network::new();
-    for _ in 0..3 {
+    for _ in 0..dials {
         network.dial(Span::MILLISECOND, b"");
     }
-    let wakes = network
+    network
         .sim
-        .run_on(&network.local.clone(), |node, _| async move {
+        .run_on(&network.local.clone(), move |node, _| async move {
             let side = Side::listening(&node, listener(&node));
             let server = side.start(c"opc.tcp://:4840");
             side.clock.sleep(Span::from_nanos(2_000_000)).await;
             let count = Arc::new(Wakes::default());
             let waker = Waker::from(Arc::clone(&count));
-            let mut drive = pin!(side.manager.drive(|_| {
+            let poll = pin!(side.manager.drive(|_| {
                 side.run();
-                Poll::Ready(())
-            }));
-            let poll = drive.as_mut().poll(&mut Context::from_waker(&waker));
-            assert_eq!(poll, Poll::Ready(()));
+                give
+            }))
+            .poll(&mut Context::from_waker(&waker));
             let woken = count.0.load(Ordering::Relaxed);
+            // Less the listen connection.
+            let connections = side.connections() - 1;
             side.stop(server).await;
-            woken
+            (poll, woken, connections)
         })
-        .expect("the run ends");
-    assert_eq!(wakes, 1);
+        .expect("the run ends")
 }
 
 /// Counts the wakes of a task.
