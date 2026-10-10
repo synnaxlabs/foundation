@@ -231,31 +231,24 @@ fn a_kept_pool_budget_that_gives_a_shard_too_little_fails() {
     );
 }
 
-/// A file `budget` with a checksum that matches and the largest pool budget.
+/// A file `budget` with a checksum that matches and the largest pool budget. On one
+/// core, the part of shard 0 is the whole budget. Linux only: the test pins the node
+/// with `taskset`.
+#[cfg(target_os = "linux")]
 #[test]
 fn a_kept_pool_budget_too_large_for_the_host_fails_with_no_panic() {
     let rig = Rig::new();
     rig.keep(u64::MAX, rig.disk);
-    let output = rig.run(&["start", "--name", "edge"], b"");
+    let output = rig.run_on_one_core(&["start", "--name", "edge"], b"");
     let (status, out, errors) = ended(&output);
     assert_eq!((status, out), (Some(1), ""), "{errors}");
-    let cores = os::shards().expect("read the cores").cores().get();
-    let count = u64::try_from(cores).expect("a core count fits a u64");
-    // On a host of 96 cores or more, each part fits a 64-bit address space, and the
-    // OS refuses the memory of shard 0.
-    if block::Config::new(u64::MAX / count + u64::MAX % count).is_ok() {
-        assert!(errors.starts_with("error[node.failed]: "), "{errors}");
-        return;
-    }
     assert_eq!(
         errors,
-        format!(
-            "error[node.memory]: the pool budget 18446744073709551615B, which \
-             foundation-data keeps from its first start, gives one of {cores} shards a \
-             pool that needs more address space than this host has\n\
-             fix: Remove the file `budget` in foundation-data, and the next start \
-             computes the budgets again from the free memory and disk\n"
-        )
+        "error[node.memory]: the pool budget 18446744073709551615B, which \
+         foundation-data keeps from its first start, gives one of 1 shards a pool \
+         that needs more address space than this host has\n\
+         fix: Remove the file `budget` in foundation-data, and the next start \
+         computes the budgets again from the free memory and disk\n"
     );
 }
 

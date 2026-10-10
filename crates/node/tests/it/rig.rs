@@ -165,6 +165,23 @@ impl Rig {
         run(&self.clock, PATIENCE, command, input)
     }
 
+    /// [`Rig::run`] under `taskset`, on the first CPU of the test's affinity set, so the
+    /// node runs one shard on each host.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn run_on_one_core(&self, args: &[&str], input: &[u8]) -> Output {
+        let status = std::fs::read_to_string("/proc/self/status").expect("read status");
+        let cpus = (status.lines())
+            .find_map(|line| line.strip_prefix("Cpus_allowed_list:"))
+            .expect("a list of the allowed CPUs");
+        let first = (cpus.trim().split([',', '-']).next()).expect("one CPU at least");
+        let mut command = Command::new("taskset");
+        command
+            .args(["-c", first, env!("CARGO_BIN_EXE_foundation")])
+            .args(args)
+            .current_dir(&self.dir);
+        run(&self.clock, PATIENCE, command, input)
+    }
+
     /// Starts `foundation` with `args` in [`Rig::dir`], for a test that writes its
     /// standard input while it runs.
     pub(crate) fn talk(&self, args: &[&str]) -> Talk {
