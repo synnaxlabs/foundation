@@ -54,9 +54,9 @@
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616).
   Supersedes "The caller (`node`) already watches the spec and starts a new supervisor
   on a change (R12-4)" of the plan on #338
-  (https://github.com/synnaxlabs/foundation/issues/338#issuecomment-5994872059). The class
-  of each restart error reaches the connector's status (CONNECTOR STATUS), and its text
-  with #420.
+  (https://github.com/synnaxlabs/foundation/issues/338#issuecomment-5994872059). The
+  class of each restart error reaches the connector's status (CONNECTOR STATUS), and
+  its text with #420.
   Decided by the `connector` builder in the plan on #338, after `/eb-review`; approved
   by the coordinator (#338), with the reset after a long run approved on #338 later.
 - **CONNECTOR STATUS** `Supervisor::run` writes the status channels of its connector,
