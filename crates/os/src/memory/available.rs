@@ -241,7 +241,7 @@ mod linux {
                 Self(dir)
             }
 
-            fn write(&self, path: &str, text: &str) -> &Self {
+            fn write(&self, path: impl AsRef<Path>, text: impl AsRef<[u8]>) -> &Self {
                 let path = self.0.join(path);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();
                 fs::write(path, text).unwrap();
@@ -479,38 +479,25 @@ mod linux {
             assert_eq!(root.available().unwrap(), MIB);
         }
 
-        /// An escape with a first digit of 3, the largest that fits a byte, decodes.
+        /// Each backslash and three digits decodes as an octal byte, or stays as it is.
+        /// The kernel writes only `\040`, `\011`, `\012`, and `\134`, and the public
+        /// call reads the live `/proc`, so only this call can show the rest.
         #[test]
-        fn a_mount_point_with_an_escape_at_the_largest_first_digit_decodes() {
-            let root = Root::new("v2-largest-digit");
-            root.write("proc/meminfo", MEMINFO)
-                .write("proc/self/cgroup", "0::/a\n")
-                .write(
-                    "proc/self/mountinfo",
-                    "37 31 0:31 / /cg\\303\\251 rw - cgroup2 cgroup2 rw\n",
-                )
-                .write("cg\u{e9}/a/memory.max", &format!("{MIB}\n"))
-                .write("cg\u{e9}/a/memory.current", "0\n")
-                .write("cg\u{e9}/a/memory.stat", "inactive_file 0\n");
-            assert_eq!(root.available().unwrap(), MIB);
-        }
-
-        /// A backslash and three octal digits over `\377` is no escape. The kernel
-        /// never writes `\4xx`, and the public call reads the live `/proc`, so only a
-        /// test root can show this.
-        #[test]
-        fn a_mount_point_with_an_octal_over_a_byte_keeps_it() {
-            let root = Root::new("v2-over-byte");
-            root.write("proc/meminfo", MEMINFO)
-                .write("proc/self/cgroup", "0::/a\n")
-                .write(
-                    "proc/self/mountinfo",
-                    "37 31 0:31 / /cg\\400 rw - cgroup2 cgroup2 rw\n",
-                )
-                .write("cg\\400/a/memory.max", &format!("{MIB}\n"))
-                .write("cg\\400/a/memory.current", "0\n")
-                .write("cg\\400/a/memory.stat", "inactive_file 0\n");
-            assert_eq!(root.available().unwrap(), MIB);
+        fn unescape_decodes_each_octal_byte_and_keeps_each_other_escape() {
+            for a in b'0'..=b'9' {
+                for b in b'0'..=b'9' {
+                    for c in b'0'..=b'9' {
+                        let escape = [b'\\', a, b, c];
+                        let digits = std::str::from_utf8(&escape[1..]).unwrap();
+                        let want = match u8::from_str_radix(digits, 8) {
+                            Ok(byte) => vec![b'x', byte, b'y'],
+                            Err(_) => [b"x".as_slice(), &escape, b"y"].concat(),
+                        };
+                        let field = [b"x".as_slice(), &escape, b"y"].concat();
+                        assert_eq!(unescape(&field).into_os_string().into_vec(), want);
+                    }
+                }
+            }
         }
 
         /// Page cache that the kernel can drop is not used memory.
