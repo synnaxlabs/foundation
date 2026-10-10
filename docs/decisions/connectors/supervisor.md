@@ -17,8 +17,9 @@
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072411231. A
   connector that a change adds starts at once, unless the last run of its name has
   not returned: then it starts after that run returned, so no two runs write one set
-  of status channels (`box2.builder-7`, the request on #2261, 2026-10-10:
-  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6094794911). After a
+  of status channels. This departs from "A connector that the change adds: start its
+  run at once" of 6074718616, item 3, and waits on the ruling of item 2 of
+  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098630382. After a
   run returns, the supervisor waits, with no timeout, until each task that the run
   spawned through `Context::tasks` ended, and only then starts its backoff. A task
   that does not end at the cancel is a defect of its kind (`laptop.architect-2`,
@@ -147,7 +148,11 @@
   status writer that does not open panics on an unknown or remote channel, which is a
   defect of `node`, and gives `Ok` when the mesh stopped (`laptop.architect-2`,
   2026-10-09T18:46:26Z:
-  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6087144669).
+  https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6087144669). An
+  unknown channel after the cancel of the call also gives `Ok`, since `node` removes
+  the status channels of a connector before it cancels its run. This departs from item
+  2 of 6087144669, and waits on the ruling of item 4 of
+  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098630382.
   `status::channels` replaces the public `status::TIME` and `status::CHANNELS`, so one
   call gives each name and type (same ruling). The tests define the status channels with
   `connector::testing::create_status`, behind `sim`, which gives their definitions with
