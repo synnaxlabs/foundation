@@ -8,6 +8,8 @@ publish.workspace = true
 [features]
 # `os::net()`. A `--cfg loom` build leaves it off, as Tokio has no `net` there.
 net = ["dep:noq-udp"]
+# `os::memory::available_under`, for tests.
+sim = []
 
 [dependencies]
 block = { path = "../block" }
@@ -25,11 +27,15 @@ noq-udp = { workspace = true, optional = true }
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { workspace = true, features = ["thread"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# The Mach calls that give the free pages of the host.
+mach2 = { workspace = true }
+
 [dev-dependencies]
 counting = { path = "../counting" }
 divan = { workspace = true }
-# Turns `net` on for the tests and benches of this crate.
-os = { path = ".", features = ["net"] }
+# Turns `net` and `sim` on for the tests and benches of this crate.
+os = { path = ".", features = ["net", "sim"] }
 proptest = { workspace = true }
 rustix = { workspace = true, features = ["process"] }
 tokio = { workspace = true, features = ["net", "rt", "time"] }

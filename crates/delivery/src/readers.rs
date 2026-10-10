@@ -317,13 +317,14 @@ impl Readers {
         }
     }
 
-    /// Records that the session has every sample below `position`. An ack to a closed
-    /// session changes nothing: an ack can arrive after its session closes.
+    /// Records that the session has every sample below `position`. On each path, a seq
+    /// at or below the session's changes nothing: an ack can repeat or arrive late. An
+    /// ack to a closed session changes nothing too: an ack can arrive after its session
+    /// closes.
     ///
     /// # Errors
     ///
-    /// [`Error::Ack`] when the session is open and `position` drops a path, adds one,
-    /// or moves back on one.
+    /// [`Error::Ack`] when the session is open and `position` drops a path or adds one.
     ///
     /// # Panics
     ///
@@ -334,17 +335,16 @@ impl Readers {
         };
         let session = &mut self.complete[i];
         let from = session.position;
-        let forward = position.live >= from.live
-            && match (from.backfill, position.backfill) {
-                (Some(from), Some(to)) => to >= from,
-                (None, None) => true,
-                (Some(_), None) | (None, Some(_)) => false,
-            };
-        if !forward {
+        if position.backfill.is_some() != from.backfill.is_some() {
             return Err(Error::Ack { from, to: position });
         }
-        session.changed |= position != from;
-        session.position = position;
+        // Both paths have the same shape, so `max` compares the backfill seqs.
+        let to = Position {
+            live: from.live.max(position.live),
+            backfill: from.backfill.max(position.backfill),
+        };
+        session.changed |= to != from;
+        session.position = to;
         Ok(())
     }
 
@@ -1216,11 +1216,14 @@ pub(super) mod tests {
             readers.ack(a, live(5)).expect("forward");
             let b = readers.open(of("b", "r", 10), resume(live(2)), 0, Charge::Whole);
             assert_eq!((b.position, b.replaced), (live(2), None));
-            let error = Error::Ack {
-                from: live(5),
-                to: live(4),
+            assert_eq!(readers.ack(a, live(4)), Ok(()));
+            readers.flush();
+            let a = Record {
+                reader: reader("a", "r"),
+                ..record("r", live(5), 10, None)
             };
-            assert_eq!(readers.ack(a, live(4)), Err(error));
+            let records = drained(&mut readers);
+            assert!(records.contains(&a), "{records:?}");
             assert_eq!(readers.floor(), Some(live(2)));
         }
 
@@ -1320,26 +1323,20 @@ pub(super) mod tests {
         }
 
         #[test]
-        fn rejects_a_move_back() {
+        fn changes_nothing_on_a_move_back() {
             let (mut readers, key) = opened(live(0));
             readers.ack(key, live(5)).expect("forward");
-            let error = Error::Ack {
-                from: live(5),
-                to: live(4),
-            };
-            assert_eq!(readers.ack(key, live(4)), Err(error));
+            assert_eq!(readers.ack(key, live(4)), Ok(()));
             readers.flush();
             assert_eq!(drained(&mut readers), [record("a", live(5), 10, None)]);
         }
 
         #[test]
-        fn rejects_a_move_back_on_backfill() {
+        fn keeps_the_higher_seq_on_each_path() {
             let (mut readers, key) = opened(both(5, 5));
-            let error = Error::Ack {
-                from: both(5, 5),
-                to: both(6, 4),
-            };
-            assert_eq!(readers.ack(key, both(6, 4)), Err(error));
+            assert_eq!(readers.ack(key, both(6, 4)), Ok(()));
+            readers.flush();
+            assert_eq!(drained(&mut readers), [record("a", both(6, 5), 10, None)]);
         }
 
         #[test]
@@ -3188,14 +3185,11 @@ pub(super) mod tests {
 
             fn ack(&mut self, key: complete::Key, to: Position) -> Result<(), Error> {
                 let (_, from, _) = self.open.get_mut(&key).expect("open in the model");
-                // `None` sorts below every `Some`, so equal shapes compare by value.
-                let forward = to.live >= from.live
-                    && to.backfill.is_some() == from.backfill.is_some()
-                    && to.backfill >= from.backfill;
-                if !forward {
+                if to.backfill.is_some() != from.backfill.is_some() {
                     return Err(Error::Ack { from: *from, to });
                 }
-                *from = to;
+                from.live = from.live.max(to.live);
+                from.backfill = from.backfill.max(to.backfill);
                 Ok(())
             }
 

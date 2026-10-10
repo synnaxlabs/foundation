@@ -1,5 +1,5 @@
 - **SHARD DISK (2026-10-07)** Until segments exist, `node` gives each shard's ring
-  `disk / n` of the node's disk budget (`node::Config::disk`, a `types::byte::Size`),
+  `disk / n` of the node's disk budget (`node::Budget::disk`, a `types::byte::Size`),
   and shard 0 also gets the remainder, as SHARD POOLS does. The budget bounds each new
   ring file: `node` takes the largest ring whose file fits each part
   (`buffer::Layout::fit`), so the format stays in `buffer`. When a part holds no ring,

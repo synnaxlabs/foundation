@@ -235,7 +235,10 @@ impl Lab {
                 shards: host.shards(),
                 clock: host.clock(),
                 wall: host.wall(),
-                budget: types::byte::Size::MEBIBYTE,
+                budget: node::Budget {
+                    pool: types::byte::Size::MEBIBYTE,
+                    disk: types::byte::Size::GIBIBYTE,
+                },
                 memory: Box::new(|len| Ok(block::Heap::new(len))),
                 files: {
                     let host = host.clone();
@@ -245,7 +248,6 @@ impl Lab {
                     })
                 },
                 entropy: host.entropy(),
-                disk: types::byte::Size::GIBIBYTE,
                 net: host.net(),
                 listen: listen(host),
                 region: member.region.clone(),
@@ -910,12 +912,12 @@ fn at(entries: &[types::frame::key_set::Entry], key: types::channel::Key) -> usi
 ///
 /// When the frame holds another channel.
 fn decode(received: &hub::reader::Received<'_>, keys: Keys) -> Vec<Sample> {
-    let entries = received.set.entries();
+    let entries = received.set().entries();
     let mut series = [Vec::new(), Vec::new()];
-    for (entry, bytes) in received.view.iter() {
+    for (entry, bytes) in received.view().iter() {
         let at = &entries[entry];
         let range = received
-            .view
+            .view()
             .range(at.group)
             .expect("the group has a range");
         let count = usize::try_from(range.count).unwrap();

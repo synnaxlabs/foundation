@@ -54,7 +54,7 @@ fn reader(series: u32) -> Reader {
 
 fn head() {
     let head = Head {
-        path: Path::Backfill,
+        path: Path::Live,
         range: Range { seq: 7, count: 1 },
         series: 3,
     };
