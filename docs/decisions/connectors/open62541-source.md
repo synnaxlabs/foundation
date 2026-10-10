@@ -266,14 +266,15 @@
   peer sends while it writes what waits, closes its side, then reads until the peer
   closes its side, so that the drop sends no reset. It drops the stream with a warning
   10 s after the first close, so that a peer that reads slowly or never closes cannot
-  hold it. A manager reads each stream into its one buffer of 64 KiB, since open62541
-  copies what it keeps of a read. At most 100 streams close at once: a close past that
-  drops the stream that started to close first, before its close ends, with a warning.
-  So a server of the minimal config holds at most its 100 secure channels and 100
-  closing streams (#2262, approval of `laptop.architect-2` owed). Each connect, read,
-  write, or close error gives a warning through the logger of the loop. The first
-  close, or an error before it, gives `CLOSING` once, at the next run of the loop. The
-  wake of a send on the thread of the drive: decided by `laptop.architect-2`
+  hold it. A manager reads each stream into its one buffer of 64 KiB, which it makes
+  at the first read, since open62541 copies what it keeps of a read. At most 100
+  streams close at once: a close past that drops the stream that started to close
+  first, before its close ends, with a warning. So a server of the minimal config
+  holds at most its 100 secure channels and 100 closing streams (#2262, approval of
+  `laptop.architect-2` owed). Each connect, read, write, or close error gives a
+  warning through the logger of the loop. The first close, or an error before it,
+  gives `CLOSING` once, at the next run of the loop. The wake of a send on the thread
+  of the drive: decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6074418284,
   2026-10-09 04:43 UTC). The rest, before the send bound and the context of `run`:
   approved by `laptop.architect-2`
