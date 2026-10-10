@@ -33,8 +33,8 @@
   constants). The waits start again from 1 s after a run that lasted at least 60 s.
   `Ok` from `run` ends the connector.
   `Config` returns to the caller, which starts a new supervisor when the spec
-  changes (R12-4). The class of each restart error reaches the connector's status
-  (CONNECTOR STATUS), and its text with #420.
+  changes (R12-4). The class and the text of each restart error reach the
+  connector's status (CONNECTOR STATUS).
   Decided by the `connector` builder in the plan on #338, after `/eb-review`; approved
   by the coordinator (#338), with the reset after a long run approved on #338 later.
 - **CONNECTOR STATUS** `Supervisor::run` writes the status channels of its connector,
@@ -51,7 +51,19 @@
   | `state` | `u8` | 0 running, 1 waiting to restart, 2 stopped, 3 ending |
   | `class` | `u8` | the end of the last run: 0 none or `Ok`, 1 `Config`, 2 `Device`, 3 `Retry` |
   | `restarts` | `u64` | the restarts in this call |
+  | `backoff` | `Span` | the wait from this sample to the next run, 0 unless `state` is 1 |
+  | `error` | `String` | the text of the error that ended the last run, empty when `class` is 0 |
   | each count of the kind | `u64` | as the kind sets it through `Context::count` |
+
+  `backoff` and `error` follow the #1735 ruling (`laptop.architect-2`,
+  2026-10-08T06:29:21Z:
+  https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6053869186). The
+  text of `error` is the text of the `Device` or `Retry` source, or the diagnostics of
+  `Config` joined with `"; "`, cut to at most 1024 bytes at a char boundary, so a long
+  device error does not make a frame too large. `backoff` is the time of the next run
+  minus the time of the frame, so a frame written again later gives the wait that is
+  left. Decided by the `connector` builder in the plan on #420
+  (https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074).
 
   Each write is one frame with the last value of every status channel. Each start of a
   run writes the whole status. A change of `state`, `class`, or `restarts` is written as

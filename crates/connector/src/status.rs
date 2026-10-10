@@ -34,12 +34,22 @@ use crate::{cancel, kind};
 /// The name of the index of the status channels.
 const TIME: &str = "time";
 
-/// The channels that the supervisor writes, with the sample type of each.
-const SUPERVISOR: [(&str, Type); 3] = [
+/// The channels that the supervisor writes, with the sample type of each. `error`
+/// is last, so it is entry [`ERROR`] of a frame.
+const SUPERVISOR: [(&str, Type); 5] = [
     ("state", Type::Scalar(Scalar::U8)),
     ("class", Type::Scalar(Scalar::U8)),
     ("restarts", Type::Scalar(Scalar::U64)),
+    ("backoff", Type::Scalar(Scalar::Span)),
+    ("error", Type::String),
 ];
+
+/// The entry of `error` in a frame, after the index and the other channels of the
+/// supervisor.
+const ERROR: usize = SUPERVISOR.len();
+
+/// The most bytes of the text of `error`.
+const ERROR_MAX: usize = 1024;
 
 /// The least time between two writes of a change of counts alone.
 const PERIOD: Span = Span::SECOND;
@@ -168,6 +178,23 @@ enum Class {
 }
 
 impl Class {
+    /// The class of a run that ended with `end`, and the text of `error`: empty for
+    /// `Ok`, else the text of the error with no class, cut to [`ERROR_MAX`] bytes.
+    fn with_text(end: &Result<(), kind::Error>) -> (Self, String) {
+        let text = match end {
+            Ok(()) => String::new(),
+            Err(kind::Error::Config(diagnostics)) => {
+                let texts: Vec<_> =
+                    diagnostics.iter().map(ToString::to_string).collect();
+                texts.join("; ")
+            }
+            Err(kind::Error::Device(source) | kind::Error::Retry(source)) => {
+                source.to_string()
+            }
+        };
+        (Self::of(end), cut(&text).to_owned())
+    }
+
     /// The class of a run that ended with `end`.
     fn of(end: &Result<(), kind::Error>) -> Self {
         match end {
@@ -244,17 +271,13 @@ impl Writer {
         let session = hub.writer(config).await?;
         let entries: Box<[usize]> = session.entries().into();
         let set = session.set();
+        // The length of `error` is set at each write.
         let mut series: Box<[_]> = entries
             .iter()
-            .map(|&entry| {
-                let width = set.entries()[entry].data_type.width();
-                (
-                    entry,
-                    width.expect("invariant: a status sample has one width"),
-                )
-            })
+            .map(|&entry| (entry, set.entries()[entry].data_type.width().unwrap_or(0)))
             .collect();
         series.sort_unstable();
+        let text = series.partition_point(|&(entry, _)| entry < entries[ERROR]);
         let group = set.entries()[entries[0]].group;
         let status = Status::new(counts);
         let session = Session {
@@ -267,6 +290,9 @@ impl Writer {
             state: State::Running,
             class: Class::None,
             restarts: 0,
+            error: String::new(),
+            text,
+            next: Monotonic::default(),
             started: false,
             unapplied: false,
             closed: false,
@@ -297,18 +323,27 @@ impl Writer {
         true
     }
 
-    /// Writes `state` 3 with the class of a run that ended with `end`.
+    /// Writes `state` 3 with the class and the text of a run that ended with `end`.
     pub(crate) async fn end(&self, end: &Result<(), kind::Error>) {
+        let (class, error) = Class::with_text(end);
         self.set(|session| {
-            session.class = Class::of(end);
+            session.class = class;
+            session.error = error;
             session.state = State::Ending;
         })
         .await;
     }
 
-    /// Writes `state` 1.
-    pub(crate) async fn wait(&self) {
-        self.set(|session| session.state = State::Waiting).await;
+    /// Writes `state` 1 with the next run `span` after the write, and returns the
+    /// time of the next run.
+    pub(crate) async fn wait(&self, span: Span) -> Monotonic {
+        self.applied().await;
+        let next = self.clock.now() + span;
+        self.change(|session| {
+            session.next = next;
+            session.state = State::Waiting;
+        });
+        next
     }
 
     /// Writes `state` 2.
@@ -423,6 +458,12 @@ struct Session {
     state: State,
     class: Class,
     restarts: u64,
+    /// The text of `error`, at most [`ERROR_MAX`] bytes.
+    error: String,
+    /// The index in `series` of `error`.
+    text: usize,
+    /// The time of the next run, by the node's clock, while `state` is 1.
+    next: Monotonic,
     /// Set at the first start, after which each start is a restart.
     started: bool,
     /// Set while the last change of state waits for a frame that the home applies,
@@ -479,6 +520,7 @@ impl Session {
     /// When the draft or the home refuses the frame for a cause that only a defect
     /// gives, which includes a frame larger than the largest block of the pool.
     fn send(&mut self, values: &Values, stamp: Stamp) -> Result<(), Stamp> {
+        self.series[self.text].1 = size_of::<u32>() + self.error.len();
         let mut draft = match self.hub.draft(Form::Raw, &self.series) {
             Ok(draft) => draft,
             Err(frame::Error::Pool(error)) => {
@@ -534,12 +576,20 @@ impl Session {
 
     /// Fills `draft` with the last value of each status channel at `stamp`.
     fn fill(&self, draft: &mut Draft, values: &Values, stamp: Stamp) {
+        let backoff = match self.state {
+            State::Waiting => (self.next - self.wrote).max(Span::ZERO),
+            State::Running | State::Stopped | State::Ending => Span::ZERO,
+        };
         let supervisor = [
-            u64::from(self.state as u8),
-            u64::from(self.class as u8),
-            self.restarts,
+            u64::from(self.state as u8).to_le_bytes(),
+            u64::from(self.class as u8).to_le_bytes(),
+            self.restarts.to_le_bytes(),
+            backoff.nanos().to_le_bytes(),
         ];
-        let counts = values.counts.iter().map(|(_, count)| count.get());
+        let counts = values
+            .counts
+            .iter()
+            .map(|(_, count)| count.get().to_le_bytes());
         let mut samples = supervisor.into_iter().chain(counts);
         for (i, &entry) in self.entries.iter().enumerate() {
             let bytes = draft
@@ -549,12 +599,25 @@ impl Session {
                 bytes.copy_from_slice(&stamp.nanos().to_le_bytes());
                 continue;
             }
+            if i == ERROR {
+                let (end, text) = bytes.split_at_mut(size_of::<u32>());
+                let len = u32::try_from(self.error.len()).expect("at most ERROR_MAX");
+                end.copy_from_slice(&len.to_le_bytes());
+                text.copy_from_slice(self.error.as_bytes());
+                continue;
+            }
             let sample = samples.next().expect("invariant: a sample per channel");
             let len = bytes.len();
-            bytes.copy_from_slice(&sample.to_le_bytes()[..len]);
+            bytes.copy_from_slice(&sample[..len]);
         }
         draft.set_count(self.group, 1);
     }
+}
+
+/// The longest prefix of `text` of at most [`ERROR_MAX`] bytes that ends at a char
+/// boundary.
+fn cut(text: &str) -> &str {
+    &text[..text.floor_char_boundary(ERROR_MAX)]
 }
 
 /// The stamp 1 ns after `stamp`.
@@ -639,6 +702,8 @@ fn check_pool(error: &block::Error) {
 #[cfg(not(loom))]
 mod tests {
     use std::sync::atomic::AtomicUsize;
+
+    use proptest::prelude::*;
 
     use super::*;
 
@@ -727,11 +792,29 @@ mod tests {
             (name("plant.modbus.status.state"), u8),
             (name("plant.modbus.status.class"), u8),
             (name("plant.modbus.status.restarts"), u64),
+            (
+                name("plant.modbus.status.backoff"),
+                Type::Scalar(Scalar::Span),
+            ),
+            (name("plant.modbus.status.error"), Type::String),
             (name("plant.modbus.status.samples"), u64),
             (name("plant.modbus.status.errors"), u64),
         ];
         assert_eq!(time, name("plant.modbus.status.time"));
         assert_eq!(channels, want);
+    }
+
+    proptest! {
+        #[test]
+        fn cuts_a_text_to_the_longest_prefix_that_fits(
+            text in "(a|é|€|😀){0,1100}",
+        ) {
+            let got = cut(&text);
+            prop_assert!(text.starts_with(got));
+            prop_assert!(got.len() <= ERROR_MAX);
+            let next = text[got.len()..].chars().next();
+            prop_assert!(next.is_none_or(|c| got.len() + c.len_utf8() > ERROR_MAX));
+        }
     }
 
     #[test]

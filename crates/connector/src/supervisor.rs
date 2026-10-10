@@ -176,17 +176,16 @@ impl Supervisor {
                     writer.stop().await;
                     return end;
                 }
-                // The status gives their class. #420 adds their text.
                 Err(Error::Device(_) | Error::Retry(_)) => {}
             }
             if cancel.cancelled() {
                 break;
             }
-            writer.wait().await;
             if lasted >= HEALTHY {
                 backoff.reset();
             }
-            backoff.wait(cancel).await;
+            let next = writer.wait(backoff.next()).await;
+            cancel.race(clock.sleep_until(next)).await;
         }
         writer.stop().await;
         Ok(())
@@ -300,6 +299,8 @@ mod tests {
         Config,
         /// Returns a retry error at once.
         Retry,
+        /// Returns a device error at once, whose text is `a`, then 600 `é`.
+        Long,
         /// Cancels its own token, then returns a device error.
         Abort,
         /// Waits for the cancel, then the span, then returns a device error.
@@ -365,6 +366,7 @@ mod tests {
                 }
                 Some(Step::Config) => Err(Error::Config(vec![bad()])),
                 Some(Step::Retry) => Err(Error::Retry("busy".into())),
+                Some(Step::Long) => Err(Error::Device(long().into())),
                 Some(Step::Abort) => {
                     ctx.cancel().cancel();
                     Err(Error::Device("stopped its parts".into()))
@@ -404,6 +406,11 @@ mod tests {
         });
     }
 
+    /// `a`, then 600 `é`: 1201 bytes.
+    fn long() -> String {
+        format!("a{}", "é".repeat(600))
+    }
+
     fn bad() -> Diagnostic {
         Diagnostic::new(BAD, None, "the config is bad".into(), "Fix it".into())
     }
@@ -425,9 +432,10 @@ mod tests {
         statuses: Vec<Written>,
     }
 
-    /// One status frame: its stamp from the first, and the sample of each status
-    /// channel but the index, in the order of [`status::channels`].
-    type Written = (Span, Vec<i64>);
+    /// One status frame: its stamp from the first, the sample of each status channel
+    /// but the index and `error`, in the order of [`status::channels`], and the text
+    /// of `error`.
+    type Written = (Span, Vec<i64>, String);
 
     /// Reads the status frames of `connector` with `counts`, whose status channels
     /// have keys from [`STATUS`] on, into the vector it gives, in a task on `tasks`.
@@ -440,8 +448,14 @@ mod tests {
         let connector = connector.parse().expect("a valid name");
         let names = status::channels(&connector, counts).expect("names");
         let (_, channels) = names;
+        let error = channels
+            .iter()
+            .position(|(name, _)| name.as_str().ends_with("error"));
+        let error =
+            STATUS.as_u128() + 1 + u128::try_from(error.expect("error")).expect("few");
         let names: Vec<_> = channels.into_iter().map(|(name, _)| name).collect();
         let keys = 1..=u128::try_from(names.len()).expect("a few channels");
+        let keys = keys.filter(move |&key| STATUS.as_u128() + key != error);
         let open = hub::reader::Config {
             select: Selector::new(names.iter().map(Name::as_str)).expect("a selector"),
             mode: Mode::Complete,
@@ -461,11 +475,13 @@ mod tests {
                     .clone()
                     .map(|key| series(&received, STATUS.as_u128() + key))
                     .collect();
+                let mut texts = texts(&received, error).into_iter();
                 let mut into = into.borrow_mut();
                 for (i, stamp) in stamps.into_iter().enumerate() {
                     let first = *first.get_or_insert(stamp);
                     let at = Span::from_nanos(stamp - first);
-                    into.push((at, samples.iter().map(|series| series[i]).collect()));
+                    let samples = samples.iter().map(|series| series[i]).collect();
+                    into.push((at, samples, texts.next().expect("a text")));
                 }
             }
         });
@@ -550,7 +566,10 @@ mod tests {
             };
             (state, class, restarts)
         };
-        statuses.iter().map(|(_, samples)| state(samples)).collect()
+        statuses
+            .iter()
+            .map(|(_, samples, _)| state(samples))
+            .collect()
     }
 
     #[test]
@@ -569,10 +588,132 @@ mod tests {
             (ms(5_000), (3, 0, 1)),
             (ns(ms(5_000)), (2, 0, 1)),
         ];
-        let at = out.statuses.iter().map(|(at, _)| *at);
+        let at = out.statuses.iter().map(|(at, ..)| *at);
         let got: Vec<_> = at.zip(states(&out.statuses)).collect();
         assert_eq!(got, want);
         out.result.expect("ok after a cancel");
+    }
+
+    /// The `(backoff, error)` of each of `statuses`.
+    fn errors(statuses: &[Written]) -> Vec<(Span, &str)> {
+        statuses
+            .iter()
+            .map(|(_, samples, text)| {
+                let [.., backoff] = samples[..4] else {
+                    panic!("the samples of the supervisor's channels: {samples:?}");
+                };
+                (Span::from_nanos(backoff), text.as_str())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn writes_the_error_text_and_the_backoff_after_a_device_error() {
+        let steps = vec![Step::Device(ms(10))];
+        let out = supervise("script", steps, config(), Some(ms(5_000)));
+        let [(_, Some(ended)), (again, _)] = out.runs[..] else {
+            panic!("two runs, the first ended: {:?}", out.runs);
+        };
+        assert!(again > ended, "a wait after the end: {:?}", out.runs);
+        let want = [
+            (Span::ZERO, ""),
+            (Span::ZERO, "no reply"),
+            (between(ended, again), "no reply"),
+            (Span::ZERO, "no reply"),
+            (Span::ZERO, ""),
+            (Span::ZERO, ""),
+        ];
+        assert_eq!(errors(&out.statuses), want);
+    }
+
+    #[test]
+    fn writes_the_text_of_a_retry_error() {
+        let out = supervise("script", vec![Step::Retry, Step::Done], config(), None);
+        let texts: Vec<_> = errors(&out.statuses).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(texts, ["", "busy", "busy", "busy", "", ""]);
+    }
+
+    #[test]
+    fn writes_the_text_of_a_config_error() {
+        let out = supervise("script", vec![Step::Config], config(), None);
+        let text = bad().to_string();
+        let want = [(Span::ZERO, ""), (Span::ZERO, &*text), (Span::ZERO, &*text)];
+        assert_eq!(errors(&out.statuses), want);
+    }
+
+    #[test]
+    fn cuts_a_long_error_text_at_a_char_boundary() {
+        let out = supervise("script", vec![Step::Long], config(), Some(ms(5_000)));
+        let cut = format!("a{}", "é".repeat(511));
+        assert_eq!(cut.len(), 1_023);
+        assert_eq!(out.statuses[1].2, cut);
+        assert!(long().starts_with(&cut));
+    }
+
+    #[test]
+    fn writes_the_backoff_that_is_left_when_the_home_refused_the_wait() {
+        let (statuses, runs) = run_on(|node, tasks| async move {
+            let steps = [Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
+            let script = Script {
+                steps: Mutex::new(steps.into()),
+                ..Script::default()
+            };
+            let runs = Arc::clone(&script.runs);
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            let hog = hub::writer::Config {
+                subject: name("plant.other"),
+                authority: Authority(1),
+                lease: None,
+                channels: ["state", "error"]
+                    .map(|c| name(&format!("plant.script.status.{c}")))
+                    .into(),
+            };
+            let hog = inputs.hub.writer(hog).await.expect("opens");
+            let (token, clock) = (Token::new(), node.clock());
+            let (canceller, sleeper) = (token.clone(), clock.clone());
+            let filled = Arc::clone(&runs);
+            tasks.spawn(async move {
+                // The second run spawns a task that ends 2 s after it.
+                while filled.lock().expect("no panic under the lock").len() < 2 {
+                    sleeper.sleep(ms(10)).await;
+                }
+                sleeper.sleep(ms(1_500)).await;
+                let held = fill(&hog);
+                sleeper.sleep(ms(1_000)).await;
+                drop(held);
+                sleeper.sleep(ms(5_000)).await;
+                canceller.cancel();
+            });
+            let (supervisor, start) = (Supervisor::new(inputs), clock.now());
+            let name = name("plant.script");
+            let result = supervisor.run("script", name, &config(), &token).await;
+            result.expect("ok after a cancel");
+            clock.sleep(Span::SECOND).await;
+            let runs: Vec<_> = (runs.lock().expect("no panic under the lock").iter())
+                .map(|(from, _)| *from - start)
+                .collect();
+            (statuses.borrow().clone(), runs)
+        });
+        let [_, second, third] = runs[..] else {
+            panic!("three runs: {runs:?}");
+        };
+        let (at, samples, _) = &statuses[5];
+        assert_eq!(samples[..2], [1, 2], "the second wait: {statuses:?}");
+        let again = Span::from_nanos(second.nanos() + ms(3_000).nanos());
+        assert_eq!(*at, again, "written again 1 s after the refusal at the end");
+        let left = Span::from_nanos(samples[3]);
+        assert!(
+            left > Span::ZERO,
+            "the wait is longer than 1 s: {statuses:?}"
+        );
+        assert_eq!(
+            left,
+            between(*at, third),
+            "the wait from the write to the run"
+        );
     }
 
     #[test]
@@ -771,7 +912,7 @@ mod tests {
             let inputs =
                 create_config(&node, tasks.clone(), kinds, "plant.script").await;
             let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
-            let channels = ["state", "class", "restarts"];
+            let channels = ["state", "class", "restarts", "backoff", "error"];
             let other = hub::writer::Config {
                 subject: name("plant.other"),
                 authority: Authority::ABSOLUTE,
@@ -782,14 +923,19 @@ mod tests {
             };
             let mut other = inputs.hub.writer(other).await.expect("opens");
             let entries = other.set().entries();
+            // An empty text is its end alone, 0 as a `u32`.
             let series: Vec<_> = (entries.iter().enumerate())
-                .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
+                .map(|(i, entry)| (i, entry.data_type.width().unwrap_or(4)))
                 .collect();
             let mut draft = other.draft(Form::Raw, &series).expect("a frame");
             let stamp = other.now().nanos() + Span::SECOND.nanos();
             for (i, entry) in entries.iter().enumerate() {
                 let bytes = draft.series_mut(i).expect("a series");
-                let value = if entry.key == STATUS { stamp } else { 9 };
+                let value = match entry.data_type {
+                    _ if entry.key == STATUS => stamp,
+                    Type::String => 0,
+                    _ => 9,
+                };
                 let len = bytes.len();
                 bytes.copy_from_slice(&value.to_le_bytes()[..len]);
             }
@@ -812,10 +958,10 @@ mod tests {
         // The other frame is at 1 s, and the frames of 0 s are written again after it,
         // where each is ahead of the mesh time until the flush of 1 s.
         let want = [
-            (Span::ZERO, vec![9, 9, 9]),
-            (Span::from_nanos(2), vec![0, 0, 0]),
-            (Span::from_nanos(3), vec![3, 0, 0]),
-            (Span::from_nanos(4), vec![2, 0, 0]),
+            (Span::ZERO, vec![9, 9, 9, 9], String::new()),
+            (Span::from_nanos(2), vec![0, 0, 0, 0], String::new()),
+            (Span::from_nanos(3), vec![3, 0, 0, 0], String::new()),
+            (Span::from_nanos(4), vec![2, 0, 0, 0], String::new()),
         ];
         assert_eq!(statuses, want);
         assert_eq!(returned, Span::SECOND);
@@ -865,7 +1011,7 @@ mod tests {
             let statuses = statuses.borrow().clone();
             (statuses, returned)
         });
-        let last = statuses.last().map(|(at, samples)| (*at, samples[0]));
+        let last = statuses.last().map(|(at, samples, _)| (*at, samples[0]));
         assert_eq!(last, Some((ms(3_000), 2)), "{statuses:?}");
         assert_eq!(returned, ms(3_000), "returns once the home applied state 2");
     }
@@ -947,8 +1093,11 @@ mod tests {
         let returned = timed(run, |scene| async move {
             let clock = scene.node.clock();
             clock.sleep(ms(100)).await;
-            let hog =
-                rival(&scene.hub, &["state", "class", "restarts", "samples"]).await;
+            let hog = rival(
+                &scene.hub,
+                &["state", "class", "restarts", "backoff", "error", "samples"],
+            )
+            .await;
             clock.sleep(ms(400)).await;
             scene.remove("samples");
             clock.sleep(ms(700)).await;
@@ -971,8 +1120,11 @@ mod tests {
         let returned = timed(run, |scene| async move {
             let clock = scene.node.clock();
             clock.sleep(ms(100)).await;
-            let hog =
-                rival(&scene.hub, &["state", "class", "restarts", "samples"]).await;
+            let hog = rival(
+                &scene.hub,
+                &["state", "class", "restarts", "backoff", "error", "samples"],
+            )
+            .await;
             clock.sleep(ms(400)).await;
             scene
                 .node
@@ -1109,7 +1261,7 @@ mod tests {
             Ok(())
         };
         let returned = timed(run, |scene| async move {
-            let hog = rival(&scene.hub, &["state"]).await;
+            let hog = rival(&scene.hub, &["state", "error"]).await;
             scene.node.clock().sleep(ms(500)).await;
             let held = fill(&hog);
             scene.remove("samples");
@@ -1129,7 +1281,7 @@ mod tests {
         let returned = timed(run, |scene| async move {
             let clock = scene.node.clock();
             clock.sleep(ms(100)).await;
-            let mut hog = rival(&scene.hub, &["state"]).await;
+            let mut hog = rival(&scene.hub, &["state", "error"]).await;
             clock.sleep(ms(400)).await;
             scene
                 .node
@@ -1721,7 +1873,7 @@ mod tests {
         let statuses = tally(late(Some(2)));
         let got: Vec<_> = statuses
             .iter()
-            .map(|(at, samples)| (*at, samples[0], samples[3]))
+            .map(|(at, samples, _)| (*at, samples[0], samples[4]))
             .collect();
         let want = [
             (Span::ZERO, 0, 0),
@@ -1737,7 +1889,7 @@ mod tests {
         let statuses = tally(late(None));
         let got: Vec<_> = statuses
             .iter()
-            .map(|(at, samples)| (*at, samples[0], samples[3]))
+            .map(|(at, samples, _)| (*at, samples[0], samples[4]))
             .collect();
         let want = [(Span::ZERO, 0, 0), (ms(600), 3, 1), (ms(2_000), 2, 1)];
         assert_eq!(got, want);
@@ -1776,7 +1928,10 @@ mod tests {
     fn gives_13_frames_for_10_000_samples_over_10_s_set_from_a_task() {
         let statuses = tally(relay(10_000, ms(1)));
         assert_eq!(statuses.len(), 13, "{statuses:?}");
-        assert_eq!(statuses.last().map(|(_, samples)| samples[3]), Some(10_000));
+        assert_eq!(
+            statuses.last().map(|(_, samples, _)| samples[4]),
+            Some(10_000)
+        );
         assert_eq!(states(&statuses)[11..], [(3, 0, 0), (2, 0, 0)]);
     }
 
@@ -1787,9 +1942,10 @@ mod tests {
     /// 1 s. Else the home has no room to take that flush's frame, and loses it.
     fn hog(full: bool) -> impl Kind<Config = ()> {
         Counted(move |ctx: Context<()>| async move {
-            let channels = ["state", "class", "restarts", "samples"]
-                .map(|c| name(&format!("plant.tally.status.{c}")))
-                .into();
+            let channels =
+                ["state", "class", "restarts", "backoff", "error", "samples"]
+                    .map(|c| name(&format!("plant.tally.status.{c}")))
+                    .into();
             let writer = ctx.writer(channels, Authority(1), None).await;
             let writer = writer.expect("the writer opens");
             let mut held = fill(&writer);
@@ -1824,22 +1980,26 @@ mod tests {
     ];
 
     /// Takes frames of one sample for each channel of `writer` from the shard's pool
-    /// until the pool has no room.
+    /// until the pool has no room for a frame of any size up to 2 KiB, so that no
+    /// status frame and no copy of it in the home gets a block. `writer` has `error`,
+    /// whose text sets the size.
     fn fill(writer: &hub::writer::Writer) -> Vec<frame::Draft> {
-        let series: Vec<_> = (writer.set().entries().iter().enumerate())
-            .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
-            .collect();
         let mut held = Vec::new();
-        let error = loop {
-            match writer.draft(Form::Raw, &series) {
-                Ok(draft) => held.push(draft),
-                Err(error) => break error,
-            }
-        };
-        assert!(
-            matches!(error, frame::Error::Pool(block::Error::Exhausted { .. })),
-            "{error}"
-        );
+        for text in (0..=2_048).rev().step_by(16) {
+            let series: Vec<_> = (writer.set().entries().iter().enumerate())
+                .map(|(i, entry)| (i, entry.data_type.width().unwrap_or(4 + text)))
+                .collect();
+            let error = loop {
+                match writer.draft(Form::Raw, &series) {
+                    Ok(draft) => held.push(draft),
+                    Err(error) => break error,
+                }
+            };
+            assert!(
+                matches!(error, frame::Error::Pool(block::Error::Exhausted { .. })),
+                "{error}"
+            );
+        }
         held
     }
 
@@ -1918,7 +2078,7 @@ mod tests {
         let statuses = tally(hog(full));
         statuses
             .iter()
-            .map(|(at, samples)| (*at, samples[0], samples[3]))
+            .map(|(at, samples, _)| (*at, samples[0], samples[4]))
             .collect()
     }
 
@@ -1927,9 +2087,10 @@ mod tests {
     /// returns `Ok` at 200 ms.
     fn outlive() -> impl Kind<Config = ()> {
         Counted(|ctx: Context<()>| async move {
-            let channels = ["state", "class", "restarts", "samples"]
-                .map(|c| name(&format!("plant.tally.status.{c}")))
-                .into();
+            let channels =
+                ["state", "class", "restarts", "backoff", "error", "samples"]
+                    .map(|c| name(&format!("plant.tally.status.{c}")))
+                    .into();
             let writer = ctx.writer(channels, Authority(1), None).await;
             let writer = writer.expect("the writer opens");
             let clock = ctx.clock().clone();
@@ -1946,7 +2107,7 @@ mod tests {
     #[test]
     fn returns_at_a_cancel_while_a_change_of_state_waits() {
         let (statuses, returned) = tally_until(outlive(), Some(ms(700)));
-        let states: Vec<_> = statuses.iter().map(|(at, s)| (*at, s[0])).collect();
+        let states: Vec<_> = statuses.iter().map(|(at, s, _)| (*at, s[0])).collect();
         let want = [(Span::ZERO, 0), (ms(700), 2)];
         assert_eq!(
             states, want,
@@ -1958,7 +2119,7 @@ mod tests {
     #[test]
     fn writes_state_3_when_the_pool_is_full_at_the_end_of_a_run() {
         let statuses = tally(outlive());
-        let states: Vec<_> = statuses.iter().map(|(at, s)| (*at, s[0])).collect();
+        let states: Vec<_> = statuses.iter().map(|(at, s, _)| (*at, s[0])).collect();
         let want = [
             (Span::ZERO, 0),
             (ms(1_200), 3),
@@ -1986,7 +2147,7 @@ mod tests {
             let (canceller, sleeper) = (token.clone(), clock.clone());
             tasks.spawn(async move {
                 sleeper.sleep(ms(500)).await;
-                let channels = ["state", "class", "restarts"]
+                let channels = ["state", "class", "restarts", "backoff", "error"]
                     .map(|c| name(&format!("plant.script.status.{c}")))
                     .into();
                 let hog = hub::writer::Config {
@@ -2077,7 +2238,7 @@ mod tests {
         let mut want = vec![(Span::ZERO, 0)];
         want.extend((1..=9).map(|s| (ms(s * 1_000), s * 1_000)));
         want.extend([(end, 10_000), (Span::from_nanos(end.nanos() + 1), 10_000)]);
-        let got = statuses.iter().map(|(at, samples)| (*at, samples[3]));
+        let got = statuses.iter().map(|(at, samples, _)| (*at, samples[4]));
         assert_eq!(got.collect::<Vec<_>>(), want);
         let states = states(&statuses);
         assert_eq!(states[..10], [(0, 0, 0); 10]);
@@ -2112,7 +2273,7 @@ mod tests {
             clock.sleep(Span::SECOND).await;
             statuses.borrow().clone()
         });
-        let got: Vec<_> = statuses.iter().map(|(at, s)| (*at, s[0])).collect();
+        let got: Vec<_> = statuses.iter().map(|(at, s, _)| (*at, s[0])).collect();
         let ns = Span::from_nanos;
         let first = [(ns(0), 0), (ns(1), 3), (ns(2), 2)];
         let second = [(ns(3), 0), (ms(5_000), 3), (ns(5_000_000_001), 2)];
@@ -2132,7 +2293,7 @@ mod tests {
             (ms(10_000), 10_000),
             (Span::from_nanos(10_000_000_001), 10_000),
         ]);
-        let got = statuses.iter().map(|(at, samples)| (*at, samples[3]));
+        let got = statuses.iter().map(|(at, samples, _)| (*at, samples[4]));
         assert_eq!(got.collect::<Vec<_>>(), want);
         assert_eq!(states(&statuses)[10..], [(3, 0, 0), (2, 0, 0)]);
     }
@@ -2169,7 +2330,7 @@ mod tests {
             node.clock().sleep(Span::SECOND).await;
             statuses.borrow().clone()
         });
-        let at: Vec<_> = statuses.iter().map(|(at, _)| *at).collect();
+        let at: Vec<_> = statuses.iter().map(|(at, ..)| *at).collect();
         assert_eq!(at, [Span::ZERO, Span::SECOND], "nothing after 1.5 s");
         assert_eq!(states(&statuses), [(0, 0, 0); 2]);
     }
@@ -2206,7 +2367,7 @@ mod tests {
             let statuses = statuses.borrow().clone();
             (statuses, returned)
         });
-        let at: Vec<_> = statuses.iter().map(|(at, _)| *at).collect();
+        let at: Vec<_> = statuses.iter().map(|(at, ..)| *at).collect();
         assert_eq!(at, [Span::ZERO, Span::SECOND], "nothing after 1.5 s");
         assert_eq!(returned, ms(3_000));
     }
@@ -2434,7 +2595,28 @@ mod tests {
     }
 
     /// The samples of the channel of `key` in `received`, each widened to `i64`.
-    fn series(received: &Received<'_>, key: u128) -> Vec<i64> {
+    /// The texts of the `String` series of `key` in `received`.
+    fn texts(received: &Received<'_>, key: u128) -> Vec<String> {
+        let (data_type, count, bytes) = encoded(received, key);
+        let len = codec::validate(data_type, count, bytes).expect("valid");
+        let mut raw = vec![0; len];
+        codec::decode(data_type, count, bytes, &mut raw).expect("decodes");
+        let (ends, text) = raw.split_at(count * size_of::<u32>());
+        let mut start = 0;
+        ends.chunks(size_of::<u32>())
+            .map(|end| {
+                let end = u32::from_le_bytes(end.try_into().expect("four bytes"));
+                let end = usize::try_from(end).expect("an end");
+                let sample = std::str::from_utf8(&text[start..end]).expect("UTF-8");
+                start = end;
+                sample.to_owned()
+            })
+            .collect()
+    }
+
+    /// The type, the count, and the encoded bytes of the series of `key` in
+    /// `received`.
+    fn encoded<'a>(received: &'a Received<'_>, key: u128) -> (Type, usize, &'a [u8]) {
         let set = received.set;
         let key = channel::Key::from_u128(key);
         let entry = set.entries().iter().position(|entry| entry.key == key);
@@ -2447,7 +2629,11 @@ mod tests {
             .iter()
             .find(|&(present, _)| present == entry)
             .expect("the view holds the series");
-        let data_type = set.entries()[entry].data_type;
+        (set.entries()[entry].data_type, count, bytes)
+    }
+
+    fn series(received: &Received<'_>, key: u128) -> Vec<i64> {
+        let (data_type, count, bytes) = encoded(received, key);
         let width = data_type.width().expect("a fixed width");
         let mut out = vec![0; count * width];
         codec::decode(data_type, count, bytes, &mut out).expect("decodes");
