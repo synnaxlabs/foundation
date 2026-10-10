@@ -148,7 +148,9 @@ mod tests {
     }
 
     /// Each commit moves the durable tail of each index past one more entry, and
-    /// each log keeps one run.
+    /// each log keeps one run. It reads the private logs: `commit` gives nothing back,
+    /// and only the `logs` bench calls it, so no caller sees a commit that skips the
+    /// sync or the hide.
     #[test]
     fn each_commit_of_the_logs_syncs_one_entry_of_each_index() {
         let mut logs = Logs::new(2);
