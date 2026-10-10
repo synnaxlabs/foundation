@@ -227,8 +227,17 @@ mod tests {
     #[test]
     fn models_filter_names_each_crate_that_a_model_task_selects() {
         let root = fixture().join("../..");
-        let ci =
+        let text =
             std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
+        // YAML skips blank and comment lines, so the checks below never see them.
+        let ci = (text.lines())
+            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !ci.lines().any(|line| line.starts_with("defaults:")),
+            "ci.yaml sets defaults for each job"
+        );
         let models: Vec<&str> = (ci.split("models:\n").nth(1))
             .expect("ci.yaml has a models filter")
             .lines()
@@ -254,26 +263,27 @@ mod tests {
             let job: Vec<&str> = (ci.split(&format!("\n  {task}:\n")).nth(1))
                 .unwrap_or_else(|| panic!("ci.yaml has no job `{task}`"))
                 .lines()
-                .take_while(|line| line.is_empty() || line.starts_with("    "))
+                .take_while(|line| line.starts_with("    "))
                 .collect();
             let on_models =
                 "    if: \"!cancelled() && needs.changes.outputs.models != 'false'\"";
             let run = format!("run: cargo xtask {task}");
-            // The step that runs the task holds only its name, and the job has no
-            // `continue-on-error:`, so nothing can skip or hide the run.
+            // The job has no key past these, and the step that runs the task holds
+            // only its name.
+            let keys: Vec<&str> = (job.iter().copied())
+                .filter(|line| {
+                    !line.starts_with("     ") && !line.starts_with("    runs-on:")
+                })
+                .collect();
             let end = job.iter().position(|line| line.trim() == run);
             let alone = end.is_some_and(|end| {
                 end > 0
                     && job[end - 1].starts_with("      - name: ")
-                    && (job[end + 1..].iter().find(|line| !line.is_empty()))
+                    && (job.get(end + 1))
                         .is_none_or(|next| !next.starts_with("        "))
             });
             assert!(
-                job.contains(&on_models)
-                    && alone
-                    && !job
-                        .iter()
-                        .any(|line| line.starts_with("    continue-on-error:")),
+                keys == ["    needs: changes", on_models, "    steps:"] && alone,
                 "the {task} job of .github/workflows/ci.yaml does not run `cargo xtask \
                  {task}` on the models output: {job:#?}"
             );
@@ -282,6 +292,25 @@ mod tests {
                     models.contains(&format!("'crates/{name}/**'").as_str()),
                     "`cargo xtask {task}` runs `{name}`, but the `models` filter in \
                      .github/workflows/ci.yaml lacks 'crates/{name}/**'"
+                );
+            }
+        }
+        // Miri also runs the code of each workspace crate that a selected crate builds.
+        let workspace = metadata["packages"].as_array().unwrap();
+        for select::Package { name, .. } in miri::packages(&metadata).unwrap() {
+            let package = (workspace.iter())
+                .find(|p| p["name"] == name.as_str())
+                .unwrap();
+            for dep in package["dependencies"].as_array().unwrap() {
+                if dep["path"].is_null() || dep["kind"] == "build" {
+                    continue;
+                }
+                let dep = dep["name"].as_str().unwrap();
+                assert!(
+                    models.contains(&format!("'crates/{dep}/**'").as_str()),
+                    "`cargo xtask miri` runs `{name}`, which builds `{dep}`, but the \
+                     `models` filter in .github/workflows/ci.yaml lacks \
+                     'crates/{dep}/**'"
                 );
             }
         }

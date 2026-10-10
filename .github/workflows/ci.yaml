@@ -85,6 +85,7 @@ jobs:
               - 'crates/counting/**'
               - 'crates/waker/**'
               - 'crates/env/**'
+              - 'crates/types/**'
               - 'crates/node/**'
               - 'crates/connector/**'
               - 'crates/connector-ni/**'

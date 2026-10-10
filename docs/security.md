@@ -364,7 +364,7 @@ state on `main`.
   (`docs/claude/rust.md`, "Unsafe"). `cargo xtask miri` runs each crate that names
   `unsafe_code` under Miri, except `os` and `connector-opcua`, which Miri cannot run.
   CI starts it on a change to a `models` path of `ci.yaml`, which names each crate
-  that it runs.
+  that it runs and each workspace crate that one of them depends on.
 - The `fuzz/` crate has its own lock file. The `deny` job of `ci.yaml` checks it with
   `cargo deny` on each change to it.
 - A local patch of a Rust crate (`patches/`) is a path package, which `cargo deny`
