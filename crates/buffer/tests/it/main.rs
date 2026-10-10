@@ -5748,6 +5748,32 @@ fn newest_reads_each_table_once_for_the_indexes_tagged_in_two_records() {
     });
 }
 
+/// `newest` gives the entries of one record in table order, also entries with no
+/// bytes, which share a body offset. Its doc gives no order, but hash order must not
+/// decide one.
+#[test]
+fn newest_gives_the_entries_of_a_record_in_table_order() {
+    run(181, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let batch: Vec<Entry> = (1..=8)
+            .map(|n| tagged(n, slots.index(key(n)), Path::Live, 0, 1, shard.block(0)))
+            .collect();
+        let table: Vec<Slot> = batch.iter().map(|entry| entry.slot).collect();
+        buffer.append(batch).expect("queues");
+        buffer.committed().await.expect("commits");
+        let found = buffer
+            .newest(Path::Live, NonZeroU8::MIN)
+            .await
+            .expect("reads");
+        let given: Vec<Slot> = found.iter().map(|(slot, _)| *slot).collect();
+        assert_eq!(given, table);
+    });
+}
+
 /// `newest` reads no table of a record that holds only an entry of another tag. A
 /// is tagged 1 in the first record and 2 in the second: one table and one entry
 /// make two reads.
