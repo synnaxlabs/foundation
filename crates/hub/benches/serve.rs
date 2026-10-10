@@ -479,7 +479,7 @@ async fn create_hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
         home,
         interner,
         tasks,
-        node: types::node::Key::from_u128(1),
+        node: net::NODE,
         time,
         entropy: node.entropy(),
         region: None,
