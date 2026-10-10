@@ -20,5 +20,6 @@ idle_memory_mb = 50
 start_ms = 1000
 
 [gate]
-# A benchmark regression over this fraction blocks a merge.
-regression = 0.05
+# A slowdown needs the P1 judgment when it costs at least this fraction of the target it
+# counts against (the cost limit, `docs/decisions/memory/p1.md`).
+cost_limit = 0.01
