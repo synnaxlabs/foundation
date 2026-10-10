@@ -242,7 +242,8 @@ impl Log {
 pub(crate) struct Logs {
     paths: hash::Map<(Slot, Path), Log>,
     /// The offset of the newest record that holds a durable entry with each nonzero
-    /// tag, by the log and the tag. Tag 0 marks samples, which no caller looks up.
+    /// tag, by the log and the tag. Tag 0 marks samples, which no caller looks up. A
+    /// change that drops a log drops its tags in the same place.
     tags: hash::Map<(Slot, Path, NonZeroU8), u64>,
     /// No read finds a record before this offset.
     hidden: u64,
