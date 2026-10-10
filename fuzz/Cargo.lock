@@ -308,6 +308,7 @@ dependencies = [
 name = "connector"
 version = "0.0.0"
 dependencies = [
+ "block",
  "bytes",
  "document",
  "env",
@@ -315,6 +316,7 @@ dependencies = [
  "http-body",
  "hub",
  "hyper",
+ "loom",
  "types",
 ]
 

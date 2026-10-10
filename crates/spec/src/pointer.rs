@@ -7,14 +7,15 @@ use types::digest::Digest;
 /// The place of a region's spec in its history.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Pointer {
-    /// The version of the spec: 0 before its first apply, and one more at each apply.
+    /// The version of the spec: 0 before its first apply, and one more at each
+    /// apply that changes the root or gives an index a home.
     pub version: u64,
     /// The root of the spec's tree.
     pub root: Digest,
 }
 
 impl Pointer {
-    /// The pointer after one apply on this one, at `root`.
+    /// The pointer after an apply on this one that moves it, at `root`.
     ///
     /// # Panics
     ///

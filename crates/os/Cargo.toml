@@ -61,6 +61,10 @@ name = "now"
 harness = false
 
 [[bench]]
+name = "sleep"
+harness = false
+
+[[bench]]
 name = "udp"
 harness = false
 

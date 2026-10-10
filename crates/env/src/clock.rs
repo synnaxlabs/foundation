@@ -155,8 +155,9 @@ pub trait Driver: Send + Sync {
 pub trait Timer {
     /// Completes when the clock reaches `deadline`: at the deadline or later, never
     /// before. How late depends on the driver; Tokio's timer works in milliseconds.
-    /// Until then it returns `Pending` and wakes `cx` when it is due. The deadline
-    /// may change between polls.
+    /// Until then it returns `Pending` and wakes `cx` when it is due, or earlier.
+    /// After an early wake it wakes `cx` again only once it is polled again, so poll
+    /// it at each wake. The deadline may change between polls.
     fn poll_until(
         self: Pin<&mut Self>,
         deadline: Monotonic,
