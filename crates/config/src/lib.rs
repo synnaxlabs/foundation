@@ -76,10 +76,10 @@ pub struct Entry {
 /// Checks the definitions in a mesh's Documents, one Document for each file, and
 /// gives each by its tree key: the name of a channel or a connector, or
 /// `<label>.@<kind>` for each other block. The kind in `kinds` that a `connector`
-/// block names checks its config. Each connector also gives its status channels at
-/// the span of its label: the index `<connector>.status.time`, then `state` and
-/// `class` as `u8`, `restarts`, and each count of its kind as `u64`. Each order of
-/// `documents` gives the same entries, or each gives problems.
+/// block names checks its config. Each connector also gives, at the span of its
+/// label, the status channels that [`::connector::status::channels`] names: the index
+/// `<connector>.status.time` and each data channel on it. Each order of `documents`
+/// gives the same entries, or each gives problems.
 ///
 /// # Errors
 ///
