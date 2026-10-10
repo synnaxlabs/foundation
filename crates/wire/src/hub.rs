@@ -253,7 +253,7 @@ pub enum Reply {
 pub struct Head {
     /// How the frame reached the home.
     pub path: Path,
-    /// The samples of the frame.
+    /// The samples of the frame. The range ends at or below `u64::MAX`.
     pub range: Range,
     /// The count of the frame's series, which is the count of its ends. At least 1,
     /// since a frame holds its index. A head with more series than the session has
@@ -275,7 +275,8 @@ impl Reply {
     ///
     /// # Panics
     ///
-    /// When a head has no series, or `out` is not [`Reply::encoded_len`] bytes.
+    /// When a head has no series or a range that ends past `u64::MAX`, or `out` is
+    /// not [`Reply::encoded_len`] bytes.
     pub fn encode(&self, out: &mut [u8]) {
         let mut out = Writer::new(out, self.encoded_len());
         match self {
@@ -283,6 +284,10 @@ impl Reply {
             Self::Behind => out.put(&[BEHIND]),
             Self::Head(head) => {
                 assert!(head.series > 0, "a head names at least one series");
+                assert!(
+                    ends(head.range),
+                    "a head's range ends at or below the highest seq"
+                );
                 out.put(&[HEAD, path_byte(head.path)]);
                 out.put(&head.range.seq.to_le_bytes());
                 out.put(&head.range.count.to_le_bytes());
@@ -297,8 +302,8 @@ impl Reply {
     ///
     /// [`Error::Empty`] when `bytes` is empty, [`Error::Kind`] when the first byte
     /// names no reply, [`Error::Length`] when the length fits no reply of that kind,
-    /// [`Error::Path`] when a head names no path, and [`Error::Series`] when it names
-    /// no series.
+    /// [`Error::Path`] when a head names no path, [`Error::Series`] when it names no
+    /// series, and [`Error::Range`] when its range ends past `u64::MAX`.
     fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (&kind, rest) = bytes.split_first().ok_or(Error::Empty)?;
         let mut fields = Fields::new(rest, Error::Length { len: bytes.len() });
@@ -321,9 +326,13 @@ impl Reply {
                 if series == 0 {
                     return Err(Error::Series);
                 }
+                let range = Range { seq, count };
+                if !ends(range) {
+                    return Err(Error::Range { seq, count });
+                }
                 Ok(Self::Head(Head {
                     path,
-                    range: Range { seq, count },
+                    range,
                     series,
                 }))
             }
@@ -497,6 +506,13 @@ pub enum Error {
     Channels,
     /// A head names no series.
     Series,
+    /// A head's range ends past the highest seq.
+    Range {
+        /// The seq of the range.
+        seq: u64,
+        /// The count of the range.
+        count: u32,
+    },
     /// A head names no path.
     Path {
         /// The path byte.
@@ -576,6 +592,11 @@ impl fmt::Display for Error {
             ),
             Self::Channels => f.write_str("the hub open names no channel"),
             Self::Series => f.write_str("the frame head names no series"),
+            Self::Range { seq, count } => write!(
+                f,
+                "the frame head has {count} samples from seq {seq}, which end past the \
+                 highest seq"
+            ),
             Self::Path { byte } => write!(
                 f,
                 "the frame head names path {byte}, which this node does not know"
@@ -681,6 +702,11 @@ fn run<const N: usize>(message: &[u8]) -> Result<&[[u8; N]], Error> {
     } else {
         Ok(items)
     }
+}
+
+/// Whether `range` ends at or below `u64::MAX`.
+fn ends(range: Range) -> bool {
+    range.seq.checked_add(u64::from(range.count)).is_some()
 }
 
 fn path_byte(path: Path) -> u8 {
@@ -951,6 +977,23 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_head_whose_range_ends_past_the_highest_seq() {
+            let mut bytes = encode_reply(head(Path::Live, u64::MAX - 1, 1, 1));
+            assert_eq!(
+                Reply::decode(&bytes),
+                Ok(head(Path::Live, u64::MAX - 1, 1, 1))
+            );
+            bytes[10] = 2;
+            assert_eq!(
+                Reply::decode(&bytes),
+                Err(Error::Range {
+                    seq: u64::MAX - 1,
+                    count: 2
+                })
+            );
+        }
+
+        #[test]
         fn decodes_a_head_of_one_series() {
             let mut bytes = zeros(2, 18);
             bytes[14] = 1;
@@ -961,6 +1004,12 @@ mod tests {
         #[should_panic(expected = "a head names at least one series")]
         fn panics_on_a_head_of_no_series() {
             head(Path::Live, 0, 0, 0).encode(&mut [0; 18]);
+        }
+
+        #[test]
+        #[should_panic(expected = "a head's range ends at or below the highest seq")]
+        fn panics_on_a_head_whose_range_ends_past_the_highest_seq() {
+            head(Path::Live, u64::MAX, 1, 1).encode(&mut [0; 18]);
         }
 
         #[test]
@@ -1225,6 +1274,10 @@ mod tests {
             (Error::Channels, "the hub open names no channel"),
             (Error::Series, "the frame head names no series"),
             (
+                Error::Range { seq: 7, count: 2 },
+                "the frame head has 2 samples from seq 7, which end past the highest seq",
+            ),
+            (
                 Error::Path { byte: 2 },
                 "the frame head names path 2, which this node does not know",
             ),
@@ -1311,8 +1364,16 @@ mod tests {
         prop_oneof![
             Just(Reply::Opened),
             Just(Reply::Behind),
-            (path, any::<u64>(), any::<u32>(), 1..=u32::MAX)
-                .prop_map(|(path, seq, count, series)| head(path, seq, count, series)),
+            (path, any::<u64>(), any::<u32>(), 1..=u32::MAX).prop_map(
+                |(path, seq, count, series)| {
+                    head(
+                        path,
+                        seq.min(u64::MAX.saturating_sub(u64::from(count))),
+                        count,
+                        series,
+                    )
+                }
+            ),
         ]
     }
 

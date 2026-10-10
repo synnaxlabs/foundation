@@ -27,7 +27,9 @@
   no count of channels or series has a cap, and the reader fills one block of its
   frame's length: the header, the range, a descriptor for each series, and the body to
   the last end. A run message with more keys or ends than remain is not valid. A head of
-  no series is not valid, since a frame holds its index. The home checks each key as it
+  no series is not valid, since a frame holds its index. Nor is a head whose range ends
+  past `u64::MAX`, since the position after it does not fit (`laptop.architect`,
+  approval owed). The home checks each key as it
   arrives and never allocates by the peer's count. A head with more series than places,
   or an end with a place the session does not have or that is not above the place before
   it, is not valid; `wire::hub::Reader` checks the head as it arrives and `types` checks

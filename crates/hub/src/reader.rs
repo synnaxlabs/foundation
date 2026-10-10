@@ -146,10 +146,9 @@ impl Lens {
         let range = view
             .range(self.group)
             .expect("invariant: a frame holds the range of each group");
-        // A home at another node can send a range that ends past `u64::MAX`.
         Position {
             index: self.index,
-            live: range.seq.saturating_add(u64::from(range.count)),
+            live: range.seq + u64::from(range.count),
         }
     }
 }

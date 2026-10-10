@@ -76,6 +76,7 @@ fn malformed(error: Error) -> bool {
             | Error::Kind { .. }
             | Error::Length { .. }
             | Error::Series
+            | Error::Range { .. }
             | Error::Path { .. }
     )
 }
@@ -213,11 +214,15 @@ fn opened(places: u32) -> Reader {
 }
 
 /// Each valid message made from `input` must decode to itself. A count of 0 is not
-/// valid, so it becomes 1: an input that ends early writes the smallest messages.
+/// valid, so it becomes 1, and a seq that would end the range past `u64::MAX` becomes
+/// the highest that does not: an input that ends early writes the smallest messages.
 fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
+    let count: u32 = input.arbitrary()?;
     let range = Range {
-        seq: input.arbitrary()?,
-        count: input.arbitrary()?,
+        seq: input
+            .arbitrary::<u64>()?
+            .min(u64::MAX - u64::from(count)),
+        count,
     };
     let mut out = vec![0; Reply::Behind.encoded_len()];
     Reply::Behind.encode(&mut out);

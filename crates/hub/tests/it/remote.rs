@@ -3074,23 +3074,55 @@ fn a_reader_acks_each_position_that_it_gave_after_a_frame_of_a_lower_seq() {
 }
 
 #[test]
-fn a_reader_gives_the_highest_position_after_a_frame_that_ends_past_the_highest_seq() {
+fn a_reader_stops_the_stream_as_malformed_when_a_head_ends_past_the_highest_seq() {
     remote(
-        16,
+        20,
         sim::link::Config::default(),
         |node, _, transport, steps| async move {
-            let (_, mut sender, _receiver) = fake_open(&transport).await;
-            send_at(&mut sender, Path::Live, u64::MAX).await;
+            let (_, mut sender, mut receiver) = fake_open(&transport).await;
+            let head = Reply::Head(Head {
+                path: Path::Live,
+                range: Range {
+                    seq: u64::MAX,
+                    count: 0,
+                },
+                series: 2,
+            });
+            send(&mut sender, head.encoded_len(), |out| {
+                head.encode(out);
+                out[10] = 1;
+            })
+            .await;
+            let error = loop {
+                if let Err(error) = receiver.recv().await {
+                    break error;
+                }
+            };
+            assert_eq!(
+                error,
+                transport::Error::Reset {
+                    code: Code(MALFORMED)
+                }
+            );
+            steps.stopped.store(true, Ordering::Relaxed);
             until(&node.clock(), &steps.done).await;
         },
-        |test, _| async move {
+        |test, steps| async move {
             let mut reader = test.reader(&["value"], Mode::Latest).await;
-            let position = reader.next().await.expect("a frame").position();
-            assert!(
-                format!("{position:?}").ends_with(&format!("live: {} }}", u64::MAX)),
-                "{position:?}"
+            let ended = reader.next().await.expect_err("the head is malformed");
+            assert_eq!(
+                ended,
+                Ended::Message(wire::hub::Error::Range {
+                    seq: u64::MAX,
+                    count: 1
+                })
             );
-            reader.ack(position);
+            assert_eq!(
+                ended.to_string(),
+                "a message from the home broke the hub protocol: the frame head has 1 \
+                 samples from seq 18446744073709551615, which end past the highest seq"
+            );
+            until(&test.clock, &steps.stopped).await;
         },
     );
 }
