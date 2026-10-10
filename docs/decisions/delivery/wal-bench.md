@@ -27,5 +27,6 @@
   trim that keeps up, then syncs one data entry of each index, so a time holds the
   cost of `Logs::sync` for each durable entry. Lost: a time of the commit on a
   simulated file system, whose file writes hide the sync. Lost: a time after a
-  tagged entry in each log, as no sync of a data entry reads the tags. Decided by `laptop.architect` (#2236, 2026-10-10T05:43:41Z):
+  tagged entry in each log, as no sync of a data entry reads the tags. Decided by
+  `laptop.architect` (#2236, 2026-10-10T05:43:41Z):
   https://github.com/synnaxlabs/foundation/pull/2236#issuecomment-6094318889.
