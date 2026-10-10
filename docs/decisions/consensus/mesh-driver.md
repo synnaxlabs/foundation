@@ -121,7 +121,7 @@
   node again, and needs a ruling before it lands (decided by `laptop.architect`,
   2026-10-07T12:55:06Z:
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6038355946). That
-  change, and the first change that replaces a card, also make `node::runs` read the
+  change, and the first change that replaces a card, also make `node::wire` read the
   name of its node again, because today it reads the name once, when the mesh opens
   (`laptop.architect`, 2026-10-10T14:53:22Z:
   https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6098763970). So does
