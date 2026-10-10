@@ -2854,10 +2854,10 @@ unsafe extern "C" fn address(
 }
 
 /// Each read gives C its bytes in the one read buffer of the manager, which the
-/// manager makes only when a stream opens, at 64 KiB. It reads the capacity of the
-/// private `State.read`: C sees only the bytes of a read, which
-/// the 64 KiB stream buffers of `OPTIONS` also cap, no warning names it, and the
-/// counting-allocator tests make no manager.
+/// manager makes only when a stream opens, at 64 KiB, and keeps at that length. It
+/// reads the length and capacity of the private `State.read`: C sees only the bytes of
+/// a read, which the 64 KiB stream buffers of `OPTIONS` also cap, no warning names it,
+/// and the counting-allocator tests make no manager.
 #[test]
 fn each_read_is_in_the_one_buffer_of_the_manager() {
     let mut network = Network::new();
@@ -2869,11 +2869,14 @@ fn each_read_is_in_the_one_buffer_of_the_manager() {
             let mut side = Side::listening(&node, listener(&node));
             side.callback = address;
             assert_eq!(side.listen(PORT), Status::GOOD);
+            let buffer = |side: &Side| {
+                let read = side.manager.state().read.borrow();
+                (read.len(), read.capacity())
+            };
             side.drive(Span::from_nanos(50_000_000)).await;
-            let before = side.manager.state().read.borrow().capacity();
+            let before = buffer(&side);
             side.drive(Span::SECOND).await;
-            let after = side.manager.state().read.borrow().capacity();
-            ((before, after), side.calls())
+            ((before, buffer(&side)), side.calls())
         })
         .expect("the run ends");
     let reads: Vec<(usize, Vec<u8>)> = calls
@@ -2886,7 +2889,10 @@ fn each_read_is_in_the_one_buffer_of_the_manager() {
         .into_iter()
         .map(|(id, at)| (id, Some(at) == first))
         .collect();
-    assert_eq!((sizes, same), ((0, 1 << 16), vec![(2, true), (3, true)]));
+    assert_eq!(
+        (sizes, same),
+        (((0, 0), (1 << 16, 1 << 16)), vec![(2, true), (3, true)])
+    );
 }
 
 /// A read gives C at most 64 KiB, the size of the read buffer and of the stream
