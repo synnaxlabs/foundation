@@ -176,13 +176,13 @@ impl Node {
     /// or the mesh's group stops, which stops the node. Returns once each shard runs or
     /// one has failed to start. When the disk budget holds no ring on each shard, no
     /// shard starts, and [`Node::join`] gives [`Error::Disk`] with the budget, the
-    /// shard count, and the least budget. Else, when the port binds and a shard's part
-    /// of the pool budget needs more address space than this host has, no shard
-    /// starts, and [`Node::join`] gives [`Error::Pool`]. A failed start, a shard with
-    /// no memory, a data directory that another node holds or that was made for
-    /// another shard count, a key file that is not valid, a file `name` that holds
-    /// another name or that no node wrote, or a buffer or a mesh that does not open
-    /// stops the node, and [`Node::join`] returns its error.
+    /// shard count, and the least budget. When a shard's part of the pool budget gives
+    /// a reservation of more than `usize::MAX` bytes, no shard starts either, and
+    /// [`Node::join`] gives [`Error::Pool`]. A failed start, a shard with no memory, a
+    /// data directory that another node holds or that was made for another shard
+    /// count, a key file that is not valid, a file `name` that holds another name or
+    /// that no node wrote, or a buffer or a mesh that does not open stops the node, and
+    /// [`Node::join`] returns its error. Its `# Errors` gives which error comes first.
     ///
     /// # Panics
     ///
