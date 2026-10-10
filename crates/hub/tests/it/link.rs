@@ -1,0 +1,1272 @@
+//! The client sessions that `Link::serve` serves, over a real transport from a program
+//! to a simulated node: the hello stream, and the request streams.
+
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::{Arc, Mutex};
+
+use access::proof::{Error as Refusal, Field};
+use hub::serve;
+use transport::{Address, Code, Session};
+use types::connection;
+use types::ed25519::{Pair, PrivateKey};
+use types::node;
+use types::time::Span;
+use wire::Protocol;
+use wire::header::MALFORMED;
+use wire::hub::BUSY;
+use wire::hub::client::{
+    BODY_BYTES_MAX, CHANGED, EXPIRED, REFUSED, Request, Response, STALE, UNSYNCED, VIA,
+};
+
+use super::{AREA, BODY_MAX, NODE, POOL, Test};
+use crate::agent::{
+    AGENT, Agent, CONNECTION, SECOND, SUBJECT, THIRD, name, reset_with, signed,
+};
+use crate::net::{HOME, header, own_pool, public_key, transport};
+use crate::sessions::{
+    self, Got, HOLD, accept_on, answer, closed_after, closed_with, recorded, rules,
+    run_program, run_program_on, serve_each,
+};
+
+/// A key that the spec does not list.
+pub(super) const OTHER: PrivateKey = PrivateKey([4; 32]);
+/// How long the program waits for what must not come.
+pub(super) const QUIET: Span = Span::from_nanos(200_000_000);
+
+/// What the home saw: what `serve` gave for each stream, in the order they ended, and
+/// how the session ended.
+#[derive(Debug)]
+pub(super) struct Home {
+    pub(super) served: Vec<Result<Got, serve::Error>>,
+    pub(super) closed: transport::Error,
+}
+
+/// Runs one client session: the home's node makes a [`Test`] hub, with mesh time when
+/// `synced`, and serves each hub stream of the session on one `hub::Link`, once it
+/// reads the stream's header in the stream's own future, as `node` does. It replies
+/// to each request with its body reversed, after [`HOLD`]. The program's node gives
+/// its end to `program`.
+fn session<P>(
+    seed: u64,
+    synced: bool,
+    program: impl FnOnce(Agent) -> P + Send + 'static,
+) -> Home
+where
+    P: Future<Output = ()> + 'static,
+{
+    session_with(seed, synced, POOL, Some(rules()), program)
+}
+
+/// As [`session`], with a home pool of `pool` bytes, and `rules` given to
+/// `Hub::set_rules` unless `None`.
+fn session_with<P>(
+    seed: u64,
+    synced: bool,
+    pool: usize,
+    rules: Option<access::Rules>,
+    program: impl FnOnce(Agent) -> P + Send + 'static,
+) -> Home
+where
+    P: Future<Output = ()> + 'static,
+{
+    serve_session(seed, synced, pool, rules, move |node, tasks, at| {
+        as_agent(node, tasks, at, program)
+    })
+}
+
+/// As [`session_with`], where `program` runs on the program's node with the home's
+/// address, and dials it itself.
+pub(super) fn serve_session<G, P>(
+    seed: u64,
+    synced: bool,
+    pool: usize,
+    rules: Option<access::Rules>,
+    program: G,
+) -> Home
+where
+    G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
+    P: Future<Output = ()> + 'static,
+{
+    serve_session_on(
+        seed,
+        sim::link::Config::default(),
+        synced,
+        pool,
+        rules,
+        program,
+    )
+}
+
+/// As [`serve_session`], on `wire`.
+pub(super) fn serve_session_on<G, P>(
+    seed: u64,
+    wire: sim::link::Config,
+    synced: bool,
+    pool: usize,
+    rules: Option<access::Rules>,
+    program: G,
+) -> Home
+where
+    G: FnOnce(sim::node::Node, env::tasks::Tasks, Address) -> P + Send + 'static,
+    P: Future<Output = ()> + 'static,
+{
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let closed = Arc::new(Mutex::new(None));
+    let (kept, ended) = (Arc::clone(&served), Arc::clone(&closed));
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let (test, session, link) = accept(&node, &tasks, pool, synced, rules).await;
+        let accepted = Rc::new(Cell::new(0));
+        serve_each(&session, &link, &tasks, &node.clock(), &kept, &accepted).await;
+        *ended.lock().expect("not poisoned") = Some(session.closed().await);
+        recorded(&node, &kept, accepted.get()).await;
+        drop((link, test));
+    };
+    run_program_on(seed, wire, home, program);
+    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
+    let closed = closed.lock().expect("not poisoned").take();
+    Home {
+        served,
+        closed: closed.expect("the session closed"),
+    }
+}
+
+/// Makes the error of the wall clock of `node` unknown, and 10 ms one minute later.
+pub(super) fn shrink_wall_error(node: &sim::node::Node, tasks: &env::tasks::Tasks) {
+    node.set_wall_error(None);
+    let shrink = node.clone();
+    tasks.spawn(async move {
+        shrink.clock().sleep(Span::MINUTE).await;
+        shrink.set_wall_error(Some(Span::from_nanos(10_000_000)));
+    });
+}
+
+/// Runs [`sessions::sessions`] on a synced [`Test`] hub.
+fn sessions<const N: usize, P>(
+    seed: u64,
+    subjects: [&'static str; N],
+    program: impl FnOnce([Agent; N]) -> P + Send + 'static,
+) -> Vec<Result<Got, serve::Error>>
+where
+    P: Future<Output = ()> + 'static,
+{
+    let open = async |node: &sim::node::Node, tasks: &env::tasks::Tasks| {
+        let test = home(node, tasks, POOL, true).await;
+        (test.hub.clone(), test)
+    };
+    sessions::sessions(seed, subjects, open, program)
+}
+
+/// A [`Test`] hub as [`home`] gives it, with `rules` set unless `None`, and the
+/// session of the first program that dials it, with its link.
+pub(super) async fn accept(
+    node: &sim::node::Node,
+    tasks: &env::tasks::Tasks,
+    pool: usize,
+    synced: bool,
+    rules: Option<access::Rules>,
+) -> (Test, Session, hub::Link) {
+    let test = home(node, tasks, pool, synced).await;
+    let (session, link) = accept_on(&test.hub, node, tasks, rules).await;
+    (test, session, link)
+}
+
+/// A [`Test`] hub with a home pool of `pool` bytes, with mesh time when `synced`.
+pub(super) async fn home(
+    node: &sim::node::Node,
+    tasks: &env::tasks::Tasks,
+    pool: usize,
+    synced: bool,
+) -> Test {
+    let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
+    let mut test = Test::new(node.clone(), tasks.clone(), layout, pool, None).await;
+    if synced {
+        test.sync().await;
+    }
+    test
+}
+
+/// Runs `home` on one simulated node, and `program` on another, which dials the
+/// first as a program.
+fn run<H, P>(
+    seed: u64,
+    home: impl FnOnce(sim::node::Node, env::tasks::Tasks) -> H + Send + 'static,
+    program: impl FnOnce(Agent) -> P + Send + 'static,
+) where
+    H: Future<Output = ()> + 'static,
+    P: Future<Output = ()> + 'static,
+{
+    run_program(seed, home, move |node, tasks, at| {
+        as_agent(node, tasks, at, program)
+    });
+}
+
+/// Dials the home at `at` as an [`Agent`], runs `program`, and closes the session.
+async fn as_agent<P>(
+    node: sim::node::Node,
+    tasks: env::tasks::Tasks,
+    at: Address,
+    program: impl FnOnce(Agent) -> P,
+) where
+    P: Future<Output = ()>,
+{
+    let agent = Agent::dial(&node, tasks, at, name(SUBJECT)).await;
+    let session = agent.session.clone();
+    program(agent).await;
+    session.close(Code(0));
+    node.clock().sleep(Span::MILLISECOND).await;
+}
+
+#[test]
+fn answers_a_request_of_an_admitted_hello() {
+    let home = session(80, true, |mut agent| async move {
+        agent.admit().await;
+        let mut stream = agent.request(4, b"ping").await;
+        assert_eq!(stream.response().await, b"gnip");
+        agent.hello.sender.finish().expect("finishes");
+        agent.sleep(QUIET).await;
+    });
+    assert_eq!(
+        home.served,
+        [
+            Ok(Got::Request(name(SUBJECT), b"ping".to_vec())),
+            Ok(Got::Ended)
+        ]
+    );
+    assert_eq!(home.closed, transport::Error::Closed { code: Code(0) });
+}
+
+/// The node takes a request once its body is whole, before the program finishes the
+/// stream.
+#[test]
+fn answers_a_request_whose_stream_stays_open() {
+    let home = session(101, true, |mut agent| async move {
+        agent.admit().await;
+        let mut stream = agent.unfinished(2, b"ab").await;
+        assert_eq!(stream.response().await, b"ba");
+    });
+    assert_eq!(
+        home.served[0],
+        Ok(Got::Request(name(SUBJECT), b"ab".to_vec()))
+    );
+}
+
+#[test]
+fn answers_a_request_with_no_body() {
+    let home = session(81, true, |mut agent| async move {
+        agent.admit().await;
+        let mut stream = agent.request(0, b"").await;
+        assert_eq!(stream.response().await, b"");
+    });
+    assert_eq!(home.served[0], Ok(Got::Request(name(SUBJECT), Vec::new())));
+}
+
+/// A body and a response over the 64 KiB message limit go in parts.
+#[test]
+fn takes_a_request_and_sends_its_response_in_parts() {
+    let body: Vec<u8> = (0..200_000_u32).map(|i| (i % 251) as u8).collect();
+    let expected: Vec<u8> = body.iter().rev().copied().collect();
+    let sent = body.clone();
+    let home = session(82, true, move |mut agent| async move {
+        agent.admit().await;
+        let length = u64::try_from(sent.len()).expect("fits");
+        let mut stream = agent.request(length, &sent).await;
+        assert_eq!(stream.response().await, expected);
+    });
+    assert_eq!(home.served[0], Ok(Got::Request(name(SUBJECT), body)));
+}
+
+#[test]
+fn refuses_a_hello_of_a_key_the_spec_does_not_list_and_closes_the_session() {
+    let home = session(83, true, |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        let mut hello = Agent::hello(challenge);
+        hello.key = public_key(&OTHER);
+        agent.send_hello(hello, &OTHER).await;
+        assert_eq!(agent.closed().await, closed_with(REFUSED));
+    });
+    let refusal = Refusal::Unlisted {
+        subject: name(SUBJECT),
+        key: public_key(&OTHER),
+    };
+    assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+    assert_eq!(
+        home.closed,
+        transport::Error::Closed {
+            code: Code(REFUSED)
+        }
+    );
+    assert_eq!(
+        serve::Error::Access(Refusal::Signature).to_string(),
+        "access refused the program: the signature is not of the message by the key"
+    );
+}
+
+#[test]
+fn refuses_a_hello_that_does_not_echo_the_nonce() {
+    let home = session(84, true, |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        let mut hello = Agent::hello(challenge);
+        hello.nonce[0] ^= 1;
+        agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.hello.recv().await, Err(closed_with(STALE)));
+        assert_eq!(agent.closed().await, closed_with(STALE));
+    });
+    assert_eq!(home.served, [Err(serve::Error::Stale)]);
+    assert_eq!(
+        serve::Error::Stale.to_string(),
+        "the hello does not echo the nonce of the node's last challenge"
+    );
+}
+
+#[test]
+fn refuses_each_hello_before_the_first_rules() {
+    let home = session_with(106, true, POOL, None, |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        agent.send_hello(Agent::hello(challenge), &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(REFUSED));
+    });
+    let refusal = Refusal::Unknown {
+        subject: name(SUBJECT),
+    };
+    assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+    assert_eq!(
+        home.closed,
+        transport::Error::Closed {
+            code: Code(REFUSED)
+        }
+    );
+}
+
+#[test]
+fn refuses_a_hello_through_another_node() {
+    let other = node::Key::from_u128(2);
+    let home = session(85, true, move |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        let mut hello = Agent::hello(challenge);
+        hello.via = other;
+        agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(VIA));
+    });
+    let refusal = Refusal::Via {
+        via: other,
+        peer: NODE,
+    };
+    assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+}
+
+#[test]
+fn a_hub_of_testing_open_refuses_a_hello_through_any_node_but_1() {
+    let other = node::Key::from_u128(2);
+    let open = async |node: &sim::node::Node, tasks: &env::tasks::Tasks| {
+        let (hub, _) = hub::testing::open(crate::node::env(node, tasks.clone())).await;
+        (hub, ())
+    };
+    let served =
+        sessions::sessions(88, [SUBJECT], open, move |[mut agent]| async move {
+            let challenge = agent.hello.challenge().await;
+            let mut hello = Agent::hello(challenge);
+            hello.via = other;
+            agent.send_hello(hello, &AGENT).await;
+            assert_eq!(agent.closed().await, closed_with(VIA));
+        });
+
+    let refusal = Refusal::Via {
+        via: other,
+        peer: node::Key::from_u128(1),
+    };
+    assert_eq!(served, [Err(serve::Error::Access(refusal))]);
+}
+
+/// A node with no mesh time sends no challenge, and closes the session.
+#[test]
+fn closes_the_session_as_unsynced_when_the_node_has_no_mesh_time() {
+    let home = session(86, false, |agent| async move {
+        assert_eq!(agent.closed().await, closed_with(UNSYNCED));
+    });
+    assert_eq!(home.served, [Err(serve::Error::Access(Refusal::Unsynced))]);
+}
+
+#[test]
+fn closes_the_session_when_the_hello_expires() {
+    let life = Span::from_nanos(2 * Span::SECOND.nanos());
+    let expires = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&expires);
+    let home = session(87, true, move |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        let mut hello = Agent::hello(challenge);
+        hello.expires = challenge.now.latest + life;
+        *kept.lock().expect("not poisoned") = Some(hello.expires);
+        agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(EXPIRED));
+    });
+    let expires = expires.lock().expect("not poisoned").expect("a hello");
+    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
+        home.served.as_slice()
+    else {
+        panic!("one expiry, not {:?}", home.served);
+    };
+    assert_eq!(*at, expires);
+    assert!(
+        *now >= expires && *now < expires + Span::from_nanos(10_000_000),
+        "the node closed the session at the expiry: {now:?}, {expires:?}"
+    );
+}
+
+/// A renewal before the expiry moves it, so a request after the first expiry gets its
+/// response.
+#[test]
+fn keeps_the_session_past_the_first_expiry_after_a_renewal() {
+    let life = Span::from_nanos(2 * Span::SECOND.nanos());
+    let home = session(88, true, move |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        let mut hello = Agent::hello(challenge);
+        hello.expires = challenge.now.latest + life;
+        agent.send_hello(hello, &AGENT).await;
+        let challenge = agent.hello.challenge().await;
+        agent.sleep(Span::SECOND).await;
+        agent.send_hello(Agent::hello(challenge), &AGENT).await;
+        agent
+            .sleep(Span::from_nanos(2 * Span::SECOND.nanos()))
+            .await;
+        let mut stream = agent.request(2, b"ab").await;
+        assert_eq!(stream.response().await, b"ba");
+    });
+    assert_eq!(
+        home.served[0],
+        Ok(Got::Request(name(SUBJECT), b"ab".to_vec()))
+    );
+}
+
+/// A renewal that moves the expiry earlier closes the session at the new expiry.
+#[test]
+fn closes_the_session_at_the_expiry_of_a_renewal_that_moves_it_earlier() {
+    let short = Span::from_nanos(2 * Span::SECOND.nanos());
+    let expires = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&expires);
+    let home = session(102, true, move |mut agent| async move {
+        let challenge = agent.admit().await;
+        let mut hello = Agent::hello(challenge);
+        hello.expires = challenge.now.latest + short;
+        *kept.lock().expect("not poisoned") = Some(hello.expires);
+        agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(EXPIRED));
+    });
+    let expires = expires.lock().expect("not poisoned").expect("a hello");
+    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
+        home.served.as_slice()
+    else {
+        panic!("one expiry, not {:?}", home.served);
+    };
+    assert_eq!(*at, expires);
+    assert!(
+        *now >= expires && *now < expires + Span::from_nanos(10_000_000),
+        "the node closed the session at the renewed expiry: {now:?}, {expires:?}"
+    );
+}
+
+#[test]
+fn refuses_a_renewal_on_another_connection() {
+    let home = session(89, true, |mut agent| async move {
+        let challenge = agent.admit().await;
+        let mut hello = Agent::hello(challenge);
+        hello.connection = connection::Key([8; 16]);
+        agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(CHANGED));
+    });
+    let refusal = Refusal::Changed {
+        field: Field::Connection,
+    };
+    assert_eq!(home.served, [Err(serve::Error::Access(refusal))]);
+}
+
+/// A request stream before the hello is admitted stops as `MALFORMED`, and the
+/// session stays open.
+#[test]
+fn stops_a_request_before_the_hello_is_admitted() {
+    let home = session(90, true, |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        let mut early = agent.request(2, b"ab").await;
+        assert_eq!(early.recv().await, reset_with(MALFORMED));
+        agent.send_hello(Agent::hello(challenge), &AGENT).await;
+        agent.hello.challenge().await;
+        let mut stream = agent.request(2, b"cd").await;
+        assert_eq!(stream.response().await, b"dc");
+    });
+    assert_eq!(home.served[0], Err(serve::Error::Unadmitted));
+    assert_eq!(
+        home.served[1],
+        Ok(Got::Request(name(SUBJECT), b"cd".to_vec()))
+    );
+    assert_eq!(
+        serve::Error::Unadmitted.to_string(),
+        "the program sent a request before the node admitted a hello"
+    );
+}
+
+/// The link takes one open request: a second, while the first waits for its reply,
+/// stops as `MALFORMED`.
+#[test]
+fn stops_a_second_request_while_one_is_open() {
+    let home = session(91, true, |mut agent| async move {
+        agent.admit().await;
+        let mut first = agent.request(2, b"ab").await;
+        agent.sleep(Span::from_nanos(HOLD.nanos() / 5)).await;
+        let mut second = agent.request(2, b"cd").await;
+        assert_eq!(second.recv().await, reset_with(MALFORMED));
+        assert_eq!(first.response().await, b"ba");
+        let mut third = agent.request(2, b"ef").await;
+        assert_eq!(third.response().await, b"fe");
+    });
+    assert_eq!(
+        home.served,
+        [
+            Err(serve::Error::Pending),
+            Ok(Got::Request(name(SUBJECT), b"ab".to_vec())),
+            Ok(Got::Request(name(SUBJECT), b"ef".to_vec())),
+            Err(serve::Error::Stream(closed_with(0))),
+        ]
+    );
+    assert_eq!(
+        serve::Error::Pending.to_string(),
+        "the program sent a request while another request waits for its reply"
+    );
+}
+
+/// A serve task that still holds its reply when the session closes ends after the
+/// home's accept loop, and its result still counts.
+#[test]
+fn keeps_the_result_of_a_reply_that_fails_once_the_session_closed() {
+    let home = session(99, true, |mut agent| async move {
+        agent.admit().await;
+        let _held = agent.request(2, b"ab").await;
+        agent.sleep(Span::from_nanos(HOLD.nanos() / 5)).await;
+    });
+    assert_eq!(
+        home.served,
+        [
+            Err(serve::Error::Stream(closed_with(0))),
+            Err(serve::Error::Stream(closed_with(0))),
+        ]
+    );
+}
+
+/// The link frees a request before the first byte of its reply, so a request sent once
+/// the last reply ends is never refused as pending.
+#[test]
+fn takes_each_request_sent_once_the_last_reply_ends() {
+    const COUNT: u8 = 20;
+    let home = session(98, true, |mut agent| async move {
+        agent.admit().await;
+        for i in 0..COUNT {
+            let mut stream = agent.request(2, &[i, 0]).await;
+            assert_eq!(stream.response().await, [0, i]);
+        }
+    });
+    let expected: Vec<_> = (0..COUNT)
+        .map(|i| Ok(Got::Request(name(SUBJECT), vec![i, 0])))
+        .chain([Err(serve::Error::Stream(closed_with(0)))])
+        .collect();
+    assert_eq!(home.served, expected);
+}
+
+/// A hello on a stream after the first stops as `MALFORMED`, and the session stays
+/// open.
+#[test]
+fn stops_a_hello_on_a_request_stream() {
+    let home = session(99, true, |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        agent.send_hello(Agent::hello(challenge), &AGENT).await;
+        let challenge = agent.hello.challenge().await;
+        let mut other = agent.open().await;
+        other.send(&signed(Agent::hello(challenge), &AGENT)).await;
+        assert_eq!(other.recv().await, reset_with(MALFORMED));
+        let mut stream = agent.request(2, b"ab").await;
+        assert_eq!(stream.response().await, b"ba");
+    });
+    assert_eq!(
+        home.served,
+        [
+            Err(serve::Error::Message(wire::hub::Error::Kind { kind: 4 })),
+            Ok(Got::Request(name(SUBJECT), b"ab".to_vec())),
+            Err(serve::Error::Stream(closed_with(0))),
+        ]
+    );
+}
+
+#[test]
+fn stops_a_request_whose_body_did_not_come() {
+    let home = session(92, true, |mut agent| async move {
+        agent.admit().await;
+        let mut stream = agent.open().await;
+        let request = Request {
+            length: 10,
+            signature: [0; 64],
+        };
+        let mut out = [0; Request::LEN];
+        request.encode(&mut out);
+        stream.send(&out).await;
+        stream.send(b"abcd").await;
+        stream.sender.finish().expect("finishes");
+        assert_eq!(stream.recv().await, reset_with(MALFORMED));
+    });
+    let unfinished = wire::hub::Error::Unfinished { remain: 6 };
+    assert_eq!(
+        home.served,
+        [
+            Err(serve::Error::Message(unfinished)),
+            Err(serve::Error::Stream(closed_with(0))),
+        ]
+    );
+    assert_eq!(
+        serve::Error::Message(unfinished).to_string(),
+        "a hub message is not valid: the stream ended with 6 bytes of its body to come"
+    );
+}
+
+#[test]
+fn refuses_a_request_whose_signature_does_not_verify() {
+    let home = session(93, true, |mut agent| async move {
+        agent.admit().await;
+        let mut stream = agent.open().await;
+        let request = Request {
+            length: 2,
+            signature: Pair::new(&AGENT)
+                .sign(&access::proof::request(CONNECTION, b"xy")),
+        };
+        let mut out = [0; Request::LEN];
+        request.encode(&mut out);
+        stream.send(&out).await;
+        stream.send(b"ab").await;
+        stream.sender.finish().expect("finishes");
+        assert_eq!(stream.recv().await, reset_with(REFUSED));
+        let mut next = agent.request(2, b"cd").await;
+        assert_eq!(next.response().await, b"dc");
+    });
+    assert_eq!(
+        home.served[0],
+        Err(serve::Error::Access(Refusal::Signature))
+    );
+}
+
+/// A request whose body does not fit under the cap of the hub's request bodies stops
+/// with `BUSY` before its body, and fits once an open request replies. Only the
+/// declared lengths count, so the large bodies are never sent.
+#[test]
+fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
+    let served = sessions(
+        107,
+        [SUBJECT, SECOND, THIRD],
+        |[mut stalled, mut held, mut refused]| async move {
+            for agent in [&mut stalled, &mut held, &mut refused] {
+                agent.admit().await;
+            }
+            let _stalled = stalled.unfinished(BODY_BYTES_MAX, &[]).await;
+            stalled.sleep(Span::MILLISECOND).await;
+            let mut reply = held.request(1, b"y").await;
+            held.sleep(Span::MILLISECOND).await;
+            let mut busy = refused.unfinished(BODY_BYTES_MAX, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            assert_eq!(reply.response().await, b"y");
+            let _fits = refused.unfinished(BODY_BYTES_MAX, &[]).await;
+            refused.sleep(QUIET).await;
+        },
+    );
+    let over = serve::Error::Bodies {
+        length: BODY_BYTES_MAX,
+        held: BODY_BYTES_MAX + 1,
+    };
+    let each = closed_after(
+        vec![
+            Err(over.clone()),
+            Ok(Got::Request(name(SECOND), b"y".to_vec())),
+        ],
+        3,
+        2,
+    );
+    assert_eq!(
+        served, each,
+        "the request that fills the cap exactly is not refused"
+    );
+    assert_eq!(
+        over.to_string(),
+        "a request body of 16777216 bytes does not fit under the cap of 33554432 \
+         bytes: the open requests of the hub hold 16777217 bytes"
+    );
+}
+
+/// A request that a link refuses as `Pending` reserves no body: two more requests at
+/// the cap then fit exactly.
+#[test]
+fn reserves_no_body_for_a_second_request_of_a_link() {
+    let served = sessions(
+        109,
+        [SUBJECT, SECOND, THIRD],
+        |[mut first, mut second, mut third]| async move {
+            for agent in [&mut first, &mut second, &mut third] {
+                agent.admit().await;
+            }
+            let mut open = first.request(1, b"a").await;
+            first.sleep(Span::from_nanos(HOLD.nanos() / 5)).await;
+            let mut pending = first.unfinished(BODY_BYTES_MAX, &[]).await;
+            assert_eq!(pending.recv().await, reset_with(MALFORMED));
+            assert_eq!(open.response().await, b"a");
+            let _stalled = second.unfinished(BODY_BYTES_MAX, &[]).await;
+            second.sleep(Span::MILLISECOND).await;
+            let _fits = third.unfinished(BODY_BYTES_MAX, &[]).await;
+            third.sleep(QUIET).await;
+        },
+    );
+    let each = closed_after(
+        vec![
+            Err(serve::Error::Pending),
+            Ok(Got::Request(name(SUBJECT), b"a".to_vec())),
+        ],
+        3,
+        2,
+    );
+    assert_eq!(served, each);
+}
+
+/// A request whose stream resets after its body was reserved gives the reservation
+/// back.
+#[test]
+fn frees_the_room_of_a_request_whose_stream_reset() {
+    let served = sessions(
+        108,
+        [SUBJECT, SECOND, THIRD],
+        |[mut first, mut second, mut third]| async move {
+            for agent in [&mut first, &mut second, &mut third] {
+                agent.admit().await;
+            }
+            let _first = first.unfinished(BODY_BYTES_MAX, &[]).await;
+            let second = second.unfinished(BODY_BYTES_MAX, &[]).await;
+            third.sleep(Span::MILLISECOND).await;
+            let mut busy = third.unfinished(1, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            second.sender.reset(Code(0));
+            second.receiver.stop(Code(0));
+            third.sleep(Span::MILLISECOND).await;
+            let mut fits = third.request(1, b"z").await;
+            assert_eq!(fits.response().await, b"z");
+        },
+    );
+    assert_eq!(
+        served[0],
+        Err(serve::Error::Bodies {
+            length: 1,
+            held: 2 * BODY_BYTES_MAX,
+        })
+    );
+    assert!(
+        served.contains(&Ok(Got::Request(name(THIRD), b"z".to_vec()))),
+        "{served:?}"
+    );
+}
+
+/// A subject's requests hold at most `BODY_BYTES_MAX` of the hub's room, over each of
+/// its links. While one request of a subject trickles its body, one byte each 400 ms,
+/// so that no session is idle, each further request of the subject stops with `BUSY`,
+/// and a request of another subject 50 s later, inside the life of each hello, gets
+/// its response.
+#[test]
+fn takes_a_request_of_another_subject_while_a_body_trickles() {
+    let served = sessions(
+        110,
+        [SUBJECT, SUBJECT, SECOND],
+        |[mut first, mut second, mut other]| async move {
+            for agent in [&mut first, &mut second, &mut other] {
+                agent.admit().await;
+            }
+            let mut trickled = first.unfinished(BODY_BYTES_MAX, &[]).await;
+            first.sleep(Span::MILLISECOND).await;
+            let mut busy = second.unfinished(BODY_BYTES_MAX, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            let mut busy = second.unfinished(1, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+            let pace = Span::from_nanos(400_000_000);
+            for _ in 0..125 {
+                trickled.send(b"x").await;
+                first.sleep(pace).await;
+            }
+            let mut late = other.request(1, b"z").await;
+            assert_eq!(late.response().await, b"z");
+        },
+    );
+    let over = serve::Error::Share {
+        subject: name(SUBJECT),
+        length: 1,
+        held: BODY_BYTES_MAX,
+    };
+    let each = closed_after(
+        vec![
+            Err(serve::Error::Share {
+                subject: name(SUBJECT),
+                length: BODY_BYTES_MAX,
+                held: BODY_BYTES_MAX,
+            }),
+            Err(over.clone()),
+            Ok(Got::Request(name(SECOND), b"z".to_vec())),
+        ],
+        3,
+        1,
+    );
+    assert_eq!(
+        served, each,
+        "the request that fills the share exactly is not refused"
+    );
+    assert_eq!(
+        over.to_string(),
+        "a request body of 1 bytes does not fit under the share of 16777216 bytes of \
+         subject ops.agent: its open requests hold 16777216 bytes"
+    );
+}
+
+/// A reply gives back exactly the bytes of its body to the share of its subject, and
+/// the subject's count stays while another of its requests is open.
+#[test]
+fn frees_the_share_of_a_request_that_replied() {
+    let served = sessions(
+        112,
+        [SUBJECT, SUBJECT],
+        |[mut first, mut second]| async move {
+            for agent in [&mut first, &mut second] {
+                agent.admit().await;
+            }
+            let _open = first.unfinished(1, &[]).await;
+            first.sleep(Span::MILLISECOND).await;
+            let mut replied = second.request(1, b"b").await;
+            assert_eq!(replied.response().await, b"b");
+            let mut busy = second.unfinished(BODY_BYTES_MAX, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+        },
+    );
+    let each = closed_after(
+        vec![
+            Ok(Got::Request(name(SUBJECT), b"b".to_vec())),
+            Err(serve::Error::Share {
+                subject: name(SUBJECT),
+                length: BODY_BYTES_MAX,
+                held: 1,
+            }),
+        ],
+        2,
+        1,
+    );
+    assert_eq!(served, each);
+}
+
+/// A request over both the share of its subject and the cap of the hub gets `Share`.
+#[test]
+fn stops_a_request_over_the_share_and_the_cap_with_share() {
+    let served = sessions(
+        113,
+        [SUBJECT, SECOND, SUBJECT],
+        |[mut first, mut other, mut third]| async move {
+            for agent in [&mut first, &mut other, &mut third] {
+                agent.admit().await;
+            }
+            let _first = first.unfinished(BODY_BYTES_MAX, &[]).await;
+            let _other = other.unfinished(BODY_BYTES_MAX, &[]).await;
+            third.sleep(Span::MILLISECOND).await;
+            let mut busy = third.unfinished(1, &[]).await;
+            assert_eq!(busy.recv().await, reset_with(BUSY));
+        },
+    );
+    let each = closed_after(
+        vec![Err(serve::Error::Share {
+            subject: name(SUBJECT),
+            length: 1,
+            held: BODY_BYTES_MAX,
+        })],
+        3,
+        2,
+    );
+    assert_eq!(served, each);
+}
+
+/// Two open requests of one subject with empty bodies, over two links, each get their
+/// response.
+#[test]
+fn answers_two_empty_requests_of_one_subject() {
+    let served = sessions(
+        111,
+        [SUBJECT, SUBJECT],
+        |[mut first, mut second]| async move {
+            for agent in [&mut first, &mut second] {
+                agent.admit().await;
+            }
+            let mut a = first.request(0, b"").await;
+            first.sleep(Span::MILLISECOND).await;
+            let mut b = second.request(0, b"").await;
+            assert_eq!(a.response().await, b"");
+            assert_eq!(b.response().await, b"");
+        },
+    );
+    let each = closed_after(
+        vec![
+            Ok(Got::Request(name(SUBJECT), Vec::new())),
+            Ok(Got::Request(name(SUBJECT), Vec::new())),
+        ],
+        2,
+        0,
+    );
+    assert_eq!(served, each);
+}
+
+/// A hello stream that the program finishes before its first hello gives `Ended`, and
+/// closes the session with code 0.
+#[test]
+fn ends_a_hello_stream_that_finished_before_its_hello() {
+    let home = session(104, true, |mut agent| async move {
+        agent.hello.challenge().await;
+        agent.hello.sender.finish().expect("finishes");
+        agent.sleep(QUIET).await;
+    });
+    assert_eq!(home.served, [Ok(Got::Ended)]);
+    assert_eq!(home.closed, transport::Error::Closed { code: Code(0) });
+}
+
+/// A request stream that the program finishes before its request gives `Ended`.
+#[test]
+fn ends_a_request_stream_that_finished_before_its_request() {
+    let home = session(94, true, |mut agent| async move {
+        agent.admit().await;
+        let mut stream = agent.open().await;
+        stream.sender.finish().expect("finishes");
+        assert_eq!(stream.recv().await, Ok(None));
+    });
+    assert_eq!(home.served[0], Ok(Got::Ended));
+}
+
+/// A request on the hello stream after a hello breaks the order of the stream, so the
+/// session closes.
+#[test]
+fn closes_the_session_on_a_request_on_the_hello_stream() {
+    let home = session(95, true, |mut agent| async move {
+        agent.admit().await;
+        agent.hello.send(&empty_request()).await;
+        assert_eq!(agent.closed().await, closed_with(MALFORMED));
+    });
+    assert_eq!(
+        home.served,
+        [Err(serve::Error::Message(wire::hub::Error::Kind {
+            kind: 5
+        }))]
+    );
+}
+
+/// A request as the first message of the session asks before a hello, so the session
+/// closes.
+#[test]
+fn closes_the_session_on_a_request_before_the_first_hello() {
+    let home = session(100, true, |mut agent| async move {
+        agent.hello.challenge().await;
+        agent.hello.send(&empty_request()).await;
+        assert_eq!(agent.closed().await, closed_with(MALFORMED));
+    });
+    assert_eq!(
+        home.served,
+        [Err(serve::Error::Message(wire::hub::Error::Kind {
+            kind: 5
+        }))]
+    );
+}
+
+/// The link frees a request before the first byte of its response.
+#[test]
+fn takes_a_request_sent_once_the_last_response_header_comes() {
+    let body: Vec<u8> = (0..3_000_000_u32).map(|i| (i % 251) as u8).collect();
+    let home = session(103, true, move |mut agent| async move {
+        agent.admit().await;
+        let length = u64::try_from(body.len()).expect("fits");
+        let mut first = agent.open().await;
+        let request = Request {
+            length,
+            signature: Pair::new(&AGENT)
+                .sign(&access::proof::request(CONNECTION, &body)),
+        };
+        let mut out = [0; Request::LEN];
+        request.encode(&mut out);
+        first.send(&out).await;
+        for chunk in body.chunks(1 << 16) {
+            first.send(chunk).await;
+            agent.sleep(Span::MILLISECOND).await;
+        }
+        first.sender.finish().expect("finishes");
+        let header = first.recv().await.expect("a message").expect("a header");
+        Response::decode(&header).expect("a response");
+        let mut second = agent.request(2, b"ab").await;
+        while first.recv().await.expect("a message").is_some() {}
+        assert_eq!(second.response().await, b"ba");
+    });
+    assert!(
+        home.served
+            .iter()
+            .all(|got| got != &Err(serve::Error::Pending)),
+        "{:?}",
+        home.served
+    );
+}
+
+/// A response chunk fits the largest block of the home's pool, also when a message of
+/// the transport is larger.
+#[test]
+fn cuts_a_response_to_the_largest_block_of_the_pool() {
+    let body: Vec<u8> = (0..60_000_u32).map(|i| (i % 251) as u8).collect();
+    let reversed: Vec<u8> = body.iter().rev().copied().collect();
+    let length = u64::try_from(body.len()).expect("fits");
+    let home = session_with(
+        105,
+        true,
+        1 << 16,
+        Some(rules()),
+        move |mut agent| async move {
+            agent.admit().await;
+            let mut stream = agent.open().await;
+            let request = Request {
+                length,
+                signature: Pair::new(&AGENT)
+                    .sign(&access::proof::request(CONNECTION, &body)),
+            };
+            let mut out = [0; Request::LEN];
+            request.encode(&mut out);
+            stream.send(&out).await;
+            for chunk in body.chunks(1 << 16) {
+                stream.send(chunk).await;
+                agent.sleep(Span::MILLISECOND).await;
+            }
+            stream.sender.finish().expect("finishes");
+            assert_eq!(stream.response().await, reversed);
+        },
+    );
+    assert!(
+        matches!(home.served[0], Ok(Got::Request(_, _))),
+        "{:?}",
+        home.served
+    );
+}
+
+/// A request with no body and a signature that does not verify.
+fn empty_request() -> [u8; Request::LEN] {
+    let request = Request {
+        length: 0,
+        signature: [0; 64],
+    };
+    let mut out = [0; Request::LEN];
+    request.encode(&mut out);
+    out
+}
+
+/// A hello whose expiry is past the cap lives only until the cap, so a renewal cannot
+/// hold a session for longer than the cap.
+#[test]
+fn closes_the_session_at_the_cap_of_a_hello_past_it() {
+    let cap = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&cap);
+    let home = session(96, true, move |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        let mut hello = Agent::hello(challenge);
+        hello.expires = challenge.now.latest + access::proof::CAP + Span::SECOND;
+        *kept.lock().expect("not poisoned") =
+            Some(challenge.now.latest + access::proof::CAP);
+        agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(EXPIRED));
+    });
+    let cap = cap.lock().expect("not poisoned").expect("a hello");
+    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
+        home.served.as_slice()
+    else {
+        panic!("one expiry, not {:?}", home.served);
+    };
+    let soon = Span::from_nanos(10_000_000);
+    assert!(
+        *at >= cap && *at < cap + soon,
+        "the hello ends at the cap: {at:?}, {cap:?}"
+    );
+    assert!(
+        *now >= *at && *now < *at + soon,
+        "the node closed the session at the cap: {now:?}, {at:?}"
+    );
+}
+
+/// A node with an unknown error admits a hello, its error shrinks to 10 ms, and the
+/// program renews once from the old challenge, then stops. The renewal ends at the
+/// cap past the latest edge at its admission, and the session closes there.
+#[test]
+fn closes_the_session_at_the_cap_of_a_renewal_after_a_drop() {
+    let ten = Span::from_nanos(10 * Span::MINUTE.nanos());
+    let five = Span::from_nanos(5 * Span::MINUTE.nanos());
+    let third = Arc::new(Mutex::new(None));
+    let kept_third = Arc::clone(&third);
+    let served = Arc::new(Mutex::new(Vec::new()));
+    let kept = Arc::clone(&served);
+    run(
+        173,
+        move |node, tasks| async move {
+            shrink_wall_error(&node, &tasks);
+            let (test, session, link) =
+                accept(&node, &tasks, POOL, true, Some(rules())).await;
+            serve_each(
+                &session,
+                &link,
+                &tasks,
+                &node.clock(),
+                &kept,
+                &Rc::default(),
+            )
+            .await;
+            drop((link, test));
+        },
+        move |mut agent| async move {
+            let first = agent.hello.challenge().await;
+            let mut hello = Agent::hello(first);
+            hello.expires = first.now.latest + ten;
+            agent.send_hello(hello, &AGENT).await;
+            let second = agent.hello.challenge().await;
+            agent.sleep(five).await;
+            let mut hello = Agent::hello(second);
+            hello.expires = second.now.latest + five + ten;
+            agent.send_hello(hello, &AGENT).await;
+            let next = agent.hello.challenge().await;
+            *kept_third.lock().expect("not poisoned") = Some(next.now);
+            let start = agent.node.clock().now();
+            assert_eq!(agent.closed().await, closed_with(EXPIRED));
+            let lived = agent.node.clock().now() - start;
+            assert!(
+                lived.nanos() <= access::proof::CAP.nanos() + Span::SECOND.nanos(),
+                "the session lived {lived:?} past the renewal"
+            );
+        },
+    );
+    let next = third
+        .lock()
+        .expect("not poisoned")
+        .expect("a third challenge");
+    let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
+    let [Err(serve::Error::Access(Refusal::Expired { expires: at, now }))] =
+        served.as_slice()
+    else {
+        panic!("one expiry, not {served:?}");
+    };
+    let cap = next.latest + access::proof::CAP;
+    assert!(
+        *at <= cap && *at > cap - Span::SECOND,
+        "the renewal ends at the cap: {at:?}, {cap:?}"
+    );
+    assert!(*now >= *at && *now < *at + Span::from_nanos(10_000_000));
+}
+
+/// The first expiry that a link reads is the one the node checks: a hello that has
+/// already expired at the node is refused at admit.
+#[test]
+fn refuses_a_hello_that_expired_before_it_came() {
+    let home = session(97, true, |mut agent| async move {
+        let challenge = agent.hello.challenge().await;
+        let mut hello = Agent::hello(challenge);
+        hello.expires = challenge.now.earliest - Span::SECOND;
+        agent.send_hello(hello, &AGENT).await;
+        assert_eq!(agent.closed().await, closed_with(EXPIRED));
+    });
+    assert!(
+        matches!(
+            home.served.as_slice(),
+            [Err(serve::Error::Access(Refusal::Expired { .. }))]
+        ),
+        "{:?}",
+        home.served
+    );
+}
+
+/// `serve` takes the role of a stream at the call: the second stream given to it is a
+/// request stream, also when its future runs first. This program breaks the client
+/// wire rule, with a request stream before its hello.
+#[test]
+fn takes_the_role_of_a_stream_at_the_call() {
+    let got = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&got);
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let test = home(&node, &tasks, POOL, true).await;
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+        let session = transport.accept().await.expect("a session");
+        let link = test.hub.link(session.clone());
+        let mut first = session.accept().await.expect("a stream");
+        let mut second = session.accept().await.expect("a stream");
+        header(&mut first).await;
+        header(&mut second).await;
+        let hello = link.serve(first);
+        let request = link.serve(second);
+        let served = answer(request, &node.clock()).await;
+        *kept.lock().expect("not poisoned") = Some(served);
+        drop((hello, link, test));
+    };
+    run(107, home, |agent| async move {
+        let _request = agent.open().await;
+        agent.sleep(QUIET).await;
+    });
+    let got = got.lock().expect("not poisoned").take();
+    assert_eq!(got, Some(Err(serve::Error::Unadmitted)));
+}
+
+/// The node sees a stream at its header, so a request stream that the program opens
+/// before its hello, and whose header it sends after the challenge that follows the
+/// hello, is a request stream.
+#[test]
+fn answers_a_request_on_a_stream_opened_before_the_hello() {
+    let home = session(108, true, |mut agent| async move {
+        let mut stream = agent.silent().await;
+        agent.sleep(QUIET).await;
+        agent.admit().await;
+        stream.send(&wire::header::encode(Protocol::Hub)).await;
+        stream.request(4, b"ping").await;
+        stream.sender.finish().expect("finishes");
+        assert_eq!(stream.response().await, b"gnip");
+        agent.hello.sender.finish().expect("finishes");
+        agent.sleep(QUIET).await;
+    });
+    assert_eq!(
+        home.served,
+        [
+            Ok(Got::Request(name(SUBJECT), b"ping".to_vec())),
+            Ok(Got::Ended)
+        ]
+    );
+}
+
+/// The node does not check the client wire rule: a request stream whose header the
+/// node reads before it admits the hello is served once the hello is admitted.
+#[test]
+fn serves_a_request_whose_header_came_before_the_admission() {
+    let got = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&got);
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let test = home(&node, &tasks, POOL, true).await;
+        test.hub.set_rules(rules());
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+        let session = transport.accept().await.expect("a session");
+        let link = test.hub.link(session.clone());
+        let mut first = session.accept().await.expect("a stream");
+        header(&mut first).await;
+        let hello = link.serve(first);
+        let mut second = session.accept().await.expect("a stream");
+        header(&mut second).await;
+        let request = link.serve(second);
+        tasks.spawn(async move {
+            drop(hello.await);
+        });
+        node.clock().sleep(QUIET).await;
+        let served = answer(request, &node.clock()).await;
+        *kept.lock().expect("not poisoned") = Some(served);
+        node.clock().sleep(QUIET).await;
+        drop((link, test));
+    };
+    run(109, home, |mut agent| async move {
+        let mut stream = agent.open().await;
+        agent.admit().await;
+        stream.request(4, b"ping").await;
+        stream.sender.finish().expect("finishes");
+        assert_eq!(stream.response().await, b"gnip");
+    });
+    let got = got.lock().expect("not poisoned").take();
+    assert_eq!(got, Some(Ok(Got::Request(name(SUBJECT), b"ping".to_vec()))));
+}

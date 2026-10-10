@@ -76,7 +76,7 @@ fn checks_the_influx_fixture_into_one_connector() {
     let config = connector.config().document();
     let expected = read(
         "address = \"http://influx:8086\"\nselect = \"edge.*\"\n\
-         reader {\n  name = \"influx\"\n  mode = \"complete\"\n  hold = \"2h\"\n}\n",
+         reader {\n  mode = \"complete\"\n  hold = \"2h\"\n}\n",
     );
     assert_eq!(config, &expected);
     let parsed = connector_influx::Kind::default().parse(config);

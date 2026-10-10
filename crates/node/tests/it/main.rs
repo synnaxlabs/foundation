@@ -1,26 +1,17 @@
 //! Runs the built `foundation` binary as a process.
 
 #![cfg(test)]
+// The simulated servers need `os::net()`, which a `--cfg loom` build lacks.
+#![cfg(not(loom))]
 
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Output, Stdio};
+mod one_node;
+mod port;
+mod rig;
+#[cfg(unix)]
+mod start;
+mod status;
 
-fn foundation(args: &[&str], input: &str) -> Output {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_foundation"))
-        .args(args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(input.as_bytes())
-        .expect("write");
-    child.wait_with_output().expect("wait")
-}
+use rig::Rig;
 
 fn text(bytes: &[u8]) -> &str {
     std::str::from_utf8(bytes).expect("UTF-8")
@@ -28,7 +19,7 @@ fn text(bytes: &[u8]) -> &str {
 
 #[test]
 fn an_operation_prints_its_output_and_exits_0() {
-    let output = foundation(&["version"], "");
+    let output = Rig::new().run(&["version"], b"");
     assert_eq!(
         (
             output.status.code(),
@@ -45,7 +36,7 @@ fn an_operation_prints_its_output_and_exits_0() {
 
 #[test]
 fn an_error_goes_to_standard_error_and_exits_2() {
-    let output = foundation(&["versoin"], "");
+    let output = Rig::new().run(&["versoin"], b"");
     assert_eq!(
         (
             output.status.code(),
@@ -71,7 +62,7 @@ fn mcp_answers_each_request_on_its_own_line_until_input_closes() {
         r#"{"jsonrpc":"2.0","id":"b","method":"nope"}"#,
         "\n",
     );
-    let output = foundation(&["mcp"], input);
+    let output = Rig::new().run(&["mcp"], input.as_bytes());
     assert_eq!(
         (
             output.status.code(),
@@ -93,49 +84,36 @@ fn mcp_answers_each_request_on_its_own_line_until_input_closes() {
 
 #[test]
 fn mcp_replies_before_the_next_request_arrives() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_foundation"))
-        .arg("mcp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .spawn()
-        .expect("spawn");
-    let mut stdin = child.stdin.take().expect("stdin");
-    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let rig = Rig::new();
+    let mut mcp = rig.talk(&["mcp"]);
+    let mut replies = String::new();
     for id in 1..=2 {
-        writeln!(stdin, r#"{{"jsonrpc":"2.0","id":{id},"method":"ping"}}"#)
-            .expect("write");
-        let mut line = String::new();
-        stdout.read_line(&mut line).expect("read");
-        assert_eq!(
-            line,
-            format!("{{\"id\":{id},\"jsonrpc\":\"2.0\",\"result\":{{}}}}\n")
+        let reply = format!("{{\"id\":{id},\"jsonrpc\":\"2.0\",\"result\":{{}}}}\n");
+        replies.push_str(&reply);
+        mcp.ask(
+            &format!("{{\"jsonrpc\":\"2.0\",\"id\":{id},\"method\":\"ping\"}}\n"),
+            &replies,
         );
     }
-    drop(stdin);
-    assert_eq!(child.wait().expect("wait").code(), Some(0));
+    let output = mcp.close();
+    assert_eq!(
+        (
+            output.status.code(),
+            text(&output.stdout),
+            text(&output.stderr)
+        ),
+        (Some(0), replies.as_str(), "")
+    );
 }
 
 #[test]
 fn mcp_answers_a_line_that_is_not_utf8_and_goes_on() {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_foundation"))
-        .arg("mcp")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("spawn");
     let input = [
         b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"\xff\"}\n".as_slice(),
         b"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
     ]
     .concat();
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(&input)
-        .expect("write");
-    let output = child.wait_with_output().expect("wait");
+    let output = Rig::new().run(&["mcp"], &input);
     assert_eq!(
         (
             output.status.code(),
@@ -157,7 +135,7 @@ fn mcp_answers_a_line_that_is_not_utf8_and_goes_on() {
 
 #[test]
 fn help_lists_mcp() {
-    let output = foundation(&["--help"], "");
+    let output = Rig::new().run(&["--help"], b"");
     assert_eq!(output.status.code(), Some(0));
     assert!(
         text(&output.stdout)

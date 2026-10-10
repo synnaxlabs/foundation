@@ -42,7 +42,8 @@
 //! it.
 //!
 //! `allow` holds one bit per action: read 0, write 1, plan 2, apply 3, secret 4, and
-//! admin 5. `authority` is zero when `allow` does not hold write.
+//! admin 5, and holds at least one. `authority` is zero when `allow` does not hold
+//! write.
 //!
 //! A node settings budget of 0 bytes is no budget, because a policy cannot hold zero.
 //! A policy sets at least one budget.
@@ -77,7 +78,7 @@ use types::name::{self, Name, Selector, Written};
 use types::sample::{self, Scalar};
 use types::time::Span;
 
-use crate::access::{Action, Actions, Policy};
+use crate::access::{self, Action, Actions, Policy};
 use crate::channel::{self, Channel, Data};
 use crate::compression::{self, Mode};
 use crate::connector::Connector;
@@ -161,6 +162,23 @@ pub enum Kind {
 }
 
 impl Definition {
+    /// The kind of the definition.
+    #[must_use]
+    pub const fn kind(&self) -> Kind {
+        match self {
+            Self::Access(_) => Kind::Access,
+            Self::Connector(_) => Kind::Connector,
+            Self::Region(_) => Kind::Region,
+            Self::NodeSettings(_) => Kind::NodeSettings,
+            Self::Compression(_) => Kind::Compression,
+            Self::Placement(_) => Kind::Placement,
+            Self::Time(_) => Kind::Time,
+            Self::Channel(_) => Kind::Channel,
+            Self::Retention(_) => Kind::Retention,
+            Self::Subject(_) => Kind::Subject,
+        }
+    }
+
     /// Writes the canonical bytes of the definition.
     #[must_use]
     pub fn encode(&self) -> Vec<u8> {
@@ -739,18 +757,25 @@ impl<'a> Reader<'a> {
     fn access(&mut self) -> Result<Policy, Error> {
         let subjects = self.patterns()?;
         let select = self.patterns()?;
-        let at = self.at();
+        let actions = self.at();
         let bits = self.byte()?;
-        let allow = Actions::from_bits(bits).ok_or(Error::Actions { at, bits })?;
+        let allow =
+            Actions::from_bits(bits).ok_or(Error::Actions { at: actions, bits })?;
         let at = self.at();
-        let authority = Authority(self.byte()?);
+        // `Policy::new` runs before a missing authority fails, so a refused `allow`
+        // comes first, at the earlier byte.
+        let byte = self.byte();
+        let authority = Authority(*byte.as_ref().unwrap_or(&0));
+        let policy = Policy::new(subjects, select, allow, authority)
+            .map_err(|error| Error::Access { at: actions, error })?;
+        byte?;
         if authority.0 != 0 && !allow.contains(Action::Write) {
             return Err(Error::Authority {
                 at,
                 found: authority,
             });
         }
-        Ok(Policy::new(subjects, select, allow, authority))
+        Ok(policy)
     }
 }
 
@@ -859,6 +884,13 @@ pub enum Error {
         at: usize,
         /// Why they make no policy.
         error: node_settings::Error,
+    },
+    /// An access policy's actions make no policy.
+    Access {
+        /// Where the actions are.
+        at: usize,
+        /// Why they make no policy.
+        error: access::Error,
     },
     /// A placement's nodes make no policy.
     Placement {
@@ -979,6 +1011,9 @@ impl fmt::Display for Error {
             Self::Budget { at, error } => {
                 write!(f, "the budgets at byte {at}: {error}")
             }
+            Self::Access { at, error } => {
+                write!(f, "the access policy at byte {at}: {error}")
+            }
             Self::Placement { at, error } => {
                 write!(f, "the placement at byte {at}: {error}")
             }
@@ -1023,4 +1058,4 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

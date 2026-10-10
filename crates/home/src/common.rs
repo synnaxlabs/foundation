@@ -1,10 +1,11 @@
 //! Test helpers that the modules of `home` reuse.
 
 use std::ops::RangeInclusive;
+use std::sync::Arc;
 
 use proptest::prelude::*;
 use types::channel::{self, Slot};
-use types::frame::key_set::Interner;
+use types::frame::key_set::{Group, Interner, KeySet};
 use types::sample::{Scalar, Sides, Type};
 
 /// Each scalar.
@@ -47,12 +48,15 @@ pub(crate) fn data_type(
 }
 
 /// The raw values of one series: `count` samples of `data_type` from `state`. A
-/// variable sample holds at most 5 elements.
+/// variable sample holds at most 5 elements. A `String` sample is ASCII.
 pub(crate) fn values(state: u64, count: u32, data_type: Type) -> Vec<u8> {
     let count = usize::try_from(count).expect("a small count");
     match data_type {
-        Type::String | Type::Bytes => variable(state, count, Scalar::U8, 5),
-        Type::List { element, max } => variable(state, count, element, max.min(5)),
+        Type::String => variable(state, count, Scalar::U8, 5, 0x7f),
+        Type::Bytes => variable(state, count, Scalar::U8, 5, 0xff),
+        Type::List { element, max } => {
+            variable(state, count, element, max.min(5), 0xff)
+        }
         fixed => {
             let width = fixed.width().expect("a fixed width");
             elements(state, count * width, width)
@@ -61,8 +65,15 @@ pub(crate) fn values(state: u64, count: u32, data_type: Type) -> Vec<u8> {
 }
 
 /// The raw values of `count` variable samples of `element`, each of at most `max`
-/// elements: their ends, zeros to the start of the elements, then the elements.
-fn variable(mut state: u64, count: usize, element: Scalar, max: u32) -> Vec<u8> {
+/// elements: their ends, zeros to the start of the elements, then the elements, each
+/// byte of which is cut by `mask`.
+fn variable(
+    mut state: u64,
+    count: usize,
+    element: Scalar,
+    max: u32,
+    mask: u8,
+) -> Vec<u8> {
     let mut out = Vec::new();
     let mut end = 0;
     for _ in 0..count {
@@ -73,7 +84,11 @@ fn variable(mut state: u64, count: usize, element: Scalar, max: u32) -> Vec<u8> 
     out.resize(out.len().next_multiple_of(element.width().min(8)), 0);
     let width = element.width();
     let len = usize::try_from(end).expect("a small end") * width;
-    out.extend(elements(state, len, width));
+    out.extend(
+        elements(state, len, width)
+            .into_iter()
+            .map(|byte| byte & mask),
+    );
     out
 }
 
@@ -112,11 +127,32 @@ pub(crate) fn key(slot: Slot) -> channel::Key {
     channel::Key::from_u128(bits << 120 | bits)
 }
 
-/// An interner where `key(slot)` has `slot`, for each slot below 64.
-pub(crate) fn create_interner() -> Interner {
+/// An interner where `key(slot)` has `slot`, for each slot below 64: as an index for
+/// each slot in `indexes`, else as a data channel of the type that `groups` gives its
+/// key, or `I64`.
+pub(crate) fn create_interner(indexes: &[u32], groups: &[Group<'_>]) -> Interner {
     let mut interner = Interner::new();
     for n in 0..64 {
-        interner.slots().assign(key(Slot::new(n)));
+        let key = key(Slot::new(n));
+        if indexes.contains(&n) {
+            interner.slots().index(key);
+        } else {
+            let data_type = groups
+                .iter()
+                .flat_map(|group| group.data)
+                .find_map(|&(at, data_type)| (at == key).then_some(data_type));
+            let data_type = data_type.unwrap_or(Type::Scalar(Scalar::I64));
+            interner.slots().data(key, data_type);
+        }
     }
     interner
+}
+
+/// The key set of `groups` from an interner where `key(slot)` has `slot`, for each
+/// slot below 64, in its role in `groups`.
+pub(crate) fn intern(groups: &[Group<'_>]) -> Arc<KeySet> {
+    let indexes: Vec<u32> = (0..64)
+        .filter(|&n| groups.iter().any(|group| group.index == key(Slot::new(n))))
+        .collect();
+    create_interner(&indexes, groups).intern(groups)
 }

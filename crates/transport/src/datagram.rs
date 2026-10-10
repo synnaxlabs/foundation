@@ -42,6 +42,7 @@ impl Sender {
     ///     sender.send(sample)
     /// }
     /// ```
+    #[expect(clippy::todo, reason = "a stub until #68")]
     pub fn send(&self, message: Block) -> Result<(), Error> {
         drop(message);
         todo!("#68")
@@ -56,6 +57,7 @@ impl Sender {
     ///     frame.len() <= sender.bytes_max()
     /// }
     /// ```
+    #[expect(clippy::todo, reason = "a stub until #68")]
     #[must_use]
     pub fn bytes_max(&self) -> usize {
         todo!("#68")
@@ -98,6 +100,7 @@ impl Receiver {
     ///     receiver.recv().await
     /// }
     /// ```
+    #[expect(clippy::todo, reason = "a stub until #68")]
     pub async fn recv(&mut self) -> Result<Block, Error> {
         todo!("#68")
     }

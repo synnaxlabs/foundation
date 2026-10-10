@@ -1,0 +1,11 @@
+[package]
+name = "beside"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+p = { path = "../../patches/p" }
+q = "1"

@@ -1,35 +1,47 @@
-//! Decides whether a subject may do an action on a name: union of allows, authority
-//! cap.
+//! Decides whether a proof is of its subject (signed hellos and requests), and whether
+//! a subject may do an action on a name: union of allows, authority cap.
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
+pub mod proof;
+
 use spec::access::{Action, Actions, Policy};
-use spec::definition::Definition;
+use spec::definition::{Definition, Kind};
+use spec::subject::Subject;
 use types::authority::Authority;
-use types::hash::Set;
+use types::hash::{Map, Set};
 use types::name::{Name, Prefix};
 
-/// The access rules of a mesh: its access policies and its connectors. Owners build
-/// one from the spec they read and ask it for each decision.
-#[derive(Clone, Debug)]
+/// The access rules of a mesh: its access policies, its connectors, and the keys of
+/// its subjects. Owners build one from the spec they read and ask it for each
+/// decision. The default has no subject, policy, or connector, so [`Rules::admit`]
+/// refuses each hello that has mesh time with [`proof::Error::Unknown`].
+#[derive(Clone, Debug, Default)]
 pub struct Rules {
     policies: Vec<(Prefix, Policy)>,
     connectors: Set<Name>,
+    subjects: Map<Name, Subject>,
 }
 
 impl Rules {
     /// Builds the rules from the region trees that the owner reads. Each item is the
     /// prefix of a region, with [`Prefix::ROOT`] for the root region, and the
-    /// definitions of its tree by name. Access keeps the access policies and the
-    /// connectors, and ignores each other kind.
+    /// definitions of its tree by name. Access keeps the access policies, the
+    /// connectors, and the subjects, and ignores each other kind.
+    ///
+    /// Each tree must have no problem from [`spec::region::check`] at its prefix, as
+    /// the tree of the spec that a region uses has. Given another tree, a subject can
+    /// take the label of a subject of another region.
+    ///
+    /// # Panics
+    ///
+    /// When a subject definition is at a key that gives no label. A tree with no
+    /// problem from [`spec::region::check`] has none.
     pub fn new<'a, T>(trees: impl IntoIterator<Item = (Prefix, T)>) -> Self
     where
         T: IntoIterator<Item = (&'a Name, &'a Definition)>,
     {
-        let mut rules = Self {
-            policies: Vec::new(),
-            connectors: Set::default(),
-        };
+        let mut rules = Self::default();
         for (region, tree) in trees {
             for (name, definition) in tree {
                 match definition {
@@ -39,14 +51,22 @@ impl Rules {
                     Definition::Connector(_) => {
                         rules.connectors.insert(name.clone());
                     }
+                    Definition::Subject(subject) => {
+                        let label = Kind::Subject.label(name).unwrap_or_else(|| {
+                            panic!(
+                                "invariant: a tree with no problem from region::check \
+                                 has a label at each subject key, not at {name}"
+                            )
+                        });
+                        rules.subjects.insert(label, subject.clone());
+                    }
                     Definition::Region(_)
                     | Definition::NodeSettings(_)
                     | Definition::Compression(_)
                     | Definition::Placement(_)
                     | Definition::Time(_)
                     | Definition::Channel(_)
-                    | Definition::Retention(_)
-                    | Definition::Subject(_) => {}
+                    | Definition::Retention(_) => {}
                 }
             }
         }

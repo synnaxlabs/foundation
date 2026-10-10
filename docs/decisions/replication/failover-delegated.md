@@ -1,0 +1,1 @@
+- **FAILOVER DELEGATED** The remaining r13 choices are parameters tuned by simulation.

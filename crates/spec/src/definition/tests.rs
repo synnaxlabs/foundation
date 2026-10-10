@@ -12,12 +12,15 @@ fn selector(texts: &[&str]) -> Selector {
 
 fn policy() -> Definition {
     let allow = [Action::Read, Action::Write].into_iter().collect();
-    Definition::Access(Policy::new(
-        selector(&["ops.*"]),
-        selector(&["site_a.**", "!site_a.@secrets.**"]),
-        allow,
-        Authority(9),
-    ))
+    Definition::Access(
+        Policy::new(
+            selector(&["ops.*"]),
+            selector(&["site_a.**", "!site_a.@secrets.**"]),
+            allow,
+            Authority(9),
+        )
+        .unwrap(),
+    )
 }
 
 /// Writes a pattern as a file writes it: a leading `!` is the exclusion flag.
@@ -60,7 +63,8 @@ fn reads_what_it_writes() {
 #[test]
 fn writes_no_authority_without_write() {
     let read = [Action::Read].into_iter().collect();
-    let policy = Policy::new(selector(&["a"]), selector(&["b"]), read, Authority(9));
+    let policy =
+        Policy::new(selector(&["a"]), selector(&["b"]), read, Authority(9)).unwrap();
     let bytes = Definition::Access(policy).encode();
     assert_eq!(bytes, access(&[b"a"], &[b"b"], 0b1, 0));
 }
@@ -240,14 +244,15 @@ fn stores_an_exclusion_of_the_longest_name() {
     let longest = "a".repeat(Name::MAX_BYTES);
     let excluded = format!("!{longest}");
     let select = Selector::new(["**", excluded.as_str()]).unwrap();
-    let policy = Policy::new(selector(&["a"]), select, Actions::NONE, Authority(0));
+    let read = [Action::Read].into_iter().collect();
+    let policy = Policy::new(selector(&["a"]), select, read, Authority(0)).unwrap();
     let definition = Definition::Access(policy);
     let bytes = definition.encode();
     let stored = [
         &[1][..],
         &255_u64.to_le_bytes(),
         longest.as_bytes(),
-        &[0, 0],
+        &[1, 0],
     ]
     .concat();
     assert!(bytes.ends_with(&stored));
@@ -266,6 +271,54 @@ fn refuses_bits_that_name_no_action() {
         error.to_string(),
         "the actions 0b01000001 at byte 38 name no action"
     );
+}
+
+#[test]
+fn refuses_actions_that_allow_nothing() {
+    let bytes = access(&[b"a"], &[b"b"], 0, 0);
+    let error = Error::Access {
+        at: 38,
+        error: access::Error::Empty,
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error.clone()));
+    assert_eq!(
+        error.to_string(),
+        "the access policy at byte 38: an access policy allows no action"
+    );
+}
+
+#[test]
+fn refuses_actions_that_allow_nothing_before_their_authority() {
+    let bytes = access(&[b"a"], &[b"b"], 0, 3);
+    let input = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/access_empty_authority"
+    );
+    assert_eq!(bytes, input);
+    let error = Error::Access {
+        at: 38,
+        error: access::Error::Empty,
+    };
+    assert_eq!(Definition::decode(&bytes), Err(error));
+}
+
+#[test]
+fn refuses_actions_that_allow_nothing_before_a_missing_authority() {
+    let bytes = access(&[b"a"], &[b"b"], 0, 0);
+    let input = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/access_empty_truncated_at_39"
+    );
+    assert_eq!(&bytes[..bytes.len() - 1], input);
+    let error = Error::Access {
+        at: 38,
+        error: access::Error::Empty,
+    };
+    assert_eq!(Definition::decode(input), Err(error));
+    let read = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/read_only_truncated_at_39"
+    );
+    let full = include_bytes!("../../../../oracles/fuzz/spec_definition/read_only");
+    assert_eq!(read, &full[..39]);
+    assert_eq!(Definition::decode(read), Err(Error::Truncated { at: 39 }));
 }
 
 #[test]
@@ -1264,17 +1317,14 @@ fn access_strategy() -> impl Strategy<Value = Definition> {
     (
         selectors(),
         selectors(),
-        prop::sample::subsequence(Action::ALL.to_vec(), 0..=6),
+        prop::sample::subsequence(Action::ALL.to_vec(), 1..=6),
         any::<u8>(),
     )
         .prop_map(|(subjects, select, allow, authority)| {
             let allow = allow.into_iter().collect();
-            Definition::Access(Policy::new(
-                subjects,
-                select,
-                allow,
-                Authority(authority),
-            ))
+            Definition::Access(
+                Policy::new(subjects, select, allow, Authority(authority)).unwrap(),
+            )
         })
 }
 
@@ -1407,6 +1457,22 @@ fn definition() -> impl Strategy<Value = Definition> {
     ]
 }
 
+/// A definition of each kind, with its kind.
+pub(crate) fn kinded() -> impl Strategy<Value = (super::Kind, Definition)> {
+    prop_oneof![
+        access_strategy().prop_map(|d| (super::Kind::Access, d)),
+        connector_strategy().prop_map(|d| (super::Kind::Connector, d)),
+        region_strategy().prop_map(|d| (super::Kind::Region, d)),
+        settings_strategy().prop_map(|d| (super::Kind::NodeSettings, d)),
+        compression_strategy().prop_map(|d| (super::Kind::Compression, d)),
+        placement_strategy().prop_map(|d| (super::Kind::Placement, d)),
+        time_strategy().prop_map(|d| (super::Kind::Time, d)),
+        channel_strategy().prop_map(|d| (super::Kind::Channel, d)),
+        retention_strategy().prop_map(|d| (super::Kind::Retention, d)),
+        subject_strategy().prop_map(|d| (super::Kind::Subject, d)),
+    ]
+}
+
 proptest! {
     #[test]
     fn decodes_each_encoding_to_its_definition(definition in definition()) {
@@ -1499,6 +1565,22 @@ proptest! {
             prop_assert_eq!(definition.encode(), bytes);
         }
     }
+}
+
+#[test]
+fn decodes_the_longest_exclusion_fuzz_input_that_allows_read() {
+    let empty =
+        include_bytes!("../../../../oracles/fuzz/spec_definition/longest_exclusion");
+    let read = include_bytes!(
+        "../../../../oracles/fuzz/spec_definition/longest_exclusion_read"
+    );
+    let error = Error::Access {
+        at: empty.len() - 2,
+        error: access::Error::Empty,
+    };
+    assert_eq!(Definition::decode(empty), Err(error));
+    let decoded = Definition::decode(read).expect("a policy that allows read");
+    assert_eq!(decoded.encode(), read);
 }
 
 #[test]

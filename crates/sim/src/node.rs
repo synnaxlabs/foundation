@@ -3,7 +3,7 @@
 use std::fmt;
 use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::task::Waker;
 
 use types::time::{Monotonic, Span, Stamp};
@@ -107,7 +107,7 @@ impl Node {
     ///   last connect, from 49152. A listen conflicts only with other listens.
     /// - A peer sends at most `recv_buffer_bytes` past the bytes read, and a stream
     ///   holds at most `send_buffer_bytes` that its peer has not received. A write
-    ///   after `poll_close` gives `Error::Io` with code 32 (`EPIPE`).
+    ///   of bytes after `poll_close` gives `Error::Io` with code 32 (`EPIPE`).
     /// - TCP panics on a link with loss, on `delayed` sends, on a connect to an
     ///   address that no node has, and on a connect to a full backlog.
     /// - A socket half, a stream, or a listener panics when it polls outside the
@@ -211,9 +211,22 @@ impl Node {
     /// - A failure gives the code that Linux gives: 20 (`ENOTDIR`) for a path
     ///   through a file, 21 (`EISDIR`) for a file call on a directory, and 17
     ///   (`EEXIST`) for `create_dir` on a file.
+    /// - Each `Files` that it gives acts as a clone of one: a write open, a remove, or
+    ///   a rename from any of them waits for each call that a drop from any of them
+    ///   left to run.
     #[must_use]
     pub fn files(&self) -> env::files::Files {
         env::files::Files::new(self.0.clone())
+    }
+
+    /// The path of each file descriptor that the node closed or dropped, in order,
+    /// since the run started: the path of its open, or of the last rename that it made,
+    /// with only its names. A crash closes each descriptor of the node, a leaked one
+    /// too. Those that the drops of its futures close come first, in the order of the
+    /// drops. The leaked ones come last, in the order that their opens started.
+    #[must_use]
+    pub fn file_closes(&self) -> Vec<PathBuf> {
+        lock(&self.0.shared).files().closes(self.0.node)
     }
 
     /// Makes the next call of `operation` on `path` on the node fail with
@@ -315,11 +328,16 @@ pub struct Config {
     pub wall_error: Option<Span>,
     /// The bytes of the node's disk.
     pub disk_bytes: u64,
+    /// The longest wait that a timer arms for, as `os` arms each Tokio sleep for at
+    /// most a second. A timer with a later deadline wakes its task early, and arms
+    /// again only at its next poll. `None` arms each timer for its deadline. A span
+    /// must be positive.
+    pub arm_max: Option<Span>,
 }
 
 impl Default for Config {
     /// Four cores that can pin, one hour after boot, at 2026-01-01T00:00:00Z, with a
-    /// wall error of 10 ms and a disk of 64 GiB.
+    /// wall error of 10 ms, a disk of 64 GiB, and each timer armed for its deadline.
     fn default() -> Self {
         Self {
             cores: NonZeroUsize::new(4).expect("four is not zero"),
@@ -328,6 +346,7 @@ impl Default for Config {
             wall: Stamp::from_nanos(1_767_225_600 * Span::SECOND.nanos()),
             wall_error: Some(Span::from_nanos(10 * Span::MILLISECOND.nanos())),
             disk_bytes: 64 << 30,
+            arm_max: None,
         }
     }
 }

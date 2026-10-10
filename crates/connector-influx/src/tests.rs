@@ -1,13 +1,11 @@
 #![expect(clippy::arithmetic_side_effects, reason = "a test may panic")]
 
-use std::sync::Arc;
-
 use connector::kind::{Kind as _, Table};
 use connector::supervisor::Supervisor;
+use connector::testing;
 use document::value::Kind as Value;
 use document::{Attribute, Block, Map, Position, Source, Span};
-use env::clock::Clock;
-use env::entropy::Entropy;
+use env::tasks::Tasks;
 
 use super::*;
 
@@ -62,11 +60,7 @@ fn config(address: Value) -> Document {
         vec![block(
             20,
             "reader",
-            &[
-                (30, "name", string("influx")),
-                (40, "mode", string("complete")),
-                (50, "hold", string("2h")),
-            ],
+            &[(40, "mode", string("complete")), (50, "hold", string("2h"))],
         )],
     )
 }
@@ -267,27 +261,35 @@ fn discovers_nothing() {
 
 /// The result of supervising one influx connector with `config`.
 fn connector_run(config: Document) -> Result<(), Error> {
-    run(move |clock, entropy| async move {
-        let kinds = Arc::new(Table::new().with("influx", Kind));
-        Supervisor::new(kinds, clock, entropy)
-            .run(
-                "influx",
-                "influx".parse().expect("a name"),
-                &config,
-                &cancel::Token::new(),
-            )
+    run(move |node, tasks| async move {
+        let env = hub::testing::Env {
+            files: node.files(),
+            clock: node.clock(),
+            wall: node.wall(),
+            entropy: node.entropy(),
+            tasks,
+        };
+        let kinds = Table::new().with("influx", Kind);
+        let inputs = testing::create_config(env, node.net(), kinds).await;
+        let connector = "influx".parse().expect("a name");
+        let status =
+            testing::create_status(&connector, &[], types::channel::Key::from_u128(1));
+        inputs
+            .hub
+            .set_definitions(status.iter().map(|(name, def)| (name, def)));
+        Supervisor::new(inputs)
+            .run("influx", connector, &config, &cancel::Token::new())
             .await
     })
 }
 
 /// Runs `main` on a shard of one simulated node and returns its output.
-fn run<T, F>(main: impl FnOnce(Clock, Entropy) -> F + Send + 'static) -> T
+fn run<T, F>(main: impl FnOnce(::sim::node::Node, Tasks) -> F + Send + 'static) -> T
 where
     T: Send + 'static,
     F: Future<Output = T> + 'static,
 {
     let mut sim = ::sim::Sim::new(::sim::Config::default());
     let node = sim.node(::sim::node::Config::default());
-    sim.run_on(&node, |node, _| main(node.clock(), node.entropy()))
-        .expect("the run ends")
+    sim.run_on(&node, main).expect("the run ends")
 }

@@ -304,6 +304,15 @@ fn a_panic_ends_the_run_and_its_thread() {
 }
 
 #[test]
+fn a_panic_in_the_call_of_main_ends_the_run_and_its_thread() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config::default());
+    let main = |_: env::tasks::Tasks| -> Ready<()> { panic!("main") };
+    let handle = node.shards().start(shard("shard-0"), main);
+    assert_panicked(&mut sim, handle.unwrap(), "main");
+}
+
+#[test]
 fn a_panic_in_a_spawned_task_ends_its_shard() {
     let mut sim = sim(0);
     let node = sim.node(node::Config::default());
@@ -835,6 +844,53 @@ impl Drop for Bomb {
     fn drop(&mut self) {
         panic!("{}", self.0);
     }
+}
+
+/// Runs `child` in a copy of this test in a child process, and asserts that the child
+/// aborts at a panic that unwinds into the unwind of another panic.
+#[cfg(unix)]
+fn assert_aborts(child: impl FnOnce()) {
+    use std::os::unix::process::ExitStatusExt;
+    const CHILD: &str = "SIM_TEST_CHILD";
+    const SIGABRT: i32 = 6;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the parent sets it for the child"
+    )]
+    if std::env::var_os(CHILD).is_some() {
+        child();
+        return;
+    }
+    let thread = std::thread::current();
+    let test = thread.name().expect("invariant: libtest names the thread");
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.signal(), Some(SIGABRT), "{stderr}");
+    assert!(
+        stderr.contains("panic in a destructor during cleanup"),
+        "{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_panic_over_a_local_that_panics_in_its_drop_in_a_task_aborts_the_process() {
+    assert_aborts(|| {
+        let mut sim = sim(0);
+        let node = sim.node(node::Config::default());
+        let handle = node.shards().start(shard("shard-0"), |tasks| async move {
+            tasks.spawn(async {
+                let _bomb = Bomb("bomb");
+                panic!("task");
+            });
+            pending::<()>().await;
+        });
+        assert_panicked(&mut sim, handle.unwrap(), "task");
+    });
 }
 
 #[test]
@@ -1387,6 +1443,51 @@ fn a_timer_wakes_its_task_only_when_due() {
     a.unwrap().join().unwrap();
     b.unwrap().join().unwrap();
     assert_eq!(polls.load(Ordering::Relaxed), 2);
+}
+
+/// As on `os`, a timer whose deadline is past the node's `arm_max` wakes its task
+/// once each `arm_max`, and completes at its deadline.
+#[test]
+fn a_timer_wakes_its_task_at_each_arm_max_until_due() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        arm_max: Some(Span::SECOND),
+        ..node::Config::default()
+    });
+    let clock = node.clock();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&polls);
+    let handle = node.shards().start(shard("sleep"), move |_| {
+        let sleep = async move {
+            let start = clock.now();
+            clock.sleep(millis(2_500)).await;
+            assert_eq!(clock.now(), start + millis(2_500));
+        };
+        Counted(Box::pin(sleep), count)
+    });
+    sim.run().unwrap();
+    handle.unwrap().join().unwrap();
+    assert_eq!(polls.load(Ordering::Relaxed), 4);
+}
+
+#[test]
+#[should_panic(expected = "arm_max Span(0) is not positive")]
+fn a_node_with_an_arm_max_of_zero_panics() {
+    let mut sim = sim(0);
+    sim.node(node::Config {
+        arm_max: Some(Span::ZERO),
+        ..node::Config::default()
+    });
+}
+
+#[test]
+#[should_panic(expected = "arm_max Span(-1000000) is not positive")]
+fn a_node_with_a_negative_arm_max_panics() {
+    let mut sim = sim(0);
+    sim.node(node::Config {
+        arm_max: Some(millis(-1)),
+        ..node::Config::default()
+    });
 }
 
 fn millis(n: i64) -> Span {

@@ -1,0 +1,14 @@
+-DUA_DYNAMIC_LINKING_EXPORT
+-Ideps
+-Iinclude
+-Iplugins/include
+-Isrc_generated
+-std=c99
+-fno-strict-aliasing
+-fexceptions
+-ffunction-sections
+-fdata-sections
+-fno-unwind-tables
+-fno-asynchronous-unwind-tables
+-fno-math-errno
+-DNDEBUG

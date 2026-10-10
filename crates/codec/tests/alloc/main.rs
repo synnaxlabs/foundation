@@ -4,6 +4,8 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::iter;
+
 use codec::{Decoder, Encoder, Error, VECTOR_LEN, max_len};
 use types::sample::{Scalar, Type};
 
@@ -152,7 +154,8 @@ fn round_trip_types() {
 }
 
 /// The raw bytes of `count` samples of `data_type`, an array or a variable type. A
-/// variable sample holds 0 to 4 elements, after the ends and their padding.
+/// variable sample holds 0 to 4 elements, after the ends and their padding. A
+/// `String` sample is one char of its length, so that some chars span vectors.
 fn values(data_type: Type, count: usize) -> Vec<u8> {
     let bytes = |len| (0..len).map(|i| mix(i).to_le_bytes()[0]);
     let width = match data_type {
@@ -174,7 +177,16 @@ fn values(data_type: Type, count: usize) -> Vec<u8> {
     let elements = elements * u64::try_from(width).expect("widths are small");
     let mut values: Vec<u8> = ends.iter().flat_map(|end| end.to_le_bytes()).collect();
     values.resize(values.len().next_multiple_of(width.min(8)), 0);
-    values.extend(bytes(elements));
+    if data_type == Type::String {
+        let chars = ["", "a", "\u{e9}", "\u{20ac}", "\u{1f600}"];
+        let starts = iter::once(0).chain(ends.iter().copied());
+        for (start, end) in starts.zip(&ends) {
+            let len = usize::try_from(end - start).expect("lengths are small");
+            values.extend(chars[len].bytes());
+        }
+    } else {
+        values.extend(bytes(elements));
+    }
     values
 }
 
@@ -292,7 +304,8 @@ fn refuse() {
     refuse_ends();
 }
 
-/// Refuses decreasing ends and a long list sample, raw and encoded.
+/// Refuses decreasing ends, a long list sample, and a string sample that is not
+/// UTF-8, raw and encoded.
 fn refuse_ends() {
     let list = Type::List {
         element: Scalar::U8,
@@ -318,6 +331,12 @@ fn refuse_ends() {
                 len: 2,
                 max: 1,
             },
+        ),
+        (
+            Type::String,
+            [1, 2],
+            &b"a\xff"[..],
+            Error::Utf8 { sample: 1 },
         ),
     ];
     for (data_type, ends, elements, error) in cases {

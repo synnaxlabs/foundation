@@ -1,4 +1,4 @@
-//! The crate map. It must match section 4 of `docs/decisions.md`.
+//! The crate map. It must match `docs/decisions/crate-map.md`.
 
 /// One crate in the map.
 pub(crate) struct Crate {
@@ -25,9 +25,12 @@ pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting"];
 pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
     ("connector-ni", "daqmx-stub"),
     ("hub", "buffer"),
+    ("hub", "blob"),
     ("access", "document"),
     ("config", "config-hcl"),
     ("config", "connector-influx"),
+    ("ops", "config-hcl"),
+    ("ops", "transport"),
 ];
 
 /// Every crate with its layer and the workspace crates it may depend on.
@@ -175,6 +178,7 @@ pub(crate) const CRATES: &[Crate] = &[
         name: "hub",
         layer: 2,
         deps: Deps::Only(&[
+            "access",
             "env",
             "types",
             "block",

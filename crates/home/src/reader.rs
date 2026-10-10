@@ -1,15 +1,18 @@
 //! The open readers of a shard: their keys, their charge, and what a take gives.
 
+use std::fmt;
 use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 
 use buffer::Buffer;
-pub use delivery::Next;
-use delivery::{Position, Reader, Readers, Start};
+pub use delivery::{Error, Next, Position, named};
+use delivery::{Reader, Readers, Start};
 use types::channel::Slot;
 use types::frame::key_set::KeySet;
 use types::frame::{Frame, Path};
+use types::hash;
+use types::time::Stamp;
 
 /// An open reader on its shard, in either mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -18,6 +21,33 @@ pub struct Key {
     pub(crate) slot: Slot,
     /// The reader's session on the index.
     pub(crate) session: delivery::Key,
+}
+
+/// A named reader did not open: the node has no mesh time yet, and a named open can
+/// close a named complete session, whose hold starts at mesh time. Nothing changed.
+/// Open it again later.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unsynced;
+
+impl fmt::Display for Unsynced {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the node has no mesh time yet: open the named reader again later"
+        )
+    }
+}
+
+impl std::error::Error for Unsynced {}
+
+/// A reader that opened, and the session of its name that it took over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Opened<K> {
+    /// The new reader.
+    pub key: K,
+    /// The reader's session that was open before, in either mode. It is closed: a
+    /// take gives `Empty`.
+    pub replaced: Option<Key>,
 }
 
 /// The key of a reader that takes every frame.
@@ -59,6 +89,10 @@ pub(crate) struct Set {
     keys: Vec<Key>,
     /// The commits the buffer had ended at the last [`Set::woken`].
     commits: u64,
+    /// The number of the first reader key of each index that the set shed and does
+    /// not carry now: above each key that the index had, so that a key never names two
+    /// readers. An index with no number starts at 0.
+    first: hash::Map<Slot, u64>,
 }
 
 /// The readers of one carried index.
@@ -81,11 +115,27 @@ impl Set {
         assert_eq!(place, self.entries.len(), "{place} is not the next place");
         self.entries.push(Entry {
             slot,
-            readers: Readers::new(live),
+            readers: Readers::after(live, self.first.remove(&slot).unwrap_or(0)),
             listed: false,
         });
         // Room for every index, so that `applied` never grows the list.
         self.listed.reserve(self.entries.len());
+    }
+
+    /// Drops the readers of the index at `place`, and moves the readers of the last
+    /// place there, as `Vec::swap_remove` moves an item.
+    ///
+    /// # Panics
+    ///
+    /// If a reader of the index is open.
+    pub(crate) fn shed(&mut self, place: usize) {
+        let last = self.entries.len() - 1;
+        let entry = self.entries.swap_remove(place);
+        self.first.insert(entry.slot, entry.readers.end());
+        self.listed.retain(|&listed| listed != place);
+        if let Some(listed) = self.listed.iter_mut().find(|listed| **listed == last) {
+            *listed = place;
+        }
     }
 
     /// Opens an unnamed complete reader on the index at `place` at seq `live`, with a
@@ -107,10 +157,82 @@ impl Set {
             .key
     }
 
+    /// Opens `reader`, which is named, on the index at `place` at its held position,
+    /// else at seq `live`, as [`open_complete`](Self::open_complete) does. Each hold
+    /// that ended at or before mesh time `now` ends first.
+    ///
+    /// # Panics
+    ///
+    /// If the reader's hold is negative.
+    pub(crate) fn open_named_complete(
+        &mut self,
+        place: usize,
+        reader: Reader,
+        live: u64,
+        limit_bytes: u64,
+        charge: complete::Charge,
+        now: Stamp,
+    ) -> delivery::complete::Opened {
+        let start = Start::Resume {
+            presented: None,
+            otherwise: Position {
+                live,
+                backfill: None,
+            },
+        };
+        let readers = &mut self.entries[place].readers;
+        readers.advance(now);
+        let opened = readers.open(reader, start, limit_bytes, charge);
+        self.replaced(place, opened.replaced);
+        self.drop_records(place);
+        opened
+    }
+
     /// Opens an unnamed latest reader on the index at `place`. It is not woken for the
     /// newest frame it can take at once.
     pub(crate) fn open_latest(&mut self, place: usize) -> delivery::latest::Key {
         self.entries[place].readers.open_latest().key
+    }
+
+    /// Opens a latest session for the named reader `reader` on the index at `place`,
+    /// as [`open_latest`](Self::open_latest) does. A complete session that it takes
+    /// over closes at mesh time `now`.
+    pub(crate) fn open_named_latest(
+        &mut self,
+        place: usize,
+        reader: named::Key,
+        now: Stamp,
+    ) -> delivery::latest::Opened {
+        let readers = &mut self.entries[place].readers;
+        let opened = readers.open_named_latest(reader, now);
+        self.replaced(place, opened.replaced);
+        self.drop_records(place);
+        opened
+    }
+
+    /// Forgets the session `replaced` of the index at `place`, which a takeover
+    /// closed.
+    fn replaced(&mut self, place: usize, replaced: Option<delivery::Key>) {
+        if let Some(delivery::Key::Latest(latest)) = replaced {
+            self.forget(place, latest);
+        }
+    }
+
+    /// Drops the position records of the index at `place`, until #274 appends them to
+    /// the index log.
+    fn drop_records(&mut self, place: usize) {
+        self.entries[place].readers.records().for_each(drop);
+    }
+
+    /// Records that the complete reader `session` on the index at `place` has each
+    /// sample below `position`, as [`Readers::ack`] does.
+    pub(crate) fn ack(
+        &mut self,
+        place: usize,
+        session: delivery::complete::Key,
+        position: Position,
+    ) -> Result<(), Error> {
+        self.entries[place].readers.ack(session, position)
     }
 
     /// Raises the credit of the complete reader `session` on the index at `place`, as
@@ -133,19 +255,34 @@ impl Set {
         self.entries[place].readers.take(session)
     }
 
-    /// Closes the reader `session` on the index at `place`. Its waiting frames do not
-    /// go out, and [`woken`](Self::woken) does not name it. A close of a closed reader
-    /// changes nothing.
+    /// Closes the reader `session` on the index at `place` at mesh time `now`. Its
+    /// waiting frames do not go out, and [`woken`](Self::woken) does not name it. A
+    /// close of a closed reader changes nothing.
     ///
     /// # Panics
     ///
-    /// If the index never gave `session`.
-    pub(crate) fn close(&mut self, place: usize, session: delivery::Key) {
-        let entry = &mut self.entries[place];
-        entry.readers.close(session);
+    /// If the index never gave `session`, or `now` is `None` and `session` is an open
+    /// named complete session.
+    pub(crate) fn close(
+        &mut self,
+        place: usize,
+        session: delivery::Key,
+        now: Option<Stamp>,
+    ) {
+        self.entries[place].readers.close(session, now);
+        self.drop_records(place);
+        if let delivery::Key::Latest(latest) = session {
+            self.forget(place, latest);
+        }
+    }
+
+    /// Drops the closed latest reader `session` of the index at `place` from the
+    /// readers to wake. Only a latest reader waits there between calls of
+    /// [`woken`](Self::woken).
+    fn forget(&mut self, place: usize, session: delivery::latest::Key) {
         let key = Key {
-            slot: entry.slot,
-            session,
+            slot: self.entries[place].slot,
+            session: session.into(),
         };
         self.keys.retain(|&woken| woken != key);
     }
@@ -361,7 +498,8 @@ mod tests {
             let frames = Frames::new();
             let mut set = carried(1);
             let latest = set.open_latest(0);
-            let _ = set.open_complete(0, 0, u64::MAX, complete::Charge::Whole);
+            let _: complete::Key =
+                set.open_complete(0, 0, u64::MAX, complete::Charge::Whole);
             set.applied(0, frames.frame(Path::Backfill, 0..2), &frames.set, 0..2);
             assert_eq!(woken(&mut set), []);
             assert_eq!(set.listed(), []);
@@ -408,6 +546,16 @@ mod tests {
             let mut set = carried(1);
             set.carry(2, Slot::new(1), 0);
         }
+
+        /// The set keeps the number of a shed index only until it carries it again.
+        #[test]
+        fn drops_the_number_of_a_shed_index_that_it_carries_again() {
+            let mut set = carried(2);
+            set.shed(0);
+            assert_eq!(set.first.len(), 1);
+            set.carry(1, Slot::new(0), 0);
+            assert!(set.first.is_empty());
+        }
     }
 
     mod open_latest {
@@ -437,8 +585,66 @@ mod tests {
             assert_eq!(first, second, "each index numbers its own readers");
             set.applied(0, frames.frame(Path::Live, 0..1), &frames.set, 0..1);
             set.applied(1, frames.frame(Path::Live, 0..1), &frames.set, 0..1);
-            set.close(0, first.into());
+            set.close(0, first.into(), None);
             assert_eq!(woken(&mut set), [reader(1, second)]);
+        }
+    }
+
+    mod named {
+        use types::time::Span;
+
+        use super::*;
+
+        fn key() -> delivery::named::Key {
+            delivery::named::Key {
+                subject: "s".parse().expect("a valid name"),
+                name: "r".parse().expect("a valid name"),
+            }
+        }
+
+        fn open(set: &mut Set) -> complete::Key {
+            let reader = Reader::Named {
+                reader: key(),
+                hold: Span::from_nanos(10),
+            };
+            let now = Stamp::from_nanos(0);
+            set.open_named_complete(
+                0,
+                reader,
+                0,
+                u64::MAX,
+                complete::Charge::Whole,
+                now,
+            )
+            .key
+        }
+
+        /// The position records that wait on the index at slot 0. No call shows them,
+        /// and each would stay for the life of the shard.
+        fn records(set: &mut Set) -> usize {
+            set.entries[0].readers.records().count()
+        }
+
+        #[test]
+        fn drops_the_position_records_at_each_open_takeover_and_close() {
+            let mut set = carried(1);
+            let _first = open(&mut set);
+            assert_eq!(records(&mut set), 0);
+            let second = open(&mut set);
+            assert_eq!(records(&mut set), 0);
+            set.close(0, second.into(), Some(Stamp::from_nanos(1)));
+            assert_eq!(records(&mut set), 0);
+            let _third = open(&mut set);
+            let _latest = set.open_named_latest(0, key(), Stamp::from_nanos(2));
+            assert_eq!(records(&mut set), 0);
+        }
+
+        #[test]
+        fn says_why_a_named_reader_did_not_open() {
+            assert_eq!(
+                Unsynced.to_string(),
+                "the node has no mesh time yet: open the named reader again later"
+            );
         }
     }
 }

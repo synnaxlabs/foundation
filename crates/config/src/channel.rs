@@ -1,12 +1,12 @@
 use document::diagnostic::{Code, Diagnostic};
 use document::value::Value;
-use document::{Block, Span, read};
+use document::{Block, read};
 use spec::channel::{Data, Edge, Error, Kind};
 use spec::data_type::DataType;
 use spec::unit::Unit;
 use types::name::Name;
 
-use crate::{Definition, Found, Reported};
+use crate::{Definition, Found, Reported, span};
 
 const BAD_CHANNEL_KIND: Code = Code::new("config.bad-channel-kind");
 const BAD_DATA_TYPE: Code = Code::new("config.bad-data-type");
@@ -21,7 +21,11 @@ type Attributes = fn(&mut Found<'_>, &Block) -> Option<Kind<Name>>;
 /// Checks a `channel` block and gives its channel, with each edge as a name. After a
 /// bad `kind`, it reports each attribute that no kind knows, and leaves each other
 /// attribute, since its problem depends on the kind.
-pub(crate) fn check(found: &mut Found<'_>, block: &Block) -> Option<Definition> {
+pub(crate) fn check(
+    found: &mut Found<'_>,
+    block: &Block,
+    _: Option<&Name>,
+) -> Option<Definition> {
     let attributes = found.attribute(block, "kind", |value| -> Result<Attributes, _> {
         match text(value, BAD_CHANNEL_KIND, "the channel kind", "\"index\"")? {
             "index" => Ok(index),
@@ -119,12 +123,7 @@ fn edge(
     block: &Block,
     edge: Edge,
 ) -> Result<Option<Name>, Reported> {
-    let key = match edge {
-        Edge::Index => "index",
-        Edge::Quality => "quality",
-        Edge::Error => "error",
-        Edge::Control => "control",
-    };
+    let key = attribute(edge);
     match found.attribute(block, key, read::name)? {
         Some(to) if !found.channels.contains(&to) => {
             found.diagnostics.push(Diagnostic::new(
@@ -139,9 +138,14 @@ fn edge(
     }
 }
 
-/// The span of the value of `key` in `block`.
-fn span(block: &Block, key: &str) -> Option<Span> {
-    block.body.attributes.get(key)?.value.span
+/// The attribute of a `channel` block that holds `edge`.
+pub(crate) const fn attribute(edge: Edge) -> &'static str {
+    match edge {
+        Edge::Index => "index",
+        Edge::Quality => "quality",
+        Edge::Error => "error",
+        Edge::Control => "control",
+    }
 }
 
 /// The text of a string or a reference. Another value gives `code`, with `what` in

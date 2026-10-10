@@ -4,6 +4,7 @@ use std::future::{pending, poll_fn};
 use std::io::IoSlice;
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
+use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,7 +54,7 @@ fn options() -> tcp::Options {
     tcp::Options {
         send_buffer_bytes: 1 << 20,
         recv_buffer_bytes: 1 << 20,
-        unsent_bytes_max: 1 << 14,
+        unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
         delayed: false,
     }
 }
@@ -435,7 +436,7 @@ fn stalled(options: tcp::Options) -> (usize, usize) {
 fn a_peer_that_reads_nothing_stops_the_writer_when_both_buffers_are_full() {
     let options = tcp::Options {
         send_buffer_bytes: 1 << 16,
-        unsent_bytes_max: 1 << 16,
+        unsent_bytes_max: NonZeroUsize::new(1 << 16).unwrap(),
         ..options()
     };
     assert_eq!(stalled(options), (2 << 16, 1 << 18));
@@ -453,7 +454,7 @@ fn a_write_is_pending_while_the_send_buffer_is_full() {
         ..options()
     };
     let unsent = tcp::Options {
-        unsent_bytes_max: 1 << 20,
+        unsent_bytes_max: NonZeroUsize::new(1 << 20).unwrap(),
         ..options
     };
     assert_eq!(stalled(unsent), ((1 << 16) + (1 << 14), 1 << 18));
@@ -476,6 +477,140 @@ fn a_write_takes_no_more_bytes_than_the_send_buffer_has_room_for() {
     });
     sim.run().unwrap();
     assert_eq!(take(&wrote), Ok(1 << 14));
+}
+
+/// A write of no parts and one of three empty parts, each polled once.
+async fn write_nothing(tcp: &mut Tcp) -> [Option<Result<usize, Net>>; 2] {
+    let empty = [IoSlice::new(&[]); 3];
+    [
+        poll_once(poll_fn(|cx| tcp.poll_write(cx, &[]))).await,
+        poll_once(poll_fn(|cx| tcp.poll_write(cx, &empty))).await,
+    ]
+}
+
+/// A stream that `b` accepts from `a`, after the run of the connect.
+fn accepted() -> (crate::Sim, node::Node, Tcp) {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    let server = start(
+        &b,
+        "server",
+        move |_| async move { accept(&mut listener).await },
+    );
+    let remote = at(&b, 4433);
+    start(&a, "client", move |node| async move {
+        let _tcp = connect(&node, remote, options()).await.unwrap();
+        pending::<()>().await;
+    });
+    sim.run_for(millis(5)).unwrap();
+    let tcp = take(&server);
+    (sim, b, tcp)
+}
+
+#[test]
+fn a_write_of_no_bytes_after_a_crash_panics() {
+    let (mut sim, b, mut tcp) = accepted();
+    sim.crash(&b, Crash::Process);
+    start(&b, "stream", move |_| async move {
+        drop(write_nothing(&mut tcp).await);
+    });
+    let message = "a TCP stream of node 1 polls after a crash of the node";
+    assert_eq!(sim.run_for(millis(1)), Err(panicked("stream", message)));
+}
+
+#[test]
+fn a_write_of_no_bytes_on_a_second_thread_panics() {
+    let (mut sim, b, mut tcp) = accepted();
+    let slot = start(&b, "first", move |_| async move {
+        drop(poll_once(write_all(&mut tcp, b"x")).await);
+        tcp
+    });
+    sim.run_for(millis(1)).unwrap();
+    let mut tcp = take(&slot);
+    start(&b, "second", move |_| async move {
+        drop(write_nothing(&mut tcp).await);
+    });
+    let message = "a TCP stream polls only on thread \"first\" of its first poll";
+    assert_eq!(sim.run_for(millis(1)), Err(panicked("second", message)));
+}
+
+#[test]
+fn a_first_write_of_no_bytes_binds_the_thread() {
+    let (mut sim, b, mut tcp) = accepted();
+    let slot = start(&b, "first", move |_| async move {
+        drop(write_nothing(&mut tcp).await);
+        tcp
+    });
+    sim.run_for(millis(1)).unwrap();
+    let mut tcp = take(&slot);
+    start(&b, "second", move |_| async move {
+        drop(poll_once(write_all(&mut tcp, b"x")).await);
+    });
+    let message = "a TCP stream polls only on thread \"first\" of its first poll";
+    assert_eq!(sim.run_for(millis(1)), Err(panicked("second", message)));
+}
+
+#[test]
+fn a_write_of_no_bytes_gives_0_at_a_full_send_buffer() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let _listener = listen(&b, 4433);
+    let remote = at(&b, 4433);
+    let small = tcp::Options {
+        send_buffer_bytes: 1 << 14,
+        ..options()
+    };
+    let wrote = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, small).await.unwrap();
+        let block = vec![1; 1 << 14];
+        let parts = [IoSlice::new(&block)];
+        let filled = poll_fn(|cx| tcp.poll_write(cx, &parts)).await;
+        let full = poll_once(poll_fn(|cx| tcp.poll_write(cx, &parts))).await;
+        (filled, full, write_nothing(&mut tcp).await)
+    });
+    sim.run().unwrap();
+    assert_eq!(
+        take(&wrote),
+        (Ok(1 << 14), None, [Some(Ok(0)), Some(Ok(0))])
+    );
+}
+
+#[test]
+fn a_write_of_no_bytes_after_a_reset_gives_0() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let mut listener = listen(&b, 4433);
+    start(&b, "server", move |_| async move {
+        drop(accept(&mut listener).await);
+    });
+    let remote = at(&b, 4433);
+    let wrote = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        node.clock().sleep(millis(10)).await;
+        let before = write_nothing(&mut tcp).await;
+        let bytes = write_all(&mut tcp, b"x").await;
+        (before, bytes, write_nothing(&mut tcp).await)
+    });
+    sim.run().unwrap();
+    let nothing = [Some(Ok(0)), Some(Ok(0))];
+    let reset = Net::Reset { remote };
+    assert_eq!(take(&wrote), (nothing.clone(), Err(reset), nothing));
+}
+
+#[test]
+fn a_write_of_no_bytes_after_the_close_gives_0() {
+    let (mut sim, a, b) = pair(0, link::Config::default());
+    let _listener = listen(&b, 4433);
+    let remote = at(&b, 4433);
+    let wrote = start(&a, "client", move |node| async move {
+        let mut tcp = connect(&node, remote, options()).await.unwrap();
+        close(&mut tcp).await.unwrap();
+        let before = write_nothing(&mut tcp).await;
+        let bytes = write_all(&mut tcp, b"x").await;
+        (before, bytes, write_nothing(&mut tcp).await)
+    });
+    sim.run().unwrap();
+    let nothing = [Some(Ok(0)), Some(Ok(0))];
+    let pipe = Net::Io { code: 32 };
+    assert_eq!(take(&wrote), (nothing.clone(), Err(pipe), nothing));
 }
 
 /// Fills the receive buffer of `recv` bytes of a reader on `b`, which then reads up
@@ -681,7 +816,7 @@ fn a_drop_after_close_still_sends_every_byte_and_the_end() {
     });
     let remote = at(&b, 4433);
     let unsent = tcp::Options {
-        unsent_bytes_max: 1 << 20,
+        unsent_bytes_max: NonZeroUsize::new(1 << 20).unwrap(),
         ..options()
     };
     start(&a, "client", move |node| async move {
@@ -1243,7 +1378,7 @@ fn a_power_cut_frees_the_port_of_an_orphan_for_a_connect_after_the_ports_wrap() 
     let (remote, closed) = (at(&b, 4433), at(&b, 9));
     start(&a, "client", move |node| async move {
         let queued = tcp::Options {
-            unsent_bytes_max: 1 << 20,
+            unsent_bytes_max: NonZeroUsize::new(1 << 20).unwrap(),
             ..options()
         };
         let mut tcp = connect(&node, remote, queued).await.unwrap();

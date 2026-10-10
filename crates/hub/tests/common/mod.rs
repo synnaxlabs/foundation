@@ -2,38 +2,58 @@
 //! it, for the tests and benches that count or time the hub.
 
 use env::tasks::Tasks;
+use hub::Hub;
 use hub::home::Outcome;
+use hub::reader;
 use hub::writer::Writer;
-use hub::{Channel, Hub};
+use spec::channel::{Channel, Data, Kind};
+use spec::data_type::DataType;
+use spec::definition::Definition;
 use types::channel;
 use types::frame::{Draft, Form, Label, Path};
+use types::name::{Name, Selector};
 use types::sample::{Scalar, Type};
 use types::time::Span;
 
-use crate::shard::{name, shard};
+use crate::node::env;
 
 /// Past the commit of a write.
 pub(crate) const SETTLE: Span = Span::from_nanos(20_000_000);
 
 /// A hub on a new shard, with `time` and `value` defined, and the node's mesh time now.
 pub(crate) async fn hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
-    let (home, interner, now) = shard(node, tasks.clone()).await;
-    let hub = Hub::new(hub::Config {
-        home,
-        interner,
-        tasks,
-    });
-    for (key, channel, scalar) in
-        [(1, "time", Scalar::Stamp), (2, "value", Scalar::I64)]
-    {
-        hub.define(Channel {
-            key: channel::Key::from_u128(key),
-            name: name(channel),
-            data_type: Type::Scalar(scalar),
-            index: channel::Key::from_u128(1),
-        });
+    let (hub, now) = hub::testing::open(env(node, tasks)).await;
+    let time = Channel {
+        key: channel::Key::from_u128(1),
+        kind: Kind::Index {
+            error: None,
+            control: None,
+        },
+    };
+    let i64 = DataType::Sample(Type::Scalar(Scalar::I64));
+    let data = Data::new(time.key, None, i64, None).expect("no unit");
+    let value = Channel {
+        key: channel::Key::from_u128(2),
+        kind: Kind::Data(data),
+    };
+    let (time, value) = (Definition::Channel(time), Definition::Channel(value));
+    hub.set_definitions([(&name("time"), &time), (&name("value"), &value)]);
+    (hub, now.nanos())
+}
+
+pub(crate) fn name(name: &str) -> Name {
+    name.parse().expect("a valid name")
+}
+
+/// An unnamed reader on the channels named `channels`.
+pub(crate) fn unnamed(channels: &[&str], mode: reader::Mode) -> reader::Config {
+    reader::Config {
+        select: Selector::new(channels.iter().copied()).expect("a selector"),
+        mode,
+        subject: name("reader"),
+        name: None,
+        hold: Span::ZERO,
     }
-    (hub, now)
 }
 
 /// A frame of one sample at `stamp` on `time` and `value`.

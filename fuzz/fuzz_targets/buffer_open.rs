@@ -29,6 +29,7 @@
 //! checked: the build never wraps.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use std::iter;
 use std::path::{Path, PathBuf};
@@ -44,6 +45,7 @@ use libfuzzer_sys::arbitrary::{Arbitrary, Result, Unstructured};
 use libfuzzer_sys::fuzz_target;
 use types::channel::{self, Slot, Slots};
 use types::frame;
+use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
 
 const BLOCK: usize = 4096;
@@ -606,8 +608,8 @@ struct Shard {
 
 impl Shard {
     /// Opens the ring. Gives the slot of each index of the build, then each other
-    /// slot up to that of `SPARE`: an edit can change the index of an entry. An edit
-    /// that writes `SPARE` hides the slots after it.
+    /// slot up to a new data slot of `SPARE`, which comes after each slot the open
+    /// made: an edit can change the index of an entry.
     async fn open(&self) -> std::result::Result<(Buffer, Vec<Slot>), Error> {
         let mut table = Slots::new();
         let config = Config {
@@ -623,8 +625,8 @@ impl Shard {
         };
         let buffer = Buffer::open(config, &mut table).await?;
         let mut slots: Vec<Slot> =
-            (0..INDEXES).map(|index| table.assign(key(index))).collect();
-        let edited: Vec<Slot> = (0..=table.assign(SPARE).get())
+            (0..INDEXES).map(|index| table.index(key(index))).collect();
+        let edited: Vec<Slot> = (0..=table.data(SPARE, Type::Scalar(Scalar::U8)).get())
             .map(Slot::new)
             .filter(|slot| !slots.contains(slot))
             .collect();

@@ -26,8 +26,7 @@ use crate::net::Error;
 pub trait Driver: Send {
     /// Sends `transmit`, with the rules of
     /// [`Sender::poll_send`](super::Sender::poll_send). An error affects only this
-    /// transmit. A `Pending` or an error may come after some datagrams went out, and
-    /// `sim` models the duplicates that the retry sends.
+    /// transmit.
     fn poll_send(
         &mut self,
         cx: &mut Context<'_>,

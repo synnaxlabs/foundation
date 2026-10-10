@@ -1,21 +1,20 @@
-//! `wire::blob::Server` and `wire::blob::Requester` never panic, each head encodes to
-//! its message, each body message is where `body` says and no longer than the rest of
-//! the body, each refusal is the one the state gives, and each valid message made from
-//! the input decodes to itself.
+//! `wire::blob::Server`, `wire::blob::Requester`, and the `Body` of each head never
+//! panic, each head encodes to its message, each body counts the bytes that its head
+//! names and no more, each refusal is the one the state gives, a body ends unfinished
+//! while bytes remain, and each valid message made from the input decodes to itself.
 //!
 //! Input: the chunk limit (one byte), then the stream messages (`fuzz::messages`),
 //! which each side reads.
 
 #![no_main]
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use libfuzzer_sys::{
     arbitrary::{self, Unstructured},
     fuzz_target,
 };
 use types::digest::Digest;
-use wire::blob::{
-    Error, FromRequester, FromServer, Put, Reply, Requester, Server, get,
-};
+use wire::blob::{Body, Error, FromRequester, Put, Reply, Requester, Server, get};
 
 /// The most digests of a written get.
 const GET_MAX: usize = 4;
@@ -26,14 +25,13 @@ const DIGEST_LEN: usize = 32;
 /// The bytes of a chunk length.
 const LEN_LEN: usize = 4;
 
-/// The rest of a body, kept apart from the decoder.
+/// The rest of a body, kept apart from `wire`.
 #[derive(Clone, Copy, Debug)]
-struct Body {
-    len: usize,
+struct Count {
     remain: usize,
 }
 
-impl Body {
+impl Count {
     /// The body of a chunk of `len` bytes whose head a decoder with `max` took. `None`
     /// when the chunk has no body message.
     ///
@@ -45,29 +43,21 @@ impl Body {
             .ok()
             .filter(|&len| len <= max)
             .expect("a head over the limit decoded");
-        (len > 0).then_some(Self { len, remain: len })
+        (len > 0).then_some(Self { remain: len })
     }
 
-    /// Where in the chunk the next body message starts.
-    fn at(self) -> usize {
-        self.len - self.remain
-    }
-
-    /// The rest of the body after a message of `bytes` bytes that the decoder took and
-    /// called `last`. `None` when the body ended.
+    /// The rest of the body after a message of `bytes` bytes that `wire` took.
     ///
     /// # Panics
     ///
-    /// When the message is empty or longer than the rest, or when `last` is not where
-    /// the body ends.
-    fn take(self, bytes: usize, last: bool) -> Option<Self> {
+    /// When the message is empty or longer than the rest.
+    fn take(self, bytes: usize) -> Self {
         assert!(bytes > 0, "a body message has no byte");
         let remain = self
             .remain
             .checked_sub(bytes)
             .expect("a body message is longer than the rest of the body");
-        assert_eq!(last, remain == 0, "the body ends at another message");
-        (!last).then_some(Self { remain, ..self })
+        Self { remain }
     }
 
     /// Whether `error` is the refusal of `message` where the body continues.
@@ -81,20 +71,20 @@ impl Body {
     }
 }
 
-/// What a decoder gave for a message, the same for both sides.
+/// A head that a decoder gave, the same for both sides.
 #[derive(Debug)]
-enum Event<'m> {
-    /// A head, encoded again, and the length of its chunk. `None` when no body follows.
-    Head(Vec<u8>, Option<u32>),
-    /// A body message.
-    Body(&'m [u8], bool),
+struct Head {
+    /// The head, encoded again.
+    out: Vec<u8>,
+    /// The length of its chunk. `None` when the head names no chunk.
+    len: Option<u32>,
+    /// The body that follows it. `None` for a get.
+    body: Option<Body>,
 }
 
 /// One side of a blob stream.
 trait Side {
-    fn decode<'m>(&mut self, message: &'m [u8]) -> Result<Event<'m>, Error>;
-
-    fn body(&self) -> Option<usize>;
+    fn head(&self, message: &[u8]) -> Result<Head, Error>;
 
     /// The error that the side gives for `message` where it takes a head, or `None`
     /// when the message is a head it takes.
@@ -102,25 +92,28 @@ trait Side {
 }
 
 impl Side for Server {
-    fn decode<'m>(&mut self, message: &'m [u8]) -> Result<Event<'m>, Error> {
+    fn head(&self, message: &[u8]) -> Result<Head, Error> {
         Ok(match Server::decode(self, message)? {
             FromRequester::Get(digests) => {
                 let digests: Vec<_> = digests.collect();
                 let mut out = vec![0; get::encoded_len(digests.len())];
                 get::encode(&digests, &mut out);
-                Event::Head(out, None)
+                Head {
+                    out,
+                    len: None,
+                    body: None,
+                }
             }
             FromRequester::Put(put) => {
                 let mut out = vec![0; Put::LEN];
                 put.encode(&mut out);
-                Event::Head(out, Some(put.len))
+                Head {
+                    out,
+                    len: Some(put.len),
+                    body: Some(put.body()),
+                }
             }
-            FromRequester::Body { bytes, last } => Event::Body(bytes, last),
         })
-    }
-
-    fn body(&self) -> Option<usize> {
-        Server::body(self)
     }
 
     fn refusal(message: &[u8], max: usize) -> Option<Error> {
@@ -141,23 +134,19 @@ impl Side for Server {
 }
 
 impl Side for Requester {
-    fn decode<'m>(&mut self, message: &'m [u8]) -> Result<Event<'m>, Error> {
-        Ok(match Requester::decode(self, message)? {
-            FromServer::Reply(reply) => {
-                let mut out = vec![0; reply.encoded_len()];
-                reply.encode(&mut out);
-                let len = match reply {
-                    Reply::Chunk { len, .. } => Some(len),
-                    Reply::Absent { .. } | Reply::Stored { .. } => None,
-                };
-                Event::Head(out, len)
-            }
-            FromServer::Body { bytes, last } => Event::Body(bytes, last),
+    fn head(&self, message: &[u8]) -> Result<Head, Error> {
+        let reply = Requester::decode(self, message)?;
+        let mut out = vec![0; reply.encoded_len()];
+        reply.encode(&mut out);
+        let len = match reply {
+            Reply::Chunk { len, .. } => Some(len),
+            Reply::Absent { .. } | Reply::Stored { .. } => None,
+        };
+        Ok(Head {
+            out,
+            len,
+            body: Some(reply.body()),
         })
-    }
-
-    fn body(&self) -> Option<usize> {
-        Requester::body(self)
     }
 
     fn refusal(message: &[u8], max: usize) -> Option<Error> {
@@ -224,34 +213,66 @@ fn reply_kind(reply: Reply) -> u8 {
     out[0]
 }
 
-/// Each event that `side` gives for the messages in `bytes` must encode to its message
-/// and be where the body says, and each refusal must be the one the state gives.
-fn read<S: Side + std::fmt::Debug>(mut side: S, max: usize, bytes: &[u8]) {
-    let mut body: Option<Body> = None;
+/// Each head that `side` gives for the messages in `bytes` must encode to its message,
+/// each body must count what the target counts, and each refusal must be the one the
+/// state gives.
+fn read<S: Side>(side: &S, max: usize, bytes: &[u8]) {
+    let mut body: Option<(Body, Count)> = None;
     for message in fuzz::messages(bytes) {
-        body = match (body, side.decode(message)) {
-            (None, Ok(Event::Head(out, len))) => {
-                assert_eq!(out, message, "the head changed");
-                len.and_then(|len| Body::start(len, max))
-            }
-            (Some(body), Ok(Event::Body(bytes, last))) => {
-                assert_eq!(bytes, message, "the body message changed");
-                body.take(bytes.len(), last)
-            }
-            (body, Err(error)) => {
-                let refused = match body {
-                    None => S::refusal(message, max) == Some(error),
-                    Some(body) => body.refused(message, error),
+        body = match body {
+            None => match side.head(message) {
+                Ok(head) => {
+                    assert_eq!(head.out, message, "the head changed");
+                    let count = head.len.and_then(|len| Count::start(len, max));
+                    let remain = count.map_or(0, |count| count.remain);
+                    let body = head.body.filter(|body| body.remain() > 0);
+                    assert_eq!(
+                        body.as_ref().map_or(0, Body::remain),
+                        remain,
+                        "the body"
+                    );
+                    body.zip(count)
+                }
+                Err(error) => {
+                    assert_eq!(
+                        S::refusal(message, max),
+                        Some(error),
+                        "{error:?} is not the refusal of {message:?}"
+                    );
+                    None
+                }
+            },
+            Some((mut body, count)) => {
+                let count = match body.take(message) {
+                    Ok(bytes) => {
+                        assert_eq!(bytes, message, "the body message changed");
+                        count.take(bytes.len())
+                    }
+                    Err(error) => {
+                        assert!(
+                            count.refused(message, error),
+                            "{error:?} is not the refusal of {message:?} for {count:?}"
+                        );
+                        count
+                    }
                 };
-                assert!(
-                    refused,
-                    "{error:?} is not the refusal of {message:?} for {body:?}"
-                );
-                body
+                assert_eq!(body.remain(), count.remain, "the body is elsewhere");
+                if count.remain == 0 {
+                    assert_eq!(body.end(), Ok(()), "a body that ended is unfinished");
+                    None
+                } else {
+                    Some((body, count))
+                }
             }
-            (body, Ok(event)) => panic!("{event:?} came, not {body:?}"),
         };
-        assert_eq!(side.body(), body.map(Body::at), "the body is elsewhere");
+    }
+    if let Some((body, count)) = body {
+        let remain = count.remain;
+        assert_eq!(
+            body.end(),
+            Err(Error::Unfinished { remain }),
+            "the body ended"
+        );
     }
 }
 
@@ -289,9 +310,7 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
         let mut out = vec![0; reply.encoded_len()];
         reply.encode(&mut out);
         match Requester::new(usize::MAX).decode(&out) {
-            Ok(FromServer::Reply(decoded)) => {
-                assert_eq!(decoded, reply, "the reply changed");
-            }
+            Ok(decoded) => assert_eq!(decoded, reply, "the reply changed"),
             other => panic!("a reply did not read back: {other:?}"),
         }
     }
@@ -301,8 +320,8 @@ fn write(input: &mut Unstructured) -> arbitrary::Result<()> {
 fuzz_target!(|bytes: &[u8]| {
     if let Some((&max, messages)) = bytes.split_first() {
         let max = usize::from(max);
-        read(Server::new(max), max, messages);
-        read(Requester::new(max), max, messages);
+        read(&Server::new(max), max, messages);
+        read(&Requester::new(max), max, messages);
     }
     write(&mut Unstructured::new(bytes)).expect("an input that ends gives zeros");
 });

@@ -139,6 +139,36 @@ fn an_earlier_round_that_names_a_hot_path_needs_performance() {
     );
 }
 
+/// The problem of a round 3 with raw HTML in `line`.
+fn raw(line: &str) -> String {
+    format!(
+        "review round 3 has raw HTML, which can hide text on GitHub, in the line \
+         `{line}`. Put the line in a code span, in the format of \
+         .claude/skills/review/SKILL.md, \"Round comment\"."
+    )
+}
+
+/// The problem of a round 3 with `[^` before the last line of a paragraph in `line`.
+fn bracket(line: &str) -> String {
+    format!(
+        "review round 3 has `[^` before the last line of a paragraph, which can hide \
+         text on GitHub, in the line `{line}`. Put the line in a code span, in the \
+         format of .claude/skills/review/SKILL.md, \"Round comment\"."
+    )
+}
+
+/// The problem of a round 3 with a paragraph that comrak places in the wrong lines,
+/// which starts with `line`.
+fn misplaced(line: &str) -> String {
+    format!(
+        "review round 3 has a link or an image with a line break after its text, or a \
+         link reference definition, in the paragraph that starts with the line \
+         `{line}`, which the check cannot read. Write each link and image on one line, \
+         and put a blank line after each link reference definition, in the format of \
+         .claude/skills/review/SKILL.md, \"Round comment\"."
+    )
+}
+
 /// The problem of a round 3 that does not end with its `name:` line.
 fn unended(name: &str) -> String {
     format!(
@@ -185,10 +215,8 @@ fn fails_a_round_whose_end_lines_are_out_of_order_or_not_last() {
         vec![unended("Deferred")]
     );
     let indented = ROUND.replace("\nHot path:", "\n  Hot path:");
-    assert_eq!(
-        check(&record(vec![bot(&indented)])),
-        vec![unended("Hot path")]
-    );
+    assert_ne!(indented, ROUND);
+    assert_eq!(check(&record(vec![bot(&indented)])), Vec::<String>::new());
     let trailed = ROUND.replace("none\n", "none  \n") + "\n  \n";
     assert_eq!(check(&record(vec![bot(&trailed)])), Vec::<String>::new());
     let followed = ROUND.to_string() + "\n\nThe author fixes each finding.";
@@ -514,7 +542,7 @@ fn a_round_that_names_a_hot_path_needs_performance() {
     );
     assert_eq!(
         check(&record(vec![bot(&listed)])),
-        check(&record(vec![bot(&hot)]))
+        vec![unended("Deferred")]
     );
     let called = later("reviewer, breaker")
         .replace("Hot path: none", "Hot path: `none()`, once per frame");
@@ -552,7 +580,7 @@ fn a_round_that_names_a_hot_path_needs_performance() {
     assert_eq!(check(&record(vec![bot(&cold)])), Vec::<String>::new());
     let docs = ROUND.replace("Hot path: none", "Hot path: `Sender::send`");
     let mut record = record(vec![bot(&docs)]);
-    record.files = vec!["docs/decisions.md".to_string()];
+    record.files = vec!["docs/decisions/crate-map.md".to_string()];
     assert_eq!(
         check(&record),
         vec![
@@ -564,12 +592,237 @@ fn a_round_that_names_a_hot_path_needs_performance() {
 
 #[test]
 fn fails_an_earlier_round_with_fields_and_no_number() {
-    for heading in ["## Review round 1.", "## Review round <n>"] {
+    // GitHub does not show the raw HTML `<n>`.
+    for (heading, shown) in [
+        ("## Review round 1.", "## Review round 1."),
+        ("## Review round <n>", "## Review round "),
+    ] {
         let first = bot(&format!("{heading}\n\nReviewers: reviewer"));
         assert_eq!(
             check(&record(vec![first, bot(ROUND)])),
-            vec![format!("`{heading}` has no round number")]
+            vec![format!("`{shown}` has no round number")]
         );
+    }
+    // The number comes before raw HTML.
+    let html = bot("## Review round x\n\nReviewers: reviewer\n\n<div>");
+    assert_eq!(
+        check(&record(vec![html, bot(ROUND)])),
+        vec!["`## Review round x` has no round number"]
+    );
+}
+
+#[test]
+fn reads_each_name_as_github_shows_it() {
+    // GitHub shows each line with `Hot path:` at its start.
+    for line in [
+        "&#72;ot path: `send`",
+        "**Hot path:** `send`",
+        "`Hot path:` `send`",
+        "~~Hot path:~~ `send`",
+        "` `Hot path: `send`",
+        "&#32;Hot path: `send`",
+        "&#9;Hot path: `send`",
+        "&#10;Hot path: `send`",
+        "&nbsp;Hot path: `send`",
+        "&#8203;Hot path: `send`",
+        "&ZeroWidthSpace;Hot path: `send`",
+        "&shy;Hot path: `send`",
+        "&#xFEFF;Hot path: `send`",
+        "Hot&nbsp;path: `send`",
+        "Hot&#8203; path: `send`",
+        "Hot&#x2003;&#x2003;path: `send`",
+    ] {
+        let comment =
+            ROUND.replace("Hot path: none", &format!("{line}\nHot path: none"));
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec!["review round 3 has a second `Hot path:` line in its end lines."],
+            "{line}"
+        );
+    }
+    for (plain, shown) in [
+        ("Reviewers: reviewer", "Reviewers\\: reviewer"),
+        ("Deferred: none", "Deferred\\: none"),
+        ("Hot path: none", "Hot path\\: none"),
+        // GitHub shows the image, not its text.
+        ("Hot path: none", "![Hot path:](x) `send`\nHot path: none"),
+        // A Cyrillic `о` in place of the Latin one.
+        ("Hot path: none", "H\u{43e}t path: `send`\nHot path: none"),
+    ] {
+        let comment = ROUND.replace(plain, shown);
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            Vec::<String>::new(),
+            "{shown}"
+        );
+    }
+}
+
+#[test]
+fn reads_each_field_as_github_shows_it() {
+    for line in [
+        "Findings\\: 2",
+        "&#32;Findings: 2",
+        "Findings:\t2",
+        "Findings:&#32;2",
+        "Findings:&nbsp;2",
+    ] {
+        let comment =
+            ROUND.replace("Findings: none", &format!("{line}\nFindings: none"));
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![
+                "review round 3 has findings (2). Fix or answer them, then run another \
+                 round."
+            ],
+            "{line}"
+        );
+    }
+    let range = ROUND.replace(
+        "Range: `38cba24f",
+        "Range\\: `aaaaaaaa..bbbbbbbb`\nRange: `38cba24f",
+    );
+    assert_ne!(range, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&range)])),
+        vec![
+            "review round 3 skips `breaker`, but its range changes code at `a.rs:2`.",
+            "review round 3 ends at bbbbbbbb, not at the head \
+             c77c67d72fd8d37964334c80e14dd8b5a1d5b6fb. A commit after the round needs \
+             a new round; only a clean merge of the base does not.",
+        ]
+    );
+}
+
+#[test]
+fn reads_no_invisible_character() {
+    // Both ends of each range of Unicode default ignorable code points.
+    for c in [
+        '\u{AD}',
+        '\u{34F}',
+        '\u{61C}',
+        '\u{115F}',
+        '\u{1160}',
+        '\u{17B4}',
+        '\u{17B5}',
+        '\u{180B}',
+        '\u{180F}',
+        '\u{200B}',
+        '\u{200F}',
+        '\u{202A}',
+        '\u{202E}',
+        '\u{2060}',
+        '\u{206F}',
+        '\u{3164}',
+        '\u{FE00}',
+        '\u{FE0F}',
+        '\u{FEFF}',
+        '\u{FFA0}',
+        '\u{FFF0}',
+        '\u{FFF8}',
+        '\u{1BCA0}',
+        '\u{1BCA3}',
+        '\u{1D173}',
+        '\u{1D17A}',
+        '\u{E0000}',
+        '\u{E0FFF}',
+    ] {
+        let comment = ROUND.replace(
+            "Hot path: none",
+            &format!("{c}Hot path: `send`\nHot path: none"),
+        );
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec!["review round 3 has a second `Hot path:` line in its end lines."],
+            "{:X}",
+            u32::from(c)
+        );
+    }
+}
+
+#[test]
+fn reads_off_the_backticks_that_github_shows() {
+    let escaped = ROUND
+        .replace("Reviewers: reviewer", "Reviewers: \\`reviewer\\`")
+        .replace("`38cba24f..c77c67d7`", "\\`38cba24f..c77c67d7\\`");
+    assert_eq!(check(&record(vec![bot(&escaped)])), Vec::<String>::new());
+    let code = ROUND.replace("Hot path: none", "Hot path: `Sender::send`");
+    let shown = ROUND.replace("Hot path: none", "Hot path: \\`Sender::send\\`");
+    let mut code = record(vec![bot(&code)]);
+    let mut shown = record(vec![bot(&shown)]);
+    code.files = vec!["docs/decisions/crate-map.md".to_string()];
+    shown.files = code.files.clone();
+    assert_eq!(
+        check(&shown),
+        vec!["review round 3 names no performance, which this round requires."]
+    );
+    assert_eq!(check(&shown), check(&code));
+    let none = ROUND.replace("Hot path: none", "Hot path: \\`none\\`");
+    let mut none = record(vec![bot(&none)]);
+    none.files = code.files;
+    assert_eq!(check(&none), Vec::<String>::new());
+}
+
+#[test]
+fn reads_the_round_heading_as_github_shows_it() {
+    let fields = ROUND.replace("Findings: none", "Findings: 2");
+    for heading in [
+        "## Review&#32;round 3",
+        "## Review *round* 3",
+        "## Review\u{200B} round 3",
+        "Review round 3\n---",
+    ] {
+        let last = fields.replace("## Review round 3", heading);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&last)])),
+            vec![
+                "review round 3 has findings (2). Fix or answer them, then run \
+                 another round."
+            ],
+            "{heading}"
+        );
+    }
+    let word = fields.replace("## Review round 3", "## Review roundup 3");
+    assert_eq!(
+        check(&record(vec![bot(ROUND), bot(&word)])),
+        Vec::<String>::new()
+    );
+    // GitHub shows these headings in a quote, or of level 1: not a round.
+    for heading in ["# Review round 3", "<search\n> ## Review round 3"] {
+        let other = fields.replace("## Review round 3", heading);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&other)])),
+            Vec::<String>::new(),
+            "{heading}"
+        );
+    }
+    let lines = fields.replace("## Review round 3", "Review round\n3\n---");
+    assert_eq!(
+        check(&record(vec![bot(ROUND), bot(&lines)])),
+        vec!["`## Review round ` has no round number"]
+    );
+}
+
+#[test]
+fn an_old_round_counts_a_name_where_github_shows_it() {
+    let entity =
+        old("## Review round 1\n\nConfirmed a finding.\n\n&#72;ot path: `send`");
+    let escaped = old(
+        "## Review round 1\n\nConfirmed a finding.\n\nReviewers\\: performance\n\n\
+         Hot path: `send`",
+    );
+    for (round, problems) in [
+        (
+            entity,
+            vec![
+                "review round 1 names no performance, which this round requires."
+                    .to_string(),
+            ],
+        ),
+        (escaped, Vec::new()),
+    ] {
+        assert_eq!(check(&record(vec![round, bot(ROUND)])), problems);
     }
 }
 
@@ -734,7 +987,10 @@ fn round_1_of_a_code_pr_needs_each_reviewer_of_the_table() {
 fn needs_only_the_reviewer_for_a_diff_with_no_code() {
     let first = later("`reviewer`").replace("round 3", "round 1");
     let mut docs = record(vec![bot(&first)]);
-    docs.files = vec!["docs/decisions.md".to_string(), "README.md".to_string()];
+    docs.files = vec![
+        "docs/decisions/crate-map.md".to_string(),
+        "README.md".to_string(),
+    ];
     assert_eq!(check(&docs), Vec::<String>::new());
     for code in ["xtask/Cargo.toml", "Cargo.lock", "a/.rs"] {
         let mut record = record(vec![bot(&first)]);
@@ -1033,14 +1289,35 @@ fn a_parsed_old_round_reads_its_reviewers_field_at_any_indent() {
     let indented = ROUND
         .replace(
             "\nReviewers: reviewer\n",
+            "\nRange: `38cba24f..c77c67d7`\n    Reviewers: reviewer, performance\n",
+        )
+        .replace("\nBreaker:", "\n    Breaker:")
+        .replace(
+            "\nRange: `38cba24f..c77c67d7`\nFindings:",
+            "\n    Findings:",
+        )
+        .replace("Hot path: none", "Hot path: `send`");
+    assert_ne!(indented, ROUND);
+    assert_eq!(check(&record(vec![old(&indented)])), Vec::<String>::new());
+    let code = ROUND
+        .replace(
+            "\nReviewers: reviewer\n",
             "\n    Reviewers: reviewer, performance\n",
         )
         .replace("\nBreaker:", "\n    Breaker:")
         .replace("\nRange:", "\n    Range:")
         .replace("\nFindings:", "\n    Findings:")
         .replace("Hot path: none", "Hot path: `send`");
-    assert_ne!(indented, ROUND);
-    assert_eq!(check(&record(vec![old(&indented)])), Vec::<String>::new());
+    assert_eq!(
+        check(&record(vec![old(&code)])),
+        vec![
+            "review round 3 has no `Range:` line. Write the round in the format of \
+             .claude/skills/review/SKILL.md, \"Round comment\"."
+                .to_string(),
+            "review round 3 names no performance, which this round requires."
+                .to_string()
+        ]
+    );
 }
 
 #[test]
@@ -1062,7 +1339,7 @@ fn a_parsed_old_round_reads_performance_only_from_its_reviewers_field() {
 }
 
 #[test]
-fn an_old_round_reads_a_line_with_at_most_three_spaces_of_indent() {
+fn an_old_round_reads_no_line_of_an_indented_code_block() {
     let malformed = |reviewers: &str, hot: &str| {
         old(&format!(
             "## Review round 1\n\nConfirmed findings.\n\n{reviewers}Reviewers: \
@@ -1094,4 +1371,902 @@ fn an_old_round_reads_a_line_with_at_most_three_spaces_of_indent() {
 fn a_lone_carriage_return_ends_a_line_of_an_approval() {
     let head = "Quality: 8/10\rGood.\r\rDirector: approved at `c77c67d7`.";
     assert_eq!(check(&red(&[head])), Vec::<String>::new());
+}
+
+#[test]
+fn fails_a_round_with_raw_html() {
+    let cases = [
+        ("<div>\n```\n</div>", "<div>"),
+        ("<!--\nHot path: none\n-->", "<!--"),
+        ("<div><!--", "<div><!--"),
+        ("<source\n***", "<source"),
+        ("- a\n  <source", "<source"),
+        ("A <details> b", "A <details> b"),
+        ("A `b`\nc <!-- d --> e", "c <!-- d --> e"),
+        ("</x>", "</x>"),
+        ("<?a ?>", "<?a ?>"),
+        ("<source\n---", "<source"),
+        ("<source\n===", "<source"),
+        ("a\n<source\n---", "<source"),
+        ("<source | b\n--- | ---\nc | d", "<source | b"),
+        ("> 1. <source", "> 1. <source"),
+        ("- <source", "- <source"),
+        ("- ```\n  a\n  ```\n  <source", "<source"),
+        ("| a |\n| - |\n<source", "<source"),
+        ("</source", "</source"),
+        ("<! a", "<! a"),
+        ("+ <source", "+ <source"),
+        ("* <source", "* <source"),
+        ("1) <source", "1) <source"),
+        ("-\t<source", "-\t<source"),
+        ("[^1]: <source", "[^1]: <source"),
+        ("[^1]: [^2]: <source x", "[^1]: [^2]: <source x"),
+        ("> [^a]: <source", "> [^a]: <source"),
+        ("[^a\\\\]: <source", "[^a\\\\]: <source"),
+        ("- [^a]:<source", "- [^a]:<source"),
+        ("[^a\\]: <source", "[^a\\]: <source"),
+        ("[^\\]: <source", "[^\\]: <source"),
+        ("[^a[b]: <source", "[^a[b]: <source"),
+        ("[^`\\]: <source x`", "[^`\\]: <source x`"),
+    ];
+    for (html, line) in cases {
+        let comment =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{html}\n\n"));
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![raw(line)],
+            "{html}"
+        );
+    }
+    let summary = format!("<b>\n\n{ROUND}");
+    assert_eq!(check(&record(vec![bot(&summary)])), vec![raw("<b>")]);
+    let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n<source\n---\n");
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<source")]);
+    let noted = ROUND.replace("weakening.\n\n", "weakening.[^1]\n\n[^1]: <source\n\n");
+    assert_eq!(
+        check(&record(vec![bot(&noted)])),
+        vec![raw("[^1]: <source")]
+    );
+}
+
+#[test]
+fn fails_raw_html_before_the_fields_or_the_heading() {
+    let unranged = ROUND
+        .replace("Range: `38cba24f..c77c67d7`\n", "")
+        .replace("weakening.\n\n", "weakening.\n\n<div>\n\n");
+    assert_eq!(check(&record(vec![bot(&unranged)])), vec![raw("<div>")]);
+    let hidden = ROUND.replace("\nReviewers:", "\n<details>\n\nReviewers:");
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<details>")]);
+    for heading in [
+        "<search\n## Review round 3",
+        "<search\n   ## Review round 3",
+        "<search\n## Review round 3\n## Review round 4",
+        "<search\r## Review round 3",
+        "<search\r## Review round 3\r## Review round 4",
+        "<search\n## Review *round* 3",
+        "<search\n## Review&#32;round 3",
+        "<search\n## Review  round 3",
+        "<search\n## Review [round][r] 3\n[r]: /x",
+        "<search\n***\nReview round 3\n---",
+        "<search\n## x\nReview round 3\n---",
+        "<search\n<search\n## Review *round* 3",
+        "<search\n## Review [round][d] 3",
+        " <search\n <search\n## Review *round* 3",
+        "<search\n## Review round 3\n\n<search\n## Review round 4",
+        "<search\n## x\n<b></b>Review round 3\n---",
+        "<search\n***\n<i></i>Review round 3\n---",
+    ] {
+        let headless = ROUND.replace("## Review round 3", heading) + "\n\n[d]: /x";
+        assert_eq!(
+            check(&record(vec![bot(&headless)])),
+            vec![raw("<search")],
+            "{heading}"
+        );
+    }
+}
+
+#[test]
+fn fails_raw_html_before_a_heading_that_github_shows_and_comrak_does_not() {
+    let found = ROUND.replace("Findings: none", "Findings: 2");
+    let notes = "x[^1]\n\n[^1]: <search\n    <search\n    <search\n\n";
+    for (front, heading, line) in [
+        ("", "<search>Review round 3\n---", "<search>Review round 3"),
+        ("", "<search\n<!-- x -->\nReview round 3\n---", "<search"),
+        (
+            "",
+            "<SEARCH x\n<!-- x -->\nReview round 3\n---",
+            "<SEARCH x",
+        ),
+        ("", "<!doctype x>\n## Review round 3", "<!doctype x>"),
+        ("", "<search\n<?a?>\nReview round 3\n---", "<search"),
+        ("", "<search\n<!----- x -->\nReview round 3\n---", "<search"),
+        ("", "<!-- a -->\nReview round 3\n---", "<!-- a -->"),
+        ("", "- <source x\nReview round 3\n---", "- <source x"),
+        ("", "> <source x\nReview round 3\n---", "> <source x"),
+        ("", "- <source\nReview round 3\n---", "- <source"),
+        ("", "- </SOURCE>a\nReview round 3\n---", "- </SOURCE>a"),
+        ("", "<source>a\n<textarea\n\n## Review round 3", "<source>a"),
+        ("", "<search\ta\n## Review round 3", "<search\ta"),
+        ("", "<search\u{b}a\n## Review round 3", "<search\u{b}a"),
+        ("", "<search\u{c}a\n## Review round 3", "<search\u{c}a"),
+        ("", "x\n<search>\n## Review round 3", "<search>"),
+        (
+            "",
+            "</search x=\"1\">\n## Review round 3",
+            "</search x=\"1\">",
+        ),
+        ("", "<!x\n<!x\n## Review round 3", "<!x"),
+        (
+            "",
+            "<search\n## Review round 2\n\n## Review round 3",
+            "<search",
+        ),
+        (notes, "a\n<search\n## Review round 3", "[^1]: <search"),
+        (notes, "é\n<search\n## Review round 3", "[^1]: <search"),
+    ] {
+        let last = front.to_owned() + &found.replace("## Review round 3", heading);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&last)])),
+            vec![raw(line)],
+            "{heading}"
+        );
+    }
+}
+
+#[test]
+fn fails_raw_html_after_a_byte_order_mark_at_the_start() {
+    let found = ROUND.replace("Findings: none", "Findings: 2");
+    let at = found.find("## Review round 3").unwrap();
+    for line in ["<search", "<!x", "<SEARCH x", "<source", "<SOURCE x"] {
+        let last = format!("\u{feff}{line}\n{}", &found[at..]);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&last)])),
+            vec![raw(line)],
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn passes_a_code_block_after_a_byte_order_mark_at_the_start() {
+    let at = ROUND.find("## Review round 3").unwrap();
+    let last = format!("\u{feff}    <b>x</b>\n\n{}", &ROUND[at..]);
+    assert_eq!(
+        check(&record(vec![bot(ROUND), bot(&last)])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn reads_no_heading_after_two_byte_order_marks() {
+    // GitHub drops only the first mark, so it shows the heading line as text.
+    let earlier = ROUND.replace("Findings: none", "Findings: 2");
+    let at = ROUND.find("## Review round 3").unwrap();
+    for (marks, expected) in [
+        ("\u{feff}", vec![]),
+        (
+            "\u{feff}\u{feff}",
+            vec![
+                "review round 3 has findings (2). Fix or answer them, then run another \
+                 round."
+                    .to_owned(),
+            ],
+        ),
+    ] {
+        let last = format!("{marks}{}", &ROUND[at..]);
+        assert_eq!(check(&record(vec![bot(&earlier), bot(&last)])), expected);
+    }
+    // After the second mark, a tag is text, and the heading after it shows.
+    let shown = check(&record(vec![bot(ROUND), bot(&earlier[at..])]));
+    assert_eq!(shown.len(), 1);
+    for line in ["<search x", "<!-- x", "<SEARCH x"] {
+        let last = format!("\u{feff}\u{feff}{line}\n{}", &earlier[at..]);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&last)])),
+            shown,
+            "{line}"
+        );
+    }
+}
+
+#[test]
+fn passes_a_round_whose_heading_github_hides_in_an_html_block() {
+    let found = ROUND.replace("Findings: none", "Findings: 2");
+    // GitHub starts a block of type 7 at a complete tag alone on its line.
+    for heading in [
+        "<search>\n## Review round 3",
+        "<search x=\"1\">\n## Review round 3",
+        "</search>\n<!-- x -->\nReview round 3\n---",
+        "<search/>\n<!-- x -->\nReview round 3\n---",
+    ] {
+        let last = found.replace("## Review round 3", heading);
+        assert_eq!(
+            check(&record(vec![bot(ROUND), bot(&last)])),
+            Vec::<String>::new(),
+            "{heading}"
+        );
+    }
+}
+
+#[test]
+fn passes_a_round_whose_text_github_shows_as_text() {
+    let shown = [
+        "<https://github.com>",
+        "\\<div>",
+        "`Vec<u8>`",
+        "```\n<div>\n```",
+        "    <div>",
+        "a < b, <1",
+        "# <source",
+        "a | <source\n--- | ---",
+        "*a*<source",
+        "*<source",
+        "1.<source",
+        "a <b",
+        "[^]: <source",
+        "[^a]b]: <source",
+        "[^a\\]b]: <source",
+        "[^a b]: <source",
+        "[^a\tb]: <source",
+        "[^a] <source",
+        "[^a]<source",
+    ];
+    for text in shown {
+        let comment =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
+    let old = old("## Review round 1\n\nNo fields.\n\n<div>");
+    assert_eq!(check(&record(vec![old, bot(ROUND)])), Vec::<String>::new());
+}
+
+/// The problem of a round 3 whose fields have no `Range:` line.
+fn rangeless() -> String {
+    "review round 3 has no `Range:` line. Write the round in the format of \
+     .claude/skills/review/SKILL.md, \"Round comment\"."
+        .to_string()
+}
+
+#[test]
+fn hides_the_lines_of_a_footnote_with_no_reference() {
+    // GitHub reads each label as a footnote, which continues onto the fields, and
+    // hides it.
+    let fields = [
+        ROUND.replace("\nReviewers:", "\n[^a\\]: x\nReviewers:"),
+        ROUND.replace(
+            "## Review round 3\n\n",
+            "## Review round 3\n\n[x]: /u \"t\n[^a\\]: y\"\n",
+        ),
+    ];
+    let spans = [
+        "[x](https://x.y \"t\n[^a\\]: y\")",
+        "`x\n[^a\\]: y`",
+        "> `x\n> [^a\\]: y`",
+        "*a `x\n[^a\\]: y` b*",
+    ]
+    .map(|text| ROUND.replace("but comments", &format!("but {text}")));
+    for hidden in fields.iter().chain(&spans) {
+        assert_ne!(hidden, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(hidden)])),
+            vec![rangeless()],
+            "{hidden}"
+        );
+    }
+    let end = ROUND.replace("weakening.\n\n", "weakening.\n\n    c\r[^a\\]: x\n");
+    assert_ne!(end, ROUND);
+    assert_eq!(check(&record(vec![bot(&end)])), vec![unended("Deferred")]);
+}
+
+#[test]
+fn passes_a_footnote_with_no_reference_that_hides_no_field() {
+    let cases = [
+        "[^a\\]: x",
+        "[^\\]: x",
+        "[^a[b]: x",
+        "> [^a\\]: x",
+        "- [^a\\]: x",
+        "[^1]: [^a\\]: x",
+        "[^1]: [^2]: [^a\\]: x",
+        "a\n[^a\\]: x",
+        "[^a\\]: x](https://x.y)",
+        "a `x\n  [^a\\]: y`",
+        "> a `x\n> [^a\\]: y`",
+        "- a `x\n  [^a\\]: y`",
+        "[^1]: - [^a\\]: x",
+        "[^1]: > [^a\\]: x",
+        "a\r[^a\\]: x",
+        "[^1]: x",
+        "> [^a]: x",
+        "[^a]: x\n[^b]: y",
+        "[^a\\\\]:x",
+        "`[^a\\]: x`",
+        "```\n[^a\\]: x\n```",
+        "> ```\n> [^a\\]: x\n> ```",
+        "    [^a\\]: x",
+        "- a\n\n      [^a\\]: x",
+    ];
+    for text in cases {
+        let comment =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
+    let first = format!("[^a\\]: x\n\n{ROUND}");
+    assert_eq!(check(&record(vec![bot(&first)])), Vec::<String>::new());
+}
+
+#[test]
+fn fails_raw_html_on_a_line_inside_a_span() {
+    let cases = [
+        ("a `x\n<source y` z", "<source y` z"),
+        ("a `x\n<div>` b", "<div>` b"),
+        ("a `x\n> <source y`", "> <source y`"),
+        (
+            "a `x\n<source [y](https://x.y)`",
+            "<source [y](https://x.y)`",
+        ),
+        ("[a\n<source y](https://x.y)", "<source y](https://x.y)"),
+    ];
+    for (text, line) in cases {
+        let hidden = ROUND.replace("but comments", &format!("but {text}"));
+        assert_ne!(hidden, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&hidden)])),
+            vec![raw(line)],
+            "{text}"
+        );
+    }
+    let definition = ROUND.replace(
+        "## Review round 3\n\n",
+        "## Review round 3\n\n[x]: /u \"t\n<source y\"\n\n",
+    );
+    assert_ne!(definition, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&definition)])),
+        vec![raw("<source y\"")]
+    );
+    for text in ["`x\ny <source z`", "`x\n<https://x.y>`", "`x\n< y`"] {
+        let shown = ROUND.replace("but comments", &format!("but {text}"));
+        assert_ne!(shown, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&shown)])),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn reads_a_line_after_a_tab_that_a_list_item_takes_in_part() {
+    // The item takes 3 of the 4 columns of the tab, and the line continues the quote.
+    let hot = old("## Review round 1\n\nNo fields.\n\n*  > a\n\tHot path: `send`");
+    assert_eq!(
+        check(&record(vec![hot, bot(ROUND)])),
+        vec!["review round 1 names no performance, which this round requires."]
+    );
+    let wide = ROUND.replace("weakening.\n\n", "weakening.\n\n*  > a\n\t\u{e9}\n\n");
+    assert_ne!(wide, ROUND);
+    assert_eq!(check(&record(vec![bot(&wide)])), Vec::<String>::new());
+}
+
+#[test]
+fn fails_a_round_with_a_footnote_reference_over_a_line_break() {
+    // GitHub shows each `[^` up to a `]` on a later line as `[^]`.
+    // A `]` that a `[` before it takes, an escape, or an entity does not end it.
+    for mark in ["[^x", "[^x [y]", "[^x \\]", "[^x\\]", "[^x &#93;"] {
+        let end = ROUND.replace(
+            "Public surface: none\n",
+            &format!("Public surface: none {mark}\n"),
+        );
+        let end = end.replace("Hot path: none", "Hot path: none ]");
+        let line = format!("Public surface: none {mark}");
+        assert_eq!(
+            check(&record(vec![bot(&end)])),
+            vec![bracket(&line)],
+            "{mark}"
+        );
+    }
+    for (text, line) in [
+        ("a [^*f*\ng]", "a [^*f*"),
+        ("a [^x `]`\nb ]", "a [^x `]`"),
+        ("a [^x] [^y\nz]", "a [^x] [^y"),
+        ("- a\n\n  b [^x\n  c ]", "b [^x"),
+    ] {
+        let hidden =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(hidden, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&hidden)])),
+            vec![bracket(line)],
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn passes_a_footnote_mark_in_a_link_or_a_code_span() {
+    for text in [
+        "a [^x\nb](u)",
+        "a `[^x`",
+        "```\n[^x\n```",
+        "a [^] [^x]",
+        "a [^x *y* z]",
+        "a\nb [^x",
+    ] {
+        let shown =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(shown, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&shown)])),
+            Vec::<String>::new(),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn hides_both_footnotes_with_no_reference_of_one_label() {
+    let notes = format!("{ROUND}\n\n[^a]: x\n\n[^a]: y");
+    assert_eq!(check(&record(vec![bot(&notes)])), Vec::<String>::new());
+}
+
+#[test]
+fn an_old_round_reads_the_first_footnote_of_a_label_with_a_reference() {
+    // GitHub shows the first definition of a label, also in another case.
+    for second in ["[^a]: y", "[^A]: y"] {
+        let round = old(&format!(
+            "## Review round 1\n\nConfirmed a finding [^a].\n\n\
+             [^a]: Hot path: `send`\n\n{second}"
+        ));
+        assert_eq!(
+            check(&record(vec![round, bot(ROUND)])),
+            vec!["review round 1 names no performance, which this round requires."],
+            "{second}"
+        );
+    }
+    let round = old(
+        "## Review round 1\n\nConfirmed a finding [^a].\n\n[^a]: x\n\n\
+         [^a]: Hot path: `send`",
+    );
+    assert_eq!(
+        check(&record(vec![round, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+    let round = old(
+        "## Review round 1\n\nConfirmed a finding [^a] [^b].\n\n[^a]: x\n\n\
+         [^b]: Hot path: `send`",
+    );
+    assert_eq!(
+        check(&record(vec![round, bot(ROUND)])),
+        vec!["review round 1 names no performance, which this round requires."]
+    );
+}
+
+#[test]
+fn an_old_round_reads_a_tab_after_a_quote_mark_to_the_next_multiple_of_4() {
+    // Each line starts at an odd offset.
+    let round = |text: &str| {
+        old(&format!(
+            "## Review round 1\n\nConfirmed a finding.\n\n{text}"
+        ))
+    };
+    let unnamed = vec![
+        "review round 1 names no performance, which this round requires.".to_string(),
+    ];
+    // The quote takes the space, and the tab is 2 columns of indent.
+    let quoted = round("> \tHot path: `send`");
+    assert_eq!(check(&record(vec![quoted, bot(ROUND)])), unnamed);
+    // A lazy line of the inner quote, whose text starts with `é`.
+    let lazy = round("> > a\n>\t\u{e9}Hot path: `send`");
+    assert_eq!(check(&record(vec![lazy, bot(ROUND)])), Vec::<String>::new());
+}
+
+#[test]
+fn passes_a_code_block_in_a_footnote_with_no_reference() {
+    for note in ["```\n    <b>\n    ```", "    <b>"] {
+        let hidden = format!("{ROUND}\n\n[^a]: x\n\n    {note}");
+        assert_eq!(
+            check(&record(vec![bot(&hidden)])),
+            Vec::<String>::new(),
+            "{note}"
+        );
+    }
+}
+
+#[test]
+fn names_the_first_line_that_can_hide_text() {
+    for (text, problem) in [
+        ("<b>\n\n<source x", raw("<b>")),
+        ("<source x\n\n<b>", raw("<source x")),
+        ("[^x\nb ]\n\n<b>", bracket("[^x")),
+        ("<b>\n\n[^x\nb ]", raw("<b>")),
+        ("a[^1]\n\n[^1]: a <b>\n\nc <i>", raw("[^1]: a <b>")),
+        (
+            "[x](https://x.y \"t\n<source y\")",
+            misplaced("[x](https://x.y \"t"),
+        ),
+    ] {
+        let hidden =
+            ROUND.replace("weakening.\n\n", &format!("weakening.\n\n{text}\n\n"));
+        assert_ne!(hidden, ROUND);
+        assert_eq!(check(&record(vec![bot(&hidden)])), vec![problem], "{text}");
+    }
+}
+
+#[test]
+fn fails_a_paragraph_that_comrak_places_in_the_wrong_lines() {
+    // GitHub shows `Findings: 2` and the second `Hot path:` line. comrak places each
+    // line after the link or the definition too early.
+    let fields = ROUND.replace(
+        "Reviewers: reviewer\n",
+        "Reviewers: reviewer, [x](https://x.y \"a\nRange: `38cba24f..c77c67d7`\n\
+         Findings: none\n\")\nFindings: 2\n",
+    );
+    let end = ROUND.replace(
+        "Deferred: none",
+        "Deferred: none [x](https://x.y \"a\nPublic surface: none\nHot path: none\n\")",
+    );
+    let end = format!("{end}\nHot path: `send`");
+    let link = ROUND.replace("Deferred: none", "Deferred: none [x](\nhttps://x.y)");
+    let definition =
+        ROUND.replace("Deferred: none", "[x]: https://x.y\nDeferred: none");
+    for (comment, line) in [
+        (fields, "Reviewers: reviewer, [x](https://x.y \"a"),
+        (end, "Deferred: none [x](https://x.y \"a"),
+        (link, "Deferred: none [x]("),
+        (definition, "[x]: https://x.y"),
+    ] {
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![misplaced(line)],
+            "{comment}"
+        );
+    }
+    let text = ROUND.replace("Deferred: none", "Deferred: none [x\ny](https://x.y)");
+    assert_eq!(check(&record(vec![bot(&text)])), Vec::<String>::new());
+    // comrak places the `\\x` span inside the `é` of the line before.
+    let wide =
+        ROUND.replace("weakening.\n\n", "weakening.\n\n[r]: u\n\u{e9}\n\\\\x\n\n");
+    assert_eq!(check(&record(vec![bot(&wide)])), vec![misplaced("[r]: u")]);
+    // The one paragraph after the heading is both the fields and the end lines.
+    let alone = bot("## Review round 3\n\n[r]: https://x.y\nz");
+    assert_eq!(
+        check(&record(vec![alone])),
+        vec![misplaced("[r]: https://x.y")]
+    );
+}
+
+#[test]
+fn fails_an_old_round_with_a_paragraph_that_comrak_places_in_the_wrong_lines() {
+    // GitHub shows `Hot path: send` as a line of text in the first three cases, hides
+    // `Reviewers: performance` in a link title in the fourth, and shows
+    // `2. Hot path: send` in the fifth.
+    let performance = "review round 1 names no performance, which this round requires.";
+    for (text, line, named) in [
+        (
+            "[r]: https://x.y\nHot path: `send`",
+            "[r]: https://x.y",
+            false,
+        ),
+        (
+            "See [x](https://x.y \"a\nb\")\nHot path: `send`",
+            "See [x](https://x.y \"a",
+            false,
+        ),
+        (
+            "> - See [x](\n>   https://x.y)\n>   Hot path: `send`",
+            "> - See [x](",
+            false,
+        ),
+        (
+            "See [x](https://x.y \"a\nReviewers: performance\nb\")\nmore\n\n\
+             Hot path: `send`",
+            "See [x](https://x.y \"a",
+            true,
+        ),
+        (
+            "[r]: https://x.y\n2. Hot path: `send`",
+            "[r]: https://x.y",
+            false,
+        ),
+        // Raw HTML before the paragraph does not count in an old round.
+        (
+            "<b>a</b>\n\nSee [x](\nhttps://x.y)\nHot path: `send`",
+            "See [x](",
+            false,
+        ),
+    ] {
+        let round = old(&format!(
+            "## Review round 1\n\nConfirmed a finding.\n\n{text}"
+        ));
+        let mut problems = vec![misplaced(line).replace("round 3", "round 1")];
+        problems.extend(named.then(|| performance.to_string()));
+        assert_eq!(check(&record(vec![round, bot(ROUND)])), problems, "{text}");
+    }
+    let round = old("## Review round x\n\nConfirmed a finding.\n\n[r]: https://x.y\nz");
+    assert_eq!(
+        check(&record(vec![round, bot(ROUND)])),
+        vec!["`## Review round x` has no round number"]
+    );
+}
+
+#[test]
+fn fails_raw_html_after_a_lone_carriage_return_in_a_code_block() {
+    let hidden = ROUND.replace("weakening.\n\n", "weakening.\n\n    c\r<!-- x\n");
+    assert_ne!(hidden, ROUND);
+    assert_eq!(check(&record(vec![bot(&hidden)])), vec![raw("<!-- x")]);
+}
+
+#[test]
+fn fails_end_lines_that_a_fence_after_a_list_item_hides() {
+    let hidden = later("reviewer, breaker").replace(
+        "weakening.\n\n",
+        "weakening.\n\nDeferred: none\nPublic surface: none\nHot path: `send`\n\n\
+         - ```\n  x\n  ```\n\n```\n\n",
+    );
+    assert_ne!(hidden, later("reviewer, breaker"));
+    assert_eq!(
+        check(&record(vec![bot(&hidden)])),
+        vec![unended("Deferred")]
+    );
+}
+
+#[test]
+fn an_old_round_reads_each_line_of_text_that_github_shows() {
+    let unnamed = vec![
+        "review round 1 names no performance, which this round requires.".to_string(),
+    ];
+    let shown = [
+        "Confirmed findings.\n    {line}",
+        "Confirmed findings.\n\t{line}",
+        "- a\n  - b\n\n    {line}",
+        "Confirmed[^1].\n\n[^1]: a\n    {line}",
+        "> Confirmed.\n> {line}",
+        "- {line}",
+        "- [ ] {line}",
+    ];
+    for text in shown {
+        let hot = text.replace("{line}", "Hot path: `send`");
+        let comment = old(&format!("## Review round 1\n\nNo fields.\n\n{hot}"));
+        assert_eq!(check(&record(vec![comment, bot(ROUND)])), unnamed, "{hot}");
+        let named = text.replace("{line}", "Reviewers: reviewer, performance");
+        let comment = old(&format!(
+            "## Review round 1\n\nNo fields.\n\n{named}\n\nHot path: `send`"
+        ));
+        assert_eq!(
+            check(&record(vec![comment, bot(ROUND)])),
+            Vec::<String>::new(),
+            "{named}"
+        );
+    }
+}
+
+#[test]
+fn an_old_round_reads_no_line_of_a_fence_in_a_nested_list_item() {
+    let fenced = |line: &str| {
+        old(&format!(
+            "## Review round 1\n\n- a\n  - b\n\n    ```\n    {line}\n    ```"
+        ))
+    };
+    assert_eq!(
+        check(&record(vec![fenced("Hot path: `send`"), bot(ROUND)])),
+        Vec::<String>::new()
+    );
+    let named =
+        fenced("Reviewers: reviewer, performance").body + "\n\nHot path: `send`";
+    assert_eq!(
+        check(&record(vec![old(&named), bot(ROUND)])),
+        vec![
+            "review round 1 names no performance, which this round requires."
+                .to_string()
+        ]
+    );
+}
+
+#[test]
+fn a_fence_with_a_tab_after_it_closes() {
+    let hidden = later("reviewer, breaker").replace(
+        "weakening.\n\n",
+        "weakening.\n\n```\n```\t\n\nDeferred: none\nPublic surface: none\n\
+         Hot path: `send`\n\n```\n\n",
+    );
+    assert_ne!(hidden, later("reviewer, breaker"));
+    assert_eq!(
+        check(&record(vec![bot(&hidden)])),
+        vec![unended("Deferred")]
+    );
+}
+
+#[test]
+fn reads_the_blocks_of_the_extensions_of_github() {
+    let table =
+        old("## Review round 1\n\nNo fields.\n\nHot path: `send` | a\n--- | ---");
+    assert_eq!(
+        check(&record(vec![table, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+    let unreferenced = ROUND.to_string() + "\n\n[^1]: Hot path: `send`";
+    assert_eq!(
+        check(&record(vec![bot(&unreferenced)])),
+        Vec::<String>::new()
+    );
+    let footnote = unreferenced.replace("weakening.", "weakening.[^1]");
+    assert_ne!(footnote, unreferenced);
+    assert_eq!(
+        check(&record(vec![bot(&footnote)])),
+        vec![unended("Deferred")]
+    );
+    let early = ROUND.replace("weakening.\n\n", "weakening.[^1]\n\n[^1]: a\n\n");
+    assert_ne!(early, ROUND);
+    assert_eq!(check(&record(vec![bot(&early)])), vec![unended("Deferred")]);
+    let rule = ROUND.to_string() + "\n\n***";
+    assert_eq!(check(&record(vec![bot(&rule)])), vec![unended("Deferred")]);
+}
+
+#[test]
+fn reads_inline_markup_as_part_of_its_line() {
+    let named = format!("**laptop.integrator-2** · author\n{ROUND}")
+        .replace("Deferred: none", "Deferred: *none*");
+    assert_eq!(check(&record(vec![bot(&named)])), Vec::<String>::new());
+    for markup in ["*a*", "**a**", "~~a~~", "[a](b)", "![a](b)"] {
+        let glued =
+            format!("## Review round 1\n\nNo fields.\n\n{markup}Hot path: `send`");
+        assert_eq!(
+            check(&record(vec![old(&glued), bot(ROUND)])),
+            Vec::<String>::new(),
+            "{markup}"
+        );
+    }
+}
+
+#[test]
+fn reads_a_line_after_a_break_or_a_block_as_its_own() {
+    let broken = ROUND.replace("Deferred: none\n", "Deferred: none\\\n");
+    assert_ne!(broken, ROUND);
+    assert_eq!(check(&record(vec![bot(&broken)])), Vec::<String>::new());
+    for item in [
+        "- a\n  ***\n  Hot path: `send`",
+        "- a\n  - Hot path: `send`",
+    ] {
+        let comment = old(&format!("## Review round 1\n\nNo fields.\n\n{item}"));
+        assert_eq!(
+            check(&record(vec![comment, bot(ROUND)])),
+            vec!["review round 1 names no performance, which this round requires."],
+            "{item}"
+        );
+    }
+}
+
+#[test]
+fn reads_no_fields_in_a_list() {
+    let listed = ROUND.replace("\nReviewers:", "\n- x\n  Reviewers:");
+    assert_ne!(listed, ROUND);
+    assert_eq!(
+        check(&record(vec![bot(&listed)])),
+        vec![
+            "review round 3 has no `Range:` line. Write the round in the format of \
+             .claude/skills/review/SKILL.md, \"Round comment\"."
+        ]
+    );
+}
+
+#[test]
+fn reads_only_a_top_level_round_heading() {
+    for quoted in [
+        "> ## Review round 2",
+        "- ## Review round 2",
+        "    ## Review round 2",
+        "```\n## Review round 2\n```",
+        "<search\n    ## Review round 2",
+        "- <search\n  ## Review round 2",
+        "<!-- a -->\n\n```\n## Review round 2\n```",
+        "<b>a</b>\n\n~~~\n## Review round 2\n~~~",
+        "So:\n\n```\n## Review round <n>\n\nReviewers: reviewer\n```\n\nA Vec<u8>.",
+        "See:\n\n```\n## Review round 4\n```\n\n<details>\n\nx",
+        "- a\n\n  ## Review round 2",
+    ] {
+        let comment = bot(&format!("{quoted}\n\nNo fields."));
+        assert_eq!(
+            check(&record(vec![comment, bot(ROUND)])),
+            Vec::<String>::new(),
+            "{quoted}"
+        );
+    }
+    let ruled = bot(&format!("a\n\n***\n\n{ROUND}"));
+    assert_eq!(check(&record(vec![ruled])), Vec::<String>::new());
+    let before = old("Hot path: `send`\n\n## Review round 1\n\nNo fields.");
+    assert_eq!(
+        check(&record(vec![before, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn an_old_round_reads_no_hot_path_after_other_text_on_its_line() {
+    // A `2.` item cannot interrupt a paragraph, so GitHub shows `2. Hot path: send`.
+    let round =
+        old("## Review round 1\n\nConfirmed a finding.\n\nSee\n2. Hot path: `send`");
+    assert_eq!(
+        check(&record(vec![round, bot(ROUND)])),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn reads_an_old_round_with_html_or_a_bracket_as_before() {
+    let fields =
+        "Reviewers: reviewer, architecture, breaker\nRange: `a..b`\nFindings: 2";
+    let html = old(&format!("## Review round 1\n\n{fields}\n\n<div>"));
+    let hidden = old("<search\n## Review round 1\n\nHot path: `send`");
+    let bracket = old(&format!("## Review round 1\n\n{fields}\n\na [^x\nb]"));
+    for before in [html, hidden, bracket] {
+        assert_eq!(
+            check(&record(vec![before, bot(ROUND)])),
+            Vec::<String>::new()
+        );
+    }
+}
+
+#[test]
+fn reads_a_line_break_in_an_image_text_as_github_shows_it() {
+    // GitHub shows the image as one character on the line of `Reviewers:`, so the
+    // `Findings:` line that GitHub shows is `Findings: 2`.
+    for image in ["![a\nb](x)", "![a\\\nb](x)"] {
+        let comment = ROUND.replace("Findings: none", "Findings: 2").replace(
+            "Reviewers: reviewer",
+            &format!("Reviewers: reviewer, {image}Findings: none"),
+        );
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![
+                "review round 3 has findings (2). Fix or answer them, then run \
+                 another round."
+            ],
+            "{image}"
+        );
+    }
+}
+
+#[test]
+fn an_old_round_reads_a_footnote_reference_as_github_shows_it() {
+    // GitHub shows `Hot path: 1none` and `Hot path: 1`: no first word is `none`.
+    for path in ["[^1]none\n\n[^1]: x", "[^none]\n\n[^none]: x"] {
+        let round = old(&format!(
+            "## Review round 1\n\nConfirmed a finding.\n\nHot path: {path}"
+        ));
+        assert_eq!(
+            check(&record(vec![round, bot(ROUND)])),
+            vec!["review round 1 names no performance, which this round requires."],
+            "{path}"
+        );
+    }
+}
+
+#[test]
+fn fails_end_lines_in_a_quote_or_a_list() {
+    let end = "Deferred: none\nPublic surface: none\nHot path: none";
+    for nested in [
+        "> Deferred: none\n> Public surface: none\n> Hot path: none",
+        "- Deferred: none\n  Public surface: none\n  Hot path: none",
+    ] {
+        let comment = ROUND.replace(end, nested);
+        assert_ne!(comment, ROUND);
+        assert_eq!(
+            check(&record(vec![bot(&comment)])),
+            vec![unended("Deferred")],
+            "{nested}"
+        );
+    }
 }

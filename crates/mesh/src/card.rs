@@ -2,14 +2,13 @@
 
 use std::fmt;
 
-use types::ed25519::{BadSignature, PrivateKey, PublicKey};
+use types::ed25519::{BadSignature, Pair, PrivateKey, PublicKey};
 use types::name::Name;
 use types::node::{self, SealKey};
 
 use crate::bytes::{
     put_key, put_name, put_public_key, take, take_key, take_name, take_public_key,
 };
-use crate::ed25519;
 
 pub mod addresses;
 
@@ -78,12 +77,12 @@ impl Signed {
     /// When `card.public_key` is not the public half of `private_key`.
     #[must_use]
     pub fn sign(key: node::Key, card: Card, private_key: &PrivateKey) -> Self {
-        let pair = ed25519::pair(private_key);
+        let pair = Pair::new(private_key);
         assert!(
-            private_key.public() == card.public_key,
+            pair.public() == card.public_key,
             "the card's public key is not the public half of the private key"
         );
-        let signature = ed25519::sign(&pair, &statement(TAG, key, &card));
+        let signature = pair.sign(&statement(TAG, key, &card));
         Self(Unchecked {
             key,
             card,
@@ -117,10 +116,6 @@ impl Signed {
     /// Takes one signed card from the start of `bytes`. `None` when the bytes do not
     /// start with what [`Signed::encode`] gives, or when the signature does not hold;
     /// `bytes` is then at no known place.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the join answer of #336 is the first user")
-    )]
     pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
         Unchecked::decode(bytes)?.check().ok()
     }

@@ -1,0 +1,13 @@
+[package]
+name = "dev"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+s = "1"
+
+[patch.crates-io]
+p = { path = "../../patches/p" }

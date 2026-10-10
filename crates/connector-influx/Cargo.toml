@@ -24,11 +24,13 @@ types = { path = "../types" }
 unicode-properties.workspace = true
 
 [dev-dependencies]
+connector = { path = "../connector", features = ["sim"] }
 # Turns on `sim` for the tests and the bench, since the bench host runs no features.
 connector-influx = { path = ".", features = ["sim"] }
 counting = { path = "../counting" }
 divan.workspace = true
 env = { path = "../env" }
+hub = { path = "../hub", features = ["sim"] }
 proptest.workspace = true
 sim = { path = "../sim" }
 

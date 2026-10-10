@@ -17,7 +17,7 @@ impl Cluster {
 
     /// Starts a cluster in which each node proposed itself as the home for 5 s, and
     /// gives the leader, a follower, and the position of the entry of that home.
-    fn led(run: u64) -> (Self, u8, u8, Position) {
+    pub(super) fn led(run: u64) -> (Self, u8, u8, Position) {
         let mut cluster = Self::new(run);
         cluster.script(home);
         cluster.start();
@@ -31,7 +31,7 @@ impl Cluster {
     }
 
     /// Sets the chance that a datagram between `node` and each other node is lost.
-    fn link_each(&mut self, node: u8, loss: f64) {
+    pub(super) fn link_each(&mut self, node: u8, loss: f64) {
         for other in IDS.into_iter().filter(|&id| id != node) {
             self.link(node, other, loss);
         }
@@ -117,7 +117,7 @@ fn a_call_on_a_follower_that_is_cut_off_returns_after_the_links_heal() {
 #[test]
 fn a_member_that_is_not_a_voter_sets_no_home() {
     let mut cluster = Cluster::new(5);
-    cluster.board.lock().unwrap().learner = Some(3);
+    cluster.board.lock().unwrap().learners = [3].into();
     cluster.script(home);
     cluster.start();
     cluster.run(seconds(5));
@@ -270,7 +270,7 @@ fn set_home_proposes_again_while_the_pool_has_no_block() {
         let pool = small_pool();
         let config = Config {
             pool: Rc::clone(&pool),
-            ..config(&node, &tasks, 1, &[1], &[1])
+            ..config(&node, &tasks, 1, &[1], &[1]).await
         };
         let mesh = Mesh::start(config).await.unwrap();
         let clock = node.clock();
@@ -356,6 +356,40 @@ fn a_call_gives_ok_when_its_entry_applies_in_the_batch_that_stops_the_group() {
     });
 }
 
+// One reply of node 2 commits a spec change and, after it, an entry that is not a
+// change.
+#[test]
+fn the_pointer_after_a_stop_is_the_pointer_at_the_stop() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+        let first = elect(&mesh).await;
+        let base = mesh.pointer();
+        let change = Change::Spec {
+            base,
+            root: common::digest(1),
+            chunks: [common::digest(1)].into(),
+            holders: IDS.map(key).into(),
+            homes: BTreeMap::new(),
+        };
+        mesh.propose_data(encoded(&change)).await.unwrap();
+        let bad = mesh.propose_data(vec![9]).await.unwrap();
+        let reply = raft::Message {
+            term: first.term,
+            ..message(2, 1, Body::AppendReply { last: bad.index })
+        };
+        assert_eq!(mesh.receive(public(2), reply), Ok(()));
+        node.clock().sleep(Span::MILLISECOND).await;
+        let cause = Unknown::Kind { kind: 9 };
+        let stopped = Stopped::Change { at: bad, cause };
+        assert_eq!(mesh.watch(INDEX).next().await, Err(stopped));
+        let moved = Pointer {
+            version: 1,
+            root: common::digest(1),
+        };
+        assert_eq!(mesh.pointer(), moved);
+    });
+}
+
 // A waker or a floor that stays only takes memory, which no call shows, so this
 // test reads the group.
 #[test]
@@ -393,9 +427,8 @@ struct Leader {
     peer: Peer,
     /// Whether node 2 sends no heartbeat now.
     silent: Rc<Cell<bool>>,
-    /// The session that node 2 dialed, for its `raft` messages.
-    dialed: Session,
-    /// The session that node 1 dialed.
+    /// The session between node 1 and node 2. Node 2 dialed it, and node 1 got it
+    /// for its own dial.
     session: Session,
     /// The streams of node 1 that go one way.
     held: Vec<Receiver>,
@@ -404,14 +437,30 @@ struct Leader {
 impl Leader {
     async fn new(peer: Peer) -> Self {
         let addresses = [Address::Udp(address(1))];
-        let dialed = peer.transport.dial(public(1), &addresses).await.unwrap();
-        let mut beats = Self::open(&peer, &dialed).await;
-        let (clock, pool) = (peer.node.clock(), Rc::clone(&peer.pool));
+        let session = peer.transport.dial(public(1), &addresses).await.unwrap();
+        // `accept` also gives the session of each dial.
+        drop(peer.session().await);
+        let mut leader = Self {
+            peer,
+            silent: Rc::new(Cell::new(true)),
+            session,
+            held: Vec::new(),
+        };
+        leader.beat().await;
+        leader
+    }
+
+    /// Sends the heartbeats on a new stream of `session` from now on, and none on
+    /// the stream before.
+    async fn beat(&mut self) {
+        self.silent.set(true);
+        let mut beats = Self::open(&self.peer, &self.session).await;
+        let (clock, pool) = (self.peer.node.clock(), Rc::clone(&self.peer.pool));
         let silent = Rc::new(Cell::new(false));
-        let ended = Rc::clone(&silent);
-        peer.tasks.spawn(async move {
+        self.silent = Rc::clone(&silent);
+        self.peer.tasks.spawn(async move {
             loop {
-                if !ended.get() {
+                if !silent.get() {
                     let beat = proven(2, 1, Body::Heartbeat { commit: 0 });
                     let beat = block(&pool, &Message::Raft(beat).encode()).unwrap();
                     beats.send(beat).await.unwrap();
@@ -419,15 +468,6 @@ impl Leader {
                 clock.sleep(BEAT).await;
             }
         });
-        // Node 1 dials for its reply to the first heartbeat.
-        let session = peer.session().await;
-        Self {
-            peer,
-            silent,
-            dialed,
-            session,
-            held: Vec::new(),
-        }
     }
 
     /// A stream to node 1 that goes one way, after its header.
@@ -489,7 +529,7 @@ impl Leader {
             commit: at.index,
         };
         let append = Message::Raft(proven(2, 1, append)).encode();
-        let mut sender = Self::open(&self.peer, &self.dialed).await;
+        let mut sender = Self::open(&self.peer, &self.session).await;
         sender.send(self.peer.block(&append)).await.unwrap();
         sender.finish().unwrap();
     }
@@ -553,7 +593,7 @@ where
     let called = Arc::new(Mutex::new(None));
     let result = Arc::clone(&called);
     let mesh = move |node: sim::node::Node, tasks: Tasks| async move {
-        let config = create_config(&node, &tasks, create_pool());
+        let config = create_config(&node, &tasks, create_pool()).await;
         let transport = Rc::clone(&config.transport);
         let mesh = Mesh::open(config).await.unwrap();
         let (serving, streams) = (mesh.clone(), tasks.clone());
@@ -647,7 +687,7 @@ fn a_try_ends_when_the_same_leader_leads_a_later_term() {
         leader.silent.set(true);
         leader.rest(BEAT).await;
         let beat = common::proven_in(Term(6), 2, 1, Body::Heartbeat { commit: 0 });
-        let mut sender = Leader::open(&leader.peer, &leader.dialed).await;
+        let mut sender = Leader::open(&leader.peer, &leader.session).await;
         let start = clock.now();
         let beat = leader.peer.block(&Message::Raft(beat).encode());
         sender.send(beat).await.unwrap();
@@ -690,7 +730,7 @@ fn one_poll_that_sees_the_answer_and_a_later_term_keeps_the_answer() {
         *got.lock().unwrap() = true;
         leader.answer(&mut asked, at(1)).await.unwrap();
         leader.rest(seconds(1)).await;
-        let mut sender = Leader::open(&leader.peer, &leader.dialed).await;
+        let mut sender = Leader::open(&leader.peer, &leader.session).await;
         let append = leader.append_in(Term(6), &home(1), at(1));
         sender.send(append).await.unwrap();
         let more = leader.proposal_within(seconds(3)).await;
@@ -799,9 +839,9 @@ fn a_call_that_waits_for_the_answer_gets_the_cause_when_the_group_stops() {
     let cause = Stopped::Change { at: at(1), cause };
     assert_eq!(stopped, Err(cause.clone()));
     assert_eq!(set, Err(Error::Stopped(cause)));
-    // The group dropped its sessions at the stop, so the try held the last handle
-    // of this one.
-    assert_eq!(end, Err(transport::Error::PeerClosed { code: Code(0) }));
+    // The group dropped its streams at the stop. The session stays open: `accept`
+    // on node 1 holds it.
+    assert_eq!(end, Err(transport::Error::Reset { code: Code(0) }));
 }
 
 /// How node 2 refuses a proposal.
@@ -946,8 +986,11 @@ fn no_proposal_goes_to_the_leader_while_the_pool_has_no_block() {
 fn a_proposal_goes_on_the_next_session_when_the_session_to_the_leader_closed() {
     let call = |_, mesh| set(mesh);
     let (set, change) = run(call, |mut leader| async move {
+        // No heartbeat goes on the closed session.
+        leader.silent.set(true);
         leader.session.close(Code(7));
         leader.session = leader.peer.session().await;
+        leader.beat().await;
         let (change, mut asked) = leader.proposal().await;
         leader.answer(&mut asked, at(1)).await.unwrap();
         leader.append(&home(1), at(1)).await;

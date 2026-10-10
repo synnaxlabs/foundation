@@ -1,0 +1,53 @@
+- **BENCH BASELINES (2026-10-06)** The committed baselines and the CI bench job with
+  the 5% check (P1) come with #715. Until then, a PR that touches a hot path gives its
+  benchmark results, with the machine named. When a result is near 5%, `laptop.monitor`
+  runs it again on a quiet Linux host; a result still over 5% needs the P1 judgment.
+  Once a day, `laptop.monitor` runs the hot-path benchmarks on a quiet Linux host
+  against a fixed commit, which finds a slowdown that no PR expected. `laptop.monitor`
+  runs both because it alone rents cloud machines (`laptop.monitor`'s record of the
+  person's decision, 2026-10-07T16:48:27Z:
+  https://github.com/synnaxlabs/foundation/issues/15#issuecomment-6042582552).
+  Supersedes the runs by the coordinator in
+  https://github.com/synnaxlabs/foundation/pull/894. Patch; #715 is the long-term fix.
+  The person decided on 2026-10-06 ("I am ok with deferring #715").
+  Amended (2026-10-09): a PR that closes or builds part of an issue on the FIRST SLICE
+  milestone merges with no rerun on a quiet host. After it merges, its author sends
+  `laptop.monitor` the PR number, and `laptop.monitor` runs the hot-path benchmarks on a
+  quiet Linux host at the merge commit and at its parent on `main`. A slowdown over 5%
+  is an issue for the PR's author, who fixes it next. The daily run stays. Each other PR
+  keeps the rule above. The person (2026-10-09T01:04:51Z), on the question of
+  `laptop.monitor` at 2026-10-09T01:04:26Z: "Approved" (`laptop.monitor`'s record:
+  https://github.com/synnaxlabs/foundation/issues/462#issuecomment-6074405652).
+  Amended (2026-10-09, #2044): when each changed hot function compiles only on an OS for
+  which no quiet host exists, the PR gives a diff of the disassembly in place of the
+  rerun. It covers each such function, with its inlined callers, at `main` and at the PR
+  head, built with the toolchain and profile of the bench binaries, and names the target
+  and both commits. The diff only removes instructions: no added instruction, call,
+  loop, or memory access. The runs with the machine named stay in the PR. A change that
+  adds anything on such a path waits for a quiet host of its OS. Decided by
+  `laptop.director` for #2044 at 2026-10-09T00:55:15Z
+  (https://github.com/synnaxlabs/foundation/pull/2044#issuecomment-6072038524), and made
+  a rule for each such PR by item 3 of
+  https://github.com/synnaxlabs/foundation/issues/2041, as that ruling says.
+  Amended (2026-10-09): each one-host quiet-host run builds both commits with
+  `RUSTFLAGS="-C target-cpu=x86-64-v2 -C llvm-args=-align-all-functions=6"`, and its
+  result names these flags beside the machine. The two builds of one comparison, also in
+  the daily run against its fixed commit, use the same flags. An aligned result over 5%
+  still needs the P1 judgment. `scripts/bench-host.sh` passes the flags (item of #1139,
+  https://github.com/synnaxlabs/foundation/issues/1139#issuecomment-6074402988). The
+  two-host carrier bench builds as `bench/carrier/run.sh` does. A carrier result over
+  5% that the P1 judgment does not find in the code of the PR is the trigger for a
+  change of the script. Decided by `laptop.director`, 2026-10-09T02:44:36Z:
+  https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073190937, with its
+  scope at 2026-10-09T02:50:37Z:
+  https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073252079.
+  Amended (2026-10-10T00:24Z): each 5% in this record is now the cost limit of P1
+  (`docs/decisions/memory/p1.md`), and each "over 5%" is "at or over the cost limit". A
+  result is near the limit when it is at or over the limit and the noise of its run
+  could put it under. A slowdown under the limit needs no rerun, no judgment, and no
+  issue. The daily run stays: it finds small slowdowns that add up. The person decided
+  on 2026-10-10T00:24Z ("Yes, I approve it"; `laptop.monitor`'s record:
+  https://github.com/synnaxlabs/foundation/pull/2196#issuecomment-6091584600).
+  Supersedes the 5% of
+  https://github.com/synnaxlabs/foundation/issues/462#issuecomment-6074405652 and
+  https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6073190937.

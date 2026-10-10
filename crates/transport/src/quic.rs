@@ -4,6 +4,7 @@ mod carrier;
 mod cid;
 pub(crate) mod connection;
 mod datagram;
+mod end;
 #[cfg_attr(
     not(feature = "fuzzing"),
     expect(unreachable_pub, reason = "only the fuzzing feature exports it")
@@ -38,11 +39,15 @@ use types::time::Monotonic;
 use self::connection::Connection;
 use self::settings::Settings;
 use self::stream::{Incoming, Receiver, Sender, Streams};
-use crate::{Class, Code, Config, Error, Peer};
+use crate::message::Reader;
+use crate::stream::Part;
+use crate::{Class, Code, Error, Peer};
 
-pub(crate) use self::carrier::{Carrier, Session};
+pub(crate) use self::carrier::{Carrier, Handle, Session};
+pub use self::end::Ended;
 #[cfg(feature = "fuzzing")]
 pub use self::hello::Hello;
+pub(crate) use self::settings::{Role, Setup};
 
 /// The server name a dial sends. The verifiers check the node key, not the name.
 const SERVER_NAME: &str = "foundation";
@@ -70,6 +75,8 @@ pub(crate) struct Endpoint {
     window_bytes: usize,
     /// Indexed by noq-proto's handle.
     connections: Vec<Option<Connection>>,
+    /// The messages of the drained connections that waited for send budget room.
+    budget_waits: u64,
     /// The connections made so far.
     serial: u64,
     /// The connections that may have a datagram to send, each once, in the order
@@ -100,8 +107,9 @@ pub(crate) enum Event {
     /// [`Endpoint::accept`] has a stream for `key`.
     Incoming { key: connection::Key },
     /// [`Endpoint::open`] and [`Endpoint::open_sender`] may now give a stream. It
-    /// comes first when the peer's hello arrives. A peer may never send its hello:
-    /// the caller bounds that wait.
+    /// comes first when the peer's hello arrives. When the peer's hello has not arrived
+    /// twice the idle timeout after [`Event::Connected`], the key gets
+    /// [`Event::Closed`] in its place.
     Available { key: connection::Key },
     /// `stream` may have more to read. It can repeat, and it can name a stream the
     /// caller no longer holds or has not accepted yet.
@@ -109,40 +117,35 @@ pub(crate) enum Event {
     /// `stream` may take more, or the peer stopped it. It can repeat, and it can
     /// name a stream the caller no longer holds or has not accepted yet.
     Writable { stream: stream::Key },
+    /// The peer acknowledged a packet sent after the last [`Endpoint::ping`] of `key`.
+    Acked { key: connection::Key },
     /// [`Endpoint::datagrams`] has a datagram of `key` to take. It comes when one
     /// arrives and none waited, so take them all after it.
     Datagram { key: connection::Key },
 }
 
 impl Endpoint {
-    /// An endpoint for this node's key whose connection IDs all start with
-    /// `shard`. Each [`Transmit`] holds at most `datagrams_max` datagrams, the
-    /// socket's batch max, and at most
-    /// [`TRANSMIT_BYTES_MAX`](env::net::udp::TRANSMIT_BYTES_MAX) bytes.
-    ///
-    /// # Panics
-    ///
-    /// When [`Transport::new`](crate::Transport::new) refuses `config`, with its error.
-    pub(crate) fn new(config: &Config, shard: u8, datagrams_max: NonZeroUsize) -> Self {
-        if let Err(error) = config.check() {
-            panic!("{error}");
-        }
-        let (settings, endpoint) = Settings::new(config, shard);
+    /// An endpoint for `setup` whose connection IDs all start with `shard`. Each
+    /// [`Transmit`] holds at most `datagrams_max` datagrams, the socket's batch max,
+    /// and at most [`TRANSMIT_BYTES_MAX`](env::net::udp::TRANSMIT_BYTES_MAX) bytes.
+    pub(crate) fn new(setup: &Setup, shard: u8, datagrams_max: NonZeroUsize) -> Self {
+        let (settings, endpoint) = Settings::new(setup, shard);
         Self {
-            epoch: config.clock.epoch(),
+            epoch: setup.clock.epoch(),
             settings,
             inner: endpoint,
             datagrams_max: datagrams_max.min(settings::BATCH_MAX),
-            pool: Rc::clone(&config.pool),
-            message_bytes_max: config.message_bytes_max.get(),
-            window_bytes: config.window_bytes,
+            pool: Rc::clone(&setup.pool),
+            message_bytes_max: setup.message_bytes_max,
+            window_bytes: setup.window_bytes,
             connections: Vec::new(),
+            budget_waits: 0,
             serial: 0,
             ready: VecDeque::new(),
             events: VecDeque::new(),
             responses: VecDeque::new(),
             refusing: false,
-            resets: stateless::Limit::new(&config.entropy),
+            resets: stateless::Limit::new(&setup.entropy),
             received: BytesMut::new(),
         }
     }
@@ -231,41 +234,57 @@ impl Endpoint {
     /// When [`Endpoint::timeout`] must next run, or `None` with no connection.
     pub(crate) fn deadline(&self) -> Option<Monotonic> {
         let connections = self.connections.iter().flatten();
-        let deadline = connections
-            .filter_map(|connection| connection.inner.poll_timeout())
-            .min()?;
+        let deadline = connections.filter_map(Connection::deadline).min()?;
         let nanos = deadline.duration_since(self.epoch).as_nanos();
         Some(Monotonic(u64::try_from(nanos).unwrap_or(u64::MAX)))
     }
 
-    /// Runs the timers due at `now`: loss detection, keep-alives, and the idle
-    /// timeout.
+    /// Runs the timers due at `now`: loss detection, keep-alives, the idle timeout,
+    /// and the wait for each peer's hello.
     pub(crate) fn timeout(&mut self, now: Monotonic) {
         let now = self.instant(now);
         for handle in (0..self.connections.len()).map(ConnectionHandle) {
-            let Some(connection) = &mut self.connections[handle.0] else {
-                continue;
-            };
-            if connection
-                .inner
-                .poll_timeout()
-                .is_some_and(|deadline| deadline <= now)
+            if let Some(connection) = &mut self.connections[handle.0]
+                && connection.timeout(now, &mut self.events)
             {
-                connection.inner.handle_timeout(now);
                 self.drive(handle, now);
             }
         }
     }
 
-    /// Refuses each connection that a peer dials from now on. The peer's dial ends
-    /// at once.
-    pub(crate) fn refuse(&mut self) {
+    /// Shuts the endpoint to new connections: refuses each one that a peer dials from
+    /// now on, and closes with code 0 each one whose handshake is in flight, in either
+    /// direction. The peer's dial ends at once, and each dial of the caller gets its
+    /// [`Event::Closed`].
+    pub(crate) fn shut(&mut self, now: Monotonic) {
         self.refusing = true;
+        let now = self.instant(now);
+        for handle in (0..self.connections.len()).map(ConnectionHandle) {
+            let entry = self.connections[handle.0].as_mut();
+            let Some(connection) = entry.filter(|c| c.handshaking()) else {
+                continue;
+            };
+            self.events.extend(connection.abort(now));
+            self.drive(handle, now);
+        }
+    }
+
+    /// The messages that waited for room in the send budget of their connection, over
+    /// every connection, also those that drained.
+    pub(crate) fn budget_waits(&self) -> u64 {
+        let live = self.connections.iter().flatten();
+        self.budget_waits + live.map(|c| c.streams.budget_waits()).sum::<u64>()
     }
 
     /// `true` when each connection drained, so none sends again.
     pub(crate) fn drained(&self) -> bool {
         self.connections.iter().all(Option::is_none)
+    }
+
+    /// `true` when each connection ended. One that ended may still drain its close.
+    pub(crate) fn ended(&self) -> bool {
+        let mut connections = self.connections.iter().flatten();
+        connections.all(|connection| !connection.live())
     }
 
     /// Ends each connection after the socket broke, and queues the
@@ -274,6 +293,12 @@ impl Endpoint {
         let connections = self.connections.iter_mut().flatten();
         let closed = connections.filter_map(|connection| connection.fail(error));
         self.events.extend(closed);
+    }
+
+    /// Whether the connection of `key` has not ended. A close ends it at once.
+    pub(crate) fn live(&self, key: connection::Key) -> bool {
+        let connection = self.connections.get(key.handle.0).and_then(Option::as_ref);
+        connection.is_some_and(|connection| connection.key == key && connection.live())
     }
 
     /// Closes the connection of `key` with `code`, and queues its [`Event::Closed`]
@@ -287,6 +312,18 @@ impl Endpoint {
         let closed = connection.close(now, code);
         self.events.extend(closed);
         self.drive(key.handle, now);
+    }
+
+    /// Pings the peer on the connection of `key`: [`Event::Acked`] follows once the
+    /// peer acknowledges the ping or a later packet. Does nothing when the connection
+    /// ended.
+    pub(crate) fn ping(&mut self, now: Monotonic, key: connection::Key) {
+        let Some(connection) = find(&mut self.connections, key).filter(|c| c.live())
+        else {
+            return;
+        };
+        connection.ping();
+        self.drive(key.handle, self.instant(now));
     }
 
     /// Opens a stream of `class` that goes both ways. `None` until the peer's hello
@@ -324,50 +361,56 @@ impl Endpoint {
         connection.streams.accept(key)
     }
 
-    /// Puts `message`, when `Some`, on the stream after the messages before it, and
-    /// takes it. Leaves it while the stream holds part of an earlier message.
-    /// `Ready` when the stream holds no message: it took all of `message`, or with
-    /// `None`, all of the one before. Else `Pending`: write again after
+    /// Puts a message of `parts` of `message`, when `Some`, on the stream after the
+    /// messages before it, and takes the block: for each part, its range of the
+    /// block, then its zeros. Leaves it while the stream holds part of an earlier
+    /// message. `Ready` when the stream holds no message: it took all of `message`,
+    /// or with `None`, all of the one before. Else `Pending`: write again after
     /// [`Event::Writable`] to send the rest. The streams that wait for the
     /// connection take turns, by class with `Complete` ahead of `Latest` while it is
     /// owed bytes, then oldest first, so a write behind one waits.
     ///
     /// # Errors
     ///
-    /// [`Error::TooLarge`] when `message` is over the peer's largest message.
-    /// Nothing of it is sent, and it stays in `message`. Then the error of the
-    /// connection's [`Event::Closed`] once it ended. Then [`Error::Reset`] with
-    /// `Code(0)` after an [`Endpoint::cancel`] reset the stream, and
-    /// [`Error::Stopped`] when the peer stopped it; each later write gives it too.
+    /// [`Error::TooLarge`] when the message, the sum of the range lengths and the
+    /// zeros, is over the peer's largest message. Nothing of it is sent, and the
+    /// block stays in `message`. Then the error of the connection's
+    /// [`Event::Closed`] once it ended. Then [`Error::Reset`] with `Code(0)` after an
+    /// [`Endpoint::cancel`] reset the stream, and [`Error::Stopped`] when the peer
+    /// stopped it; each later write gives it too.
     ///
     /// # Panics
     ///
-    /// After an [`Endpoint::finish`] that gave `Ok`.
+    /// When `message` is `Some` and a range starts after its end or ends past the
+    /// block. Then after an [`Endpoint::finish`] that gave `Ok`.
     pub(crate) fn write(
         &mut self,
         now: Monotonic,
         sender: &Sender,
         message: &mut Option<Block>,
+        parts: &[Part],
     ) -> Result<Poll<()>, Error> {
+        let bytes = message
+            .as_ref()
+            .map_or(0, |block| crate::stream::size(parts, block.len()));
         sender.check_open();
-        if let Some(message) = message {
-            stream::check_size(message.len(), sender.bytes_max())?;
-        }
+        stream::check_size(bytes, sender.bytes_max())?;
         let key = sender.key().connection;
         self.streams(
             now,
             key,
             sender.closed().cloned(),
-            |streams, inner, _, _| streams.write(inner, sender, message),
+            |streams, inner, _, _| streams.write(inner, sender, message, parts, bytes),
         )
     }
 
-    /// Puts `message` on the stream after the messages before it when the stream
-    /// can take it now. Else gives it back with nothing of it sent: when the stream
-    /// still holds part of an earlier message once it wrote what it could of it,
-    /// when the send budget has no room for it or a stream that goes ahead of it
-    /// waits for room or its turn. The stream does not wait for room for a message
-    /// it gives back. Once taken, the stream sends the rest of it by itself.
+    /// Puts a message of `parts` of `message` on the stream after the messages before
+    /// it, as [`Endpoint::write`] does, when the stream can take it now. Else gives
+    /// the block back with nothing of it sent: when the stream still holds part of
+    /// an earlier message once it wrote what it could of it, when the send budget
+    /// has no room for it or a stream that goes ahead of it waits for room or its
+    /// turn. The stream does not wait for room for a message it gives back. Once
+    /// taken, the stream sends the rest of it by itself.
     ///
     /// # Errors
     ///
@@ -375,22 +418,26 @@ impl Endpoint {
     ///
     /// # Panics
     ///
-    /// After an [`Endpoint::finish`] that gave `Ok`.
+    /// As [`Endpoint::write`].
     pub(crate) fn try_write(
         &mut self,
         now: Monotonic,
         sender: &Sender,
         message: Block,
+        parts: &[Part],
     ) -> Result<Option<Block>, Error> {
+        let bytes = crate::stream::size(parts, message.len());
         sender.check_open();
-        stream::check_size(message.len(), sender.bytes_max())?;
+        stream::check_size(bytes, sender.bytes_max())?;
         let key = sender.key().connection;
         let mut message = Some(message);
         self.streams(
             now,
             key,
             sender.closed().cloned(),
-            |streams, inner, _, _| streams.try_write(inner, sender, &mut message),
+            |streams, inner, _, _| {
+                streams.try_write(inner, sender, &mut message, parts, bytes)
+            },
         )?;
         Ok(message)
     }
@@ -447,12 +494,65 @@ impl Endpoint {
         receiver: &mut Receiver,
         mut take: impl FnMut(&Pool, usize) -> Option<Unique>,
     ) -> Result<Poll<Option<Block>>, Error> {
+        self.read_with(now, receiver, |reader, pool, len| {
+            reader.fill(take(pool, len))
+        })
+    }
+
+    /// The length of the next whole message of `receiver`'s stream, which it copies
+    /// to the start of `buffer`. As [`Endpoint::read`], with no block: `Pending`
+    /// only when no whole message is here yet.
+    ///
+    /// # Errors
+    ///
+    /// As [`Endpoint::read`], and [`Error::TooLarge`] with the message's length and
+    /// `buffer.len()` when the message is longer than `buffer`. Then the message
+    /// and its room in the receive budget stay for the next read.
+    pub(crate) fn read_into(
+        &mut self,
+        now: Monotonic,
+        receiver: &mut Receiver,
+        buffer: &mut [u8],
+    ) -> Result<Poll<Option<usize>>, Error> {
+        let read = self.read_with(now, receiver, |reader, _, len| {
+            if len > buffer.len() {
+                reader.hold();
+                let bytes_max = buffer.len();
+                return Poll::Ready(Err(Error::TooLarge {
+                    bytes: len,
+                    bytes_max,
+                }));
+            }
+            reader.copy(&mut buffer[..len]);
+            Poll::Ready(Ok(len))
+        })?;
+        match read {
+            Poll::Ready(Some(landed)) => landed.map(|len| Poll::Ready(Some(len))),
+            Poll::Ready(None) => Ok(Poll::Ready(None)),
+            Poll::Pending => Ok(Poll::Pending),
+        }
+    }
+
+    /// What `land(reader, pool, len)` makes of the next whole message of
+    /// `receiver`'s stream, as [`Endpoint::read`] gives it. `land` takes the message
+    /// from `reader`, or holds it there for the next read.
+    fn read_with<T>(
+        &mut self,
+        now: Monotonic,
+        receiver: &mut Receiver,
+        mut land: impl FnMut(&mut Reader, &Pool, usize) -> Poll<T>,
+    ) -> Result<Poll<Option<T>>, Error> {
         if let Some(ended) = receiver.ended() {
             return ended;
         }
         let (key, closed) = (receiver.key().connection, receiver.closed().cloned());
         let read = self.streams(now, key, closed, |streams, inner, pool, events| {
-            streams.read(inner, receiver, |len| take(pool, len), events)
+            streams.read(
+                inner,
+                receiver,
+                |reader, len| land(reader, pool, len),
+                events,
+            )
         });
         if read.is_err() {
             receiver.clear();
@@ -625,8 +725,6 @@ impl Endpoint {
         if dropped(&datagram) {
             return;
         }
-        // noq-proto answers a short header only with a stateless reset.
-        let short = datagram.first().is_some_and(|form| form & 0x80 == 0);
         let mut reply = Vec::new();
         let event = self.inner.handle(now, path, ecn, datagram, &mut reply);
         let response = match event {
@@ -655,8 +753,9 @@ impl Endpoint {
                 }
             }
             Some(DatagramEvent::Response(response)) => {
+                let reset = reply.first().is_some_and(|form| form & 0x80 == 0);
                 let admitted =
-                    !short || self.resets.admit(now, response.destination.ip());
+                    !reset || self.resets.admit(now, response.destination.ip());
                 admitted.then_some(response)
             }
         };
@@ -674,6 +773,7 @@ impl Endpoint {
         let entry = &mut self.connections[handle.0];
         let connection = entry.as_mut().expect("invariant: a live handle");
         if connection.drive(now, &mut self.inner, &self.pool, &mut self.events) {
+            self.budget_waits += connection.streams.budget_waits();
             *entry = None;
         } else {
             queue(&mut self.ready, connection);
@@ -907,8 +1007,11 @@ mod tests {
         fn to_port_zero_panics() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::CLIENT_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
                 endpoint.connect(Monotonic(0), server(), remote);
             });
@@ -1031,8 +1134,11 @@ mod tests {
         fn stays_at_the_earliest_timer_when_a_later_dial_starts() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::CLIENT_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let mut buffer = Vec::new();
                 endpoint.connect(Monotonic(0), server(), pair::SERVER);
                 while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {}
@@ -1041,6 +1147,30 @@ mod tests {
                 endpoint.connect(later, server(), pair::SERVER);
                 while endpoint.transmit(later, &mut buffer).is_some() {}
                 assert_eq!(endpoint.deadline(), Some(earliest));
+            });
+        }
+    }
+
+    mod ping {
+        use super::*;
+
+        fn acks(side: &Side) -> Vec<&Event> {
+            let acked = |event: &&Event| matches!(event, Event::Acked { .. });
+            events(side).into_iter().filter(acked).collect()
+        }
+
+        // The server acknowledged the client's handshake packets, all before the mark.
+        #[test]
+        fn gives_acked_once_the_peer_acknowledges_a_packet_after_it() {
+            testing::run(1, |shard| {
+                let mut pair = dial(shard, server());
+                let key = pair.client.key.expect("a key");
+                let now = pair.now();
+                pair.client.endpoint.ping(now, key);
+                pair.run(DELAY);
+                assert!(acks(&pair.client).is_empty());
+                pair.run(Duration::from_millis(100));
+                assert_eq!(acks(&pair.client), [&Event::Acked { key }]);
             });
         }
     }
@@ -1057,8 +1187,11 @@ mod tests {
         fn writes_a_response_into_the_callers_buffer() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let initial = pair::draft_29();
                 let meta = pair::meta(pair::CLIENT, &initial);
                 endpoint.receive(Monotonic(0), &meta, &initial);
@@ -1074,8 +1207,11 @@ mod tests {
         fn keeps_at_most_responses_max_responses() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let initial = pair::draft_29();
                 let meta = pair::meta(pair::CLIENT, &initial);
                 for _ in 0..=RESPONSES_MAX {
@@ -1148,7 +1284,7 @@ mod tests {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let batch = NonZeroUsize::new(64).expect("not zero");
                 pair.client.endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, batch);
+                    Endpoint::new(&testing::setup(&config), pair::CLIENT_SHARD, batch);
                 pair.dial(server());
                 pair.run(Duration::from_millis(100));
                 let sent: Vec<u8> = (0..=u8::MAX).cycle().take(1 << 16).collect();
@@ -1157,8 +1293,12 @@ mod tests {
                 for _ in 0..testing::STREAMS_MAX - 1 {
                     let opened = client.open_sender(now, key, Class::Command);
                     let sender = opened.expect("a stream");
-                    let written =
-                        client.write(now, &sender, &mut Some(shard.block(&sent)));
+                    let written = pair::write(
+                        client,
+                        now,
+                        &sender,
+                        &mut Some(shard.block(&sent)),
+                    );
                     assert_eq!(written, Ok(Poll::Ready(())));
                 }
                 pair.run(Duration::from_secs(1));
@@ -1210,10 +1350,14 @@ mod tests {
         fn answers_a_refused_first_initial_with_a_close() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut server =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut server = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
-                let (_, mut client) = Settings::new(&config, pair::CLIENT_SHARD);
+                let (_, mut client) =
+                    Settings::new(&testing::setup(&config), pair::CLIENT_SHARD);
                 let now = server.instant(Monotonic(0));
                 let dial =
                     client.connect(now, other_protocol(), pair::SERVER, SERVER_NAME);
@@ -1271,8 +1415,11 @@ mod tests {
         fn with_no_stride_panics() {
             testing::run(1, |shard| {
                 let config = shard.config(pair::SERVER_KEY, Span::SECOND);
-                let mut endpoint =
-                    Endpoint::new(&config, pair::SERVER_SHARD, NonZeroUsize::MIN);
+                let mut endpoint = Endpoint::new(
+                    &testing::setup(&config),
+                    pair::SERVER_SHARD,
+                    NonZeroUsize::MIN,
+                );
                 let initial = pair::draft_29();
                 let meta = Meta {
                     len: 10,
@@ -1290,7 +1437,7 @@ mod tests {
                 let config = shard.config(pair::CLIENT_KEY, Span::SECOND);
                 let batch = NonZeroUsize::new(10).expect("not zero");
                 pair.client.endpoint =
-                    Endpoint::new(&config, pair::CLIENT_SHARD, batch);
+                    Endpoint::new(&testing::setup(&config), pair::CLIENT_SHARD, batch);
                 pair.dial(server());
                 pair.run(Duration::from_millis(100));
                 let sent: Vec<u8> = (0..=u8::MAX).cycle().take(20_000).collect();
@@ -1298,7 +1445,8 @@ mod tests {
                 let client = &mut pair.client.endpoint;
                 let opened = client.open_sender(now, key, Class::Command);
                 let sender = opened.expect("a stream");
-                let written = client.write(now, &sender, &mut Some(shard.block(&sent)));
+                let written =
+                    pair::write(client, now, &sender, &mut Some(shard.block(&sent)));
                 assert_eq!(written, Ok(Poll::Ready(())));
                 pair.run(Duration::from_millis(100));
                 assert!(pair.client.batch_max > 1, "{}", pair.client.batch_max);

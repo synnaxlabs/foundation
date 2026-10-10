@@ -1,7 +1,7 @@
 # Security
 
 The threat model of Foundation. The red-team sessions own this file and update it when
-a surface lands. `docs/decisions.md` wins where they differ. A defect that an
+a surface lands. `docs/decisions/` wins where they differ. A defect that an
 attacker can use is a GitHub issue with the `security` label and a failing test.
 
 ## What we protect
@@ -31,7 +31,8 @@ attacker can use is a GitHub issue with the `security` label and a failing test.
 | Voter | Vote and stall its region; break `raft` safety (Node to node) | Forge a spec change or move a home outside placement |
 | Time source | Shift the clocks that follow it, within what the estimator accepts | |
 | Device | Send any bytes to a connector | Reach the core except through `hub` |
-| Local user | Read and write the node's files, and so hold its keys and cached secrets and become that member node | Read memory of the process |
+| Local user that runs the node | Read and write the node's files and memory, and so hold its keys and cached secrets and become that member node | |
+| Other local user | Read, write, or list a file or directory that the operator opens to it: one that is there with a wider mode, which `os` does not change, or one that an ACL of the data directory opens. With write, it can write the node's keys and so become that node | Read, write, or list another file or directory that `os` makes; read memory of the process |
 | Agent host | Use the key of the agent's subject, which the MCP process holds | Go past that subject's allows |
 | Dependency | Ship hostile or defective code in a crate we build | |
 
@@ -39,7 +40,7 @@ The reach of each node role is from BQ12. Placement is the trust decision: the h
 of an index is the authority for it.
 
 Accepted in v1 (BQ12): no end-to-end integrity of frames, so a member node can change
-what it forwards, commands included. Out of scope: a hostile operating system or
+what it forwards, commands included. Out of scope: a hostile operating system, root, or
 hardware.
 
 ## Trust boundaries and their state
@@ -109,14 +110,25 @@ state on `main`.
   exchange and one signature, and one signature check more when the peer sends a
   certificate. With no limit, each spoofed Initial holds about 46 KB until the idle
   timeout (#563).
+- Fixed: #2084 (a peer with no key started a handshake that it kept alive, and the
+  stop of the node waited for it with no bound, because shard 0 holds `lock` until
+  the transport frees the port). The drop of the transport closes each handshake in
+  flight, and the transport waits at most 3 s for the closes to drain after the last
+  session ended, so the round trip of a peer cannot hold the port.
 
 ### `transport` to protocols
 
 - The first message of a stream, and each datagram, starts with a `wire` header
   (PROTOCOL HEADER). `node` stops a stream whose header is not valid, and drops and
   counts such a datagram. A client opens only hub streams; `node` refuses the other
-  protocols from a client. `node` stops and resets each stream until a protocol has a
-  server. It reads no datagram yet (#1661), and admits every peer (#1628).
+  protocols from a client. A node with a region gives each `Mesh` stream of a peer
+  that proved a node key to `Mesh::serve`, which checks each message (NODE MESH), and
+  rejects a client's. It gives a `Hub` stream to the hub only when a member of its
+  region has the peer's public key, once, at the header (NODE PORT); it rejects a
+  client's until #1744. `node` stops and resets each other stream until its protocol
+  has a server. It reads no datagram yet (#1661). It admits each member of the region
+  to a session, and at most 256 sessions of other peers at once (NODE PORT); it
+  rejects a stream whose header has not arrived within 10 s.
 
 ### Subject to owner
 
@@ -153,18 +165,19 @@ state on `main`.
   answer are not built (#336).
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
-  placement. Not built (`spec`).
-- `raft` does not check the sender of a request, by decision: the caller
-  authenticates the sender and decides which nodes may send (RAFT SURFACE).
-  `Mesh::receive` refuses a message whose sender is not the peer that holds the
-  stream (`Error::Spoofed`). No node serves mesh streams yet (#471). Before it acts,
-  `raft` checks the index a heartbeat or an append answer names, the order of an
-  append's entries, and that no entry is above the append's term. A node that a
-  change removed and that missed its release campaigns; a voter whose log holds the
-  leave refuses the request, with `removed` once the leave commits, and the node stops
-  (#1105). A voter whose log lacks the leave entry admits the request until #1107, so
-  in `raft` alone such a node can win an election once no voter has a lease, and lead
-  until it commits the leave.
+  placement. Not built (`spec`). Until #1213, a `Change::Spec` has no signature, and
+  the leader proposes one that any voter forwards with the holders it names. So any
+  voter can move the spec pointer to any root, with chunks that no voter holds.
+- `raft` does not check the sender of a request, by decision: the caller authenticates
+  the sender and decides which nodes may send (RAFT SURFACE). `Mesh::receive` refuses a
+  message whose sender is not the peer that holds the stream (`Error::Spoofed`). `node`
+  serves mesh streams when it has a region (NODE MESH). Before it acts, `raft` checks
+  the index a heartbeat or an append answer names, the order of an append's entries, and
+  that no entry is above the append's term. A node that a change removed and that missed
+  its release campaigns; a voter whose log holds the leave refuses the request, with
+  `removed` once the leave commits, and the node stops (#1105). A voter whose log lacks
+  the leave entry admits the request until #1107, so in `raft` alone such a node can win
+  an election once no voter has a lease, and lead until it commits the leave.
 - `raft` drops a reply from a node that is not a voter, unless a change removed the node
   and `raft` still sends to it (#352). It takes a higher term only with a proof that a
   quorum of its configuration granted the sender, in every message but a `PreVote` and a
@@ -187,8 +200,8 @@ state on `main`.
   refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
   code 17) only to a sender that a committed configuration removed, so a stranger
   cannot learn from the answer which nodes the log held, and a sender stops its group
-  only on that answer from a voter of its own configuration (#1105). No node serves
-  mesh streams yet (#471).
+  only on that answer from a voter of its own configuration (#1105). `node` serves
+  mesh streams when it has a region (NODE MESH).
   A voter that lies can still break safety, because a false `AppendReply` counts as
   held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a
   voter that lies writes gives its node the key it names (MESH DRIVER). A signed
@@ -201,7 +214,8 @@ state on `main`.
   forge a link until #882 (the bullet above). `raft` counts the keys of a proof, and
   `mesh::claim` checks each signature against the voter's public key.
   `Mesh::receive` runs that check before `step`, and `Mesh::serve` runs it for each
-  `raft` message of a one-way stream. No node serves mesh streams yet (#471).
+  `raft` message of a one-way stream. `node` serves mesh streams when it has a
+  region (NODE MESH).
   `raft/tests/it/hostile.rs` pins the refusal and the gap.
 - A voter that was down through a configuration change holds the old configuration.
   The new leader's message carries the chain of configuration entries below its
@@ -273,8 +287,8 @@ state on `main`.
   `main` (#1441): when the disk cuts the file to zero bytes, or when the first sector
   of each header block reads as zero, an open takes the file for a ring with no
   checkpoint, removes it, and makes a new ring with no error. The CRC does not stop a
-  local user who writes the file: it is not a secret, and a header block has no tie
-  to its ring.
+  local user who can write the file (Who attacks): it is not a secret, and a header
+  block has no tie to its ring.
 - The engine landed (#161): `Buffer::open` reads the header blocks and walks the
   ring. #234 and #300 were robustness defects of this boundary, fixed in #356 and
   #348. They do not have the `security` label: each needed a writer of the file, or,
@@ -295,12 +309,20 @@ state on `main`.
 
 - Each protocol parser reads bytes from a device. A connector reaches the core only
   through `hub`. Not built. Each parser gets a fuzz target when it lands.
+- `connector-opcua` decodes OPC UA with the C code of open62541. Fuzzed:
+  `connector_opcua_decode`. Its chunk processing is not fuzzed yet (#1990).
+- The random generator of the open62541 copy is PCG32, which a peer can predict. The
+  copy takes the nonces of the security policy None and the session token of its server
+  from it. OPEN62541 SOURCE bars it for each nonce, key, and session token of Foundation
+  code, and states what a security policy that encrypts, or an OPC UA server of
+  Foundation, changes first. Neither is built.
 
 ### Encoded series
 
 - `codec::validate`, `codec::decode`, and `codec::Decoder` read series from peers
   and from disk. A series cannot make `decode` or `Decoder` write outside `out`.
-  Fuzzed: `codec_series`, `codec_encoder`.
+  Fuzzed: `codec_series`, `codec_encoder`, `codec_string`, `codec_shape`, and
+  `codec_shape_encoder`.
 
 ## Secrets
 
@@ -308,8 +330,8 @@ state on `main`.
   and no equality. The TLS configs do not write key bytes in `Debug`.
 - Open hardening: `PrivateKey` is `Clone` with a public field, and neither it nor the
   PKCS#8 copy in `tls` is cleared when dropped.
-- Node key material is on the node's local disk. A local user who reads it is that
-  node.
+- Node key material is on the node's local disk. A local user who can read it (Who
+  attacks) is that node.
 - `ctx.secret(name)` is the only path to a secret value (SECRET STORES AS ADAPTERS).
   The built-in store seals each value to the X25519 seal key of each node that may
   use it (BQ16, S8). The other adapters (an environment variable or a file, and the
@@ -340,7 +362,12 @@ state on `main`.
   manifest. aws-lc-rs is the only crypto provider, with one recorded exception.
 - `unsafe` is denied in the workspace. The crates that allow it (`block`, `ring`,
   `counting`) run under Miri in CI.
-- The `fuzz/` crate has its own lock file, which `cargo deny` does not read (#252).
+- The `fuzz/` crate has its own lock file. The `deny` job of `ci.yaml` checks it with
+  `cargo deny` on each change to it.
+- A local patch of a Rust crate (`patches/`) is a path package, which `cargo deny`
+  does not check against advisories. The `Advisories of each patched release` step of
+  the `deny` job checks its release (#1867). The open62541 copy in `patches/open62541/`
+  is C, not a crate: no check compares it with advisories until #1910.
 - A node fetches the signed binary of a release by hash from a nearby peer (C9d). The
   signing key and its check are not built.
 
@@ -349,31 +376,40 @@ state on `main`.
 The rule is one target for each decoder of outside input
 (`docs/claude/testing.md`). An encoder or a writer also gets a target when a
 decoder must read its output back (`codec_encoder`, `config_hcl_write`). Inputs are
-in `oracles/fuzz/<target>/`. The CI job is #252.
+in `oracles/fuzz/<target>/`. The `fuzz` job of `ci.yaml` runs each target for 60
+seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 
 | Target | Surface | Checks besides "no panic" |
 | --- | --- | --- |
 | `wire_header` | `wire::header::decode` | Encodes to the same bytes |
 | `wire_clock` | `wire::clock::decode` | Encodes to the same bytes |
 | `wire_hub_home` | `wire::hub::Home::decode`, `Open::encode`, `Credit::encode`, `keys::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; each valid message made from the input decodes to itself |
-| `wire_blob` | `wire::blob::Server::decode`, `Requester::decode`, `get::encode`, `Put::encode`, `Reply::encode` | Each message encodes to the same bytes; each body message is where `body` says and no longer than the rest of the body; each refusal is the one the state gives; each valid message made from the input decodes to itself |
-| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; the body is where `Reader::body` says; each valid message made from the input decodes to itself |
+| `wire_blob` | `wire::blob::Server::decode`, `Requester::decode`, `Put::body`, `Reply::body`, `Body::take`, `Body::end`, `get::encode`, `Put::encode`, `Reply::encode` | Each message encodes to the same bytes; each body counts exactly the bytes of its head, and each refusal of a body is the one that its rest gives; a body ends unfinished while bytes remain; each valid message made from the input decodes to itself |
+| `wire_hub_reader` | `wire::hub::Reader::decode`, `Reader::end`, `Reply::encode`, `ends::encode` | Each message encodes to the same bytes; each event comes in the order of a session, and each refusal is one that the order or the mode of the session gives; the body is where `Reader::body` says; `Reader::end` refuses each point before `Behind`, with `Unfinished` inside a body; each valid message made from the input decodes to itself |
+| `wire_hub_client` | `wire::hub::client::Challenge::decode`, `Signed::decode`, `Request::decode`, `Response::decode`, `Body::take`, `Body::end`, and the encoders of each message | Each message encodes to the same bytes; each decoder refuses another kind with `Error::Kind`; each body ends at its length and nowhere else, and each refusal of a body is the one that its rest gives; each valid message made from the input decodes to itself |
 | `transport_hello` | `transport::fuzzing::Hello::decode`, `Hello::encode` (feature `fuzzing`) | Gives the hello, or the refusal, that a second reader of the STREAM WIRE rules gives; its encoding decodes to itself |
+| `transport_certificate` | `transport::fuzzing::peer`: the client verifier and the peer of a node's server, for a dialer's chain of 0 to 3 certificates (feature `fuzzing`) | Gives the peer that a second reader of the rules gives: a client for no certificate, none for a chain of more than one or a certificate over 1024 bytes, and else none or the node whose key follows the Ed25519 key header in the certificate; a certificate that a node issues reads back to its key, and two of it are refused. Not reached: the handshake signature, which fuzzed bytes cannot make |
 | `mesh_change` | `mesh::change::Change::decode`, and `Card::decode` and `Status::decode` through a `Join`, by `mesh::testing::round_trip_change` | Encodes to the same bytes |
 | `mesh_message` | The decode of a mesh message, with its `raft` proof, chain, and entries, by `mesh::testing::round_trip_message` | Encodes to the same bytes |
 | `mesh_entries` | The decode of `raft` entries one after another, as a mesh log record body and an append hold them, by `mesh::testing::round_trip_entries` | Encode to the same bytes |
 | `mesh_log` | The decode of one mesh log record by `mesh::testing::round_trip_log_record`: the header, its version, and the hard state and entries of the body, after `seal_log_record` writes the length and both checks | Encodes to the same bytes |
 | `codec_series` | `codec::validate`, `codec::decode`, `codec::Decoder` | All give one result |
 | `codec_encoder` | `codec::Encoder` | Its output is valid and decodes unchanged |
+| `codec_string` | `codec::Encoder`, `codec::validate`, `codec::decode` on a `String` series | Each refuses at the first sample that `str::from_utf8` refuses, and at no other |
+| `codec_shape` | `codec::validate`, `codec::decode` on an array, matrix, list, `String`, or `Bytes` series | Both give one result; an array or a matrix gives the result of the series of its elements; a `String` series gives the result of a `Bytes` series or the first sample that `str::from_utf8` refuses; a valid series decodes with zeros for the padding, and encodes and decodes unchanged |
+| `codec_shape_encoder` | `codec::Encoder` on an array, matrix, list, `String`, or `Bytes` series | Gives the refusal that a second reader of the raw form gives, or a valid series that decodes unchanged with zeros for the padding; an array or a matrix encodes as the series of its elements |
 | `document_encoding` | `document::encoding::decode` | Encodes to the same bytes |
 | `spec_definition` | `spec::definition::Definition::decode` | Encodes to the same bytes |
+| `spec_tree` | `spec::tree::get`, `apply`, `diff`, and `spec::region::definitions` on chunks from a peer | `get` agrees with a whole `diff`; `apply` gives the entries with the changes; `definitions` gives the decode of the entries only when `spec::region::tree` of them has the same root |
 | `spec_data_type` | `spec::data_type::DataType` | Prints as the text it was read from |
 | `config_hcl_read` | `config_hcl::read` | The encoding decodes to an equal document |
 | `config_hcl_update` | `config_hcl::update` | Its text reads as the document; an update to its own document keeps each byte; an unread text gives the problems of `read` |
 | `config_hcl_write` | `config_hcl::write` | Its text reads back as an equal document |
-| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case, pass together and give the union of their entries |
+| `config_plan` | `config::plan::Plan::decode` | Encodes to the same bytes |
+| `config_check` | `config::check` on the documents that `config_hcl::read` reads from up to three files, with the influx kind in the kind table | The same entries for the files in either order, or problems in both; with no problem, one entry for each block, unique in any case, each policy and connector decodes to itself, and each edge of a channel names a channel entry; each problem's span is in its file, in the order of the files, then of the source; files that pass alone, with keys that differ in more than case and no subject named as a connector in any ASCII case, pass together and give the union of their entries |
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply` | A request reads back unchanged; a reply has the asked count |
+| `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES` | No memory fault or leak; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. Until #435 is fixed, the encoding decodes with as many zeros after it as its length. |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
@@ -386,14 +422,18 @@ in `oracles/fuzz/<target>/`. The CI job is #252.
 | `types_frame_ends` | `frame::Layout::from_ends`, `frame::check`, `frame::split` | Refuses exactly the ends that break a rule, with an error that names a broken rule; the layout is the one that `Layout::new` gives for the lengths; a frame drafted from the ends has them, and `split` cuts its series at them; `check` refuses exactly the ends that do not fit a body whose length the input gives, and `split` cuts a body that `check` took at them. Not reached: the panics of `split`, a body over 64 KiB |
 | `buffer_open` | `Buffer::open` and `Buffer::read` on an edited ring | An `Err`, or a commit survives a reopen; a read gives each path as the doc of `Buffer::read` says, up to the tail, the same in one read, in steps, from inside an entry or a gap, and after a reopen. Not reached: a pool with no block, a read before a commit ends |
 | `secret_sealed` | `secret::store::Sealed::put` | Takes only the one real sealed value; refuses any other bytes, name, or version; a refused `put` leaves the store as it was |
+| `node_identity` | `node::identity::decode` and `encode`, by `node::fuzz::identity` (feature `sim`), on 68 bytes, or on 64 bytes with their CRC32C | Gives an identity exactly for bytes with the tag and the CRC32C, and that identity encodes to the same bytes |
 
 No target yet, because the decoder is private, not built, not reached from a file, or
-not reached from the corpus:
-`transport::message` and `tls` (#55), the QUIC hello
-(`transport::quic::hello::Hello::decode`), `mesh::Member::decode` (the join answer of
-#336 adds its target), `spec` tree chunks (#64), `types::time::Rate`, the scan of the
+not reached from the corpus: `transport::message` (#55), the QUIC hello
+(`transport::quic::hello::Hello::decode`), `spec` tree chunks (#64), the scan of the
 mesh log files and the names of their directory (`mesh::log::scan` and
-`mesh::log::sequence`, #1746), each connector's protocol parser, and
+`mesh::log::sequence`, #1746), the file `founding` of the mesh directory
+(`mesh::region::Founding::decode`, with `mesh::Member::decode` in it, #1746), the join
+answer (`mesh::Member::decode` from a peer, #336 adds its target), the names in the
+directory of the spec in use (`mesh::driver::used::pointer`, #1746), each connector's
+protocol parser, the file `name` of the data directory (`node::name::decode`, #2174),
+the chunk processing of open62541 (`ua_securechannel.c`, #1990), and
 `connector::reader::read`, `connector::http::uri`, and `connector_influx::Kind::parse`,
 which `config_check` reaches only from an input with a `connector` block of kind
 `influx`, and no input holds one yet (#1817).
