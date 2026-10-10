@@ -94,6 +94,12 @@ _Static_assert(sizeof(UA_ConnectionState) == sizeof(int), "UA_ConnectionState ch
 _Static_assert(UA_LIFECYCLESTATE_STOPPED == 0 && UA_LIFECYCLESTATE_STOPPING == 2,
                "UA_LifecycleState moved");
 _Static_assert(sizeof(UA_LifecycleState) == sizeof(int), "UA_LifecycleState changed");
+_Static_assert(UA_NODEIDTYPE_NUMERIC == 0, "UA_NODEIDTYPE_NUMERIC moved");
+_Static_assert(sizeof(enum UA_NodeIdType) == sizeof(int), "UA_NodeIdType changed");
+_Static_assert(sizeof(UA_SessionState) == sizeof(int), "UA_SessionState changed");
+_Static_assert(sizeof(UA_EventSourceType) == sizeof(int), "UA_EventSourceType changed");
+_Static_assert(sizeof(UA_EventSourceState) == sizeof(int),
+               "UA_EventSourceState changed");
 
 /* `src/ffi.rs` mirrors the struct, in words of the size of a pointer, and asserts the
  * same offsets. */

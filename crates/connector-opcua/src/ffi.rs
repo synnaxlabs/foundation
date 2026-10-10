@@ -1,5 +1,6 @@
 //! The C functions of open62541 and `shim.c` that Rust calls, each declared once.
-//! `shim.c` asserts each C enum value that this module names, and the size of its type.
+//! `shim.c` asserts the size of each C enum that this module mirrors, and each value
+//! that it names.
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
@@ -470,6 +471,9 @@ pub(crate) mod test {
         status: u32,
         value: *mut c_void,
     );
+
+    /// `UA_NODEIDTYPE_NUMERIC`.
+    pub(crate) const NUMERIC: c_int = 0;
 
     /// `UA_NodeId` with a numeric identifier.
     #[repr(C, align(8))]

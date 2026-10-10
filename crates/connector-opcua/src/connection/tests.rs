@@ -23,9 +23,9 @@ use crate::bench::caught;
 use crate::child;
 use crate::event::Loop;
 use crate::ffi::test::{
-    Members, NodeId, QualifiedName, UA_Client_disconnect, UA_KeyValueMap_clear,
-    UA_KeyValueMap_getScalar, UA_KeyValueMap_setScalar, UA_findDataType,
-    shim_map_set_strings,
+    Members, NUMERIC, NodeId, QualifiedName, UA_Client_disconnect,
+    UA_KeyValueMap_clear, UA_KeyValueMap_getScalar, UA_KeyValueMap_setScalar,
+    UA_findDataType, shim_map_set_strings,
 };
 use crate::ffi::{self, Bytes, ConnectionState, KeyValueMap, Status};
 
@@ -118,7 +118,7 @@ fn get(map: *const KeyValueMap, key: &str, kind: u32) -> *const c_void {
 fn builtin(kind: u32) -> *const c_void {
     let id = NodeId {
         namespace: 0,
-        kind: 0,
+        kind: NUMERIC,
         numeric: kind,
         rest: [0; 3],
     };
