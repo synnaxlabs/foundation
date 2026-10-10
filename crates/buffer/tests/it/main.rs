@@ -3823,9 +3823,10 @@ fn a_commit_polled_with_new_wakers_keeps_the_last_one() {
 
 /// The drop of a polled `Commit` leaves the waker of another, and the commit wakes it.
 ///
-/// No test checks that a waker drops after the borrow of the state ends. Only a waker
-/// that holds a `Commit` can see the order, and such a waker is not `Send`, so safe
-/// code cannot make it.
+/// No test checks that a `Commit` or an `End` drops a waker after the borrow of the
+/// state ends, in a poll or in its own drop. Only a waker that holds a `Commit` or an
+/// `End` can see the order, and such a waker is not `Send`, so safe code cannot make
+/// it.
 #[test]
 fn a_dropped_commit_keeps_the_wakers_of_others() {
     let (mut sim, node) = create_node(134);
