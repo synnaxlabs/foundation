@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::fmt;
 use std::future::poll_fn;
 use std::io::{IoSlice, Write as _};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::num::NonZeroUsize;
 use std::pin::Pin;
 use std::ptr::{self, NonNull};
@@ -25,6 +25,7 @@ use types::time::Span;
 use crate::event::Loop;
 use crate::ffi::{self, Bytes, Status};
 
+/// The options of each stream.
 const OPTIONS: tcp::Options = tcp::Options {
     send_buffer_bytes: 1 << 16,
     recv_buffer_bytes: 1 << 16,
@@ -78,8 +79,12 @@ impl Manager {
         Self::make(clock, net, None, rng)
     }
 
-    /// As [`Manager::new`], and the manager also accepts on `listener`, where a server
-    /// finds it.
+    /// As [`Manager::new`], and the manager also accepts on a listener that it binds on
+    /// `local`, with a queue of `backlog` streams, where a server finds it.
+    ///
+    /// # Errors
+    ///
+    /// As [`Net::listen`].
     ///
     /// # Panics
     ///
@@ -87,10 +92,16 @@ impl Manager {
     pub(crate) fn listening(
         clock: Clock,
         net: Net,
-        listener: Listener,
+        local: SocketAddr,
+        backlog: u32,
         rng: &mut Rng,
-    ) -> Self {
-        Self::make(clock, net, Some(listener), rng)
+    ) -> Result<Self, net::Error> {
+        let listener = net.listen(&tcp::Listen {
+            local,
+            backlog,
+            options: OPTIONS,
+        })?;
+        Ok(Self::make(clock, net, Some(listener), rng))
     }
 
     fn make(clock: Clock, net: Net, listener: Option<Listener>, rng: &mut Rng) -> Self {
@@ -166,8 +177,9 @@ impl Manager {
         let mut sleep: Option<Sleep> = None;
         poll_fn(|cx| {
             state.driving.set(true);
+            let _driving = Held(&state.driving);
             self.pass(cx);
-            let poll = loop {
+            loop {
                 let poll = run(cx);
                 let moved = state.move_on_again(cx);
                 if poll.is_ready() {
@@ -184,11 +196,48 @@ impl Manager {
                 if Pin::new(timer).poll(cx).is_pending() {
                     break Poll::Pending;
                 }
-            };
-            state.driving.set(false);
-            poll
+            }
         })
         .await
+    }
+
+    /// Drives the manager until nothing is due on the loop, then deletes `server`. Call
+    /// it after `UA_Server_run_shutdown`. It checks after each run of the loop, so a
+    /// busy loop only makes the delete later.
+    ///
+    /// # Safety
+    ///
+    /// `server` lives on the loop of the manager, and nothing uses it after the call
+    /// returns.
+    ///
+    /// # Panics
+    ///
+    /// If open62541 fails a run of the loop or refuses the delete, or if the server is
+    /// not stopped when nothing is due: with no `UA_Server_run_shutdown` before the
+    /// call, or after a close that does not queue its `CLOSING`. Each panic but the
+    /// refused delete comes before the delete, so `server` still lives after it.
+    #[cfg(any(test, feature = "sim"))]
+    pub(crate) async unsafe fn delete_server(&self, server: *mut ffi::test::Server) {
+        let events = &self.events;
+        self.drive(|_| {
+            events.run();
+            if events.due() {
+                Poll::Pending
+            } else {
+                Poll::Ready(())
+            }
+        })
+        .await;
+        // SAFETY: the server lives.
+        let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
+        assert_eq!(
+            state,
+            ffi::test::Lifecycle::STOPPED,
+            "invariant: a close queues its `CLOSING` at once"
+        );
+        // SAFETY: the server is stopped, and nothing holds it.
+        let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
+        assert_eq!(status, Status::GOOD, "open62541 refused the server delete");
     }
 
     /// Connects, reads, and writes each connection until each waits, and has the task
@@ -471,7 +520,7 @@ impl State {
     }
 }
 
-/// Clears the flag of a drive when the drive drops.
+/// Clears a flag of a drive when it drops, also in a panic.
 struct Held<'a>(&'a Cell<bool>);
 
 impl Drop for Held<'_> {

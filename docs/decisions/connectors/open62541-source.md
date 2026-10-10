@@ -229,7 +229,11 @@
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6067067211,
   2026-10-08 19:05 UTC); the abort supersedes "panics" in that comment
   (https://github.com/synnaxlabs/foundation/pull/1982#issuecomment-6068349707,
-  2026-10-08 20:22 UTC).
+  2026-10-08 20:22 UTC). `bench` also gives a connection manager with the test server
+  and its clients on the loop of the manager. Approved by `laptop.architect-2` at
+  `3b508e494`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338,
+  2026-10-10 03:05 UTC).
   The logger of the loop writes each message of level warning and up to fd 2, and
   drops the lower levels: it formats the line into a stack buffer of 512 bytes with
   `mp_vsnprintf` and sends it in one `write`, so a line allocates nothing, takes no
@@ -287,46 +291,76 @@
   close or an error before it: approved by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2159#issuecomment-6086768731,
   2026-10-09 18:21 UTC).
-  A server listens on the listener that its owner gives the manager at
-  `Manager::listening`. Each accepted stream is a new connection that gets
-  `ESTABLISHED`, with the context of the listen connection at the accept. As the POSIX
-  manager does, the first `ESTABLISHED` of the listen gives `listen-address`, the host
-  of its `address` param, and `listen-port`, from which the server makes its discovery
-  URL, and that of an accepted connection gives `remote-address`. A listen with no
-  `address` gives the address of the listener as `listen-address`, where the POSIX
-  manager gives the host name. A listen on each address with no `address` gives neither,
-  so the server makes no discovery URL from it, since `env` has no host name. A listen
-  takes one `address` at most, because the manager has one listener: an open with more,
-  or with an `address` that is not a string, gives `BadInvalidArgument`. An accept error
-  closes the listen connection with a warning, also an error of one stream after which
-  the listener stays usable, because `env` gives both as `Error::Io`. This holds only
-  while the one server is the test server: before a server serves users, the manager
-  must keep listening after an error of one stream (#2005). Lost: the manager binds its
-  own listener with `Net::listen` from the parameters. `address` is a host name and
-  `Net::listen` takes a socket address, so the open would resolve in a hook that must
-  give `ESTABLISHED` before it returns, and an owner that binds port 0 could not learn
-  the port before it builds the URL of its server. Also lost: one constructor with an
-  `Option<Listener>`, which a client gives as a literal `None` (`docs/claude/rust.md`;
-  `laptop.director`,
-  https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089322178,
-  2026-10-09 21:10 UTC), and one with an enum argument, a new type that holds one
-  value. Decided by `laptop.architect-2`
+  A server listens on the listener that `Manager::listening` binds on the socket address
+  that its owner gives, with the options of each stream of the manager. Each accepted
+  stream is a new connection that gets `ESTABLISHED`, with the context of the listen
+  connection at the accept. As the POSIX manager does, the first `ESTABLISHED` of the
+  listen gives `listen-address`, the host of its `address` param, and `listen-port`,
+  from which the server makes its discovery URL, and that of an accepted connection
+  gives `remote-address`. A listen with no `address` gives the address of the listener
+  as `listen-address`, where the POSIX manager gives the host name. A listen on each
+  address with no `address` gives neither, so the server makes no discovery URL from it,
+  since `env` has no host name. A listen takes one `address` at most, because the
+  manager has one listener: an open with more, or with an `address` that is not a
+  string, gives `BadInvalidArgument`. An accept error closes the listen connection with
+  a warning, also an error of one stream after which the listener stays usable, because
+  `env` gives both as `Error::Io`. This holds only while the one server is the test
+  server: before a server serves users, the manager must keep listening after an error
+  of one stream (#2005). Also before a server serves users, a pass must move only the
+  connections that are woken: a pass moves each connection, about 63 to 107 ns each by
+  the load of the host on the bench of #435 6b3, on box2, an Intel Xeon Platinum 8488C.
+  Deferred by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6092329880,
+  2026-10-10 01:45 UTC), with these words approved at `3b508e494`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338,
+  2026-10-10 03:05 UTC). Lost for the listener: the open of the listen binds it from its
+  parameters. `address` is a host name and `Net::listen` takes a socket address, so the
+  open would resolve in a hook that must give `ESTABLISHED` before it returns. Also
+  lost: the owner binds the listener and gives it to `Manager::listening`, so the stream
+  options hold only when the owner binds with the options of the manager. An owner that
+  binds port 0 needs the port before it builds the URL of its server: with the first
+  such owner, `Manager::listening` also gives the address of its listener. Also lost:
+  one constructor with an `Option<Listener>`, which a client gives as a literal `None`
+  (`docs/claude/rust.md`; `laptop.director`,
+  https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089322178, 2026-10-09
+  21:10 UTC), and one with an enum argument, a new type that holds one value. Decided by
+  `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286,
   2026-10-09 20:26 UTC). The two constructors: decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089351505,
   2026-10-09 21:12 UTC), after the ruling of `laptop.director`. Supersedes the one
   constructor of
-  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286. The
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286. The bind
+  in `Manager::listening`: decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093207582,
+  2026-10-10 03:15 UTC). Supersedes "the listener that its owner gives" of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286 and
+  https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089351505. The
   parameters of the first callbacks: approved by `laptop.architect-2` at `feb6c21a4`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089521550,
   2026-10-09 21:25 UTC).
   A server on the loop of a manager is `STOPPED` when its last connection closes after
   `UA_Server_run_shutdown`. That close can queue a delayed callback on the server, such
-  as the removal of a session that is not activated, so its owner drives until the
-  server is `STOPPED` and nothing is due (`event::Loop::due` is false).
-  `UA_Server_delete` then frees the server and each session at once. Between that drive
-  and the delete, the owner calls nothing that queues a delayed callback on the server,
-  such as `UA_Server_addCertificates`: the next run of the loop would read the freed
-  server. Approved by `laptop.architect-2` at `5ebf60ae2`
+  as the removal of a session that is not activated, so its owner drives the loop until
+  nothing is due, and panics if the server is then not `STOPPED`. `event::Loop::due`
+  gives whether something is due. `UA_Server_delete` then frees the server and each
+  session at once. Between that drive and the delete, the owner calls nothing that
+  queues a delayed callback on the server, such as `UA_Server_addCertificates`: the next
+  run of the loop would read the freed server. The drive: approved by
+  `laptop.architect-2` at `5ebf60ae2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6091519998,
-  2026-10-10 00:19 UTC).
+  2026-10-10 00:19 UTC). The delete and the calls between: approved by
+  `laptop.architect-2` at `1816b9c85`
+  (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6090016795,
+  2026-10-09 22:04 UTC). The panic in place of a drive until `STOPPED`: decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093544897,
+  2026-10-10 04:00 UTC). Supersedes the drive until `STOPPED` of
+  https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6091519998.
+  `connection::Manager::delete_server` does that drive and the delete with no call
+  between. It is behind `cfg(any(test, feature = "sim"))` until a server that serves
+  users calls it. The one function: asked by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089865399,
+  2026-10-09 21:51 UTC), with these words approved at `3b508e494`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338,
+  2026-10-10 03:05 UTC).

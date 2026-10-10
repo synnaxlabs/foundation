@@ -1,10 +1,12 @@
 //! One run of the open62541 event loop with due timers allocates nothing, in C or in
 //! Rust, and the fuzz round trip makes a fixed count of allocations, and none after a
-//! decode that fails. The count covers each thread, so this binary has no test harness.
+//! decode that fails. A read through the connection manager makes a fixed count of
+//! allocations, and a drive with nothing ready makes none. The count covers each
+//! thread, so this binary has no test harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use connector_opcua::bench::Client;
+use connector_opcua::bench::{Client, Manager};
 use sim::Sim;
 use types::time::Span;
 
@@ -17,6 +19,7 @@ fn main() {
     the_drop_frees_the_client();
     the_fuzz_round_trip_allocates_for_each_step();
     a_failed_decode_stops_the_round_trip();
+    a_read_through_the_manager_allocates_a_fixed_count();
 }
 
 fn sim() -> (Sim, env::clock::Clock) {
@@ -80,4 +83,50 @@ fn a_failed_decode_stops_the_round_trip() {
     // A `Variant` of a `Boolean` with no byte: C allocates the `Boolean` first.
     let ((), count) = ALLOCATOR.count(|| connector_opcua::fuzz::decode(&[23, 0, 0x01]));
     assert_eq!(count, 2, "a failed decode after C allocates");
+}
+
+/// The delay of the default link.
+fn delay() -> Span {
+    sim::link::Config::default().delay
+}
+
+/// The allocations of each drive of reads 2 to 100 with `idle` idle clients: the ask,
+/// the answer of the server, the read of the answer, and a drive with nothing ready.
+fn reads(idle: usize) -> Vec<[u64; 4]> {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let run = move |node: sim::node::Node, _| async move {
+        let (clock, address) = (node.clock(), node.addresses()[0]);
+        let body = async |manager: &Manager| {
+            let mut counts = Vec::new();
+            for read in 1..=100 {
+                let ((), ask) = ALLOCATOR.count(|| manager.ask());
+                clock.sleep(delay()).await;
+                let ((), answer) = ALLOCATOR.count(|| manager.drive());
+                clock.sleep(delay()).await;
+                let ((), receive) = ALLOCATOR.count(|| manager.drive());
+                let ((), pass) = ALLOCATOR.count(|| manager.drive());
+                assert_eq!(manager.answers(), read, "{idle} idle");
+                if read > 1 {
+                    counts.push([ask, answer, receive, pass]);
+                }
+            }
+            counts
+        };
+        Manager::scope(node.clock(), node.net(), address, idle, body).await
+    };
+    sim.run_on(&node, run).expect("the run ends")
+}
+
+/// open62541 allocates for each message it sends and decodes, and the sim net
+/// allocates a segment for each write, one in the ask and one in the answer. So a read
+/// is not free. The count is the same for each read and each count of idle
+/// connections, so a Rust allocation on the path of a message adds one to a count.
+fn a_read_through_the_manager_allocates_a_fixed_count() {
+    for idle in [0, 15] {
+        for (at, counts) in reads(idle).into_iter().enumerate() {
+            let read = at + 2;
+            assert_eq!(counts, [4, 5, 2, 0], "{idle} idle, read {read}");
+        }
+    }
 }

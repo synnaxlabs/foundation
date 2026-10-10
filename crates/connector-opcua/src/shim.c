@@ -7,6 +7,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <open62541/client_config_default.h>
+#include <open62541/client_highlevel_async.h>
 #include <open62541/server_config_default.h>
 #include <open62541/plugin/eventloop.h>
 #include <open62541/types.h>
@@ -73,6 +74,32 @@ _Static_assert(offsetof(UA_DecodeBinaryOptions, decodedLength) == 32,
 _Static_assert(UA_TYPES_COUNT == 388, "UA_TYPES changed");
 _Static_assert(UA_TYPES_BYTESTRING == 14, "UA_TYPES_BYTESTRING moved");
 _Static_assert(UA_TYPES_VARIANT == 23, "UA_TYPES_VARIANT moved");
+_Static_assert(UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME == 2258,
+               "UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME moved");
+_Static_assert(UA_SECURECHANNELSTATE_CLOSED == 0,
+               "UA_SECURECHANNELSTATE_CLOSED moved");
+_Static_assert(sizeof(UA_SecureChannelState) == sizeof(int),
+               "UA_SecureChannelState changed");
+_Static_assert(UA_TIMERPOLICY_ONCE == 0 && UA_TIMERPOLICY_CURRENTTIME == 1 &&
+                   UA_TIMERPOLICY_BASETIME == 2,
+               "UA_TimerPolicy moved");
+_Static_assert(sizeof(UA_TimerPolicy) == sizeof(int), "UA_TimerPolicy changed");
+_Static_assert(UA_EVENTLOOPSTATE_FRESH == 0 && UA_EVENTLOOPSTATE_STARTED == 2,
+               "UA_EventLoopState moved");
+_Static_assert(sizeof(UA_EventLoopState) == sizeof(int), "UA_EventLoopState changed");
+_Static_assert(UA_CONNECTIONSTATE_OPENING == 1 && UA_CONNECTIONSTATE_ESTABLISHED == 2 &&
+                   UA_CONNECTIONSTATE_CLOSING == 3,
+               "UA_ConnectionState moved");
+_Static_assert(sizeof(UA_ConnectionState) == sizeof(int), "UA_ConnectionState changed");
+_Static_assert(UA_LIFECYCLESTATE_STOPPED == 0 && UA_LIFECYCLESTATE_STOPPING == 2,
+               "UA_LifecycleState moved");
+_Static_assert(sizeof(UA_LifecycleState) == sizeof(int), "UA_LifecycleState changed");
+_Static_assert(UA_NODEIDTYPE_NUMERIC == 0, "UA_NODEIDTYPE_NUMERIC moved");
+_Static_assert(sizeof(enum UA_NodeIdType) == sizeof(int), "UA_NodeIdType changed");
+_Static_assert(sizeof(UA_SessionState) == sizeof(int), "UA_SessionState changed");
+_Static_assert(sizeof(UA_EventSourceType) == sizeof(int), "UA_EventSourceType changed");
+_Static_assert(sizeof(UA_EventSourceState) == sizeof(int),
+               "UA_EventSourceState changed");
 
 /* `src/ffi.rs` mirrors the struct, in words of the size of a pointer, and asserts the
  * same offsets. */
@@ -583,9 +610,10 @@ UA_Client *shim_client_new(UA_EventLoop *el) {
     return UA_Client_newWithConfig(&config);
 }
 
-/* Gives a server on `el` with the minimal config for `port` and the one server URL
- * `url`, or NULL on a failure. */
-UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port, const char *url) {
+/* Gives a server on `el` with the minimal config for `port`, the one server URL `url`,
+ * and room for `sessions` sessions and secure channels, or NULL on a failure. */
+UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port, const char *url,
+                           UA_UInt16 sessions) {
     UA_ServerConfig config;
     memset(&config, 0, sizeof(config));
     config.logging = &loop_of(el)->logger;
@@ -595,6 +623,8 @@ UA_Server *shim_server_new(UA_EventLoop *el, UA_UInt16 port, const char *url) {
         UA_ServerConfig_clear(&config);
         return NULL;
     }
+    config.maxSessions = sessions;
+    config.maxSecureChannels = sessions;
     UA_Array_delete(config.serverUrls, config.serverUrlsSize, &UA_TYPES[UA_TYPES_STRING]);
     config.serverUrlsSize = 0;
     UA_String text = UA_STRING((char *)(uintptr_t)url);
@@ -636,3 +666,32 @@ const UA_String *shim_server_discovery_url(UA_Server *server, size_t index) {
         return NULL;
     return &description->discoveryUrls[index];
 }
+
+/* Asks `client` for the Value of node `node` of namespace 0, and has `callback` called
+ * with `data` and the answer. */
+UA_StatusCode shim_client_read(UA_Client *client, UA_UInt32 node,
+                               UA_ClientAsyncReadValueAttributeCallback callback,
+                               void *data) {
+    return UA_Client_readValueAttribute_async(client, UA_NODEID_NUMERIC(0, node),
+                                              callback, data, NULL);
+}
+
+/* Gives the status of `value`, an answer of a read: `BadNoData` when it holds no
+ * value. A read callback gets `Good` whatever the answer holds. */
+UA_StatusCode shim_value_status(const void *value) {
+    const UA_DataValue *answer = (const UA_DataValue *)value;
+    if(answer->hasStatus && answer->status != UA_STATUSCODE_GOOD)
+        return answer->status;
+    return answer->hasValue ? UA_STATUSCODE_GOOD : UA_STATUSCODE_BADNODATA;
+}
+
+/* Gives whether `client` has the URI of namespace 1 from its server, which it reads
+ * after its session activates. */
+UA_Boolean shim_client_namespaced(UA_Client *client) {
+    UA_String uri = UA_STRING_NULL;
+    UA_StatusCode status = UA_Client_getNamespaceUri(client, 1, &uri);
+    UA_Boolean namespaced = status == UA_STATUSCODE_GOOD && uri.length > 0;
+    UA_String_clear(&uri);
+    return namespaced;
+}
+
