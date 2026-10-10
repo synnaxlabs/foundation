@@ -3890,8 +3890,10 @@ mod port {
             let opened = Arc::new(Mutex::new(None));
             let out = Arc::clone(&opened);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                match hub.reader(&[value], ::hub::reader::Mode::Complete).await {
+                match hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await
+                {
                     Ok(mut reader) => {
                         *out.lock().unwrap() = Some(Ok(()));
                         let next = reader.next().await;
