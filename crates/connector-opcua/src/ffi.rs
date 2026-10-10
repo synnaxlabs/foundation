@@ -361,8 +361,9 @@ unsafe extern "C" {
     );
 }
 
-/// Only tests use these.
-#[cfg(test)]
+/// Only tests and `bench` use these.
+#[cfg(any(test, feature = "sim"))]
+#[cfg_attr(not(test), expect(dead_code, reason = "`bench` uses only some"))]
 pub(crate) mod test {
     use std::ffi::{c_int, c_void};
     use std::mem::offset_of;
@@ -445,6 +446,15 @@ pub(crate) mod test {
             "free_buffer moved"
         );
     };
+
+    /// `UA_ClientAsyncReadValueAttributeCallback`.
+    pub(crate) type Read = unsafe extern "C" fn(
+        client: *mut super::Client,
+        data: *mut c_void,
+        request: u32,
+        status: u32,
+        value: *mut c_void,
+    );
 
     /// `UA_NodeId` with a numeric identifier.
     #[repr(C, align(8))]
@@ -541,6 +551,17 @@ pub(crate) mod test {
         pub(crate) fn UA_Server_delete(server: *mut Server) -> u32;
         pub(crate) fn UA_Server_getLifecycleState(server: *mut Server) -> Lifecycle;
         pub(crate) fn shim_response_result(response: *const c_void) -> u32;
+        pub(crate) fn shim_client_read_time(
+            client: *mut super::Client,
+            callback: Read,
+            data: *mut c_void,
+        ) -> u32;
+        pub(crate) fn UA_Client_getState(
+            client: *mut super::Client,
+            channel: *mut c_int,
+            session: *mut c_int,
+            status: *mut u32,
+        );
         pub(crate) fn shim_server_discovery_url(
             server: *mut Server,
             index: usize,

@@ -1,17 +1,26 @@
-//! Runs the event loop of open62541 alone, for benchmarks and allocation tests. Not
-//! part of the contract of the crate.
+//! Runs the event loop of open62541 alone, and a connection manager with a server and
+//! clients on it, for benchmarks and allocation tests. Not part of the contract of the
+//! crate.
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
-use std::ffi::c_void;
+use std::cell::Cell;
+use std::ffi::{CString, c_int, c_void};
+use std::future::Future as _;
+use std::mem::ManuallyDrop;
+use std::net::{IpAddr, SocketAddr};
+use std::pin::pin;
 use std::ptr::{self, NonNull};
+use std::task::{Context, Poll, Waker};
 
 use env::clock::Clock;
+use env::net::{Net, tcp};
 use env::rng::Rng;
 use types::time::Monotonic;
 
+use crate::connection::{self, OPTIONS};
 use crate::event::Loop;
-use crate::ffi::{self, Status};
+use crate::ffi::{self, Status, test::Lifecycle};
 
 /// A client of open62541 on its own event loop, which also runs a count of repeated
 /// timers that do nothing.
@@ -94,11 +103,324 @@ impl Drop for Client {
 /// A timer callback that does nothing.
 unsafe extern "C" fn idle(_: *mut c_void, _: *mut c_void) {}
 
+/// The port of the server of a [`Manager`].
+const PORT: u16 = 4840;
+
+/// `UA_SESSIONSTATE_ACTIVATED`.
+const ACTIVATED: c_int = 4;
+
+/// `UA_SECURECHANNELSTATE_CLOSED`.
+const CLOSED: c_int = 0;
+
+/// A connection manager over `env::net` with a test server of open62541 and `idle + 1`
+/// clients with an activated session on its loop. The first client reads; the others
+/// send nothing.
+pub struct Manager {
+    clients: Vec<NonNull<ffi::Client>>,
+    server: NonNull<ffi::test::Server>,
+    /// C holds its address while a read waits.
+    answers: Box<Answers>,
+    /// Only `close` drops it, after it deletes the server and the clients on its loop.
+    connections: ManuallyDrop<connection::Manager>,
+}
+
+#[derive(Default)]
+struct Answers {
+    count: Cell<usize>,
+    /// The first status other than `Good`.
+    failed: Cell<Option<Status>>,
+}
+
+impl Manager {
+    /// Makes the manager on `clock` and `net`, with its listener on `address` and port
+    /// 4840, and drives it until each session is activated. Then it runs `body` on the
+    /// manager, and closes each session and deletes the server and the clients. A
+    /// panic in `body` leaks them.
+    ///
+    /// # Panics
+    ///
+    /// If open62541 refuses the server, a client, or a step of the close, or if the
+    /// port is taken.
+    pub async fn scope<T>(
+        clock: Clock,
+        net: Net,
+        address: IpAddr,
+        idle: usize,
+        body: impl AsyncFnOnce(&Self) -> T,
+    ) -> T {
+        let this = Self::new(clock, net, address, idle).await;
+        let value = body(&this).await;
+        this.close().await;
+        value
+    }
+
+    async fn new(clock: Clock, net: Net, address: IpAddr, idle: usize) -> Self {
+        let local = SocketAddr::new(address, PORT);
+        let listen = tcp::Listen {
+            local,
+            backlog: u32::try_from(idle + 1).expect("at most 2^32 clients"),
+            options: OPTIONS,
+        };
+        let listener = net.listen(&listen).expect("the port is free");
+        let rng = &mut Rng::from_seed(0);
+        let manager = connection::Manager::listening(clock, net, listener, rng);
+        let events = manager.events();
+        // SAFETY: the member takes its own loop.
+        let status = Status(unsafe { (events.members().start)(events.raw()) });
+        assert_eq!(status, Status::GOOD, "open62541 refused the loop");
+        // SAFETY: the loop outlives the server, which `close` deletes.
+        let server = unsafe {
+            ffi::test::shim_server_new(events.raw(), PORT, c"opc.tcp://:4840".as_ptr())
+        };
+        let server = NonNull::new(server).expect("open62541 refused the server");
+        // SAFETY: the server lives.
+        let status =
+            Status(unsafe { ffi::test::UA_Server_run_startup(server.as_ptr()) });
+        assert_eq!(status, Status::GOOD, "open62541 refused the server start");
+        let url = CString::new(format!("opc.tcp://{local}")).expect("no NUL");
+        let clients = (0..=idle)
+            .map(|_| {
+                // SAFETY: the loop outlives the client, which `close` deletes.
+                let client = unsafe { ffi::shim_client_new(events.raw()) };
+                let client = NonNull::new(client).expect("open62541 refused a client");
+                // SAFETY: the client lives, and copies the URL.
+                let status = Status(unsafe {
+                    ffi::test::UA_Client_connectAsync(client.as_ptr(), url.as_ptr())
+                });
+                assert_eq!(status, Status::GOOD, "open62541 refused a connect");
+                client
+            })
+            .collect();
+        let this = Self {
+            clients,
+            server,
+            answers: Box::default(),
+            connections: ManuallyDrop::new(manager),
+        };
+        this.until(|(_, session)| session == ACTIVATED).await;
+        this
+    }
+
+    /// Drives the manager once: a pass, one run of the loop, and the moves after it.
+    pub fn drive(&self) {
+        self.drive_after(|| ());
+    }
+
+    /// Drives the manager once, as `drive` does, with a run that first asks the first
+    /// client for a read of the current time of the server.
+    ///
+    /// # Panics
+    ///
+    /// If open62541 refuses the read.
+    pub fn ask(&self) {
+        self.drive_after(|| {
+            let data = ptr::from_ref::<Answers>(&self.answers).cast_mut().cast();
+            // SAFETY: the client lives, and `answers` outlives it.
+            let status = Status(unsafe {
+                ffi::test::shim_client_read_time(self.clients[0].as_ptr(), answer, data)
+            });
+            assert_eq!(status, Status::GOOD, "open62541 refused the read");
+        });
+    }
+
+    /// Gives the count of reads answered.
+    ///
+    /// # Panics
+    ///
+    /// If an answer has a status other than `Good`, with its name.
+    #[must_use]
+    pub fn answers(&self) -> usize {
+        if let Some(status) = self.answers.failed.get() {
+            panic!("a read failed: {status:?}");
+        }
+        self.answers.count.get()
+    }
+
+    /// Drives the manager until each channel is closed and until the server is stopped
+    /// with nothing due on the loop, then deletes them all.
+    async fn close(mut self) {
+        for client in &self.clients {
+            // SAFETY: the client lives.
+            let status = Status(unsafe {
+                ffi::test::UA_Client_disconnectAsync(client.as_ptr())
+            });
+            assert_eq!(status, Status::GOOD, "open62541 refused a disconnect");
+        }
+        self.until(|(channel, _)| channel == CLOSED).await;
+        let server = self.server.as_ptr();
+        // SAFETY: the server lives.
+        let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
+        assert_eq!(status, Status::GOOD, "open62541 refused the server stop");
+        let events = self.connections.events();
+        self.connections
+            .drive(|_| {
+                self.run();
+                // SAFETY: the server lives.
+                let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
+                if state == Lifecycle::STOPPED && !events.due() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+        // SAFETY: the server is stopped, and nothing holds it.
+        let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
+        assert_eq!(status, Status::GOOD, "open62541 refused the server delete");
+        for client in self.clients.drain(..) {
+            // SAFETY: the channel is closed, and nothing uses the client after it.
+            unsafe { ffi::UA_Client_delete(client.as_ptr()) };
+        }
+        // SAFETY: nothing is on its loop, and nothing uses it after it.
+        unsafe { ManuallyDrop::drop(&mut self.connections) };
+    }
+
+    fn drive_after(&self, first: impl FnOnce()) {
+        let mut first = Some(first);
+        let drive = pin!(self.connections.drive(|_| {
+            if let Some(first) = first.take() {
+                first();
+            }
+            self.run();
+            Poll::Ready(())
+        }));
+        let ready = drive.poll(&mut Context::from_waker(Waker::noop()));
+        assert!(ready.is_ready(), "a drive whose run is ready ends");
+    }
+
+    fn run(&self) {
+        let events = self.connections.events();
+        // SAFETY: the member takes its own loop.
+        let status = Status(unsafe { (events.members().run)(events.raw(), 0) });
+        assert_eq!(status, Status::GOOD, "open62541 failed a run");
+    }
+
+    /// Drives the manager until each client has a channel and a session state that
+    /// `reached` takes.
+    async fn until(&self, reached: impl Fn((c_int, c_int)) -> bool) {
+        let all = || {
+            self.clients.iter().all(|client| {
+                let (mut channel, mut session) = (-1, -1);
+                // SAFETY: the client lives.
+                unsafe {
+                    ffi::test::UA_Client_getState(
+                        client.as_ptr(),
+                        &raw mut channel,
+                        &raw mut session,
+                        ptr::null_mut(),
+                    );
+                }
+                reached((channel, session))
+            })
+        };
+        self.connections
+            .drive(|_| {
+                self.run();
+                if all() {
+                    Poll::Ready(())
+                } else {
+                    Poll::Pending
+                }
+            })
+            .await;
+    }
+}
+
+impl std::fmt::Debug for Manager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Manager")
+            .field("clients", &self.clients.len())
+            .field("answers", &self.answers.count.get())
+            .finish_non_exhaustive()
+    }
+}
+
+/// Counts an answer of a read in the [`Answers`] at `data`, and keeps the first
+/// status other than `Good`.
+///
+/// # Safety
+///
+/// `data` points at live `Answers`.
+unsafe extern "C" fn answer(
+    _: *mut ffi::Client,
+    data: *mut c_void,
+    _: u32,
+    status: u32,
+    _: *mut c_void,
+) {
+    // SAFETY: `ask` gives live answers.
+    let answers = unsafe { &*data.cast::<Answers>() };
+    answers.count.set(answers.count.get() + 1);
+    let status = Status(status);
+    if status != Status::GOOD && answers.failed.get().is_none() {
+        answers.failed.set(Some(status));
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use env::clock::Clock;
+    use sim::{Sim, node};
     use types::time::Span;
 
-    use super::Client;
+    use super::{Client, Manager};
+
+    /// The delay of the default link.
+    const DELAY: Span = Span::from_nanos(250_000);
+
+    /// Runs `body` in the scope of a manager with `idle` idle clients.
+    fn check(idle: usize, body: impl AsyncFnOnce(&Manager, Clock) + Send + 'static) {
+        let mut sim = Sim::new(sim::Config::default());
+        let node = sim.node(node::Config::default());
+        sim.run_on(&node, move |node, _| async move {
+            let (clock, address) = (node.clock(), node.addresses()[0]);
+            let body = async |manager: &Manager| body(manager, clock).await;
+            Manager::scope(node.clock(), node.net(), address, idle, body).await;
+        })
+        .expect("the run ends");
+    }
+
+    #[test]
+    fn a_read_is_answered_in_the_third_drive_after_two_hops() {
+        for idle in [0, 3] {
+            check(idle, async move |manager, clock| {
+                for read in 1..=3 {
+                    manager.ask();
+                    clock.sleep(DELAY).await;
+                    manager.drive();
+                    assert_eq!(manager.answers(), read - 1, "the server answered");
+                    clock.sleep(DELAY).await;
+                    manager.drive();
+                    assert_eq!(manager.answers(), read, "{idle} idle, read {read}");
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn a_drive_before_the_hop_gets_no_answer() {
+        check(0, async |manager, clock| {
+            manager.ask();
+            manager.drive();
+            clock.sleep(DELAY).await;
+            manager.drive();
+            manager.drive();
+            assert_eq!(manager.answers(), 0);
+            clock.sleep(DELAY).await;
+            manager.drive();
+            assert_eq!(manager.answers(), 1);
+        });
+    }
+
+    #[test]
+    fn the_debug_of_a_manager_gives_its_clients_and_answers() {
+        check(2, async |manager, _| {
+            assert_eq!(
+                format!("{manager:?}"),
+                "Manager { clients: 3, answers: 0, .. }"
+            );
+        });
+    }
 
     #[test]
     fn a_run_runs_the_due_timers() {

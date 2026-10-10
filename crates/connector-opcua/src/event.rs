@@ -63,7 +63,7 @@ impl Loop {
 
     /// Gives whether a timer or a delayed callback is due now.
     #[cfg_attr(
-        not(test),
+        not(any(test, feature = "sim")),
         expect(dead_code, reason = "the stop of a server of #435 calls it")
     )]
     pub(crate) fn due(&self) -> bool {

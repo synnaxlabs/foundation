@@ -7,6 +7,7 @@
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <open62541/client_config_default.h>
+#include <open62541/client_highlevel_async.h>
 #include <open62541/server_config_default.h>
 #include <open62541/plugin/eventloop.h>
 #include <open62541/types.h>
@@ -636,3 +637,14 @@ const UA_String *shim_server_discovery_url(UA_Server *server, size_t index) {
         return NULL;
     return &description->discoveryUrls[index];
 }
+
+/* Asks `client` for the Value of the current time of its server, i=2258, and has
+ * `callback` called with `data` and the answer. */
+UA_StatusCode shim_client_read_time(UA_Client *client,
+                                    UA_ClientAsyncReadValueAttributeCallback callback,
+                                    void *data) {
+    return UA_Client_readValueAttribute_async(
+        client, UA_NODEID_NUMERIC(0, UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME),
+        callback, data, NULL);
+}
+

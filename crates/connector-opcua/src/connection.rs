@@ -25,7 +25,8 @@ use types::time::Span;
 use crate::event::Loop;
 use crate::ffi::{self, Bytes, Status};
 
-const OPTIONS: tcp::Options = tcp::Options {
+/// The options of each stream.
+pub(crate) const OPTIONS: tcp::Options = tcp::Options {
     send_buffer_bytes: 1 << 16,
     recv_buffer_bytes: 1 << 16,
     unsent_bytes_max: NonZeroUsize::new(1 << 14).expect("invariant: 2^14 is not 0"),
