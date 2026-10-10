@@ -5721,6 +5721,58 @@ fn newest_reads_one_table_for_the_indexes_tagged_in_one_record() {
     });
 }
 
+/// `newest` reads the table of each record once, also when the ring holds the newest
+/// entries of the indexes in more than one record. Odd indexes are tagged in the
+/// first record and even ones in the second: two tables and 16 entries make 18 reads.
+#[test]
+fn newest_reads_each_table_once_for_the_indexes_tagged_in_two_records() {
+    run_on_memory(186, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let indexes: Vec<_> = (1..=16).map(|n| (n, slots.index(key(n)))).collect();
+        for odd in [true, false] {
+            let batch = indexes
+                .iter()
+                .filter(|&&(n, _)| (n % 2 == 1) == odd)
+                .map(|&(n, slot)| tagged(n, slot, Path::Live, 0, 1, shard.block(1)));
+            buffer.append(batch).expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let before = shard.memory().reads();
+        let found = newest(&buffer, Path::Live, 1).await.expect("reads");
+        assert_eq!(found.len(), 16);
+        assert_eq!(shard.memory().reads() - before, 18);
+    });
+}
+
+/// `newest` reads no table of a record that holds only an entry of another tag. A
+/// is tagged 1 in the first record and 2 in the second: one table and one entry
+/// make two reads.
+#[test]
+fn newest_reads_no_record_of_another_tag() {
+    run_on_memory(187, |shard| async move {
+        let mut slots = Slots::new();
+        let buffer = shard
+            .open(layout(AREA, BODY_MAX), &mut slots)
+            .await
+            .expect("opens");
+        let a = slots.index(key(1));
+        for tag in [1, 2] {
+            buffer
+                .append([tagged(1, a, Path::Live, 0, tag, shard.block(1))])
+                .expect("queues");
+            buffer.committed().await.expect("commits");
+        }
+        let before = shard.memory().reads();
+        let found = newest(&buffer, Path::Live, 1).await.expect("reads");
+        assert_eq!(found, vec![(a, stored_tagged(0, 1, shard.block(1)))]);
+        assert_eq!(shard.memory().reads() - before, 2);
+    });
+}
+
 /// `newest` reads no table of a record that holds no newest tagged entry. A is
 /// tagged in the first record and b in the third, so the second and the fourth are
 /// not read: two tables and two entries make four reads.
