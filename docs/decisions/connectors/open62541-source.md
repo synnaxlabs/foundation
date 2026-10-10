@@ -367,7 +367,10 @@
   2026-10-10 15:28 UTC). Supersedes the `delete_server` sentence approved at `3b508e494`
   (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338). It is
   behind `cfg(any(test, feature = "sim"))` until a server that serves users calls it:
-  approved by `laptop.architect-2` at `3b508e494`
+  decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6099099141,
+  2026-10-10 15:28 UTC), which moves to `close_server` the cfg on `delete_server`
+  approved at `3b508e494`
   (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093126338,
   2026-10-10 03:05 UTC). The one function: asked by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089865399,
