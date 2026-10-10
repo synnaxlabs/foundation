@@ -360,7 +360,8 @@ impl Writer {
         output
     }
 
-    /// Writes the staged status until the session closed, then never again. It ends
+    /// Writes the staged status until the session closed, then never again. A close
+    /// while it waits for [`PERIOD`] ends it at the next wake of that wait. It ends
     /// when its call drops it.
     async fn flush(&self) -> Infallible {
         let values = &self.values;
@@ -378,13 +379,17 @@ impl Writer {
         pending().await
     }
 
-    /// Waits until [`PERIOD`] after the last write, then writes the status if it is
-    /// still staged.
+    /// Waits until [`PERIOD`] after the last write, or the session closed, then writes
+    /// the status if it is still staged.
     async fn write_staged(&self) {
         // A write by the supervisor while this sleeps moves the next write later.
         loop {
-            let next = self.session.borrow().wrote + PERIOD;
-            if self.clock.now() >= next {
+            let (closed, wrote) = {
+                let session = self.session.borrow();
+                (session.closed, session.wrote)
+            };
+            let next = wrote + PERIOD;
+            if closed || self.clock.now() >= next {
                 break;
             }
             self.clock.sleep_until(next).await;
