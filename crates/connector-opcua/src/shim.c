@@ -74,6 +74,8 @@ _Static_assert(offsetof(UA_DecodeBinaryOptions, decodedLength) == 32,
 _Static_assert(UA_TYPES_COUNT == 388, "UA_TYPES changed");
 _Static_assert(UA_TYPES_BYTESTRING == 14, "UA_TYPES_BYTESTRING moved");
 _Static_assert(UA_TYPES_VARIANT == 23, "UA_TYPES_VARIANT moved");
+_Static_assert(UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME == 2258,
+               "UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME moved");
 
 /* `src/ffi.rs` mirrors the struct, in words of the size of a pointer, and asserts the
  * same offsets. */

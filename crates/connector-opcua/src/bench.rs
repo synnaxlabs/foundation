@@ -107,9 +107,6 @@ unsafe extern "C" fn idle(_: *mut c_void, _: *mut c_void) {}
 /// The port of the server of a [`Manager`].
 const PORT: u16 = 4840;
 
-/// The node of the current time of a server.
-const TIME: u32 = 2258;
-
 /// The sessions that the server takes, from its minimal config.
 const SESSIONS: usize = 100;
 
@@ -221,7 +218,7 @@ impl Manager {
     ///
     /// If open62541 refuses the read.
     pub fn ask(&self) {
-        self.drive_after(|| self.read(TIME));
+        self.drive_after(|| self.read(ffi::test::TIME));
     }
 
     /// Asks the first client for a read of the Value of `node` of namespace 0.
