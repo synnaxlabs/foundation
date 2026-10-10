@@ -3,13 +3,16 @@
 //! open whose log holds a record checks `Config::founding` against it.
 //!
 //! The file holds an 8-byte check of the rest, the format version, then what
-//! `region::Founding::encode` gives. A first open removes `founding`, writes
-//! `founding.new`, renames it to `founding`, and syncs the directory, before raft
-//! writes a record. So a crash before the first record leaves a first open.
+//! `region::Founding::encode` gives. A first open whose directory holds another
+//! founding or none removes `founding`, writes `founding.new`, renames it to
+//! `founding`, and syncs the directory, before raft writes a record. So a crash before
+//! the first record leaves a first open, and a reopen with the same founding keeps it.
 
 use std::path::Path;
+use std::rc::Rc;
 
-use env::files::{Files, Mode};
+use block::Pool;
+use env::files::{self, Files, Mode};
 
 use crate::error::Error;
 use crate::file::{self, Blocks, CHECK};
@@ -20,9 +23,33 @@ pub(super) const FILE: &str = "founding";
 const NEW: &str = "founding.new";
 const VERSION: u16 = 1;
 
-/// Writes `given` to `dir` when `logged` is false, or checks it against the founding
-/// in `dir`. `logged` states that the log of `dir` holds a record. The caller holds
-/// the lock of the log. A founding that it writes is durable when it returns.
+/// The founding that the mesh directory `dir` of `files` holds, or `None` when `dir`
+/// is not there or holds no founding file. [`Mesh::open`](crate::Mesh::open) with this
+/// founding opens the same region.
+///
+/// # Errors
+///
+/// - [`Error::Unfounded`] when `dir` holds a founding file that does not read back
+///   whole.
+/// - [`Error::Pool`] when `pool` has no block for the read.
+/// - [`Error::Files`] when a file call fails.
+pub async fn founding(
+    files: &Files,
+    dir: &Path,
+    pool: Rc<Pool>,
+) -> Result<Option<Founding>, Error> {
+    let blocks = Blocks::new(pool).map_err(Error::Pool)?;
+    let Some(body) = read(files, dir, &blocks, Mode::Read).await? else {
+        return Ok(None);
+    };
+    let founding = Founding::decode(&body).ok_or_else(|| unfounded(dir))?;
+    Ok(Some(founding))
+}
+
+/// Writes `given` to `dir` when `logged` is false and `dir` holds another founding or
+/// none, or checks it against the founding in `dir`. `logged` states that the log of
+/// `dir` holds a record. The caller holds the lock of the log. The founding in `dir` is
+/// durable when it returns `Ok`.
 ///
 /// # Errors
 ///
@@ -38,28 +65,25 @@ pub(super) async fn keep(
     given: &Founding,
     logged: bool,
 ) -> Result<(), Error> {
+    let encoded = given.encode();
+    let body = match read(files, dir, blocks, Mode::Write).await {
+        // A first open writes over it, and an open with a record refuses it below.
+        Err(Error::Unfounded { .. }) => None,
+        body => body?,
+    };
     if !logged {
-        return write(files, dir, blocks, &given.encode()).await;
+        if body.as_ref() != Some(&encoded) {
+            write(files, dir, blocks, &encoded).await?;
+        }
+        // Also for the same founding: a crash after the rename of an earlier open can
+        // leave its name not durable.
+        return files.sync_dir(dir).await.map_err(Error::Files);
     }
-    let path = dir.join(FILE);
-    let unfounded = || Error::Unfounded { path: path.clone() };
-    let names = files.list(dir).await.map_err(Error::Files)?;
-    if !names.iter().any(|name| name == Path::new(FILE)) {
-        return Err(unfounded());
-    }
-    let opened = files.open(&path, Mode::Read).await.map_err(Error::Files)?;
-    let stored = blocks.read(&opened).await;
-    opened.close().await;
-    let stored = stored?;
-    let (check, rest) = stored.split_first_chunk::<CHECK>().ok_or_else(unfounded)?;
-    let (version, body) = rest.split_first_chunk::<2>().ok_or_else(unfounded)?;
-    if *check != file::check(rest) || u16::from_le_bytes(*version) != VERSION {
-        return Err(unfounded());
-    }
-    if body == given.encode() {
+    if body.as_ref() == Some(&encoded) {
         return Ok(());
     }
-    let stored = Founding::decode(body).ok_or_else(unfounded)?;
+    let body = body.ok_or_else(|| unfounded(dir))?;
+    let stored = Founding::decode(&body).ok_or_else(|| unfounded(dir))?;
     let mut given = given.clone();
     given.members.sort_by_key(|member| member.card.key());
     Err(Error::Founding {
@@ -68,7 +92,44 @@ pub(super) async fn keep(
     })
 }
 
-// `File::rename` refuses an existing target, so the old `founding` goes first.
+// The body of the founding file in `dir`, after its check and version, or `None` when
+// `dir` or the file is not there. A `mode` of `Mode::Write` first waits for each call
+// on the file that a dropped `keep` left to run, such as its remove; a read open does
+// not.
+async fn read(
+    files: &Files,
+    dir: &Path,
+    blocks: &Blocks,
+    mode: Mode,
+) -> Result<Option<Vec<u8>>, Error> {
+    let opened = match files.open(&dir.join(FILE), mode).await {
+        Ok(opened) => opened,
+        Err(files::Error::NotFound { .. }) => return Ok(None),
+        Err(error) => return Err(Error::Files(error)),
+    };
+    let stored = blocks.read(&opened).await;
+    opened.close().await;
+    let stored = stored?;
+    let (check, rest) = stored
+        .split_first_chunk::<CHECK>()
+        .ok_or_else(|| unfounded(dir))?;
+    let (version, body) = rest
+        .split_first_chunk::<2>()
+        .ok_or_else(|| unfounded(dir))?;
+    if *check != file::check(rest) || u16::from_le_bytes(*version) != VERSION {
+        return Err(unfounded(dir));
+    }
+    Ok(Some(body.to_vec()))
+}
+
+fn unfounded(dir: &Path) -> Error {
+    Error::Unfounded {
+        path: dir.join(FILE),
+    }
+}
+
+// `File::rename` refuses an existing target, so the old `founding` goes first. The
+// caller syncs `dir`.
 async fn write(
     files: &Files,
     dir: &Path,
@@ -90,5 +151,5 @@ async fn write(
     blocks.write(&opened, 0, &mut &bytes[..]).await?;
     opened.rename(&path).await.map_err(Error::Files)?;
     opened.close().await;
-    files.sync_dir(dir).await.map_err(Error::Files)
+    Ok(())
 }

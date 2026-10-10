@@ -164,24 +164,23 @@ impl Supervisor {
             let end = kinds.run(kind, config, ctx).map_err(Error::Config)?.await;
             let lasted = clock.now() - start;
             drop(token);
-            writer.end(&end).await;
+            let ended = writer.end(&end);
+            // A device error can be large, and nothing after this needs it.
+            let last = matches!(end, Ok(()) | Err(Error::Config(_))).then_some(end);
+            ended.await;
             group.ended().await;
-            match end {
-                Ok(()) | Err(Error::Config(_)) => {
-                    writer.stop().await;
-                    return end;
-                }
-                // The status gives their class. #420 adds their text.
-                Err(Error::Device(_) | Error::Retry(_)) => {}
+            if let Some(end) = last {
+                writer.stop().await;
+                return end;
             }
             if cancel.cancelled() {
                 break;
             }
-            writer.wait().await;
             if lasted >= HEALTHY {
                 backoff.reset();
             }
-            backoff.wait(cancel).await;
+            let next = writer.wait(backoff.next()).await;
+            cancel.race(clock.sleep_until(next)).await;
         }
         writer.stop().await;
         Ok(())
@@ -244,8 +243,14 @@ mod tests {
         Device(Span),
         /// Returns a config error at once.
         Config,
+        /// Returns a config error of two diagnostics at once.
+        Configs,
         /// Returns a retry error at once.
         Retry,
+        /// Returns a device error at once, whose text is `a`, then 600 `é`.
+        Long,
+        /// Returns a device error at once, whose text is 1100 `a`.
+        Wide,
         /// Cancels its own token, then returns a device error.
         Abort,
         /// Waits for the cancel, then the span, then returns a device error.
@@ -310,7 +315,10 @@ mod tests {
                     Err(Error::Device("no reply".into()))
                 }
                 Some(Step::Config) => Err(Error::Config(vec![bad()])),
+                Some(Step::Configs) => Err(Error::Config(vec![bad(), worse()])),
                 Some(Step::Retry) => Err(Error::Retry("busy".into())),
+                Some(Step::Long) => Err(Error::Device(long().into())),
+                Some(Step::Wide) => Err(Error::Device("a".repeat(1_100).into())),
                 Some(Step::Abort) => {
                     ctx.cancel().cancel();
                     Err(Error::Device("stopped its parts".into()))
@@ -350,8 +358,17 @@ mod tests {
         });
     }
 
+    /// `a`, then 600 `é`: 1201 bytes.
+    fn long() -> String {
+        format!("a{}", "é".repeat(600))
+    }
+
     fn bad() -> Diagnostic {
         Diagnostic::new(BAD, None, "the config is bad".into(), "Fix it".into())
+    }
+
+    fn worse() -> Diagnostic {
+        Diagnostic::new(BAD, None, "the rate is bad".into(), "Fix it too".into())
     }
 
     fn between(from: Span, to: Span) -> Span {
@@ -371,9 +388,52 @@ mod tests {
         statuses: Vec<Written>,
     }
 
-    /// One status frame: its stamp from the first, and the sample of each status
-    /// channel but the index, in the order of [`status::channels`].
-    type Written = (Span, Vec<i64>);
+    /// One status frame: its stamp from the first, the sample of each status channel
+    /// but the index and `error`, in the order of [`status::channels`], and the text
+    /// of `error`.
+    type Written = (Span, Vec<i64>, String);
+
+    /// Writes one status frame of `plant.script` from another writer, stamped `lead`
+    /// after the hub's time, with an empty `error` and 9 in each other sample.
+    async fn write_ahead(hub: &hub::Hub, lead: Span) {
+        let channels = ["state", "class", "restarts", "backoff", "error"];
+        let other = hub::writer::Config {
+            subject: name("plant.other"),
+            authority: Authority::ABSOLUTE,
+            lease: None,
+            channels: channels
+                .map(|c| name(&format!("plant.script.status.{c}")))
+                .into(),
+        };
+        let mut other = hub.writer(other).await.expect("opens");
+        let entries = other.set().entries();
+        let text = codec::Variable::of(Type::String).expect("a variable type");
+        let series: Vec<_> = (entries.iter().enumerate())
+            .map(|(i, entry)| {
+                let width = entry.data_type.width();
+                (
+                    i,
+                    width.unwrap_or_else(|| text.len(&[""]).expect("a length")),
+                )
+            })
+            .collect();
+        let mut draft = other.draft(Form::Raw, &series).expect("a frame");
+        let stamp = other.now().nanos() + lead.nanos();
+        for (i, entry) in entries.iter().enumerate() {
+            let bytes = draft.series_mut(i).expect("a series");
+            if entry.data_type == Type::String {
+                text.write(&[""], bytes);
+                continue;
+            }
+            let value = if entry.key == STATUS { stamp } else { 9 };
+            let len = bytes.len();
+            bytes.copy_from_slice(&value.to_le_bytes()[..len]);
+        }
+        draft.set_count(entries[0].group, 1);
+        let outcomes = other.write(Label::Path(Path::Live), draft);
+        let applied = matches!(outcomes, Ok([hub::home::Outcome::Applied { .. }]));
+        assert!(applied, "the frame ahead applies: {outcomes:?}");
+    }
 
     /// Reads the status frames of `connector` with `counts`, whose status channels
     /// have keys from [`STATUS`] on, into the vector it gives, in a task on `tasks`.
@@ -386,8 +446,14 @@ mod tests {
         let connector = connector.parse().expect("a valid name");
         let names = status::channels(&connector, counts).expect("names");
         let (_, channels) = names;
+        let error = channels
+            .iter()
+            .position(|(name, _)| name.as_str().ends_with("error"));
+        let error =
+            STATUS.as_u128() + 1 + u128::try_from(error.expect("error")).expect("few");
         let names: Vec<_> = channels.into_iter().map(|(name, _)| name).collect();
         let keys = 1..=u128::try_from(names.len()).expect("a few channels");
+        let keys = keys.filter(move |&key| STATUS.as_u128() + key != error);
         let open = hub::reader::Config {
             select: Selector::new(names.iter().map(Name::as_str)).expect("a selector"),
             mode: Mode::Complete,
@@ -407,24 +473,34 @@ mod tests {
                     .clone()
                     .map(|key| series(&received, STATUS.as_u128() + key))
                     .collect();
+                let mut texts = texts(&received, error).into_iter();
                 let mut into = into.borrow_mut();
                 for (i, stamp) in stamps.into_iter().enumerate() {
                     let first = *first.get_or_insert(stamp);
                     let at = Span::from_nanos(stamp - first);
-                    into.push((at, samples.iter().map(|series| series[i]).collect()));
+                    let samples = samples.iter().map(|series| series[i]).collect();
+                    into.push((at, samples, texts.next().expect("a text")));
                 }
             }
         });
         statuses
     }
 
+    /// When [`supervise`] cancels its connector.
+    enum Cancel {
+        Never,
+        /// Before the call.
+        Now,
+        After(Span),
+    }
+
     /// Supervises one connector of [`Script`] with `steps` and `config`, and
-    /// cancels it after `cancel`, if given. A zero `cancel` cancels before the call.
+    /// cancels it at `cancel`.
     fn supervise(
         kind: &'static str,
         steps: Vec<Step>,
         config: Document,
-        cancel: Option<Span>,
+        cancel: Cancel,
     ) -> Outcome {
         run_on(move |node, tasks| async move {
             let script = Script {
@@ -439,15 +515,17 @@ mod tests {
             let supervisor = Supervisor::new(inputs);
             let clock = node.clock();
             let token = Token::new();
-            if cancel == Some(Span::ZERO) {
-                token.cancel();
-            } else if let Some(after) = cancel {
-                let canceller = token.clone();
-                let sleeper = clock.clone();
-                tasks.spawn(async move {
-                    sleeper.sleep(after).await;
-                    canceller.cancel();
-                });
+            match cancel {
+                Cancel::Never => {}
+                Cancel::Now => token.cancel(),
+                Cancel::After(after) => {
+                    let canceller = token.clone();
+                    let sleeper = clock.clone();
+                    tasks.spawn(async move {
+                        sleeper.sleep(after).await;
+                        canceller.cancel();
+                    });
+                }
             }
             let start = clock.now();
             let name = "plant.script".parse().expect("a valid name");
@@ -483,7 +561,7 @@ mod tests {
 
     #[test]
     fn runs_once_and_returns_when_run_returns_ok() {
-        let out = supervise("script", vec![Step::Done], config(), None);
+        let out = supervise("script", vec![Step::Done], config(), Cancel::Never);
         out.result.expect("ok");
         assert_eq!(out.runs, [(Span::ZERO, Some(Span::ZERO))]);
     }
@@ -496,13 +574,16 @@ mod tests {
             };
             (state, class, restarts)
         };
-        statuses.iter().map(|(_, samples)| state(samples)).collect()
+        statuses
+            .iter()
+            .map(|(_, samples, _)| state(samples))
+            .collect()
     }
 
     #[test]
     fn writes_the_status_of_each_start_and_end_after_a_device_error() {
         let steps = vec![Step::Device(ms(10))];
-        let out = supervise("script", steps, config(), Some(ms(5_000)));
+        let out = supervise("script", steps, config(), Cancel::After(ms(5_000)));
         let [(_, Some(ended)), (again, _)] = out.runs[..] else {
             panic!("two runs, the first ended: {:?}", out.runs);
         };
@@ -515,15 +596,226 @@ mod tests {
             (ms(5_000), (3, 0, 1)),
             (ns(ms(5_000)), (2, 0, 1)),
         ];
-        let at = out.statuses.iter().map(|(at, _)| *at);
+        let at = out.statuses.iter().map(|(at, ..)| *at);
         let got: Vec<_> = at.zip(states(&out.statuses)).collect();
         assert_eq!(got, want);
         out.result.expect("ok after a cancel");
     }
 
+    /// The `(backoff, error)` of each of `statuses`.
+    fn errors(statuses: &[Written]) -> Vec<(Span, &str)> {
+        statuses
+            .iter()
+            .map(|(_, samples, text)| {
+                let [.., backoff] = samples[..4] else {
+                    panic!("the samples of the supervisor's channels: {samples:?}");
+                };
+                (Span::from_nanos(backoff), text.as_str())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn writes_the_error_text_and_the_backoff_after_a_device_error() {
+        let steps = vec![Step::Device(ms(10))];
+        let out = supervise("script", steps, config(), Cancel::After(ms(5_000)));
+        let [(_, Some(ended)), (again, _)] = out.runs[..] else {
+            panic!("two runs, the first ended: {:?}", out.runs);
+        };
+        assert!(again > ended, "a wait after the end: {:?}", out.runs);
+        let waited = out.statuses[2].0;
+        assert!(waited > ended, "1 ns after `state` 3: {:?}", out.statuses);
+        let want = [
+            (Span::ZERO, ""),
+            (Span::ZERO, "no reply"),
+            (between(waited, again), "no reply"),
+            (Span::ZERO, "no reply"),
+            (Span::ZERO, ""),
+            (Span::ZERO, ""),
+        ];
+        assert_eq!(errors(&out.statuses), want);
+    }
+
+    #[test]
+    fn writes_no_backoff_when_the_next_run_passed_before_the_write() {
+        let (statuses, runs) =
+            refuse_the_last_wait(vec![Step::Hold(ms(2_000))], Span::ZERO);
+        let [_, again] = runs[..] else {
+            panic!("two runs: {runs:?}");
+        };
+        let (at, samples, _) = &statuses[2];
+        assert_eq!(samples[..2], [1, 2], "the wait: {statuses:?}");
+        assert_eq!(*at, ms(3_000), "written again 1 s after the refusal at 2 s");
+        assert_eq!(again, ms(3_000), "the run waits for the write");
+        assert_eq!(samples[3], 0, "the next run passed: {statuses:?}");
+    }
+
+    #[test]
+    fn writes_the_text_of_a_retry_error() {
+        let out = supervise(
+            "script",
+            vec![Step::Retry, Step::Done],
+            config(),
+            Cancel::Never,
+        );
+        let texts: Vec<_> = errors(&out.statuses).into_iter().map(|(_, t)| t).collect();
+        assert_eq!(texts, ["", "busy", "busy", "busy", "", ""]);
+    }
+
+    #[test]
+    fn writes_the_text_of_a_config_error() {
+        let out = supervise("script", vec![Step::Config], config(), Cancel::Never);
+        let text = bad().to_string();
+        let want = [(Span::ZERO, ""), (Span::ZERO, &*text), (Span::ZERO, &*text)];
+        assert_eq!(errors(&out.statuses), want);
+    }
+
+    #[test]
+    fn joins_the_texts_of_the_diagnostics_of_a_config_error() {
+        let out = supervise("script", vec![Step::Configs], config(), Cancel::Never);
+        let text = format!("{}; {}", bad(), worse());
+        assert_eq!(out.statuses[1].2, text);
+    }
+
+    #[test]
+    fn writes_no_backoff_when_a_cancel_ends_the_wait() {
+        let steps = vec![Step::Device(Span::ZERO)];
+        let out = supervise(
+            "script",
+            steps,
+            config(),
+            Cancel::After(Span::from_nanos(1)),
+        );
+        let states: Vec<_> = out.statuses.iter().map(|(_, s, _)| s[0]).collect();
+        assert_eq!(states, [0, 3, 1, 2], "a cancel in the wait");
+        assert!(out.statuses[2].1[3] > 0, "a wait: {:?}", out.statuses);
+        assert_eq!(errors(&out.statuses)[3], (Span::ZERO, "no reply"));
+    }
+
+    #[test]
+    fn cuts_a_long_error_text_to_1024_bytes() {
+        let out = supervise(
+            "script",
+            vec![Step::Wide],
+            config(),
+            Cancel::After(ms(5_000)),
+        );
+        assert_eq!(out.statuses[1].2, "a".repeat(1_024));
+    }
+
+    /// The 512th `é` takes bytes 1023 and 1024, across the bound of 1024 bytes.
+    #[test]
+    fn cuts_a_long_error_text_at_a_char_boundary() {
+        let out = supervise(
+            "script",
+            vec![Step::Long],
+            config(),
+            Cancel::After(ms(5_000)),
+        );
+        let cut = format!("a{}", "é".repeat(511));
+        assert_eq!(cut.len(), 1_023);
+        assert_eq!(out.statuses[1].2, cut);
+        assert!(long().starts_with(&cut));
+    }
+
+    /// Runs `steps` and fills the pool from 1.5 s after the start of the last run
+    /// for 1 s, so the home refuses the frame of the wait after it. The last step
+    /// holds a task for 2 s. The wall steps forward by `wall` 2.001 s after the start
+    /// of the last run. Returns the status and the start of each run.
+    fn refuse_the_last_wait(steps: Vec<Step>, wall: Span) -> (Vec<Written>, Vec<Span>) {
+        let count = steps.len();
+        run_on(move |node, tasks| async move {
+            let script = Script {
+                steps: Mutex::new(steps.into()),
+                ..Script::default()
+            };
+            let runs = Arc::clone(&script.runs);
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            let hog = hub::writer::Config {
+                subject: name("plant.other"),
+                authority: Authority(1),
+                lease: None,
+                channels: ["state", "error"]
+                    .map(|c| name(&format!("plant.script.status.{c}")))
+                    .into(),
+            };
+            let hog = inputs.hub.writer(hog).await.expect("opens");
+            let (token, clock) = (Token::new(), node.clock());
+            let (canceller, sleeper) = (token.clone(), clock.clone());
+            let (filled, node) = (Arc::clone(&runs), node.clone());
+            tasks.spawn(async move {
+                while filled.lock().expect("no panic under the lock").len() < count {
+                    sleeper.sleep(ms(10)).await;
+                }
+                sleeper.sleep(ms(1_500)).await;
+                let held = fill(&hog);
+                sleeper.sleep(ms(501)).await;
+                node.step_wall(wall);
+                sleeper.sleep(ms(499)).await;
+                drop(held);
+                sleeper.sleep(ms(5_000)).await;
+                canceller.cancel();
+            });
+            let (supervisor, start) = (Supervisor::new(inputs), clock.now());
+            let name = name("plant.script");
+            let result = supervisor.run("script", name, &config(), &token).await;
+            result.expect("ok after a cancel");
+            clock.sleep(Span::SECOND).await;
+            let runs: Vec<_> = (runs.lock().expect("no panic under the lock").iter())
+                .map(|(from, _)| *from - start)
+                .collect();
+            (statuses.borrow().clone(), runs)
+        })
+    }
+
+    #[test]
+    fn writes_the_backoff_that_is_left_when_the_home_refused_the_wait() {
+        let steps = vec![Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
+        let (statuses, runs) = refuse_the_last_wait(steps, Span::ZERO);
+        let [_, second, third] = runs[..] else {
+            panic!("three runs: {runs:?}");
+        };
+        let (at, samples, _) = &statuses[5];
+        assert_eq!(samples[..2], [1, 2], "the second wait: {statuses:?}");
+        let again = Span::from_nanos(second.nanos() + ms(3_000).nanos());
+        assert_eq!(*at, again, "written again 1 s after the refusal at the end");
+        let left = Span::from_nanos(samples[3]);
+        assert!(
+            left > Span::ZERO,
+            "the wait is longer than 1 s: {statuses:?}"
+        );
+        assert_eq!(
+            left,
+            between(*at, third),
+            "the wait from the write to the run"
+        );
+    }
+
+    #[test]
+    fn writes_the_backoff_that_is_left_after_a_wall_step_in_the_wait() {
+        let steps = vec![Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
+        let (statuses, _) = refuse_the_last_wait(steps, ms(10_000));
+        let (at, samples, _) = &statuses[5];
+        assert_eq!(samples[..2], [1, 2], "the second wait: {statuses:?}");
+        let (run, again, _) = &statuses[6];
+        assert_eq!(again[0], 0, "the next run: {statuses:?}");
+        // `backoff` is the wait by the node's clock. After the step, the hub's time
+        // slews toward the wall at the 500 ppm of MESH SLEW.
+        let (backoff, wait) = (samples[3], between(*at, *run).nanos());
+        assert_eq!(wait - backoff, backoff / 2_000, "{statuses:?}");
+    }
+
     #[test]
     fn writes_the_class_of_a_retry_error() {
-        let out = supervise("script", vec![Step::Retry, Step::Done], config(), None);
+        let out = supervise(
+            "script",
+            vec![Step::Retry, Step::Done],
+            config(),
+            Cancel::Never,
+        );
         let want = [
             (0, 0, 0),
             (3, 3, 0),
@@ -537,26 +829,31 @@ mod tests {
 
     #[test]
     fn writes_stopped_after_a_config_error_from_run() {
-        let out = supervise("script", vec![Step::Config], config(), None);
+        let out = supervise("script", vec![Step::Config], config(), Cancel::Never);
         assert_eq!(states(&out.statuses), [(0, 0, 0), (3, 1, 0), (2, 1, 0)]);
     }
 
     #[test]
     fn writes_stopped_after_a_run_returns_ok() {
-        let out = supervise("script", vec![Step::Done], config(), None);
+        let out = supervise("script", vec![Step::Done], config(), Cancel::Never);
         assert_eq!(states(&out.statuses), [(0, 0, 0), (3, 0, 0), (2, 0, 0)]);
     }
 
     #[test]
     fn writes_only_stopped_when_cancelled_before_the_call() {
-        let out = supervise("script", vec![Step::Done], config(), Some(Span::ZERO));
+        let out = supervise("script", vec![Step::Done], config(), Cancel::Now);
         assert_eq!(states(&out.statuses), [(2, 0, 0)]);
     }
 
     #[test]
     fn writes_stopped_when_cancelled_during_the_backoff() {
         let steps = vec![Step::Device(Span::ZERO)];
-        let out = supervise("script", steps, config(), Some(Span::from_nanos(1)));
+        let out = supervise(
+            "script",
+            steps,
+            config(),
+            Cancel::After(Span::from_nanos(1)),
+        );
         let want = [(0, 0, 0), (3, 2, 0), (1, 2, 0), (2, 2, 0)];
         assert_eq!(states(&out.statuses), want);
     }
@@ -564,7 +861,7 @@ mod tests {
     #[test]
     fn writes_no_waiting_after_a_cancel() {
         let steps = vec![Step::Linger(ms(30))];
-        let out = supervise("script", steps, config(), Some(ms(50)));
+        let out = supervise("script", steps, config(), Cancel::After(ms(50)));
         let want = [(0, 0, 0), (3, 2, 0), (2, 2, 0)];
         assert_eq!(states(&out.statuses), want);
     }
@@ -572,7 +869,7 @@ mod tests {
     #[test]
     fn writes_ending_until_the_tasks_of_a_run_end() {
         let steps = vec![Step::Hold(ms(2_000)), Step::Done];
-        let out = supervise("script", steps, config(), None);
+        let out = supervise("script", steps, config(), Cancel::Never);
         let at = |i: usize| out.statuses[i].0;
         let want = [
             (0, 0, 0),
@@ -717,33 +1014,7 @@ mod tests {
             let inputs =
                 create_config(&node, tasks.clone(), kinds, "plant.script").await;
             let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
-            let channels = ["state", "class", "restarts"];
-            let other = hub::writer::Config {
-                subject: name("plant.other"),
-                authority: Authority::ABSOLUTE,
-                lease: None,
-                channels: channels
-                    .map(|c| name(&format!("plant.script.status.{c}")))
-                    .into(),
-            };
-            let mut other = inputs.hub.writer(other).await.expect("opens");
-            let entries = other.set().entries();
-            let series: Vec<_> = (entries.iter().enumerate())
-                .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
-                .collect();
-            let mut draft = other.draft(Form::Raw, &series).expect("a frame");
-            let stamp = other.now().nanos() + Span::SECOND.nanos();
-            for (i, entry) in entries.iter().enumerate() {
-                let bytes = draft.series_mut(i).expect("a series");
-                let value = if entry.key == STATUS { stamp } else { 9 };
-                let len = bytes.len();
-                bytes.copy_from_slice(&value.to_le_bytes()[..len]);
-            }
-            draft.set_count(entries[0].group, 1);
-            let outcomes = other.write(Label::Path(Path::Live), draft);
-            let applied = matches!(outcomes, Ok([hub::home::Outcome::Applied { .. }]));
-            assert!(applied, "the frame 1 s ahead applies: {outcomes:?}");
-            drop(other);
+            write_ahead(&inputs.hub, Span::SECOND).await;
             let (clock, token) = (node.clock(), Token::new());
             let (supervisor, start) = (Supervisor::new(inputs), clock.now());
             let result = supervisor
@@ -758,10 +1029,10 @@ mod tests {
         // The other frame is at 1 s, and the frames of 0 s are written again after it,
         // where each is ahead of the mesh time until the flush of 1 s.
         let want = [
-            (Span::ZERO, vec![9, 9, 9]),
-            (Span::from_nanos(2), vec![0, 0, 0]),
-            (Span::from_nanos(3), vec![3, 0, 0]),
-            (Span::from_nanos(4), vec![2, 0, 0]),
+            (Span::ZERO, vec![9, 9, 9, 9], String::new()),
+            (Span::from_nanos(2), vec![0, 0, 0, 0], String::new()),
+            (Span::from_nanos(3), vec![3, 0, 0, 0], String::new()),
+            (Span::from_nanos(4), vec![2, 0, 0, 0], String::new()),
         ];
         assert_eq!(statuses, want);
         assert_eq!(returned, Span::SECOND);
@@ -811,7 +1082,7 @@ mod tests {
             let statuses = statuses.borrow().clone();
             (statuses, returned)
         });
-        let last = statuses.last().map(|(at, samples)| (*at, samples[0]));
+        let last = statuses.last().map(|(at, samples, _)| (*at, samples[0]));
         assert_eq!(last, Some((ms(3_000), 2)), "{statuses:?}");
         assert_eq!(returned, ms(3_000), "returns once the home applied state 2");
     }
@@ -895,8 +1166,11 @@ mod tests {
         let returned = timed(run, |scene| async move {
             let clock = scene.node.clock();
             clock.sleep(ms(100)).await;
-            let hog =
-                rival(&scene.hub, &["state", "class", "restarts", "samples"]).await;
+            let hog = rival(
+                &scene.hub,
+                &["state", "class", "restarts", "backoff", "error", "samples"],
+            )
+            .await;
             clock.sleep(ms(400)).await;
             scene.remove("samples");
             clock.sleep(ms(700)).await;
@@ -919,8 +1193,11 @@ mod tests {
         let returned = timed(run, |scene| async move {
             let clock = scene.node.clock();
             clock.sleep(ms(100)).await;
-            let hog =
-                rival(&scene.hub, &["state", "class", "restarts", "samples"]).await;
+            let hog = rival(
+                &scene.hub,
+                &["state", "class", "restarts", "backoff", "error", "samples"],
+            )
+            .await;
             clock.sleep(ms(400)).await;
             scene
                 .node
@@ -1058,7 +1335,7 @@ mod tests {
             Ok(())
         };
         let returned = timed(run, |scene| async move {
-            let hog = rival(&scene.hub, &["state"]).await;
+            let hog = rival(&scene.hub, &["state", "error"]).await;
             scene.node.clock().sleep(ms(500)).await;
             let held = fill(&hog);
             scene.remove("samples");
@@ -1078,7 +1355,7 @@ mod tests {
         let returned = timed(run, |scene| async move {
             let clock = scene.node.clock();
             clock.sleep(ms(100)).await;
-            let mut hog = rival(&scene.hub, &["state"]).await;
+            let mut hog = rival(&scene.hub, &["state", "error"]).await;
             clock.sleep(ms(400)).await;
             scene
                 .node
@@ -1104,7 +1381,7 @@ mod tests {
 
     #[test]
     fn writes_no_status_for_a_config_that_does_not_parse() {
-        let out = supervise("modbus", vec![Step::Done], config(), None);
+        let out = supervise("modbus", vec![Step::Done], config(), Cancel::Never);
         assert!(out.statuses.is_empty(), "{:?}", out.statuses);
     }
 
@@ -1116,7 +1393,7 @@ mod tests {
             Step::Device(ms(10)),
             Step::Done,
         ];
-        let out = supervise("script", steps, config(), None);
+        let out = supervise("script", steps, config(), Cancel::Never);
         out.result.expect("ok");
         assert_eq!(out.runs.len(), 4);
         let ceilings = [Span::SECOND, ms(2000), ms(4000)];
@@ -1131,14 +1408,24 @@ mod tests {
 
     #[test]
     fn restarts_after_a_retry_error() {
-        let out = supervise("script", vec![Step::Retry, Step::Done], config(), None);
+        let out = supervise(
+            "script",
+            vec![Step::Retry, Step::Done],
+            config(),
+            Cancel::Never,
+        );
         out.result.expect("ok");
         assert_eq!(out.runs.len(), 2);
     }
 
     #[test]
     fn restarts_after_a_run_cancels_its_own_token() {
-        let out = supervise("script", vec![Step::Abort, Step::Done], config(), None);
+        let out = supervise(
+            "script",
+            vec![Step::Abort, Step::Done],
+            config(),
+            Cancel::Never,
+        );
         out.result.expect("ok");
         assert_eq!(out.runs.len(), 2, "the run's token is not the caller's");
     }
@@ -1147,7 +1434,7 @@ mod tests {
     fn grows_the_waits_after_short_runs() {
         let mut steps = vec![Step::Device(Span::ZERO); 12];
         steps.push(Step::Done);
-        let out = supervise("script", steps, config(), None);
+        let out = supervise("script", steps, config(), Cancel::Never);
         out.result.expect("ok");
         let last = out.runs.last().expect("13 runs").0;
         // With no growth, twelve waits of at most 1 s each.
@@ -1157,7 +1444,7 @@ mod tests {
     #[test]
     fn returns_a_config_error_from_run_without_a_restart() {
         let steps = vec![Step::Config, Step::Done];
-        let out = supervise("script", steps, config(), None);
+        let out = supervise("script", steps, config(), Cancel::Never);
         assert_eq!(config_errors(out.result), [bad()]);
         assert_eq!(out.runs.len(), 1);
     }
@@ -1176,14 +1463,14 @@ mod tests {
             attributes: Map::new(vec![n]).expect("one key"),
             blocks: Vec::new(),
         };
-        let out = supervise("script", vec![Step::Done], config, None);
+        let out = supervise("script", vec![Step::Done], config, Cancel::Never);
         assert_eq!(config_errors(out.result), [bad()]);
         assert!(out.runs.is_empty());
     }
 
     #[test]
     fn returns_an_unknown_kind_as_a_config_error() {
-        let out = supervise("modbus", vec![Step::Done], config(), None);
+        let out = supervise("modbus", vec![Step::Done], config(), Cancel::Never);
         let codes: Vec<_> = config_errors(out.result).iter().map(|d| d.code).collect();
         assert_eq!(codes, [Code::new("connector.unknown-kind")]);
         assert!(out.runs.is_empty());
@@ -1192,7 +1479,7 @@ mod tests {
     #[test]
     fn waits_for_the_run_to_return_after_a_cancel() {
         let steps = vec![Step::Linger(ms(30))];
-        let out = supervise("script", steps, config(), Some(ms(50)));
+        let out = supervise("script", steps, config(), Cancel::After(ms(50)));
         out.result.expect("ok after a cancel");
         assert_eq!(out.runs, [(Span::ZERO, Some(ms(80)))]);
         assert_eq!(out.returned, ms(80), "after the run returned, never before");
@@ -1201,7 +1488,12 @@ mod tests {
     #[test]
     fn returns_at_once_when_cancelled_during_the_backoff() {
         let steps = vec![Step::Device(Span::ZERO)];
-        let out = supervise("script", steps, config(), Some(Span::from_nanos(1)));
+        let out = supervise(
+            "script",
+            steps,
+            config(),
+            Cancel::After(Span::from_nanos(1)),
+        );
         out.result.expect("ok after a cancel");
         assert_eq!(out.runs, [(Span::ZERO, Some(Span::ZERO))]);
         assert_eq!(out.returned, Span::from_nanos(1), "at the cancel");
@@ -1209,7 +1501,7 @@ mod tests {
 
     #[test]
     fn starts_no_run_when_cancelled_before_the_call() {
-        let out = supervise("script", vec![Step::Done], config(), Some(Span::ZERO));
+        let out = supervise("script", vec![Step::Done], config(), Cancel::Now);
         out.result.expect("ok after a cancel");
         assert!(out.runs.is_empty(), "a run started after the cancel");
     }
@@ -1220,7 +1512,7 @@ mod tests {
         steps.push(Step::Device(Span::MINUTE));
         steps.extend([Step::Device(Span::ZERO); 3]);
         steps.push(Step::Done);
-        let out = supervise("script", steps, config(), None);
+        let out = supervise("script", steps, config(), Cancel::Never);
         out.result.expect("ok");
         let after = out.runs.get(9..).expect("13 runs");
         let first = out.runs.get(8).and_then(|run| run.1).expect("run 8 ended");
@@ -1237,7 +1529,7 @@ mod tests {
         steps.push(Step::Hold(ms(61_000)));
         steps.extend([Step::Device(Span::ZERO); 3]);
         steps.push(Step::Done);
-        let out = supervise("script", steps, config(), None);
+        let out = supervise("script", steps, config(), Cancel::Never);
         out.result.expect("ok");
         let held = out.runs.get(8).and_then(|run| run.1).expect("run 8 ended");
         let last = out.runs.last().expect("13 runs").0;
@@ -1485,7 +1777,12 @@ mod tests {
 
     #[test]
     fn waits_for_the_tasks_of_a_run_before_it_returns_a_config_error() {
-        let out = supervise("script", vec![Step::Refuse(ms(2_000))], config(), None);
+        let out = supervise(
+            "script",
+            vec![Step::Refuse(ms(2_000))],
+            config(),
+            Cancel::Never,
+        );
         assert_eq!(config_errors(out.result), [bad()]);
         assert_eq!(out.returned, ms(2_000));
     }
@@ -1670,7 +1967,7 @@ mod tests {
         let statuses = tally(late(Some(2)));
         let got: Vec<_> = statuses
             .iter()
-            .map(|(at, samples)| (*at, samples[0], samples[3]))
+            .map(|(at, samples, _)| (*at, samples[0], samples[4]))
             .collect();
         let want = [
             (Span::ZERO, 0, 0),
@@ -1686,7 +1983,7 @@ mod tests {
         let statuses = tally(late(None));
         let got: Vec<_> = statuses
             .iter()
-            .map(|(at, samples)| (*at, samples[0], samples[3]))
+            .map(|(at, samples, _)| (*at, samples[0], samples[4]))
             .collect();
         let want = [(Span::ZERO, 0, 0), (ms(600), 3, 1), (ms(2_000), 2, 1)];
         assert_eq!(got, want);
@@ -1725,7 +2022,10 @@ mod tests {
     fn gives_13_frames_for_10_000_samples_over_10_s_set_from_a_task() {
         let statuses = tally(relay(10_000, ms(1)));
         assert_eq!(statuses.len(), 13, "{statuses:?}");
-        assert_eq!(statuses.last().map(|(_, samples)| samples[3]), Some(10_000));
+        assert_eq!(
+            statuses.last().map(|(_, samples, _)| samples[4]),
+            Some(10_000)
+        );
         assert_eq!(states(&statuses)[11..], [(3, 0, 0), (2, 0, 0)]);
     }
 
@@ -1736,9 +2036,10 @@ mod tests {
     /// 1 s. Else the home has no room to take that flush's frame, and loses it.
     fn hog(full: bool) -> impl Kind<Config = ()> {
         Counted(move |ctx: Context<()>| async move {
-            let channels = ["state", "class", "restarts", "samples"]
-                .map(|c| name(&format!("plant.tally.status.{c}")))
-                .into();
+            let channels =
+                ["state", "class", "restarts", "backoff", "error", "samples"]
+                    .map(|c| name(&format!("plant.tally.status.{c}")))
+                    .into();
             let writer = ctx.writer(channels, Authority(1), None).await;
             let writer = writer.expect("the writer opens");
             let mut held = fill(&writer);
@@ -1773,22 +2074,26 @@ mod tests {
     ];
 
     /// Takes frames of one sample for each channel of `writer` from the shard's pool
-    /// until the pool has no room.
+    /// until the pool has no room for a frame of any size up to 2 KiB, so that no
+    /// status frame and no copy of it in the home gets a block. `writer` has `error`,
+    /// whose text sets the size.
     fn fill(writer: &hub::writer::Writer) -> Vec<frame::Draft> {
-        let series: Vec<_> = (writer.set().entries().iter().enumerate())
-            .map(|(i, entry)| (i, entry.data_type.width().expect("one width")))
-            .collect();
         let mut held = Vec::new();
-        let error = loop {
-            match writer.draft(Form::Raw, &series) {
-                Ok(draft) => held.push(draft),
-                Err(error) => break error,
-            }
-        };
-        assert!(
-            matches!(error, frame::Error::Pool(block::Error::Exhausted { .. })),
-            "{error}"
-        );
+        for text in (0..=2_048).rev().step_by(16) {
+            let series: Vec<_> = (writer.set().entries().iter().enumerate())
+                .map(|(i, entry)| (i, entry.data_type.width().unwrap_or(4 + text)))
+                .collect();
+            let error = loop {
+                match writer.draft(Form::Raw, &series) {
+                    Ok(draft) => held.push(draft),
+                    Err(error) => break error,
+                }
+            };
+            assert!(
+                matches!(error, frame::Error::Pool(block::Error::Exhausted { .. })),
+                "{error}"
+            );
+        }
         held
     }
 
@@ -1894,7 +2199,7 @@ mod tests {
         let statuses = tally(hog(full));
         statuses
             .iter()
-            .map(|(at, samples)| (*at, samples[0], samples[3]))
+            .map(|(at, samples, _)| (*at, samples[0], samples[4]))
             .collect()
     }
 
@@ -1903,9 +2208,10 @@ mod tests {
     /// returns `Ok` at 200 ms.
     fn outlive() -> impl Kind<Config = ()> {
         Counted(|ctx: Context<()>| async move {
-            let channels = ["state", "class", "restarts", "samples"]
-                .map(|c| name(&format!("plant.tally.status.{c}")))
-                .into();
+            let channels =
+                ["state", "class", "restarts", "backoff", "error", "samples"]
+                    .map(|c| name(&format!("plant.tally.status.{c}")))
+                    .into();
             let writer = ctx.writer(channels, Authority(1), None).await;
             let writer = writer.expect("the writer opens");
             let clock = ctx.clock().clone();
@@ -1922,7 +2228,7 @@ mod tests {
     #[test]
     fn returns_at_a_cancel_while_a_change_of_state_waits() {
         let (statuses, returned) = tally_until(outlive(), Some(ms(700)));
-        let states: Vec<_> = statuses.iter().map(|(at, s)| (*at, s[0])).collect();
+        let states: Vec<_> = statuses.iter().map(|(at, s, _)| (*at, s[0])).collect();
         let want = [(Span::ZERO, 0), (ms(700), 2)];
         assert_eq!(
             states, want,
@@ -1934,7 +2240,7 @@ mod tests {
     #[test]
     fn writes_state_3_when_the_pool_is_full_at_the_end_of_a_run() {
         let statuses = tally(outlive());
-        let states: Vec<_> = statuses.iter().map(|(at, s)| (*at, s[0])).collect();
+        let states: Vec<_> = statuses.iter().map(|(at, s, _)| (*at, s[0])).collect();
         let want = [
             (Span::ZERO, 0),
             (ms(1_200), 3),
@@ -1962,7 +2268,7 @@ mod tests {
             let (canceller, sleeper) = (token.clone(), clock.clone());
             tasks.spawn(async move {
                 sleeper.sleep(ms(500)).await;
-                let channels = ["state", "class", "restarts"]
+                let channels = ["state", "class", "restarts", "backoff", "error"]
                     .map(|c| name(&format!("plant.script.status.{c}")))
                     .into();
                 let hog = hub::writer::Config {
@@ -2053,7 +2359,7 @@ mod tests {
         let mut want = vec![(Span::ZERO, 0)];
         want.extend((1..=9).map(|s| (ms(s * 1_000), s * 1_000)));
         want.extend([(end, 10_000), (Span::from_nanos(end.nanos() + 1), 10_000)]);
-        let got = statuses.iter().map(|(at, samples)| (*at, samples[3]));
+        let got = statuses.iter().map(|(at, samples, _)| (*at, samples[4]));
         assert_eq!(got.collect::<Vec<_>>(), want);
         let states = states(&statuses);
         assert_eq!(states[..10], [(0, 0, 0); 10]);
@@ -2088,7 +2394,7 @@ mod tests {
             clock.sleep(Span::SECOND).await;
             statuses.borrow().clone()
         });
-        let got: Vec<_> = statuses.iter().map(|(at, s)| (*at, s[0])).collect();
+        let got: Vec<_> = statuses.iter().map(|(at, s, _)| (*at, s[0])).collect();
         let ns = Span::from_nanos;
         let first = [(ns(0), 0), (ns(1), 3), (ns(2), 2)];
         let second = [(ns(3), 0), (ms(5_000), 3), (ns(5_000_000_001), 2)];
@@ -2108,7 +2414,7 @@ mod tests {
             (ms(10_000), 10_000),
             (Span::from_nanos(10_000_000_001), 10_000),
         ]);
-        let got = statuses.iter().map(|(at, samples)| (*at, samples[3]));
+        let got = statuses.iter().map(|(at, samples, _)| (*at, samples[4]));
         assert_eq!(got.collect::<Vec<_>>(), want);
         assert_eq!(states(&statuses)[10..], [(3, 0, 0), (2, 0, 0)]);
     }
@@ -2145,7 +2451,7 @@ mod tests {
             node.clock().sleep(Span::SECOND).await;
             statuses.borrow().clone()
         });
-        let at: Vec<_> = statuses.iter().map(|(at, _)| *at).collect();
+        let at: Vec<_> = statuses.iter().map(|(at, ..)| *at).collect();
         assert_eq!(at, [Span::ZERO, Span::SECOND], "nothing after 1.5 s");
         assert_eq!(states(&statuses), [(0, 0, 0); 2]);
     }
@@ -2182,7 +2488,7 @@ mod tests {
             let statuses = statuses.borrow().clone();
             (statuses, returned)
         });
-        let at: Vec<_> = statuses.iter().map(|(at, _)| *at).collect();
+        let at: Vec<_> = statuses.iter().map(|(at, ..)| *at).collect();
         assert_eq!(at, [Span::ZERO, Span::SECOND], "nothing after 1.5 s");
         assert_eq!(returned, ms(3_000));
     }
@@ -2409,8 +2715,21 @@ mod tests {
         series(received, 2)
     }
 
-    /// The samples of the channel of `key` in `received`, each widened to `i64`.
-    fn series(received: &Received<'_>, key: u128) -> Vec<i64> {
+    /// The texts of the `String` series of `key` in `received`.
+    fn texts(received: &Received<'_>, key: u128) -> Vec<String> {
+        let (data_type, count, bytes) = encoded(received, key);
+        let mut raw = Vec::new();
+        codec::decode(data_type, count, bytes, &mut raw).expect("decodes");
+        let variable = codec::Variable::of(data_type).expect("a variable type");
+        variable
+            .samples(count, &raw)
+            .map(|sample| std::str::from_utf8(sample).expect("UTF-8").to_owned())
+            .collect()
+    }
+
+    /// The type, the count, and the encoded bytes of the series of `key` in
+    /// `received`.
+    fn encoded<'a>(received: &'a Received<'_>, key: u128) -> (Type, usize, &'a [u8]) {
         let set = received.set();
         let key = channel::Key::from_u128(key);
         let entry = set.entries().iter().position(|entry| entry.key == key);
@@ -2423,7 +2742,12 @@ mod tests {
             .iter()
             .find(|&(present, _)| present == entry)
             .expect("the view holds the series");
-        let data_type = set.entries()[entry].data_type;
+        (set.entries()[entry].data_type, count, bytes)
+    }
+
+    /// The samples of the channel of `key` in `received`, each widened to `i64`.
+    fn series(received: &Received<'_>, key: u128) -> Vec<i64> {
+        let (data_type, count, bytes) = encoded(received, key);
         let width = data_type.width().expect("a fixed width");
         let mut out = Vec::new();
         codec::decode(data_type, count, bytes, &mut out).expect("decodes");
@@ -2434,6 +2758,51 @@ mod tests {
                 i64::from_le_bytes(sample)
             })
             .collect()
+    }
+
+    #[test]
+    fn writes_a_backoff_that_ends_at_the_next_run_after_a_frame_ahead() {
+        let lead = ms(500);
+        let (statuses, again) = run_on(move |node, tasks| async move {
+            let script = Script {
+                steps: Mutex::new([Step::Device(ms(10))].into()),
+                ..Script::default()
+            };
+            let runs = Arc::clone(&script.runs);
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            write_ahead(&inputs.hub, lead).await;
+            let (clock, token) = (node.clock(), Token::new());
+            let (canceller, sleeper) = (token.clone(), clock.clone());
+            tasks.spawn(async move {
+                sleeper.sleep(ms(5_000)).await;
+                canceller.cancel();
+            });
+            let (supervisor, start) = (Supervisor::new(inputs), clock.now());
+            let result = supervisor
+                .run("script", name("plant.script"), &config(), &token)
+                .await;
+            result.expect("ok");
+            clock.sleep(Span::SECOND).await;
+            let runs = runs.lock().expect("no panic under the lock").clone();
+            let [_, (again, _)] = runs[..] else {
+                panic!("two runs: {runs:?}");
+            };
+            (statuses.borrow().clone(), again - start)
+        });
+        let (at, samples, _) = statuses
+            .iter()
+            .find(|(_, samples, _)| samples[0] == 1)
+            .expect("a frame of state 1");
+        // `statuses` gives each stamp from the first frame: the one 500 ms ahead.
+        let next = Span::from_nanos(at.nanos() + samples[3]);
+        let run = Span::from_nanos(again.nanos() - lead.nanos());
+        assert_eq!(
+            next, run,
+            "the frame's time plus `backoff` is the next run: {statuses:?}"
+        );
     }
 
     #[test]

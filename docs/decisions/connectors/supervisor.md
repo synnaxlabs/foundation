@@ -33,8 +33,8 @@
   constants). The waits start again from 1 s after a run that lasted at least 60 s.
   `Ok` from `run` ends the connector.
   `Config` returns to the caller, which starts a new supervisor when the spec
-  changes (R12-4). The class of each restart error reaches the connector's status
-  (CONNECTOR STATUS), and its text with #420.
+  changes (R12-4). The class and the text of each restart error reach the
+  connector's status (CONNECTOR STATUS).
   Decided by the `connector` builder in the plan on #338, after `/eb-review`; approved
   by the coordinator (#338), with the reset after a long run approved on #338 later.
 - **CONNECTOR STATUS** `Supervisor::run` writes the status channels of its connector,
@@ -51,13 +51,39 @@
   | `state` | `u8` | 0 running, 1 waiting to restart, 2 stopped, 3 ending |
   | `class` | `u8` | the end of the last run: 0 none or `Ok`, 1 `Config`, 2 `Device`, 3 `Retry` |
   | `restarts` | `u64` | the restarts in this call |
+  | `backoff` | `Span` | the wait from this sample to the next run, 0 unless `state` is 1 |
+  | `error` | `String` | the text of the error that ended the last run, empty when `class` is 0 |
   | each count of the kind | `u64` | as the kind sets it through `Context::count` |
 
+  `backoff` and `error` follow the #1735 ruling (`laptop.architect-2`,
+  2026-10-08T06:29:21Z:
+  https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6053869186). The
+  text of `error` is the text of the `Device` or `Retry` source, or the diagnostics of
+  `Config` joined with `"; "`, cut to at most 1024 bytes at a char boundary, so a long
+  device error does not make a frame too large. `backoff` is the wait that is left to
+  the next run by the node's clock at the write, less the time by which the frame is
+  stamped after the hub's time (below). So a frame written again later gives the wait
+  that is left, a frame stamped ahead gives a wait that ends at the next run, and a step
+  of the hub's time during the wait does not change it. The wait is by the node's
+  clock, so while the hub's time slews, the next run is up to 500 ppm (MESH SLEW) of
+  the wait from the frame's time plus `backoff`. Decided by the `connector` builder in
+  the plan on #420 (2026-10-10T03:22:36Z:
+  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074),
+  measured from the frame's time after round 1 of PR #2227 (finding 2,
+  2026-10-10T03:55:58Z:
+  https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6093511014), and by
+  the node's clock after round 2 (finding 1, 2026-10-10T05:36:36Z:
+  https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6094269805). The
+  `backoff` text is approved by `laptop.architect` (2026-10-10T05:38:31Z:
+  https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6094282904). The cut
+  and the join are approved by `laptop.architect-2` (2026-10-10T04:00:21Z:
+  https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6093545130).
+
   Each write is one frame with the last value of every status channel. Each start of a
-  run writes the whole status. A change of `state`, `class`, or `restarts` is written as
-  soon as the home applied the state before it (below). A change of counts alone is
-  written at most once each second after the last write, timed with the clock of
-  `supervisor::Config` (`laptop.architect-2`, 2026-10-08T06:38:42Z:
+  run writes the whole status. A change of `state`, `class`, `restarts`, `backoff`, or
+  `error` is written as soon as the home applied the state before it (below). A change
+  of counts alone is written at most once each second after the last write, timed with
+  the clock of `supervisor::Config` (`laptop.architect-2`, 2026-10-08T06:38:42Z:
   https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6054035730, rules 1
   to 3). When a run returns, `state` 3 with the class of that end is written as soon as
   the home applied the state before it. When each task of the run ended, `state` 1, or 2
@@ -77,8 +103,10 @@
   `state` 3 and the next state stay two frames also when no task is left, because
   `state` 3 marks the end of the run (`laptop.architect-2`, 2026-10-09T19:51:38Z:
   https://github.com/synnaxlabs/foundation/issues/1731#issuecomment-6088160535).
-  `status::Writer` holds the rules of `state`, `class`, and `restarts`, and the
-  supervisor calls its `start`, `end`, `wait`, and `stop` (same ruling). A frame that
+  `status::Writer` holds the rules of each channel but the counts, and the
+  supervisor calls its `start`, `end`, `wait`, and `stop` (same ruling, for `class`
+  and `restarts`; for `backoff` and `error`, the #1735 ruling and the plan on #420
+  above). A frame that
   the home does not apply (`Waiting`, `Reserved`, `Order`, or `Lost`), or for which the
   shard's pool has no block now (`block::Error::Exhausted` or `Refused` in
   `frame::Error::Pool`), leaves the status staged, so it is written again one second

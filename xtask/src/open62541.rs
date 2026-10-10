@@ -40,7 +40,8 @@ const CLOCKS: [&str; 3] = [
     "UA_DateTime_localTimeUtcOffset",
 ];
 
-/// The only (file, function) pairs that may call a function of [`CLOCKS`].
+/// The only (file, function) pairs that may call a function of [`CLOCKS`]. A test of
+/// `connector-opcua` names each pair and fails when its reason becomes false.
 const CLOCK_CALLS: [(&str, &str); 5] = [
     // The build date of a server config, for the test server only.
     ("plugins/ua_config_default.c", "setDefaultConfig"),
@@ -48,7 +49,8 @@ const CLOCK_CALLS: [(&str, &str); 5] = [
     ("plugins/ua_config_default.c", "interruptServer"),
     // The stdout logger, which we replace with our own.
     ("plugins/ua_log_stdout.c", "UA_Log_Stdout_log"),
-    // ECC user tokens, which need encryption, which is off.
+    // ECC user tokens, which need an ECC policy. Encryption is off and
+    // `connector-opcua` adds no policy, so a client has only the policy `None`.
     (
         "src/util/ua_encryptedsecret.c",
         "encryptUserIdentityTokenEcc",
@@ -785,7 +787,8 @@ fn mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
     let new = found.difference(&listed).map(|(file, function)| {
         format!(
             "{file}: `{function}` calls a global clock function. Find whether a node \
-             runs it; if not, add it to CLOCK_CALLS with the reason"
+             runs it; if not, add it to CLOCK_CALLS with the reason \
+             and a check of the reason in connector-opcua"
         )
     });
     let gone = listed.difference(found).map(|(file, function)| {
@@ -1356,6 +1359,28 @@ End of search list.
     }
 
     #[test]
+    fn a_test_of_connector_opcua_names_each_function_of_clock_calls() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let link = workspace.join("crates/connector-opcua/src/link.rs");
+        let text = std::fs::read_to_string(link).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        let docs: Vec<String> = (0..lines.len())
+            .filter(|&at| lines[at] == "#[test]")
+            .map(|at| {
+                let doc = lines[..at]
+                    .iter()
+                    .rev()
+                    .take_while(|line| line.starts_with("///"));
+                doc.copied().collect::<Vec<_>>().join(" ")
+            })
+            .collect();
+        for (_, function) in CLOCK_CALLS {
+            let name = format!("`{function}`");
+            assert!(docs.iter().any(|doc| doc.contains(&name)), "{function}");
+        }
+    }
+
+    #[test]
     fn mismatches_names_a_new_call_and_a_listed_call_that_is_gone() {
         let mut found: BTreeSet<(String, String)> = CLOCK_CALLS
             .iter()
@@ -1368,7 +1393,8 @@ End of search list.
             mismatches(&found),
             [
                 "src/ua_types.c: `UA_new` calls a global clock function. Find whether \
-                 a node runs it; if not, add it to CLOCK_CALLS with the reason",
+                 a node runs it; if not, add it to CLOCK_CALLS with the reason \
+                 and a check of the reason in connector-opcua",
                 "src/util/ua_util.c: `UA_random_seed` no longer calls a clock. Remove \
                  it from CLOCK_CALLS",
             ]
@@ -1656,7 +1682,8 @@ End of search list.
                  SYSTEM_HEADERS does not list"
                     .to_owned(),
                 "src/more/ua_types.c: `UA_new` calls a global clock function. Find \
-                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
+                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason \
+                 and a check of the reason in connector-opcua"
                     .to_owned(),
             ])
         );
@@ -1677,7 +1704,8 @@ End of search list.
             result,
             Err(vec![
                 "plugins/ua_log_stdout.c: `helper` calls a global clock function. Find \
-                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
+                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason \
+                 and a check of the reason in connector-opcua"
                     .to_owned(),
                 "plugins/ua_log_stdout.c: `UA_Log_Stdout_log` no longer calls a clock. \
                  Remove it from CLOCK_CALLS"
@@ -1760,7 +1788,8 @@ End of search list.
             result,
             Err(vec![
                 "@gen.c: `UA_gen` calls a global clock function. Find whether a node \
-                 runs it; if not, add it to CLOCK_CALLS with the reason"
+                 runs it; if not, add it to CLOCK_CALLS with the reason \
+                 and a check of the reason in connector-opcua"
                     .to_owned()
             ])
         );
@@ -1824,7 +1853,8 @@ End of search list.
             check(&root),
             Err(vec![
                 "src/util/ua_util.c: `hidden` calls a global clock function. Find \
-                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
+                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason \
+                 and a check of the reason in connector-opcua"
                     .to_owned(),
             ])
         );
