@@ -3,9 +3,10 @@
 //! open whose log holds a record checks `Config::founding` against it.
 //!
 //! The file holds an 8-byte check of the rest, the format version, then what
-//! `region::Founding::encode` gives. A first open removes `founding`, writes
-//! `founding.new`, renames it to `founding`, and syncs the directory, before raft
-//! writes a record. So a crash before the first record leaves a first open.
+//! `region::Founding::encode` gives. A first open whose directory holds another
+//! founding or none removes `founding`, writes `founding.new`, renames it to
+//! `founding`, and syncs the directory, before raft writes a record. So a crash before
+//! the first record leaves a first open, and a reopen with the same founding keeps it.
 
 use std::path::Path;
 use std::rc::Rc;
@@ -23,9 +24,8 @@ const NEW: &str = "founding.new";
 const VERSION: u16 = 1;
 
 /// The founding that the mesh directory `dir` of `files` holds, or `None` when `dir`
-/// or its founding file is not there: no [`Mesh::open`](crate::Mesh::open) wrote one,
-/// or an open whose log held no record failed or stopped while it wrote one.
-/// [`Mesh::open`](crate::Mesh::open) with this founding opens the same region.
+/// is not there or holds no founding file. [`Mesh::open`](crate::Mesh::open) with this
+/// founding opens the same region.
 ///
 /// # Errors
 ///
@@ -46,9 +46,10 @@ pub async fn founding(
     Ok(Some(founding))
 }
 
-/// Writes `given` to `dir` when `logged` is false, or checks it against the founding
-/// in `dir`. `logged` states that the log of `dir` holds a record. The caller holds
-/// the lock of the log. A founding that it writes is durable when it returns.
+/// Writes `given` to `dir` when `logged` is false and `dir` holds another founding or
+/// none, or checks it against the founding in `dir`. `logged` states that the log of
+/// `dir` holds a record. The caller holds the lock of the log. A founding that it
+/// writes is durable when it returns.
 ///
 /// # Errors
 ///
@@ -64,15 +65,19 @@ pub(super) async fn keep(
     given: &Founding,
     logged: bool,
 ) -> Result<(), Error> {
-    if !logged {
-        return write(files, dir, blocks, &given.encode()).await;
-    }
-    let body = read(files, dir, blocks)
-        .await?
-        .ok_or_else(|| unfounded(dir))?;
-    if body == given.encode() {
+    let encoded = given.encode();
+    let body = match read(files, dir, blocks).await {
+        // A first open writes over a founding that does not read back whole.
+        Err(Error::Unfounded { .. }) if !logged => None,
+        body => body?,
+    };
+    if body.as_ref() == Some(&encoded) {
         return Ok(());
     }
+    if !logged {
+        return write(files, dir, blocks, &encoded).await;
+    }
+    let body = body.ok_or_else(|| unfounded(dir))?;
     let stored = Founding::decode(&body).ok_or_else(|| unfounded(dir))?;
     let mut given = given.clone();
     given.members.sort_by_key(|member| member.card.key());

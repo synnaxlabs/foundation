@@ -375,35 +375,32 @@ fn a_failed_list_of_the_mesh_directory_gives_the_files_error() {
     assert_eq!(unread(&mut sim, &node), Error::Files(io));
 }
 
-/// A reopen whose log holds no record writes the founding again, so a failed write
-/// leaves none, and the next open is a first open.
+/// A reopen whose log holds no record writes nothing when its founding is the one in
+/// the directory, so a failed write cannot lose it. Another founding is written.
 #[test]
-fn a_failed_reopen_before_a_record_leaves_no_founding() {
+fn a_reopen_before_a_record_writes_only_another_founding() {
     let mut sim = Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
-    let region = sim
+    let mut region = sim
         .run_on(&node, |node, tasks| async move {
             create_region(&node, &tasks).await
         })
         .unwrap();
     run_with(&mut sim, &node, region.clone());
     node.fail_file(Path::new("founding.new"), Operation::WriteAt);
-    let error = refused(&mut sim, &node, region.clone());
-    let Error::Files(error) = error else {
-        panic!("{error:?}");
+    run_with(&mut sim, &node, region.clone());
+    region.members.sort_by_key(|member| member.card.key());
+    assert_eq!(read(&mut sim, &node, ""), Some(region.clone()));
+    let other = region::Founding {
+        prefix: Prefix::ROOT,
+        ..region
     };
-    let path = PathBuf::from("founding.new");
-    let operation = Operation::WriteAt;
-    assert_eq!(
-        error,
-        files::Error::Io {
-            path,
-            operation,
-            code: 5
-        }
-    );
-    assert_eq!(read(&mut sim, &node, ""), None);
-    run_with(&mut sim, &node, region);
+    let io = files::Error::Io {
+        path: PathBuf::from("founding.new"),
+        operation: Operation::WriteAt,
+        code: 5,
+    };
+    assert_eq!(refused(&mut sim, &node, other), Error::Files(io));
 }
 
 #[test]
