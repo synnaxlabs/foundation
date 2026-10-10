@@ -879,17 +879,16 @@ impl Serve {
                 region,
             });
             let parts = mesh.as_ref().map(|mesh| {
-                let kinds = Arc::new(kinds());
-                let ops = operations(mesh, &time, &entropy, Arc::clone(&kinds));
                 let config = connector::supervisor::Config {
-                    kinds,
+                    kinds: Arc::new(kinds()),
                     clock: clock.clone(),
-                    entropy,
+                    entropy: entropy.clone(),
                     net,
                     tasks: tasks.clone(),
                     hub: hub.clone(),
                 };
-                (ops, (mesh, runs(mesh, key, config)))
+                let (ops, runs) = wire(mesh, key, &time, &entropy, config);
+                (ops, (mesh, runs))
             });
             let (ops, runs) = parts.unzip();
             let ended = mesh.as_ref().map(mesh::Mesh::ended);
@@ -947,16 +946,22 @@ fn operations(
     Rc::new(ops::Node::new(mesh.clone(), key, front_ends, kinds))
 }
 
-/// The runs of the connectors that the spec in use places on the node `key` of
-/// `mesh`, on a supervisor made from `config`.
-fn runs(
+/// The operations on `mesh`, and the runs of the connectors that the spec in use
+/// places on its node `key`, on a supervisor made from `supervisor`. Both use the
+/// kind table of `supervisor`, so that each kind is one value for the life of the
+/// process.
+fn wire(
     mesh: &mesh::Mesh,
     key: types::node::Key,
-    config: connector::supervisor::Config,
-) -> connectors::Runs {
+    time: &clock::Reader,
+    entropy: &env::entropy::Entropy,
+    supervisor: connector::supervisor::Config,
+) -> (Rc<ops::Node>, connectors::Runs) {
+    let ops = operations(mesh, time, entropy, Arc::clone(&supervisor.kinds));
     let member = mesh.member(key);
     let member = member.expect("invariant: a mesh opens only on a member");
-    connectors::Runs::new(config, member.card.card().name.clone())
+    let runs = connectors::Runs::new(supervisor, member.card.card().name.clone());
+    (ops, runs)
 }
 
 /// The connector kinds of this binary.
