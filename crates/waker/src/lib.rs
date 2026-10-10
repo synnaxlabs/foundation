@@ -26,9 +26,8 @@ struct Inner<T> {
 /// shares `value`, and the last drop of the waker or a clone drops it. A wake does
 /// nothing.
 ///
-/// # Aborts
-///
-/// At a clone, a wake, or a drop of the waker or a clone on another thread.
+/// A clone, a wake, or a drop of the waker or a clone on another thread aborts the
+/// process before it reads `value`, because `value` need not be `Send`.
 pub fn holding<T: 'static>(value: T) -> Waker {
     let inner = Rc::new(Inner {
         thread: thread::current().id(),
@@ -58,7 +57,8 @@ unsafe fn check<T>(data: *const ()) {
     // so a read from any thread is no race. It reads only `thread`, never the counts.
     let thread = unsafe { (*data.cast::<Inner<T>>()).thread };
     if thread != thread::current().id() {
-        eprintln!("a waker of `waker::holding` ran on a thread that did not make it");
+        let current = thread::current().id();
+        eprintln!("a waker of `waker::holding` made on {thread:?} ran on {current:?}");
         process::abort();
     }
 }

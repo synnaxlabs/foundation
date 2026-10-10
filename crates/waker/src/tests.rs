@@ -66,12 +66,16 @@ fn assert_aborts(child: impl FnOnce()) {
         .unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert_eq!(output.status.signal(), Some(SIGABRT), "{stderr}");
+    let (made, ran) = stderr
+        .lines()
+        .find_map(|line| line.strip_prefix("a waker of `waker::holding` made on "))
+        .and_then(|threads| threads.split_once(" ran on "))
+        .unwrap_or_else(|| panic!("no abort message: {stderr}"));
     assert!(
-        stderr.contains(
-            "a waker of `waker::holding` ran on a thread that did not make it"
-        ),
+        made.starts_with("ThreadId(") && ran.starts_with("ThreadId("),
         "{stderr}"
     );
+    assert_ne!(made, ran, "{stderr}");
 }
 
 /// Runs `call` with a waker of [`holding`] on another thread.
@@ -93,6 +97,13 @@ fn on_another_thread(call: fn(Waker)) {
 #[test]
 fn a_clone_on_another_thread_aborts() {
     assert_aborts(|| on_another_thread(|waker| drop(waker.clone())));
+}
+
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "Miri cannot spawn a process")]
+#[test]
+fn a_wake_on_another_thread_aborts() {
+    assert_aborts(|| on_another_thread(Waker::wake));
 }
 
 #[cfg(unix)]
