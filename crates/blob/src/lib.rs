@@ -397,7 +397,6 @@ impl<'a> Flight<'a> {
             file.sync().await
         }
         .await;
-        // A drop closes with no wait, and another `Files` may then find the file busy.
         file.close().await;
         written?;
         store.files.sync_dir(&store.dir).await?;
