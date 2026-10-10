@@ -561,7 +561,7 @@ mod tests {
     }
 
     /// Polls `future` once with a waker of `count`.
-    fn poll_with<F: Future>(
+    fn poll_with<F: Future + ?Sized>(
         future: Pin<&mut F>,
         count: &Arc<Count>,
     ) -> Poll<F::Output> {
@@ -623,8 +623,8 @@ mod tests {
         assert_eq!(kept.0.load(Relaxed), 1, "the drop of the open wakes it");
     }
 
-    // A waiter keeps its key after its busy span ends. A key used again by a waiter of
-    // the next span would let the first waiter's drop take its waker.
+    // A waiter keeps its place after its busy span ends. A place used again by a waiter
+    // of the next span would let the first waiter's drop take its waker.
     #[test]
     fn a_waiter_of_an_ended_span_keeps_the_wakers_of_the_next_span() {
         let ports = Ports::new();
@@ -707,65 +707,72 @@ mod tests {
         assert_eq!(format!("{ports:?}"), "{}", "no slot left behind");
     }
 
-    /// An endpoint that records whether the registry's lock was free at its close.
-    struct Probe(Arc<Locked<u8, (), Probe>>, Arc<AtomicUsize>);
+    /// An endpoint whose close reads the registry, so a close under the registry's lock
+    /// deadlocks.
+    struct Probe(Arc<Registry<u8, (), Probe>>, Arc<AtomicUsize>);
 
     impl Drop for Probe {
         fn drop(&mut self) {
-            count_if_free(&self.0, &self.1);
-        }
-    }
-
-    /// Adds one to `count` when `lock` is free.
-    fn count_if_free<M>(lock: &Mutex<M>, count: &AtomicUsize) {
-        if lock.try_lock().is_ok() {
-            count.fetch_add(1, Relaxed);
+            assert_eq!(
+                format!("{:?}", self.0),
+                "{0}",
+                "the slot is busy at the close"
+            );
+            self.1.fetch_add(1, Relaxed);
         }
     }
 
     #[test]
     fn closes_after_it_releases_the_lock() {
-        let ports = Registry::<u8, (), Probe>::new();
-        let free = Arc::new(AtomicUsize::new(0));
-        let probe = Probe(Arc::clone(&ports.0), Arc::clone(&free));
+        let ports = Arc::new(Registry::<u8, (), Probe>::new());
+        let closes = Arc::new(AtomicUsize::new(0));
+        let probe = Probe(Arc::clone(&ports), Arc::clone(&closes));
         let open = |(): &()| future::ready(Ok(probe));
         drop(block_on(ports.acquire(0, (), open)).expect("opens"));
-        assert_eq!(free.load(Relaxed), 1, "the lock was free at the close");
+        assert_eq!(closes.load(Relaxed), 1);
+        assert_eq!(format!("{ports:?}"), "{}");
     }
 
-    /// A waker that records whether the registry's lock was free at its drop.
-    struct WakerProbe(Arc<Locked<&'static str, u32, Port>>, Arc<AtomicUsize>);
+    /// A waker that owns a waiting acquire of `tty0`. Its drop drops that acquire, which
+    /// takes the registry's lock, so a drop under the lock deadlocks.
+    struct Holder {
+        _waiter: Mutex<Pending>,
+    }
+
+    type Pending = Pin<
+        Box<dyn Future<Output = Result<Lease<&'static str, u32, Port>, Error>> + Send>,
+    >;
 
     #[expect(clippy::manual_noop_waker, reason = "its drop is the probe")]
-    impl std::task::Wake for WakerProbe {
+    impl std::task::Wake for Holder {
         fn wake(self: Arc<Self>) {}
     }
 
-    impl Drop for WakerProbe {
-        fn drop(&mut self) {
-            count_if_free(&self.0, &self.1);
-        }
+    fn holder(ports: &Arc<Ports>) -> Waker {
+        let ports = Arc::clone(ports);
+        let mut waiter: Pending = Box::pin(async move { busy(&ports).await });
+        assert!(poll_with(waiter.as_mut(), &Arc::default()).is_pending());
+        Waker::from(Arc::new(Holder {
+            _waiter: Mutex::new(waiter),
+        }))
     }
 
     #[test]
     fn drops_a_replaced_or_removed_waker_after_it_releases_the_lock() {
-        let ports = Ports::new();
+        let ports = Arc::new(Ports::new());
         let mut open = pin!(busy(&ports));
         assert!(poll_with(open.as_mut(), &Arc::default()).is_pending());
-        let free = Arc::new(AtomicUsize::new(0));
         let poll = |waiter: Pin<&mut _>| {
-            let probe = WakerProbe(Arc::clone(&ports.0), Arc::clone(&free));
-            let waker = Waker::from(Arc::new(probe));
+            let waker = holder(&ports);
             Future::poll(waiter, &mut std::task::Context::from_waker(&waker))
         };
         let mut replaced = pin!(busy(&ports));
         assert!(poll(replaced.as_mut()).is_pending());
         assert!(poll_with(replaced.as_mut(), &Arc::default()).is_pending());
-        assert_eq!(free.load(Relaxed), 1, "the lock was free at the replace");
         let mut removed = Box::pin(busy(&ports));
         assert!(poll(removed.as_mut()).is_pending());
         drop(removed);
-        assert_eq!(free.load(Relaxed), 2, "the lock was free at the removal");
+        assert_eq!(format!("{ports:?}"), r#"{"tty0"}"#);
     }
 
     /// Settings whose compare panics while the registry holds its lock.
