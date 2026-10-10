@@ -182,8 +182,8 @@ impl Reader {
         if seq < self.end {
             return Err(Error::Seq { seq, end: self.end });
         }
-        Ok(super::end(head.range)
-            .expect("Reply::decode refuses a range past the highest seq"))
+        // `Reply::decode` refused a range past `u64::MAX`, so this does not wrap.
+        Ok(seq.wrapping_add(u64::from(head.range.count)))
     }
 }
 
