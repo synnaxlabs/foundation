@@ -560,36 +560,42 @@ mod tests {
         assert_eq!(noop(&mut ended), Poll::Ready(()));
     }
 
-    /// Wakers whose clone and drop run code, as a waker of another crate may. Safe
-    /// Rust makes a waker only from a `Wake`, whose clone runs no code.
+    /// Wakers whose clone and drop run code, as a waker of another crate may, and the
+    /// tests that use them. Safe Rust makes a waker only from a `Wake`, whose clone
+    /// runs no code.
     #[expect(unsafe_code, reason = "a waker whose clone and drop run code")]
     mod hooked {
-        use std::cell::Cell;
         use std::ptr;
-        use std::task::{RawWaker, RawWakerVTable, Waker};
+        use std::task::{RawWaker, RawWakerVTable};
+
+        use super::*;
 
         /// What the clone, the drop, and the wake of each waker of [`waker`] do.
         #[derive(Default)]
-        pub(super) struct Hooks {
+        struct Hooks {
             /// Runs at the next clone.
-            pub(super) clone: Cell<Option<Box<dyn FnOnce()>>>,
+            clone: Cell<Option<Box<dyn FnOnce()>>>,
             /// Runs at the next drop.
-            pub(super) drop: Cell<Option<Box<dyn FnOnce()>>>,
-            pub(super) woken: Cell<bool>,
+            drop: Cell<Option<Box<dyn FnOnce()>>>,
+            woken: Cell<bool>,
         }
 
         // Each function reads `data` only as the `&Hooks` that `waker` gave, and each
         // clone gives the same `data` with this table.
         const VTABLE: RawWakerVTable =
-            RawWakerVTable::new(clone, wake, wake_by_ref, drop);
+            RawWakerVTable::new(on_clone, on_wake, on_wake_by_ref, on_drop);
 
-        /// A waker over `hooks`. It and each clone stay on the test's thread and drop
-        /// before `hooks`.
-        pub(super) fn waker(hooks: &Hooks) -> Waker {
+        /// A waker over `hooks`.
+        ///
+        /// # Safety
+        ///
+        /// `hooks` outlives the waker and each clone of it, and each stays on this
+        /// thread.
+        unsafe fn waker(hooks: &Hooks) -> Waker {
             let raw = RawWaker::new(ptr::from_ref(hooks).cast(), &VTABLE);
             // SAFETY: each function of `VTABLE` reads `data` as the `&Hooks` it is,
-            // which outlives the waker. The waker and each clone stay on the thread of
-            // the test, so the thread-safety contract of `RawWaker` holds.
+            // which outlives the waker and stays on this thread with each clone, as
+            // the caller's contract states. So the contract of `RawWaker` holds.
             unsafe { Waker::from_raw(raw) }
         }
 
@@ -604,7 +610,7 @@ mod tests {
         /// # Safety
         ///
         /// As [`hooks`].
-        unsafe fn clone(data: *const ()) -> RawWaker {
+        unsafe fn on_clone(data: *const ()) -> RawWaker {
             // SAFETY: the caller's contract.
             let hooks = unsafe { hooks(data) };
             if let Some(hook) = hooks.clone.take() {
@@ -616,17 +622,17 @@ mod tests {
         /// # Safety
         ///
         /// As [`hooks`].
-        unsafe fn wake(data: *const ()) {
+        unsafe fn on_wake(data: *const ()) {
             // SAFETY: the caller's contract.
-            unsafe { wake_by_ref(data) };
+            unsafe { on_wake_by_ref(data) };
             // SAFETY: the caller's contract.
-            unsafe { drop(data) };
+            unsafe { on_drop(data) };
         }
 
         /// # Safety
         ///
         /// As [`hooks`].
-        unsafe fn wake_by_ref(data: *const ()) {
+        unsafe fn on_wake_by_ref(data: *const ()) {
             // SAFETY: the caller's contract.
             unsafe { hooks(data) }.woken.set(true);
         }
@@ -634,78 +640,84 @@ mod tests {
         /// # Safety
         ///
         /// As [`hooks`].
-        unsafe fn drop(data: *const ()) {
+        unsafe fn on_drop(data: *const ()) {
             // SAFETY: the caller's contract.
             let hooks = unsafe { hooks(data) };
             if let Some(hook) = hooks.drop.take() {
                 hook();
             }
         }
-    }
 
-    #[test]
-    fn a_waker_whose_clone_drops_the_last_task_gives_ready() {
-        let hooks = hooked::Hooks::default();
-        let (kept, group) = group();
-        group.tasks().spawn(std::future::pending());
-        let task = kept.0.borrow_mut()[0].take().expect("a live task");
-        hooks.clone.set(Some(Box::new(move || drop(task))));
-        let mut ended = group.ended();
-        assert_eq!(poll(&mut ended, &hooked::waker(&hooks)), Poll::Ready(()));
-    }
+        #[test]
+        fn a_waker_whose_clone_drops_the_last_task_gives_ready() {
+            let hooks = Hooks::default();
+            let (kept, group) = group();
+            group.tasks().spawn(std::future::pending());
+            let task = kept.0.borrow_mut()[0].take().expect("a live task");
+            hooks.clone.set(Some(Box::new(move || drop(task))));
+            let mut ended = group.ended();
+            // SAFETY: `hooks` drops last, and no waker leaves this thread.
+            let hooked = unsafe { waker(&hooks) };
+            assert_eq!(poll(&mut ended, &hooked), Poll::Ready(()));
+        }
 
-    #[test]
-    fn a_waker_whose_clone_drops_the_last_task_and_drop_spawns_gives_pending() {
-        let hooks = hooked::Hooks::default();
-        let (kept, group) = group();
-        group.tasks().spawn(std::future::pending());
-        let task = kept.0.borrow_mut()[0].take().expect("a live task");
-        hooks.clone.set(Some(Box::new(move || drop(task))));
-        let spawner = group.clone();
-        hooks.drop.set(Some(Box::new(move || {
-            spawner.tasks().spawn(std::future::pending());
-        })));
-        let mut ended = group.ended();
-        assert_eq!(poll(&mut ended, &hooked::waker(&hooks)), Poll::Pending);
-        assert_eq!(kept.0.borrow().len(), 2);
-        kept.drop_task(1);
-        assert!(hooks.woken.get());
-        assert_eq!(noop(&mut ended), Poll::Ready(()));
-    }
+        #[test]
+        fn a_waker_whose_clone_drops_the_last_task_and_drop_spawns_gives_pending() {
+            let hooks = Hooks::default();
+            let (kept, group) = group();
+            group.tasks().spawn(std::future::pending());
+            let task = kept.0.borrow_mut()[0].take().expect("a live task");
+            hooks.clone.set(Some(Box::new(move || drop(task))));
+            let spawner = group.clone();
+            hooks.drop.set(Some(Box::new(move || {
+                spawner.tasks().spawn(std::future::pending());
+            })));
+            let mut ended = group.ended();
+            // SAFETY: `hooks` drops last, and no waker leaves this thread.
+            let hooked = unsafe { waker(&hooks) };
+            assert_eq!(poll(&mut ended, &hooked), Poll::Pending);
+            assert_eq!(kept.0.borrow().len(), 2);
+            kept.drop_task(1);
+            assert!(hooks.woken.get());
+            assert_eq!(noop(&mut ended), Poll::Ready(()));
+        }
 
-    #[test]
-    fn a_replaced_waker_whose_drop_drops_the_last_task_wakes_the_new_one() {
-        let hooks = hooked::Hooks::default();
-        let (kept, group) = group();
-        group.tasks().spawn(std::future::pending());
-        let task = kept.0.borrow_mut()[0].take().expect("a live task");
-        let mut ended = group.ended();
-        let first = hooked::waker(&hooks);
-        assert_eq!(poll(&mut ended, &first), Poll::Pending);
-        drop(first);
-        hooks.drop.set(Some(Box::new(move || drop(task))));
-        let flag = Arc::new(Flag::default());
-        assert_eq!(
-            poll(&mut ended, &Waker::from(Arc::clone(&flag))),
-            Poll::Pending
-        );
-        assert!(flag.woken());
-        assert_eq!(noop(&mut ended), Poll::Ready(()));
-    }
+        #[test]
+        fn a_replaced_waker_whose_drop_drops_the_last_task_wakes_the_new_one() {
+            let hooks = Hooks::default();
+            let (kept, group) = group();
+            group.tasks().spawn(std::future::pending());
+            let task = kept.0.borrow_mut()[0].take().expect("a live task");
+            let mut ended = group.ended();
+            // SAFETY: `hooks` drops last, and no waker leaves this thread.
+            let first = unsafe { waker(&hooks) };
+            assert_eq!(poll(&mut ended, &first), Poll::Pending);
+            drop(first);
+            hooks.drop.set(Some(Box::new(move || drop(task))));
+            let flag = Arc::new(Flag::default());
+            assert_eq!(
+                poll(&mut ended, &Waker::from(Arc::clone(&flag))),
+                Poll::Pending
+            );
+            assert!(flag.woken());
+            assert_eq!(noop(&mut ended), Poll::Ready(()));
+        }
 
-    #[test]
-    fn a_removed_waker_whose_drop_drops_another_ended_drops_both() {
-        let hooks = hooked::Hooks::default();
-        let (_kept, group) = group();
-        group.tasks().spawn(std::future::pending());
-        let mut ended = group.ended();
-        let first = hooked::waker(&hooks);
-        assert_eq!(poll(&mut ended, &first), Poll::Pending);
-        drop(first);
-        let other = group.ended();
-        hooks.drop.set(Some(Box::new(move || drop(other))));
-        drop(ended);
-        assert!(hooks.drop.take().is_none());
-        assert!(!hooks.woken.get());
+        #[test]
+        fn a_removed_waker_whose_drop_drops_another_ended_drops_both() {
+            let hooks = Hooks::default();
+            let (_kept, group) = group();
+            group.tasks().spawn(std::future::pending());
+            let mut ended = group.ended();
+            // SAFETY: `hooks` drops last, and no waker leaves this thread.
+            let first = unsafe { waker(&hooks) };
+            assert_eq!(poll(&mut ended, &first), Poll::Pending);
+            drop(first);
+            let other = group.ended();
+            hooks.drop.set(Some(Box::new(move || drop(other))));
+            drop(ended);
+            assert!(hooks.drop.take().is_none());
+            assert!(!hooks.woken.get());
+        }
     }
 }
