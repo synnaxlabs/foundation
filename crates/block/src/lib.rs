@@ -47,6 +47,38 @@ pub struct Config {
 }
 
 impl Config {
+    /// Settings for a pool that commits at most `budget_bytes` bytes at once. Resident
+    /// memory can pass the budget by up to two partial pages per size class, because a
+    /// purge rounds in to page bounds.
+    ///
+    /// # Errors
+    ///
+    /// [`Unfit`] when the pool's reservation, up to 96 times the budget, does not fit
+    /// in this host's address space.
+    pub const fn new(budget_bytes: u64) -> Result<Self, Unfit> {
+        let unfit = Unfit {
+            budget: budget_bytes,
+        };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "`TryFrom` is not const; the next line refuses a truncated budget"
+        )]
+        let budget = budget_bytes as usize;
+        if budget as u64 != budget_bytes {
+            return Err(unfit);
+        }
+        let Some(span) = budget.checked_next_multiple_of(ALIGN) else {
+            return Err(unfit);
+        };
+        let Some(spans) = span.checked_mul(classes(budget)) else {
+            return Err(unfit);
+        };
+        if spans.checked_add(HEADER).is_none() {
+            return Err(unfit);
+        }
+        Ok(Self { budget })
+    }
+
     /// Bytes of address space that a pool with these settings needs from its
     /// [`Memory`]. Each size class can grow to the full budget, so this is up to 96
     /// times the budget.
@@ -64,11 +96,35 @@ impl Config {
     }
 }
 
+/// A pool budget whose reservation does not fit in this host's address space.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Unfit {
+    /// The budget, in bytes.
+    pub budget: u64,
+}
+
+impl fmt::Display for Unfit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "pool budget {} bytes needs more address space than this host has",
+            self.budget
+        )
+    }
+}
+
+impl std::error::Error for Unfit {}
+
 /// How many size classes fit in `budget`, at most `CLASSES_MAX`.
-fn classes(budget: usize) -> usize {
-    match budget.checked_sub(HEADER) {
-        Some(room) => class_of(room + 1).min(CLASSES_MAX),
-        None => 0,
+const fn classes(budget: usize) -> usize {
+    let Some(room) = budget.checked_sub(HEADER) else {
+        return 0;
+    };
+    let index = class_of(room + 1);
+    if index < CLASSES_MAX {
+        index
+    } else {
+        CLASSES_MAX
     }
 }
 
@@ -1007,6 +1063,40 @@ mod tests {
             assert_eq!(classes((1 << 31) + 64), CLASSES_MAX);
             assert_eq!(classes(1 << 40), CLASSES_MAX);
             assert_eq!(classes(usize::MAX), CLASSES_MAX);
+        }
+
+        #[test]
+        #[cfg(target_pointer_width = "64")]
+        fn fits_up_to_the_last_span_below_the_address_space() {
+            let last = 192_153_584_101_141_120;
+            let config = Config::new(last).expect("the reservation fits");
+            assert_eq!(config.reservation(), usize::MAX - 4031);
+            let error = Config::new(last + 1).expect_err("the reservation is past it");
+            assert_eq!(error, Unfit { budget: last + 1 });
+        }
+
+        #[test]
+        fn is_unfit_for_the_largest_budget() {
+            let error = Config::new(u64::MAX).expect_err("the reservation is past it");
+            assert_eq!(error, Unfit { budget: u64::MAX });
+            assert_eq!(
+                error.to_string(),
+                "pool budget 18446744073709551615 bytes needs more address space \
+                 than this host has"
+            );
+        }
+
+        proptest! {
+            #[test]
+            fn is_the_wide_sum_when_it_fits(budget in any::<u64>()) {
+                let wide = usize::try_from(budget).ok().map(|narrow| {
+                    let span = u128::from(budget).next_multiple_of(64);
+                    span * u128::try_from(classes(narrow)).expect("at most 96") + 64
+                });
+                let fits = wide.and_then(|wide| usize::try_from(wide).ok());
+                let given = Config::new(budget).map(|config| config.reservation());
+                prop_assert_eq!(given, fits.ok_or(Unfit { budget }));
+            }
         }
 
         #[test]
