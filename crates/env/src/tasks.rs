@@ -197,12 +197,12 @@ impl Future for Ended {
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        // A waker's clone and drop can drop a task or an `Ended` of this group. So the
+        // clone comes before the check, and the old waker drops after the borrow.
+        let waker = cx.waker().clone();
         if self.count.live.get() == 0 {
             return Poll::Ready(());
         }
-        let waker = cx.waker().clone();
-        // The old waker drops after the borrow: its drop can drop a task or an
-        // `Ended` of this group.
         let replaced = self.count.waiting.borrow_mut().insert(self.slot, waker);
         drop(replaced);
         Poll::Pending
