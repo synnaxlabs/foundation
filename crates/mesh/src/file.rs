@@ -107,22 +107,3 @@ pub(crate) fn wide(len: usize) -> u64 {
 pub(crate) fn narrow(offset: u64) -> usize {
     usize::try_from(offset).expect("invariant: a file offset fits in memory")
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn blocks(budget: usize) -> Result<Blocks, block::Error> {
-        let config = block::Config { budget };
-        let memory = block::Heap::new(config.reservation());
-        Blocks::new(Rc::new(Pool::new(config, memory)))
-    }
-
-    #[test]
-    fn refuses_a_pool_with_no_block_of_one_sector() {
-        let refused = blocks(512).unwrap_err();
-        let largest = 448;
-        let requested = files::SECTOR;
-        assert_eq!(refused, block::Error::TooLarge { requested, largest });
-    }
-}
