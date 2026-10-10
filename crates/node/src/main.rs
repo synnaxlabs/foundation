@@ -274,7 +274,7 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
                     fix,
                 }
             }
-            Origin::Most | Origin::Quarter => failure(dir, error),
+            Origin::Most | Origin::Quarter => failed(error),
         },
         node::Error::Memory {
             core,
