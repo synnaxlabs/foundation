@@ -74,9 +74,10 @@
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6060989849,
   2026-10-08 13:31 UTC). The `UA_ARCH_HEADER` of the allocator below and the sanitizer
   flags below are the only flags of `build.rs` outside `flags.txt`, so the objects of
-  the check do not have them. The check adds only `-g -O0` and `-fno-stack-protector`
-  (above). A `-W` flag with no `,` is a warning, which changes no code, so `collect`
-  leaves it out by that pattern, not by name. Decided by `laptop.architect-2`
+  the check do not have them. The check adds `-g -O0` and `-fno-stack-protector`
+  (above), and no other flag that changes the code. A `-W` flag with no `,` is a
+  warning, which changes no code, so `collect` leaves it out by that pattern, not by
+  name. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061473044,
   2026-10-08 13:57 UTC) and `laptop.director`
   (https://github.com/synnaxlabs/foundation/pull/1893#issuecomment-6061540779,

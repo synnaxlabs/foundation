@@ -1521,8 +1521,8 @@ End of search list.
             symbol_mismatches(&found),
             [
                 unlisted("src/ua_types.c", "socket"),
-                "plugins/ua_log_syslog.c: no longer references `syslog`. Remove it from \
-                 FILE_SYMBOLS"
+                "plugins/ua_log_syslog.c: no longer references `syslog`. Remove it \
+                 from FILE_SYMBOLS"
                     .to_owned(),
             ]
         );
