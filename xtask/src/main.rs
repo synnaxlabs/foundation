@@ -268,8 +268,24 @@ mod tests {
             .unwrap();
         let step = under(&steps[start..], steps[start]);
         let filters = under(&under(&step, "        with:"), "          filters: |");
+        // A deeper line, or a scalar on a line of the list, is part of one item, so
+        // each line must be one whole item.
         (under(&filters, "            models:").iter())
-            .map(|line| line.trim().strip_prefix("- ").expect("a path"))
+            .map(|line| {
+                (line.strip_prefix("              - "))
+                    .filter(|path| {
+                        path.len() > 2
+                            && path.starts_with('\'')
+                            && path.ends_with('\'')
+                            && path.matches('\'').count() == 2
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "the models filter has a line that is not one quoted path: \
+                             `{line}`"
+                        )
+                    })
+            })
             .collect()
     }
 
@@ -313,6 +329,29 @@ mod tests {
         let ci: Vec<&str> = ci.lines().collect();
         assert_eq!(models(&ci), ["'crates/env/**'"]);
         assert_eq!(output(&ci), ["        real"]);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "the models filter has a line that is not one quoted path: \
+                    `              - >-`"
+    )]
+    fn models_refuses_a_path_inside_a_scalar_of_the_filter() {
+        let ci = concat!(
+            "jobs:\n",
+            "  changes:\n",
+            "    steps:\n",
+            "      - uses: dorny/paths-filter\n",
+            "        id: filter\n",
+            "        with:\n",
+            "          filters: |\n",
+            "            models:\n",
+            "              - 'crates/env/**'\n",
+            "              - >-\n",
+            "                - 'crates/types/**'\n",
+        );
+        let ci: Vec<&str> = ci.lines().collect();
+        models(&ci);
     }
 
     #[test]
