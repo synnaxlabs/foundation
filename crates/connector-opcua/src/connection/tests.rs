@@ -2782,48 +2782,86 @@ fn a_manager_that_listens_at_a_taken_address_fails() {
     assert_eq!(error, Some(net::Error::AddressInUse { local }));
 }
 
-/// Sends 1 KiB at a time on stream `id` until the manager refuses one, and gives the
-/// count of sends that it took.
-async fn taken(side: &Side, id: usize) -> usize {
-    let mut sent = 0;
-    while side.send(id, &[7; 1 << 10]) == Status::GOOD {
-        sent += 1;
-        side.drive(Span::from_nanos(1_000_000)).await;
+/// How the manager opens the one stream of a test.
+#[derive(Clone, Copy)]
+enum Open {
+    Accepted,
+    Dialed,
+}
+
+impl Open {
+    /// Opens the stream with the peer in [`hold`] with `delay` and `bytes`, drives
+    /// the manager for 3.5 s, and gives `body` the side, the key of the stream, and
+    /// the count of [`hold`].
+    fn run<T, F>(
+        self,
+        network: &mut Network,
+        delay: Span,
+        bytes: usize,
+        body: impl FnOnce(Side, usize, Arc<Mutex<usize>>) -> F + Send + 'static,
+    ) -> T
+    where
+        T: Send + 'static,
+        F: Future<Output = T> + 'static,
+    {
+        let taken = match self {
+            Self::Accepted => network.dial_and_hold(delay, bytes),
+            Self::Dialed => network.accept_and_hold(delay, bytes),
+        };
+        let remote = network.remote();
+        network
+            .sim
+            .run_on(&network.local.clone(), move |node, _| async move {
+                let side = match self {
+                    Self::Accepted => {
+                        let side = Side::listening(&node, local(&node));
+                        assert_eq!(side.listen(PORT), Status::GOOD);
+                        side
+                    }
+                    Self::Dialed => {
+                        let side = Side::new(&node);
+                        assert_eq!(side.connect(remote), Status::GOOD);
+                        side
+                    }
+                };
+                side.drive(Span::from_nanos(3_500_000_000)).await;
+                let id = match self {
+                    Self::Accepted => side.calls()[1].0,
+                    Self::Dialed => 1,
+                };
+                body(side, id, taken).await
+            })
+            .expect("the run ends")
     }
-    sent
 }
 
-/// Gives [`taken`] on an accepted stream whose peer reads nothing.
-fn taken_on_an_accepted_stream(network: &mut Network) -> usize {
-    network.dial_and_hold(Span::ZERO, 0);
-    network
-        .sim
-        .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::listening(&node, local(&node));
-            assert_eq!(side.listen(PORT), Status::GOOD);
-            side.drive(Span::from_nanos(3_500_000_000)).await;
-            let (id, _, _) = side.calls()[1];
-            taken(&side, id).await
-        })
-        .expect("the run ends")
+/// Sends 1 KiB at a time on the stream that `open` opens, whose peer reads nothing,
+/// until the manager refuses one, and gives the count of sends that it took.
+fn sent(network: &mut Network, open: Open) -> usize {
+    open.run(network, Span::ZERO, 0, |side, id, _| async move {
+        let mut sent = 0;
+        while side.send(id, &[7; 1 << 10]) == Status::GOOD {
+            sent += 1;
+            side.drive(Span::from_nanos(1_000_000)).await;
+        }
+        sent
+    })
 }
 
-/// Gives [`taken`] on a dialed stream whose peer reads nothing.
-fn taken_on_a_dialed_stream(network: &mut Network) -> usize {
-    network.accept_and_hold(Span::ZERO, 0);
-    let remote = network.remote();
-    network
-        .sim
-        .run_on(&network.local.clone(), move |node, _| async move {
-            let side = Side::new(&node);
-            assert_eq!(side.connect(remote), Status::GOOD);
-            side.drive(Span::from_nanos(3_500_000_000)).await;
-            taken(&side, 1).await
-        })
-        .expect("the run ends")
+/// Gives the bytes that the peer writes in 1 s on the stream that `open` opens,
+/// while the manager reads nothing.
+fn received(network: &mut Network, open: Open) -> usize {
+    let delay = Span::from_nanos(3_600_000_000);
+    open.run(network, delay, 1 << 20, |side, _, taken| async move {
+        side.clock.sleep(Span::from_nanos(2_000_000_000)).await;
+        let taken = *taken.lock().expect("no panic under the lock");
+        // The block holds all of `side`, not only its clock, so its streams live.
+        drop(side);
+        taken
+    })
 }
 
-/// A link of 1 s, so that no ack comes back while [`taken`] goes.
+/// A link of 1 s, so that no ack comes back while [`sent`] sends.
 fn slow(network: &mut Network) {
     let link = sim::link::Config {
         delay: Span::SECOND,
@@ -2838,7 +2876,7 @@ fn slow(network: &mut Network) {
 #[test]
 fn an_accepted_stream_holds_the_unsent_bytes_of_the_manager() {
     let mut network = Network::new();
-    assert_eq!(taken_on_an_accepted_stream(&mut network), SENDS + 64 + 16);
+    assert_eq!(sent(&mut network, Open::Accepted), SENDS + 64 + 16);
 }
 
 /// With no ack, an accepted stream takes the 64 KiB of `send_buffer_bytes` of
@@ -2847,26 +2885,15 @@ fn an_accepted_stream_holds_the_unsent_bytes_of_the_manager() {
 fn an_accepted_stream_takes_the_send_buffer_of_the_manager() {
     let mut network = Network::new();
     slow(&mut network);
-    assert_eq!(taken_on_an_accepted_stream(&mut network), SENDS + 64);
+    assert_eq!(sent(&mut network, Open::Accepted), SENDS + 64);
 }
 
-/// The manager reads nothing between drives, so the peer writes the 64 KiB of
-/// `recv_buffer_bytes` of [`OPTIONS`], and the 64 KiB of its own send buffer.
+/// The peer writes the 64 KiB of `recv_buffer_bytes` of [`OPTIONS`], and the 64 KiB
+/// of its own send buffer.
 #[test]
 fn an_accepted_stream_takes_the_receive_buffer_of_the_manager() {
     let mut network = Network::new();
-    let taken = network.dial_and_hold(Span::from_nanos(200_000_000), 1 << 20);
-    let taken = network
-        .sim
-        .run_on(&network.local.clone(), |node, _| async move {
-            let side = Side::listening(&node, local(&node));
-            assert_eq!(side.listen(PORT), Status::GOOD);
-            side.drive(Span::from_nanos(100_000_000)).await;
-            node.clock().sleep(Span::from_nanos(2_000_000_000)).await;
-            *taken.lock().expect("no panic under the lock")
-        })
-        .expect("the run ends");
-    assert_eq!(taken, (64 + 64) << 10);
+    assert_eq!(received(&mut network, Open::Accepted), (64 + 64) << 10);
 }
 
 /// As [`an_accepted_stream_holds_the_unsent_bytes_of_the_manager`], for a dialed
@@ -2874,7 +2901,7 @@ fn an_accepted_stream_takes_the_receive_buffer_of_the_manager() {
 #[test]
 fn a_dialed_stream_holds_the_unsent_bytes_of_the_manager() {
     let mut network = Network::new();
-    assert_eq!(taken_on_a_dialed_stream(&mut network), SENDS + 64 + 16);
+    assert_eq!(sent(&mut network, Open::Dialed), SENDS + 64 + 16);
 }
 
 /// As [`an_accepted_stream_takes_the_send_buffer_of_the_manager`], for a dialed
@@ -2883,7 +2910,7 @@ fn a_dialed_stream_holds_the_unsent_bytes_of_the_manager() {
 fn a_dialed_stream_takes_the_send_buffer_of_the_manager() {
     let mut network = Network::new();
     slow(&mut network);
-    assert_eq!(taken_on_a_dialed_stream(&mut network), SENDS + 64);
+    assert_eq!(sent(&mut network, Open::Dialed), SENDS + 64);
 }
 
 /// As [`an_accepted_stream_takes_the_receive_buffer_of_the_manager`], for a dialed
@@ -2891,17 +2918,5 @@ fn a_dialed_stream_takes_the_send_buffer_of_the_manager() {
 #[test]
 fn a_dialed_stream_takes_the_receive_buffer_of_the_manager() {
     let mut network = Network::new();
-    let taken = network.accept_and_hold(Span::from_nanos(200_000_000), 1 << 20);
-    let remote = network.remote();
-    let taken = network
-        .sim
-        .run_on(&network.local.clone(), move |node, _| async move {
-            let side = Side::new(&node);
-            assert_eq!(side.connect(remote), Status::GOOD);
-            side.drive(Span::from_nanos(100_000_000)).await;
-            node.clock().sleep(Span::from_nanos(2_000_000_000)).await;
-            *taken.lock().expect("no panic under the lock")
-        })
-        .expect("the run ends");
-    assert_eq!(taken, (64 + 64) << 10);
+    assert_eq!(received(&mut network, Open::Dialed), (64 + 64) << 10);
 }
