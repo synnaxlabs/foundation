@@ -945,16 +945,21 @@ mod tests {
         }
     }
 
+    /// Checks that the public `read` refuses `text` with the diagnostic of each
+    /// error, and each diagnostic's text.
     fn check(text: &str, expected: &[(Error, &str)]) {
-        let errors = read(Source(0), text).unwrap_err();
-        let messages: Vec<String> = errors
-            .iter()
-            .map(|error| Diagnostic::from(error).to_string())
-            .collect();
-        let (errors_expected, messages_expected): (Vec<Error>, Vec<&str>) =
+        let diagnostics = crate::read(Source(0), text).unwrap_err();
+        let messages: Vec<String> =
+            diagnostics.iter().map(ToString::to_string).collect();
+        let (errors, messages_expected): (Vec<Error>, Vec<&str>) =
             expected.iter().cloned().unzip();
-        assert_eq!(errors, errors_expected);
+        assert_eq!(Err(diagnostics), diagnosed(&errors));
         assert_eq!(messages, messages_expected);
+    }
+
+    /// What the public `read` gives for a text with `errors`.
+    fn diagnosed(errors: &[Error]) -> Result<Document, Vec<Diagnostic>> {
+        Err(errors.iter().map(Diagnostic::from).collect())
     }
 
     fn syntax(span: Span, expected: Expected) -> Error {
@@ -1804,8 +1809,8 @@ c = "°C # not a comment"
                 indent in "[ \t\u{b}\u{a0}\u{3000}]{0,4}",
             ) {
                 lines.insert(at.index(lines.len().saturating_add(1)), line);
-                let indented = read(Source(0), &heredoc("<<-", &lines, &indent));
-                let plain = read(Source(0), &heredoc("<<", &lines, ""));
+                let indented = crate::read(Source(0), &heredoc("<<-", &lines, &indent));
+                let plain = crate::read(Source(0), &heredoc("<<", &lines, ""));
                 prop_assert_eq!(indented, plain);
             }
         }
@@ -2144,12 +2149,12 @@ c = "°C # not a comment"
             for text in ["s = \"ab\nc\"\n", "s = \"ab\r\nc\"\r\n"] {
                 check(text, &[(unclosed(7), quote)]);
             }
-            let errors = read(Source(0), "s = \"ab\nc\"\n").unwrap_err();
+            let diagnostics = crate::read(Source(0), "s = \"ab\nc\"\n").unwrap_err();
             let note = Note {
                 span: on(4, 5),
                 text: "the string starts here".into(),
             };
-            assert_eq!(Diagnostic::from(&errors[0]).notes, vec![note]);
+            assert_eq!(diagnostics[0].notes, vec![note]);
         }
 
         #[test]
@@ -2681,8 +2686,8 @@ c = "°C # not a comment"
         fn check_depth(levels: &[Level]) {
             let (text, spans) = nested(levels);
             if let Some(&span) = spans.get(DEPTH_MAX) {
-                let expected = Err(vec![Error::TooDeep { span }]);
-                assert_eq!(read(Source(0), &text), expected);
+                let expected = diagnosed(&[Error::TooDeep { span }]);
+                assert_eq!(crate::read(Source(0), &text), expected);
             } else {
                 let document = read(Source(0), &text).unwrap();
                 let bytes = Checked::new(document.clone()).unwrap().encode();
@@ -2704,10 +2709,10 @@ c = "°C # not a comment"
         #[test]
         fn too_deep_names_the_fix() {
             let (text, spans) = nested(&[Level::List; 65]);
-            let errors = read(Source(0), &text).unwrap_err();
-            assert_eq!(errors, vec![Error::TooDeep { span: spans[64] }]);
+            let read = crate::read(Source(0), &text);
+            assert_eq!(read, diagnosed(&[Error::TooDeep { span: spans[64] }]));
             assert_eq!(
-                Diagnostic::from(&errors[0]).to_string(),
+                read.unwrap_err()[0].to_string(),
                 "the document nests deeper than 64 levels. Make it flatter"
             );
         }
@@ -2753,8 +2758,8 @@ c = "°C # not a comment"
                     let (text, spans) = nested(&vec![level; 100_000]);
                     let span = spans[DEPTH_MAX];
                     assert_eq!(
-                        read(Source(0), &text),
-                        Err(vec![Error::TooDeep { span }])
+                        crate::read(Source(0), &text),
+                        diagnosed(&[Error::TooDeep { span }])
                     );
                 }
                 for prefix in ["-", "!"] {
@@ -2763,14 +2768,14 @@ c = "°C # not a comment"
                         span: on(4, 5),
                         form: Form::Operator,
                     };
-                    assert_eq!(read(Source(0), &text), Err(vec![expected]));
+                    assert_eq!(crate::read(Source(0), &text), diagnosed(&[expected]));
                 }
                 let text = format!("a = 1 + {}", "[".repeat(100_000));
                 let expected = Error::Form {
                     span: on(6, 7),
                     form: Form::Operator,
                 };
-                assert_eq!(read(Source(0), &text), Err(vec![expected]));
+                assert_eq!(crate::read(Source(0), &text), diagnosed(&[expected]));
             });
         }
     }
@@ -2818,7 +2823,7 @@ c = "°C # not a comment"
         /// A text that reads gives a Document that writes and reads back the same.
         /// Otherwise each problem starts inside the text.
         fn check_text(text: &str) -> Result<(), TestCaseError> {
-            match read(Source(0), text) {
+            match crate::read(Source(0), text) {
                 Ok(document) => {
                     let checked = Checked::new(document.clone()).map_err(|error| {
                         TestCaseError::fail(format!("{error:?} from {text:?}"))
@@ -2830,17 +2835,20 @@ c = "°C # not a comment"
                         )));
                     };
                     prop_assert_eq!(
-                        read(Source(0), &written),
+                        crate::read(Source(0), &written),
                         Ok(document),
                         "{}",
                         text
                     );
                 }
-                Err(errors) => {
-                    let inside = |error: &&Error| {
-                        usize::try_from(error.offset()).is_ok_and(|at| at <= text.len())
+                Err(diagnostics) => {
+                    let inside = |diagnostic: &&Diagnostic| {
+                        diagnostic.span.is_some_and(|span| {
+                            usize::try_from(span.start().offset)
+                                .is_ok_and(|at| at <= text.len())
+                        })
                     };
-                    let outside = errors.iter().find(|error| !inside(error));
+                    let outside = diagnostics.iter().find(|d| !inside(d));
                     prop_assert!(outside.is_none(), "{:?} in {:?}", outside, text);
                 }
             }

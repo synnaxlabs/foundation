@@ -466,6 +466,20 @@ mod tests {
             diagnostics,
             errors.iter().map(Diagnostic::from).collect::<Vec<_>>()
         );
+
+        let repeat = Error::Document(document::Error::DuplicateKey {
+            key: "a".into(),
+            first: Some(on(at(0, 0, 0), at(1, 0, 1))),
+            second: Some(on(at(6, 1, 0), at(7, 1, 1))),
+        });
+        let null = Error::Form {
+            span: on(at(16, 2, 4), at(20, 2, 8)),
+            form: Form::Null,
+        };
+        assert_eq!(
+            read(Source(0), "a = 1\na = 2\nb = null\n"),
+            Err(vec![Diagnostic::from(&repeat), Diagnostic::from(&null)])
+        );
     }
 
     const EXPECTED: [(Expected, &str); 13] = [
