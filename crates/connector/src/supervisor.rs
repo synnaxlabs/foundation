@@ -806,6 +806,66 @@ mod tests {
     }
 
     #[test]
+    fn writes_the_backoff_that_is_left_after_a_wall_step_in_the_wait() {
+        // The wait starts 2 s after the second run; its frame is refused until 2.5 s
+        // and written again at 3 s. The wall steps 10 s forward at 2.001 s.
+        let step_at: i64 = 2_001;
+        let statuses = run_on(move |node, tasks| async move {
+            let steps = vec![Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
+            let count = steps.len();
+            let script = Script {
+                steps: Mutex::new(steps.into()),
+                ..Script::default()
+            };
+            let runs = Arc::clone(&script.runs);
+            let kinds = Table::new().with("script", script);
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.script").await;
+            let statuses = read_status(&inputs.hub, "plant.script", &[], &tasks).await;
+            let hog = hub::writer::Config {
+                subject: name("plant.other"),
+                authority: Authority(1),
+                lease: None,
+                channels: ["state", "error"]
+                    .map(|c| name(&format!("plant.script.status.{c}")))
+                    .into(),
+            };
+            let hog = inputs.hub.writer(hog).await.expect("opens");
+            let (token, clock) = (Token::new(), node.clock());
+            let (canceller, sleeper) = (token.clone(), clock.clone());
+            let filled = Arc::clone(&runs);
+            let stepper = node.clone();
+            tasks.spawn(async move {
+                while filled.lock().expect("no panic under the lock").len() < count {
+                    sleeper.sleep(ms(10)).await;
+                }
+                sleeper.sleep(ms(1_500)).await;
+                let held = fill(&hog);
+                sleeper.sleep(ms(step_at - 1_500)).await;
+                stepper.step_wall(Span::from_nanos(10_000_000_000));
+                sleeper.sleep(ms(2_500 - step_at)).await;
+                drop(held);
+                sleeper.sleep(ms(5_000)).await;
+                canceller.cancel();
+            });
+            let supervisor = Supervisor::new(inputs);
+            let name = name("plant.script");
+            let result = supervisor.run("script", name, &config(), &token).await;
+            result.expect("ok after a cancel");
+            clock.sleep(Span::SECOND).await;
+            statuses.borrow().clone()
+        });
+        let (at, samples, _) = &statuses[5];
+        assert_eq!(samples[..2], [1, 2], "the second wait: {statuses:?}");
+        let (run, again, _) = &statuses[6];
+        assert_eq!(again[0], 0, "the next run: {statuses:?}");
+        // `backoff` is the wait by the node's clock. After the step, the hub's time
+        // slews toward the wall at 500 ppm.
+        let (backoff, wait) = (samples[3], between(*at, *run).nanos());
+        assert_eq!(wait - backoff, backoff / 2_000, "{statuses:?}");
+    }
+
+    #[test]
     fn writes_the_class_of_a_retry_error() {
         let out = supervise("script", vec![Step::Retry, Step::Done], config(), None);
         let want = [

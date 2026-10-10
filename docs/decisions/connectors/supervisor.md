@@ -60,13 +60,14 @@
   https://github.com/synnaxlabs/foundation/issues/1735#issuecomment-6053869186). The
   text of `error` is the text of the `Device` or `Retry` source, or the diagnostics of
   `Config` joined with `"; "`, cut to at most 1024 bytes at a char boundary, so a long
-  device error does not make a frame too large. `backoff` is the time of the next run,
-  by the hub's clock, minus the time of the frame, so a frame written again later gives
-  the wait that is left, and a frame stamped after the hub's time (below) gives a wait
-  that ends at the next run. Decided by the `connector` builder in the plan on #420
-  (2026-10-10T03:22:36Z:
-  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074). The
-  cut and the join are approved by `laptop.architect-2` (2026-10-10T04:00:21Z:
+  device error does not make a frame too large. `backoff` is the wait that is left to
+  the next run by the node's clock at the write, less the time by which the frame is
+  stamped after the hub's time (below). So a frame written again later gives the wait
+  that is left, a frame stamped ahead gives a wait that ends at the next run, and a step
+  of the hub's time during the wait does not change it. Decided by the `connector`
+  builder in the plan on #420 (2026-10-10T03:22:36Z:
+  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074). The cut
+  and the join are approved by `laptop.architect-2` (2026-10-10T04:00:21Z:
   https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6093545130).
 
   Each write is one frame with the last value of every status channel. Each start of a

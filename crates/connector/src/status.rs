@@ -295,7 +295,7 @@ impl Writer {
                 at,
                 form,
             },
-            next: Stamp::default(),
+            next: Monotonic::default(),
             started: false,
             unapplied: false,
             closed: false,
@@ -341,11 +341,12 @@ impl Writer {
     /// time of the next run.
     pub(crate) async fn wait(&self, span: Span) -> Monotonic {
         self.applied().await;
+        let next = self.clock.now() + span;
         self.change(|session| {
-            session.next = session.hub.now() + span;
+            session.next = next;
             session.state = State::Waiting;
         });
-        self.clock.now() + span
+        next
     }
 
     /// Writes `state` 2.
@@ -461,8 +462,8 @@ struct Session {
     class: Class,
     restarts: u64,
     error: Text,
-    /// The time of the next run, by the hub's clock, while `state` is 1.
-    next: Stamp,
+    /// The time of the next run, by the node's clock, while `state` is 1.
+    next: Monotonic,
     /// Set at the first start, after which each start is a restart.
     started: bool,
     /// Set while the last change of state waits for a frame that the home applies,
@@ -513,8 +514,10 @@ impl Session {
         self.wrote = now;
         let mesh = self.hub.now();
         let stamp = self.last.map_or(mesh, |last| mesh.max(after(last)));
-        if let Err(before) = self.send(values, stamp)
-            && let Err(again) = self.send(values, after(before))
+        // The hub's clock can step while the node's clock does not.
+        let next = mesh + (self.next - now);
+        if let Err(before) = self.send(values, stamp, next)
+            && let Err(again) = self.send(values, after(before), next)
         {
             panic!(
                 "invariant: a status frame stamped after {before}, the last stamp of \
@@ -526,7 +529,8 @@ impl Session {
         }
     }
 
-    /// Writes one frame of the last value of each status channel at `stamp`.
+    /// Writes one frame of the last value of each status channel at `stamp`, with
+    /// `next` the time of the next run by the hub's clock.
     ///
     /// # Errors
     ///
@@ -536,7 +540,12 @@ impl Session {
     ///
     /// When the draft or the home refuses the frame for a cause that only a defect
     /// gives, which includes a frame larger than the largest block of the pool.
-    fn send(&mut self, values: &Values, stamp: Stamp) -> Result<(), Stamp> {
+    fn send(
+        &mut self,
+        values: &Values,
+        stamp: Stamp,
+        next: Stamp,
+    ) -> Result<(), Stamp> {
         let mut draft = match self.hub.draft(Form::Raw, &self.series) {
             Ok(draft) => draft,
             Err(frame::Error::Pool(error)) => {
@@ -546,7 +555,7 @@ impl Session {
             }
             Err(error) => panic!("invariant: the series follow the key set: {error}"),
         };
-        self.fill(&mut draft, values, stamp);
+        self.fill(&mut draft, values, stamp, next);
         self.last = Some(stamp);
         match self.hub.write(Label::Path(Path::Live), draft) {
             Ok([Outcome::Applied { .. }]) => {}
@@ -590,10 +599,11 @@ impl Session {
         Ok(())
     }
 
-    /// Fills `draft` with the last value of each status channel at `stamp`.
-    fn fill(&self, draft: &mut Draft, values: &Values, stamp: Stamp) {
+    /// Fills `draft` with the last value of each status channel at `stamp`, with
+    /// `next` the time of the next run by the hub's clock.
+    fn fill(&self, draft: &mut Draft, values: &Values, stamp: Stamp, next: Stamp) {
         let backoff = match self.state {
-            State::Waiting => (self.next - stamp).max(Span::ZERO),
+            State::Waiting => (next - stamp).max(Span::ZERO),
             State::Running | State::Stopped | State::Ending => Span::ZERO,
         };
         let supervisor = [
