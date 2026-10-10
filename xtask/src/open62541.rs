@@ -2124,7 +2124,7 @@ End of search list.
             result,
             Err(vec![
                 unlisted_clock("plugins/ua_log_stdout.c", "helper"),
-                "plugins/ua_log_stdout.c: `UA_Log_Stdout_log` no longer references \
+                "plugins/ua_log_stdout.c: `UA_Log_Stdout_log` no longer calls \
                  `UA_DateTime_now`. Remove it from FUNCTION_SYMBOLS"
                     .to_owned(),
             ])
@@ -2499,15 +2499,15 @@ End of search list.
         };
         replace(
             "deps/parse_num.c",
-            "size_t parseDouble(",
+            "void parseDouble(",
             "double (*UA_conv)(const char *, char **);\n\
              double UA_parseOther(const char *s) { return UA_conv(s, 0); }\n\
-             size_t parseDouble(",
+             void parseDouble(",
         );
         replace(
             "deps/parse_num.c",
-            "*result = strtod(",
-            "UA_conv = strtod;\n*result = strtod(",
+            "(void)strtod(",
+            "UA_conv = strtod;\n(void)strtod(",
         );
         assert_eq!(
             check(&root),
