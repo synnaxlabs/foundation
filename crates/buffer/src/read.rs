@@ -212,8 +212,9 @@ pub(crate) async fn newest(
     wanted: &hash::Map<channel::Key, Slot>,
 ) -> Result<Vec<(Slot, Stored)>, Error> {
     let table = table(file, pool, place).await?;
-    let mut last: hash::Map<channel::Key, (Slot, Header, usize)> = hash::Map::default();
-    for header in headers(&table) {
+    let mut last: hash::Map<channel::Key, (usize, Slot, Header, usize)> =
+        hash::Map::default();
+    for (at, header) in headers(&table).enumerate() {
         let (header, offset) = header.expect("invariant: a run names a record");
         let Some(&slot) = wanted.get(&header.index) else {
             continue;
@@ -221,13 +222,13 @@ pub(crate) async fn newest(
         if (header.path, header.tag) != (path, tag.get()) {
             continue;
         }
-        last.insert(header.index, (slot, header, offset));
+        last.insert(header.index, (at, slot, header, offset));
     }
     drop(table);
     let mut last: Vec<_> = last.into_values().collect();
-    last.sort_unstable_by_key(|&(.., offset)| offset);
+    last.sort_unstable_by_key(|&(at, ..)| at);
     let mut found = Vec::with_capacity(last.len());
-    for (slot, header, offset) in last {
+    for (_, slot, header, offset) in last {
         let bytes = bytes(file, pool, place, offset, header.bytes).await?;
         found.push((slot, stored(header, bytes)));
     }
