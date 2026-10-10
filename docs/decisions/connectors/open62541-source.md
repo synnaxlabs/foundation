@@ -53,7 +53,14 @@
   reference is an undefined symbol that a relocation names, and it is outside the copy
   when no object exports it: approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093780083,
-  2026-10-10 04:30 UTC). The check fails on every reference to a clock function that
+  2026-10-10 04:30 UTC). For a file that a node runs, the check keys each reference by
+  (file, function, symbol), read from `objdump -dr` as the clock check reads a call, so
+  a listed symbol in a new function of that file fails. `FUNCTION_SYMBOLS` lists these
+  triples, the clock calls among them. `FILE_SYMBOLS` keeps only pairs of a file that no
+  node runs. A reference from outside a function fails, as the address of a clock does.
+  Decided by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094336509,
+  2026-10-10 05:46 UTC). The check fails on every reference to a clock function that
   is not a call, also one in code. A call relocation counts as a call only in a section
   that `objdump -d` disassembles. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715,

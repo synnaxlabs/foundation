@@ -40,22 +40,58 @@ const CLOCKS: [&str; 3] = [
     "UA_DateTime_localTimeUtcOffset",
 ];
 
-/// The only (file, function) pairs that may call a function of [`CLOCKS`].
-const CLOCK_CALLS: [(&str, &str); 5] = [
-    // The build date of a server config, for the test server only.
-    ("plugins/ua_config_default.c", "setDefaultConfig"),
+/// The only (file, function, symbol) triples in which a function references a symbol
+/// outside the copy that [`SYMBOLS`] does not list and, for a symbol other than a
+/// clock, [`FILE_SYMBOLS`] does not admit. A clock counts only as a call.
+const FUNCTION_SYMBOLS: [(&str, &str, &str); 13] = [
+    // `isdigit` reads the locale, which stays C: nothing calls `setlocale`.
+    ("deps/musl_inet_pton.c", "musl_inet_pton", "__ctype_b_loc"),
+    // Writes `errno` and never reads it.
+    (
+        "deps/musl_inet_pton.c",
+        "musl_inet_pton",
+        "__errno_location",
+    ),
+    // Sets `errno` to 0 before `strtod` and reads only the error of that call.
+    ("deps/parse_num.c", "parseDouble", "__errno_location"),
+    // `strtod` reads the decimal point of the locale, which stays C.
+    ("deps/parse_num.c", "parseDouble", "strtod"),
     // `UA_Server_runUntilInterrupt`, which we never call.
-    ("plugins/ua_config_default.c", "interruptServer"),
+    (
+        "plugins/ua_config_default.c",
+        "interruptServer",
+        "UA_DateTime_nowMonotonic",
+    ),
+    // The build date of a server config, for the test server only.
+    (
+        "plugins/ua_config_default.c",
+        "setDefaultConfig",
+        "UA_DateTime_now",
+    ),
     // The stdout logger, which we replace with our own.
-    ("plugins/ua_log_stdout.c", "UA_Log_Stdout_log"),
+    (
+        "plugins/ua_log_stdout.c",
+        "UA_Log_Stdout_log",
+        "UA_DateTime_localTimeUtcOffset",
+    ),
+    (
+        "plugins/ua_log_stdout.c",
+        "UA_Log_Stdout_log",
+        "UA_DateTime_now",
+    ),
     // ECC user tokens, which need encryption, which is off.
     (
         "src/util/ua_encryptedsecret.c",
         "encryptUserIdentityTokenEcc",
+        "UA_DateTime_now",
     ),
     // The start value of the random state, which `UA_ENABLE_DETERMINISTIC_RNG` keeps
     // from the clock.
-    ("src/util/ua_util.c", "UA_random_seed"),
+    ("src/util/ua_util.c", "UA_random_seed", "UA_DateTime_now"),
+    // Our change: a draw on a thread with no start value prints its name and aborts.
+    ("src/util/ua_util.c", "UA_rng_require", "abort"),
+    ("src/util/ua_util.c", "UA_rng_require", "fprintf"),
+    ("src/util/ua_util.c", "UA_rng_require", "stderr"),
 ];
 
 /// The release files that the copy holds and the library of our options does not
@@ -92,9 +128,8 @@ const LEFT_OUT: [&str; 4] = [
 
 /// The symbols outside the copy that any file of it may reference. Each reads no clock,
 /// file, network, randomness, or process state, except the allocator, with its reason.
-/// The functions of [`CLOCKS`] pass too: [`CLOCK_CALLS`] checks each call of one. A new
-/// symbol outside the copy also goes in `OUTSIDE` in `connector-opcua`, which lists the
-/// symbols of the production build.
+/// A new symbol outside the copy also goes in `OUTSIDE` in `connector-opcua`, which
+/// lists the symbols of the production build.
 const SYMBOLS: [&str; 16] = [
     // The allocator of libc, since the check builds without `alloc.h`. It returns
     // addresses that the OS places at random, so no result of the copy may depend on
@@ -120,17 +155,9 @@ const SYMBOLS: [&str; 16] = [
 ];
 
 /// The only (file, symbol) pairs that may reference a symbol outside the copy that
-/// [`SYMBOLS`] does not list.
-const FILE_SYMBOLS: [(&str, &str); 14] = [
-    // `isdigit` and `isxdigit` read the locale, which stays C: nothing calls
-    // `setlocale`.
-    ("deps/musl_inet_pton.c", "__ctype_b_loc"),
-    // Writes `errno` and never reads it.
-    ("deps/musl_inet_pton.c", "__errno_location"),
-    // `strtod` reads the decimal point of the locale, which stays C.
-    ("deps/parse_num.c", "strtod"),
-    // Sets `errno` to 0 before `strtod` and reads only the error of that call.
-    ("deps/parse_num.c", "__errno_location"),
+/// [`SYMBOLS`] does not list, other than a clock, from anywhere in the file. Each file
+/// is one that no node runs.
+const FILE_SYMBOLS: [(&str, &str); 7] = [
     // The stdout logger, which we replace with our own.
     ("plugins/ua_log_stdout.c", "fflush"),
     ("plugins/ua_log_stdout.c", "printf"),
@@ -142,10 +169,6 @@ const FILE_SYMBOLS: [(&str, &str); 14] = [
     // runs.
     ("src/server/ua_discovery.c", "access"),
     ("src/server/ua_services_discovery.c", "access"),
-    // Our change: a draw on a thread with no start value prints its name and aborts.
-    ("src/util/ua_util.c", "abort"),
-    ("src/util/ua_util.c", "fprintf"),
-    ("src/util/ua_util.c", "stderr"),
 ];
 
 /// Clones `tag` of `url` into `target/open62541/`, builds it with [`OPTIONS`], and
@@ -193,12 +216,12 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 /// A line of `flags.txt` other than a `-D`, `-I`, or `-std` flag with its value or one
 /// of [`CODE_FLAGS`], a build that fails, an `#include` or `#import` of a header
 /// outside both the copy and the system directories, a reference to a symbol outside
-/// the copy from a file that neither [`SYMBOLS`] nor [`FILE_SYMBOLS`] admits, a pair
-/// of [`FILE_SYMBOLS`] with no reference, a call of a clock function from a pair that
-/// [`CLOCK_CALLS`] does not list, a listed pair with no call, any other reference to a
-/// clock function, such as its address in code or data, through which any code can
-/// call it, each inlined function, an `#include_next`, and a `#line` directive or line
-/// marker in a `.c` or `.h` file of the copy.
+/// the copy that neither [`SYMBOLS`], [`FILE_SYMBOLS`], nor [`FUNCTION_SYMBOLS`]
+/// admits, a listed pair or triple with no reference, a reference outside a function
+/// that [`SYMBOLS`] and [`FILE_SYMBOLS`] do not admit, any reference to a clock
+/// function other than a call, such as its address in code or data, through which any
+/// code can call it, each inlined function, an `#include_next`, and a `#line`
+/// directive or line marker in a `.c` or `.h` file of the copy.
 pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
     let out = root.join("target/open62541/check");
     inspect(&root.join(DEST), &out, Path::new("cc"))
@@ -476,26 +499,24 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
         &["--defined-only", "--extern-only"],
     )
     .map_err(|e| vec![e])?;
-    let mut references = BTreeSet::new();
-    let mut calls = BTreeSet::new();
+    let mut uses = Uses::default();
     let mut problems = line_directives(copy, Path::new("")).map_err(|e| vec![e])?;
     for (source, object, preprocessed) in objects {
         let disassembly = exec(Command::new("objdump").arg("-dr").arg(&object))
             .map_err(|e| vec![e])?;
-        for function in clock_calls(&disassembly) {
-            calls.insert((source.to_owned(), function));
-        }
         let relocations = exec(Command::new("objdump").arg("-r").arg(&object));
-        let relocations = relocations.map_err(|e| vec![e])?;
-        for symbol in outside(&object, &relocations, &exported).map_err(|e| vec![e])? {
-            references.insert((source.to_owned(), symbol));
-        }
-        for (section, symbol) in clock_addresses(&relocations, &disassembly) {
-            problems.push(format!(
-                "{source}: the section `{section}` takes the address of `{symbol}`, \
-                 so a call through it escapes CLOCK_CALLS"
-            ));
-        }
+        let outside = symbols([object.as_path()], &["--undefined-only"])
+            .map_err(|e| vec![e])?
+            .difference(&exported)
+            .cloned()
+            .collect();
+        let found =
+            references(&disassembly, &relocations.map_err(|e| vec![e])?, &outside);
+        problems.extend(
+            found
+                .into_iter()
+                .filter_map(|found| uses.add(source, found)),
+        );
         let info = exec(Command::new("objdump").arg("--dwarf=info").arg(&object));
         for function in inlined(&info.map_err(|e| vec![e])?) {
             problems.push(format!(
@@ -507,34 +528,12 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
             problems.push(format!("{source}: {problem}"));
         }
     }
-    problems.extend(clock_mismatches(&calls));
-    problems.extend(symbol_mismatches(&references));
+    problems.extend(uses.mismatches());
     if problems.is_empty() {
         Ok(())
     } else {
         Err(problems)
     }
-}
-
-/// Each symbol that `object` references and that no object of `exported` defines, so
-/// the linker takes it from outside the copy. A reference is a relocation, in
-/// `relocations`, the output of `objdump -r`: on x86-64 the assembler makes
-/// `_GLOBAL_OFFSET_TABLE_` undefined in each object that reads the table, with no
-/// relocation against it.
-fn outside(
-    object: &Path,
-    relocations: &str,
-    exported: &BTreeSet<String>,
-) -> Result<Vec<String>, String> {
-    let relocated: BTreeSet<&str> = relocations
-        .lines()
-        .filter_map(|line| Some(relocation(line)?.1))
-        .collect();
-    Ok(symbols([object], &["--undefined-only"])?
-        .difference(exported)
-        .filter(|symbol| relocated.contains(symbol.as_str()))
-        .cloned()
-        .collect())
 }
 
 /// An error for each `#line` directive or line marker in a `.c` or `.h` file under
@@ -765,59 +764,165 @@ fn inlined(info: &str) -> Vec<String> {
 /// address.
 const CALLS: [&str; 3] = ["R_X86_64_PLT32", "R_AARCH64_CALL26", "R_AARCH64_JUMP26"];
 
-/// The functions in the output of `objdump -dr` that call a function of [`CLOCKS`].
-/// A name loses the suffix of a compiler clone, such as `.isra.0`.
-fn clock_calls(text: &str) -> BTreeSet<String> {
-    let mut calls = BTreeSet::new();
-    let mut function = "";
-    for line in text.lines() {
-        if let Some(name) = line.strip_suffix(">:").and_then(|l| l.split_once(" <")) {
-            function = name.1.split('.').next().unwrap_or(name.1);
-        } else if let Some((kind, _)) = clock(line)
-            && CALLS.contains(&kind)
-        {
-            calls.insert(function.to_owned());
-        }
-    }
-    calls
+/// A relocation against a symbol outside the copy or a function of [`CLOCKS`].
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct Reference {
+    /// The section that holds it.
+    section: String,
+    /// The function that holds it, with no suffix of a compiler clone such as
+    /// `.isra.0`, or `None` in a section that is not code.
+    function: Option<String>,
+    /// Its type is one of [`CALLS`].
+    call: bool,
+    symbol: String,
 }
 
-/// Each (section, clock function) in `relocations`, the output of `objdump -r`,
-/// where the section takes the address of a function of [`CLOCKS`]: any reference
-/// other than a call from a section that `disassembly`, the output of `objdump -dr`,
-/// shows. Each pair comes once, also when one address takes two relocations, as
-/// `adrp` and `add` do on 64-bit Arm.
-fn clock_addresses(
-    relocations: &str,
+/// Each relocation against a symbol of `outside` or a function of [`CLOCKS`]: from
+/// `disassembly`, the output of `objdump -dr`, in each section that it shows, and from
+/// `relocations`, the output of `objdump -r`, in each other section. Equal ones come
+/// once, as the two relocations of one address on 64-bit Arm do.
+fn references(
     disassembly: &str,
-) -> Vec<(String, &'static str)> {
-    let code: BTreeSet<&str> = disassembly
-        .lines()
-        .filter_map(|line| line.strip_prefix("Disassembly of section "))
-        .map(|name| name.trim_end_matches(':'))
-        .collect();
-    let mut found = Vec::new();
+    relocations: &str,
+    outside: &BTreeSet<String>,
+) -> BTreeSet<Reference> {
+    let mut found = BTreeSet::new();
+    let mut code = BTreeSet::new();
     let mut section = "";
+    let mut function = None;
+    let mut add = |section: &str, function: Option<&str>, line: &str| {
+        if let Some((kind, symbol)) = relocation(line)
+            && (outside.contains(symbol) || CLOCKS.contains(&symbol))
+        {
+            found.insert(Reference {
+                section: section.to_owned(),
+                function: function.map(str::to_owned),
+                call: CALLS.contains(&kind),
+                symbol: symbol.to_owned(),
+            });
+        }
+    };
+    for line in disassembly.lines() {
+        if let Some(name) = line.strip_prefix("Disassembly of section ") {
+            section = name.trim_end_matches(':');
+            function = None;
+            code.insert(section);
+        } else if let Some(name) =
+            line.strip_suffix(">:").and_then(|l| l.split_once(" <"))
+        {
+            // A section with no symbol at its start shows as `<.text>`.
+            function = name.1.split('.').next().filter(|name| !name.is_empty());
+        } else {
+            add(section, function, line);
+        }
+    }
     for line in relocations.lines() {
         if let Some(name) = line.strip_prefix("RELOCATION RECORDS FOR [") {
             section = name.trim_end_matches("]:");
-        } else if let Some((kind, symbol)) = clock(line)
-            && !(CALLS.contains(&kind) && code.contains(section))
-            && !found.contains(&(section.to_owned(), symbol))
-        {
-            found.push((section.to_owned(), symbol));
+        } else if !code.contains(section) {
+            add(section, None, line);
         }
     }
     found
 }
 
-/// The type and the clock function of a relocation line that refers to one.
-fn clock(line: &str) -> Option<(&str, &'static str)> {
-    let (kind, symbol) = relocation(line)?;
-    CLOCKS
-        .into_iter()
-        .find(|&clock| clock == symbol)
-        .map(|clock| (kind, clock))
+/// The references to symbols outside the copy that [`SYMBOLS`] does not list, read so
+/// far, as the lists key them.
+#[derive(Default)]
+struct Uses {
+    /// Each pair of [`FILE_SYMBOLS`] with a reference.
+    pairs: BTreeSet<(String, String)>,
+    /// Each (file, function, symbol) that [`FILE_SYMBOLS`] does not admit.
+    triples: BTreeSet<(String, String, String)>,
+}
+
+impl Uses {
+    /// Adds `found`, a reference of `file`, and gives its error when no list can admit
+    /// it: a reference to a clock function other than a call from a function, or a
+    /// reference outside a function that [`FILE_SYMBOLS`] does not admit.
+    fn add(&mut self, file: &str, found: Reference) -> Option<String> {
+        let Reference {
+            section,
+            function,
+            call,
+            symbol,
+        } = found;
+        if SYMBOLS.contains(&symbol.as_str()) {
+            return None;
+        }
+        let clock = CLOCKS.contains(&symbol.as_str());
+        let pair = (file.to_owned(), symbol);
+        if !clock
+            && FILE_SYMBOLS
+                .iter()
+                .any(|&(f, s)| (f, s) == (&pair.0, &pair.1))
+        {
+            self.pairs.insert(pair);
+            return None;
+        }
+        let (file, symbol) = pair;
+        match function {
+            Some(function) if call || !clock => {
+                self.triples.insert((file, function, symbol));
+                None
+            }
+            _ if clock => Some(format!(
+                "{file}: the section `{section}` takes the address of `{symbol}`, so a \
+                 call through it escapes FUNCTION_SYMBOLS"
+            )),
+            _ => Some(format!(
+                "{file}: the section `{section}` references `{symbol}` outside a \
+                 function, so a use through it escapes FUNCTION_SYMBOLS"
+            )),
+        }
+    }
+
+    /// An error for each triple that [`FUNCTION_SYMBOLS`] does not list, for each
+    /// listed triple with no reference, and for each pair of [`FILE_SYMBOLS`] with no
+    /// reference.
+    fn mismatches(&self) -> Vec<String> {
+        let listed: BTreeSet<(String, String, String)> = FUNCTION_SYMBOLS
+            .iter()
+            .map(|&(file, function, symbol)| {
+                (file.to_owned(), function.to_owned(), symbol.to_owned())
+            })
+            .collect();
+        let new = self.triples.difference(&listed).map(|(file, function, symbol)| {
+            if CLOCKS.contains(&symbol.as_str()) {
+                format!(
+                    "{file}: `{function}` calls `{symbol}`, a global clock function. \
+                     Find whether a node runs it; if not, add it to FUNCTION_SYMBOLS \
+                     with the reason"
+                )
+            } else {
+                format!(
+                    "{file}: `{function}` references `{symbol}`, which no list admits. \
+                     Find whether a node runs it; if it reads no clock, file, network, \
+                     randomness, or process state, add it with the reason, to \
+                     FILE_SYMBOLS for a file that no node runs, else to \
+                     FUNCTION_SYMBOLS"
+                )
+            }
+        });
+        let gone = listed.difference(&self.triples).map(|(file, function, symbol)| {
+            format!(
+                "{file}: `{function}` no longer references `{symbol}`. Remove it from \
+                 FUNCTION_SYMBOLS"
+            )
+        });
+        let files = FILE_SYMBOLS
+            .iter()
+            .filter(|&&(file, symbol)| {
+                !self.pairs.contains(&(file.to_owned(), symbol.to_owned()))
+            })
+            .map(|(file, symbol)| {
+                format!(
+                    "{file}: no longer references `{symbol}`. Remove it from \
+                     FILE_SYMBOLS"
+                )
+            });
+        new.chain(gone).chain(files).collect()
+    }
 }
 
 /// The type and the symbol of a line of `objdump -r` that holds a relocation.
@@ -850,68 +955,6 @@ fn headers(depfile: &str) -> Vec<PathBuf> {
         .map(PathBuf::from)
         .filter(|path| path.extension().is_some_and(|e| e == "h"))
         .collect()
-}
-
-/// An error for each call in `found` that [`CLOCK_CALLS`] does not list, and for each
-/// listed call that `found` does not hold.
-fn clock_mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
-    let new = |file: &str, function: &str| {
-        format!(
-            "{file}: `{function}` calls a global clock function. Find whether a node \
-             runs it; if not, add it to CLOCK_CALLS with the reason"
-        )
-    };
-    let gone = |file: &str, function: &str| {
-        format!(
-            "{file}: `{function}` no longer calls a clock. Remove it from CLOCK_CALLS"
-        )
-    };
-    mismatches(found, &CLOCK_CALLS, new, gone)
-}
-
-/// An error for each (file, symbol) in `found` that neither [`SYMBOLS`],
-/// [`CLOCKS`], nor [`FILE_SYMBOLS`] lists, and for each pair of [`FILE_SYMBOLS`] that
-/// `found` does not hold.
-fn symbol_mismatches(found: &BTreeSet<(String, String)>) -> Vec<String> {
-    let found: BTreeSet<(String, String)> = found
-        .iter()
-        .filter(|(_, symbol)| {
-            !SYMBOLS.contains(&symbol.as_str()) && !CLOCKS.contains(&symbol.as_str())
-        })
-        .cloned()
-        .collect();
-    let new = |file: &str, symbol: &str| {
-        format!(
-            "{file}: references `{symbol}`, which neither SYMBOLS nor FILE_SYMBOLS \
-             lists. Find whether a node runs it; if it reads no clock, file, network, \
-             randomness, or process state, add it with the reason"
-        )
-    };
-    let gone = |file: &str, symbol: &str| {
-        format!("{file}: no longer references `{symbol}`. Remove it from FILE_SYMBOLS")
-    };
-    mismatches(&found, &FILE_SYMBOLS, new, gone)
-}
-
-/// An error from `new` for each (file, name) of `found` that `listed` does not hold,
-/// and one from `gone` for each listed pair that `found` does not hold.
-fn mismatches(
-    found: &BTreeSet<(String, String)>,
-    listed: &[(&str, &str)],
-    new: impl Fn(&str, &str) -> String,
-    gone: impl Fn(&str, &str) -> String,
-) -> Vec<String> {
-    let listed: BTreeSet<(String, String)> = listed
-        .iter()
-        .map(|&(file, name)| (file.to_owned(), name.to_owned()))
-        .collect();
-    let new = found
-        .difference(&listed)
-        .map(|(file, name)| new(file, name));
-    let gone = listed
-        .difference(found)
-        .map(|(file, name)| gone(file, name));
-    new.chain(gone).collect()
 }
 
 /// The names of the symbols that `nm -P` with `flags` gives for `objects`.
@@ -994,9 +1037,28 @@ fn wait((name, child): (String, Child)) -> Result<(String, String), String> {
 mod tests {
     use super::*;
 
+    fn reference(
+        section: &str,
+        function: Option<&str>,
+        call: bool,
+        symbol: &str,
+    ) -> Reference {
+        Reference {
+            section: section.to_owned(),
+            function: function.map(str::to_owned),
+            call,
+            symbol: symbol.to_owned(),
+        }
+    }
+
     #[test]
-    fn clock_calls_names_each_function_that_refers_to_a_clock() {
-        let text = "\
+    fn references_keys_each_reference_by_its_section_and_function() {
+        let disassembly = "\
+Disassembly of section .text:
+
+0000000000000000 <.text>:
+\t\t\t0: R_X86_64_PC32\tstrtod-0x4
+
 Disassembly of section .text.setDefaultConfig:
 
 0000000000000000 <setDefaultConfig>:
@@ -1006,31 +1068,26 @@ Disassembly of section .text.setDefaultConfig:
 \t\t\t40: R_X86_64_REX_GOTPCRELX\tUA_DateTime_now-0x4
 \t\t\t41: R_X86_64_PLT32\tUA_DateTime_nowMore-0x4
 \t\t\t42: R_X86_64_PC32\tUA_DateTime_now_x+0x4
+\t\t\t43: R_X86_64_PLT32\tstrtod-0x4
+\t\t\t44: R_X86_64_PLT32\tUA_inside-0x4
 0000000000000080 <seed.isra.0>:
 \t\t\t81: R_AARCH64_CALL26\tUA_DateTime_nowMonotonic
 00000000000000c0 <log>:
 \t\t\tc1: R_X86_64_PLT32\tUA_DateTime_localTimeUtcOffset-0x4
 ";
-        let calls: Vec<_> = clock_calls(text).into_iter().collect();
-        assert_eq!(calls, ["log", "seed", "setDefaultConfig"]);
-    }
-
-    #[test]
-    fn clock_addresses_names_each_reference_other_than_a_call() {
-        let text = "\
+        let relocations = "\
 RELOCATION RECORDS FOR [.text]:
 OFFSET           TYPE              VALUE
 0000000000000005 R_X86_64_PLT32    UA_DateTime_now-0x0000000000000004
-0000000000000009 R_X86_64_REX_GOTPCRELX  UA_DateTime_now-0x0000000000000004
 
-RELOCATION RECORDS FOR [.text.log]:
-0000000000000005 R_AARCH64_CALL26  UA_DateTime_nowMonotonic
-0000000000000009 R_AARCH64_JUMP26  UA_DateTime_nowMonotonic
+RELOCATION RECORDS FOR [.text.setDefaultConfig]:
+0000000000000001 R_X86_64_PLT32    UA_DateTime_now-0x0000000000000004
 
 RELOCATION RECORDS FOR [.data.rel]:
 OFFSET           TYPE              VALUE
 0000000000000000 R_X86_64_64       UA_DateTime_now
 0000000000000008 R_X86_64_64       UA_DateTime_nowMore
+0000000000000010 R_X86_64_64       strtod
 
 RELOCATION RECORDS FOR [.rodata]:
 0000000000000000 R_AARCH64_ABS64   UA_DateTime_localTimeUtcOffset+0x8
@@ -1038,37 +1095,55 @@ RELOCATION RECORDS FOR [.rodata]:
 RELOCATION RECORDS FOR [.data.rel.ro]:
 0000000000000000 R_X86_64_PLT32    UA_DateTime_now
 ";
-        let disassembly = "\
-Disassembly of section .text:
-Disassembly of section .text.log:
-";
+        let outside = BTreeSet::from(["strtod".to_owned()]);
         assert_eq!(
-            clock_addresses(text, disassembly),
+            Vec::from_iter(references(disassembly, relocations, &outside)),
             [
-                (".text".to_owned(), "UA_DateTime_now"),
-                (".data.rel".to_owned(), "UA_DateTime_now"),
-                (".rodata".to_owned(), "UA_DateTime_localTimeUtcOffset"),
-                (".data.rel.ro".to_owned(), "UA_DateTime_now"),
+                reference(".data.rel", None, false, "UA_DateTime_now"),
+                reference(".data.rel", None, false, "strtod"),
+                reference(".data.rel.ro", None, true, "UA_DateTime_now"),
+                reference(".rodata", None, false, "UA_DateTime_localTimeUtcOffset"),
+                reference(".text", None, false, "strtod"),
+                reference(
+                    ".text.setDefaultConfig",
+                    Some("log"),
+                    true,
+                    "UA_DateTime_localTimeUtcOffset"
+                ),
+                reference(".text.setDefaultConfig", Some("other"), false, CLOCKS[0]),
+                reference(".text.setDefaultConfig", Some("other"), true, "strtod"),
+                reference(
+                    ".text.setDefaultConfig",
+                    Some("seed"),
+                    true,
+                    "UA_DateTime_nowMonotonic"
+                ),
+                reference(
+                    ".text.setDefaultConfig",
+                    Some("setDefaultConfig"),
+                    true,
+                    CLOCKS[0]
+                ),
             ]
         );
     }
 
     #[test]
-    fn clock_addresses_names_an_address_in_two_relocations_once() {
-        let text = "\
-RELOCATION RECORDS FOR [.text]:
-OFFSET           TYPE              VALUE
-0000000000000008 R_AARCH64_ADR_PREL_PG_HI21  UA_DateTime_now
-000000000000000c R_AARCH64_ADD_ABS_LO12_NC  UA_DateTime_now
-0000000000000010 R_AARCH64_ADR_GOT_PAGE  UA_DateTime_nowMonotonic
-0000000000000014 R_AARCH64_LD64_GOT_LO12_NC  UA_DateTime_nowMonotonic
+    fn references_names_an_address_in_two_relocations_once() {
+        let disassembly = "\
+Disassembly of section .text:
+
+0000000000000000 <now>:
+\t\t\t8: R_AARCH64_ADR_PREL_PG_HI21\tUA_DateTime_now
+\t\t\tc: R_AARCH64_ADD_ABS_LO12_NC\tUA_DateTime_now
+\t\t\t10: R_AARCH64_ADR_GOT_PAGE\tstrtod
+\t\t\t14: R_AARCH64_LD64_GOT_LO12_NC\tstrtod
 ";
+        let outside = BTreeSet::from(["strtod".to_owned()]);
+        let found = references(disassembly, "", &outside);
         assert_eq!(
-            clock_addresses(text, "Disassembly of section .text:\n"),
-            [
-                (".text".to_owned(), "UA_DateTime_now"),
-                (".text".to_owned(), "UA_DateTime_nowMonotonic"),
-            ]
+            Vec::from_iter(found.iter().map(|found| found.symbol.as_str())),
+            ["UA_DateTime_now", "strtod"]
         );
     }
 
@@ -1476,56 +1551,114 @@ End of search list.
         );
     }
 
-    #[test]
-    fn clock_mismatches_names_a_new_call_and_a_listed_call_that_is_gone() {
-        let mut found: BTreeSet<(String, String)> = CLOCK_CALLS
-            .iter()
-            .map(|&(file, function)| (file.to_owned(), function.to_owned()))
-            .collect();
-        assert_eq!(clock_mismatches(&found), Vec::<String>::new());
-        found.remove(&("src/util/ua_util.c".to_owned(), "UA_random_seed".to_owned()));
-        found.insert(("src/ua_types.c".to_owned(), "UA_new".to_owned()));
-        assert_eq!(
-            clock_mismatches(&found),
-            [
-                "src/ua_types.c: `UA_new` calls a global clock function. Find whether \
-                 a node runs it; if not, add it to CLOCK_CALLS with the reason",
-                "src/util/ua_util.c: `UA_random_seed` no longer calls a clock. Remove \
-                 it from CLOCK_CALLS",
-            ]
-        );
+    /// A reference of `function` in a section of code, as a call when `symbol` is a
+    /// clock.
+    fn code(function: &str, symbol: &str) -> Reference {
+        reference(".text", Some(function), CLOCKS.contains(&symbol), symbol)
     }
 
-    /// The error of [`symbol_mismatches`] for a reference that no list holds.
-    fn unlisted(file: &str, symbol: &str) -> String {
+    /// A reference to `symbol` from the section `.data.rel`, with the type `call`.
+    fn data(call: bool, symbol: &str) -> Reference {
+        reference(".data.rel", None, call, symbol)
+    }
+
+    /// The error of [`Uses::mismatches`] for a reference that no list admits.
+    fn unlisted(file: &str, function: &str, symbol: &str) -> String {
         format!(
-            "{file}: references `{symbol}`, which neither SYMBOLS nor FILE_SYMBOLS \
-             lists. Find whether a node runs it; if it reads no clock, file, network, \
-             randomness, or process state, add it with the reason"
+            "{file}: `{function}` references `{symbol}`, which no list admits. Find \
+             whether a node runs it; if it reads no clock, file, network, randomness, \
+             or process state, add it with the reason, to FILE_SYMBOLS for a file \
+             that no node runs, else to FUNCTION_SYMBOLS"
         )
     }
 
+    /// The error of [`Uses::mismatches`] for a clock call that no list admits.
+    fn unlisted_clock(file: &str, function: &str) -> String {
+        format!(
+            "{file}: `{function}` calls `UA_DateTime_now`, a global clock function. \
+             Find whether a node runs it; if not, add it to FUNCTION_SYMBOLS with the \
+             reason"
+        )
+    }
+
+    /// A [`Uses`] with each reference that the lists admit, other than those of
+    /// `left_out`.
+    fn listed(left_out: &[&str]) -> Uses {
+        let mut uses = Uses::default();
+        for &(file, function, symbol) in &FUNCTION_SYMBOLS {
+            if !left_out.contains(&function) {
+                assert_eq!(uses.add(file, code(function, symbol)), None);
+            }
+        }
+        for &(file, symbol) in &FILE_SYMBOLS {
+            if !left_out.contains(&symbol) {
+                assert_eq!(uses.add(file, data(false, symbol)), None);
+            }
+        }
+        uses
+    }
+
     #[test]
-    fn symbol_mismatches_names_a_new_reference_and_a_listed_one_that_is_gone() {
-        let mut found: BTreeSet<(String, String)> = FILE_SYMBOLS
-            .iter()
-            .map(|&(file, symbol)| (file.to_owned(), symbol.to_owned()))
-            .collect();
-        assert_eq!(symbol_mismatches(&found), Vec::<String>::new());
-        found.insert(("src/ua_types.c".to_owned(), "memcpy".to_owned()));
-        found.insert(("src/ua_types.c".to_owned(), CLOCKS[0].to_owned()));
-        assert_eq!(symbol_mismatches(&found), Vec::<String>::new());
-        found.remove(&("plugins/ua_log_syslog.c".to_owned(), "syslog".to_owned()));
-        found.insert(("src/ua_types.c".to_owned(), "socket".to_owned()));
+    fn uses_names_a_new_reference_and_a_listed_one_that_is_gone() {
+        let mut uses = listed(&[]);
+        assert_eq!(uses.add("src/ua_types.c", code("UA_new", "memcpy")), None);
+        assert_eq!(uses.add("src/ua_types.c", data(false, "memcpy")), None);
+        assert_eq!(uses.mismatches(), Vec::<String>::new());
+        let mut uses = listed(&["UA_random_seed", "syslog"]);
+        let found = [
+            ("deps/parse_num.c", code("UA_parse", "__errno_location")),
+            ("plugins/ua_log_stdout.c", code("UA_print", "puts")),
+            ("src/ua_types.c", code("UA_new", CLOCKS[0])),
+            ("src/ua_types.c", code("UA_open", "socket")),
+        ];
+        for (file, found) in found {
+            assert_eq!(uses.add(file, found), None);
+        }
         assert_eq!(
-            symbol_mismatches(&found),
+            uses.mismatches(),
             [
-                unlisted("src/ua_types.c", "socket"),
+                unlisted("deps/parse_num.c", "UA_parse", "__errno_location"),
+                unlisted_clock("src/ua_types.c", "UA_new"),
+                unlisted("src/ua_types.c", "UA_open", "socket"),
+                "src/util/ua_util.c: `UA_random_seed` no longer references \
+                 `UA_DateTime_now`. Remove it from FUNCTION_SYMBOLS"
+                    .to_owned(),
                 "plugins/ua_log_syslog.c: no longer references `syslog`. Remove it \
                  from FILE_SYMBOLS"
                     .to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn uses_refuses_a_reference_that_no_function_holds_or_no_call_makes() {
+        let mut uses = Uses::default();
+        let address = |section: &str| {
+            Some(format!(
+                "src/ua_types.c: the section `{section}` takes the address of \
+                 `UA_DateTime_now`, so a call through it escapes FUNCTION_SYMBOLS"
+            ))
+        };
+        let mut no_call = code("UA_new", CLOCKS[0]);
+        no_call.call = false;
+        assert_eq!(uses.add("src/ua_types.c", no_call), address(".text"));
+        assert_eq!(
+            uses.add("src/ua_types.c", data(true, CLOCKS[0])),
+            address(".data.rel")
+        );
+        assert_eq!(
+            uses.add("deps/parse_num.c", data(false, "strtod")),
+            Some(
+                "deps/parse_num.c: the section `.data.rel` references `strtod` outside \
+                 a function, so a use through it escapes FUNCTION_SYMBOLS"
+                    .to_owned()
+            )
+        );
+        assert_eq!(
+            uses.add("plugins/ua_log_syslog.c", data(false, "syslog")),
+            None
+        );
+        assert_eq!(uses.add("src/ua_types.c", data(false, "memcpy")), None);
     }
 
     /// A directory of the test `name`, empty, in the temporary directory, with a
@@ -1561,62 +1694,63 @@ End of search list.
         git(&["tag", tag]);
     }
 
-    /// C text that includes `clock.h` and a system header, with each function of
-    /// `functions` calling a clock function.
-    fn calls(functions: &[&str]) -> String {
-        let mut text = "#include <stdio.h>\n#include \"clock.h\"\n".to_owned();
-        for function in functions {
-            text = text
-                + "long long "
-                + function
-                + "(void) { return UA_DateTime_now(); }\n";
+    /// A statement that references `symbol`, in a function with an `int n`.
+    fn statement(symbol: &str) -> String {
+        match symbol {
+            "__ctype_b_loc" => "(void)isdigit(n);".to_owned(),
+            "__errno_location" => "errno = n;".to_owned(),
+            "strtod" => "(void)strtod(\"1\", 0);".to_owned(),
+            "abort" => "if (n) abort();".to_owned(),
+            "fprintf" | "stderr" => "fprintf(stderr, \"%d\", n);".to_owned(),
+            "fflush" | "stdout" => "fflush(stdout);".to_owned(),
+            "printf" => "printf(\"%d\", n);".to_owned(),
+            "puts" => "puts(\"x\");".to_owned(),
+            "syslog" => "syslog(LOG_INFO, \"x\");".to_owned(),
+            "access" => "(void)access(\"x\", 0);".to_owned(),
+            clock if CLOCKS.contains(&clock) => format!("(void){clock}();"),
+            _ => panic!("no statement references {symbol}"),
         }
+    }
+
+    /// C text of `file` that references each symbol at its place in
+    /// [`FUNCTION_SYMBOLS`], and each that [`FILE_SYMBOLS`] lists for `file` in a
+    /// function of its own.
+    fn uses(file: &str) -> String {
+        let mut functions = std::collections::BTreeMap::<_, Vec<_>>::new();
+        for &(f, function, symbol) in &FUNCTION_SYMBOLS {
+            if f == file {
+                functions
+                    .entry(function)
+                    .or_default()
+                    .push(statement(symbol));
+            }
+        }
+        for &(f, symbol) in &FILE_SYMBOLS {
+            if f == file {
+                functions
+                    .entry("UA_use")
+                    .or_default()
+                    .push(statement(symbol));
+            }
+        }
+        let mut text = "#include <ctype.h>\n#include <errno.h>\n#include <stdio.h>\n\
+                        #include <stdlib.h>\n#include <syslog.h>\n#include <unistd.h>\n\
+                        #include \"clock.h\"\n"
+            .to_owned();
+        text.extend(functions.into_iter().map(|(function, statements)| {
+            format!("void {function}(int n) {{\n{}\n}}\n", statements.join("\n"))
+        }));
         text
     }
 
-    /// C text that references each symbol that [`FILE_SYMBOLS`] lists for `file`.
-    fn references(file: &str) -> &'static str {
-        match file {
-            "deps/musl_inet_pton.c" => {
-                "#include <ctype.h>\n#include <errno.h>\n\
-                 int UA_digit(int c) {\nerrno = EAFNOSUPPORT;\nreturn isdigit(c);\n}\n"
-            }
-            "deps/parse_num.c" => {
-                "#include <errno.h>\n#include <stdlib.h>\n\
-                 double UA_parse(const char *s) {\n\
-                 errno = 0;\nreturn strtod(s, 0);\n}\n"
-            }
-            "plugins/ua_log_stdout.c" => {
-                "#include <stdio.h>\nvoid UA_print(const char *s, int n) {\n\
-                 printf(\"%d\", n);\nputs(s);\nfflush(stdout);\n}\n"
-            }
-            "plugins/ua_log_syslog.c" => {
-                "#include <syslog.h>\nvoid UA_log(void) { syslog(LOG_INFO, \"x\"); }\n"
-            }
-            "src/server/ua_discovery.c" | "src/server/ua_services_discovery.c" => {
-                "#include <unistd.h>\n\
-                 int UA_exists(const char *path) { return access(path, 0) == 0; }\n"
-            }
-            "src/util/ua_util.c" => {
-                "#include <stdio.h>\n#include <stdlib.h>\n\
-                 void UA_refuse(int n) {\nfprintf(stderr, \"%d\", n);\nabort();\n}\n"
-            }
-            _ => panic!("FILE_SYMBOLS lists no symbol of {file}"),
-        }
-    }
-
     /// A project with the layout of open62541: the `open62541` library from two
-    /// object libraries, with a call of a clock function at each place that
-    /// [`CLOCK_CALLS`] lists, a reference to each symbol at its place in
-    /// [`FILE_SYMBOLS`], a generated header, a header that is not UTF-8, and each
-    /// file of [`EXTRA`], which the library does not compile.
+    /// object libraries, with a reference to each symbol at its place in
+    /// [`FUNCTION_SYMBOLS`] and [`FILE_SYMBOLS`], a generated header, a header that
+    /// is not UTF-8, and each file of [`EXTRA`], which the library does not compile.
     fn create_project(repo: &Path) {
         exec(Command::new("git").arg("init").arg("-q").arg(repo)).unwrap();
         let util = "#include \"open62541/config.h\"\n".to_owned()
-            + &calls(&["UA_random_seed"])
-            + references("src/util/ua_util.c");
-        let stdout =
-            calls(&["UA_Log_Stdout_log"]) + references("plugins/ua_log_stdout.c");
+            + &uses("src/util/ua_util.c");
         create_files(
             repo,
             &[
@@ -1644,35 +1778,26 @@ End of search list.
                 ),
                 ("config.h.in", "#define CONFIG 1\n"),
                 ("src/util/ua_util.c", &util),
-                (
-                    "src/util/ua_encryptedsecret.c",
-                    &calls(&["encryptUserIdentityTokenEcc"]),
-                ),
-                (
-                    "plugins/ua_config_default.c",
-                    &calls(&["setDefaultConfig", "interruptServer"]),
-                ),
-                ("plugins/ua_log_stdout.c", &stdout),
-                (
-                    "plugins/ua_log_syslog.c",
-                    references("plugins/ua_log_syslog.c"),
-                ),
-                ("deps/musl_inet_pton.c", references("deps/musl_inet_pton.c")),
-                ("deps/parse_num.c", references("deps/parse_num.c")),
-                (
-                    "src/server/ua_discovery.c",
-                    references("src/server/ua_discovery.c"),
-                ),
-                (
-                    "src/server/ua_services_discovery.c",
-                    references("src/server/ua_services_discovery.c"),
-                ),
                 ("tools/tool.c", "int main(void) { return 0; }\n"),
                 ("arch/common/timer.c", "#include \"timer.h\"\nint timer;\n"),
                 ("arch/common/timer.h", "#include <stdio.h>\n"),
             ],
         );
-        let clock = b"/* Andr\xe9 */\nlong long UA_DateTime_now(void);\n";
+        for path in [
+            "src/util/ua_encryptedsecret.c",
+            "plugins/ua_config_default.c",
+            "plugins/ua_log_stdout.c",
+            "plugins/ua_log_syslog.c",
+            "deps/musl_inet_pton.c",
+            "deps/parse_num.c",
+            "src/server/ua_discovery.c",
+            "src/server/ua_services_discovery.c",
+        ] {
+            create_files(repo, &[(path, &uses(path))]);
+        }
+        let clock = b"/* Andr\xe9 */\nlong long UA_DateTime_now(void);\n\
+                      long long UA_DateTime_nowMonotonic(void);\n\
+                      long long UA_DateTime_localTimeUtcOffset(void);\n";
         std::fs::create_dir(repo.join("include")).unwrap();
         std::fs::write(repo.join("include/clock.h"), clock).unwrap();
     }
@@ -1828,21 +1953,18 @@ End of search list.
                 &[
                     (
                         "plugins/ua_config_default.c",
-                        "#include \"clock.h\"\nlong long (*UA_clockFn)(void);\n\
-                         long long setDefaultConfig(void) {\n\
-                         UA_clockFn = UA_DateTime_now;\n\
-                         return UA_DateTime_now();\n}\n\
-                         long long interruptServer(void) {\n\
-                         return UA_DateTime_now();\n}\n",
+                        &(uses("plugins/ua_config_default.c")
+                            + "long long (*UA_clockFn)(void);\n\
+                               void UA_keep(void) { UA_clockFn = UA_DateTime_now; }\n"),
                     ),
                     (
                         "src/more/ua_types.c",
-                        &("#include \"../../../build/other.h\"\n\
+                        "#include \"../../../build/other.h\"\n\
                            #include <sys/stat.h>\n\
                            int UA_stat(const char *path) {\n\
-                           struct stat s;\nreturn stat(path, &s);\n}\n"
-                            .to_owned()
-                            + &calls(&["UA_new"])),
+                           struct stat s;\nreturn stat(path, &s);\n}\n\
+                           #include \"clock.h\"\n\
+                           long long UA_new(void) { return UA_DateTime_now(); }\n",
                     ),
                     (
                         "src/more/ua_clock.c",
@@ -1866,21 +1988,19 @@ End of search list.
                  that the include check reads"
                     .to_owned(),
                 "plugins/ua_config_default.c: the section `.text` takes the address of \
-                 `UA_DateTime_now`, so a call through it escapes CLOCK_CALLS"
+                 `UA_DateTime_now`, so a call through it escapes FUNCTION_SYMBOLS"
                     .to_owned(),
                 "src/more/ua_clock.c: the section `.data.rel` takes the address of \
-                 `UA_DateTime_now`, so a call through it escapes CLOCK_CALLS"
+                 `UA_DateTime_now`, so a call through it escapes FUNCTION_SYMBOLS"
                     .to_owned(),
                 "src/more/ua_text.c: the section `.text_ptr` takes the address of \
-                 `UA_DateTime_now`, so a call through it escapes CLOCK_CALLS"
+                 `UA_DateTime_now`, so a call through it escapes FUNCTION_SYMBOLS"
                     .to_owned(),
                 "src/more/ua_types.c: includes ./src/more/../../../build/other.h, \
                  which is outside the copy"
                     .to_owned(),
-                "src/more/ua_types.c: `UA_new` calls a global clock function. Find \
-                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
-                    .to_owned(),
-                unlisted("src/more/ua_types.c", "stat"),
+                unlisted_clock("src/more/ua_types.c", "UA_new"),
+                unlisted("src/more/ua_types.c", "UA_stat", "stat"),
             ])
         );
         assert!(root.join("patches/open62541/kept.c").exists());
@@ -1895,20 +2015,18 @@ End of search list.
     fn run_names_a_static_helper_that_calls_a_clock() {
         let (root, repo, result) = run_on("helper", |repo| {
             let log = "#include \"clock.h\"\n\
-                       static long long helper(void) { return UA_DateTime_now(); }\n\
-                       long long UA_Log_Stdout_log(void) { return helper(); }\n"
+                       static long long helper(void) { return UA_DateTime_now(); }\n"
                 .to_owned()
-                + references("plugins/ua_log_stdout.c");
+                + &uses("plugins/ua_log_stdout.c")
+                    .replace("(void)UA_DateTime_now();", "(void)helper();");
             create_files(repo, &[("plugins/ua_log_stdout.c", &log)]);
         });
         assert_eq!(
             result,
             Err(vec![
-                "plugins/ua_log_stdout.c: `helper` calls a global clock function. Find \
-                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
-                    .to_owned(),
-                "plugins/ua_log_stdout.c: `UA_Log_Stdout_log` no longer calls a clock. \
-                 Remove it from CLOCK_CALLS"
+                unlisted_clock("plugins/ua_log_stdout.c", "helper"),
+                "plugins/ua_log_stdout.c: `UA_Log_Stdout_log` no longer references \
+                 `UA_DateTime_now`. Remove it from FUNCTION_SYMBOLS"
                     .to_owned(),
             ])
         );
@@ -1996,14 +2114,7 @@ End of search list.
                 + "target_sources(open62541-object PRIVATE @gen.c gen.c)\n";
             std::fs::write(&cmake, text).unwrap();
         });
-        assert_eq!(
-            result,
-            Err(vec![
-                "@gen.c: `UA_gen` calls a global clock function. Find whether a node \
-                 runs it; if not, add it to CLOCK_CALLS with the reason"
-                    .to_owned()
-            ])
-        );
+        assert_eq!(result, Err(vec![unlisted_clock("@gen.c", "UA_gen")]));
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
@@ -2074,11 +2185,7 @@ End of search list.
         );
         assert_eq!(
             check(&root),
-            Err(vec![
-                "src/util/ua_util.c: `hidden` calls a global clock function. Find \
-                 whether a node runs it; if not, add it to CLOCK_CALLS with the reason"
-                    .to_owned(),
-            ])
+            Err(vec![unlisted_clock("src/util/ua_util.c", "hidden")])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
@@ -2108,8 +2215,8 @@ End of search list.
         assert_eq!(
             check(&root),
             Err(vec![
-                unlisted("src/util/ua_encryptedsecret.c", "time"),
-                unlisted("src/util/ua_util.c", "pthread_mutex_lock"),
+                unlisted("src/util/ua_encryptedsecret.c", "UA_time", "time"),
+                unlisted("src/util/ua_util.c", "UA_lock", "pthread_mutex_lock"),
             ])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
@@ -2140,7 +2247,7 @@ End of search list.
         );
         assert_eq!(
             check(&root),
-            Err(vec![unlisted("src/util/ua_util.c", "socket")])
+            Err(vec![unlisted("src/util/ua_util.c", "UA_connect", "socket")])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
@@ -2166,8 +2273,39 @@ End of search list.
             check(&root),
             Err(vec![unlisted(
                 "src/util/ua_encryptedsecret.c",
+                "UA_lastError",
                 "__errno_location"
             )])
+        );
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
+    fn check_finds_a_listed_symbol_at_a_place_that_the_list_does_not_name() {
+        let (root, repo, result) = run_after("place", |_| {}, &[]);
+        assert_eq!(result, Ok(()));
+        let copy = root.join("patches/open62541");
+        let append = |path: &str, text: &str| {
+            let old = std::fs::read_to_string(copy.join(path)).unwrap();
+            std::fs::write(copy.join(path), old + text).unwrap();
+        };
+        append(
+            "deps/parse_num.c",
+            "int UA_lastError(void) { return errno; }\n",
+        );
+        append("src/util/ua_util.c", "void (*UA_stop)(void) = abort;\n");
+        assert_eq!(
+            check(&root),
+            Err(vec![
+                "src/util/ua_util.c: the section `.data.rel` references `abort` \
+                 outside a function, so a use through it escapes FUNCTION_SYMBOLS"
+                    .to_owned(),
+                unlisted("deps/parse_num.c", "UA_lastError", "__errno_location"),
+            ])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
@@ -2211,6 +2349,7 @@ End of search list.
             check(&root),
             Err(vec![unlisted(
                 "src/util/ua_encryptedsecret.c",
+                "UA_now",
                 "_GLOBAL_OFFSET_TABLE_"
             )])
         );
@@ -2229,10 +2368,10 @@ End of search list.
             root.join("patches/open62541/plugins/ua_log_stdout.c"),
             "#include \"clock.h\"\n\
              static inline __attribute__((always_inline)) long long helper(void) {\n\
-             return UA_DateTime_now();\n}\n\
-             long long UA_Log_Stdout_log(void) { return helper(); }\n"
+             return UA_DateTime_now();\n}\n"
                 .to_owned()
-                + references("plugins/ua_log_stdout.c"),
+                + &uses("plugins/ua_log_stdout.c")
+                    .replace("(void)UA_DateTime_now();", "(void)helper();"),
         )
         .unwrap();
         assert_eq!(
