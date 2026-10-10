@@ -1,6 +1,7 @@
 //! The time to sync the durable logs of a shard at each commit, for each entry: one
-//! record with one data entry of each index. With a tag, each log first holds a
-//! tagged entry, as a log of a home holds a handoff.
+//! record with one data entry of each index, after a trim that hides each older
+//! record. With a tag, each log first holds a tagged entry, as a log of a home holds
+//! a handoff.
 
 use std::num::NonZeroU8;
 

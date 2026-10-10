@@ -122,7 +122,8 @@ impl Logs {
     }
 
     /// One commit of one record that holds one data entry of each index: `hide` to
-    /// the record, then `sync` for each entry.
+    /// the record, then `sync` for each entry. It models a commit after a trim that
+    /// hides each older record, so each log keeps one run, not one for each commit.
     pub fn commit(&mut self) {
         self.inner.hide(self.offset);
         for (slot, header) in &mut self.headers {
