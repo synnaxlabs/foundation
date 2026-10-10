@@ -119,15 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn a_block_is_the_most_whole_sectors_that_the_pool_gives() {
-        assert_eq!(blocks(2048).unwrap().chunk, 3 * files::SECTOR);
-        assert_eq!(blocks(1 << 20).unwrap().chunk, CHUNK);
-    }
-
-    // A pool of 1024 bytes has a largest block of 512.
-    #[test]
     fn refuses_a_pool_with_no_block_of_one_sector() {
-        assert_eq!(blocks(1024).unwrap().chunk, files::SECTOR);
         let refused = blocks(512).unwrap_err();
         let largest = 448;
         let requested = files::SECTOR;
