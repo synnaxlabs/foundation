@@ -332,17 +332,16 @@
   record leaves a first open, also with another founding (`laptop.architect`,
   2026-10-09:
   https://github.com/synnaxlabs/foundation/pull/2200#issuecomment-6091088392). Each
-  later open compares `founding` with `Config::founding`, its
-  members in key order, before `raft` starts. Another value gives
+  open whose log holds a record compares `founding` with `Config::founding`, its members
+  in key order, before `raft` starts. Another value gives
   `Error::Founding { stored, given }`, each a `Box<region::Founding>`. Its text names
   the first field that differs: the prefix and the voters in the form "the mesh was
-  founded with voters {stored}, not {given}", and for the members, the definitions,
-  and the homes the first key in key order whose value differs or is in only one of
-  the two. A text of the homes names the index by the tree key of its
-  `Definition::Channel` in `stored`, or by its key when no definition has it: "the
-  mesh was founded with another home of index {name}", "... with a home of index
-  {name}, which the config lacks", and "... with no home of index {name}"
-  (`laptop.architect`, 2026-10-09:
+  founded with voters {stored}, not {given}", and for the members, the definitions, and
+  the homes the first key in key order whose value differs or is in only one of the two.
+  A text of the homes names the index by the tree key of its `Definition::Channel` in
+  `stored`, or by its key when no definition has it: "the mesh was founded with another
+  home of index {name}", "... with a home of index {name}, which the config lacks", and
+  "... with no home of index {name}" (`laptop.architect`, 2026-10-09:
   https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6090902577). A
   log with a record and no `founding`, or a `founding` that fails its check, its
   version, or its decode, gives `Error::Unfounded { path }`. A failed file

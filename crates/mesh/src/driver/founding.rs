@@ -1,6 +1,6 @@
 //! The file `founding` of a mesh directory: the region before the first entry of the
 //! log. An open whose log holds no record is a first open: it writes the file. Each
-//! later open checks `Config::founding` against it.
+//! open whose log holds a record checks `Config::founding` against it.
 //!
 //! The file holds an 8-byte check of the rest, the format version, then what
 //! `region::Founding::encode` gives. A first open removes `founding`, writes

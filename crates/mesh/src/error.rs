@@ -126,11 +126,11 @@ pub enum Error {
         /// The most homes that one change gives.
         most: usize,
     },
-    /// `Config::founding` is not the region that the first open of the mesh directory
-    /// stored. Each field sets the state at version 0, so a node with another value
+    /// `Config::founding` is not the region in the founding file of the mesh
+    /// directory. Each field sets the state at version 0, so a node with another value
     /// applies the log to another state.
     Founding {
-        /// What the first open stored.
+        /// What the founding file holds.
         stored: Box<region::Founding>,
         /// `Config::founding`, with its members in key order.
         given: Box<region::Founding>,
