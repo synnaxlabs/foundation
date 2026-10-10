@@ -2920,3 +2920,22 @@ fn a_dialed_stream_takes_the_receive_buffer_of_the_manager() {
     let mut network = Network::new();
     assert_eq!(received(&mut network, Open::Dialed), (64 + 64) << 10);
 }
+
+/// The peer sends 64 KiB, the receive buffer of [`OPTIONS`], before the stream
+/// reads, so the first read takes it all.
+#[test]
+fn a_read_takes_the_receive_buffer_at_once() {
+    let mut network = Network::new();
+    network.dial(Span::ZERO, &vec![7; OPTIONS.recv_buffer_bytes]);
+    let calls = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, local(&node));
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::from_nanos(100_000_000)).await;
+            side.calls()
+        })
+        .expect("the run ends");
+    let lengths: Vec<usize> = calls.iter().map(|(_, _, bytes)| bytes.len()).collect();
+    assert_eq!(lengths, [0, 0, OPTIONS.recv_buffer_bytes]);
+}
