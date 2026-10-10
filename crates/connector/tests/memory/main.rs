@@ -1,6 +1,7 @@
 //! After a device error of 1 MiB, the status holds no more than after a short one,
-//! plus the bound of its error text. This binary has no test harness: the count
-//! covers each thread, and a harness allocates on its own thread at any time.
+//! plus twice the bound of its error text: once in the status and once in its frame
+//! series. This binary has no test harness: the count covers each thread, and a
+//! harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -97,9 +98,8 @@ fn main() {
     let at = |run: usize| held[run].load(Relaxed);
     let short = at(SHORT).saturating_sub(at(SHORT - 1));
     let long = at(SHORT + 1).saturating_sub(at(SHORT));
-    // About 1 KiB for the text and 1 KiB for its series in a frame.
     assert!(
-        long <= short + 4 * 1_024,
+        long <= short + 2 * 1_024 + 256,
         "a run adds {short} bytes after a short error, {long} after one of 1 MiB"
     );
 }
