@@ -1,8 +1,8 @@
 //! The time to encode, validate, and decode series shaped like sensor data, and
 //! series that FFOR and delta pack at chosen bit widths. `decoder` decodes one vector
 //! at a time, `grow` decodes into a new `out`, and `variable` writes and reads the raw
-//! form of a `String` series. Before it times anything, it checks that each full series compresses at
-//! least as well as its floor.
+//! form of a `String` series. Before it times anything, it checks that each full
+//! series compresses at least as well as its floor.
 
 use std::f64::consts::TAU;
 use std::fmt;
