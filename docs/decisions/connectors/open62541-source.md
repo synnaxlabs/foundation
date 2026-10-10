@@ -64,10 +64,10 @@
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094798299,
   2026-10-10 06:47 UTC). It refines the (file, enclosing function) list of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367 by
-  symbol and access: approval owed by `laptop.architect-2`. The function is the whole label of the function symbol, such as
-  `parse.0` for a nested function. The key also holds the access, a call or an
-  address, so the address of a listed symbol that its function only calls fails.
-  Approved by `laptop.architect`
+  symbol and access: approval owed by `laptop.architect-2`. The function is the whole
+  label of the function symbol, such as `parse.0` for a nested function. The key also
+  holds the access, a call or an address, so the address of a listed symbol that its
+  function only calls fails. Approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094746609,
   2026-10-10 06:40 UTC).
   A file that a node runs may hold keys of symbols that are not clocks, each with its
