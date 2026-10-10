@@ -27,13 +27,13 @@
   The check reads each undefined symbol of an object that a relocation in that object
   names (`nm -u` and `objdump -r`) and fails on each symbol outside the copy that is not
   on a closed list, with the file and the symbol. `SYMBOLS` admits a symbol for any
-  file, and `FILE_SYMBOLS` admits a (file, symbol) pair of a file that no node runs,
-  such as a call of the stdout logger. Each entry has its reason. A symbol goes in
-  `SYMBOLS` only when it reads no clock, file, network, randomness, or process state. A
-  symbol is outside the copy when no object exports it: a `static` function of one file
-  does not hide a call of the OS function of its name from another. A pair of
-  `FILE_SYMBOLS` with no reference fails, so a file that the build leaves out loses its
-  pairs. A new outside symbol also goes in `OUTSIDE` in `connector-opcua`, which lists
+  file. Each other reference needs its key in `FUNCTION_SYMBOLS`. Each entry has its
+  reason. A symbol goes in `SYMBOLS` only when it reads no clock, file, network,
+  randomness, or process state. A symbol is outside the copy when no object exports it:
+  a `static` function of one file does not hide a call of the OS function of its name
+  from another. A key of `FUNCTION_SYMBOLS` with no reference fails, so a file that the
+  build leaves out loses its keys. A new outside symbol also goes in `OUTSIDE` in
+  `connector-opcua`, which lists
   the outside symbols of the production build. A header list is not a check: a listed
   header can include another (`pthread.h` includes `time.h`). So the check refuses no
   system header, and each header that the copy includes must be in the copy or in a
@@ -48,29 +48,34 @@
   assembler makes `_GLOBAL_OFFSET_TABLE_` undefined in each object that reads the table,
   with no relocation, so only a reference that the C makes counts. The check builds with
   no stack protector, so the compiler adds no reference to its random canary, and a
-  reference that the C makes fails. Approval owed by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093686633). A
-  reference is an undefined symbol that a relocation names, and it is outside the copy
-  when no object exports it: approved by `laptop.architect`
+  reference that the C makes fails. Approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099166264,
+  2026-10-10 15:36 UTC). A reference is an undefined symbol that a relocation names, and
+  it is outside the copy when no object exports it: approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093780083,
-  2026-10-10 04:30 UTC). When neither `SYMBOLS` nor `FILE_SYMBOLS` admits a reference in
-  a function, in any file, the check keys it by (file, function, symbol, access), read
-  from `objdump -dr` as the clock check reads a call. The function is the whole label of
-  the function symbol, such as `parse.0` for a nested function, and the access is a call
-  or an address. So a listed symbol in a new function of a file fails, and so does the
-  address of a listed symbol that its function only calls. `FUNCTION_SYMBOLS` lists
-  these keys, the clock calls among them. A reference from outside a function fails when
-  neither `SYMBOLS` nor `FILE_SYMBOLS` admits it. Decided by `laptop.architect`
+  2026-10-10 04:30 UTC). When `SYMBOLS` does not admit a reference in a function, in any
+  file, and it is not the address of a clock, the check keys it by (file, function,
+  symbol, access), read from `objdump -dr` as the clock check reads a call. The function
+  is the whole label of the function symbol, such as `parse.0` for a nested function,
+  and the access is a call or an address. So a listed symbol in a new function of a file
+  fails, and so does the address of a listed symbol that its function only calls.
+  `FUNCTION_SYMBOLS` lists these keys, the clock calls among them. A reference from
+  outside a function fails when `SYMBOLS` does not admit it. Decided by
+  `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094336509,
   2026-10-10 05:46 UTC). The whole label and the access: approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094746609,
   2026-10-10 06:40 UTC). It refines the (file, enclosing function) list of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367 by symbol
-  and access. A file that a node runs may hold keys of symbols that are not clocks, each
-  with its reason. The text from "When neither" to here: approved by `laptop.architect`
-  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6098607545,
-  2026-10-10 14:36 UTC); approval owed by `laptop.architect-2`
-  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6098600247). The
+  and access. A key may name a symbol that is not a clock, with its reason. No list of
+  (file, symbol) pairs remains, so a new reference in any file needs its own key.
+  Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099166264,
+  2026-10-10 15:36 UTC). Supersedes the (file, symbol) pairs of
+  https://github.com/synnaxlabs/foundation/issues/1884#issuecomment-6060989375. The text
+  from "When `SYMBOLS` does not admit" to here: approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6099166264); approval
+  owed by `laptop.architect`. The
   check fails on every reference to a clock function that is not a call, also one in
   code. A call relocation counts as a call only in a section that `objdump -d`
   disassembles. Decided by `laptop.architect-2`

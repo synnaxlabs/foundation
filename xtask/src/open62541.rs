@@ -41,9 +41,9 @@ const CLOCKS: [&str; 3] = [
 ];
 
 /// The only (file, function, symbol, access) keys with which a function references a
-/// symbol outside the copy that neither [`SYMBOLS`] nor [`FILE_SYMBOLS`] admits. A
-/// clock counts only as a call.
-const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 13] = [
+/// symbol outside the copy that [`SYMBOLS`] does not admit. A clock counts only as a
+/// call.
+const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 20] = [
     // `isdigit` reads the locale, which stays C: nothing calls `setlocale`.
     (
         "deps/musl_inet_pton.c",
@@ -92,6 +92,51 @@ const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 13] = [
         "plugins/ua_log_stdout.c",
         "UA_Log_Stdout_log",
         "UA_DateTime_now",
+        Access::Call,
+    ),
+    (
+        "plugins/ua_log_stdout.c",
+        "UA_Log_Stdout_log",
+        "fflush",
+        Access::Call,
+    ),
+    (
+        "plugins/ua_log_stdout.c",
+        "UA_Log_Stdout_log",
+        "printf",
+        Access::Call,
+    ),
+    (
+        "plugins/ua_log_stdout.c",
+        "UA_Log_Stdout_log",
+        "puts",
+        Access::Call,
+    ),
+    (
+        "plugins/ua_log_stdout.c",
+        "UA_Log_Stdout_log",
+        "stdout",
+        Access::Address,
+    ),
+    // The syslog logger, which we never set.
+    (
+        "plugins/ua_log_syslog.c",
+        "UA_Log_Syslog_log",
+        "syslog",
+        Access::Call,
+    ),
+    // `UA_fileExists`, for the semaphore file of a discovery server, which no node
+    // runs.
+    (
+        "src/server/ua_discovery.c",
+        "UA_DiscoveryManager_cleanupTimedOut",
+        "access",
+        Access::Call,
+    ),
+    (
+        "src/server/ua_services_discovery.c",
+        "process_RegisterServer",
+        "access",
         Access::Call,
     ),
     // ECC user tokens, which need encryption, which is off.
@@ -190,23 +235,6 @@ const SYMBOLS: [&str; 16] = [
     "UA_InterruptManager_new_POSIX",
 ];
 
-/// The only (file, symbol) pairs that may reference a symbol outside the copy that
-/// [`SYMBOLS`] does not list, other than a clock, from anywhere in the file. Each file
-/// is one that no node runs.
-const FILE_SYMBOLS: [(&str, &str); 7] = [
-    // The stdout logger, which we replace with our own.
-    ("plugins/ua_log_stdout.c", "fflush"),
-    ("plugins/ua_log_stdout.c", "printf"),
-    ("plugins/ua_log_stdout.c", "puts"),
-    ("plugins/ua_log_stdout.c", "stdout"),
-    // The syslog logger, which we never set.
-    ("plugins/ua_log_syslog.c", "syslog"),
-    // `UA_fileExists`, for the semaphore file of a discovery server, which no node
-    // runs.
-    ("src/server/ua_discovery.c", "access"),
-    ("src/server/ua_services_discovery.c", "access"),
-];
-
 /// Clones `tag` of `url` into `target/open62541/`, builds it with [`OPTIONS`], and
 /// replaces `patches/open62541/` with its compiled sources, the headers in the clone
 /// that they include, each file of [`EXTRA`], `LICENSE`, `sources.txt` (each `.c`
@@ -252,9 +280,9 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 /// A line of `flags.txt` other than a `-D`, `-I`, or `-std` flag with its value or one
 /// of [`CODE_FLAGS`], a build that fails, an `#include` or `#import` of a header
 /// outside both the copy and the system directories, a reference to a symbol outside
-/// the copy that neither [`SYMBOLS`], [`FILE_SYMBOLS`], nor [`FUNCTION_SYMBOLS`]
-/// admits, a listed pair or key with no reference, a reference outside a function
-/// that [`SYMBOLS`] and [`FILE_SYMBOLS`] do not admit, any reference to a clock
+/// the copy that neither [`SYMBOLS`] nor [`FUNCTION_SYMBOLS`] admits, a listed key
+/// with no reference, a reference outside a function that [`SYMBOLS`] does not admit,
+/// any reference to a clock
 /// function other than a call, such as its address in code or data, through which any
 /// code can call it, each inlined function, an `#include_next`, and a `#line`
 /// directive or line marker in a `.c` or `.h` file of the copy.
@@ -888,8 +916,6 @@ fn references(
 /// far, as the lists key them.
 #[derive(Default)]
 struct Uses {
-    /// Each pair of [`FILE_SYMBOLS`] with a reference.
-    pairs: BTreeSet<(String, String)>,
     /// Each key of a reference that [`Uses::add`] gives to [`FUNCTION_SYMBOLS`].
     keys: BTreeSet<(String, String, String, Access)>,
 }
@@ -897,7 +923,7 @@ struct Uses {
 impl Uses {
     /// Adds `found`, a reference of `file`, and gives its error when no list can admit
     /// it: the address of a clock function, or a reference outside a function that
-    /// neither [`SYMBOLS`] nor [`FILE_SYMBOLS`] admits.
+    /// [`SYMBOLS`] does not admit.
     fn add(&mut self, file: &str, found: Reference) -> Option<String> {
         let Reference {
             section,
@@ -918,10 +944,6 @@ impl Uses {
         if SYMBOLS.contains(&symbol.as_str()) {
             return None;
         }
-        if FILE_SYMBOLS.contains(&(file, &symbol)) {
-            self.pairs.insert((file.to_owned(), symbol));
-            return None;
-        }
         let Some(function) = function else {
             return Some(format!(
                 "{file}: the section `{section}` references `{symbol}` outside a \
@@ -933,8 +955,8 @@ impl Uses {
         None
     }
 
-    /// An error for each key that [`FUNCTION_SYMBOLS`] does not list, for each listed
-    /// key with no reference, and for each pair of [`FILE_SYMBOLS`] with no reference.
+    /// An error for each key that [`FUNCTION_SYMBOLS`] does not list, and for each
+    /// listed key with no reference.
     fn mismatches(&self) -> Vec<String> {
         let listed: BTreeSet<(String, String, String, Access)> = FUNCTION_SYMBOLS
             .iter()
@@ -958,10 +980,9 @@ impl Uses {
             } else {
                 format!(
                     "{file}: `{function}` {verb} `{symbol}`, which no list admits. \
-                     Find whether a node runs it; if it reads no clock, file, network, \
-                     randomness, or process state, add it with the reason, to \
-                     FILE_SYMBOLS for a file that no node runs, else to \
-                     FUNCTION_SYMBOLS"
+                     Find whether a node runs it; if not, or if it reads no clock, \
+                     file, network, randomness, or process state, add it to \
+                     FUNCTION_SYMBOLS with the reason"
                 )
             }
         });
@@ -975,18 +996,7 @@ impl Uses {
                         access.verb()
                     )
                 });
-        let files = FILE_SYMBOLS
-            .iter()
-            .filter(|&&(file, symbol)| {
-                !self.pairs.contains(&(file.to_owned(), symbol.to_owned()))
-            })
-            .map(|(file, symbol)| {
-                format!(
-                    "{file}: no longer references `{symbol}`. Remove it from \
-                     FILE_SYMBOLS"
-                )
-            });
-        new.chain(gone).chain(files).collect()
+        new.chain(gone).collect()
     }
 }
 
@@ -1628,9 +1638,8 @@ End of search list.
         let verb = access.verb();
         format!(
             "{file}: `{function}` {verb} `{symbol}`, which no list admits. Find \
-             whether a node runs it; if it reads no clock, file, network, randomness, \
-             or process state, add it with the reason, to FILE_SYMBOLS for a file \
-             that no node runs, else to FUNCTION_SYMBOLS"
+             whether a node runs it; if not, or if it reads no clock, file, network, \
+             randomness, or process state, add it to FUNCTION_SYMBOLS with the reason"
         )
     }
 
@@ -1653,11 +1662,6 @@ End of search list.
                 assert_eq!(uses.add(file, found), None);
             }
         }
-        for &(file, symbol) in &FILE_SYMBOLS {
-            if !left_out.contains(&symbol) {
-                assert_eq!(uses.add(file, data(symbol)), None);
-            }
-        }
         uses
     }
 
@@ -1667,7 +1671,7 @@ End of search list.
         assert_eq!(uses.add("src/ua_types.c", call("UA_new", "memcpy")), None);
         assert_eq!(uses.add("src/ua_types.c", data("memcpy")), None);
         assert_eq!(uses.mismatches(), Vec::<String>::new());
-        let mut uses = listed(&["UA_random_seed", "syslog"]);
+        let mut uses = listed(&["UA_random_seed", "UA_Log_Syslog_log"]);
         let found = [
             ("deps/parse_num.c", call("UA_parse", "__errno_location")),
             ("plugins/ua_log_stdout.c", call("UA_print", "puts")),
@@ -1686,13 +1690,14 @@ End of search list.
                     Access::Call,
                     "__errno_location"
                 ),
+                unlisted("plugins/ua_log_stdout.c", "UA_print", Access::Call, "puts"),
                 unlisted_clock("src/ua_types.c", "UA_new"),
                 unlisted("src/ua_types.c", "UA_open", Access::Call, "socket"),
+                "plugins/ua_log_syslog.c: `UA_Log_Syslog_log` no longer calls \
+                 `syslog`. Remove it from FUNCTION_SYMBOLS"
+                    .to_owned(),
                 "src/util/ua_util.c: `UA_random_seed` no longer calls \
                  `UA_DateTime_now`. Remove it from FUNCTION_SYMBOLS"
-                    .to_owned(),
-                "plugins/ua_log_syslog.c: no longer references `syslog`. Remove it \
-                 from FILE_SYMBOLS"
                     .to_owned(),
             ]
         );
@@ -1717,13 +1722,12 @@ End of search list.
         );
     }
 
-    /// No clock is in [`SYMBOLS`] or [`FILE_SYMBOLS`], so only a key of
-    /// [`FUNCTION_SYMBOLS`] admits a clock call.
+    /// No clock is in [`SYMBOLS`], so only a key of [`FUNCTION_SYMBOLS`] admits a clock
+    /// call.
     #[test]
     fn no_list_but_function_symbols_admits_a_clock() {
         for clock in CLOCKS {
             assert!(!SYMBOLS.contains(&clock));
-            assert!(FILE_SYMBOLS.iter().all(|&(_, symbol)| symbol != clock));
         }
     }
 
@@ -1765,7 +1769,14 @@ End of search list.
                     .to_owned()
             )
         );
-        assert_eq!(uses.add("plugins/ua_log_syslog.c", data("syslog")), None);
+        assert_eq!(
+            uses.add("plugins/ua_log_syslog.c", data("syslog")),
+            Some(
+                "plugins/ua_log_syslog.c: the section `.data.rel` references `syslog` \
+                 outside a function, so a use through it escapes FUNCTION_SYMBOLS"
+                    .to_owned()
+            )
+        );
         assert_eq!(uses.add("src/ua_types.c", data("memcpy")), None);
     }
 
@@ -1821,22 +1832,13 @@ End of search list.
     }
 
     /// C text of `file` that references each symbol at its place in
-    /// [`FUNCTION_SYMBOLS`], and each that [`FILE_SYMBOLS`] lists for `file` in a
-    /// function of its own.
+    /// [`FUNCTION_SYMBOLS`].
     fn uses(file: &str) -> String {
         let mut functions = std::collections::BTreeMap::<_, Vec<_>>::new();
         for &(f, function, symbol, _) in &FUNCTION_SYMBOLS {
             if f == file {
                 functions
                     .entry(function)
-                    .or_default()
-                    .push(statement(symbol));
-            }
-        }
-        for &(f, symbol) in &FILE_SYMBOLS {
-            if f == file {
-                functions
-                    .entry("UA_use")
                     .or_default()
                     .push(statement(symbol));
             }
@@ -1853,8 +1855,8 @@ End of search list.
 
     /// A project with the layout of open62541: the `open62541` library from two
     /// object libraries, with a reference to each symbol at its place in
-    /// [`FUNCTION_SYMBOLS`] and [`FILE_SYMBOLS`], a generated header, a header that
-    /// is not UTF-8, and each file of [`EXTRA`], which the library does not compile.
+    /// [`FUNCTION_SYMBOLS`], a generated header, a header that is not UTF-8, and each
+    /// file of [`EXTRA`], which the library does not compile.
     fn create_project(repo: &Path) {
         exec(Command::new("git").arg("init").arg("-q").arg(repo)).unwrap();
         let util = "#include \"open62541/config.h\"\n".to_owned()
