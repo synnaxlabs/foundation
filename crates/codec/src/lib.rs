@@ -257,7 +257,7 @@ fn reserve(
     count: usize,
     bytes: &[u8],
 ) -> Result<(), Error> {
-    let len = validate(data_type, count, bytes)?;
+    let len = validate_shape(data_type, count, bytes)?;
     out.reserve_exact(len.saturating_sub(out.len()));
     Ok(())
 }
