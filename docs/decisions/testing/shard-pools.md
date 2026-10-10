@@ -15,4 +15,6 @@
   its own. Decided by `laptop.architect` (2026-10-07 10:27 UTC):
   https://github.com/synnaxlabs/foundation/issues/1317#issuecomment-6036013562, and
   made `const fn` by `laptop.architect` (2026-10-10 06:37 UTC):
-  https://github.com/synnaxlabs/foundation/issues/1317#issuecomment-6094721967.
+  https://github.com/synnaxlabs/foundation/issues/1317#issuecomment-6094721967, and
+  stated as more than `usize::MAX` bytes by `laptop.architect` (2026-10-10 09:23
+  UTC): https://github.com/synnaxlabs/foundation/pull/2269#issuecomment-6096088015.
