@@ -251,6 +251,7 @@ fn lock<K, S, T>(slots: &Slots<K, S, T>) -> MutexGuard<'_, BTreeMap<K, Slot<S, T
 #[cfg(not(loom))]
 mod tests {
     use std::cell::RefCell;
+    use std::pin::{Pin, pin};
     use std::rc::Rc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
@@ -493,6 +494,102 @@ mod tests {
             clock.now() - start
         });
         assert_eq!(elapsed, ms(60), "never waits for tty0");
+    }
+
+    /// Counts its wakes. A waker that the registry keeps holds a count of its `Arc`.
+    #[derive(Default)]
+    struct Count(AtomicUsize);
+
+    impl std::task::Wake for Count {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Relaxed);
+        }
+    }
+
+    /// Polls `future` once with a waker of `count`.
+    fn poll_with<F: Future>(
+        future: Pin<&mut F>,
+        count: &Arc<Count>,
+    ) -> Poll<F::Output> {
+        let waker = Waker::from(Arc::clone(count));
+        future.poll(&mut std::task::Context::from_waker(&waker))
+    }
+
+    /// An acquire of `tty0` whose open never ends, so the slot stays busy.
+    fn busy(
+        ports: &Ports,
+    ) -> impl Future<Output = Result<Lease<&'static str, u32, Port>, Error>> {
+        ports.acquire("tty0", 9600, |_: &u32| future::pending())
+    }
+
+    #[test]
+    fn acquires_that_wait_and_drop_leave_no_waker() {
+        let ports = Ports::new();
+        let mut open = pin!(busy(&ports));
+        let count = Arc::new(Count::default());
+        assert!(poll_with(open.as_mut(), &count).is_pending());
+        let count = Arc::new(Count::default());
+        for _ in 0..1000 {
+            let waiting = pin!(busy(&ports));
+            assert!(poll_with(waiting, &count).is_pending());
+        }
+        assert_eq!(Arc::strong_count(&count), 1);
+    }
+
+    #[test]
+    fn an_acquire_polled_with_new_wakers_keeps_the_last_one() {
+        let ports = Ports::new();
+        let mut open = pin!(busy(&ports));
+        assert!(poll_with(open.as_mut(), &Arc::new(Count::default())).is_pending());
+        let mut waiting = pin!(busy(&ports));
+        let counts: Vec<Arc<Count>> = (0..1000).map(|_| Arc::default()).collect();
+        for count in &counts {
+            assert!(poll_with(waiting.as_mut(), count).is_pending());
+        }
+        let held: Vec<usize> = counts.iter().map(Arc::strong_count).collect();
+        let mut expected = vec![1; 1000];
+        expected[999] = 2;
+        assert_eq!(held, expected);
+    }
+
+    #[test]
+    fn a_dropped_acquire_keeps_the_wakers_of_others() {
+        let ports = Ports::new();
+        let mut open = Box::pin(busy(&ports));
+        assert!(poll_with(open.as_mut(), &Arc::new(Count::default())).is_pending());
+        let kept = Arc::new(Count::default());
+        let mut waiting = pin!(busy(&ports));
+        assert!(poll_with(waiting.as_mut(), &kept).is_pending());
+        {
+            let dropped = pin!(busy(&ports));
+            assert!(poll_with(dropped, &Arc::new(Count::default())).is_pending());
+        }
+        assert_eq!(Arc::strong_count(&kept), 2);
+        drop(open);
+        assert_eq!(kept.0.load(Relaxed), 1, "the drop of the open wakes it");
+    }
+
+    // A waiter keeps its key after its busy span ends. A key used again by a waiter of
+    // the next span would let the first waiter's drop take its waker.
+    #[test]
+    fn a_waiter_of_an_ended_span_keeps_the_wakers_of_the_next_span() {
+        let ports = Ports::new();
+        let mut first = Box::pin(busy(&ports));
+        {
+            let mut open = pin!(busy(&ports));
+            assert!(poll_with(open.as_mut(), &Arc::new(Count::default())).is_pending());
+            assert!(
+                poll_with(first.as_mut(), &Arc::new(Count::default())).is_pending()
+            );
+        }
+        let mut open = pin!(busy(&ports));
+        let count = Arc::new(Count::default());
+        assert!(poll_with(open.as_mut(), &count).is_pending());
+        let kept = Arc::new(Count::default());
+        let mut waiting = pin!(busy(&ports));
+        assert!(poll_with(waiting.as_mut(), &kept).is_pending());
+        drop(first);
+        assert_eq!(Arc::strong_count(&kept), 2);
     }
 
     /// Polls `f` to the end on this thread, parked between wakes.
