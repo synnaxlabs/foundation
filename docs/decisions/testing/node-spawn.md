@@ -1,7 +1,7 @@
 - **NODE SPAWN (2026-10-07)** `Node::spawn(task)` calls `task` with the node's one hub,
   on shard 0, once each shard has opened its buffer, the node takes sessions, and, with
-  a region, the mesh has opened, then runs its future. It has the shape and the rules
-  of `env::tasks::Tasks::spawn`: no handle, `Output = ()`, and a panic ends shard 0 and
+  a region, the mesh has opened, then runs its future. It has the shape and the rules of
+  `env::tasks::Tasks::spawn`: no handle, `Output = ()`, and a panic ends shard 0 and
   fails the node (`Error::Panicked`), unless the transport stopped first, which gives
   `Error::Transport`. Shard 0 calls the tasks with the hub in the order of their calls,
   so their closure bodies run in that order; their futures run in no set order. A task
