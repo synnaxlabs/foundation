@@ -201,7 +201,8 @@ struct Found<'a> {
     /// The name of each channel that a `channel` block in any Document defines.
     channels: BTreeSet<Name>,
     /// The label of the first connector in span order, no span first, that a
-    /// `connector` block in any Document defines at each name, by the name in lowercase.
+    /// `connector` block in any Document defines at each name, by the name in
+    /// lowercase.
     connectors: BTreeMap<Box<str>, &'a Label>,
     /// The kinds that check each `connector` block's config.
     kinds: &'a Table,
