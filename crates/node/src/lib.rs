@@ -807,10 +807,9 @@ impl Serve {
     /// each task of the mesh to end, with a mesh, and for the transport to free the
     /// port. Unless the socket broke, the port is freed only after each task of a
     /// remote reader of the hub, and each task that a connector's run spawned, has
-    /// ended. Runs no
-    /// task and takes no session when a shard did not open, or when the budgets were
-    /// not kept, the identity did not load, or the mesh did not open, which goes into
-    /// `failed`.
+    /// ended. Runs no task and takes no session when a shard did not open, or when the
+    /// budgets were not kept, the identity did not load, or the mesh did not open,
+    /// which goes into `failed`.
     async fn run(
         self,
         home: home::Shard,
@@ -954,8 +953,8 @@ fn hcl(source: Source, text: &str) -> Result<Document, Vec<Diagnostic>> {
 }
 
 /// Gives `hub` what the spec that `mesh` uses defines and makes `runs` match it, then
-/// returns a future that does so for each later spec in use and
-/// resolves with the stop of the group, or never resolves when the node has no mesh.
+/// returns a future that does so for each later spec in use and resolves with the
+/// stop of the group, or never resolves when the node has no mesh.
 /// The hub knows each spec before the runs do, so a run finds its status channels.
 /// The future holds the runs.
 async fn follow(
