@@ -3,12 +3,13 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt;
-use std::future;
 use std::ops::Deref;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
-use std::task::{Poll, Waker};
+use std::task::{Context, Poll, Waker};
 
 use document::diagnostic::{Code, Diagnostic};
+use types::wait;
 
 use crate::kind::Error;
 
@@ -19,11 +20,18 @@ const SETTINGS: Code = Code::new("connector.endpoint-settings");
 /// kind. Any thread may use it.
 pub struct Registry<K, S, T>(Arc<Slots<K, S, T>>);
 
-type Slots<K, S, T> = Mutex<BTreeMap<K, Slot<S, T>>>;
+type Slots<K, S, T> = Mutex<Table<K, S, T>>;
+
+struct Table<K, S, T> {
+    slots: BTreeMap<K, Slot<S, T>>,
+    /// The key of the next [`Waiter`]. It is unique in the registry, so a slot that
+    /// frees and goes busy again never holds two waiters with one key.
+    next: u64,
+}
 
 enum Slot<S, T> {
-    /// An open or a close runs. The wakers are the acquires that wait for it.
-    Busy(Vec<Waker>),
+    /// An open or a close runs, while the [`Waiter`]s in the set wait.
+    Busy(wait::Set),
     Open {
         settings: S,
         endpoint: Weak<T>,
@@ -41,7 +49,10 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Registry<K, S, T> {
     /// Makes an empty registry.
     #[must_use]
     pub fn new() -> Self {
-        Self(Arc::new(Mutex::new(BTreeMap::new())))
+        Self(Arc::new(Mutex::new(Table {
+            slots: BTreeMap::new(),
+            next: 0,
+        })))
     }
 
     /// Returns a lease on the endpoint at `key`. When none is open, calls `open` with
@@ -68,37 +79,12 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Registry<K, S, T> {
     where
         F: Future<Output = Result<T, Error>>,
     {
-        let claim = future::poll_fn(|cx| {
-            let mut slots = lock(&self.0);
-            let slot = match slots.entry(key.clone()) {
-                Entry::Vacant(vacant) => {
-                    vacant.insert(Slot::Busy(Vec::new()));
-                    return Poll::Ready(Ok(Claim::Mine));
-                }
-                Entry::Occupied(occupied) => occupied.into_mut(),
-            };
-            match slot {
-                Slot::Busy(wakers) => {
-                    if !wakers.iter().any(|w| w.will_wake(cx.waker())) {
-                        wakers.push(cx.waker().clone());
-                    }
-                    Poll::Pending
-                }
-                Slot::Open {
-                    settings: open,
-                    endpoint,
-                } => {
-                    let endpoint = endpoint
-                        .upgrade()
-                        .expect("a lease removes its slot before its endpoint drops");
-                    if *open == settings {
-                        Poll::Ready(Ok(Claim::Shared(endpoint)))
-                    } else {
-                        Poll::Ready(Err(unequal(&key)))
-                    }
-                }
-            }
-        })
+        let claim = Waiter {
+            slots: &self.0,
+            key: &key,
+            settings: &settings,
+            place: None,
+        }
         .await?;
         let endpoint = match claim {
             Claim::Shared(endpoint) => endpoint,
@@ -113,7 +99,7 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Registry<K, S, T> {
                     settings,
                     endpoint: Arc::downgrade(&endpoint),
                 };
-                let busy = slots.insert(key.clone(), open);
+                let busy = slots.slots.insert(key.clone(), open);
                 drop(slots);
                 wake(busy);
                 guard.disarm();
@@ -136,7 +122,7 @@ impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Default for Registry<K, S, T>
 
 impl<K: fmt::Debug, S, T> fmt::Debug for Registry<K, S, T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_set().entries(lock(&self.0).keys()).finish()
+        f.debug_set().entries(lock(&self.0).slots.keys()).finish()
     }
 }
 
@@ -182,8 +168,8 @@ impl<K: Ord, S, T> Drop for Lease<K, S, T> {
             drop(endpoint);
             return;
         }
-        if let Some(slot) = slots.get_mut(&self.key) {
-            *slot = Slot::Busy(Vec::new());
+        if let Some(slot) = slots.slots.get_mut(&self.key) {
+            *slot = Slot::Busy(wait::Set::new());
         }
         drop(slots);
         let _free = Free {
@@ -219,9 +205,76 @@ impl<K: Ord, S, T> Free<'_, K, S, T> {
 impl<K: Ord, S, T> Drop for Free<'_, K, S, T> {
     fn drop(&mut self) {
         if let Some(key) = self.key {
-            let busy = lock(self.slots).remove(key);
+            let busy = lock(self.slots).slots.remove(key);
             wake(busy);
         }
+    }
+}
+
+/// Waits while the slot of `key` is busy, then claims it. It keeps the waker of its
+/// last poll in the busy slot, and its drop takes that waker out.
+struct Waiter<'a, K: Ord, S, T> {
+    slots: &'a Slots<K, S, T>,
+    key: &'a K,
+    settings: &'a S,
+    /// The key of its waker in a busy slot, from its first wait to its end.
+    place: Option<u64>,
+}
+
+impl<K: Ord + Clone + fmt::Debug, S: PartialEq, T> Future for Waiter<'_, K, S, T> {
+    type Output = Result<Claim<T>, Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut guard = lock(this.slots);
+        let table = &mut *guard;
+        let slot = match table.slots.entry(this.key.clone()) {
+            Entry::Vacant(vacant) => {
+                vacant.insert(Slot::Busy(wait::Set::new()));
+                this.place = None;
+                return Poll::Ready(Ok(Claim::Mine));
+            }
+            Entry::Occupied(occupied) => occupied.into_mut(),
+        };
+        match slot {
+            Slot::Busy(wakers) => {
+                let key = *this.place.get_or_insert_with(|| {
+                    let key = table.next;
+                    table.next += 1;
+                    key
+                });
+                let replaced = wakers.insert(key, cx.waker());
+                drop(guard);
+                drop(replaced);
+                Poll::Pending
+            }
+            Slot::Open { settings, endpoint } => {
+                let endpoint = endpoint
+                    .upgrade()
+                    .expect("a lease removes its slot before its endpoint drops");
+                this.place = None;
+                if settings == this.settings {
+                    Poll::Ready(Ok(Claim::Shared(endpoint)))
+                } else {
+                    Poll::Ready(Err(unequal(this.key)))
+                }
+            }
+        }
+    }
+}
+
+impl<K: Ord, S, T> Drop for Waiter<'_, K, S, T> {
+    fn drop(&mut self) {
+        let Some(place) = self.place else {
+            return;
+        };
+        let mut table = lock(self.slots);
+        let removed = match table.slots.get_mut(self.key) {
+            Some(Slot::Busy(wakers)) => wakers.remove(place),
+            _ => None,
+        };
+        drop(table);
+        drop(removed);
     }
 }
 
@@ -243,7 +296,7 @@ fn wake<S, T>(slot: Option<Slot<S, T>>) {
 
 /// Recovers a poisoned lock, so that a drop never panics. No code under the lock
 /// leaves the map half changed when it panics.
-fn lock<K, S, T>(slots: &Slots<K, S, T>) -> MutexGuard<'_, BTreeMap<K, Slot<S, T>>> {
+fn lock<K, S, T>(slots: &Slots<K, S, T>) -> MutexGuard<'_, Table<K, S, T>> {
     slots.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -251,7 +304,8 @@ fn lock<K, S, T>(slots: &Slots<K, S, T>) -> MutexGuard<'_, BTreeMap<K, Slot<S, T
 #[cfg(not(loom))]
 mod tests {
     use std::cell::RefCell;
-    use std::pin::{Pin, pin};
+    use std::future;
+    use std::pin::pin;
     use std::rc::Rc;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering::Relaxed;
@@ -672,6 +726,43 @@ mod tests {
         let open = |(): &()| future::ready(Ok(probe));
         drop(block_on(ports.acquire(0, (), open)).expect("opens"));
         assert_eq!(free.load(Relaxed), 1, "the lock was free at the close");
+    }
+
+    /// A waker that records whether the registry's lock was free at its drop.
+    struct Free(Arc<Slots<&'static str, u32, Port>>, Arc<AtomicUsize>);
+
+    #[expect(clippy::manual_noop_waker, reason = "its drop is the probe")]
+    impl std::task::Wake for Free {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    impl Drop for Free {
+        fn drop(&mut self) {
+            if self.0.try_lock().is_ok() {
+                self.1.fetch_add(1, Relaxed);
+            }
+        }
+    }
+
+    #[test]
+    fn drops_a_replaced_or_removed_waker_after_it_releases_the_lock() {
+        let ports = Ports::new();
+        let mut open = pin!(busy(&ports));
+        assert!(poll_with(open.as_mut(), &Arc::default()).is_pending());
+        let free = Arc::new(AtomicUsize::new(0));
+        let poll = |waiter: Pin<&mut _>| {
+            let probe = Free(Arc::clone(&ports.0), Arc::clone(&free));
+            let waker = Waker::from(Arc::new(probe));
+            Future::poll(waiter, &mut std::task::Context::from_waker(&waker))
+        };
+        let mut replaced = pin!(busy(&ports));
+        assert!(poll(replaced.as_mut()).is_pending());
+        assert!(poll_with(replaced.as_mut(), &Arc::default()).is_pending());
+        assert_eq!(free.load(Relaxed), 1, "the lock was free at the replace");
+        let mut removed = Box::pin(busy(&ports));
+        assert!(poll(removed.as_mut()).is_pending());
+        drop(removed);
+        assert_eq!(free.load(Relaxed), 2, "the lock was free at the removal");
     }
 
     /// Settings whose compare panics while the registry holds its lock.
