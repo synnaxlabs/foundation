@@ -228,34 +228,6 @@ mod tests {
         assert!(armed <= after + ARM_MAX, "{armed:?} after {after:?}");
     }
 
-    /// The clock is read only for a new deadline or once the sleep fired, so a poll
-    /// for the armed deadline stays pending after it passed until the runtime fires
-    /// the sleep.
-    #[test]
-    fn a_poll_for_the_armed_deadline_reads_the_clock_once_the_sleep_fired() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .unwrap();
-        let guard = runtime.enter();
-        let driver = Driver::new();
-        let mut timer = Box::pin(Timer::new(driver.clone()));
-        let deadline = Monotonic(env::clock::Driver::now(&driver).0 + SECOND / 10);
-        let mut cx = Context::from_waker(std::task::Waker::noop());
-        let mut poll =
-            |deadline| env::clock::Timer::poll_until(timer.as_mut(), deadline, &mut cx);
-        assert_eq!(poll(deadline), Poll::Pending);
-        #[expect(clippy::disallowed_methods, reason = "the boot clock must pass")]
-        std::thread::sleep(Duration::from_millis(150));
-        assert!(env::clock::Driver::now(&driver) >= deadline);
-        assert_eq!(poll(deadline), Poll::Pending);
-        assert_eq!(poll(Monotonic(deadline.0 + 1)), Poll::Ready(()));
-        drop(guard);
-        runtime.block_on(std::future::poll_fn(|cx| {
-            env::clock::Timer::poll_until(timer.as_mut(), deadline, cx)
-        }));
-    }
-
     #[test]
     fn a_resume_adds_the_time_asleep_to_the_raw_clock() {
         let asleep_ns = AtomicU64::new(0);

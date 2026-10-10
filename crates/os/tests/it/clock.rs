@@ -1,4 +1,4 @@
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -167,6 +167,28 @@ fn a_sleep_does_not_wake_its_task_before_the_deadline() {
         assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
         clock.sleep(millis(20)).await;
         assert_eq!(counter.0.load(SeqCst), 0);
+    });
+}
+
+/// A poll for the deadline that the sleep is armed for reads the clock only once the
+/// runtime fired its Tokio sleep, so it stays pending past the deadline until then. A
+/// poll for a new deadline reads the clock.
+#[test]
+fn a_poll_for_the_armed_deadline_reads_the_clock_once_the_sleep_fired() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        let deadline = clock.now() + millis(100);
+        let mut sleep = clock.sleep_until(deadline);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(Pin::new(&mut sleep).poll(&mut cx), Poll::Pending);
+        #[expect(clippy::disallowed_methods, reason = "the boot clock must pass")]
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(clock.now() >= deadline, "{:?}", clock.now());
+        assert_eq!(Pin::new(&mut sleep).poll(&mut cx), Poll::Pending);
+        sleep.reset(deadline + Span::from_nanos(1));
+        assert_eq!(Pin::new(&mut sleep).poll(&mut cx), Poll::Ready(()));
+        sleep.reset(deadline);
+        sleep.await;
     });
 }
 
