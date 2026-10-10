@@ -333,9 +333,10 @@
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286. The bind
   in `Manager::listening`: decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2212#issuecomment-6093207582,
-  2026-10-10 03:15 UTC). That supersedes "the listener that its owner gives" of
-  6088685286 and 6089351505. The parameters of the first callbacks: approved by
-  `laptop.architect-2` at `feb6c21a4`
+  2026-10-10 03:15 UTC). Supersedes "the listener that its owner gives" of
+  https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6088685286 and
+  https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089351505. The
+  parameters of the first callbacks: approved by `laptop.architect-2` at `feb6c21a4`
   (https://github.com/synnaxlabs/foundation/pull/2180#issuecomment-6089521550,
   2026-10-09 21:25 UTC).
   A server on the loop of a manager is `STOPPED` when its last connection closes after
