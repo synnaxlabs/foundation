@@ -19,7 +19,7 @@ pub(crate) enum Deps {
 
 /// Crates any crate may use as a dev-dependency, for tests. A normal dependency on
 /// one must be named in the crate's [`Deps`].
-pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting"];
+pub(crate) const TEST_ONLY: &[&str] = &["sim", "counting", "waker"];
 
 /// Edges, each as `(user, dep)`, that `user` may take only as a dev-dependency.
 pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
@@ -48,6 +48,11 @@ pub(crate) const CRATES: &[Crate] = &[
     },
     Crate {
         name: "counting",
+        layer: 1,
+        deps: Deps::Only(&[]),
+    },
+    Crate {
+        name: "waker",
         layer: 1,
         deps: Deps::Only(&[]),
     },
@@ -315,6 +320,7 @@ mod tests {
         for (name, dep, allowed) in [
             ("secret", "counting", false),
             ("node", "counting", false),
+            ("buffer", "waker", false),
             ("node", "sim", false),
             ("ops", "sim", true),
             ("secret", "block", true),
@@ -379,6 +385,7 @@ mod tests {
     fn describes_the_allowed_dependencies() {
         for (name, text) in [
             ("counting", "no workspace crates"),
+            ("waker", "no workspace crates"),
             ("sim", "env, types, block"),
             ("secret", "any layer 1 crate that is not test-only"),
             (
