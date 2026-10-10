@@ -2787,6 +2787,70 @@ mod tests {
     }
 
     #[test]
+    fn reserves_control_until_the_grace_ends_after_a_power_cut() {
+        let (mut sim, node) = cut_after(180, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            test.clock.sleep(Span::from_nanos(GRACE.nanos() - 1)).await;
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[refused(0, Refusal::Reserved), refused(2, Refusal::Reserved)][..])
+            );
+            test.clock.sleep(Span::from_nanos(1)).await;
+            let next = frame(&test.pool, &set, &[(0, &[30]), (1, &[3]), (2, &[30])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
+            );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn restores_the_waiter_that_took_control_from_a_reopened_holder_after_a_power_cut()
+    {
+        let (mut sim, node) = cut_after(181, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+            shard.close_writer(a);
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+        })
+        .expect("the second run ends");
+        sim.crash(&node, sim::Crash::Power);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let c = shard.open_writer(writer("c", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[30]), (1, &[3]), (2, &[30])]);
+            assert_eq!(
+                shard.write(c, LIVE, next),
+                Ok(&[refused(0, Refusal::Reserved), refused(2, Refusal::Reserved)][..])
+            );
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[40]), (1, &[4]), (2, &[40])]);
+            assert_eq!(
+                shard.write(b, LIVE, next),
+                Ok(&[applied(0, 2, 1), applied(2, 2, 1)][..])
+            );
+        })
+        .expect("the third run ends");
+    }
+
+    #[test]
     fn continues_at_a_lost_range_after_a_power_cut_after_an_empty_group() {
         let (mut sim, node) = create_node(120);
         sim.run_on(&node, |node, tasks| async move {
