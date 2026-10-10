@@ -365,6 +365,12 @@ impl Node {
         self.stop.set();
     }
 
+    /// A handle that stops this node from another thread.
+    #[must_use]
+    pub fn stopper(&self) -> Stopper {
+        Stopper(self.stop.clone())
+    }
+
     /// Blocks until every shard has ended. Call it on a thread that `env` did not
     /// start. Under `sim`, run the sim to its end first.
     ///
@@ -387,6 +393,18 @@ impl Node {
             (joined, shard.failed.get().cloned())
         });
         error(self.failed, shards.collect())
+    }
+}
+
+/// Stops its node from any thread, as [`Node::stop`] does. Clones stop one node. A
+/// stop after the node ended does nothing.
+#[derive(Clone, Debug)]
+pub struct Stopper(Stop);
+
+impl Stopper {
+    /// Asks every shard of the node to end, as [`Node::stop`] does.
+    pub fn stop(&self) {
+        self.0.set();
     }
 }
 
