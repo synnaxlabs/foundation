@@ -3669,6 +3669,28 @@ fn an_end_stays_pending_across_a_commit_while_the_buffer_is_held() {
     .expect("the buffer ends");
 }
 
+/// The `Debug` of a `Commit` and an `End` names what each waits for, and prints no
+/// pointer.
+#[test]
+fn the_debug_of_a_commit_and_an_end_names_its_event() {
+    let (mut sim, node) = create_node(142);
+    sim.run_on(&node, |node, tasks| async move {
+        let config = node_config(&node, tasks, DIR);
+        let buffer = Buffer::open(config, &mut Slots::new())
+            .await
+            .expect("opens");
+        let commit = format!("{:?}", buffer.committed());
+        let end = format!("{:?}", buffer.ended());
+        assert!(commit.contains("event: Commit"), "{commit}");
+        assert!(end.contains("event: End"), "{end}");
+        assert!(
+            !commit.contains("0x") && !end.contains("0x"),
+            "{commit}\n{end}"
+        );
+    })
+    .expect("the buffer ends");
+}
+
 /// `End`s polled from other tasks and dropped while the buffer is held keep no
 /// waker.
 #[test]

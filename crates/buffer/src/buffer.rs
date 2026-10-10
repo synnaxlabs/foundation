@@ -4,7 +4,7 @@
 
 #![deny(clippy::indexing_slicing, clippy::as_conversions)]
 
-use std::cell::{RefCell, RefMut};
+use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
@@ -597,7 +597,7 @@ impl Buffer {
     pub fn committed(&self) -> Commit {
         let until = self.shared.state.borrow().durable_at();
         Commit {
-            waiter: Waiter::new(&self.shared, |state| &mut state.committing),
+            waiter: Waiter::new(&self.shared, Event::Commit),
             until,
         }
     }
@@ -608,7 +608,7 @@ impl Buffer {
     #[must_use]
     pub fn ended(&self) -> End {
         End {
-            waiter: Waiter::new(&self.shared, |state| &mut state.ending),
+            waiter: Waiter::new(&self.shared, Event::End),
         }
     }
 }
@@ -939,16 +939,14 @@ impl Future for Commit {
     type Output = Result<(), files::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let state = self.waiter.shared.state.borrow_mut();
-        // Before `failed`: a commit that synced stays well after a later sync fails.
-        if state.commits >= self.until && (!state.closed || state.ended) {
-            return Poll::Ready(Ok(()));
-        }
-        if let Some(error) = &state.failed {
-            return Poll::Ready(Err(error.clone()));
-        }
-        self.waiter.keep(state, cx.waker());
-        Poll::Pending
+        let until = self.until;
+        self.waiter.poll(cx, |state| {
+            // Before `failed`: a commit that synced stays well after a later sync fails.
+            if state.commits >= until && (!state.closed || state.ended) {
+                return Some(Ok(()));
+            }
+            state.failed.clone().map(Err)
+        })
     }
 }
 
@@ -963,47 +961,71 @@ impl Future for End {
     type Output = Result<(), files::Error>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let state = self.waiter.shared.state.borrow_mut();
-        if state.ended {
-            return Poll::Ready(state.failed.clone().map_or(Ok(()), Err));
-        }
-        self.waiter.keep(state, cx.waker());
-        Poll::Pending
+        self.waiter.poll(cx, |state| {
+            let ended = state.failed.clone().map_or(Ok(()), Err);
+            state.ended.then_some(ended)
+        })
     }
 }
 
-/// The part of a [`Commit`] or an [`End`] that keeps its waker in one set of the
-/// state. Its drop takes the waker out.
+/// What a [`Waiter`] waits for.
+#[derive(Clone, Copy, Debug)]
+enum Event {
+    Commit,
+    End,
+}
+
+impl Event {
+    /// The set of `state` that keeps the wakers of this event.
+    fn set(self, state: &mut State) -> &mut wait::Set {
+        match self {
+            Self::Commit => &mut state.committing,
+            Self::End => &mut state.ending,
+        }
+    }
+}
+
+/// The part of a [`Commit`] or an [`End`] that keeps its waker in the set of its
+/// event. Its drop takes the waker out.
 #[derive(Debug)]
 struct Waiter {
     shared: Rc<Shared>,
-    set: fn(&mut State) -> &mut wait::Set,
+    event: Event,
     key: u64,
 }
 
 impl Waiter {
-    fn new(shared: &Rc<Shared>, set: fn(&mut State) -> &mut wait::Set) -> Self {
+    fn new(shared: &Rc<Shared>, event: Event) -> Self {
         Self {
             key: shared.state.borrow_mut().key(),
             shared: Rc::clone(shared),
-            set,
+            event,
         }
     }
 
-    /// Keeps `waker` in the set, and ends the borrow `state`.
-    fn keep(&self, mut state: RefMut<'_, State>, waker: &Waker) {
-        let replaced = (self.set)(&mut state).insert(self.key, waker);
+    /// Gives what `ready` reads from the state, else keeps the waker of `cx`.
+    fn poll<T>(
+        &self,
+        cx: &Context<'_>,
+        ready: impl FnOnce(&State) -> Option<T>,
+    ) -> Poll<T> {
+        let mut state = self.shared.state.borrow_mut();
+        if let Some(output) = ready(&state) {
+            return Poll::Ready(output);
+        }
+        let replaced = self.event.set(&mut state).insert(self.key, cx.waker());
         // A waker's drop can drop another waiter, which borrows the state.
         drop(state);
         drop(replaced);
+        Poll::Pending
     }
 }
 
 impl Drop for Waiter {
     fn drop(&mut self) {
         let mut state = self.shared.state.borrow_mut();
-        let held = (self.set)(&mut state).remove(self.key);
-        // As in `keep`.
+        let held = self.event.set(&mut state).remove(self.key);
+        // As in `poll`.
         drop(state);
         drop(held);
     }
