@@ -1363,8 +1363,20 @@ End of search list.
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let link = workspace.join("crates/connector-opcua/src/link.rs");
         let text = std::fs::read_to_string(link).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        let docs: Vec<String> = (0..lines.len())
+            .filter(|&at| lines[at] == "#[test]")
+            .map(|at| {
+                let doc = lines[..at]
+                    .iter()
+                    .rev()
+                    .take_while(|line| line.starts_with("///"));
+                doc.copied().collect::<Vec<_>>().join(" ")
+            })
+            .collect();
         for (_, function) in CLOCK_CALLS {
-            assert!(text.contains(&format!("`{function}`")), "{function}");
+            let name = format!("`{function}`");
+            assert!(docs.iter().any(|doc| doc.contains(&name)), "{function}");
         }
     }
 

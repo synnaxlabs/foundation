@@ -445,21 +445,14 @@ fn the_shim_draws_nothing_from_the_generator_of_the_copy() {
     assert!(drawn.is_empty(), "the shim calls {drawn:?}");
 }
 
-/// Each identifier for which `named` holds, as `path: identifier`, in each file of the
-/// module tree of `lib.rs` that a `#[cfg(test)]` declaration does not cut off. Comments
-/// and inline modules count.
-///
-/// # Panics
-///
-/// When a `.rs` file under `src/` is neither in that tree nor cut off, as a module
-/// declared in a form that the scan does not read is.
+/// Each identifier for which `named` holds, as `path: identifier`, in each `.rs`
+/// file under `src/` that a `#[cfg(test)]` module declaration does not cut off.
+/// Comments and inline modules count.
 fn named_outside_tests(named: impl Fn(&str) -> bool) -> Vec<String> {
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let mut files = vec![src.join("lib.rs")];
-    let (mut read, mut cut) = (Vec::new(), Vec::new());
-    let mut found = Vec::new();
-    while let Some(path) = files.pop() {
-        let text = std::fs::read_to_string(&path).unwrap();
+    let files = files_under("rs");
+    let mut cut = Vec::new();
+    for path in &files {
+        let text = std::fs::read_to_string(path).unwrap();
         let dir = match path.file_stem().unwrap().to_str().unwrap() {
             "lib" | "mod" => path.parent().unwrap().to_path_buf(),
             stem => path.with_file_name(stem),
@@ -483,44 +476,43 @@ fn named_outside_tests(named: impl Fn(&str) -> bool) -> Vec<String> {
                         .any(|start| line.starts_with(start))
                 })
                 .any(|line| *line == "#[cfg(test)]");
-            let file = dir.join(format!("{module}.rs"));
-            let file = if file.exists() {
-                file
-            } else {
-                dir.join(module).join("mod.rs")
-            };
             if gated {
-                cut.extend([file, dir.join(module)]);
-            } else {
-                files.push(file);
+                cut.extend([dir.join(format!("{module}.rs")), dir.join(module)]);
             }
         }
-        let words = text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
-        for word in words.filter(|word| named(word)) {
-            found.push(format!("{}: {word}", path.display()));
-        }
-        read.push(path);
     }
-    let mut dirs = vec![src];
-    let mut unread = Vec::new();
+    let kept = files
+        .iter()
+        .filter(|path| !cut.iter().any(|cut| path.starts_with(cut)));
+    kept.flat_map(|path| named_in(path, &named)).collect()
+}
+
+/// Each file under `src/` with the extension `extension`, sorted.
+fn files_under(extension: &str) -> Vec<std::path::PathBuf> {
+    let mut dirs = vec![std::path::Path::new(ROOT).join("src")];
+    let mut files = Vec::new();
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(dir).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
                 dirs.push(path);
-            } else if path.extension().is_some_and(|extension| extension == "rs")
-                && !read.contains(&path)
-                && !cut.iter().any(|cut| path.starts_with(cut))
-            {
-                unread.push(path);
+            } else if path.extension().is_some_and(|found| found == extension) {
+                files.push(path);
             }
         }
     }
-    assert!(
-        unread.is_empty(),
-        "the scan reads no declaration of {unread:?}"
-    );
+    files.sort();
+    files
+}
+
+/// Each identifier of `path` for which `named` holds, as `path: identifier`.
+fn named_in(path: &std::path::Path, named: impl Fn(&str) -> bool) -> Vec<String> {
+    let text = std::fs::read_to_string(path).unwrap();
+    let words = text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
+    let found = words.filter(|word| named(word));
     found
+        .map(|word| format!("{}: {word}", path.display()))
+        .collect()
 }
 
 /// The scan names `shim_client_new` in each file outside tests that names it, and in
@@ -530,7 +522,7 @@ fn the_scan_names_only_the_files_outside_tests() {
     let src = std::path::Path::new(ROOT).join("src");
     let named = named_outside_tests(|name| name == "shim_client_new");
     let at = |file: &str| format!("{}: shim_client_new", src.join(file).display());
-    assert_eq!(named, [at("ffi.rs"), at("bench.rs")]);
+    assert_eq!(named, [at("bench.rs"), at("ffi.rs")]);
 }
 
 /// Outside tests, the Rust of the crate names neither PCG32 draw of the copy, so it
@@ -600,7 +592,8 @@ fn the_shim_refuses_encryption() {
 
 /// Checks the reason of `encryptUserIdentityTokenEcc` in `CLOCK_CALLS` of `cargo xtask
 /// open62541`: the default config of a client with encryption off has only the policy
-/// `None`, and outside tests, neither the Rust nor `shim.c` names a security policy.
+/// `None`, and outside tests, neither the Rust nor the C under `src/` names a security
+/// policy.
 #[test]
 fn the_rust_and_the_shim_give_a_client_no_security_policy() {
     let policy = |name: &str| {
@@ -608,14 +601,9 @@ fn the_rust_and_the_shim_give_a_client_no_security_policy() {
             || ["securityPolicies", "authSecurityPolicies"].contains(&name)
     };
     let mut named = named_outside_tests(policy);
-    let shim =
-        std::fs::read_to_string(std::path::Path::new(ROOT).join("src/shim.c")).unwrap();
-    let words = shim.split(|c: char| !c.is_ascii_alphanumeric() && c != '_');
-    named.extend(
-        words
-            .filter(|word| policy(word))
-            .map(|word| format!("shim.c: {word}")),
-    );
+    for path in [files_under("c"), files_under("h")].concat() {
+        named.extend(named_in(&path, policy));
+    }
     assert!(named.is_empty(), "names {named:?}");
 }
 
