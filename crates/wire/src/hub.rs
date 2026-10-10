@@ -253,7 +253,8 @@ pub enum Reply {
 pub struct Head {
     /// How the frame reached the home.
     pub path: Path,
-    /// The samples of the frame. The range ends at or below `u64::MAX`.
+    /// The samples of the frame. A head whose range ends past `u64::MAX` is not
+    /// valid.
     pub range: Range,
     /// The count of the frame's series, which is the count of its ends. At least 1,
     /// since a frame holds its index. A head with more series than the session has
@@ -286,7 +287,10 @@ impl Reply {
                 assert!(head.series > 0, "a head names at least one series");
                 assert!(
                     end(head.range).is_some(),
-                    "a head's range ends at or below the highest seq"
+                    "a head's range ends at or below the highest seq: {} samples from \
+                     seq {}",
+                    head.range.count,
+                    head.range.seq
                 );
                 out.put(&[HEAD, path_byte(head.path)]);
                 out.put(&head.range.seq.to_le_bytes());
