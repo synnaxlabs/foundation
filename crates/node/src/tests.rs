@@ -3211,6 +3211,27 @@ mod port {
             assert_eq!(read(&mut sim, &host), own());
         }
 
+        /// Each input of the fuzz corpus in this form is a key that a node proves and
+        /// keeps, as its old form was.
+        #[test]
+        fn a_node_proves_the_key_of_each_input_of_the_corpus() {
+            let valid: &[u8; LEN] =
+                include_bytes!("../../../oracles/fuzz/node_identity/valid-2");
+            let body =
+                include_bytes!("../../../oracles/fuzz/node_identity/valid-body-2");
+            assert_eq!(crate::sector::summed(body).as_ref(), Some(valid));
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            write_key(&mut sim, &host, valid.to_vec());
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            let public = PrivateKey([7; 32]).public();
+            assert_eq!(dial(&mut sim, &host, public), Ok(Peer::Node(public)));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            assert_eq!(read(&mut sim, &host), valid);
+        }
+
         /// 100 zero bytes are a key that a crash kept from being written.
         #[test]
         fn a_node_makes_a_key_over_zero_bytes() {
