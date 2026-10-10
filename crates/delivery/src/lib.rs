@@ -3,11 +3,11 @@
 
 #![deny(clippy::wildcard_enum_match_arm)]
 
+pub mod named;
 mod readers;
 
 use std::fmt;
 
-use types::name::Name;
 use types::time::{Span, Stamp};
 
 pub use readers::{Key, Next, Readers, complete, latest};
@@ -39,12 +39,12 @@ impl fmt::Display for Position {
 pub enum Reader {
     /// A reader without a name. It holds data only while its session is open.
     Unnamed,
-    /// A reader with a name. It has at most one session at a time. After the session
-    /// closes, the reader keeps its position and holds its data for `hold`. A hold of
-    /// zero ends at the close.
+    /// A reader with a name, which belongs to the subject that opens it. It has at most
+    /// one session at a time. After the session closes, the reader keeps its position
+    /// and holds its data for `hold`. A hold of zero ends at the close.
     Named {
-        /// The reader's name.
-        name: Name,
+        /// The reader's subject and name.
+        reader: named::Key,
         /// How long the reader holds its data after its session closes: zero or more.
         hold: Span,
     },
@@ -67,12 +67,12 @@ pub enum Start {
     },
 }
 
-/// A named reader's state, for the index log. The last record of a reader replaces the
-/// ones before it.
+/// A named reader's state, for the index log. The last record of a reader, by its
+/// key, replaces the ones before it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
-    /// The reader's name.
-    pub reader: Name,
+    /// The reader's subject and name.
+    pub reader: named::Key,
     /// The reader's position.
     pub position: Position,
     /// How long the reader holds its data after its session closes.

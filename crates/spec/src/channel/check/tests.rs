@@ -117,11 +117,30 @@ fn refuses_an_edge_to_a_key_that_no_channel_has() {
 }
 
 #[test]
-#[should_panic(
-    expected = "`a.x` and `b.x` have the same key 00000000-0000-0000-0000-000000000001"
-)]
-fn panics_on_two_channels_with_one_key() {
-    check_all(&[("b.x", index(1, None, None)), ("a.x", index(1, None, None))]);
+fn finds_two_channels_with_one_key_at_the_second_in_name_order() {
+    let channels = [
+        ("c.x", data(1, 1, None, f64())),
+        ("a.x", index(1, None, None)),
+        ("b.x", data(2, 1, None, f64())),
+        ("b.y", index(1, Some(9), None)),
+    ];
+    let duplicate = |second: &str| Problem::Duplicate {
+        first: name("a.x"),
+        second: name(second),
+        key: key(1),
+    };
+    assert_eq!(
+        check_all(&channels),
+        [
+            duplicate("b.y"),
+            Problem::Dangling {
+                from: name("b.y"),
+                edge: Edge::Error,
+                to: key(9),
+            },
+            duplicate("c.x"),
+        ]
+    );
 }
 
 #[test]
@@ -139,6 +158,15 @@ fn gives_each_problem_a_message_and_a_fix() {
         to: to.clone(),
     };
     for (problem, message, fix) in [
+        (
+            Problem::Duplicate {
+                first: to.clone(),
+                second: from.clone(),
+                key: key(1),
+            },
+            "`a.time` and `a.pressure` have the same key",
+            "Report a defect: each channel gets its own key when it is first applied",
+        ),
         (
             Problem::Dangling {
                 from: from.clone(),

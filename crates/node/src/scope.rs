@@ -97,9 +97,9 @@ impl Spawned {
             running.waker.clone_from(cx.waker());
             running.future.as_mut().poll(cx)
         };
-        if self.running.strong_count() == 0 {
-            // The future dropped the scope in this poll, so this holds its last
-            // reference.
+        if Rc::strong_count(&slot) == 1 {
+            // The future dropped the scope in this poll, which could not take this
+            // slot, so this holds its last reference.
             drop(slot);
             return Poll::Ready(());
         }
@@ -107,9 +107,7 @@ impl Spawned {
             drop(slot);
             let running = self.running.upgrade().expect("invariant: a live scope");
             let done = running.borrow_mut().remove(&self.key);
-            // A future's drop may do anything, so it runs with no borrow held, and with
-            // no reference to the map, so that a task it polls sees its scope drop.
-            drop(running);
+            // A future's drop may do anything, so it runs with no borrow held.
             drop(done);
         }
         polled
@@ -187,7 +185,7 @@ mod tests {
         let held = Rc::new(());
         let inner = Rc::clone(&held);
         scope.spawn(Box::pin(poll_fn(move |_| {
-            let _ = &inner;
+            let _: &Rc<()> = &inner;
             Poll::Ready(())
         })));
         let mut task = take(&queued);
@@ -259,7 +257,7 @@ mod tests {
         let owner = Rc::new(RefCell::new(Some(scope)));
         let guard = DropsScope(Rc::clone(&owner));
         let future: Task = Box::pin(poll_fn(move |_| {
-            let _ = &guard;
+            let _: &DropsScope = &guard;
             Poll::Ready(())
         }));
         owner.borrow_mut().as_mut().unwrap().spawn(future);
@@ -381,7 +379,7 @@ mod tests {
             polled: Rc::clone(&polled),
         };
         spawn(Box::pin(poll_fn(move |_| {
-            let _ = &guard;
+            let _: &PollsOnDrop = &guard;
             Poll::Ready(())
         })));
         let mut task = take(&queued);

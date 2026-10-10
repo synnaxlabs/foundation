@@ -9,12 +9,14 @@ publish.workspace = true
 connector = { path = "../connector" }
 document = { path = "../document" }
 spec = { path = "../spec" }
+ssh-key = { workspace = true }
 types = { path = "../types" }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
+base64ct = { workspace = true }
 config-hcl = { path = "../config-hcl" }
 connector-influx = { path = "../connector-influx" }
 proptest = { workspace = true }

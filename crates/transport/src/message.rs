@@ -238,24 +238,31 @@ impl Reader {
     }
 
     /// Copies the whole message that [`Step::Block`] gave into `block` and gives
-    /// it, so that the next read starts the next message. With `None`, it copies
-    /// the message's chunks into its own buffer and gives `Pending`, and the next
-    /// read gives `Block` again.
+    /// it, so that the next read starts the next message. With `None`, it holds the
+    /// message as [`Reader::hold`] does and gives `Pending`.
     ///
     /// # Panics
     ///
     /// When the reader has no whole message, or `block` is not its length.
     pub(crate) fn fill(&mut self, block: Option<Unique>) -> Poll<Block> {
-        let State::Body { len, have, buffer } = &mut self.state else {
-            panic!("a reader fills only a whole message");
-        };
-        assert!(have == len, "a reader fills only a whole message");
         let Some(mut block) = block else {
-            spill(buffer, &mut self.chunks, *len);
+            self.hold();
             return Poll::Pending;
         };
-        assert_eq!(block.len(), *len, "the block is the message's length");
-        let (buffered, mut rest) = block.split_at_mut(buffer.len());
+        self.copy(&mut block);
+        Poll::Ready(block.freeze())
+    }
+
+    /// Copies the whole message that [`Step::Block`] gave into `into`, so that the
+    /// next read starts the next message.
+    ///
+    /// # Panics
+    ///
+    /// When the reader has no whole message, or `into` is not its length.
+    pub(crate) fn copy(&mut self, into: &mut [u8]) {
+        let (len, buffer) = body(&mut self.state);
+        assert_eq!(into.len(), len, "the copy is the message's length");
+        let (buffered, mut rest) = into.split_at_mut(buffer.len());
         buffered.copy_from_slice(buffer);
         for chunk in self.chunks.drain(..) {
             let (bytes, after) = mem::take(&mut rest).split_at_mut(chunk.len());
@@ -263,7 +270,23 @@ impl Reader {
             rest = after;
         }
         self.state = START;
-        Poll::Ready(block.freeze())
+    }
+
+    /// Keeps the whole message that [`Step::Block`] gave for the next read, which
+    /// gives `Block` again. It copies the message's chunks into the reader's own
+    /// buffer, so that it holds no receive buffer of the source.
+    ///
+    /// # Panics
+    ///
+    /// When the reader has no whole message.
+    pub(crate) fn hold(&mut self) {
+        let (len, buffer) = body(&mut self.state);
+        spill(buffer, &mut self.chunks, len);
+    }
+
+    /// Whether the reader holds a whole message that no read took.
+    pub(crate) fn whole(&self) -> bool {
+        matches!(&self.state, State::Body { len, have, .. } if have == len)
     }
 
     /// Drops the message in hand, so that the reader holds no bytes of it. For a
@@ -313,6 +336,20 @@ fn spill(buffer: &mut Vec<u8>, chunks: &mut Vec<Bytes>, len: usize) {
         }
         buffer.extend_from_slice(&chunk);
     }
+}
+
+/// The length of the whole message in `state`, and the buffer that holds its first
+/// bytes.
+///
+/// # Panics
+///
+/// When `state` holds no whole message.
+fn body(state: &mut State) -> (usize, &mut Vec<u8>) {
+    let State::Body { len, have, buffer } = state else {
+        panic!("a reader takes only a whole message");
+    };
+    assert!(have == len, "a reader takes only a whole message");
+    (*len, buffer)
 }
 
 fn ended() -> Error {
@@ -488,7 +525,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "a message of 4611686018427387904 bytes")]
     fn prefix_panics_at_2_to_the_62() {
-        let _ = prefix(1 << 62);
+        let _: Varint = prefix(1 << 62);
     }
 
     mod reader {
@@ -974,7 +1011,7 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "a reader fills only a whole message")]
+        #[should_panic(expected = "a reader takes only a whole message")]
         fn when_a_message_is_not_whole_fill_panics() {
             let mut source = Source::new(encode(&[vec![1; 4]]), 2);
             source.open = true;
@@ -987,14 +1024,14 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "a reader fills only a whole message")]
+        #[should_panic(expected = "a reader takes only a whole message")]
         fn when_no_message_is_admitted_fill_panics() {
             let mut reader = Reader::new(16);
             drop(reader.fill(None));
         }
 
         #[test]
-        #[should_panic(expected = "the block is the message's length")]
+        #[should_panic(expected = "the copy is the message's length")]
         fn when_the_block_is_not_the_message_length_fill_panics() {
             let pool = pool(1 << 16);
             let mut source = Source::new(encode(&[vec![1; 4]]), 64);

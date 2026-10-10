@@ -22,7 +22,7 @@ const BUFFER_BYTES: usize = 1 << 21;
 ///
 /// fn bind(net: &Net, at: SocketAddr) -> Result<Vec<port::Part>, Error> {
 ///     let port = Port::bind(net, at)?;
-///     let _ = port.addresses();
+///     let _: Vec<transport::Address> = port.addresses();
 ///     Ok(port.split(NonZeroUsize::MIN))
 /// }
 /// ```
@@ -46,11 +46,7 @@ impl Port {
         net: &env::net::Net,
         local: SocketAddr,
     ) -> Result<Self, env::net::Error> {
-        let (sender, receiver) = net.udp(&udp::Config {
-            local,
-            send_buffer_bytes: BUFFER_BYTES,
-            recv_buffer_bytes: BUFFER_BYTES,
-        })?;
+        let (sender, receiver) = socket(net, local)?;
         Ok(Self { sender, receiver })
     }
 
@@ -92,6 +88,34 @@ pub struct Part {
     pub(crate) receiver: udp::Receiver,
 }
 
+impl Part {
+    /// The one part of a UDP socket bound at `local`, with no TCP: a program's.
+    pub(crate) fn udp(
+        net: &env::net::Net,
+        local: SocketAddr,
+    ) -> Result<Self, env::net::Error> {
+        let (sender, receiver) = socket(net, local)?;
+        Ok(Self {
+            index: 0,
+            sender,
+            receiver,
+        })
+    }
+}
+
+/// A UDP socket bound at `local`, with the buffers of each socket of a node or a
+/// program.
+fn socket(
+    net: &env::net::Net,
+    local: SocketAddr,
+) -> Result<(udp::Sender, udp::Receiver), env::net::Error> {
+    net.udp(&udp::Config {
+        local,
+        send_buffer_bytes: BUFFER_BYTES,
+        recv_buffer_bytes: BUFFER_BYTES,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::net::{IpAddr, Ipv6Addr, SocketAddr};
@@ -99,10 +123,7 @@ mod tests {
 
     use super::{Part, Port};
     use crate::Address;
-    use crate::testing;
-
-    /// The first port that a bind of port 0 takes under `sim`.
-    const FREE: u16 = 49152;
+    use crate::testing::{self, FREE};
 
     #[test]
     fn a_bind_of_port_0_gives_the_port_it_took_and_keeps_the_ip() {

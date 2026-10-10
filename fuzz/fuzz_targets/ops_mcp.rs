@@ -2,8 +2,7 @@
 //! line it reads.
 
 #![no_main]
-
-use std::io;
+#![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
 
 use libfuzzer_sys::fuzz_target;
 
@@ -16,7 +15,10 @@ fuzz_target!(|input: &[u8]| {
         &mut output,
         &mut errors,
     );
-    assert_eq!((status, errors.as_slice()), (0, b"".as_slice()));
+    assert_eq!(
+        (status, errors.as_slice()),
+        (ops::Run::Exit(0), b"".as_slice())
+    );
     let lines = input.split(|&byte| byte == b'\n').count();
     assert!(output.iter().filter(|&&byte| byte == b'\n').count() <= lines);
 });

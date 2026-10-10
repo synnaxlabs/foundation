@@ -6,7 +6,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-# Exposes `Scope` to the `scope` bench. Off by default.
+# Exposes `Scope` to the `scope` bench, `fuzz` to the fuzz targets, and `create_key` to
+# the tests. Off by default.
 sim = []
 
 [[bin]]
@@ -14,23 +15,33 @@ name = "foundation"
 path = "src/main.rs"
 
 [dependencies]
+blob = { path = "../blob" }
 block = { path = "../block" }
 buffer = { path = "../buffer" }
 clock = { path = "../clock" }
+config-hcl = { path = "../config-hcl" }
+connector = { path = "../connector" }
+crc32c = { workspace = true }
+document = { path = "../document" }
 env = { path = "../env" }
 estimate = { path = "../estimate" }
 home = { path = "../home" }
 hub = { path = "../hub" }
+mesh = { path = "../mesh" }
 ops = { path = "../ops" }
 os = { path = "../os" }
+spec = { path = "../spec" }
 transport = { path = "../transport" }
 types = { path = "../types" }
 wire = { path = "../wire" }
 
 [dev-dependencies]
+bytes = { workspace = true }
 codec = { path = "../codec" }
+connector-influx = { path = "../connector-influx", features = ["sim"] }
 counting = { path = "../counting" }
 divan = { workspace = true }
+http = { workspace = true }
 # Turns on `sim` for the bench, since the bench host runs no features.
 node = { path = ".", features = ["sim"] }
 proptest = { workspace = true }
@@ -43,6 +54,11 @@ test = true
 
 [target.'cfg(loom)'.dependencies]
 loom = { workspace = true }
+
+# Under `--cfg loom`, tokio has no `net`.
+[target.'cfg(not(loom))'.dependencies]
+# `foundation start` serves over `os::net()`.
+os = { path = "../os", features = ["net"] }
 
 [lints]
 workspace = true

@@ -1,6 +1,7 @@
 //! UDP sockets that move batches of datagrams. A socket has two halves: a
 //! [`Sender`] that each sending thread clones, and a [`Receiver`] with one owner.
 
+pub mod receiver;
 pub mod sender;
 
 use std::fmt;
@@ -90,8 +91,11 @@ impl Sender {
     }
 
     /// Sends every datagram of `transmit`. It is pending while the OS send buffer is
-    /// full. Some datagrams may have gone out before a `Pending` or an error, and a
-    /// retry sends them again.
+    /// full. After `Pending`, call it again with the same transmit: it sends only the
+    /// datagrams that did not go out, except for a transmit in flight when GSO turns
+    /// off, whose retry can send again datagrams that went out. A different transmit in
+    /// its place can lose its first datagrams. Some datagrams may have gone out before
+    /// an error.
     ///
     /// # Errors
     ///
@@ -179,11 +183,17 @@ impl fmt::Debug for Sender {
 ///     Ok(meta[0])
 /// }
 /// ```
-pub struct Receiver(Arc<dyn Driver>);
+pub struct Receiver {
+    socket: Arc<dyn Driver>,
+    driver: Box<dyn receiver::Driver>,
+}
 
 impl Receiver {
-    pub(super) fn new(socket: Arc<dyn Driver>) -> Self {
-        Self(socket)
+    pub(super) fn new(
+        socket: Arc<dyn Driver>,
+        driver: Box<dyn receiver::Driver>,
+    ) -> Self {
+        Self { socket, driver }
     }
 
     /// The local address of the socket.
@@ -195,7 +205,7 @@ impl Receiver {
     /// ```
     #[must_use]
     pub fn local(&self) -> SocketAddr {
-        self.0.local()
+        self.socket.local()
     }
 
     /// The most datagrams that one buffer may receive: the GRO segment count, or 1
@@ -208,7 +218,7 @@ impl Receiver {
     /// ```
     #[must_use]
     pub fn batch_max(&self) -> NonZeroUsize {
-        self.0.recv_batch_max()
+        self.socket.recv_batch_max()
     }
 
     /// Receives batches into `buffers` in order, one batch per buffer, and fills the
@@ -255,7 +265,7 @@ impl Receiver {
             meta.len(),
             "poll_recv needs one Meta per buffer"
         );
-        self.0.poll_recv(cx, buffers, meta)
+        self.driver.poll_recv(cx, buffers, meta)
     }
 }
 
@@ -365,16 +375,6 @@ pub trait Driver: Send + Sync {
     /// cannot fail, so a driver that needs a resource per clone takes it at the first
     /// poll.
     fn sender(&self) -> Box<dyn sender::Driver>;
-
-    /// Receives, with the rules of [`Receiver::poll_recv`]. It absorbs the errors of
-    /// one datagram and gives an error only when the socket is broken. It panics on a
-    /// thread other than the one of the first call.
-    fn poll_recv(
-        &self,
-        cx: &mut Context<'_>,
-        buffers: &mut [IoSliceMut<'_>],
-        meta: &mut [Meta],
-    ) -> Poll<Result<usize, Error>>;
 }
 
 #[cfg(test)]
@@ -411,8 +411,31 @@ mod tests {
         }
     }
 
-    /// Numbers its sender drivers from 0. Each receive gives one datagram of three
+    /// Gives one datagram per receive, one byte longer than the one before, from 3
     /// bytes.
+    struct Receiving {
+        len: usize,
+    }
+
+    impl receiver::Driver for Receiving {
+        fn poll_recv(
+            &mut self,
+            _: &mut Context<'_>,
+            _: &mut [IoSliceMut<'_>],
+            meta: &mut [Meta],
+        ) -> Poll<Result<usize, Error>> {
+            meta[0] = Meta {
+                source: "10.0.0.2:4433".parse().expect("an address"),
+                len: self.len,
+                stride: self.len,
+                ..Meta::default()
+            };
+            self.len += 1;
+            Poll::Ready(Ok(1))
+        }
+    }
+
+    /// Numbers its sender drivers from 0.
     struct Socket {
         senders: AtomicUsize,
         sends: Arc<Mutex<Vec<String>>>,
@@ -437,21 +460,6 @@ mod tests {
                 sends: Arc::clone(&self.sends),
             })
         }
-
-        fn poll_recv(
-            &self,
-            _: &mut Context<'_>,
-            _: &mut [IoSliceMut<'_>],
-            meta: &mut [Meta],
-        ) -> Poll<Result<usize, Error>> {
-            meta[0] = Meta {
-                source: "10.0.0.2:4433".parse().expect("an address"),
-                len: 3,
-                stride: 3,
-                ..Meta::default()
-            };
-            Poll::Ready(Ok(1))
-        }
     }
 
     /// Binds every UDP socket to one [`Socket`]. It has no TCP.
@@ -460,11 +468,15 @@ mod tests {
     }
 
     impl net::Driver for Network {
-        fn udp(&self, _: &Config) -> Result<Box<dyn Driver>, Error> {
-            Ok(Box::new(Socket {
+        fn udp(
+            &self,
+            _: &Config,
+        ) -> Result<(Box<dyn Driver>, Box<dyn receiver::Driver>), Error> {
+            let socket = Socket {
                 senders: AtomicUsize::new(0),
                 sends: Arc::clone(&self.sends),
-            }))
+            };
+            Ok((Box::new(socket), Box::new(Receiving { len: 3 })))
         }
 
         fn connect<'a>(&'a self, _: &'a tcp::Config) -> net::Connect<'a> {
@@ -636,6 +648,22 @@ mod tests {
             );
             assert_eq!(count, Poll::Ready(Ok(1)));
             assert_eq!((meta[0].len, meta[0].stride), (3, 3));
+        }
+
+        #[test]
+        fn keeps_one_driver_across_polls() {
+            let (_, mut receiver, _) = bind();
+            let mut buffer = [0; 64];
+            let mut meta = [Meta::default()];
+            for len in [3, 4] {
+                let count = receive(
+                    &mut receiver,
+                    &mut [IoSliceMut::new(&mut buffer)],
+                    &mut meta,
+                );
+                assert_eq!(count, Poll::Ready(Ok(1)));
+                assert_eq!(meta[0].len, len);
+            }
         }
 
         #[test]

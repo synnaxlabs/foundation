@@ -54,16 +54,21 @@ pub fn seal_log_record(bytes: &mut [u8]) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::ops::Range;
 
     use raft::{
         Answer, Body, Data, Entry, Grant, Hard, Link, Position, Proof, Signature, Term,
         Voters,
     };
+    use spec::Pointer;
 
     use super::*;
+    use types::channel;
+    use types::digest::Digest;
+
     use crate::bytes::{put_change, put_position};
+    use crate::change::{CHUNKS_MAX, Malformed};
     use crate::common::key;
 
     #[test]
@@ -94,6 +99,272 @@ mod tests {
         std::fs::read_dir(format!("{root}{target}"))
             .unwrap()
             .count()
+    }
+
+    #[test]
+    fn each_spec_change_input_is_what_its_name_says() {
+        let inputs = inputs!(
+            "mesh_change": "spec",
+            "spec_chunks_0",
+            "spec_chunks_1024",
+            "spec_chunks_1025",
+            "spec_held",
+            "spec_held_chunks_1024",
+            "spec_holders_out_of_order",
+        );
+        let digest = |at: usize| {
+            let mut bytes = [0; 32];
+            bytes[30..].copy_from_slice(&u16::try_from(at).unwrap().to_be_bytes());
+            Digest(bytes)
+        };
+        let spec = |chunks| Change::Spec {
+            base: Pointer {
+                version: 1,
+                root: Digest([2; 32]),
+            },
+            root: Digest([3; 32]),
+            chunks,
+            holders: [key(1)].into(),
+            homes: BTreeMap::new(),
+        };
+        // These three have the byte form before the homes, which ends where the count
+        // of homes starts.
+        for (name, chunks) in [
+            ("spec_chunks_0", BTreeSet::new()),
+            ("spec_held", [Digest([4; 32]), Digest([5; 32])].into()),
+            (
+                "spec_held_chunks_1024",
+                (0..CHUNKS_MAX).map(digest).collect(),
+            ),
+        ] {
+            let homed = homed(inputs[name]);
+            assert_eq!(Change::decode(&homed), Ok(spec(chunks)), "{name}");
+            assert_eq!(round_trip_change(&homed), Some(homed), "{name}");
+        }
+        // These two have the byte form before the holders, which ends where the count
+        // of holders starts.
+        for (name, held_name) in [
+            ("spec", "spec_held"),
+            ("spec_chunks_1024", "spec_held_chunks_1024"),
+        ] {
+            let mut held = inputs[name].to_vec();
+            held.extend(1_u16.to_le_bytes());
+            held.extend(key(1).as_u128().to_le_bytes());
+            assert_eq!(held, inputs[held_name], "{name}");
+        }
+        // The chunk count is after the kind, the base, and the root.
+        let mut over = inputs["spec_chunks_1024"].to_vec();
+        over[73..75].copy_from_slice(&1025_u16.to_le_bytes());
+        over.extend(digest(CHUNKS_MAX).0);
+        assert_eq!(inputs["spec_chunks_1025"], over);
+        for (name, bytes) in &inputs {
+            let body = Malformed::Body {
+                kind: 4,
+                length: bytes.len(),
+            };
+            assert_eq!(Change::decode(bytes), Err(body), "{name}");
+            assert_eq!(round_trip_change(bytes), None, "{name}");
+        }
+        let mut order = spec(BTreeSet::new());
+        let Change::Spec { holders, .. } = &mut order else {
+            unreachable!()
+        };
+        *holders = [key(1), key(2)].into();
+        let mut bytes = unhomed(&order);
+        bytes[77..].rotate_left(16);
+        assert_eq!(inputs["spec_holders_out_of_order"], bytes);
+    }
+
+    // Each decodes as its input before the homes does with the count added, which
+    // `each_spec_change_input_is_what_its_name_says` and
+    // `each_holder_bound_input_is_what_its_name_says` check.
+    #[test]
+    fn each_input_with_a_count_of_0_homes_is_its_input_before_the_homes_with_it() {
+        let before = inputs!(
+            "mesh_change": "spec_chunks_0",
+            "spec_held",
+            "spec_held_chunks_1024",
+            "spec_holders_64",
+        );
+        let counted = inputs!(
+            "mesh_change": "spec_chunks_0_homes_0",
+            "spec_homes_0",
+            "spec_held_chunks_1024_homes_0",
+            "spec_holders_64_homes_0",
+        );
+        for (name, counted_name) in [
+            ("spec_chunks_0", "spec_chunks_0_homes_0"),
+            ("spec_held", "spec_homes_0"),
+            ("spec_held_chunks_1024", "spec_held_chunks_1024_homes_0"),
+            ("spec_holders_64", "spec_holders_64_homes_0"),
+        ] {
+            assert_eq!(counted[counted_name], homed(before[name]), "{name}");
+        }
+    }
+
+    // With the counts that its byte form lacks, each fails for what its name says.
+    #[test]
+    fn each_refused_spec_change_input_fails_for_what_its_name_says() {
+        let inputs =
+            inputs!("mesh_change": "spec_chunks_1025", "spec_holders_out_of_order");
+        for (name, lacked) in
+            [("spec_chunks_1025", 4), ("spec_holders_out_of_order", 2)]
+        {
+            let whole = [inputs[name], &vec![0; lacked]].concat();
+            let body = Malformed::Body {
+                kind: 4,
+                length: whole.len(),
+            };
+            assert_eq!(Change::decode(&whole), Err(body), "{name}");
+        }
+    }
+
+    #[test]
+    fn each_spec_change_input_with_a_repeated_or_falling_key_does_not_decode() {
+        let inputs = inputs!(
+            "mesh_change": "spec_chunks_equal",
+            "spec_chunks_falling",
+            "spec_holders_equal",
+        );
+        let encoded = |chunks: &[u8], holders: &[u8]| {
+            unhomed(&Change::Spec {
+                base: Pointer {
+                    version: 1,
+                    root: Digest([2; 32]),
+                },
+                root: Digest([3; 32]),
+                chunks: chunks.iter().map(|&chunk| Digest([chunk; 32])).collect(),
+                holders: holders.iter().map(|&holder| key(holder)).collect(),
+                homes: BTreeMap::new(),
+            })
+        };
+        // Each chunk is 32 bytes from byte 75.
+        let mut equal = encoded(&[4, 5], &[]);
+        let mut falling = equal.clone();
+        equal[107..139].fill(4);
+        assert_eq!(inputs["spec_chunks_equal"], equal);
+        falling[75..139].rotate_left(32);
+        assert_eq!(inputs["spec_chunks_falling"], falling);
+        // The count of holders is at byte 107, after one chunk.
+        let mut twice = encoded(&[5], &[3]);
+        twice[107..109].copy_from_slice(&2_u16.to_le_bytes());
+        twice.extend(key(3).as_u128().to_le_bytes());
+        assert_eq!(inputs["spec_holders_equal"], twice);
+        for (name, bytes) in inputs {
+            let homed = homed(bytes);
+            let body = Malformed::Body {
+                kind: 4,
+                length: homed.len(),
+            };
+            assert_eq!(Change::decode(&homed), Err(body), "{name}");
+            assert_eq!(round_trip_change(&homed), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn each_holder_bound_input_is_what_its_name_says() {
+        let inputs = inputs!("mesh_change": "spec_holders_64", "spec_holders_65");
+        let at_bound = Change::Spec {
+            base: Pointer {
+                version: 1,
+                root: Digest([2; 32]),
+            },
+            root: Digest([3; 32]),
+            chunks: BTreeSet::new(),
+            holders: (1..=64).map(key).collect(),
+            homes: BTreeMap::new(),
+        };
+        let mut bytes = unhomed(&at_bound);
+        assert_eq!(inputs["spec_holders_64"], bytes);
+        assert_eq!(Change::decode(&homed(&bytes)), Ok(at_bound));
+        // The count of holders is after the count of chunks, which is 0.
+        bytes[75..77].copy_from_slice(&65_u16.to_le_bytes());
+        bytes.extend(key(65).as_u128().to_le_bytes());
+        assert_eq!(inputs["spec_holders_65"], bytes);
+        let homed = homed(&bytes);
+        let body = Malformed::Body {
+            kind: 4,
+            length: homed.len(),
+        };
+        assert_eq!(Change::decode(&homed), Err(body));
+    }
+
+    #[test]
+    fn each_homed_spec_change_input_is_what_its_name_says() {
+        let inputs = inputs!(
+            "mesh_change": "spec_held",
+            "spec_homed",
+            "spec_homes_512",
+            "spec_homes_513",
+            "spec_homes_equal",
+            "spec_homes_falling",
+        );
+        // The byte form of `spec_held` with each home of `homes`, in order.
+        let homed = |homes: &[(u128, u128)]| {
+            let mut bytes = inputs["spec_held"].to_vec();
+            bytes.extend(u16::try_from(homes.len()).unwrap().to_le_bytes());
+            for (index, home) in homes {
+                bytes.extend(index.to_le_bytes());
+                bytes.extend(home.to_le_bytes());
+            }
+            bytes
+        };
+        let change = |homes: &[(u128, u128)]| Change::Spec {
+            base: Pointer {
+                version: 1,
+                root: Digest([2; 32]),
+            },
+            root: Digest([3; 32]),
+            chunks: [Digest([4; 32]), Digest([5; 32])].into(),
+            holders: [key(1)].into(),
+            homes: homes
+                .iter()
+                .map(|&(index, home)| {
+                    (
+                        channel::Key::from_u128(index),
+                        key(u8::try_from(home).unwrap()),
+                    )
+                })
+                .collect(),
+        };
+        let at_bound: Vec<_> = (1..=512).map(|index| (index, 2)).collect();
+        for (name, homes) in
+            [("spec_homed", &[(5, 3)][..]), ("spec_homes_512", &at_bound)]
+        {
+            let bytes = homed(homes);
+            assert_eq!(inputs[name], bytes, "{name}");
+            assert_eq!(Change::decode(&bytes), Ok(change(homes)), "{name}");
+            assert_eq!(round_trip_change(&bytes), Some(bytes), "{name}");
+        }
+        let over: Vec<_> = (1..=513).map(|index| (index, 2)).collect();
+        for (name, homes) in [
+            ("spec_homes_513", &over[..]),
+            ("spec_homes_equal", &[(5, 2), (5, 3)]),
+            ("spec_homes_falling", &[(9, 2), (5, 3)]),
+        ] {
+            let bytes = homed(homes);
+            assert_eq!(inputs[name], bytes, "{name}");
+            let body = Malformed::Body {
+                kind: 4,
+                length: bytes.len(),
+            };
+            assert_eq!(Change::decode(&bytes), Err(body), "{name}");
+            assert_eq!(round_trip_change(&bytes), None, "{name}");
+        }
+    }
+
+    // The byte form of a spec change with no home, before the homes: with no count of
+    // homes.
+    fn unhomed(change: &Change) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        change.encode(&mut bytes);
+        assert_eq!([bytes.pop(), bytes.pop()], [Some(0), Some(0)]);
+        bytes
+    }
+
+    // The byte form `unhomed` gave, with a count of 0 homes.
+    fn homed(unhomed: &[u8]) -> Vec<u8> {
+        [unhomed, &[0, 0]].concat()
     }
 
     fn at(term: u64, index: u64) -> Position {

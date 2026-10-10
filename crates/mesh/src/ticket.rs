@@ -2,9 +2,9 @@
 
 use std::fmt;
 
-use types::ed25519::{BadSignature, PublicKey};
+use types::ed25519::{BadSignature, Pair, PrivateKey, PublicKey};
 use types::name::{Name, Prefix};
-use types::node::{self, PrivateKey};
+use types::node;
 use types::time::{Span, Stamp};
 
 use crate::bytes::{
@@ -12,7 +12,6 @@ use crate::bytes::{
     take_optional_span, take_stamp,
 };
 use crate::card;
-use crate::ed25519;
 
 const TAG: &[u8] = b"foundation/admission/1";
 
@@ -112,7 +111,7 @@ impl Ticket {
     /// the card's node key, and the card's byte form.
     #[must_use]
     pub fn admission(&self, card: &card::Signed) -> [u8; 64] {
-        ed25519::sign(&ed25519::pair(&self.private_key), &statement(card))
+        Pair::new(&self.private_key).sign(&statement(card))
     }
 }
 

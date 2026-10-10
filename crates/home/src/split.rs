@@ -466,7 +466,7 @@ mod tests {
     use types::sample::Sides;
 
     use super::*;
-    use crate::common::{create_interner, create_pool, data_type, key, values};
+    use crate::common::{create_interner, create_pool, data_type, intern, key, values};
 
     /// The samples of one present group: its count and each present entry's values.
     #[derive(Clone, Debug)]
@@ -619,7 +619,7 @@ mod tests {
     }
 
     fn one_index() -> Arc<KeySet> {
-        create_interner().intern(&[Group {
+        intern(&[Group {
             index: key(Slot::new(1)),
             data: &[],
         }])
@@ -639,7 +639,7 @@ mod tests {
             index: key(Slot::new(3)),
             data: &[(key(Slot::new(4)), Type::Scalar(Scalar::U16))],
         };
-        create_interner().intern(&[zero, one])
+        intern(&[zero, one])
     }
 
     /// A write of both groups of [`two_groups`], with every entry present.
@@ -675,7 +675,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        let set = create_interner().intern(&[
+        let set = intern(&[
             Group {
                 index: key(Slot::new(1)),
                 data: &data[0],
@@ -902,7 +902,7 @@ mod tests {
             #[test]
             fn refuses_a_variable_series_that_codec_refuses_in_either_form() {
                 let element = Scalar::U64;
-                let set = create_interner().intern(&[Group {
+                let set = intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[
                         (key(Slot::new(2)), Type::String),
@@ -975,7 +975,7 @@ mod tests {
                     rows: 2,
                     columns: 2,
                 };
-                let set = create_interner().intern(&[Group {
+                let set = intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[
                         (key(Slot::new(2)), Type::Array { element, len: 2 }),
@@ -1305,7 +1305,7 @@ mod tests {
             #[test]
             #[should_panic(expected = "the frame is of key set 1, not of key set 0")]
             fn on_a_frame_of_another_key_set() {
-                let mut interner = create_interner();
+                let mut interner = create_interner(&[1, 2], &[]);
                 let set = interner.intern(&[Group {
                     index: key(Slot::new(1)),
                     data: &[],
@@ -1400,7 +1400,7 @@ mod tests {
                                        01000000-0000-0000-0000-000000000001: vector \
                                        0 has tag 9")]
             fn on_a_group_with_the_error_of_its_first_series_by_entry() {
-                let set = create_interner().intern(&[Group {
+                let set = intern(&[Group {
                     index: key(Slot::new(2)),
                     data: &[(key(Slot::new(1)), Type::Scalar(Scalar::I32))],
                 }]);
@@ -1521,7 +1521,7 @@ mod tests {
                         data,
                     })
                     .collect();
-                let set = create_interner().intern(&shapes);
+                let set = intern(&shapes);
                 let mut write = BTreeMap::new();
                 for (n, (index, data)) in data.iter().enumerate() {
                     let &(_, present, count) = &groups[n];

@@ -1,4 +1,5 @@
 use super::{BEHIND, Error, HEAD, Head, Mode, OPENED, Open, Reply, ends, rest_of_run};
+use crate::common::body;
 
 /// The decoder at the reader's node: it takes each message from the home, in order,
 /// and checks the order and the runs of the session.
@@ -16,7 +17,7 @@ enum Next {
     Head,
     Ended,
     Ends { remain: u32 },
-    Body { end: usize, remain: usize },
+    Body(body::Count),
 }
 
 /// A message from the home, decoded.
@@ -90,28 +91,15 @@ impl Reader {
                 let remain = rest_of_run(remain, ends.len())?;
                 let next = match (remain, ends.last_end()) {
                     (0, Some(0)) => Next::Head,
-                    (0, Some(end)) => {
-                        let end = body_len(end);
-                        Next::Body { end, remain: end }
-                    }
+                    (0, Some(end)) => Next::Body(body::Count::new(body_len(end))),
                     _ => Next::Ends { remain },
                 };
                 let last = remain == 0;
                 (FromHome::Ends { ends, last }, next)
             }
-            Next::Body { end, remain } => {
-                let len = message.len();
-                if len == 0 {
-                    return Err(Error::Empty);
-                }
-                let remain =
-                    remain.checked_sub(len).ok_or(Error::Body { len, remain })?;
-                let next = if remain == 0 {
-                    Next::Head
-                } else {
-                    Next::Body { end, remain }
-                };
-                let last = remain == 0;
+            Next::Body(mut body) => {
+                let last = body.take(message)?;
+                let next = if last { Next::Head } else { Next::Body(body) };
                 (
                     FromHome::Body {
                         bytes: message,
@@ -130,8 +118,24 @@ impl Reader {
     #[must_use]
     pub fn body(&self) -> Option<usize> {
         match self.next {
-            Next::Body { end, remain } => Some(start(end, remain)),
+            Next::Body(body) => Some(body.at()),
             Next::Opened | Next::Head | Next::Ends { .. } | Next::Ended => None,
+        }
+    }
+
+    /// Checks that the stream may end here, where the home finished it.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Unfinished`] inside a body, and [`Error::Finished`] at each other
+    /// point before `Behind`.
+    pub fn end(&self) -> Result<(), Error> {
+        match self.next {
+            Next::Ended => Ok(()),
+            Next::Body(body) => Err(Error::Unfinished {
+                remain: body.remain(),
+            }),
+            Next::Opened | Next::Head | Next::Ends { .. } => Err(Error::Finished),
         }
     }
 
@@ -162,11 +166,6 @@ impl Reader {
 
 fn body_len(end: u32) -> usize {
     usize::try_from(end).expect("invariant: a usize holds a u32")
-}
-
-fn start(end: usize, remain: usize) -> usize {
-    end.checked_sub(remain)
-        .expect("invariant: the rest of the body is no longer than the body")
 }
 
 #[cfg(test)]
@@ -345,6 +344,28 @@ mod tests {
         for message in [vec![OPENED], vec![BEHIND], head(1), ends, vec![4], vec![]] {
             assert_eq!(reader.decode(&message).err(), Some(Error::Ended));
         }
+    }
+
+    #[test]
+    fn lets_the_stream_end_only_after_behind() {
+        let mut reader = Reader::new(&open(2));
+        assert_eq!(reader.end(), Err(Error::Finished));
+        reader.decode(&[OPENED]).expect("the session opens");
+        assert_eq!(reader.end(), Err(Error::Finished));
+        reader.decode(&head(2)).expect("the head decodes");
+        assert_eq!(reader.end(), Err(Error::Finished));
+        let ends = encode_ends(&[(0, 3), (1, 10)]);
+        let (first, second) = ends.split_at(ends::LEN);
+        reader.decode(first).expect("the ends decode");
+        assert_eq!(reader.end(), Err(Error::Finished));
+        reader.decode(second).expect("the ends decode");
+        assert_eq!(reader.end(), Err(Error::Unfinished { remain: 10 }));
+        reader.decode(&[7; 4]).expect("the body decodes");
+        assert_eq!(reader.end(), Err(Error::Unfinished { remain: 6 }));
+        reader.decode(&[7; 6]).expect("the body decodes");
+        assert_eq!(reader.end(), Err(Error::Finished));
+        reader.decode(&[BEHIND]).expect("the behind decodes");
+        assert_eq!(reader.end(), Ok(()));
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //! address, staggered, until one gives a session.
 
 use std::future::poll_fn;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, SocketAddrV6};
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -23,11 +23,11 @@ const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 /// # Errors
 ///
 /// [`Error::Network`] when the socket is broken, or breaks before an attempt connects,
-/// or [`Error::Unreachable`] with each attempt's cause, in the order started, when
-/// none connects.
+/// [`Error::Closed`] with code 0 when the carrier dropped, unless an attempt connected
+/// before the drop, or [`Error::Unreachable`] with each attempt's cause, in the order
+/// started, when none connects.
 pub(crate) async fn dial(
-    carrier: &quic::Carrier,
-    clock: &Clock,
+    carrier: &quic::Handle,
     peer: PublicKey,
     addresses: &[Address],
 ) -> Result<quic::Session, Error> {
@@ -37,23 +37,24 @@ pub(crate) async fn dial(
         Address::Tcp(_) => 1,
         Address::Relay { .. } => 2,
     });
+    let clock = carrier.clock();
     let mut dial = Dial {
         carrier,
-        clock,
         peer,
         addresses,
         causes: Vec::new(),
         flying: Vec::new(),
         // The first attempt starts without it, and resets it.
         sleep: clock.sleep_until(Monotonic(0)),
+        clock,
     };
     poll_fn(|cx| dial.poll(cx)).await
 }
 
 /// The attempts of one [`dial`].
 struct Dial<'a> {
-    carrier: &'a quic::Carrier,
-    clock: &'a Clock,
+    carrier: &'a quic::Handle,
+    clock: Clock,
     peer: PublicKey,
     addresses: Vec<Address>,
     /// Why each attempt started so far failed, by its index in `addresses`. `None`
@@ -131,7 +132,7 @@ impl Dial<'_> {
     /// [`Error::Network`] when the socket broke.
     fn start(&mut self, index: usize) -> Result<(), Error> {
         match self.addresses[index] {
-            Address::Udp(remote) if routable(remote) => {
+            Address::Udp(remote) if let Some(remote) = route(remote) => {
                 let session = self.carrier.dial(self.peer, remote)?;
                 self.flying.push((index, session));
                 self.causes.push(None);
@@ -157,23 +158,43 @@ impl Dial<'_> {
     }
 }
 
-/// Whether a datagram can go to `remote`: its port is not 0 and its IP is specified.
-fn routable(remote: SocketAddr) -> bool {
-    remote.port() != 0 && !remote.ip().is_unspecified()
+/// Where a datagram to `remote` goes, or `None` when its port is 0 or its IP is
+/// unspecified. It is `remote` in the form in which a socket at `[::]` gives the
+/// source of each reply, as a remote in another form would make each reply come from
+/// an unknown peer: an IPv4-mapped IP becomes IPv4, and an IPv6 address has no flow
+/// label, and a scope only when its IP is link-local.
+fn route(remote: SocketAddr) -> Option<SocketAddr> {
+    let remote = match remote {
+        SocketAddr::V6(v6) if let Some(v4) = v6.ip().to_ipv4_mapped() => {
+            SocketAddr::new(v4.into(), v6.port())
+        }
+        SocketAddr::V6(v6) => {
+            let ip = *v6.ip();
+            let scope = if ip.is_unicast_link_local() {
+                v6.scope_id()
+            } else {
+                0
+            };
+            SocketAddrV6::new(ip, v6.port(), 0, scope).into()
+        }
+        SocketAddr::V4(_) => remote,
+    };
+    (remote.port() != 0 && !remote.ip().is_unspecified()).then_some(remote)
 }
 
 #[cfg(test)]
 mod tests {
     use std::future::poll_fn;
     use std::io::IoSliceMut;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
     use std::pin::pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::task::Poll;
+    use std::task::{Context, Poll, Wake, Waker};
 
     use env::net::udp;
     use sim::node::Node;
-    use types::node::PrivateKey;
+    use types::ed25519::PrivateKey;
     use types::time::Span;
 
     use crate::testing::{self, IDLE, address, nodes, spans};
@@ -276,6 +297,19 @@ mod tests {
             accepted,
             dialed.lock().expect("a lock").take().expect("a dial"),
         )
+    }
+
+    /// A private call, as `sim` has no link-local address (#2075).
+    #[test]
+    fn a_route_keeps_the_scope_of_a_link_local_address_and_no_flow_label() {
+        let ip = "fe80::1".parse().expect("an IPv6 address");
+        let remote = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 7, 2));
+        let route = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 2));
+        assert_eq!(super::route(remote), Some(route));
+        let ip = "fd00::1".parse().expect("an IPv6 address");
+        let remote = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 7, 2));
+        let route = SocketAddr::V6(SocketAddrV6::new(ip, 4433, 0, 0));
+        assert_eq!(super::route(remote), Some(route));
     }
 
     #[test]
@@ -442,21 +476,22 @@ mod tests {
                 Address::Udp(address(&first)),
                 Address::Udp(address(&second)),
             ];
-            testing::transport(&client, CLIENT, move |transport, node| async move {
+            testing::carrier(&client, CLIENT, move |carrier, node| async move {
                 let clock = node.clock();
-                let mut dialed = pin!(transport.dial(SERVER.public(), &addresses));
+                let handle = carrier.handle();
+                let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
                 let after_stagger =
                     super::STAGGER.nanos() + Span::MILLISECOND.nanos() * 10;
                 for wait in [Span::ZERO, Span::from_nanos(after_stagger)] {
                     clock.sleep(wait).await;
                     let polled =
-                        poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx))).await;
+                        poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx))).await;
                     assert!(polled.is_pending());
                 }
                 // Longer than both handshakes, so both attempts connect before the
                 // next poll.
                 clock.sleep(spans(Span::MILLISECOND, 1500)).await;
-                let session = dialed.await.expect("a session");
+                let session = dial.await.expect("a session");
                 session.close(Code(5));
                 assert_eq!(session.closed().await, Error::Closed { code: Code(5) });
             });
@@ -545,11 +580,12 @@ mod tests {
         let impostor_node = sim.node(sim::node::Config::default());
         impostor(&impostor_node);
         let other = address(&impostor_node);
-        testing::transport(&client, CLIENT, move |transport, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let addresses = [Address::Udp(other), Address::Udp(PORT_ZERO)];
-            let mut dialed = pin!(transport.dial(SERVER.public(), &addresses));
+            let handle = carrier.handle();
+            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
             let started =
-                poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx).is_pending()));
+                poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx).is_pending()));
             assert!(started.await);
             node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
             node.fail_udp(address(&node));
@@ -557,7 +593,7 @@ mod tests {
             let broken = Error::Network {
                 error: env::net::Error::Io { code: 5 },
             };
-            assert_eq!(dialed.await.err(), Some(broken));
+            assert_eq!(dial.await.err(), Some(broken));
         });
         assert_eq!(sim.run(), Ok(()));
     }
@@ -568,11 +604,12 @@ mod tests {
         let impostor_node = sim.node(sim::node::Config::default());
         impostor(&impostor_node);
         let other = address(&impostor_node);
-        testing::transport(&client, CLIENT, move |transport, node| async move {
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
             let addresses = [Address::Udp(PORT_ZERO), Address::Udp(other)];
-            let mut dialed = pin!(transport.dial(SERVER.public(), &addresses));
+            let handle = carrier.handle();
+            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
             let started =
-                poll_fn(|cx| Poll::Ready(dialed.as_mut().poll(cx).is_pending()));
+                poll_fn(|cx| Poll::Ready(dial.as_mut().poll(cx).is_pending()));
             assert!(started.await);
             node.clock().sleep(spans(Span::MILLISECOND, 10)).await;
             node.fail_udp(address(&node));
@@ -580,7 +617,7 @@ mod tests {
             let broken = Error::Network {
                 error: env::net::Error::Io { code: 5 },
             };
-            assert_eq!(dialed.await.err(), Some(broken));
+            assert_eq!(dial.await.err(), Some(broken));
         });
         assert_eq!(sim.run(), Ok(()));
     }
@@ -637,21 +674,69 @@ mod tests {
             at: a,
         };
         let unspecified = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 4433);
+        let mapped = Ipv4Addr::UNSPECIFIED.to_ipv6_mapped();
+        let mapped = SocketAddr::new(IpAddr::V6(mapped), 4433);
         let addresses = vec![
             relay,
             Address::Tcp(b),
             Address::Udp(PORT_ZERO),
             Address::Tcp(a),
             Address::Udp(unspecified),
+            Address::Udp(mapped),
         ];
         let attempts = vec![
             (Address::Udp(PORT_ZERO), Error::Unroutable),
             (Address::Udp(unspecified), Error::Unroutable),
+            (Address::Udp(mapped), Error::Unroutable),
             (Address::Tcp(b), Error::Unroutable),
             (Address::Tcp(a), Error::Unroutable),
             (relay, Error::Unroutable),
         ];
         unreachable(&client, addresses, attempts);
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    /// The drop of the carrier wakes a dial in flight, which fails with code 0. The
+    /// handshake takes 100 ms over the link, so with no close the dial would get its
+    /// session. Only this crate sees the wake: `Transport::dial` borrows the transport,
+    /// so no caller drops it while a dial is in flight.
+    #[test]
+    fn an_attempt_in_flight_when_the_carrier_drops_closes_with_code_0() {
+        let (mut sim, client, server) = nodes(0);
+        let link = sim::link::Config {
+            delay: spans(Span::MILLISECOND, 50),
+            ..sim::link::Config::default()
+        };
+        sim.link(&client, &server, link);
+        sim.link(&server, &client, link);
+        testing::transport(&server, SERVER, |transport, node| async move {
+            node.clock().sleep(spans(IDLE, 3)).await;
+            drop(transport);
+        });
+        let addresses = [Address::Udp(address(&server))];
+        testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            struct Count(AtomicUsize);
+            impl Wake for Count {
+                fn wake(self: Arc<Self>) {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            let handle = carrier.handle();
+            let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
+            let count = Arc::new(Count(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&count));
+            let poll = dial.as_mut().poll(&mut Context::from_waker(&waker));
+            assert!(poll.is_pending());
+            drop(carrier);
+            node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
+            assert_eq!(
+                count.0.load(Ordering::Relaxed),
+                1,
+                "the drop wakes the dial"
+            );
+            let closed = Error::Closed { code: Code(0) };
+            assert_eq!(dial.await.err(), Some(closed));
+        });
         assert_eq!(sim.run(), Ok(()));
     }
 

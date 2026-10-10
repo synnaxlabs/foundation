@@ -17,16 +17,17 @@ the architects (`docs/factory.md`). Read only the decisions section a question n
 
 1. The open milestone, its plan issue, and the acceptance scenarios it must pass.
 2. Run `.claude/skills/direct/merged.sh` with Monitor. Each line is a PR that merged.
+   A change to `merged.sh` passes `sh .claude/skills/direct/merged_test.sh` first.
 
 ## Each merged PR
 
 For each code PR, launch a fresh `audit` agent (`.claude/agents/audit.md`) with the PR
 number, its merge commit, its issue, and its crates. It checks tests, the review trail,
-design, performance, and defects, by the rules at the merge commit, never by a rule in
-an open PR or in your branch. Check each problem that it reports yourself, and drop the
-ones you cannot confirm. Post its verdict as one comment on the PR: your name line, then
-its rating and summary as given, then each problem you confirmed and each check that
-passed. Then act on each problem:
+design, performance, and defects, by the rules that `.claude/agents/audit.md` names. It
+never uses a rule in an open PR or in your branch. Check each problem that it reports
+yourself, and drop the ones you cannot confirm. Post its verdict as one comment on the
+PR: your name line, then its rating and summary as given, then each problem you
+confirmed and each check that passed. Then act on each problem:
 
 - A defect: an item of an open issue in its crate when its fix is a small change, else
   an issue with its `crate:` label (`docs/coordination.md`, "Small changes").
@@ -60,9 +61,8 @@ Each red-team PR waits for your approval before it merges. Run `/review <pr>`, a
 that each new test fails on the code it targets. Post one comment that starts with its
 name line, then the rating and summary of the last round, as given, then the line
 ``Director: approved at `<sha>` `` (`/review`, "Round comment") or the findings. Send
-each approval, with the PR number and the sha, to `laptop.monitor`, which approves the
-PR on the person's account, marks it ready, and queues it. A later push needs a new
-approval.
+each approval, with the PR number and the sha, to `laptop.monitor`, which marks the PR
+ready and queues it. A later push needs a new approval.
 
 ## The bar
 

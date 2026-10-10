@@ -238,8 +238,8 @@ impl From<header::Error> for Error {
 /// `tasks`. The task idles while nothing is queued and no commit runs. A drop ends
 /// the task at once when it idles, else at the end of its last commit, which writes
 /// each entry queued at the drop, or earlier at the first file call that fails.
-/// Await a [`Commit`] held past the drop before a reopen, and before the shard ends,
-/// which cancels the task.
+/// Await an [`End`] past the drop, then drop it, before a reopen and before the shard
+/// ends, which cancels the task.
 #[derive(Debug)]
 pub struct Buffer {
     shared: Rc<Shared>,
@@ -282,12 +282,19 @@ struct State {
     taken: u64,
     /// How many deadlines ended with no error.
     commits: u64,
+    /// The waiting [`Commit`]s, which the end of each commit and of the task wakes.
     wakers: Vec<Waker>,
+    /// The waker of each waiting [`End`] by its key. Only the end of the task wakes
+    /// them, and the drop of an `End` takes its waker out.
+    ending: Vec<(u64, Waker)>,
+    /// The key of the next [`End`].
+    next_end: u64,
     /// The task, while it idles. Whoever ends the idle span takes it and wakes it.
     parked: Option<Waker>,
     /// Whether the handle dropped. The task ends when it next idles.
     closed: bool,
-    /// Whether the task ended. A [`Commit`] held past the drop waits for it.
+    /// Whether the task ended. An [`End`], and a [`Commit`] held past the drop, wait
+    /// for it.
     ended: bool,
     /// The error that ended the task.
     failed: Option<files::Error>,
@@ -307,6 +314,19 @@ impl State {
         } else {
             self.taken + 1
         }
+    }
+
+    /// Marks the task ended and moves each waiter into `woken`.
+    fn end(&mut self, woken: &mut Vec<Waker>) {
+        self.ended = true;
+        woken.append(&mut self.wakers);
+        woken.extend(self.ending.drain(..).map(|(_, waker)| waker));
+    }
+
+    /// Takes the waker of the [`End`] with `key` out of `ending`.
+    fn forget(&mut self, key: u64) -> Option<Waker> {
+        let at = self.ending.iter().position(|(held, _)| *held == key)?;
+        Some(self.ending.swap_remove(at).1)
     }
 
     /// Closes the open group into the queue and opens a spare.
@@ -348,9 +368,7 @@ impl Buffer {
     /// durable. It reads the header and the records from the ring's tail and writes
     /// them again, so its time grows with the records. Open one directory at most one
     /// time at once. Opens at once can fail with `Busy`, `Files(Length)`, or
-    /// `Files(Full)`. Dropping this future before it ends and then opening the same
-    /// directory again in this process can lose the commits of the second open, because
-    /// a remove of the first can still run (#1310).
+    /// `Files(Full)`.
     ///
     /// # Errors
     ///
@@ -396,6 +414,8 @@ impl Buffer {
                 taken: 0,
                 commits: 0,
                 wakers: Vec::new(),
+                ending: Vec::new(),
+                next_end: 0,
                 parked: None,
                 closed: false,
                 ended: false,
@@ -577,6 +597,20 @@ impl Buffer {
         Commit {
             shared: Rc::clone(&self.shared),
             until: self.shared.state.borrow().durable_at(),
+        }
+    }
+
+    /// Resolves once the commit task ended: after the drop, once nothing is queued,
+    /// or at a failed file call. Gives the error of that call, so `Ok` means that
+    /// each entry appended before the drop is durable.
+    #[must_use]
+    pub fn ended(&self) -> End {
+        let mut state = self.shared.state.borrow_mut();
+        let key = state.next_end;
+        state.next_end += 1;
+        End {
+            shared: Rc::clone(&self.shared),
+            key,
         }
     }
 }
@@ -764,7 +798,7 @@ fn recover(
         if requested > largest {
             return Err(Error::Pool(block::Error::TooLarge { requested, largest }));
         }
-        let slot = slots.assign(header.index);
+        let slot = slots.index(header.index);
         logs.append(slot, &header).map_err(misplaced)?;
         logs.sync(slot, &header, offset).map_err(misplaced)?;
     }
@@ -834,8 +868,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
         .await;
         if ended {
             let mut state = shared.state.borrow_mut();
-            state.ended = true;
-            woken.append(&mut state.wakers);
+            state.end(&mut woken);
             drop(state);
             for waker in woken.drain(..) {
                 waker.wake();
@@ -869,7 +902,7 @@ async fn run(shared: Rc<Shared>, clock: Clock, commit: Span, chain: u32) {
             Ok(()) => state.synced(sealed.drain(..)),
             Err(error) => {
                 state.failed = Some(error);
-                state.ended = true;
+                state.end(&mut woken);
             }
         }
         woken.append(&mut state.wakers);
@@ -920,6 +953,42 @@ impl Future for Commit {
             state.wakers.push(cx.waker().clone());
         }
         Poll::Pending
+    }
+}
+
+/// The future of [`Buffer::ended`]. It does not borrow the buffer, and it holds the
+/// ring open until it drops.
+#[derive(Debug)]
+pub struct End {
+    shared: Rc<Shared>,
+    /// Its key in `ending`.
+    key: u64,
+}
+
+impl Future for End {
+    type Output = Result<(), files::Error>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut state = self.shared.state.borrow_mut();
+        if state.ended {
+            return Poll::Ready(state.failed.clone().map_or(Ok(()), Err));
+        }
+        let replaced = state.forget(self.key);
+        state.ending.push((self.key, cx.waker().clone()));
+        // A waker's drop can drop another `End`, which borrows the state.
+        drop(state);
+        drop(replaced);
+        Poll::Pending
+    }
+}
+
+impl Drop for End {
+    fn drop(&mut self) {
+        let mut state = self.shared.state.borrow_mut();
+        let held = state.forget(self.key);
+        // A waker's drop can drop another `End`, which borrows the state.
+        drop(state);
+        drop(held);
     }
 }
 
@@ -1012,8 +1081,8 @@ mod tests {
             &node,
             "write",
             |buffer, mut slots, pool| async move {
-                let one = slots.assign(channel::Key::from_u128(1));
-                let two = slots.assign(channel::Key::from_u128(2));
+                let one = slots.index(channel::Key::from_u128(1));
+                let two = slots.index(channel::Key::from_u128(2));
                 let part = pool.alloc(100).expect("a block").freeze();
                 for commit in 0..3 {
                     let seq = 6 * commit;
@@ -1064,7 +1133,7 @@ mod tests {
             &node,
             "write",
             |buffer, mut slots, pool| async move {
-                let one = slots.assign(channel::Key::from_u128(1));
+                let one = slots.index(channel::Key::from_u128(1));
                 let part = pool.alloc(100).expect("a block").freeze();
                 for commit in 0..60 {
                     let batch = [entry(1, one, Path::Live, 3 * commit, &part)];
@@ -1089,7 +1158,7 @@ mod tests {
         slots: &mut Slots,
         pool: &Pool,
     ) -> Slot {
-        let one = slots.assign(channel::Key::from_u128(1));
+        let one = slots.index(channel::Key::from_u128(1));
         let part = pool.alloc(100).expect("a block").freeze();
         for commit in 0..3 {
             let batch = [entry(1, one, Path::Live, 3 * commit, &part)];
@@ -1166,7 +1235,7 @@ mod tests {
             &node,
             "write",
             |buffer, mut slots, pool| async move {
-                let one = slots.assign(channel::Key::from_u128(1));
+                let one = slots.index(channel::Key::from_u128(1));
                 let part = pool.alloc(100).expect("a block").freeze();
                 let empty = || Entry {
                     len: 0,

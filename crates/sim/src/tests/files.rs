@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 use block::{Block, Pool};
@@ -358,12 +358,86 @@ fn create_after_dropped_remove(value: u64) -> Option<Error> {
 }
 
 #[test]
-fn a_dropped_remove_can_remove_a_file_that_a_later_create_makes() {
-    let removed = Some(Error::NotFound { path: "a".into() });
-    let both = [removed, None];
-    let opens: Vec<_> = (0..32).map(create_after_dropped_remove).collect();
-    assert!(opens.iter().all(|open| both.contains(open)), "{opens:?}");
-    assert!(both.iter().all(|end| opens.contains(end)), "{opens:?}");
+fn a_create_after_a_dropped_remove_keeps_its_file() {
+    for value in 0..32 {
+        assert_eq!(create_after_dropped_remove(value), None, "value {value}");
+    }
+}
+
+/// What a read open of `a` gives while a remove of it is in flight: one whose future
+/// lives, or, when `dropped`, one polled once whose future drops.
+fn read_beside_remove(value: u64, dropped: bool) -> Option<Error> {
+    run(value, MIB, move |node, tasks| async move {
+        let (files, path) = (node.files(), Path::new("a"));
+        drop(create(&node, "a", KIB).await);
+        if dropped {
+            let mut remove = Box::pin(files.remove(path));
+            pend(remove.as_mut()).await;
+        } else {
+            let theirs = files.clone();
+            tasks.spawn(async move { theirs.remove(Path::new("a")).await.unwrap() });
+        }
+        let found = files.open(path, Mode::Read).await.map(drop).err();
+        node.clock().sleep(Span::MILLISECOND).await;
+        found
+    })
+}
+
+#[test]
+fn a_read_open_does_not_wait_for_a_remove_in_flight() {
+    let gone = Some(Error::NotFound { path: "a".into() });
+    for dropped in [false, true] {
+        let found: Vec<_> = (0..32)
+            .map(|value| read_beside_remove(value, dropped))
+            .collect();
+        assert!(
+            found.contains(&None) && found.contains(&gone),
+            "{dropped}: {found:?}"
+        );
+    }
+}
+
+/// What a remove of `a` gives once a create of `a` is polled once and its future
+/// drops, and the names in the data directory a millisecond later.
+fn remove_after_dropped_create(value: u64) -> (Result<(), Error>, Vec<PathBuf>) {
+    run(value, MIB, |node, _| async move {
+        let (files, path) = (node.files(), Path::new("a"));
+        let mut made = Box::pin(files.open(path, Mode::Create { len: KIB }));
+        pend(made.as_mut()).await;
+        drop(made);
+        let removed = files.remove(path).await;
+        node.clock().sleep(Span::MILLISECOND).await;
+        (removed, files.list(Path::new("")).await.unwrap())
+    })
+}
+
+#[test]
+fn a_remove_waits_for_a_dropped_create() {
+    for value in 0..32 {
+        let found = remove_after_dropped_create(value);
+        assert_eq!(found, (Ok(()), Vec::new()), "value {value}");
+    }
+}
+
+/// What a create of `a` gives while a remove of it, whose future lives, is in flight,
+/// and the names in the data directory a millisecond later.
+fn create_beside_remove(value: u64) -> (Option<Error>, Vec<PathBuf>) {
+    run(value, MIB, |node, tasks| async move {
+        let files = node.files();
+        let theirs = files.clone();
+        tasks.spawn(async move { theirs.remove(Path::new("a")).await.unwrap() });
+        let made = files.open(Path::new("a"), Mode::Create { len: KIB }).await;
+        node.clock().sleep(Span::MILLISECOND).await;
+        (made.err(), files.list(Path::new("")).await.unwrap())
+    })
+}
+
+#[test]
+fn a_create_does_not_wait_for_a_remove_whose_future_lives() {
+    let runs: Vec<_> = (0..32).map(create_beside_remove).collect();
+    assert!(runs.iter().all(|(made, _)| made.is_none()), "{runs:?}");
+    let names: BTreeSet<_> = runs.into_iter().map(|(_, names)| names).collect();
+    assert_eq!(names, BTreeSet::from([vec![], vec![PathBuf::from("a")]]));
 }
 
 #[test]
@@ -1019,33 +1093,145 @@ fn a_read_handle_neither_takes_nor_checks_the_write_hold() {
     });
 }
 
-/// What a write open of a file gives at once after its write handle dropped with a
-/// write in flight, and then after a millisecond.
+/// What a write open of a file gives after its write handle dropped with a write in
+/// flight, and what a second write open gives while the first holds the file.
 fn open_after_dropped_write(value: u64) -> (Option<Error>, Option<Error>) {
     run(value, MIB, |node, _| async move {
         let (files, path, pool) = (node.files(), Path::new("a"), pool());
         let file = create(&node, "a", 1_024).await;
         let parts = [block(&pool, &[1; 1_024])];
         let mut write = Box::pin(file.write_at(0, &parts));
-        poll_fn(|cx| {
-            assert!(write.as_mut().poll(cx).is_pending());
-            Poll::Ready(())
-        })
-        .await;
+        pend(write.as_mut()).await;
         drop(write);
         drop(file);
-        let first = files.open(path, Mode::Write).await.err();
-        node.clock().sleep(Span::MILLISECOND).await;
-        (first, files.open(path, Mode::Write).await.err())
+        let first = files.open(path, Mode::Write).await;
+        let second = files.open(path, Mode::Write).await.err();
+        (first.err(), second)
     })
 }
 
 #[test]
-fn a_write_in_flight_holds_the_file_after_its_handle_drops() {
-    let both = [(Some(busy("a")), None), (None, None)];
-    let opens: Vec<_> = (0..32).map(open_after_dropped_write).collect();
-    assert!(opens.iter().all(|open| both.contains(open)), "{opens:?}");
-    assert!(both.iter().all(|end| opens.contains(end)), "{opens:?}");
+fn a_write_open_waits_for_the_write_of_a_dropped_handle() {
+    for value in 0..32 {
+        let opens = open_after_dropped_write(value);
+        assert_eq!(opens, (None, Some(busy("a"))), "value {value}");
+    }
+}
+
+/// What a create of `a` gives after a drop of a write handle with a write in flight,
+/// whose file a durable `Files::remove` of `a` unlinked first. The write holds the
+/// 600 KiB of the old file until it ends.
+fn create_after_dropped_handle_of_removed_file(value: u64) -> Result<(), Error> {
+    run(value, MIB, |node, _| async move {
+        let (files, path, pool) = (node.files(), Path::new("a"), pool());
+        let file = create(&node, "a", 600 * KIB).await;
+        files.sync_dir(Path::new("")).await.unwrap();
+        files.remove(path).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        let parts = [block(&pool, &[1; 512])];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(file);
+        files
+            .open(path, Mode::Create { len: 600 * KIB })
+            .await
+            .map(drop)
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_write_of_a_dropped_handle_of_a_removed_file() {
+    for value in 0..32 {
+        let made = create_after_dropped_handle_of_removed_file(value);
+        assert_eq!(made, Ok(()), "value {value}");
+    }
+}
+
+/// What a create of `a` gives after a drop of a write handle with a write in flight,
+/// whose file a durable `Files::remove` of `a` unlinked first, and then a rename of
+/// the handle of another file from `c` to `d`. The write holds the 600 KiB of the old
+/// file until it ends.
+fn create_after_dropped_handle_of_removed_file_and_rename(
+    value: u64,
+) -> Result<(), Error> {
+    run(value, MIB, |node, _| async move {
+        let (files, path, pool) = (node.files(), Path::new("a"), pool());
+        let mut other = create(&node, "c", KIB).await;
+        let file = create(&node, "a", 600 * KIB).await;
+        files.sync_dir(Path::new("")).await.unwrap();
+        files.remove(path).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        let parts = [block(&pool, &[1; 512])];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(file);
+        other.rename(Path::new("d")).await.unwrap();
+        files
+            .open(path, Mode::Create { len: 600 * KIB })
+            .await
+            .map(drop)
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_write_of_a_removed_file_after_a_rename_of_another() {
+    for value in 0..64 {
+        let made = create_after_dropped_handle_of_removed_file_and_rename(value);
+        assert_eq!(made, Ok(()), "value {value}");
+    }
+}
+
+/// What a write open of `a` gives after the drop of a handle with two writes in
+/// flight.
+fn open_after_two_dropped_writes(value: u64) -> Option<Error> {
+    run(value, MIB, |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let file = create(&node, "a", 1_024).await;
+        let (first, second) = ([block(&pool, &[1; 512])], [block(&pool, &[2; 512])]);
+        let mut writes = (
+            Box::pin(file.write_at(0, &first)),
+            Box::pin(file.write_at(512, &second)),
+        );
+        pend(writes.0.as_mut()).await;
+        pend(writes.1.as_mut()).await;
+        drop(writes);
+        drop(file);
+        files.open(Path::new("a"), Mode::Write).await.err()
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_last_dropped_write_of_a_handle() {
+    for value in 0..64 {
+        assert_eq!(open_after_two_dropped_writes(value), None, "value {value}");
+    }
+}
+
+/// What a write open of `b` gives after a drop of a write handle that a rename moved
+/// from `a` to `b`, with a write dropped in flight before the rename.
+fn open_after_rename_with_dropped_write(value: u64) -> Option<Error> {
+    run(value, MIB, |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let mut file = create(&node, "a", KIB).await;
+        let parts = [block(&pool, &[1; 512])];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        file.rename(Path::new("b")).await.unwrap();
+        drop(file);
+        files.open(Path::new("b"), Mode::Write).await.err()
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_a_dropped_call_on_the_file_that_its_path_names() {
+    // The write outlasts the rename and the open in about 1 run in 30.
+    for value in 0..256 {
+        let found = open_after_rename_with_dropped_write(value);
+        assert_eq!(found, None, "value {value}");
+    }
 }
 
 #[test]
@@ -1201,8 +1387,8 @@ fn a_close_waits_only_for_the_calls_of_its_handle() {
     assert_eq!(start, end);
 }
 
-/// What a write open of a file gives at once after a drop of a close that waits for a
-/// write in flight, and then after a millisecond.
+/// What a write open of a file gives after a drop of a close that waits for a write
+/// in flight, and then after a millisecond.
 fn open_after_dropped_close(value: u64) -> (Option<Error>, Option<Error>) {
     run(value, MIB, |node, _| async move {
         let (files, path, pool) = (node.files(), Path::new("a"), pool());
@@ -1221,11 +1407,11 @@ fn open_after_dropped_close(value: u64) -> (Option<Error>, Option<Error>) {
 }
 
 #[test]
-fn a_dropped_close_closes_the_file_without_a_wait() {
-    let both = [(Some(busy("a")), None), (None, None)];
-    let opens: Vec<_> = (0..32).map(open_after_dropped_close).collect();
-    assert!(opens.iter().all(|open| both.contains(open)), "{opens:?}");
-    assert!(both.iter().all(|end| opens.contains(end)), "{opens:?}");
+fn a_write_open_waits_for_the_calls_of_a_dropped_close() {
+    for value in 0..32 {
+        let opens = open_after_dropped_close(value);
+        assert_eq!(opens, (None, None), "value {value}");
+    }
 }
 
 /// A waker that counts its wakes.
@@ -1424,6 +1610,328 @@ fn a_dropped_rename_still_ends() {
     }
 }
 
+/// What a rename of `a` to `b` gives, and the names in the data directory a
+/// millisecond later, when a remove of `b` is polled once and its future drops first.
+/// `b` is there before the remove when `existing`.
+fn rename_after_dropped_remove(
+    value: u64,
+    existing: bool,
+) -> (Result<(), Error>, Vec<PathBuf>) {
+    run(value, MIB, move |node, _| async move {
+        let files = node.files();
+        if existing {
+            drop(create(&node, "b", KIB).await);
+        }
+        let mut file = create(&node, "a", KIB).await;
+        let mut remove = Box::pin(files.remove(Path::new("b")));
+        pend(remove.as_mut()).await;
+        drop(remove);
+        let renamed = file.rename(Path::new("b")).await;
+        node.clock().sleep(Span::MILLISECOND).await;
+        (renamed, files.list(Path::new("")).await.unwrap())
+    })
+}
+
+#[test]
+fn a_rename_waits_for_a_dropped_remove_of_its_new_name() {
+    for (value, existing) in (0..32).flat_map(|value| [(value, false), (value, true)]) {
+        let found = rename_after_dropped_remove(value, existing);
+        let names = vec![PathBuf::from("b")];
+        assert_eq!(found, (Ok(()), names), "value {value}, existing {existing}");
+    }
+}
+
+/// What a write open of `b` gives after a drop of a write handle whose rename of `a`
+/// to `b` dropped in flight, and the names in the data directory then.
+fn open_after_dropped_rename(value: u64) -> (Option<Error>, Vec<PathBuf>) {
+    run(value, MIB, |node, _| async move {
+        let files = node.files();
+        let mut file = create(&node, "a", KIB).await;
+        let mut rename = Box::pin(file.rename(Path::new("b")));
+        pend(rename.as_mut()).await;
+        node.clock().sleep(Span::from_nanos(200_000)).await;
+        pend(rename.as_mut()).await;
+        drop(rename);
+        drop(file);
+        let found = files.open(Path::new("b"), Mode::Write).await.err();
+        (found, files.list(Path::new("")).await.unwrap())
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_a_dropped_rename_to_its_path() {
+    for value in 0..32 {
+        let found = open_after_dropped_rename(value);
+        assert_eq!(found, (None, vec![PathBuf::from("b")]), "value {value}");
+    }
+}
+
+/// Whether a create of `b` ended before a call on `a` whose future dropped in flight:
+/// a write when not `renamed`, else a rename of `a` to `c`.
+fn create_before_dropped_call(value: u64, renamed: bool) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let mut file = create(&node, "a", KIB).await;
+        if renamed {
+            let mut rename = Box::pin(file.rename(Path::new("c")));
+            pend(rename.as_mut()).await;
+            node.clock().sleep(Span::from_nanos(200_000)).await;
+            pend(rename.as_mut()).await;
+        } else {
+            let parts = [block(&pool, &[1; 512])];
+            let mut write = Box::pin(file.write_at(0, &parts));
+            pend(write.as_mut()).await;
+        }
+        drop(create(&node, "b", KIB).await);
+        if renamed {
+            return files
+                .list(Path::new(""))
+                .await
+                .unwrap()
+                .contains(&"a".into());
+        }
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        read(&reader, &pool, 0, 512).await != [1; 512]
+    })
+}
+
+#[test]
+fn a_create_does_not_wait_for_a_dropped_call_on_another_path() {
+    for renamed in [false, true] {
+        let runs: Vec<_> = (0..32)
+            .map(|value| create_before_dropped_call(value, renamed))
+            .collect();
+        assert!(runs.contains(&true), "renamed {renamed}: {runs:?}");
+    }
+}
+
+/// Whether a create of `a` on node 1, one nanosecond after node 0 drops a remove of
+/// its own `a`, ends before a read open on node 0 that still finds that file.
+fn create_beside_remove_of_another_node(value: u64) -> bool {
+    let mut sim = sim(value);
+    let config = || node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    };
+    let (a, b) = (sim.node(config()), sim.node(config()));
+    let at = a.clock().now() + Span::MILLISECOND;
+    let made = Arc::new(AtomicU64::new(0));
+    let end = Arc::clone(&made);
+    let create_b = b.shards().start(shard("b"), move |_| async move {
+        b.clock().sleep_until(at + Span::from_nanos(1)).await;
+        drop(create(&b, "a", KIB).await);
+        end.store(b.clock().now().0, Ordering::Relaxed);
+    });
+    let (found, read) = sim
+        .run_on(&a, move |a, _| async move {
+            let files = a.files();
+            drop(create(&a, "a", KIB).await);
+            a.clock().sleep_until(at).await;
+            let mut remove = Box::pin(files.remove(Path::new("a")));
+            pend(remove.as_mut()).await;
+            drop(remove);
+            let found = files.open(Path::new("a"), Mode::Read).await.is_ok();
+            (found, a.clock().now().0)
+        })
+        .unwrap();
+    create_b.unwrap().join().unwrap();
+    found && made.load(Ordering::Relaxed) < read
+}
+
+#[test]
+fn a_call_does_not_wait_for_a_dropped_call_of_another_node() {
+    assert!((0..32).any(create_beside_remove_of_another_node));
+}
+
+/// What a create of `b` gives while a rename of `a` to `b` through a live handle is
+/// in flight, after the sync that the rename makes first.
+fn create_beside_live_rename(value: u64) -> Option<Error> {
+    run(value, MIB, |node, _| async move {
+        let files = node.files();
+        let mut file = create(&node, "a", KIB).await;
+        let mut rename = Box::pin(file.rename(Path::new("b")));
+        pend(rename.as_mut()).await;
+        node.clock().sleep(Span::from_nanos(200_000)).await;
+        pend(rename.as_mut()).await;
+        let found = files.open(Path::new("b"), Mode::Create { len: KIB }).await;
+        let found = found.map(drop).err();
+        drop(rename.await);
+        found
+    })
+}
+
+#[test]
+fn a_create_does_not_wait_for_a_live_rename_to_its_path() {
+    let found: Vec<_> = (0..32).map(create_beside_live_rename).collect();
+    assert!(found.contains(&None), "{found:?}");
+}
+
+/// Whether the block of a dropped write of a handle is still in use when a later
+/// write of the handle ends.
+fn block_held_after_write(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        pool.alloc(big).unwrap_err();
+        let small = [block(&pool, &[1; 512])];
+        file.write_at(0, &small).await.unwrap();
+        drop(small);
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_write_does_not_wait_for_a_dropped_write_on_its_path() {
+    assert!((0..32).any(block_held_after_write));
+}
+
+/// Whether the block of a dropped write of a handle is still in use when a read of the
+/// handle ends.
+fn block_held_after_read(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        pool.alloc(big).unwrap_err();
+        drop(read(&file, &pool, 0, 512).await);
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_read_does_not_wait_for_a_dropped_write_on_its_path() {
+    assert!((0..32).any(block_held_after_read));
+}
+
+/// What a sync and a list of `d` give after a create of `d` dropped in flight.
+fn sync_and_list_after_dropped_create_dir(
+    value: u64,
+) -> (Option<Error>, Option<Error>) {
+    run(value, MIB, |node, _| async move {
+        let (files, dir) = (node.files(), Path::new("d"));
+        let mut create = Box::pin(files.create_dir(dir));
+        pend(create.as_mut()).await;
+        drop(create);
+        let synced = files.sync_dir(dir).await.err();
+        (synced, files.list(dir).await.err())
+    })
+}
+
+#[test]
+fn a_sync_and_a_list_of_a_directory_do_not_wait_for_its_dropped_create() {
+    let found: Vec<_> = (0..32)
+        .map(sync_and_list_after_dropped_create_dir)
+        .collect();
+    let missing = Some(Error::NotFound { path: "d".into() });
+    assert!(
+        found.iter().any(|(synced, _)| *synced == missing),
+        "{found:?}"
+    );
+    assert!(
+        found.iter().any(|(_, listed)| *listed == missing),
+        "{found:?}"
+    );
+}
+
+/// Whether the block of a dropped write of a handle, sent on `a`, is still in use when
+/// a rename of the handle from `a` to `b` ends.
+fn block_held_after_rename(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let pool = pool();
+        let big = pool.largest();
+        let mut file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        pool.alloc(big).unwrap_err();
+        file.rename(Path::new("b")).await.unwrap();
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_rename_does_not_wait_for_the_dropped_write_of_its_handle_on_another_path() {
+    assert!((0..32).any(block_held_after_rename));
+}
+
+/// Whether a remove through a handle of `a` is still in flight when a create of `b`
+/// ends.
+fn create_beside_handle_remove_of_another_path(value: u64) -> bool {
+    run(value, MIB, |node, _| async move {
+        let files = node.files();
+        let file = create(&node, "a", KIB).await;
+        let mut remove = Box::pin(file.remove());
+        pend(remove.as_mut()).await;
+        files
+            .open(Path::new("b"), Mode::Create { len: KIB })
+            .await
+            .unwrap();
+        poll_fn(|cx| Poll::Ready(remove.as_mut().poll(cx).is_pending())).await
+    })
+}
+
+#[test]
+fn a_create_does_not_wait_for_a_remove_through_a_handle_of_another_path() {
+    assert!((0..32).any(create_beside_handle_remove_of_another_path));
+}
+
+/// Whether `a` is still there when a create of `b` ends, which starts once a remove
+/// of `a` is polled once and its future drops.
+fn create_beside_dropped_remove(value: u64) -> bool {
+    run(value, MIB, |node, _| async move {
+        let files = node.files();
+        drop(create(&node, "a", KIB).await);
+        let mut remove = Box::pin(files.remove(Path::new("a")));
+        pend(remove.as_mut()).await;
+        drop(remove);
+        drop(create(&node, "b", KIB).await);
+        files
+            .list(Path::new(""))
+            .await
+            .unwrap()
+            .contains(&"a".into())
+    })
+}
+
+#[test]
+fn a_create_does_not_wait_for_a_dropped_remove_of_another_path() {
+    let runs: Vec<_> = (0..32).map(create_beside_dropped_remove).collect();
+    assert!(runs.contains(&true), "{runs:?}");
+}
+
+/// What a write open of `a` gives while a `File::remove` of it, whose future lives,
+/// is in flight.
+fn open_beside_handle_remove(value: u64) -> Option<Error> {
+    run(value, MIB, |node, tasks| async move {
+        let file = create(&node, "a", KIB).await;
+        tasks.spawn(async move { file.remove().await.unwrap() });
+        node.clock().sleep(Span::from_nanos(1)).await;
+        let found = node.files().open(Path::new("a"), Mode::Write).await;
+        found.map(drop).err()
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_a_remove_through_the_handle_whose_future_lives() {
+    for value in 0..32 {
+        let gone = Some(Error::NotFound { path: "a".into() });
+        assert_eq!(open_beside_handle_remove(value), gone, "value {value}");
+    }
+}
+
 #[test]
 fn a_remove_through_the_handle_removes_the_file_and_closes_it() {
     run(0, MIB, |node, _| async move {
@@ -1441,44 +1949,114 @@ fn a_remove_through_the_handle_removes_the_file_and_closes_it() {
     });
 }
 
-/// What a write open of `a` gives at once after a `File::remove` of it is polled once
-/// and dropped, and then what a write open and a create give after a millisecond,
-/// with the names in the data directory a millisecond after the create. The first
-/// open ends before or after the remove, by their delays.
-fn opens_around_dropped_remove(
+/// What a write open of `a` gives while a `File::remove` of it, whose future lives
+/// and which a fault fails, is in flight. The open ends before the remove is polled
+/// again.
+fn open_beside_failed_handle_remove(value: u64) -> Option<Error> {
+    run(value, MIB, |node, _| async move {
+        let (files, file) = (node.files(), create(&node, "a", KIB).await);
+        node.fail_file(Path::new("a"), Operation::Remove);
+        let mut remove = Box::pin(file.remove());
+        pend(remove.as_mut()).await;
+        let found = files.open(Path::new("a"), Mode::Write).await;
+        assert_eq!(remove.await, Err(io("a", Operation::Remove, 5)));
+        found.map(drop).err()
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_close_of_a_failed_remove_through_the_handle() {
+    for value in 0..32 {
+        assert_eq!(
+            open_beside_failed_handle_remove(value),
+            None,
+            "value {value}"
+        );
+    }
+}
+
+/// What a write open of `a` gives when its node pauses while the open and a
+/// `File::remove` of `a`, which a fault fails, are in flight.
+fn open_beside_failed_handle_remove_in_pause(value: u64) -> Option<Error> {
+    run(value, MIB, |node, tasks| async move {
+        let file = create(&node, "a", KIB).await;
+        node.fail_file(Path::new("a"), Operation::Remove);
+        tasks.spawn(async move {
+            assert_eq!(file.remove().await, Err(io("a", Operation::Remove, 5)));
+        });
+        node.clock().sleep(Span::from_nanos(1)).await;
+        let files = node.files();
+        let mut open = Box::pin(files.open(Path::new("a"), Mode::Write));
+        pend(open.as_mut()).await;
+        node.pause(Span::MILLISECOND);
+        open.await.map(drop).err()
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_close_of_a_failed_remove_through_the_handle_in_a_pause() {
+    for value in 0..32 {
+        assert_eq!(
+            open_beside_failed_handle_remove_in_pause(value),
+            None,
+            "value {value}"
+        );
+    }
+}
+
+#[test]
+fn a_write_open_waits_for_a_dropped_remove_at_the_end_of_true_time() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        monotonic: Monotonic(0),
+        wall: types::time::Stamp::from_nanos(i64::MIN),
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    let found = sim
+        .run_on(&node, |node, _| async move {
+            let files = node.files();
+            drop(create(&node, "a", KIB).await);
+            node.clock().sleep_until(Monotonic(u64::MAX - 5)).await;
+            let mut remove = Box::pin(files.remove(Path::new("a")));
+            pend(remove.as_mut()).await;
+            drop(remove);
+            files.open(Path::new("a"), Mode::Write).await.map(drop)
+        })
+        .unwrap();
+    assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+}
+
+/// What a write open of `a` gives after a `File::remove` of it is polled once and
+/// dropped, then what a create gives, and the names in the data directory a
+/// millisecond after the create.
+fn opens_after_dropped_remove(
     value: u64,
-) -> (Option<Error>, Option<Error>, Option<Error>, Vec<PathBuf>) {
+) -> (Option<Error>, Option<Error>, Vec<PathBuf>) {
     run(value, MIB, |node, _| async move {
         let (files, path) = (node.files(), Path::new("a"));
         let file = create(&node, "a", KIB).await;
         let mut remove = Box::pin(file.remove());
         pend(remove.as_mut()).await;
         drop(remove);
-        let held = files.open(path, Mode::Write).await.err();
-        node.clock().sleep(Span::MILLISECOND).await;
-        let gone = files.open(path, Mode::Write).await.err();
+        let opened = files.open(path, Mode::Write).await.err();
         let made = files.open(path, Mode::Create { len: KIB }).await.err();
         node.clock().sleep(Span::MILLISECOND).await;
-        (held, gone, made, files.list(Path::new("")).await.unwrap())
+        (opened, made, files.list(Path::new("")).await.unwrap())
     })
 }
 
 #[test]
-fn a_dropped_remove_holds_the_file_until_it_ends_and_then_a_create_stays() {
+fn a_write_open_waits_for_a_dropped_remove_and_then_a_create_stays() {
     let gone = Some(Error::NotFound { path: "a".into() });
-    let mut firsts = Vec::new();
     for value in 0..32 {
-        let (first, later, made, names) = opens_around_dropped_remove(value);
-        assert_eq!((later, made, names), (gone.clone(), None, vec!["a".into()]));
-        firsts.push(first);
+        let opens = opens_after_dropped_remove(value);
+        assert_eq!(
+            opens,
+            (gone.clone(), None, vec!["a".into()]),
+            "value {value}"
+        );
     }
-    assert!(firsts.contains(&Some(busy("a"))), "{firsts:?}");
-    assert!(firsts.contains(&gone), "{firsts:?}");
-    assert!(
-        firsts
-            .iter()
-            .all(|first| [&Some(busy("a")), &gone].contains(&first))
-    );
 }
 
 #[test]
@@ -1586,4 +2164,566 @@ fn a_remove_after_a_dropped_rename_gives_poisoned_and_the_file_stays() {
             "value {value}"
         );
     }
+}
+
+#[test]
+fn the_node_gives_the_path_of_each_file_that_it_closed_in_order() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    sim.run_on(&node, |node, _| async move {
+        let a = create(&node, "a", 0).await;
+        let mut b = create(&node, "./b", 0).await;
+        b.rename(Path::new("./c")).await.unwrap();
+        let d = create(&node, "d", 0).await;
+        b.close().await;
+        drop(a);
+        d.remove().await.unwrap();
+        drop(create(&node, "./e", 0).await);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), ["c", "a", "d", "e"].map(PathBuf::from));
+}
+
+#[test]
+fn a_file_removed_while_open_gives_the_path_of_its_open() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    sim.run_on(&node, |node, _| async move {
+        let a = create(&node, "a", 0).await;
+        node.files().remove(Path::new("a")).await.unwrap();
+        drop(a);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), [PathBuf::from("a")]);
+}
+
+#[test]
+fn an_open_whose_future_dropped_closes_no_descriptor() {
+    for ended in [false, true] {
+        let mut sim = sim(0);
+        let node = sim.node(node::Config {
+            disk_bytes: MIB,
+            ..node::Config::default()
+        });
+        sim.run_on(&node, move |node, _| async move {
+            let (files, clock) = (node.files(), node.clock());
+            let mut open =
+                Box::pin(files.open(Path::new("a"), Mode::Create { len: 0 }));
+            poll_fn(|cx| {
+                assert!(open.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            if ended {
+                clock.sleep(Span::MILLISECOND).await;
+            }
+            drop(open);
+            clock.sleep(Span::MILLISECOND).await;
+        })
+        .unwrap();
+        assert_eq!(node.file_closes(), Vec::<PathBuf>::new(), "ended: {ended}");
+    }
+}
+
+#[test]
+fn a_dropped_rename_that_ends_gives_the_path_of_the_rename() {
+    for value in 0..8 {
+        let mut sim = sim(value);
+        let node = sim.node(node::Config {
+            disk_bytes: MIB,
+            ..node::Config::default()
+        });
+        let names = sim
+            .run_on(&node, |node, _| async move {
+                let files = node.files();
+                let mut file = create(&node, "a", KIB).await;
+                let mut rename = Box::pin(file.rename(Path::new("b")));
+                pend(rename.as_mut()).await;
+                node.clock().sleep(Span::from_nanos(200_000)).await;
+                pend(rename.as_mut()).await;
+                drop(rename);
+                file.close().await;
+                files.list(Path::new("")).await.unwrap()
+            })
+            .unwrap();
+        assert_eq!(names, [Path::new("b")], "value {value}");
+        assert_eq!(node.file_closes(), [PathBuf::from("b")], "value {value}");
+    }
+}
+
+#[test]
+fn a_failed_rename_keeps_the_path_of_its_open() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    node.fail_file(Path::new("a"), Operation::Rename);
+    sim.run_on(&node, |node, _| async move {
+        let mut file = create(&node, "a", 0).await;
+        let found = file.rename(Path::new("b")).await;
+        assert_eq!(found, Err(io("a", Operation::Rename, 5)));
+        drop(file);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), [PathBuf::from("a")]);
+}
+
+#[test]
+fn a_rename_gives_its_path_only_to_its_own_descriptor() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    sim.run_on(&node, |node, _| async move {
+        let mut writer = create(&node, "a", 0).await;
+        let reader = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
+        writer.rename(Path::new("b")).await.unwrap();
+        drop(writer);
+        drop(reader);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), ["b", "a"].map(PathBuf::from));
+}
+
+#[test]
+fn a_rename_of_a_removed_name_keeps_the_path_of_its_open() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    sim.run_on(&node, |node, _| async move {
+        let mut file = create(&node, "a", 0).await;
+        node.files().remove(Path::new("a")).await.unwrap();
+        let found = file.rename(Path::new("b")).await;
+        assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+        drop(file);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), [PathBuf::from("a")]);
+}
+
+#[test]
+fn a_rename_onto_a_taken_name_keeps_the_path_of_its_open() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        disk_bytes: MIB,
+        ..node::Config::default()
+    });
+    sim.run_on(&node, |node, _| async move {
+        create(&node, "b", 0).await.close().await;
+        let mut file = create(&node, "a", 0).await;
+        let found = file.rename(Path::new("b")).await;
+        assert_eq!(found, Err(Error::Exists { path: "b".into() }));
+        drop(file);
+    })
+    .unwrap();
+    assert_eq!(node.file_closes(), ["b", "a"].map(PathBuf::from));
+}
+
+#[test]
+fn a_fault_on_the_path_of_a_reader_fails_it_after_another_descriptor_renames() {
+    run(0, MIB, |node, _| async move {
+        let pool = pool();
+        let mut writer = create(&node, "a", KIB).await;
+        let reader = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
+        writer.rename(Path::new("b")).await.unwrap();
+        node.fail_file(Path::new("a"), Operation::ReadAt);
+        let found = reader.read_at(0, pool.alloc(512).unwrap()).await;
+        assert_eq!(found.map(|_| ()), Err(io("a", Operation::ReadAt, 5)));
+    });
+}
+
+#[test]
+fn a_fault_on_the_new_path_misses_a_reader_after_another_descriptor_renames() {
+    run(0, MIB, |node, _| async move {
+        let pool = pool();
+        let mut writer = create(&node, "a", KIB).await;
+        let reader = node.files().open(Path::new("a"), Mode::Read).await.unwrap();
+        writer.rename(Path::new("b")).await.unwrap();
+        node.fail_file(Path::new("b"), Operation::ReadAt);
+        let found = reader.read_at(0, pool.alloc(512).unwrap()).await;
+        assert_eq!(found.map(|_| ()), Ok(()));
+    });
+}
+
+#[test]
+fn an_error_of_a_descriptor_names_the_path_of_its_open_as_given() {
+    run(0, MIB, |node, _| async move {
+        let pool = pool();
+        let file = create(&node, "./a", KIB).await;
+        node.fail_file(Path::new("a"), Operation::ReadAt);
+        let found = file.read_at(0, pool.alloc(512).unwrap()).await;
+        assert_eq!(found.map(|_| ()), Err(io("./a", Operation::ReadAt, 5)));
+    });
+}
+
+#[test]
+fn an_error_of_a_descriptor_names_the_path_of_its_rename_as_given() {
+    run(0, MIB, |node, _| async move {
+        let pool = pool();
+        let mut file = create(&node, "./a", KIB).await;
+        file.rename(Path::new("./c")).await.unwrap();
+        node.fail_file(Path::new("c"), Operation::WriteAt);
+        let found = file.write_at(0, &[block(&pool, &[1; 512])]).await;
+        assert_eq!(found, Err(io("./c", Operation::WriteAt, 5)));
+        node.fail_file(Path::new("c"), Operation::Sync);
+        assert_eq!(file.sync().await, Err(io("./c", Operation::Sync, 5)));
+        let found = file.sync().await;
+        assert_eq!(found, Err(Error::Poisoned { path: "./c".into() }));
+    });
+}
+
+/// How a test ends a handle.
+enum End {
+    Close,
+    Remove,
+}
+
+/// Whether the block of a dropped write of a handle is still in use when `end` of the
+/// handle returns. A `Files::remove` unlinked the path of the handle before the write.
+fn block_held_after_end(value: u64, end: End) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (pool, files) = (pool(), node.files());
+        let big = pool.largest();
+        let file = create(&node, "a", big as u64).await;
+        files.remove(Path::new("a")).await.unwrap();
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        pool.alloc(pool.largest()).unwrap_err();
+        match end {
+            End::Close => file.close().await,
+            End::Remove => {
+                let found = file.remove().await;
+                assert_eq!(found, Err(Error::NotFound { path: "a".into() }));
+            }
+        }
+        pool.alloc(pool.largest()).is_err()
+    })
+}
+
+#[test]
+fn a_close_ends_after_the_dropped_write_of_its_handle() {
+    for value in 0..32 {
+        assert!(!block_held_after_end(value, End::Close), "value {value}");
+    }
+}
+
+#[test]
+fn a_remove_through_the_handle_ends_after_the_dropped_write_of_its_handle() {
+    for value in 0..32 {
+        assert!(!block_held_after_end(value, End::Remove), "value {value}");
+    }
+}
+
+/// What a create of `a` gives, and whether it ended before a `File::remove` of `a`
+/// whose future lives. A durable `Files::remove` of `a` unlinked the file of the
+/// handle first, so only the handle holds its 600 KiB.
+fn create_beside_handle_remove_of_unlinked(value: u64) -> (Result<(), Error>, bool) {
+    run(value, MIB, |node, _| async move {
+        let (files, path) = (node.files(), Path::new("a"));
+        let file = create(&node, "a", 600 * KIB).await;
+        files.sync_dir(Path::new("")).await.unwrap();
+        files.remove(path).await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        let mut remove = Box::pin(file.remove());
+        pend(remove.as_mut()).await;
+        let made = files.open(path, Mode::Create { len: 600 * KIB }).await;
+        let ended =
+            poll_fn(|cx| Poll::Ready(remove.as_mut().poll(cx).is_ready())).await;
+        (made.map(drop), !ended)
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_a_remove_through_a_handle_whose_path_names_another_file() {
+    for value in 0..32 {
+        let found = create_beside_handle_remove_of_unlinked(value);
+        assert_eq!(found, (Ok(()), false), "value {value}");
+    }
+}
+
+/// Whether the block of a dropped write of a handle of `a` is still in use when a
+/// remove through the handle ends. A remove of `b` starts, and a rename of the handle
+/// to `b` ends before it, so the remove unlinks the file. `None` when the run takes
+/// another order.
+fn block_held_after_remove_of_renamed(value: u64) -> Option<bool> {
+    run(value, MIB, move |node, _| async move {
+        let (pool, files) = (pool(), node.files());
+        let big = pool.largest();
+        let mut file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        let mut remove = Box::pin(files.remove(Path::new("b")));
+        pend(remove.as_mut()).await;
+        file.rename(Path::new("b")).await.unwrap();
+        remove.await.unwrap();
+        let found = file.remove().await;
+        let held = pool.alloc(big).is_err();
+        (found == Err(Error::NotFound { path: "b".into() })).then_some(held)
+    })
+}
+
+#[test]
+fn a_remove_through_a_renamed_handle_ends_after_the_dropped_write_of_its_handle() {
+    let runs: Vec<_> = (0..1024).map(block_held_after_remove_of_renamed).collect();
+    assert!(runs.iter().flatten().count() > 32, "{runs:?}");
+    let held: Vec<_> = (runs.iter().enumerate())
+        .filter_map(|(value, run)| (*run == Some(true)).then_some(value))
+        .collect();
+    assert_eq!(held, Vec::<usize>::new());
+}
+
+/// What a create of `path` gives after the drop of a handle of `a` with a dropped write
+/// in flight, and whether `b` is gone after it. A remove of `b` starts, a rename of
+/// the handle to `b` ends before it, and the remove can unlink the file, which holds
+/// 600 KiB of the 1 MiB disk until the write ends.
+fn create_after_handle_of_renamed_removed(
+    value: u64,
+    path: &'static str,
+) -> (bool, Result<(), Error>) {
+    run(value, MIB, move |node, _| async move {
+        let (pool, files) = (pool(), node.files());
+        let mut file = create(&node, "a", 600 * KIB).await;
+        let parts = [block(&pool, &[1; 512])];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        let mut remove = Box::pin(files.remove(Path::new("b")));
+        pend(remove.as_mut()).await;
+        file.rename(Path::new("b")).await.unwrap();
+        remove.await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        drop(file);
+        let made = files.open(Path::new(path), Mode::Create { len: 600 * KIB });
+        let made = made.await.map(drop);
+        let names = files.list(Path::new("")).await.unwrap();
+        (!names.contains(&PathBuf::from("b")), made)
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_write_of_a_dropped_handle_of_a_renamed_removed_file() {
+    let failed: Vec<_> = (0..2048)
+        .filter_map(|value| {
+            let (_, made) = create_after_handle_of_renamed_removed(value, "b");
+            made.err().map(|error| (value, error))
+        })
+        .collect();
+    assert_eq!(failed, Vec::new());
+}
+
+#[test]
+fn a_write_open_of_the_sent_path_waits_for_the_write_of_a_dropped_renamed_handle() {
+    let runs: Vec<_> = (0..2048)
+        .map(|value| (value, create_after_handle_of_renamed_removed(value, "a")))
+        .filter_map(|(value, (gone, made))| gone.then_some((value, made)))
+        .collect();
+    assert!(runs.len() > 32, "{}", runs.len());
+    let failed: Vec<_> = (runs.into_iter())
+        .filter_map(|(value, made)| made.err().map(|error| (value, error)))
+        .collect();
+    assert_eq!(failed, Vec::new());
+}
+
+/// Whether the block of a dropped write of a handle of `a` is still in use when a
+/// write open of `b` ends, after a rename of the handle to `b` fails.
+fn block_held_after_open_of_failed_rename_target(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let big = pool.largest();
+        drop(create(&node, "b", KIB).await);
+        let mut file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        pool.alloc(big).unwrap_err();
+        let renamed = file.rename(Path::new("b")).await;
+        assert_eq!(renamed, Err(Error::Exists { path: "b".into() }));
+        drop(files.open(Path::new("b"), Mode::Write).await.unwrap());
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_failed_rename_does_not_name_the_file() {
+    assert!((0..32).any(block_held_after_open_of_failed_rename_target));
+}
+
+/// Whether the block of a dropped read of a read handle of `a` is still in use when a
+/// create of `a` ends, after the write handle of the file renames it to `b`. The read
+/// stays on `a`, which named its file.
+fn block_held_after_create_of_reader_path(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let big = pool.largest();
+        let mut writer = create(&node, "a", big as u64).await;
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        let mut read = Box::pin(reader.read_at(0, pool.alloc(big).unwrap()));
+        pend(read.as_mut()).await;
+        drop(read);
+        drop(reader);
+        pool.alloc(big).unwrap_err();
+        writer.rename(Path::new("b")).await.unwrap();
+        drop(writer);
+        drop(create(&node, "a", KIB).await);
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_create_waits_for_a_dropped_read_of_a_reader_on_its_path_after_a_rename() {
+    let held: Vec<_> = (0..256)
+        .filter(|&value| block_held_after_create_of_reader_path(value))
+        .collect();
+    assert_eq!(held, Vec::<u64>::new());
+}
+
+/// What a create of `b` gives after a dropped read of a dropped read handle of `a`. A
+/// remove of `b` starts, a rename of the write handle to `b` ends before it, and the
+/// remove can unlink the file, which holds 600 KiB of the 1 MiB disk until the read
+/// ends.
+fn create_after_reader_of_renamed_removed(value: u64) -> Result<(), Error> {
+    run(value, MIB, move |node, _| async move {
+        let (pool, files) = (pool(), node.files());
+        let mut writer = create(&node, "a", 600 * KIB).await;
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        let mut read = Box::pin(reader.read_at(0, pool.alloc(512).unwrap()));
+        pend(read.as_mut()).await;
+        drop(read);
+        drop(reader);
+        let mut remove = Box::pin(files.remove(Path::new("b")));
+        pend(remove.as_mut()).await;
+        writer.rename(Path::new("b")).await.unwrap();
+        remove.await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        drop(writer);
+        (files.open(Path::new("b"), Mode::Create { len: 600 * KIB }))
+            .await
+            .map(drop)
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_read_of_a_dropped_reader_of_a_renamed_removed_file() {
+    let failed: Vec<_> = (0..2048)
+        .filter_map(|value| {
+            let made = create_after_reader_of_renamed_removed(value);
+            made.err().map(|error| (value, error))
+        })
+        .collect();
+    assert_eq!(failed, Vec::new());
+}
+
+/// What a create of `b` gives after a dropped read of a dropped read handle of `a`,
+/// sent after a rename of the write handle to `b` ended. A remove of `b` starts before
+/// the read and can unlink the file while the read holds it.
+fn create_after_stale_reader_of_renamed_removed(value: u64) -> Result<(), Error> {
+    run(value, MIB, move |node, _| async move {
+        let (pool, files) = (pool(), node.files());
+        let mut writer = create(&node, "a", 600 * KIB).await;
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        writer.rename(Path::new("b")).await.unwrap();
+        let mut remove = Box::pin(files.remove(Path::new("b")));
+        pend(remove.as_mut()).await;
+        let mut read = Box::pin(reader.read_at(0, pool.alloc(512).unwrap()));
+        pend(read.as_mut()).await;
+        drop(read);
+        drop(reader);
+        remove.await.unwrap();
+        files.sync_dir(Path::new("")).await.unwrap();
+        drop(writer);
+        (files.open(Path::new("b"), Mode::Create { len: 600 * KIB }))
+            .await
+            .map(drop)
+    })
+}
+
+#[test]
+fn a_write_open_waits_for_the_read_of_a_stale_reader_of_a_renamed_removed_file() {
+    let failed: Vec<_> = (0..2048)
+        .filter_map(|value| {
+            let made = create_after_stale_reader_of_renamed_removed(value);
+            made.err().map(|error| (value, error))
+        })
+        .collect();
+    assert_eq!(failed, Vec::new());
+}
+
+/// Whether the block of a dropped read of a read handle of `a`, sent after a rename of
+/// the write handle to `b` and a remove of `b` in flight, is still in use when a create
+/// of `b` ends.
+fn block_held_after_create_beside_stale_reader(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let big = pool.largest();
+        let mut writer = create(&node, "a", big as u64).await;
+        let reader = files.open(Path::new("a"), Mode::Read).await.unwrap();
+        writer.rename(Path::new("b")).await.unwrap();
+        let mut remove = Box::pin(files.remove(Path::new("b")));
+        pend(remove.as_mut()).await;
+        let mut read = Box::pin(reader.read_at(0, pool.alloc(big).unwrap()));
+        pend(read.as_mut()).await;
+        drop(read);
+        drop(reader);
+        pool.alloc(big).unwrap_err();
+        remove.await.unwrap();
+        drop(writer);
+        drop(create(&node, "b", KIB).await);
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_create_waits_for_a_dropped_read_of_a_stale_reader_of_a_removed_file() {
+    let held: Vec<_> = (0..256)
+        .filter(|&value| block_held_after_create_beside_stale_reader(value))
+        .collect();
+    assert_eq!(held, Vec::<u64>::new());
+}
+
+/// Whether the block of a dropped write of a handle of `a` is still in use when a
+/// write open of `d` ends, after a rename of another file from `c` to `d`.
+fn block_held_after_open_of_other_rename_target(value: u64) -> bool {
+    run(value, MIB, move |node, _| async move {
+        let (files, pool) = (node.files(), pool());
+        let big = pool.largest();
+        let mut other = create(&node, "c", KIB).await;
+        let file = create(&node, "a", big as u64).await;
+        let parts = [pool.alloc(big).unwrap().freeze()];
+        let mut write = Box::pin(file.write_at(0, &parts));
+        pend(write.as_mut()).await;
+        drop(write);
+        drop(parts);
+        drop(file);
+        pool.alloc(big).unwrap_err();
+        other.rename(Path::new("d")).await.unwrap();
+        drop(other);
+        drop(files.open(Path::new("d"), Mode::Write).await.unwrap());
+        pool.alloc(big).is_err()
+    })
+}
+
+#[test]
+fn a_write_open_does_not_wait_for_a_dropped_write_of_another_file_after_a_rename() {
+    let held: Vec<_> = (0..256)
+        .filter(|&value| block_held_after_open_of_other_rename_target(value))
+        .collect();
+    assert!(!held.is_empty());
 }

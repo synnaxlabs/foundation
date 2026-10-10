@@ -273,6 +273,11 @@ impl<'a> Layout<'a> {
         Self::checked(set, ends, Sizes::Ends)
     }
 
+    #[expect(
+        clippy::inline_always,
+        reason = "as a call, it keeps `Draft::new` from folding its constant `Sizes`"
+    )]
+    #[inline(always)]
     fn checked(
         set: &'a KeySet,
         series: &'a [(usize, usize)],
@@ -353,6 +358,9 @@ impl<'a> Layout<'a> {
     /// # Errors
     ///
     /// The pool's error when it cannot give the block.
+    // Without the hint, fat LTO stops inlining it into `Draft::new` once it has a
+    // second caller.
+    #[inline]
     pub fn draft(self, pool: &block::Pool, form: Form) -> Result<Draft, block::Error> {
         let Self {
             set,
@@ -873,11 +881,13 @@ mod tests {
         channel::Key::from_u128(u128::from(n))
     }
 
-    /// An interner where key `n` has slot `n`, for each `n` below 1000.
+    /// An interner where key `n` has slot `2n` as an index and `2n + 1` as a data
+    /// channel of `F64`, for each `n` below 1000.
     pub(super) fn interner() -> Interner {
         let mut interner = Interner::new();
         for n in 0..1000 {
-            interner.slots().assign(key(n));
+            interner.slots().index(key(n));
+            interner.slots().data(key(n), F64);
         }
         interner
     }
@@ -2109,7 +2119,8 @@ mod tests {
         }]);
         let mut interner = Interner::new();
         for &n in &remote.order {
-            interner.slots().assign(key(n));
+            interner.slots().index(key(n));
+            interner.slots().data(key(n), F64);
         }
         let held = data(&|j| remote.held[j]);
         let reader = interner.intern(&[Group {

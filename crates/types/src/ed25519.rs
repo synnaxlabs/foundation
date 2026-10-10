@@ -1,13 +1,13 @@
-//! Ed25519 public keys.
+//! Ed25519 keys.
 
 use std::fmt;
 
-use aws_lc_rs::signature::{ED25519, UnparsedPublicKey};
+use aws_lc_rs::signature::{ED25519, Ed25519KeyPair, KeyPair, UnparsedPublicKey};
 
 /// An Ed25519 public key, of a node or of a subject. The value that holds it gives its
 /// role. It is never a point of small order: a signature for such a key passes with
-/// no private key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// no private key. Keys order by their bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PublicKey([u8; 32]);
 
 impl PublicKey {
@@ -78,6 +78,79 @@ impl fmt::Display for BadSignature {
 }
 
 impl std::error::Error for BadSignature {}
+
+/// An Ed25519 private key, of a node or of a subject. Its `Debug` never writes the
+/// key, and it has no `Display` and no equality, so a log line or a timing difference
+/// cannot show it.
+#[derive(Clone)]
+pub struct PrivateKey(pub [u8; 32]);
+
+impl PrivateKey {
+    /// The Ed25519 public key of this private key. Each call derives it again: a
+    /// holder that signs keeps a [`Pair`].
+    #[must_use]
+    pub fn public(&self) -> PublicKey {
+        Pair::new(self).public
+    }
+}
+
+impl fmt::Debug for PrivateKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("PrivateKey(..)")
+    }
+}
+
+/// An Ed25519 private key with its public key, derived once, for a holder that signs.
+/// Its `Debug` writes only the public key.
+pub struct Pair {
+    pair: Ed25519KeyPair,
+    public: PublicKey,
+}
+
+impl Pair {
+    /// The pair of `private`. Derives the public key, a scalar multiplication.
+    #[must_use]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "the public half of any 32 bytes is not of small order"
+    )]
+    pub fn new(private: &PrivateKey) -> Self {
+        let pair = Ed25519KeyPair::from_seed_unchecked(&private.0)
+            .expect("invariant: any 32 bytes are an Ed25519 private key");
+        let bytes = pair.public_key().as_ref().try_into();
+        let public = PublicKey::new(
+            bytes.expect("invariant: an Ed25519 public key is 32 bytes"),
+        )
+        .expect("invariant: the public half of a private key is not of small order");
+        Self { pair, public }
+    }
+
+    /// The public key of the pair.
+    #[must_use]
+    pub const fn public(&self) -> PublicKey {
+        self.public
+    }
+
+    /// The Ed25519 signature of `message` by the private key.
+    #[must_use]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "an Ed25519 signature is always 64 bytes"
+    )]
+    pub fn sign(&self, message: &[u8]) -> [u8; 64] {
+        self.pair
+            .sign(message)
+            .as_ref()
+            .try_into()
+            .expect("invariant: an Ed25519 signature is 64 bytes")
+    }
+}
+
+impl fmt::Debug for Pair {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Pair").field(&self.public).finish()
+    }
+}
 
 /// The y of each Ed25519 point of small order, and p and p + 1, which a decoder that
 /// does not refuse y >= p reads as 0 and 1.
@@ -180,6 +253,14 @@ mod tests {
             prop_assume!(ENCODINGS.iter().all(|&hex| bytes(hex) != key));
             prop_assert_eq!(PublicKey::new(key).map(PublicKey::to_bytes), Ok(key));
         }
+
+        #[test]
+        fn orders_keys_by_their_bytes(a: [u8; 32], b: [u8; 32]) {
+            let (Ok(x), Ok(y)) = (PublicKey::new(a), PublicKey::new(b)) else {
+                return Ok(());
+            };
+            prop_assert_eq!(x.cmp(&y), a.cmp(&b));
+        }
     }
 
     /// The public key and signature of RFC 8032, section 7.1, test 1, whose message
@@ -250,5 +331,61 @@ mod tests {
         let text = PublicKey::new(bytes).unwrap().to_string();
         assert_eq!(text.len(), 64);
         assert_eq!(&text[..6], "01abab");
+    }
+
+    #[test]
+    fn hides_a_private_key_in_debug() {
+        let text = format!("{:?}", PrivateKey([0xcd; 32]));
+        assert_eq!(text, "PrivateKey(..)");
+    }
+
+    /// RFC 8032, section 7.1, test 1.
+    #[test]
+    fn derives_the_public_key_of_the_rfc_vector() {
+        let private = PrivateKey(bytes(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        ));
+        let public =
+            bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
+        assert_eq!(private.public().to_bytes(), public);
+    }
+
+    proptest! {
+        #[test]
+        fn derives_a_key_for_any_private_key(private: [u8; 32]) {
+            let key = PrivateKey(private).public();
+            prop_assert_eq!(PublicKey::new(key.to_bytes()), Ok(key));
+        }
+    }
+
+    /// RFC 8032, section 7.1, test 1.
+    #[test]
+    fn signs_the_rfc_vector() {
+        let pair = Pair::new(&PrivateKey(bytes(
+            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+        )));
+        let (key, signature) = rfc_test_1();
+        assert_eq!(pair.public(), key);
+        assert_eq!(pair.sign(b""), signature);
+    }
+
+    #[test]
+    fn writes_only_the_public_key_of_a_pair_in_debug() {
+        let private = PrivateKey([0xcd; 32]);
+        let text = format!("{:?}", Pair::new(&private));
+        assert_eq!(text, format!("Pair({:?})", private.public()));
+    }
+
+    proptest! {
+        #[test]
+        fn signs_what_the_public_key_verifies(
+            private: [u8; 32],
+            message: Vec<u8>,
+        ) {
+            let pair = Pair::new(&PrivateKey(private));
+            prop_assert_eq!(pair.public(), PrivateKey(private).public());
+            let signature = pair.sign(&message);
+            prop_assert_eq!(pair.public().verify(&message, &signature), Ok(()));
+        }
     }
 }

@@ -10,6 +10,7 @@ use std::cell::Cell;
 use std::fmt;
 use std::future::poll_fn;
 use std::net::Ipv6Addr;
+use std::num::NonZeroUsize;
 use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::task::Poll;
@@ -37,7 +38,7 @@ const ATTEMPT_MIN: Span = Span::from_nanos(2 * Span::SECOND.nanos());
 const OPTIONS: tcp::Options = tcp::Options {
     send_buffer_bytes: 1 << 16,
     recv_buffer_bytes: 1 << 16,
-    unsent_bytes_max: 1 << 14,
+    unsent_bytes_max: NonZeroUsize::new(1 << 14).expect("invariant: 2^14 is not 0"),
     delayed: false,
 };
 
@@ -487,4 +488,5 @@ impl std::error::Error for Failure {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests;

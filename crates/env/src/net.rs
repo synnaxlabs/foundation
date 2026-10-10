@@ -70,10 +70,11 @@ impl Net {
         &self,
         config: &udp::Config,
     ) -> Result<(udp::Sender, udp::Receiver), Error> {
-        let socket: Arc<dyn udp::Driver> = Arc::from(self.0.udp(config)?);
+        let (socket, receiver) = self.0.udp(config)?;
+        let socket: Arc<dyn udp::Driver> = Arc::from(socket);
         Ok((
             udp::Sender::new(Arc::clone(&socket)),
-            udp::Receiver::new(socket),
+            udp::Receiver::new(socket, receiver),
         ))
     }
 
@@ -247,10 +248,15 @@ impl Tcp {
     /// bytes written, which may be less than all. It is ready when the bytes not yet
     /// sent are fewer than [`tcp::Options::unsent_bytes_max`].
     ///
+    /// A write of no bytes gives `Ok(0)` at once, also after a reset or
+    /// [`Tcp::poll_close`].
+    ///
     /// # Errors
     ///
-    /// [`Error::Reset`] when the peer reset the stream, and [`Error::Io`] for other
-    /// failures.
+    /// [`Error::Reset`] when the peer reset the stream, also after this end's
+    /// [`Tcp::poll_close`]. [`Error::Io`] with the code of `EPIPE` for a write after
+    /// this end's `poll_close` to a stream that the peer did not reset, and
+    /// [`Error::Io`] for other failures.
     ///
     /// # Panics
     ///
@@ -480,12 +486,18 @@ pub type Resolve<'a> =
 /// }
 /// ```
 pub trait Driver: Send + Sync {
-    /// Binds a UDP socket, with the rules of [`Net::udp`].
+    /// Binds a UDP socket, with the rules of [`Net::udp`]. Gives the socket, which
+    /// gives the driver of each [`udp::Sender`] clone, and the driver of its one
+    /// [`udp::Receiver`], not bound to a thread yet.
     ///
     /// # Errors
     ///
     /// As [`Net::udp`].
-    fn udp(&self, config: &udp::Config) -> Result<Box<dyn udp::Driver>, Error>;
+    #[expect(clippy::type_complexity, reason = "the two drivers of one bind")]
+    fn udp(
+        &self,
+        config: &udp::Config,
+    ) -> Result<(Box<dyn udp::Driver>, Box<dyn udp::receiver::Driver>), Error>;
 
     /// Connects a TCP stream, with the rules of [`Net::connect`].
     fn connect<'a>(&'a self, config: &'a tcp::Config) -> Connect<'a>;
@@ -503,6 +515,7 @@ pub trait Driver: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZeroUsize;
     use std::task::Waker;
 
     use super::*;
@@ -569,7 +582,11 @@ mod tests {
     struct Network;
 
     impl Driver for Network {
-        fn udp(&self, _: &udp::Config) -> Result<Box<dyn udp::Driver>, Error> {
+        fn udp(
+            &self,
+            _: &udp::Config,
+        ) -> Result<(Box<dyn udp::Driver>, Box<dyn udp::receiver::Driver>), Error>
+        {
             Err(Error::Io { code: 95 })
         }
 
@@ -598,7 +615,7 @@ mod tests {
         tcp::Options {
             send_buffer_bytes: 1 << 20,
             recv_buffer_bytes: 1 << 20,
-            unsent_bytes_max: 1 << 14,
+            unsent_bytes_max: NonZeroUsize::new(1 << 14).unwrap(),
             delayed: false,
         }
     }

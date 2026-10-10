@@ -5,6 +5,7 @@
 #![cfg(test)]
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::path::{Path as FilePath, PathBuf};
 use std::pin::{Pin, pin};
 use std::rc::Rc;
@@ -16,17 +17,40 @@ use block::{Heap, Pool, Unique};
 use env::clock::Clock;
 use env::files::Operation;
 use env::tasks::Tasks;
+use hub::Hub;
 use hub::home::{Outcome, Refusal};
 use hub::reader::{self, Ended, Mode, Reader, Received};
-use hub::writer::{self, Writer};
-use hub::{Channel, Hub};
+use hub::writer::{self, Failure, Writer};
+use spec::channel::{Data, Kind};
+use spec::data_type::DataType;
+use spec::definition::Definition;
 use types::authority::Authority;
 use types::channel::{self, Slot};
 use types::frame::key_set::Interner;
 use types::frame::{self, Form, Label, Path, Range, View};
-use types::name::Name;
+use types::name::{Name, Selector};
 use types::sample::{Scalar, Type};
 use types::time::{Span, Stamp};
+
+#[path = "../common/net.rs"]
+mod net;
+
+#[path = "../common/agent.rs"]
+mod agent;
+mod client;
+mod definitions;
+mod link;
+mod named;
+#[path = "../common/node.rs"]
+mod node;
+mod region;
+mod remote;
+mod serve;
+#[path = "../common/sessions.rs"]
+mod sessions;
+
+use agent::name;
+use net::NODE;
 
 const DIR: &str = "shard-0";
 const RING: &str = "shard-0/ring";
@@ -62,6 +86,12 @@ const CHANNELS: [(u128, &str, Type, u128); 5] = [
     (4, "value-b", I64, 3),
     (5, "value-c", I64, 1),
 ];
+/// The key of `time` in [`CHANNELS`].
+const TIME: channel::Key = channel::Key::from_u128(CHANNELS[0].0);
+/// The key of `value` in [`CHANNELS`].
+const VALUE: channel::Key = channel::Key::from_u128(CHANNELS[1].0);
+/// The key of `time-b` in [`CHANNELS`].
+const TIME_B: channel::Key = channel::Key::from_u128(CHANNELS[2].0);
 
 /// What one test gets: a hub on one shard, with [`CHANNELS`] defined.
 struct Test {
@@ -80,13 +110,22 @@ struct Test {
     unsynced: Option<clock::Clock>,
     /// A commit of the home, taken before the hub had it. It holds the ring open.
     commit: home::Commit,
+    /// The node's region, which the hub holds too.
+    region: Option<hub::Region>,
     hub: Hub,
 }
 
 impl Test {
-    /// A hub on a new ring of `node` with `layout`, whose mesh clock does not run yet.
-    async fn new(node: sim::node::Node, tasks: Tasks, layout: buffer::Layout) -> Self {
-        let config = block::Config { budget: POOL };
+    /// A hub on a new ring of `node` with `layout`, a pool of `pool` bytes, and
+    /// `region`, whose mesh clock does not run yet.
+    async fn new(
+        node: sim::node::Node,
+        tasks: Tasks,
+        layout: buffer::Layout,
+        pool: usize,
+        region: Option<hub::Region>,
+    ) -> Self {
+        let config = block::Config { budget: pool };
         let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
         let (unsynced, mesh) = clock::Clock::new(node.clock());
         let mut interner = Interner::new();
@@ -121,15 +160,15 @@ impl Test {
                 polls: Rc::clone(&polls),
                 paused: Rc::clone(&paused),
             }),
+            node: NODE,
+            time: mesh.clone(),
+            entropy: node.entropy(),
+            region: region.as_ref().map(|region| hub::Region {
+                mesh: region.mesh.clone(),
+                transport: Rc::clone(&region.transport),
+            }),
         });
-        for (key, channel, data_type, index) in CHANNELS {
-            hub.define(Channel {
-                key: channel::Key::from_u128(key),
-                name: name(channel),
-                data_type,
-                index: channel::Key::from_u128(index),
-            });
-        }
+        hub.set_definitions(&channels());
         Self {
             clock: node.clock(),
             node,
@@ -141,6 +180,7 @@ impl Test {
             paused,
             unsynced: Some(unsynced),
             commit,
+            region,
             hub,
         }
     }
@@ -169,28 +209,43 @@ impl Test {
             .expect("opens")
     }
 
+    /// Sets [`CHANNELS`] and `more`, each `(key, name, data type, index)`, as the
+    /// definitions.
+    fn define<'a>(
+        &self,
+        more: impl IntoIterator<Item = (u128, &'a str, DataType, u128)>,
+    ) {
+        let mut channels = channels();
+        channels.extend(more.into_iter().map(|(key, channel, data_type, index)| {
+            (name(channel), definition(key, data_type, index))
+        }));
+        self.hub.set_definitions(&channels);
+    }
+
     async fn reader(&self, channels: &[&str], mode: Mode) -> reader::Reader {
-        let names: Vec<_> = channels.iter().map(|n| name(n)).collect();
-        self.hub.reader(&names, mode).await.expect("opens")
+        self.hub
+            .reader(unnamed(channels, mode))
+            .await
+            .expect("opens")
     }
 
     /// How many blocks the pool gives, largest first, until it has no room.
     fn free(&self) -> usize {
-        self.fill().len()
+        fill(&self.pool).len()
     }
+}
 
-    /// Every block the pool gives, largest first, until it has no room.
-    fn fill(&self) -> Vec<Unique> {
-        let mut blocks = Vec::new();
-        let mut len = self.pool.largest();
-        while len > 0 {
-            while let Ok(block) = self.pool.alloc(len) {
-                blocks.push(block);
-            }
-            len -= len.div_ceil(16);
+/// Every block `pool` gives, largest first, until it has no room.
+fn fill(pool: &Pool) -> Vec<Unique> {
+    let mut blocks = Vec::new();
+    let mut len = pool.largest();
+    while len > 0 {
+        while let Ok(block) = pool.alloc(len) {
+            blocks.push(block);
         }
-        blocks
+        len -= len.div_ceil(16);
     }
+    blocks
 }
 
 /// Spawns on `tasks`, and counts each poll in `polls` and each task that completes in
@@ -294,13 +349,20 @@ fn unsynced_on<F>(
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, move |node, tasks| async move {
         let layout = buffer::Layout::new(area, body_max).expect("a ring");
-        main(Test::new(node, tasks, layout).await).await;
+        main(Test::new(node, tasks, layout, POOL, None).await).await;
     })
     .expect("the run ends");
 }
 
-fn name(name: &str) -> Name {
-    name.parse().expect("a valid name")
+/// An unnamed reader of `reader` on the channels named `channels`.
+fn unnamed(channels: &[impl AsRef<str>], mode: Mode) -> reader::Config {
+    reader::Config {
+        select: Selector::new(channels.iter().map(AsRef::as_ref)).expect("a selector"),
+        mode,
+        subject: name("reader"),
+        name: None,
+        hold: Span::ZERO,
+    }
 }
 
 fn config(subject: &str, channels: &[&str]) -> writer::Config {
@@ -326,28 +388,42 @@ fn write(writer: &mut Writer, stamps: &[i64], values: &[i64]) -> Vec<Outcome> {
     write_series(writer, &[(1, stamps), (2, values)])
 }
 
-/// Writes the samples of each channel by key, in one group: the first is its index.
+/// Writes the samples of each channel by key, as [`draft`] makes them.
 fn write_series(writer: &mut Writer, channels: &[(u128, &[i64])]) -> Vec<Outcome> {
+    written(writer, channels).expect("the home takes it")
+}
+
+/// Writes as [`write_series`] does, and gives what the write gave.
+fn written(
+    writer: &mut Writer,
+    channels: &[(u128, &[i64])],
+) -> Result<Vec<Outcome>, Failure> {
+    let draft = draft(writer, channels);
+    writer.write(LIVE, draft).map(<[_]>::to_vec)
+}
+
+/// A frame of the samples of each channel by key. The count of each group is that of
+/// its index's samples.
+fn draft(writer: &Writer, channels: &[(u128, &[i64])]) -> frame::Draft {
     let set = writer.set();
-    let entries: Vec<_> = channels.iter().map(|&(key, _)| entry(set, key)).collect();
-    let group = set.entries()[entries[0]].group;
-    let mut series: Vec<_> = (entries.iter().zip(channels))
-        .map(|(&entry, (_, samples))| (entry, samples.len() * 8))
+    let mut series: Vec<_> = channels
+        .iter()
+        .map(|&(key, samples)| (entry(set, key), samples.len() * 8))
         .collect();
     series.sort_unstable();
     let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
-    for (&entry, (_, samples)) in entries.iter().zip(channels) {
+    for &(key, samples) in channels {
+        let entry = entry(set, key);
         let bytes = draft.series_mut(entry).expect("the series is present");
-        for (bytes, sample) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(*samples) {
+        for (bytes, sample) in bytes.as_chunks_mut::<8>().0.iter_mut().zip(samples) {
             *bytes = sample.to_le_bytes();
         }
+        if set.index(entry) == entry {
+            let count = u32::try_from(samples.len()).expect("a short frame");
+            draft.set_count(set.entries()[entry].group, count);
+        }
     }
-    let count = u32::try_from(channels[0].1.len()).expect("a short frame");
-    draft.set_count(group, count);
-    writer
-        .write(LIVE, draft)
-        .expect("the home takes it")
-        .to_vec()
+    draft
 }
 
 /// The entries of the view in `received`, as channel keys.
@@ -368,14 +444,18 @@ fn write_wide(writer: &mut Writer, now: i64, n: i64) {
 /// compress.
 fn write_samples(writer: &mut Writer, start: i64, samples: i64) {
     let stamps: Vec<_> = (start..start + samples).collect();
-    let values: Vec<_> = stamps
+    write(writer, &stamps, &scrambled(&stamps));
+}
+
+/// A value for each of `stamps` that does not compress.
+fn scrambled(stamps: &[i64]) -> Vec<i64> {
+    stamps
         .iter()
         .map(|&s| {
             let x = s.wrapping_mul(6_364_136_223_846_793_005);
             x ^ (x >> 29)
         })
-        .collect();
-    write(writer, &stamps, &values);
+        .collect()
 }
 
 /// The samples of the channel `key` in `received`.
@@ -438,6 +518,44 @@ fn gives_a_complete_reader_each_frame_in_seq_order_with_the_samples_written() {
     });
 }
 
+/// [`CHANNELS`], as the hub defines them in [`Test::new`].
+fn channels() -> BTreeMap<Name, Definition> {
+    CHANNELS
+        .into_iter()
+        .map(|(key, channel, data_type, index)| {
+            let data_type = DataType::Sample(data_type);
+            (name(channel), definition(key, data_type, index))
+        })
+        .collect()
+}
+
+/// [`channels`] without the channels of `names`.
+fn without(names: &[&str]) -> BTreeMap<Name, Definition> {
+    let mut channels = channels();
+    for removed in names {
+        channels
+            .remove(&name(removed))
+            .expect("a channel of the test");
+    }
+    channels
+}
+
+#[test]
+fn gives_the_entry_of_each_channel_of_the_config_in_its_order() {
+    run(4, |test| async move {
+        let names = ["value-c", "value-b", "time", "value-b", "value"];
+        let writer = test.writer("a", &names).await;
+        let keys: Vec<_> = writer
+            .entries()
+            .iter()
+            .map(|&entry| writer.set().entries()[entry].key.as_u128())
+            .collect();
+        assert_eq!(keys, [5, 4, 1, 4, 2]);
+        let time = writer.set().groups()[0];
+        assert_eq!(writer.entries()[2], time, "the entry of the index");
+    });
+}
+
 #[test]
 fn opens_no_session_on_an_unknown_name() {
     run(2, |test| async move {
@@ -445,38 +563,71 @@ fn opens_no_session_on_an_unknown_name() {
         let error = writer.expect_err("an error");
         assert_eq!(error, writer::Error::Unknown(name("nope")));
         assert_eq!(error.to_string(), "no channel is named nope");
-        let reader = test.hub.reader(&[name("nope")], Mode::Complete).await;
+        let reader = test.hub.reader(unnamed(&["nope"], Mode::Complete)).await;
         let error = reader.expect_err("an error");
-        assert_eq!(error, reader::Error::Unknown(name("nope")));
-        assert_eq!(error.to_string(), "no channel is named nope");
+        assert_eq!(error, reader::Error::Empty);
+        assert_eq!(error.to_string(), "the selector matches no channel");
     });
 }
 
 #[test]
-fn opens_no_session_on_two_indexes_or_on_no_channel() {
+fn opens_no_session_on_two_indexes_and_names_the_least_channel_of_each() {
     run(3, |test| async move {
-        let names = [name("value"), name("value-b")];
+        let names = ["value-c", "value-b", "value"];
         let error = test
             .hub
-            .reader(&names, Mode::Latest)
+            .reader(unnamed(&names, Mode::Latest))
             .await
             .expect_err("an error");
-        assert_eq!(error, reader::Error::ManyIndexes);
+        let many = reader::Error::ManyIndexes {
+            first: name("value"),
+            other: name("value-b"),
+        };
+        assert_eq!(error, many);
         assert_eq!(
             error.to_string(),
-            "the channels are on more than one index: open a reader per index"
+            "the channels value and value-b are on different indexes: open a reader \
+             per index"
         );
-        let error = test
-            .hub
-            .reader(&[], Mode::Latest)
-            .await
-            .expect_err("an error");
-        assert_eq!(error, reader::Error::Empty);
-        assert_eq!(error.to_string(), "a reader names at least one channel");
+        let error = test.hub.reader(unnamed(&["**"], Mode::Latest)).await;
+        let many = reader::Error::ManyIndexes {
+            first: name("time"),
+            other: name("time-b"),
+        };
+        assert_eq!(error.expect_err("an error"), many);
         let writer = test.hub.writer(config("a", &[])).await;
         let error = writer.expect_err("an error");
         assert_eq!(error, writer::Error::Empty);
         assert_eq!(error.to_string(), "a writer names at least one channel");
+    });
+}
+
+#[test]
+fn gives_a_reader_each_channel_that_its_selector_matches() {
+    run(41, |test| async move {
+        let select = ["**", "!time-b", "!value-b"];
+        let mut all = test.reader(&select, Mode::Complete).await;
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        write_series(&mut writer, &[(1, &[now]), (2, &[7]), (5, &[9])]);
+        let received = all.next().await.expect("a frame");
+        assert_eq!(keys(&received), [1, 2, 5]);
+        assert_eq!(samples(&received, 2), [7]);
+        assert_eq!(samples(&received, 5), [9]);
+    });
+}
+
+#[test]
+fn leaves_a_channel_that_an_exclusion_matches_out_of_the_view() {
+    run(42, |test| async move {
+        let select = ["**", "!time-b", "!value-b", "!value-c"];
+        let mut reader = test.reader(&select, Mode::Complete).await;
+        let mut writer = test.writer("a", &["value", "value-c"]).await;
+        let now = test.now();
+        write_series(&mut writer, &[(1, &[now]), (2, &[7]), (5, &[9])]);
+        let received = reader.next().await.expect("a frame");
+        assert_eq!(keys(&received), [1, 2]);
+        assert_eq!(samples(&received, 2), [7]);
     });
 }
 
@@ -505,20 +656,67 @@ fn gives_a_latest_reader_a_frame_before_its_commit_and_a_complete_reader_after()
 fn opens_a_writer_once_the_node_has_mesh_time_and_a_reader_before() {
     unsynced(5, |mut test| async move {
         let mut reader = test.reader(&["value"], Mode::Complete).await;
-        let error = test
-            .hub
-            .writer(config("a", &["value"]))
-            .await
-            .expect_err("an error");
-        let unsynced = hub::home::writer::Error::Unsynced;
-        assert_eq!(error, writer::Error::Home(unsynced));
-        assert_eq!(error.to_string(), "the node has no mesh time yet");
+        let hub = test.hub.clone();
+        let mut opening = pin!(hub.writer(config("a", &["value"])));
+        test.clock.sleep(Span::SECOND).await;
+        assert!(poll_once(opening.as_mut()).is_pending());
         test.sync().await;
-        let mut writer = test.writer("a", &["value"]).await;
-        let now = test.now();
-        assert_eq!(write(&mut writer, &[now], &[1]), [applied(0)]);
+        let synced = test.clock.now();
+        let mut writer = opening.await.expect("opens");
+        let waited = test.clock.now() - synced;
+        assert!(
+            waited <= Span::SECOND,
+            "opened {waited} after sync, more than 1 s"
+        );
+        let now = writer.now();
+        assert_eq!(now.nanos(), test.now());
+        assert_eq!(write(&mut writer, &[now.nanos()], &[1]), [applied(0)]);
         let received = reader.next().await.expect("a frame");
         assert_eq!(samples(&received, 2), [1]);
+    });
+}
+
+#[test]
+fn opens_no_writer_with_a_lease_of_zero() {
+    run(9, |test| async move {
+        let config = writer::Config {
+            lease: Some(Span::ZERO),
+            ..config("a", &["value"])
+        };
+        let error = test.hub.writer(config).await.expect_err("a lease of zero");
+        let lease = hub::home::writer::Error::Lease { span: Span::ZERO };
+        assert_eq!(error, writer::Error::Home(lease));
+        let want =
+            format!("control lease must be longer than zero, got {}", Span::ZERO);
+        assert_eq!(error.to_string(), want);
+    });
+}
+
+/// A writer on an unknown channel fails before the node has mesh time.
+#[test]
+fn opens_no_writer_on_an_unknown_name_before_the_node_has_mesh_time() {
+    unsynced(10, |test| async move {
+        let Poll::Ready(opened) = poll_once(test.hub.writer(config("a", &["nothing"])))
+        else {
+            panic!("the open fails before mesh time");
+        };
+        let error = opened.expect_err("no channel is named nothing");
+        assert_eq!(error, writer::Error::Unknown(name("nothing")));
+    });
+}
+
+/// A writer that waits for mesh time finds a channel that a call removed meanwhile
+/// unknown.
+#[test]
+fn opens_no_writer_on_a_channel_removed_while_it_waits_for_mesh_time() {
+    unsynced(8, |mut test| async move {
+        let hub = test.hub.clone();
+        let mut opening = pin!(hub.writer(config("a", &["value"])));
+        assert!(poll_once(opening.as_mut()).is_pending());
+        hub.set_definitions(&without(&["value"]));
+        test.sync().await;
+        let error = opening.await.expect_err("value was removed");
+        assert_eq!(error, writer::Error::Unknown(name("value")));
     });
 }
 
@@ -792,8 +990,8 @@ fn gives_a_complete_reader_frames_past_its_window_only_as_it_takes_them() {
 #[test]
 fn gives_a_reader_on_some_channels_of_a_frame_those_and_their_index() {
     run(20, |test| async move {
-        let mut both = test.reader(&["value-c", "value"], Mode::Complete).await;
         let mut one = test.reader(&["value-c"], Mode::Complete).await;
+        let mut both = test.reader(&["value-c", "value"], Mode::Complete).await;
         let mut writer = test.writer("a", &["value", "value-c"]).await;
         let now = test.now();
         write_series(&mut writer, &[(1, &[now]), (2, &[7]), (5, &[9])]);
@@ -907,12 +1105,7 @@ fn releases_the_lent_frame_of_a_latest_reader_at_the_next_call() {
 #[test]
 fn writes_and_reads_a_channel_of_a_variable_type() {
     run(19, |test| async move {
-        test.hub.define(Channel {
-            key: channel::Key::from_u128(6),
-            name: name("text"),
-            data_type: Type::String,
-            index: channel::Key::from_u128(1),
-        });
+        test.define([(6, "text", DataType::Sample(Type::String), 1)]);
         let mut reader = test.reader(&["text"], Mode::Complete).await;
         let mut writer = test.writer("a", &["text"]).await;
         let now = test.now();
@@ -949,6 +1142,46 @@ fn writes_and_reads_a_channel_of_a_variable_type() {
 }
 
 #[test]
+fn refuses_a_string_sample_that_is_not_utf8() {
+    run(19, |test| async move {
+        test.define([(6, "text", DataType::Sample(Type::String), 1)]);
+        let mut writer = test.writer("a", &["text"]).await;
+        let now = test.now();
+        let set = Arc::clone(writer.set());
+        let (index, text) = (entry(&set, 1), entry(&set, 6));
+        let raw = [&2_u32.to_le_bytes()[..], &[0xff, 0xfe]].concat();
+        let series = [(index, 8), (text, raw.len())];
+        let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
+        draft
+            .series_mut(index)
+            .expect("the index")
+            .copy_from_slice(&now.to_le_bytes());
+        draft
+            .series_mut(text)
+            .expect("the text")
+            .copy_from_slice(&raw);
+        draft.set_count(0, 1);
+        let written = writer
+            .write(LIVE, draft)
+            .expect("the home takes it")
+            .to_vec();
+        let refusal = Refusal::Codec {
+            channel: channel::Key::from_u128(6),
+            error: codec::Error::Utf8 { sample: 0 },
+        };
+        assert_eq!(
+            refusal.to_string(),
+            "channel 00000000-0000-0000-0000-000000000006: sample 0 is not UTF-8"
+        );
+        let refused = Outcome::Refused {
+            slot: Slot::new(0),
+            refusal,
+        };
+        assert_eq!(written, [refused], "A9: a string is UTF-8");
+    });
+}
+
+#[test]
 fn opens_a_writer_on_each_channel_once_with_its_index() {
     run(12, |test| async move {
         let channels = ["value", "time", "value", "value-b"];
@@ -961,48 +1194,154 @@ fn opens_a_writer_on_each_channel_once_with_its_index() {
     });
 }
 
-/// Defines a channel of `I64` on `index` in a new hub, which panics.
-fn define(key: u128, channel: &'static str, index: u128) {
+/// The channel `key` of the spec: an index when `index` is `key`, else a data channel
+/// of `data_type` on `index`.
+fn definition(key: u128, data_type: DataType, index: u128) -> Definition {
+    let kind = if key == index {
+        Kind::Index {
+            error: None,
+            control: None,
+        }
+    } else {
+        let index = channel::Key::from_u128(index);
+        Kind::Data(Data::new(index, None, data_type, None).expect("no unit"))
+    };
+    Definition::Channel(spec::channel::Channel {
+        key: channel::Key::from_u128(key),
+        kind,
+    })
+}
+
+/// Sets [`CHANNELS`] and `more`, each `(key, name, index)` and of `I64`, as the
+/// definitions, in one call. A `Vec`, not a map, so that a name may come twice.
+fn define(more: Vec<(u128, &'static str, u128)>) {
     run(18, move |test| async move {
-        test.hub.define(Channel {
-            key: channel::Key::from_u128(key),
-            name: name(channel),
-            data_type: I64,
-            index: channel::Key::from_u128(index),
+        let more = more.into_iter().map(|(key, channel, index)| {
+            (name(channel), definition(key, DataType::Sample(I64), index))
         });
+        let channels: Vec<_> = channels().into_iter().chain(more).collect();
+        test.hub
+            .set_definitions(channels.iter().map(|(name, channel)| (name, channel)));
     });
 }
 
 #[test]
-#[should_panic(
-    expected = "a channel with key 00000000-0000-0000-0000-000000000002 or name other is known already"
-)]
-fn define_panics_on_a_known_key() {
-    define(2, "other", 1);
+#[should_panic(expected = "two channels have key 00000000-0000-0000-0000-000000000002")]
+fn define_panics_on_a_key_twice() {
+    define(vec![(2, "other", 1)]);
+}
+
+#[test]
+#[should_panic(expected = "two channels are named value")]
+fn define_panics_on_a_name_twice() {
+    define(vec![(9, "value", 1)]);
 }
 
 #[test]
 #[should_panic(
-    expected = "a channel with key 00000000-0000-0000-0000-000000000009 or name value is known already"
-)]
-fn define_panics_on_a_known_name() {
-    define(9, "value", 1);
-}
-
-#[test]
-#[should_panic(
-    expected = "the index 00000000-0000-0000-0000-000000000002 of channel other is not a known index"
+    expected = "the index 00000000-0000-0000-0000-000000000002 of channel other is not an index of the definitions"
 )]
 fn define_panics_on_an_index_that_is_a_data_channel() {
-    define(9, "other", 2);
+    define(vec![(9, "other", 2)]);
 }
 
 #[test]
 #[should_panic(
-    expected = "the index 00000000-0000-0000-0000-000000000008 of channel other is not a known index"
+    expected = "the index 00000000-0000-0000-0000-000000000008 of channel other is not an index of the definitions"
 )]
 fn define_panics_on_an_unknown_index() {
-    define(9, "other", 8);
+    define(vec![(9, "other", 8)]);
+}
+
+#[test]
+#[should_panic(expected = "two channels are named other")]
+fn define_panics_on_a_new_name_twice() {
+    define(vec![(9, "other", 1), (10, "other", 1)]);
+}
+
+/// Name order puts a data channel before its index.
+#[test]
+fn defines_a_data_channel_before_its_index_in_one_call() {
+    run(18, |test| async move {
+        let (temp, time) = (name("plant.temp"), name("plant.time"));
+        let channels = [
+            (&temp, &definition(7, DataType::Sample(I64), 6)),
+            (&time, &definition(6, DataType::Sample(STAMP), 6)),
+        ];
+        test.hub.set_definitions(channels);
+        let writer = test.writer("a", &["plant.temp"]).await;
+        let keys: Vec<_> = writer.set().entries().iter().map(|e| e.key).collect();
+        assert_eq!(keys, [6, 7].map(channel::Key::from_u128));
+    });
+}
+
+#[test]
+fn defines_each_channel_and_no_other_kind_of_definition() {
+    run(2, |test| async move {
+        let select = types::name::Selector::new(["plant.**"]).expect("a selector");
+        let policy = spec::time::Policy::new(select, spec::time::Peers::Voters);
+        let (other, temp, time) =
+            (name("plant.clock"), name("plant.temp"), name("plant.time"));
+        test.hub.set_definitions([
+            (&other, &Definition::Time(policy)),
+            (&temp, &definition(7, DataType::Sample(I64), 6)),
+            (&time, &definition(6, DataType::Sample(STAMP), 6)),
+        ]);
+        let writer = test.writer("a", &["plant.temp"]).await;
+        let keys: Vec<_> = writer.set().entries().iter().map(|e| e.key).collect();
+        assert_eq!(keys, [6, 7].map(channel::Key::from_u128));
+        let writer = test.hub.writer(config("a", &["plant.clock"])).await;
+        let error = writer.expect_err("an error");
+        assert_eq!(error, writer::Error::Unknown(other));
+    });
+}
+
+/// The quality, error, and control edges point at keys that the hub does not know.
+#[test]
+fn defines_channels_with_edges_it_does_not_read() {
+    run(18, |test| async move {
+        let unknown = || Some(channel::Key::from_u128(9));
+        let time = spec::channel::Channel {
+            key: channel::Key::from_u128(6),
+            kind: Kind::Index {
+                error: unknown(),
+                control: unknown(),
+            },
+        };
+        let index = channel::Key::from_u128(6);
+        let data = Data::new(index, unknown(), DataType::Sample(I64), None);
+        let temp = spec::channel::Channel {
+            key: channel::Key::from_u128(7),
+            kind: Kind::Data(data.expect("no unit")),
+        };
+        let (temp_name, time_name) = (name("plant.temp"), name("plant.time"));
+        let (temp, time) = (Definition::Channel(temp), Definition::Channel(time));
+        test.hub
+            .set_definitions([(&temp_name, &temp), (&time_name, &time)]);
+        let writer = test.writer("a", &["plant.temp"]).await;
+        let keys: Vec<_> = writer.set().entries().iter().map(|e| e.key).collect();
+        assert_eq!(keys, [6, 7].map(channel::Key::from_u128));
+    });
+}
+
+#[test]
+fn gives_a_writer_the_sample_type_of_each_data_channel() {
+    run(18, |test| async move {
+        test.define([
+            (6, "text", DataType::Sample(Type::String), 1),
+            (7, "quality", DataType::Quality, 1),
+        ]);
+        let writer = test.writer("a", &["text", "quality"]).await;
+        let entries: Vec<_> = writer
+            .set()
+            .entries()
+            .iter()
+            .map(|e| (e.key.as_u128(), e.data_type))
+            .collect();
+        let quality = DataType::Quality.sample();
+        assert_eq!(entries, [(1, STAMP), (6, Type::String), (7, quality)]);
+        assert_eq!(quality, Type::Scalar(Scalar::U32));
+    });
 }
 
 #[test]
@@ -1148,25 +1487,34 @@ fn poll_flagged<F: Future>(next: Pin<&mut F>) -> (Poll<F::Output>, Arc<Flag>) {
 }
 
 #[test]
-fn ends_a_complete_reader_that_holds_a_frame_past_its_window_at_its_next_call() {
-    for seed in 0..32 {
-        run_on(seed, (WIDE_AREA, WIDE_BODY_MAX), |test| async move {
+fn ends_a_complete_reader_that_holds_a_frame_past_its_window_at_the_next_commit() {
+    for (seed, commits) in (0..32).zip([1, 2].into_iter().cycle()) {
+        run_on(seed, (WIDE_AREA, WIDE_BODY_MAX), move |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
             let mut writer = test.writer("a", &["value"]).await;
             let now = test.now();
             write_samples(&mut writer, now, PAST_WINDOW);
             let charge = charge(&reader.next().await.expect("a frame").view);
             assert!(charge > WINDOW, "{charge} bytes spend the window");
-            // The reader holds the frame, so the window has no room for the next.
-            write_samples(&mut writer, now + PAST_WINDOW, 1);
-            test.clock.sleep(SETTLE).await;
-            assert_behind(&reader.next().await.expect_err("the reader missed a frame"));
+            // The reader holds the frame, so the next waits for credit.
+            for n in 0..commits {
+                write_samples(&mut writer, now + PAST_WINDOW + n, 1);
+                test.clock.sleep(SETTLE).await;
+            }
+            let next = reader.next().await;
+            if commits == 1 {
+                let range = next.expect("the call gives credit").view.range(0);
+                let seq = PAST_WINDOW.cast_unsigned();
+                assert_eq!(range, Some(Range { seq, count: 1 }));
+            } else {
+                assert_behind(&next.expect_err("the reader missed a frame"));
+            }
         });
     }
 }
 
 #[test]
-fn ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window() {
+fn gives_a_waiting_complete_reader_each_frame_of_a_commit_past_its_window() {
     for seed in 0..32 {
         run(seed, |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
@@ -1185,12 +1533,22 @@ fn ends_a_waiting_complete_reader_after_the_frames_of_a_commit_past_its_window()
                 flag.0.load(Ordering::Relaxed),
                 "the commit wakes the reader"
             );
-            let (charges, ended) = take_all(&mut reader).await;
-            assert_behind(&ended);
-            assert!(charges.len() < 200, "the reader misses a frame");
-            let spent: u64 = charges.iter().sum();
-            assert!(spent >= WINDOW, "{spent} bytes spend the window");
-            assert_behind(&reader.next().await.expect_err("the reader ended"));
+            let mut spent = 0;
+            for n in 0..200 {
+                let received = reader.next().await.expect("a frame");
+                let range = received.view.range(0).expect("the index is present");
+                assert_eq!(
+                    range,
+                    Range {
+                        seq: n * 1000,
+                        count: 1000
+                    }
+                );
+                spent += charge(&received.view);
+            }
+            assert!(spent > WINDOW, "{spent} bytes pass the window");
+            let (polled, _) = poll_flagged(pin!(reader.next()));
+            assert!(polled.is_pending(), "no frame waits");
         });
     }
 }
@@ -1210,6 +1568,9 @@ fn ends_a_complete_reader_after_its_waiting_frames_when_it_misses_a_frame() {
                 write_wide(&mut writer, now, n);
             }
             test.clock.sleep(SETTLE).await;
+            // The frames past the window miss at this commit.
+            write_wide(&mut writer, now, 200);
+            test.clock.sleep(SETTLE).await;
             let (charges, ended) = take_all(&mut reader).await;
             assert_behind(&ended);
             assert!(
@@ -1227,13 +1588,16 @@ fn ends_a_complete_reader_that_missed_a_frame_as_behind_after_a_failed_sync() {
         let mut reader = test.reader(&["value"], Mode::Complete).await;
         let mut writer = test.writer("a", &["value"]).await;
         let now = test.now();
-        for n in 0..200 {
+        for n in 0..201 {
             write_wide(&mut writer, now, n);
+            // The frames past the window miss at the commit of frame 200.
+            if n >= 199 {
+                test.clock.sleep(SETTLE).await;
+            }
         }
-        test.clock.sleep(SETTLE).await;
         let mut latest = test.reader(&["value"], Mode::Latest).await;
         test.node.fail_file(FilePath::new(RING), Operation::Sync);
-        write_wide(&mut writer, now, 200);
+        write_wide(&mut writer, now, 201);
         test.clock.sleep(SETTLE).await;
         let (_, ended) = take_all(&mut latest).await;
         assert!(matches!(ended, Ended::Buffer(_)), "the sync failed");
@@ -1292,11 +1656,32 @@ fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff() {
     }
 }
 
+/// The handoff of a writer that a removal closes reaches the commit.
+#[test]
+fn gives_a_reader_the_error_of_a_failed_sync_of_the_handoff_of_a_removal() {
+    run(16, |test| async move {
+        let mut complete = test.reader(&["value-c"], Mode::Complete).await;
+        let writer = test.writer("a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        test.node.fail_file(FilePath::new(RING), Operation::Sync);
+        test.hub.set_definitions(&without(&["value"]));
+        test.clock.sleep(SETTLE).await;
+        let failed = Ended::Buffer(env::files::Error::Io {
+            path: PathBuf::from(RING),
+            operation: Operation::Sync,
+            code: 5,
+        });
+        let next = poll_once(complete.next()).map(Result::err);
+        assert_eq!(next, Poll::Ready(Some(failed)));
+        drop(writer);
+    });
+}
+
 #[test]
 fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff_in_a_failed_write() {
     run(18, |test| async move {
         let mut complete = test.reader(&["value"], Mode::Complete).await;
-        let blocks = test.fill();
+        let blocks = fill(&test.pool);
         // The handoff finds no block, so it waits for the next write.
         let mut writer = test.writer("a", &["value"]).await;
         drop(blocks);
@@ -1325,7 +1710,7 @@ fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff_in_a_failed_write() {
         }
         draft.set_count(group, 10_000);
         let written = writer.write(LIVE, draft).map(<[_]>::to_vec);
-        assert_eq!(written, Err(hub::home::Error::Large));
+        assert_eq!(written, Err(Failure::Home(hub::home::Error::Large)));
         test.clock.sleep(SETTLE).await;
         let failed = Ended::Buffer(env::files::Error::Io {
             path: PathBuf::from(RING),
@@ -1341,8 +1726,8 @@ fn gives_a_reader_the_error_of_a_failed_sync_of_a_handoff_in_a_failed_write() {
 fn opens_a_reader_at_the_first_poll() {
     run(19, |test| async move {
         let mut writer = test.writer("a", &["value"]).await;
-        let names = [name("value")];
-        let opening = test.hub.reader(&names, Mode::Complete);
+        let names = ["value"];
+        let opening = test.hub.reader(unnamed(&names, Mode::Complete));
         write(&mut writer, &[test.now()], &[1]);
         let mut complete = opening.await.expect("opens");
         test.clock.sleep(SETTLE).await;

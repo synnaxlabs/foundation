@@ -1,5 +1,6 @@
-//! `os::files` on a small filesystem that the test mounts with `sudo`. Only one CI
-//! step on a GitHub-hosted runner runs this target.
+//! `os` with `sudo`: files on a small filesystem that the test mounts, and a listener
+//! that an operator aborts. Only one CI step on a GitHub-hosted runner runs this
+//! target.
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
 #![cfg(target_os = "linux")]
@@ -12,9 +13,12 @@ use env::files::{Error, Files, Mode};
 
 #[path = "../it/kept.rs"]
 mod kept;
+#[path = "../common/sockets.rs"]
+#[expect(dead_code, reason = "this binary only listens")]
+mod sockets;
 
 /// A 64 MiB ext4 filesystem on a loop device in a directory of its own, unmounted and
-/// removed when it drops.
+/// removed when it drops, except while the thread panics.
 struct Small(PathBuf);
 
 impl Small {
@@ -40,10 +44,19 @@ impl Small {
 
 impl Drop for Small {
     fn drop(&mut self) {
-        // Lazy: when a test panics, its files thread may still hold the mount.
-        check(sudo("umount").arg("-l").arg(self.mount()));
-        std::fs::remove_dir_all(&self.0).unwrap();
+        // While the thread panics, a command can block and a second panic aborts the
+        // test binary.
+        if !std::thread::panicking() {
+            remove(&self.mount());
+        }
     }
+}
+
+/// Unmounts the `mount` of a [`Small`] and removes its directory.
+fn remove(mount: &Path) {
+    // Lazy: a command that a parallel test starts can inherit a file on the mount.
+    check(sudo("umount").arg("-l").arg(mount));
+    std::fs::remove_dir_all(mount.parent().unwrap()).unwrap();
 }
 
 fn sudo(program: &str) -> Command {
@@ -73,6 +86,29 @@ fn run<F: Future<Output = ()>>(body: impl FnOnce(Files, PathBuf) -> F) {
 }
 
 #[test]
+fn a_disk_that_drops_while_the_test_panics_stays_mounted() {
+    let mut data = PathBuf::new();
+    let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        run(|_, path| {
+            data = path;
+            async { panic!("the test broke") }
+        });
+    }));
+    unwound.expect_err("the test panics");
+    let mount = data.parent().expect("the data directory is on the mount");
+    let mounted = Command::new("mountpoint")
+        .arg("-q")
+        .arg(mount)
+        .status()
+        .unwrap()
+        .success();
+    if mounted {
+        remove(mount);
+    }
+    assert!(mounted, "{} is not mounted", mount.display());
+}
+
+#[test]
 fn a_create_past_the_free_bytes_gives_full_and_keeps_no_blocks() {
     run(|files, _| async move {
         let free = files.free().await.unwrap();
@@ -94,6 +130,22 @@ fn a_create_after_a_failed_create_gives_full_again() {
         files.open(Path::new("a"), mode).await.unwrap_err();
         let error = files.open(Path::new("a"), mode).await.unwrap_err();
         assert_eq!(error, Error::Full { path: "a".into() });
+    });
+}
+
+/// A command that a parallel test starts inherits a file with no `O_CLOEXEC`, as the
+/// fragmented test holds `fill`.
+#[test]
+fn a_file_that_a_command_inherits_does_not_fail_the_unmount() {
+    use rustix::fs::{self, OFlags};
+    run(|_, data| async move {
+        std::fs::create_dir_all(&data).unwrap();
+        let flags = OFlags::WRONLY.union(OFlags::CREATE);
+        let fill = fs::open(data.join("fill"), flags, fs::Mode::RUSR).unwrap();
+        // The command runs on after the test, and holds the file.
+        let command = Command::new("sleep").arg("2").spawn().unwrap();
+        drop(fill);
+        drop(command);
     });
 }
 
@@ -125,4 +177,16 @@ fn a_create_on_fragmented_free_space_frees_the_blocks_past_the_end() {
             "{allocated} bytes allocated"
         );
     });
+}
+
+/// An operator aborts the listener with `ss -K`, as a tool that kills sockets does.
+#[test]
+#[expect(clippy::disallowed_methods, reason = "os is the crate under test")]
+fn a_listener_that_an_operator_aborts_drops_with_no_panic() {
+    let listener = os::net().listen(&sockets::LISTEN).unwrap();
+    let local = listener.local();
+    check(sudo("ss").args(["-K", "-t", "-l", "src", &local.to_string()]));
+    let refused = std::net::TcpStream::connect(local).unwrap_err();
+    assert_eq!(refused.kind(), std::io::ErrorKind::ConnectionRefused);
+    drop(listener);
 }

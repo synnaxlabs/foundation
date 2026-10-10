@@ -2,16 +2,23 @@
 
 use std::fmt;
 
-use aws_lc_rs::signature::{Ed25519KeyPair, KeyPair};
-
-use crate::ed25519::PublicKey;
-
 /// A node's stable identity, a UUIDv7. It stays the same when the node rotates its
 /// public key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Key(u128);
 
 impl Key {
+    /// Makes a UUIDv7 key from a time and random bits. It keeps the time in whole
+    /// milliseconds and uses the low 74 bits of `random`.
+    ///
+    /// # Panics
+    ///
+    /// When `time` is before the Unix epoch.
+    #[must_use]
+    pub fn v7(time: crate::time::Stamp, random: u128) -> Self {
+        Self(crate::uuid::v7(time, random))
+    }
+
     /// Wraps a key's 128 bits.
     #[must_use]
     pub const fn from_u128(bits: u128) -> Self {
@@ -100,39 +107,31 @@ const X25519_SMALL_ORDER: [[u8; 32]; 5] = [
     ],
 ];
 
-/// A node's Ed25519 private key. Its `Debug` never writes the key, and it has no
-/// `Display` and no equality, so a log line or a timing difference cannot show it.
-#[derive(Clone)]
-pub struct PrivateKey(pub [u8; 32]);
-
-impl PrivateKey {
-    /// The Ed25519 public key of this private key. Each call derives it again.
-    #[must_use]
-    #[expect(
-        clippy::missing_panics_doc,
-        reason = "the public half of any 32 bytes is not of small order"
-    )]
-    pub fn public(&self) -> PublicKey {
-        let pair = Ed25519KeyPair::from_seed_unchecked(&self.0)
-            .expect("invariant: any 32 bytes are an Ed25519 private key");
-        let bytes = pair.public_key().as_ref().try_into();
-        PublicKey::new(bytes.expect("invariant: an Ed25519 public key is 32 bytes"))
-            .expect("invariant: the public half of a private key is not of small order")
-    }
-}
-
-impl fmt::Debug for PrivateKey {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("PrivateKey(..)")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
 
     use super::*;
     use crate::common::bytes;
+    use crate::time::Stamp;
+
+    #[test]
+    fn makes_the_rfc_example() {
+        let time = Stamp::from_nanos(0x017f_22e2_79b0 * 1_000_000);
+        let random = 0xcc3 << 62 | 0x18c4_dc0c_0c07_398f;
+        assert_eq!(
+            Key::v7(time, random).to_string(),
+            "017f22e2-79b0-7cc3-98c4-dc0c0c07398f"
+        );
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a key is made after the Unix epoch, not at -1 ns"
+    )]
+    fn panics_before_the_epoch() {
+        let _key = Key::v7(Stamp::from_nanos(-1), 0);
+    }
 
     /// p - 1, little-endian.
     fn p_minus_one() -> [u8; 32] {
@@ -197,31 +196,6 @@ mod tests {
             key[31] &= 0x7f;
             prop_assume!(key[31] != 0x7f && !X25519_SMALL_ORDER.contains(&key));
             prop_assert_eq!(SealKey::new(key).map(SealKey::to_bytes), Ok(key));
-        }
-    }
-
-    #[test]
-    fn hides_a_private_key_in_debug() {
-        let text = format!("{:?}", PrivateKey([0xcd; 32]));
-        assert_eq!(text, "PrivateKey(..)");
-    }
-
-    /// RFC 8032, section 7.1, test 1.
-    #[test]
-    fn derives_the_public_key_of_the_rfc_vector() {
-        let private = PrivateKey(bytes(
-            "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
-        ));
-        let public =
-            bytes("d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a");
-        assert_eq!(private.public().to_bytes(), public);
-    }
-
-    proptest! {
-        #[test]
-        fn derives_a_key_for_any_private_key(private: [u8; 32]) {
-            let key = PrivateKey(private).public();
-            prop_assert_eq!(PublicKey::new(key.to_bytes()), Ok(key));
         }
     }
 

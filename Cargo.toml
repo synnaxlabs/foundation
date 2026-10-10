@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask", "bench/*"]
-exclude = ["docs"]
+exclude = ["docs", "patches", ".claude"]
 
 [workspace.package]
 version = "0.0.0"
@@ -11,9 +11,12 @@ publish = false
 
 [workspace.dependencies]
 aws-lc-rs = { version = "1.18.1", default-features = false, features = ["aws-lc-sys"] }
+base64ct = "1.8.3"
 blake3 = "1.8.7"
 bytes = { version = "1.12.1", default-features = false, features = ["std"] }
+cc = "1.6.0"
 clap = { version = "4.6.7", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
+comrak = { version = "0.56.0", default-features = false }
 core_affinity = "0.8.3"
 crc32c = "0.6.8"
 divan = "0.1.21"
@@ -29,12 +32,14 @@ loom = { version = "0.7.2", features = ["futures"] }
 noq-proto = { version = "=1.3.0", default-features = false, features = ["rustls", "aws-lc-rs"] }
 proptest = { version = "1.11.0", default-features = false, features = ["std"] }
 noq = { version = "1.3.0", default-features = false }
+noq-udp = { version = "=1.3.0", default-features = false }
 rustc-hash = { version = "2.1.3", default-features = false }
 rustix = { version = "1.1.5", features = ["mm", "param"] }
 rustls = { version = "0.23.45", default-features = false, features = ["std", "aws_lc_rs"] }
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+ssh-key = { version = "=0.6.7", default-features = false, features = ["alloc"] }
 tokio = { version = "1.53.2", default-features = false }
 tokio-rustls = { version = "0.26.6", default-features = false }
 unicode-ident = "1.0.26"
@@ -94,11 +99,13 @@ missing_assert_message = "warn"
 assertions_on_result_states = "deny"
 unused_result_ok = "deny"
 let_underscore_must_use = "deny"
+let_underscore_untyped = "deny"
 map_err_ignore = "deny"
 unwrap_in_result = "warn"
 get_unwrap = "deny"
 fallible_impl_from = "warn"
 unimplemented = "deny"
+todo = "deny"
 exit = "deny"
 
 iter_over_hash_type = "deny"
@@ -135,3 +142,8 @@ panic = "abort"
 codegen-units = 1
 lto = "fat"
 debug = "line-tables-only"
+
+# Local patches: docs/dependencies.md.
+[patch.crates-io]
+noq-proto = { path = "patches/noq-proto" }
+noq-udp = { path = "patches/noq-udp" }

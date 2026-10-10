@@ -9,8 +9,9 @@ use crate::{Protocol, VERSION};
 /// The bytes of a header.
 pub const LEN: usize = 3;
 
-/// The code that stops a stream whose header is not valid. Stop and reset codes 1 to
-/// 15 belong to the header; each protocol numbers its own codes from 16.
+/// The code that stops a stream whose header is not valid. Codes 1 to 15, of streams
+/// and sessions, belong to this module and [`session`](crate::session); each protocol
+/// numbers its own codes from 16.
 pub const REJECTED: u32 = 1;
 
 /// The code that stops a stream when a message after the header does not decode,
@@ -115,7 +116,7 @@ mod tests {
         for (protocol, number) in PROTOCOLS {
             assert_eq!(encode(protocol), [1, 0, number], "{protocol:?}");
         }
-        assert_eq!((REJECTED, MALFORMED), (1, 2));
+        assert_eq!((REJECTED, MALFORMED, crate::session::REFUSED), (1, 2, 3));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::SeqCst;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
@@ -167,6 +167,61 @@ fn a_sleep_does_not_wake_its_task_before_the_deadline() {
         assert_eq!(sleep.as_mut().poll(&mut cx), Poll::Pending);
         clock.sleep(millis(20)).await;
         assert_eq!(counter.0.load(SeqCst), 0);
+    });
+}
+
+/// A poll for the deadline that the sleep is armed for reads the clock only once the
+/// runtime fired its Tokio sleep, so it stays pending past the deadline until then. A
+/// poll for a new deadline reads the clock.
+#[test]
+fn a_poll_for_the_armed_deadline_reads_the_clock_once_the_sleep_fired() {
+    let clock = os::clock();
+    on_a_thread(move || async move {
+        let deadline = clock.now() + millis(100);
+        let mut sleep = clock.sleep_until(deadline);
+        let mut cx = Context::from_waker(Waker::noop());
+        assert_eq!(Pin::new(&mut sleep).poll(&mut cx), Poll::Pending);
+        #[expect(clippy::disallowed_methods, reason = "the boot clock must pass")]
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        assert!(clock.now() >= deadline, "{:?}", clock.now());
+        assert_eq!(Pin::new(&mut sleep).poll(&mut cx), Poll::Pending);
+        sleep.reset(deadline + Span::from_nanos(1));
+        assert_eq!(Pin::new(&mut sleep).poll(&mut cx), Poll::Ready(()));
+        sleep.reset(deadline);
+        sleep.await;
+    });
+}
+
+/// A task that spends its Tokio budget before it polls its sleep, as the drain of a
+/// busy socket does, still sees the sleep complete once the deadline passed. The body
+/// of a thread of `os` has no budget, so the test runs in a `block_on`.
+#[test]
+fn a_sleep_completes_after_its_deadline_when_its_task_spent_its_budget() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    let clock = os::clock();
+    runtime.block_on(async move {
+        let deadline = clock.now() + millis(100);
+        let mut sleep = pin!(clock.sleep_until(deadline));
+        let completed = std::future::poll_fn(|cx| {
+            while let Poll::Ready(progress) = tokio::task::coop::poll_proceed(cx) {
+                progress.made_progress();
+            }
+            if sleep.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(true);
+            }
+            if clock.now() > deadline + seconds(3) {
+                return Poll::Ready(false);
+            }
+            Poll::Pending
+        })
+        .await;
+        assert!(
+            completed,
+            "the sleep did not complete 3 s after its deadline"
+        );
     });
 }
 

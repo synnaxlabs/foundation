@@ -6,10 +6,8 @@ use proptest::prelude::*;
 use spec::channel::{Channel, Kind as ChannelKind};
 use spec::compression::{self, Mode};
 use spec::connector::Connector;
-use spec::definition::Kind;
 use spec::placement::{self, Nodes};
 use spec::region::Delegation;
-use spec::subject::Subject;
 use spec::time::{self, Peers};
 use spec::{node_settings, retention};
 use types::byte::Size;
@@ -31,6 +29,7 @@ fn policy(subjects: &str, select: &str, allow: &[Action], authority: u8) -> Poli
         allow.iter().copied().collect(),
         Authority(authority),
     )
+    .unwrap()
 }
 
 fn connector() -> Definition {
@@ -320,11 +319,29 @@ fn keeps_each_policy_with_the_region_of_its_tree() {
     assert_eq!(grant(&rules, "ops.ana", "site_b.pt_1").actions(), plan);
 }
 
+fn subject() -> Definition {
+    Definition::Subject(Subject::new(vec![PublicKey::new([2; 32]).unwrap()]).unwrap())
+}
+
+#[test]
+#[should_panic(expected = "has a label at each subject key, not at ops.@x.@subject")]
+fn panics_at_a_subject_key_with_no_label() {
+    let tree = Tree::from([(name("ops.@x.@subject"), subject())]);
+    Rules::new([(name("ops").into(), &tree)]);
+}
+
+#[test]
+#[should_panic(expected = "has a label at each subject key, not at ops.ana")]
+fn panics_at_a_subject_definition_off_its_subject_key() {
+    let tree = Tree::from([(name("ops.ana"), subject())]);
+    Rules::new([(Prefix::ROOT, &tree)]);
+}
+
 fn arbitrary_policy() -> impl Strategy<Value = (&'static str, Policy)> {
     let regions = prop::sample::select(vec!["", "a", "a.b", "b"]);
     let selects = prop::sample::select(vec!["**", "a.**", "b.*", "a.b.**", "*.x"]);
     let subjects = prop::sample::select(vec!["**", "s.*", "s.x", "t.*"]);
-    let allow = prop::sample::subsequence(spec_actions(), 0..=6);
+    let allow = prop::sample::subsequence(spec_actions(), 1..=6);
     (regions, subjects, selects, allow, any::<u8>())
         .prop_map(|(r, s, sel, a, auth)| (r, policy(s, sel, &a, auth)))
 }

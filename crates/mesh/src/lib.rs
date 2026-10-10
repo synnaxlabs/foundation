@@ -18,9 +18,9 @@ pub mod claim;
 #[cfg(test)]
 mod common;
 mod driver;
-mod ed25519;
 mod entry;
 mod error;
+mod file;
 pub mod log;
 mod member;
 mod message;
@@ -29,6 +29,7 @@ pub mod status;
 #[cfg(any(test, feature = "sim"))]
 pub mod testing;
 pub mod ticket;
+pub mod used;
 
 pub use driver::{Config, Ended, Mesh, Watch};
 pub use error::{Error, Stopped};

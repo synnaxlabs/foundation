@@ -1,11 +1,20 @@
 # Performance rulebook
 
 Foundation targets (P1): 100M samples/s per node; within 2x at 100k channels;
-latest-mode p99 under 250 µs over one encrypted LAN hop; under 4 bytes per sample;
-a Raspberry Pi 4 idles under 50 MB and starts in under 1 s. A regression over 5% needs
-a written judgment before merge: how often the path runs (per sample, frame, session, or
-start), its absolute cost against the P1 budget, the noise of the machine, and what the
-change buys. The architect accepts or rejects it on those facts.
+latest-mode p99 under 250 µs over one encrypted LAN hop; under 4 bytes per sample; a
+Raspberry Pi 4 idles under 50 MB and starts in under 1 s. A slowdown that costs 1% or
+more of the target it counts against (the cost limit) needs a written judgment before
+merge. For CPU, 1% is 10 ms per second at 100M samples/s: the extra ns per call times
+the calls per second of the path, so 0.1 ns for a path that runs once per sample. A path
+that runs once per frame or data message makes 100M calls per second divided by the
+samples that one call carries. The report states that number and its source: a decision,
+a documented workload, or a measured per-frame cost that shows P1 cannot hold with
+smaller frames on the cores of the measured machine. With no source, the path counts as
+once per sample. The other limits are in `docs/decisions/memory/p1.md`. The judgment
+states how often the path runs (per sample, frame, session, or start), its absolute cost
+against the P1 budget, the noise of the machine, and what the change buys. The architect
+accepts or rejects it on those facts. A slowdown under the cost limit needs nothing but
+its numbers.
 
 Evidence: `docs/research/r1-thread-model.md`, `docs/research/r11-memory-sync.md`, and
 `docs/research/r11-mem-bench/`. The numbers below are from an M3 Max. Rerun on Linux
@@ -20,7 +29,9 @@ only for tests and benchmarks, such as a counting `GlobalAlloc`, needs only rule
 
 1. **No heap allocation on the hot path.** Frames come from the shard's pool (alloc and
    free 1.1 ns, against 4.2 ns for mimalloc and 9.2 ns for macOS malloc). A counting
-   allocator in tests fails any hot-path allocation.
+   allocator in tests fails any hot-path allocation. One exception: the heap copies of
+   `send_parts` that STREAM WIRE (`docs/decisions/transport/stream-wire.md`) states.
+   Each stretch of short runs and zeros is copied, and noq keeps the copy until the ACK.
 2. **One reference count per frame, never per series.** Fan-out is 18-26x cheaper. One
    shared `Arc` under 8 threads costs about 430 ns: no shared reference-count hot
    spots.
@@ -47,7 +58,8 @@ only for tests and benchmarks, such as a counting `GlobalAlloc`, needs only rule
 11. **Per-frame cost scales with interested readers, not with channel count.**
 12. **Claims are measured, never inferred.** Name the machine.
 13. **Memory is bounded everywhere.** A hard per-node pool budget. Pools commit pages
-    lazily and purge after idle time. Credits cap the blocks a reader can pin. A
+    lazily and purge after idle time. Credits cap the blocks a reader can pin, with the
+    exception that MEMORY BOUNDS (`docs/decisions/memory/memory-bounds.md`) states. A
     reader that falls behind is served from disk, never from pinned memory. A live
     write that finds the pool full records a gap instead of waiting.
 14. **Facts known per writer session (types, keys) are interned once** in the key set,
@@ -66,4 +78,5 @@ Every PR that touches a hot path answers these in its description:
 
 Before you write a hot path, make a back-of-envelope sketch of its network, disk,
 memory, and CPU cost, in bandwidth and in latency. Put the sketch in the PR beside the
-six answers (r16 rule 41). A regression over 5% adds the P1 judgment beside them.
+six answers (r16 rule 41). A slowdown at or over the cost limit adds the P1 judgment
+beside them.

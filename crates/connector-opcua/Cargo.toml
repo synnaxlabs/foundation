@@ -1,0 +1,50 @@
+[package]
+name = "connector-opcua"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+open62541 = ["dep:cc"]
+# Exposes `bench` to the `run` bench, `fuzz` to the fuzz target, and both to the
+# `alloc` and `memory` tests.
+sim = ["open62541"]
+
+[dependencies]
+env = { path = "../env" }
+types = { path = "../types" }
+
+[build-dependencies]
+cc = { workspace = true, optional = true }
+
+[dev-dependencies]
+cc = { workspace = true }
+# Turns on `sim`, since the bench host runs no features.
+connector-opcua = { path = ".", features = ["sim"] }
+counting = { path = "../counting" }
+divan = { workspace = true }
+sim = { path = "../sim" }
+
+[[test]]
+name = "alloc"
+harness = false
+
+[[test]]
+name = "memory"
+harness = false
+required-features = ["open62541"]
+
+[[bench]]
+name = "decode"
+harness = false
+test = true
+required-features = ["open62541"]
+
+[[bench]]
+name = "run"
+harness = false
+test = true
+
+[lints]
+workspace = true

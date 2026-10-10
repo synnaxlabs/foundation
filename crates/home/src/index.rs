@@ -299,7 +299,8 @@ mod tests {
         #[test]
         fn hands_control_on_when_the_holder_lease_ran_out() {
             let mut index = index();
-            let _ = index.gate.open(writer("a", 10), Some(lease(10)), at(0));
+            let _: control::Key =
+                index.gate.open(writer("a", 10), Some(lease(10)), at(0));
             let waiter = index.gate.open(writer("b", 5), None, at(0));
             index.gate.recorded();
             assert_eq!(write(&mut index, waiter, &[1], at(20)), Ok(0..1));
@@ -336,7 +337,7 @@ mod tests {
         fn keeps_a_handoff_from_a_refused_write() {
             let mut index = index();
             let holder = index.gate.open(writer("a", 10), Some(lease(10)), at(0));
-            let _ = index.gate.open(writer("b", 5), None, at(0));
+            let _: control::Key = index.gate.open(writer("b", 5), None, at(0));
             index.gate.recorded();
             let refusal = write(&mut index, holder, &[1], at(20));
             assert_eq!(refusal, Err(Refusal::Expired));
@@ -410,7 +411,7 @@ mod tests {
             let key = index.gate.open(writer("a", 10), None, at(0));
             let first = check(&mut index, key, Path::Live, &[1], at(1));
             let first = first.expect("a holder's frame in order");
-            let _ = index.gate.open(writer("b", 20), None, at(1));
+            let _: control::Key = index.gate.open(writer("b", 20), None, at(1));
             index.spend(first);
         }
     }
@@ -427,9 +428,9 @@ mod tests {
             assert_eq!(handed_to(&index), Some(writer("a", 5)));
             index.gate.recorded();
             assert_eq!(index.gate.handoff(), None);
-            let _ = index.gate.open(writer("b", 1), None, at(1));
+            let _: control::Key = index.gate.open(writer("b", 1), None, at(1));
             assert_eq!(index.gate.handoff(), None);
-            let _ = index.gate.open(writer("c", 9), None, at(2));
+            let _: control::Key = index.gate.open(writer("c", 9), None, at(2));
             assert_eq!(handed_to(&index), Some(writer("c", 9)));
             index.gate.close(first, at(3));
             assert_eq!(handed_to(&index), Some(writer("c", 9)));
@@ -447,7 +448,7 @@ mod tests {
         #[test]
         fn is_none_when_the_gate_returns_to_the_logged_holder() {
             let mut index = index();
-            let _ = index.gate.open(writer("a", 5), None, at(0));
+            let _: control::Key = index.gate.open(writer("a", 5), None, at(0));
             index.gate.recorded();
             let b = index.gate.open(writer("b", 9), None, at(1));
             assert_eq!(handed_to(&index), Some(writer("b", 9)));
