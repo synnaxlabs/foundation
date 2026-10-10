@@ -2537,7 +2537,7 @@ mod tests {
             let ints: Vec<u8> = (0..2048_u32)
                 .map(|i| u8::try_from(i % 200).expect("small"))
                 .collect();
-            let (count, text) = variable(1, &["a"; 2048]);
+            let (count, text) = variable(1, &vec!["a"; 2048]);
             let truncated = |vector, needed| Error::Truncated {
                 vector,
                 needed,
