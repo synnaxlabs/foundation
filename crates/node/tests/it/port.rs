@@ -187,6 +187,10 @@ fn wait<T>(receiver: &mpsc::Receiver<T>) -> T {
 }
 
 /// What a shard sends on `receiver` within `timeout`.
+///
+/// # Errors
+///
+/// When it sends nothing within `timeout`, or the shard drops its sender.
 fn recv<T>(
     receiver: &mpsc::Receiver<T>,
     timeout: Duration,
