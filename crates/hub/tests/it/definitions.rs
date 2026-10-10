@@ -348,10 +348,10 @@ fn gives_a_latest_reader_of_a_changed_channel_no_series_of_the_removed_one() {
         assert_eq!(write_i32(&mut writer, now + 1, 20), [applied(1)]);
         let received = reader.next().await.expect("a frame");
         assert_eq!(keys(&received), [1, 2]);
-        let at = entry(received.set, 2);
-        assert_eq!(received.set.entries()[at].data_type, I32);
+        let at = entry(received.set(), 2);
+        assert_eq!(received.set().entries()[at].data_type, I32);
         let (_, bytes) = received
-            .view
+            .view()
             .iter()
             .find(|&(present, _)| present == at)
             .expect("the view holds the series");
