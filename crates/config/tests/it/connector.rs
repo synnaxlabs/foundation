@@ -7,7 +7,8 @@ use document::encoding::DEPTH_MAX;
 use document::value::{self, Value};
 use document::{Attribute, Document, Map, Source};
 use spec::connector::Connector;
-use types::name::Name;
+use types::name::{Name, Selector};
+use types::time::Span;
 
 const FIXTURE: &str = include_str!("../../../acceptance/tests/it/fixtures/influx.hcl");
 
@@ -67,9 +68,17 @@ fn connector(entry: &Entry) -> &Connector {
 }
 
 #[test]
-fn checks_the_influx_fixture_into_one_connector() {
+fn checks_the_influx_fixture_into_one_connector_and_its_status() {
     let entries = config::check(&[read(FIXTURE)], &kinds()).expect("no problems");
-    assert_eq!(entries.keys().collect::<Vec<_>>(), [&name("influx")]);
+    let keys: Vec<_> = entries.keys().map(Name::as_str).collect();
+    let expected = [
+        "influx",
+        "influx.status.class",
+        "influx.status.restarts",
+        "influx.status.state",
+        "influx.status.time",
+    ];
+    assert_eq!(keys, expected);
     let connector = connector(&entries[&name("influx")]);
     assert_eq!(connector.kind(), &name("influx"));
     assert_eq!(connector.node(), &name("cloud"));
@@ -80,8 +89,13 @@ fn checks_the_influx_fixture_into_one_connector() {
     );
     assert_eq!(config, &expected);
     let parsed = connector_influx::Kind::default().parse(config);
-    assert_eq!(parsed, connector_influx::Kind::default().parse(&expected));
-    assert!(parsed.is_ok(), "{parsed:?}");
+    let parsed = parsed.expect("a config");
+    assert_eq!(parsed.address, "http://influx:8086");
+    let select = Selector::new(["edge.*"]).expect("a selector");
+    assert_eq!(parsed.reader.select, select);
+    // The crate map does not let `config` take `hub`, the home of `reader::Mode`.
+    assert_eq!(format!("{:?}", parsed.reader.mode), "Complete");
+    assert_eq!(parsed.reader.hold, Span::from_nanos(2 * Span::HOUR.nanos()));
 }
 
 #[test]

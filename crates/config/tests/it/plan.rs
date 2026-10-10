@@ -7,12 +7,13 @@ use config::plan::Plan;
 use config::{Definition, Entry};
 use connector::cancel;
 use connector::kind::{self, Channels, Context, Kind, Table};
-use document::diagnostic::{Code, Diagnostic};
+use document::diagnostic::{Code, Diagnostic, Note};
 use document::encoding::Checked;
 use document::{Document, Source, read as reader};
 use spec::Pointer;
-use spec::channel::Channel;
+use spec::channel::{Channel, Data};
 use spec::compression::{self, Mode};
+use spec::data_type::DataType;
 use spec::definition::Definition as Stored;
 use spec::time::{self, Peers};
 use spec::tree::{self, Chunks};
@@ -20,6 +21,7 @@ use types::channel::Key;
 use types::digest::Digest;
 use types::ed25519::PrivateKey;
 use types::name::{Name, Selector};
+use types::sample::{Scalar, Type};
 
 mod check;
 mod codec;
@@ -50,25 +52,31 @@ placement \"a\" {
 }
 ";
 
-/// A kind whose config is one attribute, `writes`: the channels it writes to the mesh.
+/// A kind whose config is `writes`, the channels it writes to the mesh, and an optional
+/// `counts`, the counts of its status.
 struct Writer;
 
 impl Kind for Writer {
-    type Config = Vec<Name>;
+    type Config = (Vec<Name>, Vec<Name>);
 
-    fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
-        let writes = config
-            .attributes
-            .get("writes")
-            .expect("a `writes` attribute");
-        reader::names(&writes.value).map_err(|diagnostic| vec![diagnostic])
+    fn parse(&self, config: &Document) -> Result<Self::Config, Vec<Diagnostic>> {
+        let names = |attribute: &document::Attribute| {
+            reader::names(&attribute.value).map_err(|diagnostic| vec![diagnostic])
+        };
+        let writes = config.attributes.get("writes");
+        let writes = names(writes.expect("a `writes` attribute"))?;
+        let counts = config.attributes.get("counts").map(names);
+        Ok((writes, counts.transpose()?.unwrap_or_default()))
     }
 
-    fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
+    fn check(
+        &self,
+        (writes, counts): &Self::Config,
+    ) -> Result<Channels, Vec<Diagnostic>> {
         Ok(Channels {
             reads: Vec::new(),
             writes: writes.clone(),
-            counts: Vec::new(),
+            counts: counts.clone(),
         })
     }
 
@@ -81,7 +89,7 @@ impl Kind for Writer {
 
     fn run(
         &self,
-        _: Context<Vec<Name>>,
+        _: Context<Self::Config>,
     ) -> impl Future<Output = Result<(), kind::Error>> {
         std::future::ready(Ok(()))
     }
@@ -265,7 +273,7 @@ impl Kind for Commander {
     type Config = Vec<Name>;
 
     fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
-        Writer.parse(config)
+        Writer.parse(config).map(|(writes, _)| writes)
     }
 
     fn check(&self, writes: &Vec<Name>) -> Result<Channels, Vec<Diagnostic>> {
@@ -418,17 +426,12 @@ fn adds_each_definition_of_the_fixtures_to_the_empty_spec() {
         .map(|(key, entry)| (key, None, Some(entry)))
         .collect();
     assert_eq!(changes(&plan), added);
-    let influx = plan
-        .changes
-        .values()
-        .last()
-        .and_then(|change| change.new.as_ref());
+    let influx = plan.changes[&name("influx")].new.as_ref();
     let influx = influx.and_then(|entry| entry.label_span);
     assert_eq!(influx.map(document::Span::source), Some(Source(1)));
-    assert_eq!(
-        plan.homes,
-        BTreeMap::from([(name("edge.time"), name("edge"))])
-    );
+    let homes = [("edge.time", "edge"), ("influx.status.time", "cloud")];
+    let homes = homes.map(|(index, home)| (name(index), name(home)));
+    assert_eq!(plan.homes, BTreeMap::from(homes));
     assert_eq!(plan.base, spec.pointer);
 }
 
@@ -439,8 +442,9 @@ fn plans_no_change_after_its_apply() {
     spec.apply(&spec.plan(&[EDGE, INFLUX], &members).expect("no problems"));
     let plan = spec.plan(&[EDGE, INFLUX], &members).expect("no problems");
     assert_eq!(changes(&plan), []);
-    let homes = BTreeMap::from([(name("edge.time"), name("edge"))]);
-    assert_eq!(plan.homes, homes);
+    let homes = [("edge.time", "edge"), ("influx.status.time", "cloud")];
+    let homes = homes.map(|(index, home)| (name(index), name(home)));
+    assert_eq!(plan.homes, BTreeMap::from(homes));
     assert_eq!(plan.base.version, 1);
     assert_eq!(plan.base, spec.pointer);
 }
@@ -465,6 +469,7 @@ fn places_each_index_of_a_device_fixture_at_its_connector() {
             .expect("no problems");
         let homes = BTreeMap::from([
             (name("dev.q_time"), name("edge")),
+            (name("dev.status.time"), name("edge")),
             (name("dev.time"), name("edge")),
         ]);
         assert_eq!(plan.homes, homes);
@@ -497,8 +502,19 @@ fn removes_a_definition_that_no_file_holds() {
     let members = ["cloud", "edge"];
     spec.apply(&spec.plan(&[EDGE, INFLUX], &members).expect("no problems"));
     let plan = spec.plan(&[EDGE], &members).expect("no problems");
-    let old = Digest::of(spec.get("influx"));
-    assert_eq!(changes(&plan), [(&name("influx"), Some(old), None)]);
+    let removed = [
+        "influx",
+        "influx.status.class",
+        "influx.status.restarts",
+        "influx.status.state",
+        "influx.status.time",
+    ]
+    .map(name);
+    let removed: Vec<_> = removed
+        .iter()
+        .map(|key| (key, Some(Digest::of(spec.get(key.as_str()))), None))
+        .collect();
+    assert_eq!(changes(&plan), removed);
 }
 
 #[test]
@@ -653,7 +669,13 @@ connector \"w2\" {
     let plan = Spec::create_empty()
         .plan(&[text], &["w"])
         .expect("no problems");
-    assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("w"))]));
+    let homes = [
+        ("a.time", "w"),
+        ("w1.status.time", "w"),
+        ("w2.status.time", "w"),
+    ];
+    let homes = homes.map(|(index, home)| (name(index), name(home)));
+    assert_eq!(plan.homes, BTreeMap::from(homes));
 }
 
 #[test]
@@ -675,7 +697,13 @@ connector \"c2\" {{
     let plan = Spec::create_empty()
         .plan(&[&text], &["n", "n1", "n2"])
         .expect("no problems");
-    assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("n"))]));
+    let homes = [
+        ("a.time", "n"),
+        ("c1.status.time", "n1"),
+        ("c2.status.time", "n2"),
+    ];
+    let homes = homes.map(|(index, home)| (name(index), name(home)));
+    assert_eq!(plan.homes, BTreeMap::from(homes));
 }
 
 /// The fix of `config.unplaced` when the node of a connector has a second role in the
@@ -1276,7 +1304,14 @@ connector \"c\" {
     let plan = Spec::create_empty()
         .plan(&[text], &["m", "n"])
         .expect("no problems");
-    let homes = [("a.time", "n"), ("b.time", "n"), ("c.time", "m")];
+    let homes = [
+        ("a.status.time", "n"),
+        ("a.time", "n"),
+        ("b.status.time", "n"),
+        ("b.time", "n"),
+        ("c.status.time", "m"),
+        ("c.time", "m"),
+    ];
     let homes = homes.map(|(index, home)| (name(index), name(home)));
     assert_eq!(plan.homes, BTreeMap::from(homes));
 }
@@ -1418,7 +1453,13 @@ connector \"d.e\" {{
     let plan = Spec::create_empty()
         .plan(&[&text("d.e.**")], &nodes)
         .expect("no problems");
-    assert_eq!(plan.homes, BTreeMap::from([(name("d.e.time"), name("m"))]));
+    let homes = [
+        ("d.e.status.time", "m"),
+        ("d.e.time", "m"),
+        ("d.status.time", "n"),
+    ];
+    let homes = homes.map(|(index, home)| (name(index), name(home)));
+    assert_eq!(plan.homes, BTreeMap::from(homes));
     let text = text("d.e");
     let found = problems(Spec::create_empty().plan(&[&text], &nodes));
     let expected = split(
@@ -1470,7 +1511,13 @@ connector \"edge\" {{
     let plan = Spec::create_empty()
         .plan(&[&fixed], &nodes)
         .expect("no problems");
-    assert_eq!(plan.homes, BTreeMap::from([(name("site.time"), name("n"))]));
+    let homes = [
+        ("edge.status.time", "n"),
+        ("site.status.time", "m"),
+        ("site.time", "n"),
+    ];
+    let homes = homes.map(|(index, home)| (name(index), name(home)));
+    assert_eq!(plan.homes, BTreeMap::from(homes));
 }
 
 #[test]
@@ -1511,10 +1558,9 @@ connector \"plc\" {{
     let plan = Spec::create_empty()
         .plan(&[&fixed], &nodes)
         .expect("no problems");
-    assert_eq!(
-        plan.homes,
-        BTreeMap::from([(name("plant.time"), name("edge"))])
-    );
+    let homes = [("plant.time", "edge"), ("plc.status.time", "edge")];
+    let homes = homes.map(|(index, home)| (name(index), name(home)));
+    assert_eq!(plan.homes, BTreeMap::from(homes));
 }
 
 #[test]
@@ -1540,10 +1586,9 @@ connector \"valve\" {{
     let plan = Spec::create_empty()
         .plan(&[&text], &["core", "edge"])
         .expect("no problems");
-    assert_eq!(
-        plan.homes,
-        BTreeMap::from([(name("valve.time"), name("core"))])
-    );
+    let homes = [("valve.status.time", "edge"), ("valve.time", "core")];
+    let homes = homes.map(|(index, home)| (name(index), name(home)));
+    assert_eq!(plan.homes, BTreeMap::from(homes));
 }
 
 #[test]
@@ -2491,7 +2536,9 @@ connector \"a\" {
         &kinds,
     )
     .expect("the one check of the connector passes");
-    assert_eq!(plan.homes, BTreeMap::from([(name("a.time"), name("n"))]));
+    let homes = [("a.status.time", "n"), ("a.time", "n")];
+    let homes = homes.map(|(index, home)| (name(index), name(home)));
+    assert_eq!(plan.homes, BTreeMap::from(homes));
 }
 
 /// The fix that makes `winner` win for each of `connectors`, a list such as "`a` and
@@ -2799,4 +2846,186 @@ fn reports_the_splits_at_one_placement_in_unit_order() {
         )
     };
     assert_eq!(found, [split("x.time", "a"), split("w.time", "b")]);
+}
+
+/// A connector `c` on `n` with the count `confirmed`.
+const COUNTED: &str = "\
+connector \"c\" {
+  kind = \"writer\"
+  node = \"n\"
+  writes = []
+  counts = [\"confirmed\"]
+}
+";
+
+/// A status channel of `c` with `sample`.
+fn status(sample: Type) -> spec::channel::Kind<Name> {
+    let data = Data::new(name("c.status.time"), None, DataType::Sample(sample), None);
+    spec::channel::Kind::Data(data.expect("no unit"))
+}
+
+#[test]
+fn implies_the_status_channels_of_each_connector_at_its_label() {
+    let mut spec = Spec::create_empty();
+    let plan = spec.plan(&[COUNTED], &["n"]).expect("no problems");
+    let index = spec::channel::Kind::Index {
+        error: None,
+        control: None,
+    };
+    let expected = [
+        ("c.status.class", status(Type::Scalar(Scalar::U8))),
+        ("c.status.confirmed", status(Type::Scalar(Scalar::U64))),
+        ("c.status.restarts", status(Type::Scalar(Scalar::U64))),
+        ("c.status.state", status(Type::Scalar(Scalar::U8))),
+        ("c.status.time", index),
+    ];
+    let at = Some((Source(0), label(COUNTED, "c")));
+    let expected: Vec<_> = expected
+        .into_iter()
+        .map(|(key, kind)| (name(key), None, Some((Definition::Channel(kind), at))))
+        .collect();
+    let found: Vec<_> = changes(&plan)
+        .into_iter()
+        .filter(|(key, _, _)| key.as_str() != "c")
+        .map(|(key, old, new)| {
+            let new = new.map(|entry| {
+                let at = entry.label_span.map(|at| (at.source(), at.start().offset));
+                (entry.definition.clone(), at)
+            });
+            (key.clone(), old, new)
+        })
+        .collect();
+    assert_eq!(found, expected);
+    let homes = BTreeMap::from([(name("c.status.time"), name("n"))]);
+    assert_eq!(plan.homes, homes);
+    spec.apply(&plan);
+    let plan = spec.plan(&[COUNTED], &["n"]).expect("no problems");
+    assert_eq!(changes(&plan), []);
+}
+
+#[test]
+fn places_a_status_index_with_its_connector_whatever_selects_it() {
+    let text = format!(
+        "{COUNTED}{}{}",
+        placement("c", "\"c\"", "n"),
+        placement("status", "\"c.status.*\"", "m")
+    );
+    let plan = Spec::create_empty()
+        .plan(&[&text], &["m", "n"])
+        .expect("no problems");
+    let homes = BTreeMap::from([(name("c.status.time"), name("n"))]);
+    assert_eq!(plan.homes, homes);
+}
+
+#[test]
+fn refuses_a_block_at_the_name_of_a_status_channel_in_any_case() {
+    for implied in ["c.status.state", "C.Status.State"] {
+        let channel = format!(
+            "channel \"{implied}\" {{\n  data_type = \"u8\"\n  index = \"a.time\"\n}}\n"
+        );
+        let documents = documents(&[COUNTED, PLANT, &channel]);
+        let found = config::check(&documents, &kinds()).expect_err("problems");
+        let span = |document: &Document| document.blocks[0].labels[0].span;
+        let mut expected = Diagnostic::new(
+            Code::new("config.implied-channel"),
+            span(&documents[2]),
+            "the connector `c` implies the channel `c.status.state`, so a block \
+             cannot have its name"
+                .into(),
+            "Give the block another name".into(),
+        );
+        expected.notes.push(Note {
+            span: span(&documents[0]).expect("a span"),
+            text: "the connector".into(),
+        });
+        assert_eq!(found, [expected]);
+    }
+}
+
+#[test]
+fn refuses_each_block_at_the_name_of_a_status_channel() {
+    let channel = |name: &str| {
+        format!(
+            "channel \"{name}\" {{\n  data_type = \"u8\"\n  index = \"a.time\"\n}}\n"
+        )
+    };
+    let (lower, upper) = (channel("c.status.state"), channel("C.Status.State"));
+    let documents = documents(&[COUNTED, PLANT, &lower, &upper]);
+    let found = config::check(&documents, &kinds()).expect_err("problems");
+    let found: Vec<_> = (found.iter())
+        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.span))
+        .collect();
+    let span = |document: &Document| document.blocks[0].labels[0].span;
+    let expected = [
+        ("config.implied-channel", span(&documents[2])),
+        ("config.implied-channel", span(&documents[3])),
+        ("config.duplicate-name", span(&documents[3])),
+    ];
+    assert_eq!(found, expected);
+}
+
+/// A connector whose name repeats implies no channel, so the order of the files changes
+/// no problem.
+#[test]
+fn implies_no_channel_of_a_connector_whose_name_repeats() {
+    let uncounted = COUNTED.replace("  counts = [\"confirmed\"]\n", "");
+    let channel = "channel \"c.status.confirmed\" {\n  data_type = \"u8\"\n  \
+                   index = \"a.time\"\n}\n";
+    let documents = documents(&[COUNTED, &uncounted, PLANT, channel]);
+    let mut reversed = documents.clone();
+    reversed.reverse();
+    let codes = |documents: &[Document]| -> Vec<_> {
+        let found = config::check(documents, &kinds()).expect_err("problems");
+        (found.into_iter())
+            .map(|diagnostic| (diagnostic.code.as_str().to_owned(), diagnostic.span))
+            .collect()
+    };
+    let expected = [(
+        "config.duplicate-name".to_owned(),
+        documents[1].blocks[0].labels[0].span,
+    )];
+    assert_eq!(codes(&documents), expected);
+    assert_eq!(codes(&reversed), expected);
+}
+
+#[test]
+fn gives_writer_nodes_for_a_connector_that_writes_a_status_channel_on_another_node() {
+    let text = format!(
+        "{COUNTED}connector \"d\" {{\n  kind = \"writer\"\n  node = \"m\"\n  \
+         writes = [\"c.status.state\"]\n}}\n"
+    );
+    let found = Spec::create_empty().plan(&[&text], &["m", "n"]);
+    let expected = problem(
+        "config.writer-nodes",
+        (0, value(&text, "node", "\"m\"")),
+        "connectors on the nodes `n` and `m` write the index `c.status.time`, so it \
+         has no one home",
+        "Run each connector that writes `c.status.time` on one node",
+    );
+    assert_eq!(problems(found), [expected]);
+}
+
+#[test]
+fn refuses_a_connector_whose_status_names_are_too_long() {
+    let long = "c".repeat(244);
+    let text = COUNTED.replace("\"c\"", &format!("\"{long}\""));
+    let found = problems(Spec::create_empty().plan(&[&text], &["n"]));
+    let expected = problem(
+        "config.long-name",
+        (0, label(&text, &long)),
+        &format!(
+            "the name of a status channel of the connector `{long}` is 256 bytes, and \
+             the most is 255"
+        ),
+        "Shorten the name of the connector",
+    );
+    assert_eq!(found, std::slice::from_ref(&expected));
+    let members = BTreeSet::from([name("n")]);
+    let definitions = BTreeMap::from([connector(&long, "writer", "writes = []")]);
+    let found = config::plan::check(&definitions, &members, &kinds());
+    let (code, _, message, fix) = expected;
+    assert_eq!(
+        problems(found.map(|()| unreachable())),
+        [(code, None, message, fix)]
+    );
 }

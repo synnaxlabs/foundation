@@ -43,10 +43,18 @@ fn refused(subject: &Document, connector: &Document, message: &str) -> Vec<Diagn
 
 #[test]
 fn checks_the_connector_and_the_subject_alone() {
-    for (text, key) in [(CONNECTOR, "plc"), (SUBJECT, "plc.@subject")] {
+    let connector = [
+        "plc",
+        "plc.status.class",
+        "plc.status.restarts",
+        "plc.status.state",
+        "plc.status.time",
+    ];
+    for (text, expected) in [(CONNECTOR, &connector[..]), (SUBJECT, &["plc.@subject"])]
+    {
         let entries = config::check(&[read(0, text)], &kinds()).expect("no problems");
         let keys: Vec<_> = entries.keys().map(Name::as_str).collect();
-        assert_eq!(keys, [key]);
+        assert_eq!(keys, expected);
     }
 }
 

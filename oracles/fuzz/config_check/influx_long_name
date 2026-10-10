@@ -1,0 +1,6 @@
+connector "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" {
+  kind = "influx"
+  node = "cloud"
+  address = "http://influx:8086"
+  select = "edge.*"
+}

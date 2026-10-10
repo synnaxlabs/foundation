@@ -1,0 +1,10 @@
+connector "c" {
+  kind = "influx"
+  node = "cloud"
+  address = "http://influx:8086"
+  select = "edge.*"
+}
+channel "C.Status.State" {
+  data_type = "u8"
+  index = "c.status.time"
+}
