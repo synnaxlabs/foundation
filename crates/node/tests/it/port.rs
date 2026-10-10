@@ -36,6 +36,14 @@ fn the_port_binds_at_once_when_the_lock_is_free() {
     });
     let listen = free();
     let node = start_node(&rig, &shards, &threads, &io, listen);
+    // A dial times out after 30 s, and a node on a loaded host can take longer to
+    // serve.
+    let (serves, serving) = mpsc::channel();
+    node.spawn(move |_| {
+        serves.send(()).unwrap();
+        async {}
+    });
+    wait(&serving);
     let (opened, open) = mpsc::channel();
     let (closed, close) = mpsc::channel();
     let peer = start(&shards, "peer", move |tasks| async move {
