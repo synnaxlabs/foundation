@@ -819,13 +819,17 @@ fn the_scan_refuses_a_cfg_value_that_it_cannot_build() {
     }
 }
 
-/// The scan finds a cfg of the crate under an `allow(unexpected_cfgs)` of the crate or
-/// of an item.
+/// The scan finds a cfg of the crate under an `allow` or `expect` of `unexpected_cfgs`,
+/// of the crate or of an item.
 #[test]
 fn the_scan_finds_a_cfg_that_an_allow_hides() {
     for (case, lib) in [
         ("crate", "#![allow(unexpected_cfgs)]\nmod m;\n"),
         ("item", "#[allow(unexpected_cfgs)]\nmod m;\n"),
+        (
+            "expect",
+            "#![expect(unexpected_cfgs, reason = \"r\")]\nmod m;\n",
+        ),
     ] {
         let root = create_tree(
             case,
