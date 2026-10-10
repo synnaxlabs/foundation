@@ -171,6 +171,7 @@ impl Manager {
             self.pass(cx);
             let poll = loop {
                 let poll = run(cx);
+                state.resume(cx);
                 let moved = state.move_on_again(cx);
                 if poll.is_ready() {
                     // After an accept, the listener holds no waker for the task.
@@ -269,7 +270,8 @@ struct State {
     again: RefCell<Vec<usize>>,
     /// The listen connection that accepted a stream, which is paused until the next
     /// run of the loop, so that run gives the `CLOSING` of a channel that the accept
-    /// purged.
+    /// purged. It holds a connection exactly while that connection is paused or no
+    /// longer listens.
     accepted: Cell<Option<usize>>,
     /// The calls of `move_on`, for tests of the work of a drive.
     #[cfg(feature = "sim")]
@@ -308,21 +310,21 @@ impl State {
         }
     }
 
-    /// Resumes and moves on the connection in `accepted`, then moves on each
-    /// connection in `again` and each that those steps add, until none is left, and
-    /// gives whether it moved one of `again`. An accept or a failed accept adds one to
-    /// `again`.
-    fn move_on_again(&self, cx: &mut Context<'_>) -> bool {
-        if let Some(id) = self.accepted.take() {
-            if let Some(Connection {
-                stream: Stream::Listening { paused, .. },
-                ..
-            }) = self.table.borrow_mut().get_mut(&id)
-            {
-                *paused = false;
-            }
-            self.move_on(id, cx);
+    /// Resumes and moves on the connection in `accepted`, if any.
+    fn resume(&self, cx: &mut Context<'_>) {
+        let Some(id) = self.accepted.take() else {
+            return;
+        };
+        if let Some(connection) = self.table.borrow_mut().get_mut(&id) {
+            connection.resume();
         }
+        self.move_on(id, cx);
+    }
+
+    /// Moves on each connection in `again` and each that those steps add, until none
+    /// is left, and gives whether it moved one. An accept or a failed accept adds one
+    /// to `again`.
+    fn move_on_again(&self, cx: &mut Context<'_>) -> bool {
         let mut moved = false;
         loop {
             let Some(id) = self.again.borrow_mut().pop() else {
@@ -676,6 +678,14 @@ impl fmt::Display for Failure {
 }
 
 impl Connection {
+    /// Lets a paused listen stream accept again. A stream that the loop closed while
+    /// it was paused has nothing to resume.
+    fn resume(&mut self) {
+        if let Stream::Listening { paused, .. } = &mut self.stream {
+            *paused = false;
+        }
+    }
+
     /// Moves the connection on, or gives why it fails.
     fn step(&mut self, cx: &mut Context<'_>) -> Result<Step, Failure> {
         match &mut self.stream {
