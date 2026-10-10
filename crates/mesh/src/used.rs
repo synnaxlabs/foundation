@@ -10,6 +10,8 @@ use types::name::Name;
 
 use spec::Pointer;
 
+pub use crate::driver::used::Watch;
+
 /// The spec that a node uses. A committed pointer takes effect on a node only when its
 /// store holds each chunk and the spec has no problem at its build.
 #[derive(Clone, Debug, PartialEq, Eq)]

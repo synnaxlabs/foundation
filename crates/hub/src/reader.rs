@@ -13,10 +13,12 @@ use ::home::reader::Next;
 use types::channel;
 use types::frame::key_set::KeySet;
 use types::frame::{Frame, Mask, View};
-use types::name::Name;
+use types::name::{Name, Selector};
 use types::sample::Type;
+use types::time::Span;
 
-use crate::{Away, Removal, State};
+use crate::channel::Channel;
+use crate::{Away, End, Ending, State};
 use remote::Remote;
 
 /// The credit a complete reader has past the frames it gave back: a fixed window until
@@ -40,6 +42,30 @@ pub enum Mode {
     Latest,
 }
 
+/// What a reader session reads, and how.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Config {
+    /// The channels it reads: each channel the hub knows at the open whose name the
+    /// selector matches.
+    pub select: Selector,
+    /// Which frames it gets.
+    pub mode: Mode,
+    /// The subject that opens the reader. A named reader belongs to it: an open by the
+    /// same subject and name on the same index takes over the session, and an open by
+    /// another subject opens another reader.
+    pub subject: Name,
+    /// The reader's name, or `None`. A named reader has at most one session on each
+    /// index: an open takes over the session of the same subject and name on its index.
+    /// A named complete reader that opens while the home holds its position resumes at
+    /// the position where its last complete session opened, and ends with
+    /// [`Ended::Behind`] when a frame after that position was released, or dropped
+    /// because no complete session on its index was open.
+    pub name: Option<Name>,
+    /// How long the home holds a named complete reader's position after its session
+    /// closes. Zero or more. It must be zero when the reader is unnamed or latest.
+    pub hold: Span,
+}
+
 /// One frame that a reader got, through the reader's mask (M2): only the reader's
 /// channels and their index.
 #[derive(Debug)]
@@ -55,10 +81,13 @@ pub struct Received<'a> {
 pub enum Ended {
     /// The shard's buffer failed.
     Buffer(env::files::Error),
-    /// A complete reader missed a frame ([`Mode::Complete`]).
+    /// A complete reader missed a frame: [`Mode::Complete`] and [`Config::name`] state
+    /// when.
     Behind,
     /// A channel of the reader was removed from the definitions.
     Removed(channel::Key),
+    /// A later open of the same subject and name took over the session.
+    Replaced,
     /// The stream to the home of another node broke.
     Stream(transport::Error),
     /// The home of another node stopped or reset the stream with this HUB WIRE code.
@@ -91,6 +120,9 @@ impl fmt::Display for Ended {
             Self::Removed(key) => {
                 write!(f, "channel {key} was removed: open a new reader")
             }
+            Self::Replaced => f.write_str(
+                "a later open of the same named reader took over the session",
+            ),
             Self::Stream(error) => write!(f, "the stream to the home broke: {error}"),
             Self::Refused(refusal) => write!(
                 f,
@@ -119,12 +151,24 @@ impl std::error::Error for Ended {}
 /// Why a reader session did not open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// No channel has this name.
-    Unknown(Name),
-    /// The channels are on more than one index.
-    ManyIndexes,
-    /// The reader names no channel.
+    /// The selector matches no channel.
     Empty,
+    /// The channels are on more than one index: `first` is the least matched name,
+    /// and `other` the least matched name on another index.
+    ManyIndexes {
+        /// The least matched name.
+        first: Name,
+        /// The least matched name on another index than `first`.
+        other: Name,
+    },
+    /// The reader is named and the node has no mesh time yet. Open it again later.
+    Unsynced,
+    /// The reader is named, and the home of its index is `home`, another node. A named
+    /// reader opens only at the home of its index.
+    Remote {
+        /// The home.
+        home: types::node::Key,
+    },
     /// The mesh stopped, so the home of the index is not known.
     Mesh(mesh::Stopped),
     /// The session or the stream to the home of another node failed.
@@ -142,11 +186,20 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Unknown(name) => write!(f, "no channel is named {name}"),
-            Self::ManyIndexes => f.write_str(
-                "the channels are on more than one index: open a reader per index",
+            Self::Empty => f.write_str("the selector matches no channel"),
+            Self::ManyIndexes { first, other } => write!(
+                f,
+                "the channels {first} and {other} are on different indexes: open a \
+                 reader per index"
             ),
-            Self::Empty => f.write_str("a reader names at least one channel"),
+            Self::Unsynced => f.write_str(
+                "the node has no mesh time yet: open the named reader again later",
+            ),
+            Self::Remote { home } => write!(
+                f,
+                "the home of the index of the reader is node {home}, and a named reader \
+                 opens only at this node"
+            ),
             Self::Mesh(stopped) => write!(f, "the mesh stopped: {stopped}"),
             Self::Transport(error) => {
                 write!(f, "the transport to the home failed: {error}")
@@ -167,6 +220,12 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl From<::home::reader::Unsynced> for Error {
+    fn from(::home::reader::Unsynced: ::home::reader::Unsynced) -> Self {
+        Self::Unsynced
+    }
+}
 
 /// A reader session through the reader's channels. Dropping it closes the session;
 /// frames that wait do not go out.
@@ -195,6 +254,52 @@ struct Local {
 }
 
 impl Local {
+    /// Opens a session on `channels` at this node, the home of their index.
+    fn open(
+        state: &Rc<RefCell<State>>,
+        channels: Channels,
+        mode: Mode,
+        named: Option<::home::reader::named::Key>,
+        hold: Span,
+    ) -> Result<Self, Error> {
+        let charge = ::home::reader::complete::Charge::Whole;
+        let (session, credit) = match (mode, named) {
+            (Mode::Complete, None) => {
+                let (session, credit) =
+                    Session::complete(state, channels, WINDOW, charge);
+                (session, Some(credit))
+            }
+            (Mode::Complete, Some(named)) => {
+                let key = {
+                    let mut state = state.borrow_mut();
+                    let opened = state.home.open_named_complete(
+                        channels.index,
+                        named,
+                        hold,
+                        WINDOW,
+                        charge,
+                    )?;
+                    state.take_over(opened)
+                };
+                let (session, credit) = Session::with_credit(state, key, channels);
+                (session, Some(credit))
+            }
+            (Mode::Latest, None) => (Session::latest(state, channels), None),
+            (Mode::Latest, Some(named)) => {
+                let key = {
+                    let mut state = state.borrow_mut();
+                    let opened = state.home.open_named_latest(channels.index, named)?;
+                    state.take_over(opened)
+                };
+                (Session::new(state, key, channels), None)
+            }
+        };
+        Ok(Self {
+            session,
+            credit: credit.map(|credit| (credit, 0)),
+        })
+    }
+
     /// Raises the grant by the charge of `frame`, which the reader gave back.
     fn give_back(&mut self, frame: &Frame) {
         if let Some((credit, taken_bytes)) = &mut self.credit {
@@ -205,25 +310,47 @@ impl Local {
 }
 
 impl Reader {
-    /// Opens a reader on the index of `channels`.
+    /// Opens a reader on the channels that `config.select` matches.
+    ///
+    /// # Panics
+    ///
+    /// When `config.hold` is negative, or not zero for an unnamed or latest reader.
     pub(crate) async fn open(
         state: &Rc<RefCell<State>>,
-        channels: &[Name],
-        mode: Mode,
+        config: Config,
     ) -> Result<Self, Error> {
+        let Config {
+            select,
+            mode,
+            subject,
+            name,
+            hold,
+        } = config;
+        assert!(
+            hold >= Span::ZERO,
+            "the hold {hold} of a reader is negative"
+        );
+        assert!(
+            hold == Span::ZERO || (name.is_some() && mode == Mode::Complete),
+            "a hold of {hold} for a reader that is unnamed or latest"
+        );
+        let named = name.map(|name| ::home::reader::named::Key { subject, name });
         let (keys, index) = loop {
-            let (_, index) = resolve(&state.borrow(), channels)?;
+            let (_, index) = resolve(&state.borrow(), &select)?;
             let away = match crate::homes(state, &[index]).await {
                 Ok(()) => None,
                 Err(Away::Remote(home)) => Some(home),
                 Err(Away::Mesh(stopped)) => return Err(Error::Mesh(stopped)),
             };
             // A call of `set_definitions` while the open waits can change a channel.
-            let (keys, again) = resolve(&state.borrow(), channels)?;
+            let (keys, again) = resolve(&state.borrow(), &select)?;
             if again != index {
                 continue;
             }
             if let Some(home) = away {
+                if named.is_some() {
+                    return Err(Error::Remote { home });
+                }
                 let remote = Remote::open(state, home, keys, index, mode).await?;
                 return Ok(Self {
                     source: Source::Remote(Box::new(remote)),
@@ -237,23 +364,14 @@ impl Reader {
         keys.push(index);
         let slots = state.borrow_mut().slots(index, &keys);
         let slot = slots[slots.len() - 1];
-        let keys = keys.into();
-        let (session, credit) = match mode {
-            Mode::Complete => {
-                let (session, credit) = Session::complete(
-                    state,
-                    keys,
-                    slots,
-                    slot,
-                    WINDOW,
-                    ::home::reader::complete::Charge::Whole,
-                );
-                (session, Some((credit, 0)))
-            }
-            Mode::Latest => (Session::latest(state, keys, slots, slot), None),
+        let channels = Channels {
+            keys: keys.into(),
+            slots,
+            index: slot,
         };
+        let local = Local::open(state, channels, mode, named, hold)?;
         Ok(Self {
-            source: Source::Local(Local { session, credit }),
+            source: Source::Local(local),
             frame: None,
         })
     }
@@ -265,7 +383,8 @@ impl Reader {
     ///
     /// # Errors
     ///
-    /// [`Ended::Removed`] once a channel of the reader is removed, before any frame
+    /// [`Ended::Removed`] once a channel of the reader is removed, or
+    /// [`Ended::Replaced`] once a later open takes over the session, before any frame
     /// that waits. Else [`Ended`] once no frame waits and the session can give no
     /// more. Either on this and every later call: [`Ended::Behind`] before
     /// [`Ended::Buffer`].
@@ -303,6 +422,17 @@ pub(crate) enum Stop {
     Behind,
     /// A channel of the session was removed from the definitions.
     Removed(channel::Key),
+    /// A later open of the same named reader took over the session.
+    Replaced,
+}
+
+impl From<End> for Stop {
+    fn from(end: End) -> Self {
+        match end {
+            End::Removed(key) => Self::Removed(key),
+            End::Replaced => Self::Replaced,
+        }
+    }
 }
 
 impl From<Stop> for Ended {
@@ -311,28 +441,37 @@ impl From<Stop> for Ended {
             Stop::Buffer(error) => Self::Buffer(error),
             Stop::Behind => Self::Behind,
             Stop::Removed(key) => Self::Removed(key),
+            Stop::Replaced => Self::Replaced,
         }
     }
 }
 
-/// The key and sample type of each of `channels`, and their one index.
+/// The key and sample type of each channel that `select` matches, in name order, and
+/// their one index.
 fn resolve(
     state: &State,
-    channels: &[Name],
+    select: &Selector,
 ) -> Result<(Vec<(channel::Key, Type)>, channel::Key), Error> {
-    let mut keys = Vec::with_capacity(channels.len());
-    let mut index = None;
-    for name in channels {
-        let channel = state
-            .channels
-            .named(name)
-            .ok_or_else(|| Error::Unknown(name.clone()))?;
-        if *index.get_or_insert(channel.index()) != channel.index() {
-            return Err(Error::ManyIndexes);
-        }
-        keys.push((channel.key(), channel.sample()));
+    let mut matched: Vec<(&Name, &Channel)> = state
+        .channels
+        .iter()
+        .filter(|&(name, _)| select.matches(name).is_some())
+        .collect();
+    matched.sort_unstable_by_key(|&(name, _)| name);
+    let &(first, channel) = matched.first().ok_or(Error::Empty)?;
+    let index = channel.index();
+    if let Some(&(other, _)) = matched.iter().find(|(_, other)| other.index() != index)
+    {
+        return Err(Error::ManyIndexes {
+            first: first.clone(),
+            other: other.clone(),
+        });
     }
-    Ok((keys, index.ok_or(Error::Empty)?))
+    let keys = matched
+        .iter()
+        .map(|(_, channel)| (channel.key(), channel.sample()))
+        .collect();
+    Ok((keys, index))
 }
 
 /// A session at the shard's home, through a mask of the reader's channels: the frames
@@ -342,8 +481,8 @@ fn resolve(
 pub(crate) struct Session {
     state: Rc<RefCell<State>>,
     key: ::home::reader::Key,
-    /// The channel whose removal ended the session.
-    removed: Removal,
+    /// Why the hub ended the session.
+    ending: Ending,
     /// The slots of the reader's channels.
     slots: Box<[channel::Slot]>,
     /// The key set of the last frame, and the mask of the reader's channels in it.
@@ -351,54 +490,64 @@ pub(crate) struct Session {
     streak: Streak,
 }
 
+/// The channels of a [`Session`]: the key and slot of each, and the slot of their
+/// index.
+#[derive(Debug)]
+pub(crate) struct Channels {
+    pub(crate) keys: Box<[channel::Key]>,
+    pub(crate) slots: Box<[channel::Slot]>,
+    pub(crate) index: channel::Slot,
+}
+
 impl Session {
-    /// Opens a complete session on `keys` through their `slots` on the index of
-    /// `index`, with a grant of `limit_bytes` that each frame spends as `charge` says.
-    /// Returns the session and the credit that raises its grant.
+    /// Opens a complete session on `channels`, with a grant of `limit_bytes` that each
+    /// frame spends as `charge` says. Returns the session and the credit that raises
+    /// its grant.
     pub(crate) fn complete(
         state: &Rc<RefCell<State>>,
-        keys: Box<[channel::Key]>,
-        slots: Box<[channel::Slot]>,
-        index: channel::Slot,
+        channels: Channels,
         limit_bytes: u64,
         charge: ::home::reader::complete::Charge,
     ) -> (Self, Credit) {
-        let key = state
-            .borrow_mut()
-            .home
-            .open_complete(index, limit_bytes, charge);
-        let session = Self::new(state, key.into(), keys, slots);
+        let key =
+            state
+                .borrow_mut()
+                .home
+                .open_complete(channels.index, limit_bytes, charge);
+        Self::with_credit(state, key, channels)
+    }
+
+    /// Opens a latest session on `channels`.
+    pub(crate) fn latest(state: &Rc<RefCell<State>>, channels: Channels) -> Self {
+        let key = state.borrow_mut().home.open_latest(channels.index);
+        Self::new(state, key, channels)
+    }
+
+    fn with_credit(
+        state: &Rc<RefCell<State>>,
+        key: ::home::reader::complete::Key,
+        channels: Channels,
+    ) -> (Self, Credit) {
+        let session = Self::new(state, key.into(), channels);
         let credit = Credit {
             state: Rc::clone(state),
             key,
-            removed: session.removed.clone(),
+            ending: session.ending.clone(),
         };
         (session, credit)
-    }
-
-    /// Opens a latest session on `keys` through their `slots` on the index of `index`.
-    pub(crate) fn latest(
-        state: &Rc<RefCell<State>>,
-        keys: Box<[channel::Key]>,
-        slots: Box<[channel::Slot]>,
-        index: channel::Slot,
-    ) -> Self {
-        let key = state.borrow_mut().home.open_latest(index);
-        Self::new(state, key, keys, slots)
     }
 
     fn new(
         state: &Rc<RefCell<State>>,
         key: ::home::reader::Key,
-        keys: Box<[channel::Key]>,
-        slots: Box<[channel::Slot]>,
+        channels: Channels,
     ) -> Self {
-        let removed = state.borrow_mut().readers.add(key, keys);
+        let ending = state.borrow_mut().readers.add(key, channels.keys);
         Self {
             state: Rc::clone(state),
             key,
-            removed,
-            slots,
+            ending,
+            slots: channels.slots,
             mask: None,
             streak: Streak::default(),
         }
@@ -409,9 +558,10 @@ impl Session {
     ///
     /// # Errors
     ///
-    /// [`Stop::Removed`] once a channel of the session is removed, before any frame
-    /// that waits. Else [`Stop`] once no frame waits and the session can give no more.
-    /// Either on this and every later call: [`Stop::Behind`] before [`Stop::Buffer`].
+    /// [`Stop::Removed`] once a channel of the session is removed, or
+    /// [`Stop::Replaced`] once a takeover ends it, before any frame that waits. Else
+    /// [`Stop`] once no frame waits and the session can give no more. Either on this
+    /// and every later call: [`Stop::Behind`] before [`Stop::Buffer`].
     ///
     /// # Panics
     ///
@@ -419,8 +569,8 @@ impl Session {
     /// this hub made.
     pub(crate) async fn take(&mut self) -> Result<(Frame, &Arc<KeySet>, &Mask), Stop> {
         let frame = poll_fn(|cx| {
-            if let Some(key) = self.removed.get() {
-                return Poll::Ready(Err(Stop::Removed(key)));
+            if let Some(end) = self.ending.get() {
+                return Poll::Ready(Err(end.into()));
             }
             ready!(self.streak.poll(cx));
             let polled = poll_take(&mut self.state.borrow_mut(), self.key, cx);
@@ -490,14 +640,14 @@ impl Streak {
 pub(crate) struct Credit {
     state: Rc<RefCell<State>>,
     key: ::home::reader::complete::Key,
-    removed: Removal,
+    ending: Ending,
 }
 
 impl Credit {
     /// Raises the grant of the session to `limit_bytes` since the open. Changes
-    /// nothing once the session ended on a removed channel.
+    /// nothing once the hub ended the session.
     pub(crate) fn grant(&self, limit_bytes: u64) {
-        if self.removed.get().is_none() {
+        if self.ending.get().is_none() {
             self.state.borrow_mut().home.grant(self.key, limit_bytes);
         }
     }

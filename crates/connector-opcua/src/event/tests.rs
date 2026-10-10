@@ -665,6 +665,35 @@ fn a_change_to_an_interval_out_of_range_is_refused_and_keeps_the_timer() {
 }
 
 #[test]
+fn a_delayed_callback_is_due_off_the_100_ns_grid() {
+    let mut f = Fixture::new();
+    f.start();
+    f.advance(Span::from_nanos(50));
+    assert!(!f.events.due());
+    let mut first = f.delayed(record, number(1));
+    f.queue(&mut first);
+    assert!(f.events.due());
+    f.run();
+    assert_eq!(f.ran(), [1]);
+    assert!(!f.events.due());
+}
+
+#[test]
+fn a_timer_is_due_from_its_time() {
+    let mut f = Fixture::new();
+    f.start();
+    f.add(1, 1.0, ffi::ONCE);
+    f.advance(Span::from_nanos(999_999));
+    assert!(!f.events.due());
+    f.advance(Span::from_nanos(1));
+    assert!(f.events.due());
+    f.advance(ms(1));
+    assert!(f.events.due(), "a timer stays due until a run");
+    f.run();
+    assert!(!f.events.due());
+}
+
+#[test]
 fn delayed_callbacks_run_in_order_after_the_due_timers() {
     let mut f = Fixture::new();
     f.start();

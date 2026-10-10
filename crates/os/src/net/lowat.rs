@@ -95,7 +95,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_pointer_width = "64")]
     fn refuses_a_bound_past_a_c_int() {
         let fd = socket(loopback()).unwrap();
         let bound = usize::try_from(c_int::MAX).unwrap() + 1;

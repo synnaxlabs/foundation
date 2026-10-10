@@ -19,6 +19,7 @@ const BAD_PLAN: Code = Code::new("ops.bad-plan");
 const BEHIND: Code = Code::new("ops.behind");
 const STALE_PLAN: Code = Code::new("ops.stale-plan");
 const APPLY: Code = Code::new("ops.apply");
+const STOPPED: Code = Code::new("ops.stopped");
 /// The fix of [`ARGUMENT`].
 const HELP: &str =
     "Match the arguments to `foundation --help` or `foundation <operation> --help`";
@@ -52,9 +53,22 @@ pub(crate) enum Error {
     Apply(mesh::Error),
     /// The node did not start, or stopped with an error.
     Start(Failure),
+    /// The group of the mesh stopped, so the node can neither plan nor apply.
+    Stopped(mesh::Stopped),
 }
 
 impl Error {
+    /// `Config` with the problem of each of `diagnostics`, whose spans are in the files
+    /// at `paths`, by source.
+    pub(crate) fn config(diagnostics: Vec<Diagnostic>, paths: &[PathBuf]) -> Self {
+        Self::Config(
+            diagnostics
+                .into_iter()
+                .map(|diagnostic| Problem::of(diagnostic, paths))
+                .collect(),
+        )
+    }
+
     pub(crate) fn status(&self) -> u8 {
         match self {
             Self::Argument { .. }
@@ -66,7 +80,8 @@ impl Error {
             | Self::Behind(_)
             | Self::Stale { .. }
             | Self::Apply(_)
-            | Self::Start(_) => 1,
+            | Self::Start(_)
+            | Self::Stopped(_) => 1,
         }
     }
 
@@ -101,6 +116,11 @@ impl Error {
             Self::Apply(_) => (
                 APPLY,
                 "Fix the cause in the message, then plan and apply again".to_owned(),
+            ),
+            Self::Stopped(_) => (
+                STOPPED,
+                "Fix the cause in the message, then start the node and plan again"
+                    .to_owned(),
             ),
         };
         Cow::Owned(vec![Problem {
@@ -286,6 +306,7 @@ impl fmt::Display for Error {
             ),
             Self::Apply(error) => error.fmt(f),
             Self::Start(failure) => f.write_str(&failure.message),
+            Self::Stopped(stopped) => stopped.fmt(f),
         }
     }
 }

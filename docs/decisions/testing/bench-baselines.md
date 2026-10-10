@@ -33,9 +33,8 @@
   `RUSTFLAGS="-C target-cpu=x86-64-v2 -C llvm-args=-align-all-functions=6"`, and its
   result names these flags beside the machine. The two builds of one comparison, also in
   the daily run against its fixed commit, use the same flags. An aligned result over 5%
-  still needs the P1 judgment. `scripts/bench-host.sh` passes these flags after the item
-  of #1139
-  (https://github.com/synnaxlabs/foundation/issues/1139#issuecomment-6074402988). The
+  still needs the P1 judgment. `scripts/bench-host.sh` passes the flags (item of #1139,
+  https://github.com/synnaxlabs/foundation/issues/1139#issuecomment-6074402988). The
   two-host carrier bench builds as `bench/carrier/run.sh` does. A carrier result over
   5% that the P1 judgment does not find in the code of the PR is the trigger for a
   change of the script. Decided by `laptop.director`, 2026-10-09T02:44:36Z:

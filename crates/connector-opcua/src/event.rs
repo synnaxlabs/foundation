@@ -50,15 +50,28 @@ impl Loop {
         unsafe { self.raw.as_ref() }
     }
 
-    /// Gives the due time of the next timer, now when a delayed callback waits, or
-    /// `None` when nothing waits or the next timer is due after the clock ends. A due
-    /// time before the clock's epoch comes as the epoch: a once timer may have a date
-    /// that has passed.
+    /// Gives the due time of the next timer, now rounded down to 100 ns when a delayed
+    /// callback waits, or `None` when nothing waits or the next timer is due after the
+    /// clock ends. A due time before the clock's epoch comes as the epoch: a once timer
+    /// may have a date that has passed.
     pub(crate) fn next(&self) -> Option<Monotonic> {
         // SAFETY: the member takes its own loop.
         let ticks = unsafe { (self.members().next_timer)(self.raw()) };
         // Also `None` for the `i64::MAX` of an empty loop.
         ticks.max(0).unsigned_abs().checked_mul(100).map(Monotonic)
+    }
+
+    /// Gives whether a timer or a delayed callback is due now.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "the stop of a server of #435 calls it")
+    )]
+    pub(crate) fn due(&self) -> bool {
+        // SAFETY: the member takes its own loop.
+        let next = unsafe { (self.members().next_timer)(self.raw()) };
+        // SAFETY: the `Clock` at `clock` lives until `drop`. The loop gives the time
+        // of a delayed callback in the same ticks.
+        next <= unsafe { now(self.clock.as_ptr().cast()) }
     }
 }
 

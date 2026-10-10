@@ -24,8 +24,8 @@ use wire::hub::{
     BUSY, FAILED, FromReader, Head, Home, Mode, NOT_HOME, UNKNOWN, ends, keys,
 };
 
-use crate::reader::{Credit, Session, Stop};
-use crate::{Away, Removal, State};
+use crate::reader::{Channels, Credit, Session, Stop};
+use crate::{Away, Ending, State};
 
 pub use client::{Reply, Request};
 
@@ -301,6 +301,9 @@ async fn serve(
             Event::Frame(Err(Stop::Removed(key))) => {
                 return Err(Error::Removed(key));
             }
+            Event::Frame(Err(Stop::Replaced)) => {
+                unreachable!("invariant: a served session has no name to take over")
+            }
         }
     }
 }
@@ -380,21 +383,19 @@ async fn open(
     let keys = opening.into_keys();
     let slots = state.borrow_mut().slots(keys[at], &keys);
     let index = slots[at];
-    let keys: Box<[channel::Key]> = keys.into();
+    let channels = Channels {
+        keys: keys.into(),
+        slots: slots.clone(),
+        index,
+    };
     let (session, credit) = match open.mode {
         Mode::Complete { limit_bytes } => {
             let charge = ::home::reader::complete::Charge::Places(slots.clone());
-            let (session, credit) = Session::complete(
-                state,
-                keys,
-                slots.clone(),
-                index,
-                limit_bytes,
-                charge,
-            );
+            let (session, credit) =
+                Session::complete(state, channels, limit_bytes, charge);
             (session, Some(credit))
         }
-        Mode::Latest => (Session::latest(state, keys, slots.clone(), index), None),
+        Mode::Latest => (Session::latest(state, channels), None),
     };
     if let Some(credit) = &credit {
         credit.grant(granted);
@@ -411,7 +412,7 @@ async fn open(
 struct Opening<'s> {
     state: &'s Rc<RefCell<State>>,
     key: u64,
-    removal: Removal,
+    ending: Ending,
     /// The index of the keys checked, which the first key sets.
     index: Option<channel::Key>,
     /// The position of the index in the keys checked.
@@ -423,12 +424,12 @@ impl<'s> Opening<'s> {
         let mut borrowed = state.borrow_mut();
         let key = borrowed.opened;
         borrowed.opened += 1;
-        let removal = borrowed.opens.add(key, Box::default());
+        let ending = borrowed.opens.add(key, Box::default());
         drop(borrowed);
         Self {
             state,
             key,
-            removal,
+            ending,
             index: None,
             at: None,
         }
@@ -437,7 +438,7 @@ impl<'s> Opening<'s> {
     /// Fails with the first channel of the open that a call removed. Else sets the
     /// waker that such a call wakes.
     fn watch(&self, cx: &Context<'_>) -> Result<(), Error> {
-        if let Some(key) = self.removal.get() {
+        if let Some(key) = self.ending.removed() {
             return Err(Error::Removed(key));
         }
         let mut state = self.state.borrow_mut();
