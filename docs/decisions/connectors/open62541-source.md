@@ -53,25 +53,27 @@
   reference is an undefined symbol that a relocation names, and it is outside the copy
   when no object exports it: approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093780083,
-  2026-10-10 04:30 UTC). The check keys each reference in a function that neither
-  `SYMBOLS` nor `FILE_SYMBOLS` admits, in any file, by (file, function, symbol, access),
-  read from `objdump -dr` as the clock check reads a call. The function is the whole
-  label of the function symbol, such as `parse.0` for a nested function, and the access
-  is a call or an address. So a listed symbol in a new function of a file fails, and so
-  does the address of a listed symbol that its function only calls. `FUNCTION_SYMBOLS`
-  lists these keys, the clock calls among them. A reference from outside a function
-  fails when neither `SYMBOLS` nor `FILE_SYMBOLS` admits it, as the address of a clock
-  does. Decided by `laptop.architect`
+  2026-10-10 04:30 UTC). When neither `SYMBOLS` nor `FILE_SYMBOLS` admits a reference in
+  a function, in any file, the check keys it by (file, function, symbol, access), read
+  from `objdump -dr` as the clock check reads a call. The function is the whole label of
+  the function symbol, such as `parse.0` for a nested function, and the access is a call
+  or an address. So a listed symbol in a new function of a file fails, and so does the
+  address of a listed symbol that its function only calls. `FUNCTION_SYMBOLS` lists
+  these keys, the clock calls among them. A reference from outside a function fails when
+  neither `SYMBOLS` nor `FILE_SYMBOLS` admits it. Decided by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094336509,
   2026-10-10 05:46 UTC). The whole label and the access: approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6094746609,
   2026-10-10 06:40 UTC). It refines the (file, enclosing function) list of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367 by symbol
   and access. A file that a node runs may hold keys of symbols that are not clocks, each
-  with its reason. The text from "The check keys" to here: approval owed by
-  `laptop.architect` and `laptop.architect-2`. The check fails on every reference to a
-  clock function that is not a call, also one in code. A call relocation counts as a
-  call only in a section that `objdump -d` disassembles. Decided by `laptop.architect-2`
+  with its reason. The text from "When neither" to here: approved by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6098607545,
+  2026-10-10 14:36 UTC); approval owed by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6098600247). The
+  check fails on every reference to a clock function that is not a call, also one in
+  code. A call relocation counts as a call only in a section that `objdump -d`
+  disassembles. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715,
   2026-10-08 11:03 UTC). Supersedes the clock address rule of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572. The
