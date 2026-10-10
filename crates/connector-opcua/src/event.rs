@@ -50,10 +50,10 @@ impl Loop {
         unsafe { self.raw.as_ref() }
     }
 
-    /// Gives the due time of the next timer, now when a delayed callback waits, or
-    /// `None` when nothing waits or the next timer is due after the clock ends. A due
-    /// time before the clock's epoch comes as the epoch: a once timer may have a date
-    /// that has passed.
+    /// Gives the due time of the next timer, now rounded down to 100 ns when a delayed
+    /// callback waits, or `None` when nothing waits or the next timer is due after the
+    /// clock ends. A due time before the clock's epoch comes as the epoch: a once timer
+    /// may have a date that has passed.
     pub(crate) fn next(&self) -> Option<Monotonic> {
         // SAFETY: the member takes its own loop.
         let ticks = unsafe { (self.members().next_timer)(self.raw()) };
