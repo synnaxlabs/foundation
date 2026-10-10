@@ -680,6 +680,7 @@ mod tests {
         assert_eq!(errors(&out.statuses)[3], (Span::ZERO, "no reply"));
     }
 
+    /// The 512th `é` takes bytes 1023 and 1024, across the bound of 1024 bytes.
     #[test]
     fn cuts_a_long_error_text_at_a_char_boundary() {
         let out = supervise("script", vec![Step::Long], config(), Some(ms(5_000)));

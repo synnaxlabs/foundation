@@ -65,7 +65,9 @@
   the wait that is left, and a frame stamped after the hub's time (below) gives a wait
   that ends at the next run. Decided by the `connector` builder in the plan on #420
   (2026-10-10T03:22:36Z:
-  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074).
+  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074). The
+  cut and the join are approved by `laptop.architect-2` (2026-10-10T04:00:21Z:
+  https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6093545130).
 
   Each write is one frame with the last value of every status channel. Each start of a
   run writes the whole status. A change of `state`, `class`, `restarts`, `backoff`, or
