@@ -601,7 +601,8 @@ fn panics_on_an_ack_past_each_position_it_gave_but_not_past_each_frame_it_receiv
 }
 
 #[test]
-fn resumes_at_the_ack_of_a_position_of_another_reader_at_or_below_its_own() {
+fn resumes_at_the_ack_of_a_position_of_another_reader_at_or_below_the_highest_it_gave()
+{
     run(34, |test| async move {
         let open = named("a", "r", Mode::Complete, Span::SECOND);
         let mut reader = test.hub.reader(open).await.expect("opens");
