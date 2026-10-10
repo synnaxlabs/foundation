@@ -985,7 +985,7 @@ fn decoded(got: &Got, types: &[Type]) -> Vec<Vec<i64>> {
         .zip(types)
         .map(|(&(_, end), &data_type)| {
             let end = usize::try_from(end).expect("fits");
-            let mut out = vec![0; count * 8];
+            let mut out = Vec::new();
             codec::decode(data_type, count, &got.body[start..end], &mut out)
                 .expect("decodes");
             start = end.next_multiple_of(8);
@@ -1124,7 +1124,9 @@ fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
     let text: Vec<_> = (0..2001_u32)
         .map(|i| b' ' + u8::try_from((i * 37 + i * i) % 95).expect("fits"))
         .collect();
-    let raw = [&2001_u32.to_le_bytes()[..], &text].concat();
+    let form = codec::Variable::of(Type::String).expect("a variable type");
+    let mut raw = vec![0; form.len(&[&text]).expect("a short text")];
+    form.write(&[&text], &mut raw);
     let written = raw.clone();
     let home = |test: Test, link: Link, incoming| async move {
         test.define([(6, "text", DataType::Sample(Type::String), 1)]);
@@ -1162,14 +1164,14 @@ fn sends_the_zeros_after_a_series_cut_at_the_message_limit() {
                 .iter()
                 .all(|&b| b == 0)
         );
-        let mut text = vec![0; raw.len()];
+        let mut text = Vec::new();
         codec::decode(Type::String, 1, &got.body[..end], &mut text).expect("decodes");
         assert_eq!(text, raw);
         let value =
             end.next_multiple_of(8)..usize::try_from(got.ends[1].1).expect("fits");
-        let mut out = [0; 8];
+        let mut out = Vec::new();
         codec::decode(I64, 1, &got.body[value], &mut out).expect("decodes");
-        assert_eq!(i64::from_le_bytes(out), 30);
+        assert_eq!(out, 30_i64.to_le_bytes());
         peer.sender.finish().expect("finishes");
         assert_eq!(peer.recv().await, Ok(None));
     });

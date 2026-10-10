@@ -251,7 +251,7 @@ async fn last_state(reader: &mut hub::reader::Reader) -> Option<u8> {
     let (_, bytes) = (received.view.iter())
         .find(|&(present, _)| present == at)
         .expect("the view holds `state`");
-    let mut samples = vec![0; count];
+    let mut samples = Vec::new();
     codec::decode(entries[at].data_type, count, bytes, &mut samples).expect("decodes");
     samples.last().copied()
 }

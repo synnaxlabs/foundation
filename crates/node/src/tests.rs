@@ -1997,7 +1997,7 @@ mod hub {
             .iter()
             .find(|&(present, _)| present == entry)
             .expect("the view holds the series");
-        let mut out = vec![0; count * 8];
+        let mut out = Vec::new();
         codec::decode(entries[entry].data_type, count, bytes, &mut out)
             .expect("decodes");
         let (chunks, _) = out.as_chunks::<8>();
