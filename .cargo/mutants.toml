@@ -136,4 +136,8 @@ exclude_re = [
   'crates/hub/src/reader/remote\.rs:.*replace > with >= in Sessions::add',
   # Equal keys get no rule (ONE SESSION PER PEER, rule 4), so no test can pin `<`.
   'crates/transport/src/table\.rs:.*replace < with <= in Table::arrive',
+  # A connector on another node runs here only in a mesh of two nodes, which no test of
+  # `Node` starts yet (#2272, whose test removes this entry). The test of `Runs`
+  # `a_connector_on_another_node_starts_no_run` kills it.
+  'crates/node/src/connectors\.rs:.*\*connector\.node\(\) == self\.node with true',
 ]
