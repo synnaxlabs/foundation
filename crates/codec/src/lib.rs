@@ -175,7 +175,7 @@ fn validate_shape(data_type: Type, count: usize, bytes: &[u8]) -> Result<usize, 
 /// Decodes `bytes`, an encoded series of `count` samples of `data_type`, into `out`,
 /// in place of what it held. It checks what [`validate`] checks, and it writes the
 /// padding of a variable series as zeros. It allocates only when `out` has less
-/// capacity than the raw length.
+/// capacity than the raw length, and it then reads `bytes` twice, so reuse `out`.
 ///
 /// # Errors
 ///
@@ -213,6 +213,7 @@ fn decode_shape(
         }
         Shape::Variable { element, max, utf8 } => {
             let front = element.front(count)?;
+            // A longer `out` keeps its length, so a reused `out` gets no zero fill.
             let held = out.len().max(front.start);
             resize(out, held, data_type, count, bytes)?;
             let (ends_out, padding) =
@@ -232,8 +233,8 @@ fn decode_shape(
 }
 
 /// Sets the length of `out` to `len`. Before `out` grows past its capacity, it checks
-/// `bytes` with [`validate`] and reserves their raw length, so that bytes that do not
-/// hold `count` samples allocate nothing.
+/// `bytes` with [`validate_shape`] and reserves their raw length, so that bytes that do
+/// not hold `count` samples allocate nothing.
 #[inline]
 fn resize(
     out: &mut Vec<u8>,
@@ -2764,7 +2765,8 @@ mod tests {
                 );
                 prop_assert_eq!(&decoded, &values);
                 let read: Vec<&[u8]> = form.samples(samples.len(), &decoded).collect();
-                prop_assert_eq!(read, samples.iter().map(Vec::as_slice).collect::<Vec<_>>());
+                let samples: Vec<&[u8]> = samples.iter().map(Vec::as_slice).collect();
+                prop_assert_eq!(read, samples);
             }
         }
     }

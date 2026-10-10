@@ -1,6 +1,7 @@
 //! Encoding, checking, and decoding a series, whole or one vector at a time, and
-//! writing and reading the raw form of a variable series, make no heap allocation. This binary has no test harness: the count covers each thread, and
-//! a harness allocates on its own thread at any time.
+//! writing and reading the raw form of a variable series, make no heap allocation.
+//! This binary has no test harness: the count covers each thread, and a harness
+//! allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
