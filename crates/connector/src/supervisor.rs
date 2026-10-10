@@ -2675,19 +2675,12 @@ mod tests {
     /// The texts of the `String` series of `key` in `received`.
     fn texts(received: &Received<'_>, key: u128) -> Vec<String> {
         let (data_type, count, bytes) = encoded(received, key);
-        let len = codec::validate(data_type, count, bytes).expect("valid");
-        let mut raw = vec![0; len];
+        let mut raw = Vec::new();
         codec::decode(data_type, count, bytes, &mut raw).expect("decodes");
-        let (ends, text) = raw.split_at(count * size_of::<u32>());
-        let mut start = 0;
-        ends.chunks(size_of::<u32>())
-            .map(|end| {
-                let end = u32::from_le_bytes(end.try_into().expect("four bytes"));
-                let end = usize::try_from(end).expect("an end");
-                let sample = std::str::from_utf8(&text[start..end]).expect("UTF-8");
-                start = end;
-                sample.to_owned()
-            })
+        let variable = codec::Variable::of(data_type).expect("a variable type");
+        variable
+            .samples(count, &raw)
+            .map(|sample| std::str::from_utf8(sample).expect("UTF-8").to_owned())
             .collect()
     }
 

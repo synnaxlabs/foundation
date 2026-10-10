@@ -15,6 +15,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{self, Poll, Wake, Waker};
 
+use codec::Variable;
 use env::clock::Clock;
 use types::authority::Authority;
 use types::frame::{self, Draft, Form, Label, Path};
@@ -50,7 +51,6 @@ const ERROR: usize = SUPERVISOR.len();
 
 /// The most bytes of the text of `error`.
 const ERROR_MAX: usize = 1024;
-
 /// The least time between two writes of a change of counts alone.
 const PERIOD: Span = Span::SECOND;
 
@@ -264,7 +264,7 @@ impl Writer {
         let mut series: Box<[_]> = entries
             .iter()
             .map(|&entry| {
-                // The length of `error` is set at each write.
+                // The length of `error` is set with its text.
                 let width = (entry != error).then(|| {
                     let width = set.entries()[entry].data_type.width();
                     width.expect("invariant: a status sample but `error` has one width")
@@ -274,9 +274,11 @@ impl Writer {
             .collect();
         series.sort_unstable();
         let error_series = series.partition_point(|&(entry, _)| entry < error);
+        let text = Variable::of(set.entries()[error].data_type)
+            .expect("invariant: `error` is a `String`");
         let group = set.entries()[entries[0]].group;
         let status = Status::new(counts);
-        let session = Session {
+        let mut session = Session {
             hub: session,
             entries,
             series,
@@ -288,11 +290,13 @@ impl Writer {
             restarts: 0,
             error: String::new(),
             error_series,
+            text,
             next: Stamp::default(),
             started: false,
             unapplied: false,
             closed: false,
         };
+        session.set_error(String::new());
         let writer = Self {
             session: RefCell::new(session),
             values: Rc::clone(&status.0),
@@ -324,7 +328,7 @@ impl Writer {
         let (class, error) = Class::with_text(end);
         self.set(|session| {
             session.class = class;
-            session.error = error;
+            session.set_error(error);
             session.state = State::Ending;
         })
         .await;
@@ -457,6 +461,8 @@ struct Session {
     error: String,
     /// The index in `series` of `error`, the one series whose length changes.
     error_series: usize,
+    /// The raw form of `error`.
+    text: Variable,
     /// The time of the next run, by the hub's clock, while `state` is 1.
     next: Stamp,
     /// Set at the first start, after which each start is a restart.
@@ -471,6 +477,14 @@ struct Session {
 }
 
 impl Session {
+    /// Sets the text of `error`, and the length of its series.
+    fn set_error(&mut self, error: String) {
+        let len = self.text.len(&[&error]);
+        self.series[self.error_series].1 =
+            len.expect("invariant: at most ERROR_MAX bytes");
+        self.error = error;
+    }
+
     /// Writes the last value of each status channel. A frame that the home refuses
     /// as `Backwards` is stamped after the stamp the refusal gives and written again,
     /// one time. A frame that the home does not apply, or for which the shard's pool
@@ -515,7 +529,6 @@ impl Session {
     /// When the draft or the home refuses the frame for a cause that only a defect
     /// gives, which includes a frame larger than the largest block of the pool.
     fn send(&mut self, values: &Values, stamp: Stamp) -> Result<(), Stamp> {
-        self.series[self.error_series].1 = size_of::<u32>() + self.error.len();
         let mut draft = match self.hub.draft(Form::Raw, &self.series) {
             Ok(draft) => draft,
             Err(frame::Error::Pool(error)) => {
@@ -595,10 +608,7 @@ impl Session {
                 continue;
             }
             if i == ERROR {
-                let (end, text) = bytes.split_at_mut(size_of::<u32>());
-                let len = u32::try_from(self.error.len()).expect("at most ERROR_MAX");
-                end.copy_from_slice(&len.to_le_bytes());
-                text.copy_from_slice(self.error.as_bytes());
+                self.text.write(&[&self.error], bytes);
                 continue;
             }
             let sample = samples.next().expect("invariant: a sample per channel");
