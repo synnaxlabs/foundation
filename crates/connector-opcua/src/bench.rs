@@ -694,8 +694,8 @@ mod tests {
         .expect("the run ends")
     }
 
-    /// At 3.3 ms, the answer to the activate of the session is in flight, so the
-    /// session activates after the close asks it to close.
+    /// At 3.3 ms, the request to activate the session waits for its answer, so the
+    /// close finds an open channel and a session that is not activated.
     #[test]
     fn a_scope_closes_after_a_deadline_in_the_handshake() {
         let link = sim::link::Config::default();

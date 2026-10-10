@@ -207,13 +207,15 @@ impl Manager {
     ///
     /// # Safety
     ///
-    /// `server` lives on the loop of the manager, and nothing uses it after the call.
+    /// `server` lives on the loop of the manager, and nothing uses it after the call
+    /// returns.
     ///
     /// # Panics
     ///
     /// If open62541 fails a run of the loop or refuses the delete, or if the server is
     /// not stopped when nothing is due: with no `UA_Server_run_shutdown` before the
-    /// call, or after a close that does not queue its `CLOSING`.
+    /// call, or after a close that does not queue its `CLOSING`. Each panic but the
+    /// refused delete comes before the delete, so `server` still lives after it.
     #[cfg(any(test, feature = "sim"))]
     pub(crate) async unsafe fn delete_server(&self, server: *mut ffi::test::Server) {
         let events = &self.events;
