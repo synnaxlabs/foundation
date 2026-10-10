@@ -14,7 +14,7 @@ use block::{Block, Pool};
 use env::clock::{Clock, Sleep};
 use env::entropy::Entropy;
 use env::files::Files;
-use env::tasks::Tasks;
+use env::tasks::{self, Driver, Tasks};
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use spec::Pointer;
 use spec::tree::Chunks;
@@ -37,13 +37,10 @@ use crate::member::Member;
 use crate::message::Message;
 use crate::region::{self, Refused, Request};
 use crate::status::{self, Status};
-pub use end::Ended;
-use end::Spawner;
 use send::Senders;
 use used::{Opening, Used};
 
 mod apply;
-mod end;
 mod home;
 mod propose;
 mod send;
@@ -115,7 +112,7 @@ pub struct Config {
 #[derive(Clone)]
 pub struct Mesh {
     group: Rc<RefCell<Group>>,
-    spawner: Spawner,
+    tasks: tasks::Group,
     pool: Rc<Pool>,
     store: Rc<blob::Store>,
     clock: Clock,
@@ -184,9 +181,9 @@ impl Mesh {
             group: Rc::downgrade(&mesh.group),
             transport,
             pool: Rc::clone(&mesh.pool),
-            spawner: mesh.spawner.clone(),
+            tasks: mesh.tasks.clone(),
         };
-        mesh.spawner.spawn(senders.run());
+        mesh.tasks.spawn(Box::pin(senders.run()));
         Ok(mesh)
     }
 
@@ -225,24 +222,24 @@ impl Mesh {
         let group = Group::new(raft, state, unapplied, used);
         let group = Rc::new(RefCell::new(group));
         let weak = Rc::downgrade(&group);
-        let spawner = Spawner::new(config.tasks);
-        spawner.spawn(used::keep(
+        let tasks = tasks::Group::new(config.tasks);
+        tasks.spawn(Box::pin(used::keep(
             Weak::clone(&weak),
             Rc::clone(&config.store),
             files,
             config.dir,
             config.clock.clone(),
-        ));
-        spawner.spawn(run(
+        )));
+        tasks.spawn(Box::pin(run(
             weak,
             log,
             signer,
             config.clock.clone(),
             config.entropy.clone(),
-        ));
+        )));
         Ok(Self {
             group,
-            spawner,
+            tasks,
             pool,
             store: config.store,
             clock: config.clock,
@@ -255,8 +252,8 @@ impl Mesh {
     /// the group running. Once it resolves, the mesh holds no file, and a new open of
     /// its directory can take the log.
     #[must_use]
-    pub fn ended(&self) -> Ended {
-        self.spawner.ended()
+    pub fn ended(&self) -> tasks::Ended {
+        self.tasks.ended()
     }
 
     /// A watch of the home of `index`.
