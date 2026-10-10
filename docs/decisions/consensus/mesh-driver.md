@@ -330,8 +330,11 @@
   lock of the log, removes `founding`, writes `founding.new`, renames it to `founding`,
   and syncs the directory, before `raft` writes a record. So a crash before the first
   record leaves a first open, also with another founding (`laptop.architect`,
-  2026-10-09:
-  https://github.com/synnaxlabs/foundation/pull/2200#issuecomment-6091088392). Each
+  2026-10-09T23:35:56Z:
+  https://github.com/synnaxlabs/foundation/pull/2200#issuecomment-6091088392). This
+  supersedes the later open of the plan, which reads and compares `founding` at each
+  open after the first, and the rule of #1209 that a crash before the log exists
+  leaves a first open only for the same set. Each
   open whose log holds a record compares `founding` with `Config::founding`, its members
   in key order, before `raft` starts. Another value gives
   `Error::Founding { stored, given }`, each a `Box<region::Founding>`. Its text names
@@ -341,7 +344,7 @@
   A text of the homes names the index by the tree key of its `Definition::Channel` in
   `stored`, or by its key when no definition has it: "the mesh was founded with another
   home of index {name}", "... with a home of index {name}, which the config lacks", and
-  "... with no home of index {name}" (`laptop.architect`, 2026-10-09:
+  "... with no home of index {name}" (`laptop.architect`, 2026-10-09T23:18:27Z:
   https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6090902577). A
   log with a record and no `founding`, or a `founding` that fails its check, its
   version, or its decode, gives `Error::Unfounded { path }`. A failed file

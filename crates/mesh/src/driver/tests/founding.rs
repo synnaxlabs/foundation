@@ -251,15 +251,17 @@ fn a_reopen_with_other_homes_is_refused() {
         assert_eq!(error.to_string(), text);
     }
     let (mut sim, node, region) = founded_with(0, definitions, BTreeMap::new());
-    let given = region::Founding {
-        homes: homes(2, Some(2)),
-        ..region.clone()
-    };
-    let error = refused(&mut sim, &node, given.clone());
-    assert_eq!(error, mismatch(&region, &given));
-    let index = common::index(2);
-    let text = format!("the mesh was founded with no home of index {index}");
-    assert_eq!(error.to_string(), text);
+    let named = "plant.i".to_owned();
+    for (index, name) in [(1, named), (2, common::index(2).to_string())] {
+        let given = region::Founding {
+            homes: homes(index, Some(2)),
+            ..region.clone()
+        };
+        let error = refused(&mut sim, &node, given.clone());
+        assert_eq!(error, mismatch(&region, &given), "index {index}");
+        let text = format!("the mesh was founded with no home of index {name}");
+        assert_eq!(error.to_string(), text);
+    }
     run_with(&mut sim, &node, region);
 }
 
@@ -489,4 +491,61 @@ fn memory_that_the_system_refuses_for_the_founding_file_gives_the_pool_error() {
              block of 831 bytes"
         );
     });
+}
+
+/// The log opens in blocks of 64 KiB, which the pool holds already, and the system
+/// then refuses memory for the block of the founding read.
+#[test]
+fn memory_that_the_system_refuses_for_the_founding_read_gives_the_pool_error() {
+    let (mut sim, node, region) = founded(0);
+    let error = sim
+        .run_on(&node, |node, tasks| async move {
+            let budget = block::Config { budget: 4 << 20 };
+            let (memory, switch) = Scarce::new(budget.reservation());
+            let pool = Rc::new(Pool::new(budget, memory));
+            drop(pool.alloc(crate::file::CHUNK).unwrap());
+            let config = Config {
+                founding: region,
+                pool,
+                ..config(&node, &tasks, 1, &IDS, &IDS).await
+            };
+            switch.refuse();
+            Mesh::start(config).await.err().unwrap()
+        })
+        .unwrap();
+    let cause = block::Error::Refused { requested: 831 };
+    assert_eq!(error, Error::Pool(cause));
+    assert_eq!(
+        error.to_string(),
+        "the pool has no block for the mesh now: the system refused memory for a \
+         block of 831 bytes"
+    );
+}
+
+/// A power cut right after a first open keeps its founding, so an open after the
+/// next record checks it.
+#[test]
+fn the_founding_is_durable_when_it_is_kept() {
+    for seed in 0..16 {
+        let mut sim = Sim::new(sim::Config {
+            seed,
+            ..sim::Config::default()
+        });
+        let node = sim.node(sim::node::Config::default());
+        let region = sim
+            .run_on(&node, |node, tasks| async move {
+                let config = config(&node, &tasks, 1, &IDS, &IDS).await;
+                found(&config).await;
+                config.founding
+            })
+            .unwrap();
+        sim.crash(&node, Crash::Power);
+        write_record(&mut sim, &node);
+        let other = region::Founding {
+            voters: [key(1)].into(),
+            ..region.clone()
+        };
+        let error = refused(&mut sim, &node, other.clone());
+        assert_eq!(error, mismatch(&region, &other), "seed {seed}");
+    }
 }

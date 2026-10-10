@@ -22,7 +22,7 @@ const VERSION: u16 = 1;
 
 /// Writes `given` to `dir` when `logged` is false, or checks it against the founding
 /// in `dir`. `logged` states that the log of `dir` holds a record. The caller holds
-/// the lock of the log.
+/// the lock of the log. A founding that it writes is durable when it returns.
 ///
 /// # Errors
 ///

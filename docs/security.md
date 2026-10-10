@@ -424,8 +424,9 @@ not reached from the corpus: `transport::message` (#55), the QUIC hello
 (`transport::quic::hello::Hello::decode`), `spec` tree chunks (#64), the scan of the
 mesh log files and the names of their directory (`mesh::log::scan` and
 `mesh::log::sequence`, #1746), the file `founding` of the mesh directory
-(`mesh::region::Founding::decode`, with `mesh::Member::decode` in it, #1746), the names
-in the directory of the spec in use (`mesh::driver::used::pointer`, #1746), each
+(`mesh::region::Founding::decode`, with `mesh::Member::decode` in it, #1746), the join
+answer (`mesh::Member::decode` from a peer, #336 adds its target), the names in the
+directory of the spec in use (`mesh::driver::used::pointer`, #1746), each
 connector's protocol parser, the chunk processing of open62541 (`ua_securechannel.c`,
 #1990), and `connector::reader::read`, `connector::http::uri`, and
 `connector_influx::Kind::parse`, which `config_check` reaches only from an input with a
