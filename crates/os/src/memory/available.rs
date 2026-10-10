@@ -277,11 +277,8 @@ mod linux {
         #[test]
         fn the_room_of_a_v2_cgroup_under_mem_available_is_the_available_memory() {
             let root = v2("v2");
-            root.write("sys/fs/cgroup/a/memory.max", &format!("{}\n", 512 * MIB))
-                .write(
-                    "sys/fs/cgroup/a/memory.current",
-                    &format!("{}\n", 100 * MIB),
-                )
+            root.write("sys/fs/cgroup/a/memory.max", format!("{}\n", 512 * MIB))
+                .write("sys/fs/cgroup/a/memory.current", format!("{}\n", 100 * MIB))
                 .write("sys/fs/cgroup/a/memory.stat", "inactive_file 0\n")
                 .write("sys/fs/cgroup/a/b/memory.max", "max\n")
                 .write("sys/fs/cgroup/a/b/memory.current", "4096\n")
@@ -292,14 +289,11 @@ mod linux {
         #[test]
         fn the_least_room_of_the_cgroup_and_each_above_it_counts() {
             let root = v2("v2-least");
-            root.write("sys/fs/cgroup/a/memory.max", &format!("{}\n", 512 * MIB))
-                .write(
-                    "sys/fs/cgroup/a/memory.current",
-                    &format!("{}\n", 500 * MIB),
-                )
+            root.write("sys/fs/cgroup/a/memory.max", format!("{}\n", 512 * MIB))
+                .write("sys/fs/cgroup/a/memory.current", format!("{}\n", 500 * MIB))
                 .write("sys/fs/cgroup/a/memory.stat", "inactive_file 0\n")
-                .write("sys/fs/cgroup/a/b/memory.max", &format!("{}\n", 256 * MIB))
-                .write("sys/fs/cgroup/a/b/memory.current", &format!("{MIB}\n"))
+                .write("sys/fs/cgroup/a/b/memory.max", format!("{}\n", 256 * MIB))
+                .write("sys/fs/cgroup/a/b/memory.current", format!("{MIB}\n"))
                 .write("sys/fs/cgroup/a/b/memory.stat", "inactive_file 0\n");
             assert_eq!(root.available().unwrap(), 12 * MIB);
         }
@@ -307,11 +301,8 @@ mod linux {
         #[test]
         fn a_cgroup_over_its_limit_has_no_room() {
             let root = v2("v2-over");
-            root.write("sys/fs/cgroup/a/b/memory.max", &format!("{MIB}\n"))
-                .write(
-                    "sys/fs/cgroup/a/b/memory.current",
-                    &format!("{}\n", 2 * MIB),
-                )
+            root.write("sys/fs/cgroup/a/b/memory.max", format!("{MIB}\n"))
+                .write("sys/fs/cgroup/a/b/memory.current", format!("{}\n", 2 * MIB))
                 .write("sys/fs/cgroup/a/b/memory.stat", "inactive_file 0\n");
             assert_eq!(root.available().unwrap(), 0);
         }
@@ -333,7 +324,7 @@ mod linux {
             let root = v2("v2-more");
             root.write(
                 "sys/fs/cgroup/a/memory.max",
-                &format!("{}\n", 64 * 1024 * MIB),
+                format!("{}\n", 64 * 1024 * MIB),
             )
             .write("sys/fs/cgroup/a/memory.current", "0\n")
             .write("sys/fs/cgroup/a/memory.stat", "inactive_file 0\n");
@@ -357,11 +348,11 @@ mod linux {
                 )
                 .write(
                     "sys/fs/cgroup/memory/memory.limit_in_bytes",
-                    &format!("{}\n", 512 * MIB),
+                    format!("{}\n", 512 * MIB),
                 )
                 .write(
                     "sys/fs/cgroup/memory/memory.usage_in_bytes",
-                    &format!("{}\n", 12 * MIB),
+                    format!("{}\n", 12 * MIB),
                 )
                 .write(
                     "sys/fs/cgroup/memory/memory.stat",
@@ -384,7 +375,7 @@ mod linux {
                 )
                 .write(
                     "sys/fs/cgroup/cpu/memory.limit_in_bytes",
-                    &format!("{MIB}\n"),
+                    format!("{MIB}\n"),
                 )
                 .write("sys/fs/cgroup/cpu/memory.usage_in_bytes", "0\n")
                 .write("sys/fs/cgroup/cpu/memory.stat", "total_inactive_file 0\n");
@@ -403,10 +394,10 @@ mod linux {
                     "proc/self/mountinfo",
                     "37 31 0:31 / /cg rw - cgroup2 cgroup2 rw\n",
                 )
-                .write("cg/x/memory.max", &format!("{}\n", MIB / 2))
+                .write("cg/x/memory.max", format!("{}\n", MIB / 2))
                 .write("cg/x/memory.current", "0\n")
                 .write("cg/x/memory.stat", "inactive_file 0\n")
-                .write("cg/y/memory.max", &format!("{MIB}\n"))
+                .write("cg/y/memory.max", format!("{MIB}\n"))
                 .write("cg/y/memory.current", "0\n")
                 .write("cg/y/memory.stat", "inactive_file 0\n");
             assert_eq!(root.available().unwrap(), MIB);
@@ -423,7 +414,7 @@ mod linux {
                     "proc/self/mountinfo",
                     "37 31 0:31 /a /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n",
                 )
-                .write("sys/fs/cgroup/b/c/memory.max", &format!("{MIB}\n"))
+                .write("sys/fs/cgroup/b/c/memory.max", format!("{MIB}\n"))
                 .write("sys/fs/cgroup/b/c/memory.current", "0\n")
                 .write("sys/fs/cgroup/b/c/memory.stat", "inactive_file 0\n");
             assert_eq!(root.available().unwrap(), 8192 * MIB);
@@ -437,10 +428,10 @@ mod linux {
             root.write("proc/meminfo", MEMINFO)
                 .write("proc/self/cgroup", "0::/../x\n")
                 .write("proc/self/mountinfo", V2_MOUNT)
-                .write("sys/fs/cgroup/memory.max", &format!("{MIB}\n"))
+                .write("sys/fs/cgroup/memory.max", format!("{MIB}\n"))
                 .write("sys/fs/cgroup/memory.current", "0\n")
                 .write("sys/fs/cgroup/memory.stat", "inactive_file 0\n")
-                .write("sys/fs/x/memory.max", &format!("{}\n", MIB / 2))
+                .write("sys/fs/x/memory.max", format!("{}\n", MIB / 2))
                 .write("sys/fs/x/memory.current", "0\n")
                 .write("sys/fs/x/memory.stat", "inactive_file 0\n");
             assert_eq!(root.available().unwrap(), 8192 * MIB);
@@ -457,7 +448,7 @@ mod linux {
                     "proc/self/mountinfo",
                     "37 31 0:31 /a\\040b\\134c /cg rw - cgroup2 cgroup2 rw\n",
                 )
-                .write("cg/d/memory.max", &format!("{MIB}\n"))
+                .write("cg/d/memory.max", format!("{MIB}\n"))
                 .write("cg/d/memory.current", "0\n")
                 .write("cg/d/memory.stat", "inactive_file 0\n");
             assert_eq!(root.available().unwrap(), MIB);
@@ -473,7 +464,7 @@ mod linux {
                     "proc/self/mountinfo",
                     "37 31 0:31 / /cg\\040root rw - cgroup2 cgroup2 rw\n",
                 )
-                .write("cg root/a/memory.max", &format!("{MIB}\n"))
+                .write("cg root/a/memory.max", format!("{MIB}\n"))
                 .write("cg root/a/memory.current", "0\n")
                 .write("cg root/a/memory.stat", "inactive_file 0\n");
             assert_eq!(root.available().unwrap(), MIB);
@@ -504,14 +495,14 @@ mod linux {
         #[test]
         fn the_inactive_file_pages_of_a_cgroup_are_room() {
             let root = v2("v2-cache");
-            root.write("sys/fs/cgroup/a/b/memory.max", &format!("{}\n", 256 * MIB))
+            root.write("sys/fs/cgroup/a/b/memory.max", format!("{}\n", 256 * MIB))
                 .write(
                     "sys/fs/cgroup/a/b/memory.current",
-                    &format!("{}\n", 250 * MIB),
+                    format!("{}\n", 250 * MIB),
                 )
                 .write(
                     "sys/fs/cgroup/a/b/memory.stat",
-                    &format!("active_file 0\ninactive_file {}\n", 240 * MIB),
+                    format!("active_file 0\ninactive_file {}\n", 240 * MIB),
                 );
             assert_eq!(root.available().unwrap(), 246 * MIB);
         }
@@ -527,11 +518,11 @@ mod linux {
                     "proc/self/mountinfo",
                     "41 31 0:36 / /cg rw - cgroup cgroup rw,memory\n",
                 )
-                .write("cg/x/memory.limit_in_bytes", &format!("{}\n", 64 * MIB))
-                .write("cg/x/memory.usage_in_bytes", &format!("{}\n", 10 * MIB))
+                .write("cg/x/memory.limit_in_bytes", format!("{}\n", 64 * MIB))
+                .write("cg/x/memory.usage_in_bytes", format!("{}\n", 10 * MIB))
                 .write(
                     "cg/x/memory.stat",
-                    &format!("inactive_file 1\ntotal_inactive_file {}\n", 11 * MIB),
+                    format!("inactive_file 1\ntotal_inactive_file {}\n", 11 * MIB),
                 );
             assert_eq!(root.available().unwrap(), 64 * MIB);
         }
@@ -539,7 +530,7 @@ mod linux {
         #[test]
         fn a_cgroup_whose_stat_has_no_inactive_file_pages_is_an_error() {
             let root = v2("v2-no-stat");
-            root.write("sys/fs/cgroup/a/b/memory.max", &format!("{MIB}\n"))
+            root.write("sys/fs/cgroup/a/b/memory.max", format!("{MIB}\n"))
                 .write("sys/fs/cgroup/a/b/memory.current", "0\n")
                 .write("sys/fs/cgroup/a/b/memory.stat", "active_file 0\n");
             let error = root.available().unwrap_err();
@@ -563,7 +554,7 @@ mod linux {
         #[test]
         fn meminfo_with_no_mem_available_is_an_error() {
             let root = Root::new("no-available");
-            root.write("proc/meminfo", &MEMINFO.replace("MemAvailable", "Other"));
+            root.write("proc/meminfo", MEMINFO.replace("MemAvailable", "Other"));
             let error = root.available().unwrap_err();
             let file = root.0.join("proc/meminfo");
             assert_eq!(
