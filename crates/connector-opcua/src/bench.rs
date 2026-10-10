@@ -228,11 +228,12 @@ impl Manager {
             if connect.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(());
             }
-            let connected = self.connected();
-            assert!(
-                Pin::new(&mut deadline).poll(cx).is_pending(),
-                "{connected} of {clients} clients connected in {CONNECT_TIMEOUT}"
-            );
+            if Pin::new(&mut deadline).poll(cx).is_ready() {
+                let connected = self.connected();
+                panic!(
+                    "{connected} of {clients} clients connected in {CONNECT_TIMEOUT}"
+                );
+            }
             Poll::Pending
         })
         .await;
