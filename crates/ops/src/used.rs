@@ -13,14 +13,11 @@ use crate::error::Error;
 /// # Errors
 ///
 /// - [`Error::Behind`] when the node does not use the newest spec.
-/// - [`Error::Apply`] when the group of `mesh` stopped.
+/// - [`Error::Stopped`] when the group of `mesh` stopped.
 pub(crate) async fn spec(
     mesh: &mesh::Mesh,
 ) -> Result<(spec::Pointer, Rc<BTreeMap<Name, Definition>>), Error> {
-    let spec = mesh
-        .spec()
-        .await
-        .map_err(|stopped| Error::Apply(mesh::Error::Stopped(stopped)))?;
+    let spec = mesh.spec().await.map_err(Error::Stopped)?;
     if let Some(behind) = spec.behind {
         return Err(Error::Behind(Box::new(behind)));
     }

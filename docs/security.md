@@ -430,7 +430,8 @@ not reached from the corpus: `transport::message` (#55), the QUIC hello
 #336 adds its target), `spec` tree chunks (#64), the scan of the mesh log files and the
 names of their directory (`mesh::log::scan` and `mesh::log::sequence`, #1746), the names
 in the directory of the spec in use (`mesh::driver::used::pointer`, #1746), each
-connector's protocol parser, the chunk processing of open62541 (`ua_securechannel.c`,
+connector's protocol parser, the file `name` of the data directory
+(`node::name::decode`, #2174), the chunk processing of open62541 (`ua_securechannel.c`,
 #1990), and `connector::reader::read`, `connector::http::uri`, and
 `connector_influx::Kind::parse`, which `config_check` reaches only from an input with a
 `connector` block of kind `influx`, and no input holds one yet (#1817).

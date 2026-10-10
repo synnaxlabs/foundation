@@ -20,7 +20,7 @@ use types::sample::{Scalar, Type};
 
 use super::{
     I64, LIVE, RING, SETTLE, applied, channels, config, definition, entry, keys, name,
-    poll_flagged, run, samples, without, write, write_series, written,
+    poll_flagged, run, samples, unnamed, without, write, write_series, written,
 };
 
 pub(super) const I32: Type = Type::Scalar(Scalar::I32);
@@ -95,11 +95,8 @@ fn ends_each_session_on_a_removed_data_channel_at_once() {
             error.expect_err("unknown"),
             writer::Error::Unknown(name("value"))
         );
-        let error = test.hub.reader(&[name("value")], Mode::Latest).await;
-        assert_eq!(
-            error.expect_err("unknown"),
-            reader::Error::Unknown(name("value"))
-        );
+        let error = test.hub.reader(unnamed(&["value"], Mode::Latest)).await;
+        assert_eq!(error.expect_err("unknown"), reader::Error::Empty);
         // The removal closed the writer, so another takes control of the index.
         let mut other = test.writer("b", &["value-c"]).await;
         let outcomes = write_series(&mut other, &[(1, &[now + 1]), (5, &[30])]);

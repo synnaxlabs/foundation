@@ -76,6 +76,7 @@ fn config(host: &sim::node::Node, budget: Size, memory: Memory) -> Config<block:
         net: host.net(),
         listen: listen(host),
         region: None,
+        name: "edge".parse().expect("a name"),
     }
 }
 
@@ -381,7 +382,7 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
         format!(
             "Config {{ shards: Shards {{ .. }}, clock: {clock:?}, wall: {wall:?}, \
              budget: Size(4096), entropy: {entropy:?}, disk: {DISK:?}, \
-             listen: {listen:?}, region: None, .. }}",
+             listen: {listen:?}, region: None, name: Name(\"edge\"), .. }}",
             listen = config.listen,
         )
     );
@@ -572,6 +573,17 @@ fn join_gives_a_later_shard_error_over_an_earlier_panic() {
     assert_eq!(crate::error(None, all), Err(shards));
 }
 
+/// An unnamed reader on the channel named `channel`.
+fn unnamed(channel: &str, mode: ::hub::reader::Mode) -> ::hub::reader::Config {
+    ::hub::reader::Config {
+        select: types::name::Selector::new([channel]).expect("a selector"),
+        mode,
+        subject: "test".parse().expect("a name"),
+        name: None,
+        hold: Span::ZERO,
+    }
+}
+
 mod buffer {
     use std::cell::RefCell;
     use std::rc::Rc;
@@ -626,7 +638,7 @@ mod buffer {
     /// # Panics
     ///
     /// When the node dropped `probe`, or when the opens go on after 10 ms.
-    fn all_opened(probe: &Mutex<Fate>, after: Span) -> bool {
+    pub(super) fn all_opened(probe: &Mutex<Fate>, after: Span) -> bool {
         let fate = fate(probe);
         assert_ne!(fate, Fate::Dropped, "{after:?}");
         assert!(after < Span::from_nanos(10_000_000), "the opens go on");
@@ -713,7 +725,7 @@ mod buffer {
         let host = host(&mut sim, 2);
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let shards = ["shard-0", "shard-1"];
-        let made = ["lock", "node.key", "shard-0", "shard-1", "shards-2"];
+        let made = ["lock", "name", "node.key", "shard-0", "shard-1", "shards-2"];
         assert_eq!(listed(&mut sim, &host, ""), made.map(PathBuf::from));
         for shard in shards {
             assert_eq!(listed(&mut sim, &host, shard), [PathBuf::from("ring")]);
@@ -922,10 +934,10 @@ mod buffer {
     /// leaves the claim alone.
     #[test]
     fn a_stop_ends_the_steps_that_started_and_starts_no_other() {
-        let all = ["lock", "shard-0", "shard-1", "shard-2", "shards-3"];
+        let all = ["lock", "name", "shard-0", "shard-1", "shard-2", "shards-3"];
         let all = all.map(PathBuf::from);
-        let mut seen = [false; 6];
-        for step in 0..200 {
+        let mut seen = [false; 7];
+        for step in 0..250 {
             let mut sim = sim::Sim::new(sim::Config::default());
             let host = host(&mut sim, 3);
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
@@ -945,7 +957,7 @@ mod buffer {
                 Vec::new()
             } else {
                 let held = listed.len() - 1;
-                all[..held].iter().chain(&all[4..]).cloned().collect()
+                all[..held].iter().chain(&all[5..]).cloned().collect()
             };
             assert_eq!(listed, made, "at {after:?}");
             seen[listed.len()] = true;
@@ -965,7 +977,7 @@ mod buffer {
                 assert_eq!(ring, len, "{dir:?} at {after:?}");
             }
         }
-        assert_eq!(seen[2..], [true; 4], "a stop after each step");
+        assert_eq!(seen[3..], [true; 4], "a stop after each step");
     }
 
     /// A crash at any point of the claim and the first opens leaves a data directory
@@ -1069,7 +1081,7 @@ mod buffer {
         assert_eq!(panics(&mut run), Vec::<String>::new());
         assert_eq!(fate(&probe), Fate::Dropped);
         assert_eq!(run.node.join(), Err(opened(1)));
-        let made = ["lock", "shard-0", "shards-3"].map(PathBuf::from);
+        let made = ["lock", "name", "shard-0", "shards-3"].map(PathBuf::from);
         assert_eq!(listed(&mut run.sim, &run.host, ""), made);
     }
 
@@ -1201,6 +1213,7 @@ mod directory {
         let listed = listed(&mut sim, &host, "");
         let made = [
             "lock",
+            "name",
             "node.key",
             "other-3",
             "shard-0",
@@ -1288,7 +1301,7 @@ mod directory {
             assert_eq!(e, Error::Directory(io), "{operation:?}");
             assert_eq!(
                 e.to_string(),
-                format!("cannot claim the data directory: {text}")
+                format!("cannot use the data directory: {text}")
             );
             let made: Vec<PathBuf> = made.iter().map(PathBuf::from).collect();
             assert_eq!(listed(&mut sim, &host, ""), made, "{operation:?}");
@@ -1311,7 +1324,9 @@ mod directory {
         .expect("the run ends");
         assert_eq!(run_on(&mut sim, &host), Ok(()));
         let listed = listed(&mut sim, &host, "");
-        let made = ["lock", "node.key", "shard-0", "shard-1", &name, "shards-2"];
+        let made = [
+            "lock", "name", "node.key", "shard-0", "shard-1", &name, "shards-2",
+        ];
         assert_eq!(listed, made.map(PathBuf::from));
     }
 
@@ -1333,8 +1348,9 @@ mod directory {
             })
             .expect("the run ends");
             assert_eq!(run_on(&mut sim, &host), Ok(()), "{name}");
-            let mut made =
-                ["lock", "node.key", "shard-0", "shard-1", &name, "shards-2"];
+            let mut made = [
+                "lock", "name", "node.key", "shard-0", "shard-1", &name, "shards-2",
+            ];
             made.sort_unstable();
             let made = made.map(PathBuf::from);
             assert_eq!(listed(&mut sim, &host, ""), made, "{name}");
@@ -1719,13 +1735,13 @@ mod lock {
         assert_eq!(e, Err(busy()));
         assert_eq!(
             busy().to_string(),
-            "cannot claim the data directory: file lock is open for writing in \
+            "cannot use the data directory: file lock is open for writing in \
              another handle"
         );
         first.stop();
         assert_eq!(sim.run(), Ok(()));
         assert_eq!(first.join(), Ok(()));
-        let made = ["lock", "node.key", "shard-0", "shard-1", "shards-2"];
+        let made = ["lock", "name", "node.key", "shard-0", "shard-1", "shards-2"];
         assert_eq!(listed(&mut sim, &host, ""), made.map(PathBuf::from));
     }
 
@@ -1751,7 +1767,7 @@ mod lock {
             assert_eq!(joined[claimed], Ok(()), "seed {seed}");
             assert_eq!(joined[1 - claimed], Err(busy()), "seed {seed}");
             seen[claimed] = true;
-            let made = ["lock", "node.key", "shard-0", "shard-1", "shards-2"];
+            let made = ["lock", "name", "node.key", "shard-0", "shard-1", "shards-2"];
             let made = made.map(PathBuf::from);
             assert_eq!(listed(&mut sim, &host, ""), made, "seed {seed}");
         }
@@ -1984,7 +2000,7 @@ mod hub {
         let probe = probe(&node);
         node.spawn(move |hub| async move {
             define(&hub, &[("time", index(1)), ("value", data(2, I64, 1))]);
-            let reader = hub.reader(&[name("value")], Mode::Complete).await;
+            let reader = hub.reader(unnamed("value", Mode::Complete)).await;
             let mut reader = reader.expect("the reader opens");
             let mut writer = writer(&hub, &["value"]).await;
             let stamp = writer.now().nanos();
@@ -2149,7 +2165,7 @@ mod hub {
         node.spawn(move |hub| async move {
             let _task = task;
             define(&hub, &[("time", index(1))]);
-            let reader = hub.reader(&[name("time")], Mode::Complete).await;
+            let reader = hub.reader(unnamed("time", Mode::Complete)).await;
             let mut reader = reader.expect("the reader opens");
             drop(reader.next().await);
             unreachable!("no frame comes");
@@ -3044,6 +3060,16 @@ mod port {
         use super::*;
         use crate::identity::{FILE, LEN};
 
+        /// Through the public fuzz entry, which panics when the decode is wrong.
+        #[test]
+        fn a_key_decodes_and_a_key_with_another_tag_does_not() {
+            let mut body = [7; 64];
+            body[..16].copy_from_slice(b"foundation/key/1");
+            crate::fuzz::identity(&body);
+            body[0] ^= 1;
+            crate::fuzz::identity(&body);
+        }
+
         /// The bytes of `node.key` on `host`.
         fn read(sim: &mut sim::Sim, host: &sim::node::Node) -> Vec<u8> {
             sim.run_on(host, |host, _| async move {
@@ -3231,7 +3257,7 @@ mod port {
             }
             assert_eq!(
                 Error::Key.to_string(),
-                "the file node.key in the data directory is not a node key; restore \
+                "the file `node.key` in the data directory is not a node key; restore \
                  it from a backup of this node"
             );
         }
@@ -3303,7 +3329,7 @@ mod port {
             assert_eq!(read(&mut sim, &host), short, "keeps the file");
             assert_eq!(
                 Error::Directory(exists).to_string(),
-                "cannot claim the data directory: path node.key is already there"
+                "cannot use the data directory: path node.key is already there"
             );
         }
 
@@ -3556,7 +3582,7 @@ mod port {
         const OPEN: Span = Span::from_nanos(10_000_000);
         /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
         /// fails from [`OPEN`] stops the group in the sim.
-        const WRITE: i64 = 1_792_553_323;
+        const WRITE: i64 = 1_793_161_050;
 
         /// Why the group stops when a write of [`LOG`] fails.
         fn write_failed() -> ::mesh::Stopped {
@@ -3639,8 +3665,9 @@ mod port {
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let reader = hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await;
                 let mut reader = reader.expect("the reader opens");
                 let mut writer = writer(&hub, &["plant.value"]).await;
                 write(&mut writer, stamp, 7);
@@ -3678,8 +3705,8 @@ mod port {
             let channel = Definition::Channel(data(2, I64, 1));
             founding.definitions.insert(value.clone(), channel);
             let node = start(&host, founding);
-            let unknown = ::hub::reader::Error::Unknown(value);
-            assert_eq!(readers(&mut sim, &node, &["plant.value"]), [Some(unknown)]);
+            let empty = ::hub::reader::Error::Empty;
+            assert_eq!(readers(&mut sim, &node, &["plant.value"]), [Some(empty)]);
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
@@ -3692,14 +3719,13 @@ mod port {
             node: &Node,
             names: &[&str],
         ) -> Vec<Option<::hub::reader::Error>> {
-            let names: Vec<Name> =
-                names.iter().map(|name| name.parse().unwrap()).collect();
+            let names: Vec<String> = names.iter().map(|name| (*name).into()).collect();
             let errors = Arc::new(Mutex::new(Vec::new()));
             let out = Arc::clone(&errors);
             node.spawn(move |hub| async move {
                 for name in names {
-                    let reader =
-                        hub.reader(&[name], ::hub::reader::Mode::Complete).await;
+                    let mode = ::hub::reader::Mode::Complete;
+                    let reader = hub.reader(unnamed(&name, mode)).await;
                     out.lock().unwrap().push(reader.err());
                 }
             });
@@ -3740,8 +3766,9 @@ mod port {
             let opened = Arc::new(Mutex::new(None));
             let out = Arc::clone(&opened);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let reader = hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await;
                 *out.lock().unwrap() = Some(reader.err());
             });
             assert_eq!(sim.run_for(TEN), Ok(()));
@@ -3878,8 +3905,10 @@ mod port {
             let opened = Arc::new(Mutex::new(None));
             let out = Arc::clone(&opened);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                match hub.reader(&[value], ::hub::reader::Mode::Complete).await {
+                match hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await
+                {
                     Ok(mut reader) => {
                         *out.lock().unwrap() = Some(Ok(()));
                         let next = reader.next().await;
@@ -4979,8 +5008,9 @@ mod port {
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let reader = hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await;
                 let mut reader = match reader {
                     Ok(reader) => reader,
                     Err(error) => {
@@ -5027,9 +5057,9 @@ mod port {
                 let read = Arc::new(Mutex::new(Vec::new()));
                 let out = Arc::clone(&read);
                 node.spawn(move |hub| async move {
-                    let value = "plant.value".parse().unwrap();
-                    let reader =
-                        hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                    let reader = hub
+                        .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                        .await;
                     out.lock().unwrap().push(reader.is_ok());
                     let mut reader = reader.expect("the reader opens");
                     let next = reader.next().await.is_ok();
@@ -5095,9 +5125,8 @@ mod port {
                 host.clock().sleep(Span::SECOND).await;
                 let mut readers = Vec::new();
                 for _ in 0..count {
-                    let value = "plant.value".parse().unwrap();
                     let mode = ::hub::reader::Mode::Latest;
-                    let reader = hub.reader(&[value], mode).await;
+                    let reader = hub.reader(unnamed("plant.value", mode)).await;
                     readers.push(reader.expect("the reader opens"));
                     out.lock().unwrap().0 += 1;
                 }
@@ -5141,8 +5170,9 @@ mod port {
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
             peer_hub(&hosts[1], founding, move |hub, _, _| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let reader = hub
+                    .reader(unnamed("plant.value", ::hub::reader::Mode::Complete))
+                    .await;
                 let mut reader = match reader {
                     Ok(reader) => reader,
                     Err(error) => {
@@ -5444,8 +5474,8 @@ mod port {
             let read = Arc::new(Mutex::new(None));
             let out = Arc::clone(&read);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let mode = ::hub::reader::Mode::Complete;
+                let reader = hub.reader(unnamed("plant.value", mode)).await;
                 let mut reader = reader.expect("the reader opens");
                 let mut writer = writer(&hub, &["plant.value"]).await;
                 write_at(&mut writer, keys, WALL, 7);
@@ -5471,8 +5501,8 @@ mod port {
             let ended = Arc::new(Mutex::new(None));
             let out = Arc::clone(&ended);
             node.spawn(move |hub| async move {
-                let value = "plant.value".parse().unwrap();
-                let reader = hub.reader(&[value], ::hub::reader::Mode::Complete).await;
+                let mode = ::hub::reader::Mode::Complete;
+                let reader = hub.reader(unnamed("plant.value", mode)).await;
                 let mut reader = reader.expect("the reader opens");
                 *out.lock().unwrap() = Some(reader.next().await.map(|_| ()));
             });
@@ -5501,9 +5531,9 @@ mod port {
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
             let node = start(&host, founded(&host));
-            let unknown = ::hub::reader::Error::Unknown("plant.value".parse().unwrap());
+            let empty = ::hub::reader::Error::Empty;
             let readers = readers(&mut sim, &node, &["plant.value", "plant.flow"]);
-            assert_eq!(readers, [Some(unknown), None]);
+            assert_eq!(readers, [Some(empty), None]);
             node.stop();
             assert_eq!(sim.run(), Ok(()));
             assert_eq!(node.join(), Ok(()));
@@ -5567,6 +5597,448 @@ mod port {
             let host = keyed(&mut sim, 2);
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
             node.operate(|_| async {});
+        }
+    }
+}
+
+mod name {
+    use types::name::Name;
+
+    use super::*;
+    use crate::name::{FILE, LEN};
+
+    const NEW: &str = "name.new";
+
+    fn name(text: &str) -> Name {
+        text.parse().expect("a name")
+    }
+
+    /// What [`crate::name`] gives on `host` for `given`.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a test helper panics on a run that does not end"
+    )]
+    fn resolve(
+        sim: &mut sim::Sim,
+        host: &sim::node::Node,
+        given: Option<&str>,
+    ) -> Result<Name, Error> {
+        let given = given.map(name);
+        sim.run_on(host, move |host, _| async move {
+            crate::name(&host.files(), given).await
+        })
+        .expect("the run ends")
+    }
+
+    /// Writes `bytes` to a new file `path` on `host`.
+    fn write(sim: &mut sim::Sim, host: &sim::node::Node, path: &str, bytes: Vec<u8>) {
+        let path = PathBuf::from(path);
+        sim.run_on(host, move |host, _| async move {
+            let files = host.files();
+            let mode = env::files::Mode::Create {
+                len: bytes.len() as u64,
+            };
+            let file = files.open(&path, mode).await.expect("opens");
+            if !bytes.is_empty() {
+                let pool = block::Pool::heap(block::Config { budget: 4096 });
+                let block = pool.copy(&bytes).expect("a block");
+                file.write_at(0, &[block]).await.expect("writes");
+            }
+            file.sync().await.expect("syncs");
+            files.sync_dir(Path::new("")).await.expect("syncs");
+        })
+        .expect("the run ends");
+    }
+
+    /// The bytes of the file `name` on `host`, or `None` when it is not there.
+    fn read(sim: &mut sim::Sim, host: &sim::node::Node) -> Option<Vec<u8>> {
+        sim.run_on(host, |host, _| async move {
+            let files = host.files();
+            let mode = env::files::Mode::Read;
+            let file = match files.open(Path::new(FILE), mode).await {
+                Err(env::files::Error::NotFound { .. }) => return None,
+                file => file.expect("opens"),
+            };
+            let len = usize::try_from(file.len()).unwrap();
+            if len == 0 {
+                return Some(Vec::new());
+            }
+            let pool = block::Pool::heap(block::Config { budget: 4096 });
+            let into = pool.alloc(len).expect("a block");
+            Some(file.read_at(0, into).await.expect("reads").to_vec())
+        })
+        .expect("the run ends")
+    }
+
+    /// Starts a node named `text` on `host`, runs `sim` for a second, then stops it
+    /// and gives the error of its join.
+    fn start_and_stop(
+        sim: &mut sim::Sim,
+        host: &sim::node::Node,
+        text: &str,
+    ) -> Result<(), Error> {
+        let node = Node::start(Config {
+            name: name(text),
+            ..config(host, Size::MEBIBYTE, Box::new(heap))
+        });
+        assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+        node.stop();
+        assert_eq!(sim.run(), Ok(()));
+        node.join()
+    }
+
+    #[test]
+    fn a_data_directory_with_no_name_gives_the_given_one_and_writes_nothing() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(resolve(&mut sim, &host, None), Err(Error::Unnamed));
+        assert_eq!(resolve(&mut sim, &host, Some("edge")), Ok(name("edge")));
+        assert_eq!(read(&mut sim, &host), None);
+        assert_eq!(
+            Error::Unnamed.to_string(),
+            "the data directory holds no node name; give the node a name"
+        );
+    }
+
+    #[test]
+    fn the_first_start_keeps_its_name_for_each_later_start() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(start_and_stop(&mut sim, &host, "site_a.edge"), Ok(()));
+        let kept = read(&mut sim, &host).expect("the file");
+        assert_eq!(kept.len(), 277);
+        assert_eq!(&kept[..17], b"foundation/name/1");
+        assert_eq!(kept[17], 11);
+        assert_eq!(&kept[18..29], b"site_a.edge");
+        assert_eq!(kept[29..273], [0; 244]);
+        let crc = crc32c::crc32c(&kept[..273]).to_le_bytes();
+        assert_eq!(kept[273..], crc, "little-endian");
+        assert_eq!(resolve(&mut sim, &host, None), Ok(name("site_a.edge")));
+        let given = resolve(&mut sim, &host, Some("site_a.edge"));
+        assert_eq!(given, Ok(name("site_a.edge")));
+        assert_eq!(start_and_stop(&mut sim, &host, "site_a.edge"), Ok(()));
+        assert_eq!(read(&mut sim, &host), Some(kept));
+    }
+
+    #[test]
+    fn a_name_of_the_most_bytes_is_kept() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        let long = "a".repeat(255);
+        assert_eq!(start_and_stop(&mut sim, &host, &long), Ok(()));
+        let kept = read(&mut sim, &host).expect("the file");
+        assert_eq!((kept.len(), kept[17]), (277, 255));
+        assert_eq!(resolve(&mut sim, &host, None), Ok(name(&long)));
+        assert_eq!(start_and_stop(&mut sim, &host, &long), Ok(()));
+    }
+
+    /// Each file call on the name that fails stops the node with its error, at the
+    /// first start and at a later one. A failed first start leaves no name, and the
+    /// next start makes it.
+    #[test]
+    fn a_failed_file_call_on_the_name_stops_the_node() {
+        use env::files::Operation::{Open, ReadAt, Remove, Rename, Sync, WriteAt};
+        for (path, operation, text) in [
+            (NEW, Remove, "remove of name.new failed with OS error 5"),
+            (NEW, Open, "open of name.new failed with OS error 5"),
+            (NEW, WriteAt, "write_at of name.new failed with OS error 5"),
+            (NEW, Sync, "sync of name.new failed with OS error 5"),
+            (NEW, Rename, "rename of name.new failed with OS error 5"),
+            (FILE, Open, "open of name failed with OS error 5"),
+            (FILE, ReadAt, "read_at of name failed with OS error 5"),
+        ] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            if path == FILE {
+                assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            }
+            host.fail_file(Path::new(path), operation);
+            let error = Error::Directory(env::files::Error::Io {
+                path: PathBuf::from(path),
+                operation,
+                code: 5,
+            });
+            let started = start_and_stop(&mut sim, &host, "edge");
+            assert_eq!(started, Err(error.clone()), "{operation:?} {path}");
+            assert_eq!(
+                error.to_string(),
+                format!("cannot use the data directory: {text}")
+            );
+            if path == NEW {
+                assert_eq!(resolve(&mut sim, &host, None), Err(Error::Unnamed));
+            }
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            assert_eq!(resolve(&mut sim, &host, None), Ok(name("edge")));
+        }
+    }
+
+    /// A read of the name that fails gives its error, not a name or no name.
+    #[test]
+    fn a_failed_read_of_the_name_gives_its_error() {
+        use env::files::Operation::{Open, ReadAt};
+        for operation in [Open, ReadAt] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            host.fail_file(Path::new(FILE), operation);
+            let error = Error::Directory(env::files::Error::Io {
+                path: PathBuf::from(FILE),
+                operation,
+                code: 5,
+            });
+            let found = resolve(&mut sim, &host, None);
+            assert_eq!(found, Err(error), "{operation:?}");
+            host.fail_file(Path::new(FILE), operation);
+            let given = resolve(&mut sim, &host, Some("cloud"));
+            assert_eq!(given, Ok(name("cloud")), "reads nothing: {operation:?}");
+        }
+    }
+
+    /// `node::name` gives a given name and reads nothing, so only the start, under
+    /// the lock, refuses another name.
+    #[test]
+    fn a_start_with_another_name_stops_and_keeps_the_file() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+        let kept = read(&mut sim, &host);
+        let renamed = Error::Renamed {
+            stored: name("edge"),
+            given: name("cloud"),
+        };
+        let given = resolve(&mut sim, &host, Some("cloud"));
+        assert_eq!(given, Ok(name("cloud")));
+        let started = start_and_stop(&mut sim, &host, "cloud");
+        assert_eq!(started, Err(renamed.clone()));
+        assert_eq!(read(&mut sim, &host), kept, "keeps the file");
+        assert_eq!(
+            renamed.to_string(),
+            "the data directory holds the node edge, not cloud; give edge, or another \
+             data directory"
+        );
+    }
+
+    /// A file of another length that is not 0, or that `encode` does not give, is
+    /// not a name: also one whose padding is not zero, under a checksum that holds.
+    #[test]
+    fn a_file_that_no_node_wrote_stops_the_node_which_keeps_it() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, 2);
+        assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+        let kept = read(&mut sim, &host).expect("the file");
+        let mut changed = kept.clone();
+        changed[20] ^= 1;
+        let mut padded = kept.clone();
+        padded[22] = b'x';
+        let checksum = crc32c::crc32c(&padded[..LEN - 4]).to_le_bytes();
+        padded[LEN - 4..].copy_from_slice(&checksum);
+        let short = kept[..LEN - 1].to_vec();
+        let long = [kept, vec![0]].concat();
+        for bytes in [short, long, changed, padded] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = super::host(&mut sim, 2);
+            write(&mut sim, &host, FILE, bytes.clone());
+            assert_eq!(resolve(&mut sim, &host, None), Err(Error::Name));
+            let given = resolve(&mut sim, &host, Some("edge"));
+            assert_eq!(given, Ok(name("edge")));
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Err(Error::Name));
+            assert_eq!(read(&mut sim, &host), Some(bytes), "keeps the file");
+        }
+        assert_eq!(
+            Error::Name.to_string(),
+            "the file `name` in the data directory is not a node name; remove it, and \
+             start the node with its name"
+        );
+    }
+
+    /// The node never leaves a file `name` with no bytes or with zeros, so such a
+    /// file is not a name.
+    #[test]
+    fn an_empty_or_zero_file_is_not_a_name() {
+        for bytes in [Vec::new(), vec![0; LEN]] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            write(&mut sim, &host, FILE, bytes.clone());
+            assert_eq!(resolve(&mut sim, &host, None), Err(Error::Name));
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Err(Error::Name));
+            assert_eq!(read(&mut sim, &host), Some(bytes), "keeps the file");
+        }
+    }
+
+    /// A start removes the file `name.new` that a crash left, of any length, and
+    /// makes the name.
+    #[test]
+    fn a_start_removes_a_new_name_that_a_crash_left() {
+        for bytes in [Vec::new(), vec![7; LEN], vec![7; 3]] {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let host = host(&mut sim, 2);
+            write(&mut sim, &host, NEW, bytes);
+            assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+            assert_eq!(resolve(&mut sim, &host, None), Ok(name("edge")));
+            assert!(!listed(&mut sim, &host, "").contains(&PathBuf::from(NEW)));
+        }
+    }
+
+    /// The error of a start whose shard 0 cannot make its directory.
+    fn shard_dir_failed() -> Error {
+        Error::Buffer {
+            core: 0,
+            error: ::buffer::Error::Files(env::files::Error::Io {
+                path: PathBuf::from("shard-0"),
+                operation: env::files::Operation::CreateDir,
+                code: 5,
+            }),
+        }
+    }
+
+    /// A first start that fails after the claim, before any other sync of the data
+    /// directory, has made the name durable.
+    #[test]
+    fn a_first_start_makes_the_name_durable() {
+        for seed in 0..8 {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let host = host(&mut sim, 2);
+            host.fail_file(Path::new("shard-0"), env::files::Operation::CreateDir);
+            let started = start_and_stop(&mut sim, &host, "edge");
+            assert_eq!(started, Err(shard_dir_failed()), "seed {seed}");
+            sim.crash(&host, sim::Crash::Power);
+            assert_eq!(resolve(&mut sim, &host, None), Ok(name("edge")), "{seed}");
+        }
+    }
+
+    /// A process crash can leave a name that a read sees but a power cut loses. The
+    /// claim of the next start makes it durable, also when the start fails after it.
+    /// Takes the first crash time, on seeds 0 to 7, at which a read sees the name,
+    /// and checks that a power cut then can lose it.
+    #[test]
+    fn a_later_start_makes_the_name_durable() {
+        let mut lost = 0;
+        let crashed = |seed, after| {
+            let mut sim = sim::Sim::new(sim::Config {
+                seed,
+                ..sim::Config::default()
+            });
+            let host = host(&mut sim, 2);
+            let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+            assert_eq!(sim.run_for(after), Ok(()), "seed {seed} at {after:?}");
+            sim.crash(&host, sim::Crash::Process);
+            drop(node);
+            let found = resolve(&mut sim, &host, None);
+            (sim, host, found)
+        };
+        for seed in 0..8 {
+            let after = (0..10_000_000)
+                .step_by(5_000)
+                .map(Span::from_nanos)
+                .find(|&after| crashed(seed, after).2 == Ok(name("edge")))
+                .expect("a crash leaves the name");
+            let (mut sim, host, _) = crashed(seed, after);
+            sim.crash(&host, sim::Crash::Power);
+            if resolve(&mut sim, &host, None) == Err(Error::Unnamed) {
+                lost += 1;
+            }
+            let (mut sim, host, _) = crashed(seed, after);
+            host.fail_file(Path::new("shard-0"), env::files::Operation::CreateDir);
+            let started = start_and_stop(&mut sim, &host, "edge");
+            assert_eq!(started, Err(shard_dir_failed()), "seed {seed} at {after:?}");
+            sim.crash(&host, sim::Crash::Power);
+            let found = resolve(&mut sim, &host, None);
+            assert_eq!(found, Ok(name("edge")), "seed {seed} at {after:?}");
+        }
+        assert!(lost > 0, "no power cut lost the name");
+    }
+
+    /// Reads the name on `host` `count` times, on a shard of its own, while the run
+    /// goes on. Gives each result.
+    fn reads(
+        host: &sim::node::Node,
+        count: usize,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<Result<Name, Error>>>> {
+        let found = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (slot, own) = (std::sync::Arc::clone(&found), host.clone());
+        let config = env::shards::Config {
+            name: "reader".into(),
+            core: None,
+        };
+        let start = host.shards().start(config, move |_| async move {
+            for _ in 0..count {
+                let read = crate::name(&own.files(), None).await;
+                slot.lock().unwrap().push(read);
+            }
+        });
+        drop(start.expect("starts"));
+        found
+    }
+
+    /// A read while a node starts on the data directory, for the first time or a
+    /// later time, gives no name or the whole name.
+    #[test]
+    fn a_read_during_a_start_gives_no_name_or_the_name() {
+        for (seed, later) in (0..64).flat_map(|seed| [(seed, false), (seed, true)]) {
+            for offset in (0..200_000).step_by(20_000) {
+                let mut sim = sim::Sim::new(sim::Config {
+                    seed,
+                    ..sim::Config::default()
+                });
+                let host = host(&mut sim, 2);
+                if later {
+                    assert_eq!(start_and_stop(&mut sim, &host, "edge"), Ok(()));
+                }
+                let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+                assert_eq!(sim.run_for(Span::from_nanos(offset)), Ok(()));
+                let found = reads(&host, 400);
+                assert_eq!(sim.run_for(Span::SECOND), Ok(()));
+                node.stop();
+                assert_eq!(sim.run(), Ok(()));
+                assert_eq!(node.join(), Ok(()));
+                let kept: &[_] = if later {
+                    &[Ok(name("edge"))]
+                } else {
+                    &[Ok(name("edge")), Err(Error::Unnamed)]
+                };
+                for read in found.lock().unwrap().iter() {
+                    let at = format!("seed {seed}, later {later}, at {offset}");
+                    assert!(kept.contains(read), "{read:?}: {at}");
+                }
+            }
+        }
+    }
+
+    /// A crash every 25 µs of the first start, on seeds 0 to 7, leaves no name or the
+    /// whole name, and the whole name once each ring has opened.
+    #[test]
+    fn a_crash_during_the_first_start_leaves_no_name_or_the_whole_name() {
+        let crashes = [sim::Crash::Process, sim::Crash::Power];
+        for (seed, crash) in (0..8).flat_map(|seed| crashes.map(|crash| (seed, crash)))
+        {
+            for after in (0..).step_by(25_000).map(Span::from_nanos) {
+                let mut sim = sim::Sim::new(sim::Config {
+                    seed,
+                    ..sim::Config::default()
+                });
+                let host = host(&mut sim, 2);
+                let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
+                let probe = probe(&node);
+                let run = sim.run_for(after);
+                assert_eq!(run, Ok(()), "seed {seed}: {crash:?} at {after:?}");
+                let opened = super::buffer::all_opened(&probe, after);
+                sim.crash(&host, crash);
+                drop(node);
+                let found = resolve(&mut sim, &host, None);
+                if opened {
+                    let at = format!("seed {seed}: {crash:?} at {after:?}");
+                    assert_eq!(found, Ok(name("edge")), "{at}");
+                    break;
+                }
+                let kept = [Ok(name("edge")), Err(Error::Unnamed)];
+                assert!(
+                    kept.contains(&found),
+                    "{found:?}: seed {seed}: {crash:?} at {after:?}"
+                );
+            }
         }
     }
 }

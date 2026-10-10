@@ -537,17 +537,17 @@ impl Mesh {
     ///
     /// # Errors
     ///
-    /// [`Stopped`] when the group stops first.
+    /// [`Stopped`] when the group stopped, before or during the call.
     pub async fn spec(&self) -> Result<Spec, Stopped> {
         let call = Call::new(&self.group);
         let committed = self.group.borrow().state.pointer().version;
         poll_fn(|cx| {
             let mut group = self.group.borrow_mut();
-            if group.used.reached(committed) {
-                return Poll::Ready(Ok(group.used.spec.clone()));
-            }
             if let Some(stopped) = group.stopped.get() {
                 return Poll::Ready(Err(stopped.clone()));
+            }
+            if group.used.reached(committed) {
+                return Poll::Ready(Ok(group.used.spec.clone()));
             }
             group.calls.insert(call.slot, cx.waker().clone());
             Poll::Pending

@@ -1493,6 +1493,16 @@ fn a_node_with_an_arm_max_of_zero_panics() {
     });
 }
 
+#[test]
+#[should_panic(expected = "arm_max Span(-1000000) is not positive")]
+fn a_node_with_a_negative_arm_max_panics() {
+    let mut sim = sim(0);
+    sim.node(node::Config {
+        arm_max: Some(millis(-1)),
+        ..node::Config::default()
+    });
+}
+
 fn millis(n: i64) -> Span {
     Span::from_nanos(n * Span::MILLISECOND.nanos())
 }

@@ -19,7 +19,7 @@ mod woken;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use common::{SETTLE, hub, name};
+use common::{SETTLE, hub, name, unnamed};
 use home::reader::Next;
 use home::reader::complete::Charge;
 use hub::Hub;
@@ -80,7 +80,7 @@ async fn five_latest(
 ) {
     let mut latests = vec![latest];
     for _ in 0..4 {
-        let latest = hub.reader(&[name("value")], Mode::Latest).await;
+        let latest = hub.reader(unnamed(&["value"], Mode::Latest)).await;
         latests.push(latest.expect("opens"));
     }
     for latest in &mut latests[1..] {
@@ -110,7 +110,7 @@ async fn replaced(
 ) {
     let mut latests = Vec::new();
     for _ in 0..12 {
-        let latest = hub.reader(&[name("value")], Mode::Latest).await;
+        let latest = hub.reader(unnamed(&["value"], Mode::Latest)).await;
         latests.push(latest.expect("opens"));
     }
     for latest in &mut latests {
@@ -130,7 +130,7 @@ async fn replaced(
         }
     }
     for latest in &mut latests {
-        let replaced = hub.reader(&[name("value")], Mode::Latest).await;
+        let replaced = hub.reader(unnamed(&["value"], Mode::Latest)).await;
         *latest = replaced.expect("opens");
         read(latest);
     }
@@ -262,7 +262,7 @@ fn main() {
     sim.run_on(&node, |node, tasks| async move {
         let (hub, now) = hub(&node, tasks).await;
         let mut reader = hub
-            .reader(&[name("value")], Mode::Complete)
+            .reader(unnamed(&["value"], Mode::Complete))
             .await
             .expect("opens");
         let config = writer::Config {
@@ -273,7 +273,7 @@ fn main() {
         };
         let mut writer = hub.writer(config).await.expect("opens");
         let mut latest = hub
-            .reader(&[name("value")], Mode::Latest)
+            .reader(unnamed(&["value"], Mode::Latest))
             .await
             .expect("opens");
         for n in 0..WARM + COUNTED {
