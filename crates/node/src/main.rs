@@ -260,6 +260,17 @@ fn stopped(dir: &Path, error: &node::Error, known: &Known) -> Failure {
                 fix,
             }
         }
+        node::Error::Pool { pool, cores } => {
+            let (from, fix) = source(dir, known.from.pool, Resource::Memory);
+            Failure {
+                code: MEMORY,
+                message: format!(
+                    "the pool budget {pool}, {from}, gives one of {cores} shards a pool \
+                     that needs more address space than this host has"
+                ),
+                fix,
+            }
+        }
         node::Error::Buffer {
             core,
             error: error @ buffer::Error::Pool(pool),
@@ -605,6 +616,30 @@ mod tests {
                      gives shard-3 too little: {TOO_LARGE}"
                 ),
                 fix: "Free memory on this host".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_kept_pool_budget_past_the_address_space_tells_the_user_to_remove_it() {
+        let pool = Size::from_bytes(u64::MAX);
+        let error = node::Error::Pool { pool, cores: 16 };
+        let budget = Budget {
+            pool,
+            disk: Size::GIBIBYTE,
+        };
+        assert_eq!(
+            stopped(dir(), &error, &known(budget, Origin::Kept)),
+            Failure {
+                code: MEMORY,
+                message:
+                    "the pool budget 18446744073709551615B, which foundation-data \
+                          keeps from its first start, gives one of 16 shards a pool \
+                          that needs more address space than this host has"
+                        .to_owned(),
+                fix: "Remove the file `budget` in foundation-data, and the next start \
+                      computes the budgets again from the free memory and disk"
+                    .to_owned(),
             }
         );
     }

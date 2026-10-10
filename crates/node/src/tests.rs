@@ -415,19 +415,28 @@ fn a_config_shows_its_budget_and_entropy_but_not_its_memory_or_files() {
     );
 }
 
+/// No part of the largest pool budget fits a shard's reservation. No shard starts,
+/// and a task given to the node is dropped unrun.
 #[test]
-#[should_panic(
-    expected = "shard-0: pool budget 18446744073709551615 bytes needs more address \
-                space than this host has"
-)]
-fn a_reservation_past_usize_max_panics_at_start() {
-    drop(start_with(
-        7,
-        1,
-        &[],
-        Size::from_bytes(u64::MAX),
-        Box::new(heap),
-    ));
+fn a_pool_reservation_past_usize_max_starts_no_shard() {
+    let pool = Size::from_bytes(u64::MAX);
+    for cores in [1, 2] {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let host = host(&mut sim, cores);
+        let node = Node::start(config(&host, pool, Box::new(heap)));
+        assert_eq!(host.shard_starts(), [], "{cores} cores");
+        assert_eq!(fate(&probe(&node)), Fate::Dropped, "{cores} cores");
+        assert_eq!(sim.run(), Ok(()));
+        let e = node.join().unwrap_err();
+        assert_eq!(e, Error::Pool { pool, cores });
+        assert_eq!(
+            e.to_string(),
+            format!(
+                "the pool budget 18446744073709551615B gives one of {cores} shards a \
+                 pool that needs more address space than this host has"
+            )
+        );
+    }
 }
 
 #[test]
