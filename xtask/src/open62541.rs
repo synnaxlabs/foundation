@@ -41,8 +41,8 @@ const CLOCKS: [&str; 3] = [
 ];
 
 /// The only (file, function, symbol, access) keys with which a function references a
-/// symbol outside the copy that neither [`SYMBOLS`] nor [`FILE_SYMBOLS`] admits. A clock
-/// counts only as a call.
+/// symbol outside the copy that neither [`SYMBOLS`] nor [`FILE_SYMBOLS`] admits. A
+/// clock counts only as a call.
 const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 13] = [
     // `isdigit` reads the locale, which stays C: nothing calls `setlocale`.
     (
