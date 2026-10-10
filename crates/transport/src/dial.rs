@@ -23,8 +23,8 @@ const STAGGER: Span = Span::from_nanos(250 * Span::MILLISECOND.nanos());
 /// # Errors
 ///
 /// [`Error::Network`] when the socket is broken, or breaks before an attempt connects,
-/// [`Error::Closed`] with code 0 when the carrier dropped, unless an attempt in flight
-/// connected first, or [`Error::Unreachable`] with each attempt's cause, in the order
+/// [`Error::Closed`] with code 0 when the carrier dropped, unless an attempt connected
+/// before the drop, or [`Error::Unreachable`] with each attempt's cause, in the order
 /// started, when none connects.
 pub(crate) async fn dial(
     carrier: &quic::Handle,
@@ -188,8 +188,9 @@ mod tests {
     use std::io::IoSliceMut;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV6};
     use std::pin::pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use std::task::Poll;
+    use std::task::{Context, Poll, Wake, Waker};
 
     use env::net::udp;
     use sim::node::Node;
@@ -695,9 +696,12 @@ mod tests {
         assert_eq!(sim.run(), Ok(()));
     }
 
-    // The handshake takes 100 ms over the link, and ends after the drop.
+    /// The drop of the carrier wakes a dial in flight, which fails with code 0. The
+    /// handshake takes 100 ms over the link, so with no close the dial would get its
+    /// session. Only this crate sees the wake: `Transport::dial` borrows the transport,
+    /// so no caller drops it while a dial is in flight.
     #[test]
-    fn an_attempt_in_flight_when_the_carrier_drops_gives_its_session() {
+    fn an_attempt_in_flight_when_the_carrier_drops_closes_with_code_0() {
         let (mut sim, client, server) = nodes(0);
         let link = sim::link::Config {
             delay: spans(Span::MILLISECOND, 50),
@@ -711,13 +715,27 @@ mod tests {
         });
         let addresses = [Address::Udp(address(&server))];
         testing::carrier(&client, CLIENT, move |carrier, node| async move {
+            struct Count(AtomicUsize);
+            impl Wake for Count {
+                fn wake(self: Arc<Self>) {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
             let handle = carrier.handle();
             let mut dial = pin!(super::dial(&handle, SERVER.public(), &addresses));
-            assert!(testing::poll_once(dial.as_mut()).await.is_none());
+            let count = Arc::new(Count(AtomicUsize::new(0)));
+            let waker = Waker::from(Arc::clone(&count));
+            let poll = dial.as_mut().poll(&mut Context::from_waker(&waker));
+            assert!(poll.is_pending());
             drop(carrier);
             node.clock().sleep(spans(Span::MILLISECOND, 200)).await;
-            let peer = dial.await.map(|session| session.peer());
-            assert_eq!(peer, Ok(Peer::Node(SERVER.public())));
+            assert_eq!(
+                count.0.load(Ordering::Relaxed),
+                1,
+                "the drop wakes the dial"
+            );
+            let closed = Error::Closed { code: Code(0) };
+            assert_eq!(dial.await.err(), Some(closed));
         });
         assert_eq!(sim.run(), Ok(()));
     }

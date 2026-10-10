@@ -19,8 +19,9 @@ use env::net::udp::{self, Meta, Transmit};
 use noq_proto::StreamId;
 use types::ed25519::PublicKey;
 use types::hash::Map;
-use types::time::Monotonic;
+use types::time::{Monotonic, Span};
 
+use super::end::{End, Ended, Live};
 use super::stream::{Incoming, Receiver, Sender};
 use super::wait::{self, RETRY};
 use super::{Endpoint, Event, Setup, connection};
@@ -32,9 +33,15 @@ use crate::{Class, Code, Error, PAYLOAD_IPV4, Peer, Status, port};
 /// shard's other tasks.
 const BATCHES: usize = 8;
 
+/// The longest the task of a dropped carrier lets the closes drain once each
+/// connection ended. A drain takes 3 PTO, and the peer's round trip sets the PTO with
+/// no bound.
+const DRAIN_MAX: Span = Span::from_nanos(3 * Span::SECOND.nanos());
+
 /// One shard's QUIC endpoint on a UDP socket. A task on the shard moves its
 /// datagrams and runs its timers until the socket breaks, or until the carrier
-/// dropped and each connection drained. It stays on the thread that made it.
+/// dropped and each connection drained, for at most [`DRAIN_MAX`] after each one
+/// ended. It stays on the thread that made it.
 pub(crate) struct Carrier(Rc<RefCell<State>>);
 
 impl Carrier {
@@ -48,10 +55,13 @@ impl Carrier {
         } = part;
         let endpoint = Endpoint::new(&setup, index, sender.batch_max());
         let Setup { clock, tasks, .. } = setup;
+        let end = Rc::default();
+        let task = Live::new(&end);
         let state = Rc::new(RefCell::new(State {
             endpoint,
             clock: clock.clone(),
             task: None,
+            end,
             sessions: BTreeMap::new(),
             accepted: Some(VecDeque::new()),
             accepting: Vec::new(),
@@ -59,7 +69,7 @@ impl Carrier {
             connects: 0,
             waits: wait::Queue::default(),
         }));
-        let task = Task::new(Rc::clone(&state), &clock, sender, receiver);
+        let task = Task::new(Rc::clone(&state), &clock, sender, receiver, task);
         tasks.spawn(task.run());
         Self(state)
     }
@@ -100,6 +110,11 @@ impl Carrier {
             budget_waits: state.endpoint.budget_waits(),
             ..state.waits.status(state.clock.now())
         }
+    }
+
+    /// Resolves once the task dropped, and the socket with it.
+    pub(crate) fn ended(&self) -> Ended {
+        Ended::new(&self.0.borrow().end)
     }
 
     /// A handle that dials and accepts on this carrier, and that does not keep it
@@ -199,12 +214,13 @@ impl Handle {
 }
 
 impl Drop for Carrier {
-    /// Refuses each later dial from a peer until each connection drained, closes
-    /// each session that no caller accepted with code 0, and wakes each wait in
-    /// [`Handle::poll_accept`].
+    /// Refuses each later dial from a peer until each connection drained, closes with
+    /// code 0 each handshake in flight and each session that no caller accepted, and
+    /// wakes each wait in [`Handle::poll_accept`].
     fn drop(&mut self) {
         let mut state = self.0.borrow_mut();
-        state.endpoint.refuse();
+        let now = state.clock.now();
+        state.endpoint.shut(now);
         for key in state.accepted.take().into_iter().flatten() {
             state.sessions.remove(&key);
             state.close(key, Code(0));
@@ -220,6 +236,8 @@ struct State {
     clock: Clock,
     /// The waker of the task's last poll, or `None` once the task ended.
     task: Option<Waker>,
+    /// Whether the task dropped.
+    end: Rc<End>,
     /// Each connection that a [`Session`] holds or that no caller accepted yet.
     sessions: BTreeMap<connection::Key, Slot>,
     /// The connections peers dialed, in the order they connected, for
@@ -265,10 +283,10 @@ impl State {
                     slot.wake_status();
                     return;
                 }
-                let Some(accepted) = &mut self.accepted else {
-                    self.close(key, Code(0));
-                    return;
-                };
+                // The task dispatches each event of its poll in that poll, and the
+                // drop of the carrier ends each handshake in flight.
+                let accepted = (self.accepted.as_mut())
+                    .expect("invariant: no handshake finishes after the carrier drops");
                 accepted.push_back(key);
                 let slot = Slot {
                     peer: Some(peer),
@@ -739,9 +757,15 @@ impl Drop for Session {
 struct Task {
     state: Rc<RefCell<State>>,
     socket: Socket,
-    /// Completes at the endpoint's deadline as of the last poll that changed it.
+    /// Completes at the first of the endpoint's deadline and `cut`, as of the last
+    /// poll.
     sleep: Sleep,
     retry: Retry,
+    /// When the task ends while a close still drains: [`DRAIN_MAX`] after a poll first
+    /// saw the carrier dropped and each connection ended.
+    cut: Option<Monotonic>,
+    /// Last, so that the socket has dropped when it wakes each [`Ended`].
+    _live: Live,
 }
 
 /// The timer that wakes the first read that waits for a block once each [`RETRY`].
@@ -757,6 +781,7 @@ impl Task {
         clock: &Clock,
         sender: udp::Sender,
         receiver: udp::Receiver,
+        live: Live,
     ) -> Self {
         Self {
             state,
@@ -766,6 +791,8 @@ impl Task {
                 sleep: clock.sleep_until(Monotonic(0)),
                 armed: false,
             },
+            cut: None,
+            _live: live,
         }
     }
 
@@ -773,13 +800,11 @@ impl Task {
         poll_fn(|cx| self.poll(cx)).await;
     }
 
-    /// Ready when the socket broke, or when the carrier dropped, each connection
-    /// drained, and the socket holds no datagram.
+    /// Ready when the socket broke, when the carrier dropped, each connection
+    /// drained, and the socket holds no datagram, or at `cut`.
     fn poll(&mut self, cx: &mut Context<'_>) -> Poll<()> {
         let mut state = self.state.borrow_mut();
-        let fresh =
-            !(state.task.as_ref()).is_some_and(|task| task.will_wake(cx.waker()));
-        if fresh {
+        if !(state.task.as_ref()).is_some_and(|task| task.will_wake(cx.waker())) {
             state.task = Some(cx.waker().clone());
         }
         let now = state.clock.now();
@@ -799,22 +824,23 @@ impl Task {
             state.dispatch(event);
         }
         // Once the carrier dropped, no connection starts again.
-        if state.accepted.is_none()
-            && state.endpoint.drained()
-            && self.socket.held.is_none()
-            && !more
-        {
-            state.task = None;
-            return Poll::Ready(());
+        if state.accepted.is_none() {
+            if self.cut.is_none() && state.endpoint.ended() {
+                self.cut = Some(now + DRAIN_MAX);
+            }
+            let drained =
+                state.endpoint.drained() && self.socket.held.is_none() && !more;
+            if drained || self.cut.is_some_and(|cut| cut <= now) {
+                state.task = None;
+                return Poll::Ready(());
+            }
         }
-        // Each poll of the sleep arms the timer again.
-        if let Some(deadline) = state.endpoint.deadline()
-            && (fresh || deadline != self.sleep.deadline())
-        {
+        let deadline = state.endpoint.deadline().into_iter().chain(self.cut).min();
+        if let Some(deadline) = deadline {
             self.sleep.reset(deadline);
             more |= Pin::new(&mut self.sleep).poll(cx).is_ready();
         }
-        more |= self.retry.poll(cx, &state.waits, now, fresh);
+        more |= self.retry.poll(cx, &state.waits, now);
         if more {
             cx.waker().wake_by_ref();
         }
@@ -830,7 +856,6 @@ impl Retry {
         cx: &mut Context<'_>,
         waits: &wait::Queue,
         now: Monotonic,
-        fresh: bool,
     ) -> bool {
         if !waits.waiting() {
             self.armed = false;
@@ -840,14 +865,10 @@ impl Retry {
             waits.wake_first();
             self.armed = false;
         }
-        if self.armed && !fresh {
-            return false;
-        }
         if !self.armed {
             self.sleep.reset(now + RETRY);
             self.armed = true;
         }
-        // Each poll of the sleep arms the timer again.
         Pin::new(&mut self.sleep).poll(cx).is_ready()
     }
 }
@@ -1243,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn a_handshake_that_finishes_after_the_carrier_drops_closes_with_code_0() {
+    fn a_handshake_in_flight_when_the_carrier_drops_ends_in_the_drain() {
         let (mut sim, client, server) = nodes(0);
         let late = sim.node(sim::node::Config::default());
         link(&mut sim, &late, &server, slow());
@@ -1268,9 +1289,14 @@ mod tests {
             let before = node.clock().now();
             let dialed = carrier.connect(SERVER.public(), at).await;
             let session = dialed.expect("a session");
-            let closed = Error::PeerClosed { code: Code(0) };
+            // QUIC sends a close in the handshake as a transport error.
+            let reason = "aborted by peer: the application or application protocol \
+                          caused the connection to be closed during the handshake";
+            let closed = Error::Broken {
+                reason: reason.into(),
+            };
             assert_eq!(session.closed().await, closed);
-            assert!(node.clock().now() - before < IDLE);
+            assert!(node.clock().now() - before < spans(Span::MILLISECOND, 200));
         });
         assert_eq!(sim.run(), Ok(()));
     }
@@ -1348,14 +1374,14 @@ mod tests {
             assert!(taken.is_none());
             for task in [&old, &new] {
                 let mut cx = Context::from_waker(task);
-                assert!(!retry.poll(&mut cx, &waits, start, true));
+                assert!(!retry.poll(&mut cx, &waits, start));
             }
             clock.sleep(spans(Span::MILLISECOND, 9)).await;
             assert_eq!(woken(), [0, 0, 0]);
             clock.sleep(spans(Span::MILLISECOND, 2)).await;
             assert_eq!(woken(), [0, 0, 1]);
             let mut cx = Context::from_waker(&new);
-            assert!(!retry.poll(&mut cx, &waits, clock.now(), false));
+            assert!(!retry.poll(&mut cx, &waits, clock.now()));
             assert_eq!(woken(), [1, 0, 1]);
             clock.sleep(spans(Span::MILLISECOND, 10)).await;
             assert_eq!(woken(), [1, 0, 2]);

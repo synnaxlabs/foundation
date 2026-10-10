@@ -1445,6 +1445,51 @@ fn a_timer_wakes_its_task_only_when_due() {
     assert_eq!(polls.load(Ordering::Relaxed), 2);
 }
 
+/// As on `os`, a timer whose deadline is past the node's `arm_max` wakes its task
+/// once each `arm_max`, and completes at its deadline.
+#[test]
+fn a_timer_wakes_its_task_at_each_arm_max_until_due() {
+    let mut sim = sim(0);
+    let node = sim.node(node::Config {
+        arm_max: Some(Span::SECOND),
+        ..node::Config::default()
+    });
+    let clock = node.clock();
+    let polls = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&polls);
+    let handle = node.shards().start(shard("sleep"), move |_| {
+        let sleep = async move {
+            let start = clock.now();
+            clock.sleep(millis(2_500)).await;
+            assert_eq!(clock.now(), start + millis(2_500));
+        };
+        Counted(Box::pin(sleep), count)
+    });
+    sim.run().unwrap();
+    handle.unwrap().join().unwrap();
+    assert_eq!(polls.load(Ordering::Relaxed), 4);
+}
+
+#[test]
+#[should_panic(expected = "arm_max Span(0) is not positive")]
+fn a_node_with_an_arm_max_of_zero_panics() {
+    let mut sim = sim(0);
+    sim.node(node::Config {
+        arm_max: Some(Span::ZERO),
+        ..node::Config::default()
+    });
+}
+
+#[test]
+#[should_panic(expected = "arm_max Span(-1000000) is not positive")]
+fn a_node_with_a_negative_arm_max_panics() {
+    let mut sim = sim(0);
+    sim.node(node::Config {
+        arm_max: Some(millis(-1)),
+        ..node::Config::default()
+    });
+}
+
 fn millis(n: i64) -> Span {
     Span::from_nanos(n * Span::MILLISECOND.nanos())
 }
