@@ -202,9 +202,9 @@ impl Manager {
         .await
     }
 
-    /// Drives the manager until `server`, after `UA_Server_run_shutdown`, is stopped
-    /// and nothing is due on the loop, then deletes it, with no call between. It checks
-    /// after each run of the loop, so a busy loop only makes the delete later.
+    /// Drives the manager until nothing is due on the loop, then deletes `server`,
+    /// after `UA_Server_run_shutdown`, with no call between. It checks after each run
+    /// of the loop, so a busy loop only makes the delete later.
     ///
     /// # Safety
     ///
@@ -212,21 +212,27 @@ impl Manager {
     ///
     /// # Panics
     ///
-    /// If open62541 fails a run of the loop or refuses the delete.
+    /// If open62541 fails a run of the loop or refuses the delete, or if the server is
+    /// not stopped when nothing is due.
     #[cfg(any(test, feature = "sim"))]
     pub(crate) async unsafe fn delete_server(&self, server: *mut ffi::test::Server) {
         let events = &self.events;
         self.drive(|_| {
             events.run();
-            // SAFETY: the server lives.
-            let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
-            if state == ffi::test::Lifecycle::STOPPED && !events.due() {
-                Poll::Ready(())
-            } else {
+            if events.due() {
                 Poll::Pending
+            } else {
+                Poll::Ready(())
             }
         })
         .await;
+        // SAFETY: the server lives.
+        let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
+        assert_eq!(
+            state,
+            ffi::test::Lifecycle::STOPPED,
+            "invariant: a close queues its `CLOSING` at once"
+        );
         // SAFETY: the server is stopped, and nothing holds it.
         let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
         assert_eq!(status, Status::GOOD, "open62541 refused the server delete");
