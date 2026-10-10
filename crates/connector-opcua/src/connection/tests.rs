@@ -285,27 +285,6 @@ impl Side {
         assert_eq!(status, Status::GOOD);
     }
 
-    /// Drives until `server` is `STOPPED` and nothing is due on the loop, then deletes
-    /// it, with no call between.
-    async fn delete(&self, server: *mut ffi::test::Server) {
-        self.manager
-            .drive(|_| {
-                self.run();
-                // SAFETY: the server lives.
-                let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
-                let due = self.events().due();
-                if state == ffi::test::Lifecycle::STOPPED && !due {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                }
-            })
-            .await;
-        // SAFETY: the server is stopped, and nothing holds it.
-        let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
-        assert_eq!(status, Status::GOOD);
-    }
-
     /// Drives the manager and runs the loop until `span` passes, and gives the count
     /// of runs.
     async fn drive(&self, span: Span) -> usize {
@@ -2131,7 +2110,8 @@ fn a_server_with_a_host_in_its_url_has_that_url_alone_as_its_discovery_url() {
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
             assert_eq!(status, Status::GOOD);
-            side.delete(server).await;
+            // SAFETY: the server lives on the loop, and nothing uses it after.
+            unsafe { side.manager.delete_server(server) }.await;
         })
         .expect("the run ends");
 }
@@ -2457,7 +2437,8 @@ fn a_server_answers_hel_with_ack_and_its_shutdown_closes_each_connection() {
             // SAFETY: the server lives.
             let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
             assert_eq!(state, ffi::test::Lifecycle::STOPPED);
-            side.delete(server).await;
+            // SAFETY: the server lives on the loop, and nothing uses it after.
+            unsafe { side.manager.delete_server(server) }.await;
             side.calls()
         })
         .expect("the run ends");
@@ -2504,7 +2485,8 @@ fn a_stopped_server_with_a_session_is_deleted_with_its_session() {
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
             assert_eq!(status, Status::GOOD);
-            side.delete(server).await;
+            // SAFETY: the server lives on the loop, and nothing uses it after.
+            unsafe { side.manager.delete_server(server) }.await;
             // A client that has not seen the close waits in its delete for the answer
             // of `CloseSession`, while the sim clock stands still.
             side.drive(Span::SECOND).await;
@@ -2554,7 +2536,8 @@ fn a_session_that_its_client_closes_is_removed_after_the_service() {
             // SAFETY: the server lives.
             let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
             assert_eq!(status, Status::GOOD);
-            side.delete(server).await;
+            // SAFETY: the server lives on the loop, and nothing uses it after.
+            unsafe { side.manager.delete_server(server) }.await;
             // SAFETY: nothing uses the client after it.
             unsafe { ffi::UA_Client_delete(client) };
             side.drive(Span::SECOND).await;
@@ -2641,7 +2624,8 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
                 let status =
                     Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
                 assert_eq!(status, Status::GOOD);
-                side.delete(server).await;
+                // SAFETY: the server lives on the loop, and nothing uses it after.
+                unsafe { side.manager.delete_server(server) }.await;
                 // SAFETY: nothing uses the client after it.
                 unsafe { ffi::UA_Client_delete(client) };
                 side.drive(Span::SECOND).await;

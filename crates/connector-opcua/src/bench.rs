@@ -20,7 +20,7 @@ use types::time::Monotonic;
 
 use crate::connection;
 use crate::event::Loop;
-use crate::ffi::test::{Lifecycle, Session};
+use crate::ffi::test::Session;
 use crate::ffi::{self, Status};
 
 /// A client of open62541 on its own event loop, which also runs a count of repeated
@@ -261,22 +261,8 @@ impl Manager {
         // SAFETY: the server lives.
         let status = Status(unsafe { ffi::test::UA_Server_run_shutdown(server) });
         assert_eq!(status, Status::GOOD, "open62541 refused the server stop");
-        let events = self.connections.events();
-        self.connections
-            .drive(|_| {
-                self.run();
-                // SAFETY: the server lives.
-                let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
-                if state == Lifecycle::STOPPED && !events.due() {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
-                }
-            })
-            .await;
-        // SAFETY: the server is stopped, and nothing holds it.
-        let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
-        assert_eq!(status, Status::GOOD, "open62541 refused the server delete");
+        // SAFETY: the server lives on the loop, and nothing uses it after.
+        unsafe { self.connections.delete_server(server) }.await;
         for client in self.clients.drain(..) {
             // SAFETY: nothing uses the client after it. It asked to disconnect, so the
             // delete waits for no answer.

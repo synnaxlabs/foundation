@@ -210,6 +210,38 @@ impl Manager {
         .await
     }
 
+    /// Drives the manager until `server`, after `UA_Server_run_shutdown`, is stopped
+    /// and nothing is due on the loop, then deletes it, with no call between. It checks
+    /// after each run of the loop, so a busy loop only makes the delete later.
+    ///
+    /// # Safety
+    ///
+    /// `server` lives on the loop of the manager, and nothing uses it after the call.
+    ///
+    /// # Panics
+    ///
+    /// If open62541 fails a run of the loop or refuses the delete.
+    #[cfg(any(test, feature = "sim"))]
+    pub(crate) async unsafe fn delete_server(&self, server: *mut ffi::test::Server) {
+        let events = &self.events;
+        self.drive(|_| {
+            // SAFETY: the member takes its own loop.
+            let status = Status(unsafe { (events.members().run)(events.raw(), 0) });
+            assert_eq!(status, Status::GOOD, "open62541 failed a run");
+            // SAFETY: the server lives.
+            let state = unsafe { ffi::test::UA_Server_getLifecycleState(server) };
+            if state == ffi::test::Lifecycle::STOPPED && !events.due() {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        })
+        .await;
+        // SAFETY: the server is stopped, and nothing holds it.
+        let status = Status(unsafe { ffi::test::UA_Server_delete(server) });
+        assert_eq!(status, Status::GOOD, "open62541 refused the server delete");
+    }
+
     /// Connects, reads, and writes each connection until each waits, and has the task
     /// of `cx` woken when one can go on.
     fn pass(&self, cx: &mut Context<'_>) {
