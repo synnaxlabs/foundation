@@ -589,8 +589,8 @@ mod tests {
         ///
         /// # Safety
         ///
-        /// `hooks` outlives the waker and each clone of it, and each stays on this
-        /// thread.
+        /// `hooks` does not move or drop until the waker and each clone of it drop, and
+        /// each stays on this thread.
         unsafe fn waker(hooks: &Hooks) -> Waker {
             let raw = RawWaker::new(ptr::from_ref(hooks).cast(), &VTABLE);
             // SAFETY: each function of `VTABLE` reads `data` as the `&Hooks` it is,
@@ -656,7 +656,8 @@ mod tests {
             let task = kept.0.borrow_mut()[0].take().expect("a live task");
             hooks.clone.set(Some(Box::new(move || drop(task))));
             let mut ended = group.ended();
-            // SAFETY: `hooks` drops last, and no waker leaves this thread.
+            // SAFETY: `hooks` is declared first, so it drops last and never moves, and
+            // no waker leaves this thread.
             let hooked = unsafe { waker(&hooks) };
             assert_eq!(poll(&mut ended, &hooked), Poll::Ready(()));
         }
@@ -673,7 +674,8 @@ mod tests {
                 spawner.tasks().spawn(std::future::pending());
             })));
             let mut ended = group.ended();
-            // SAFETY: `hooks` drops last, and no waker leaves this thread.
+            // SAFETY: `hooks` is declared first, so it drops last and never moves, and
+            // no waker leaves this thread.
             let hooked = unsafe { waker(&hooks) };
             assert_eq!(poll(&mut ended, &hooked), Poll::Pending);
             assert_eq!(kept.0.borrow().len(), 2);
@@ -689,7 +691,8 @@ mod tests {
             group.tasks().spawn(std::future::pending());
             let task = kept.0.borrow_mut()[0].take().expect("a live task");
             let mut ended = group.ended();
-            // SAFETY: `hooks` drops last, and no waker leaves this thread.
+            // SAFETY: `hooks` is declared first, so it drops last and never moves, and
+            // no waker leaves this thread.
             let first = unsafe { waker(&hooks) };
             assert_eq!(poll(&mut ended, &first), Poll::Pending);
             drop(first);
@@ -709,7 +712,8 @@ mod tests {
             let (_kept, group) = group();
             group.tasks().spawn(std::future::pending());
             let mut ended = group.ended();
-            // SAFETY: `hooks` drops last, and no waker leaves this thread.
+            // SAFETY: `hooks` is declared first, so it drops last and never moves, and
+            // no waker leaves this thread.
             let first = unsafe { waker(&hooks) };
             assert_eq!(poll(&mut ended, &first), Poll::Pending);
             drop(first);
