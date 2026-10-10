@@ -7,7 +7,6 @@
     reason = "a waker over an `Rc` needs its own `RawWakerVTable`"
 )]
 
-use std::process;
 use std::rc::Rc;
 use std::task::{RawWaker, RawWakerVTable, Waker};
 use std::thread::{self, ThreadId};
@@ -28,7 +27,8 @@ struct Inner<T> {
 /// nothing.
 ///
 /// A clone, a wake, or a drop of the waker or a clone on another thread aborts the
-/// process before it reads `value`, because `value` need not be `Send`.
+/// process before it reads `value`, because `value` need not be `Send`. Under libtest,
+/// the message of the abort shows only with `--nocapture`.
 pub fn holding<T: 'static>(value: T) -> Waker {
     let inner = Rc::new(Inner {
         thread: thread::current().id(),
@@ -41,27 +41,24 @@ pub fn holding<T: 'static>(value: T) -> Waker {
 }
 
 fn vtable<T: 'static>() -> &'static RawWakerVTable {
-    &RawWakerVTable::new(clone::<T>, release::<T>, stay::<T>, release::<T>)
+    &RawWakerVTable::new(clone::<T>, release::<T>, wake_by_ref::<T>, release::<T>)
 }
 
-/// Aborts unless this thread made the waker at `data`.
+/// Aborts unless this thread made the waker at `data`. It panics, and the panic
+/// aborts at the `extern "C"` boundary.
 ///
 /// # Safety
 ///
 /// `data` is the data of a live waker of [`holding`] of `T`.
-#[expect(
-    clippy::print_stderr,
-    reason = "the process aborts next, so this is its only report"
-)]
-unsafe fn check<T>(data: *const ()) {
+unsafe extern "C" fn check<T>(data: *const ()) {
     // SAFETY: the waker holds a count, so `Inner` is live, and `thread` never changes,
     // so a read from any thread is no race. It reads only `thread`, never the counts.
     let thread = unsafe { (*data.cast::<Inner<T>>()).thread };
-    if thread != thread::current().id() {
-        let current = thread::current().id();
-        eprintln!("a waker of `waker::holding` made on {thread:?} ran on {current:?}");
-        process::abort();
-    }
+    let current = thread::current().id();
+    assert!(
+        thread == current,
+        "a waker of `waker::holding` made on {thread:?} ran on {current:?}"
+    );
 }
 
 unsafe fn clone<T: 'static>(data: *const ()) -> RawWaker {
@@ -73,7 +70,7 @@ unsafe fn clone<T: 'static>(data: *const ()) -> RawWaker {
 }
 
 /// A wake by reference, which does nothing.
-unsafe fn stay<T>(data: *const ()) {
+unsafe fn wake_by_ref<T>(data: *const ()) {
     // SAFETY: the vtable gets `data` from a live waker.
     unsafe { check::<T>(data) };
 }

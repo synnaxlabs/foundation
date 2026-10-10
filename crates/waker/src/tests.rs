@@ -47,6 +47,7 @@ fn a_wake_by_reference_keeps_the_value() {
 #[cfg(unix)]
 fn assert_aborts(child: impl FnOnce()) {
     use std::os::unix::process::ExitStatusExt;
+    use std::process;
     const CHILD: &str = "WAKER_TEST_CHILD";
     const SIGABRT: i32 = 6;
     #[expect(
