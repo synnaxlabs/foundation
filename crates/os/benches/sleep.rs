@@ -13,8 +13,10 @@ fn main() {
     divan::main();
 }
 
-/// One poll of each of `sleeps` sleeps a minute away, which an earlier poll armed,
-/// inside a Tokio task. The carrier polls one, and two while a read waits.
+/// One poll of each of `sleeps` sleeps a minute away, which an earlier poll armed, in
+/// the `block_on` of a current-thread runtime. Its waker counts references with
+/// atomics, as the waker of a task does. The carrier polls one, and two while a read
+/// waits.
 #[divan::bench(args = [1, 2], sample_count = 20)]
 fn poll_armed(bencher: Bencher<'_, '_>, sleeps: usize) {
     let runtime = tokio::runtime::Builder::new_current_thread()
