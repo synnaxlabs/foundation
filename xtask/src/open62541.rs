@@ -862,10 +862,6 @@ fn wait((name, child): (String, Child)) -> Result<(String, String), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::process::ExitStatusExt;
-
-    /// The signal number of `SIGABRT` on Linux.
-    const SIGABRT: i32 = 6;
 
     #[test]
     fn clock_calls_names_each_function_that_refers_to_a_clock() {
@@ -1885,6 +1881,7 @@ End of search list.
     }
 
     #[test]
+    #[cfg(unix)]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC and GNU objdump")]
     fn check_passes_on_the_committed_copy() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
@@ -1897,8 +1894,12 @@ End of search list.
     }
 
     #[test]
+    #[cfg(unix)]
     #[cfg_attr(not(target_os = "linux"), ignore = "needs GCC")]
     fn each_thread_of_the_committed_copy_draws_from_its_own_random_state_or_aborts() {
+        use std::os::unix::process::ExitStatusExt;
+        /// The signal number of `SIGABRT` on Linux.
+        const SIGABRT: i32 = 6;
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let (copy, out) = (root.join(DEST), temp("rng"));
         let read = |name| std::fs::read_to_string(copy.join(name)).unwrap();
