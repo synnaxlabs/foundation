@@ -162,10 +162,23 @@ impl Count {
 /// What a connector's run is doing, as `state` gives it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
-    Running = 0,
-    Waiting = 1,
-    Stopped = 2,
-    Ending = 3,
+    Running,
+    /// Waits for the next run, at this time by the node's clock.
+    Waiting(Monotonic),
+    Stopped,
+    Ending,
+}
+
+impl State {
+    /// The value of `state`.
+    fn code(self) -> u8 {
+        match self {
+            Self::Running => 0,
+            Self::Waiting(_) => 1,
+            Self::Stopped => 2,
+            Self::Ending => 3,
+        }
+    }
 }
 
 /// How the last run ended, as `class` gives it: `None` also before the first end.
@@ -295,7 +308,6 @@ impl Writer {
                 at,
                 form,
             },
-            next: Monotonic::default(),
             started: false,
             unapplied: false,
             closed: false,
@@ -342,10 +354,7 @@ impl Writer {
     pub(crate) async fn wait(&self, span: Span) -> Monotonic {
         self.applied().await;
         let next = self.clock.now() + span;
-        self.change(|session| {
-            session.next = next;
-            session.state = State::Waiting;
-        });
+        self.change(|session| session.state = State::Waiting(next));
         next
     }
 
@@ -462,8 +471,6 @@ struct Session {
     class: Class,
     restarts: u64,
     error: Text,
-    /// The time of the next run, by the node's clock, while `state` is 1.
-    next: Monotonic,
     /// Set at the first start, after which each start is a restart.
     started: bool,
     /// Set while the last change of state waits for a frame that the home applies,
@@ -515,7 +522,10 @@ impl Session {
         let mesh = self.hub.now();
         let stamp = self.last.map_or(mesh, |last| mesh.max(after(last)));
         // The hub's clock can step while the node's clock does not.
-        let next = mesh + (self.next - now);
+        let next = match self.state {
+            State::Waiting(next) => Some(mesh + (next - now)),
+            State::Running | State::Stopped | State::Ending => None,
+        };
         if let Err(before) = self.send(values, stamp, next)
             && let Err(again) = self.send(values, after(before), next)
         {
@@ -530,7 +540,7 @@ impl Session {
     }
 
     /// Writes one frame of the last value of each status channel at `stamp`, with
-    /// `next` the time of the next run by the hub's clock.
+    /// `next` the time of the next run by the hub's clock, while one waits.
     ///
     /// # Errors
     ///
@@ -544,7 +554,7 @@ impl Session {
         &mut self,
         values: &Values,
         stamp: Stamp,
-        next: Stamp,
+        next: Option<Stamp>,
     ) -> Result<(), Stamp> {
         let mut draft = match self.hub.draft(Form::Raw, &self.series) {
             Ok(draft) => draft,
@@ -600,14 +610,17 @@ impl Session {
     }
 
     /// Fills `draft` with the last value of each status channel at `stamp`, with
-    /// `next` the time of the next run by the hub's clock.
-    fn fill(&self, draft: &mut Draft, values: &Values, stamp: Stamp, next: Stamp) {
-        let backoff = match self.state {
-            State::Waiting => (next - stamp).max(Span::ZERO),
-            State::Running | State::Stopped | State::Ending => Span::ZERO,
-        };
+    /// `next` the time of the next run by the hub's clock, while one waits.
+    fn fill(
+        &self,
+        draft: &mut Draft,
+        values: &Values,
+        stamp: Stamp,
+        next: Option<Stamp>,
+    ) {
+        let backoff = next.map_or(Span::ZERO, |next| (next - stamp).max(Span::ZERO));
         let supervisor = [
-            u64::from(self.state as u8).to_le_bytes(),
+            u64::from(self.state.code()).to_le_bytes(),
             u64::from(self.class as u8).to_le_bytes(),
             self.restarts.to_le_bytes(),
             backoff.nanos().to_le_bytes(),
