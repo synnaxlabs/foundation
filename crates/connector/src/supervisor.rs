@@ -1966,10 +1966,29 @@ mod tests {
         }
     }
 
-    /// A kind with the count `samples`, whose run is the function it holds.
-    struct Counted<F>(F);
+    /// A kind with the counts `counts`, whose run is the function it holds.
+    struct Closure<F> {
+        counts: Vec<Name>,
+        run: F,
+    }
 
-    impl<F, R> Kind for Counted<F>
+    /// A kind with the count `samples`, whose run is `run`.
+    fn counted<F>(run: F) -> Closure<F> {
+        Closure {
+            counts: vec![name("samples")],
+            run,
+        }
+    }
+
+    /// A kind with no count, whose run is `run`.
+    fn plain<F>(run: F) -> Closure<F> {
+        Closure {
+            counts: Vec::new(),
+            run,
+        }
+    }
+
+    impl<F, R> Kind for Closure<F>
     where
         F: Fn(Context<()>) -> R + Send + Sync + 'static,
         R: Future<Output = Result<(), Error>>,
@@ -1981,7 +2000,10 @@ mod tests {
         }
 
         fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
-            Tally::check(&Tally::new("samples"), &())
+            Ok(Channels {
+                counts: self.counts.clone(),
+                ..Channels::default()
+            })
         }
 
         fn discover(
@@ -1992,7 +2014,7 @@ mod tests {
         }
 
         fn run(&self, ctx: Context<()>) -> impl Future<Output = Result<(), Error>> {
-            (self.0)(ctx)
+            (self.run)(ctx)
         }
     }
 
@@ -2000,7 +2022,7 @@ mod tests {
     /// `Ok` at 600 ms. A task of the run sets it to `value`, if given, at 800 ms and
     /// ends at 2 s.
     fn late(value: Option<u64>) -> impl Kind<Config = ()> {
-        Counted(move |ctx: Context<()>| async move {
+        counted(move |ctx: Context<()>| async move {
             let (late, clock) = (ctx.count("samples"), ctx.clock().clone());
             ctx.tasks().spawn(async move {
                 clock.sleep(ms(800)).await;
@@ -2046,7 +2068,7 @@ mod tests {
     /// A kind with the count `samples`. Its run spawns a task that sets the count to
     /// each of 1 to `n`, `gap` apart, and returns `Ok` once that task ended.
     fn relay(n: u64, gap: Span) -> impl Kind<Config = ()> {
-        Counted(move |ctx: Context<()>| async move {
+        counted(move |ctx: Context<()>| async move {
             let (count, clock) = (ctx.count("samples"), ctx.clock().clone());
             let done = Rc::new((Cell::new(false), Cell::new(None::<Waker>)));
             let signal = Rc::clone(&done);
@@ -2089,7 +2111,7 @@ mod tests {
     /// the room that came back again at 900 ms, so the pool is full at the flush at
     /// 1 s. Else the home has no room to take that flush's frame, and loses it.
     fn hog(full: bool) -> impl Kind<Config = ()> {
-        Counted(move |ctx: Context<()>| async move {
+        counted(move |ctx: Context<()>| async move {
             let channels =
                 ["state", "class", "restarts", "backoff", "error", "samples"]
                     .map(|c| name(&format!("plant.tally.status.{c}")))
@@ -2210,7 +2232,7 @@ mod tests {
         T: Future<Output = ()> + 'static,
     {
         run_with(node, |node, tasks| async move {
-            let kinds = Table::new().with("tally", Counted(run));
+            let kinds = Table::new().with("tally", counted(run));
             let inputs =
                 create_config(&node, tasks.clone(), kinds, "plant.tally").await;
             let (connector, counts) = (name("plant.tally"), [name("samples")]);
@@ -2261,7 +2283,7 @@ mod tests {
     /// the shard's pool until it has no room and gives them back at 500 ms, and
     /// returns `Ok` at 200 ms.
     fn outlive() -> impl Kind<Config = ()> {
-        Counted(|ctx: Context<()>| async move {
+        counted(|ctx: Context<()>| async move {
             let channels =
                 ["state", "class", "restarts", "backoff", "error", "samples"]
                     .map(|c| name(&format!("plant.tally.status.{c}")))
@@ -2904,36 +2926,6 @@ mod tests {
         assert_eq!(got, [30, 10, 20]);
     }
 
-    /// A kind with no count, whose run is the function it holds.
-    struct Plain<F>(F);
-
-    impl<F, R> Kind for Plain<F>
-    where
-        F: Fn(Context<()>) -> R + Send + Sync + 'static,
-        R: Future<Output = Result<(), Error>>,
-    {
-        type Config = ();
-
-        fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
-            Ok(())
-        }
-
-        fn check(&self, (): &()) -> Result<Channels, Vec<Diagnostic>> {
-            Ok(Channels::default())
-        }
-
-        fn discover(
-            &self,
-            _: &cancel::Token,
-        ) -> impl Future<Output = Result<Vec<Document>, Error>> {
-            std::future::ready(Ok(Vec::new()))
-        }
-
-        fn run(&self, ctx: Context<()>) -> impl Future<Output = Result<(), Error>> {
-            (self.0)(ctx)
-        }
-    }
-
     /// The reader settings of `plant.value`, complete, with a hold of `hold`.
     fn settings(hold: Span) -> reader::Settings {
         reader::Settings {
@@ -2955,7 +2947,7 @@ mod tests {
         run_on(move |node, tasks| async move {
             let got = Arc::new(Mutex::new(Vec::new()));
             let into = Arc::clone(&got);
-            let kind = Plain(move |ctx| kind(ctx, Arc::clone(&into)));
+            let kind = plain(move |ctx| kind(ctx, Arc::clone(&into)));
             let kinds = Table::new().with("read", kind);
             let inputs =
                 create_config(&node, tasks.clone(), kinds, "plant.write").await;
@@ -3011,7 +3003,7 @@ mod tests {
         let got = run_on(|node, tasks| async move {
             let got: Arc<Mutex<Option<hub::reader::Ended>>> = Arc::default();
             let into = Arc::clone(&got);
-            let kind = Plain(move |ctx: Context<()>| {
+            let kind = plain(move |ctx: Context<()>| {
                 let into = Arc::clone(&into);
                 async move {
                     let reader = ctx.reader(&settings(Span::ZERO)).await;
