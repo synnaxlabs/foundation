@@ -2943,6 +2943,45 @@ fn refuses_a_block_at_the_name_of_a_status_channel_in_any_case() {
 }
 
 #[test]
+fn refuses_each_block_at_the_name_of_a_status_channel() {
+    let channel = |name: &str| {
+        format!(
+            "channel \"{name}\" {{\n  data_type = \"u8\"\n  index = \"a.time\"\n}}\n"
+        )
+    };
+    let (lower, upper) = (channel("c.status.state"), channel("C.Status.State"));
+    let documents = documents(&[COUNTED, PLANT, &lower, &upper]);
+    let found = config::check(&documents, &kinds()).expect_err("problems");
+    let found: Vec<_> = (found.iter())
+        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.span))
+        .collect();
+    let span = |document: &Document| document.blocks[0].labels[0].span;
+    let expected = [
+        ("config.implied-channel", span(&documents[2])),
+        ("config.implied-channel", span(&documents[3])),
+        ("config.duplicate-name", span(&documents[3])),
+    ];
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn gives_writer_nodes_for_a_connector_that_writes_a_status_channel_on_another_node() {
+    let text = format!(
+        "{COUNTED}connector \"d\" {{\n  kind = \"writer\"\n  node = \"m\"\n  \
+         writes = [\"c.status.state\"]\n}}\n"
+    );
+    let found = Spec::create_empty().plan(&[&text], &["m", "n"]);
+    let expected = problem(
+        "config.writer-nodes",
+        (0, value(&text, "node", "\"m\"")),
+        "connectors on the nodes `n` and `m` write the index `c.status.time`, so it \
+         has no one home",
+        "Run each connector that writes `c.status.time` on one node",
+    );
+    assert_eq!(problems(found), [expected]);
+}
+
+#[test]
 fn refuses_a_connector_whose_status_names_are_too_long() {
     let long = "c".repeat(244);
     let text = COUNTED.replace("\"c\"", &format!("\"{long}\""));

@@ -93,6 +93,7 @@ fn checks_the_influx_fixture_into_one_connector_and_its_status() {
     assert_eq!(parsed.address, "http://influx:8086");
     let select = Selector::new(["edge.*"]).expect("a selector");
     assert_eq!(parsed.reader.select, select);
+    // The crate map does not let `config` take `hub`, the home of `reader::Mode`.
     assert_eq!(format!("{:?}", parsed.reader.mode), "Complete");
     assert_eq!(parsed.reader.hold, Span::from_nanos(2 * Span::HOUR.nanos()));
 }
