@@ -44,7 +44,7 @@ fn read(bytes: &[u8]) -> Option<Hello> {
         window_bytes: window?,
         message_bytes_max: message?,
     };
-    let limits = hello.window_bytes >= hello.message_bytes_max
+    let limits = hello.window_bytes / 2 >= hello.message_bytes_max
         && hello.message_bytes_max >= 1472;
     limits.then_some(hello)
 }

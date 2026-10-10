@@ -96,6 +96,12 @@ const PAYLOAD_IPV4: u16 = 1472;
 /// and so does a hub head or key.
 const MESSAGE_BYTES_MIN: usize = PAYLOAD_IPV4 as usize;
 
+/// The smallest `window_bytes` for a message limit of `message` bytes, so that a
+/// message of one class leaves room for a message of the other.
+const fn window_min(message: usize) -> usize {
+    2 * message
+}
+
 /// The rule that a pool breaks when its largest block is below [`MESSAGE_BYTES_MIN`].
 const POOL_RULE: &str = "must hold a message of at least 1472 bytes";
 
@@ -133,7 +139,7 @@ impl Transport {
     /// [`Error::Config`] when `config.idle` is not positive, the message limit (the
     /// smaller of `config.message_bytes_max` and `config.pool.largest()`) is below
     /// 1472, the largest UDP payload a node takes, or `config.window_bytes` is below
-    /// that limit.
+    /// twice that limit.
     ///
     /// ```
     /// use transport::{Config, Error, Transport, port};
@@ -322,8 +328,9 @@ pub struct Config {
     pub message_bytes_max: NonZeroUsize,
     /// The most bytes in flight per session in each direction: sent and not yet
     /// acknowledged, or received and not yet taken. It bounds the memory of a session.
-    /// Size it near bandwidth times round trip. Must be at least the message limit:
-    /// the smaller of `message_bytes_max` and `pool.largest()`.
+    /// Size it near bandwidth times round trip. Must be at least twice the message
+    /// limit (the smaller of `message_bytes_max` and `pool.largest()`), so a message
+    /// of one class leaves room for a message of the other.
     pub window_bytes: usize,
     /// The most two-way streams, and apart from them the most one-way streams, a peer
     /// may have open to this node at once, per session. Size it near the rate of new
@@ -362,8 +369,8 @@ impl Config {
             } else {
                 ("message_bytes_max", "must be at least 1472")
             }
-        } else if self.window_bytes < limit {
-            ("window_bytes", "must be at least the message limit")
+        } else if self.window_bytes < window_min(limit) {
+            ("window_bytes", "must be at least twice the message limit")
         } else {
             return Ok(quic::Setup {
                 role: quic::Role::Node(self.private_key),
@@ -416,7 +423,7 @@ mod tests {
     };
     const WINDOW: Error = Error::Config {
         field: "window_bytes",
-        rule: "must be at least the message limit",
+        rule: "must be at least twice the message limit",
     };
 
     /// A config of `shard` with these limits.
@@ -439,7 +446,7 @@ mod tests {
     fn new_takes_each_limit_at_its_edge() {
         testing::run(0, |shard| {
             for message in [1472, largest(shard)] {
-                let config = config(shard, Span::NANOSECOND, message, message);
+                let config = config(shard, Span::NANOSECOND, 2 * message, message);
                 let new = Transport::new(config, shard.part());
                 let shown = new.map(|transport| format!("{transport:?}"));
                 assert_eq!(shown, Ok("Transport { .. }".into()), "{message} bytes");
@@ -456,8 +463,8 @@ mod tests {
                 (Span::ZERO, message, message, IDLE),
                 (Span::from_nanos(-1), message, message, IDLE),
                 (Span::SECOND, 1471, 1471, FLOOR),
-                (Span::SECOND, message - 1, message, WINDOW),
-                (Span::SECOND, largest - 1, largest + 1, WINDOW),
+                (Span::SECOND, 2 * message - 1, message, WINDOW),
+                (Span::SECOND, 2 * largest - 1, largest + 1, WINDOW),
             ] {
                 let config = config(shard, idle, window, message);
                 assert_eq!(
@@ -490,11 +497,11 @@ mod tests {
     }
 
     #[test]
-    fn new_takes_a_message_limit_over_the_pool_and_a_window_of_the_pool() {
+    fn new_takes_a_message_limit_over_the_pool_and_a_window_of_twice_the_pool() {
         testing::run(0, |shard| {
             let largest = largest(shard);
             for message in [largest + 1, usize::MAX] {
-                let config = config(shard, Span::SECOND, largest, message);
+                let config = config(shard, Span::SECOND, 2 * largest, message);
                 let new = Transport::new(config, shard.part());
                 assert_eq!(new.err(), None, "{message} bytes");
             }
@@ -533,7 +540,7 @@ mod tests {
             0,
             |config| Config {
                 message_bytes_max: NonZeroUsize::MAX,
-                window_bytes: config.pool.largest(),
+                window_bytes: 2 * config.pool.largest(),
                 ..config
             },
             // Both sides have pools of the same budget.
