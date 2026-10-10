@@ -51,7 +51,7 @@ pub enum Error {
     ManyIndexes,
     /// The keys of the open do not hold their index. Code `MALFORMED`.
     NoIndex,
-    /// The open lists the channel twice. Code `MALFORMED`.
+    /// The open names a channel more than once. Code `MALFORMED`.
     Repeated(channel::Key),
     /// The open names a channel that this node does not know. Code `UNKNOWN`.
     Unknown(channel::Key),
@@ -144,7 +144,9 @@ impl fmt::Display for Error {
             Self::NoIndex => {
                 f.write_str("the open does not name the index of its channels")
             }
-            Self::Repeated(key) => write!(f, "the open lists the channel {key} twice"),
+            Self::Repeated(key) => {
+                write!(f, "the open names channel {key} more than once")
+            }
             Self::Unknown(key) => {
                 write!(
                     f,
@@ -465,7 +467,7 @@ impl<'s> Opening<'s> {
         .await
     }
 
-    /// Checks that each of `keys` is known, on the index of the open, and not listed
+    /// Checks that each of `keys` is known, on the index of the open, and not named
     /// before, and adds it to the channels of the open.
     fn check(&mut self, keys: keys::Iter<'_>) -> Result<(), Error> {
         let state = &mut *self.state.borrow_mut();

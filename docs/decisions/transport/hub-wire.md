@@ -11,19 +11,19 @@
   `delivery::complete::Charge::Places` of the slots of its open (#1642, #1636; the
   architect, 2026-10-07T22:25:18Z,
   https://github.com/synnaxlabs/foundation/pull/1636#issuecomment-6048108229). A series
-  has the place of its listing in the open, from 0. The reader's `hub` lists the keys
-  in the entry order of its own frame (its slot order), the index too, so a place is an
-  entry of the reader's frame and a session has `channels` places. An open that lists
-  a key twice is not valid: the home's `hub` stops the session with `MALFORMED`, so an
-  open holds at most one key for each channel that the home knows (#2273, the ruling
-  waits on
-  https://github.com/synnaxlabs/foundation/issues/2273#issuecomment-6098654006). An
-  open whose
+  has the place of its listing in the open, from 0. The reader's `hub` lists the
+  keys in the entry order of its own frame (its slot order), the index too, so a place
+  is an entry of the reader's frame and a session has `channels` places. An open whose
   keys do not hold the index is not valid: the home's `hub` checks it and stops the
   session with `MALFORMED` (lost: `UNKNOWN`; the architect, 2026-10-07,
   https://github.com/synnaxlabs/foundation/pull/1236#issuecomment-6032902101). An open
-  of no channel is not valid. Only the fixed part of `Open` and of `Head` is one
-  message. The rest is one run of bytes, in messages of at most the peer's
+  of no channel is not valid. Nor is an open that names a channel more than once: the
+  home stops it with `MALFORMED` at the second listing, so it holds memory only for
+  distinct channels of one index, each of which the peer sent (`laptop.architect`,
+  2026-10-10T14:40:47Z:
+  https://github.com/synnaxlabs/foundation/issues/2273#issuecomment-6098651096;
+  supersedes "the place of its first listing"). Only the fixed part of `Open` and of
+  `Head` is one message. The rest is one run of bytes, in messages of at most the peer's
   `message_bytes_max`, back to back with no prefix: after `Open`, the keys; after
   `Head`, the place and end of each series in the body, then the body. A message never
   splits a key or an end, so each side decodes each message as it arrives. The keys run

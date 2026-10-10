@@ -547,19 +547,19 @@ fn stops_an_open_without_the_index_of_its_channels_as_malformed() {
 }
 
 #[test]
-fn stops_an_open_that_lists_a_key_twice_as_malformed() {
-    let served = refused(92, &[2, 2, 1]);
+fn stops_an_open_that_names_a_channel_twice_as_malformed() {
+    let served = refused(92, &[2, 1, 2]);
     let repeated = serve::Error::Repeated(channel::Key::from_u128(2));
     assert_eq!(served, Some(Err(repeated.clone())));
     assert_eq!(
         repeated.to_string(),
-        "the open lists the channel 00000000-0000-0000-0000-000000000002 twice"
+        "the open names channel 00000000-0000-0000-0000-000000000002 more than once"
     );
 }
 
-/// A key that a later message of the keys run lists again is refused too.
+/// A channel that a later message of the keys run names again is refused too.
 #[test]
-fn stops_an_open_that_lists_a_key_again_in_a_later_message_as_malformed() {
+fn stops_an_open_that_names_a_channel_again_in_a_later_message_as_malformed() {
     let served = served(93, Class::Complete, false, |mut peer| async move {
         let open = Open {
             mode: Mode::Complete { limit_bytes: 0 },
