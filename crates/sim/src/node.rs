@@ -330,14 +330,15 @@ pub struct Config {
     pub disk_bytes: u64,
     /// The longest wait that a timer arms for, as `os` arms each Tokio sleep for at
     /// most a second. A timer with a later deadline wakes its task early, and arms
-    /// again only at its next poll. `None` arms each timer for its deadline. A span
-    /// must be positive.
+    /// again only at its next poll. A deadline past the end of true time at the poll
+    /// gets no early wake. `None` arms each timer for its deadline. A span must be
+    /// positive.
     pub arm_max: Option<Span>,
 }
 
 impl Default for Config {
     /// Four cores that can pin, one hour after boot, at 2026-01-01T00:00:00Z, with a
-    /// wall error of 10 ms, a disk of 64 GiB, and each timer armed for its deadline.
+    /// wall error of 10 ms, a disk of 64 GiB, and each timer armed for at most 1 s.
     fn default() -> Self {
         Self {
             cores: NonZeroUsize::new(4).expect("four is not zero"),
@@ -346,7 +347,7 @@ impl Default for Config {
             wall: Stamp::from_nanos(1_767_225_600 * Span::SECOND.nanos()),
             wall_error: Some(Span::from_nanos(10 * Span::MILLISECOND.nanos())),
             disk_bytes: 64 << 30,
-            arm_max: None,
+            arm_max: Some(Span::SECOND),
         }
     }
 }

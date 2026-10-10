@@ -4556,7 +4556,8 @@ mod port {
         }
 
         /// A task that panics after the group stops, before the node sees the stop:
-        /// `join` gives the panic. At [`WRITE`], the sim runs the group's stop first.
+        /// `join` gives the panic. At [`WRITE`], three idle tasks that wake at that
+        /// instant make the sim run the group's stop first.
         #[test]
         fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -4564,6 +4565,13 @@ mod port {
             let node = start_alone(&host);
             let at =
                 sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
+            for _ in 0..3 {
+                let own = host.clone();
+                node.spawn(move |_| async move {
+                    own.clock().sleep_until(at).await;
+                    std::future::pending::<()>().await;
+                });
+            }
             let own = host.clone();
             node.spawn(move |_| async move {
                 own.clock().sleep_until(at).await;

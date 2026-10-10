@@ -781,21 +781,39 @@ fn durable_moves_only_at_a_commit() {
     });
 }
 
+/// The shard waits on a gate with no timer, so only a task of the buffer can run in
+/// the idle window.
 #[test]
 fn an_idle_buffer_wakes_no_task() {
+    let gate = Arc::new(Mutex::new((false, None::<Waker>)));
+    let held = Arc::clone(&gate);
     let (mut sim, handle) = start(20, |shard| async move {
         let mut slots = Slots::new();
         let buffer = shard
             .open(layout(AREA, BODY_MAX), &mut slots)
             .await
             .expect("opens");
-        shard.clock.sleep(commits(2000)).await;
+        poll_fn(|cx| {
+            let mut gate = held.lock().unwrap();
+            if gate.0 {
+                return Poll::Ready(());
+            }
+            gate.1 = Some(cx.waker().clone());
+            Poll::Pending
+        })
+        .await;
         drop(buffer);
     });
     sim.run_for(COMMIT).expect("the open ends");
     let idle = sim.digest();
     sim.run_for(commits(200)).expect("the buffer idles");
     assert_eq!(sim.digest(), idle, "a task ran while the buffer idled");
+    let waker = {
+        let mut gate = gate.lock().unwrap();
+        gate.0 = true;
+        gate.1.take()
+    };
+    waker.expect("the shard waits on the gate").wake();
     sim.run().expect("the run ends");
     handle.join().expect("the shard ended");
 }
