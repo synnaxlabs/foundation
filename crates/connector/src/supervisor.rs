@@ -864,78 +864,48 @@ mod tests {
 
     #[test]
     fn returns_at_once_when_the_pool_fills_after_a_removed_status_channel() {
-        let returned = run_on(|node, tasks| async move {
-            let kind = Counted(|ctx: Context<()>| async move {
-                ctx.count("samples").set(1);
-                ctx.clock().sleep(ms(1_500)).await;
-                Ok(())
-            });
-            let kinds = Table::new().with("tally", kind);
-            let inputs =
-                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
-            let (connector, counts) = (name("plant.tally"), [name("samples")]);
-            let status = testing::create_status(&connector, &counts, STATUS);
-            inputs
-                .hub
-                .set_definitions(status.iter().map(|(name, def)| (name, def)));
-            let (hub, clock) = (inputs.hub.clone(), node.clock());
-            tasks.spawn(async move {
-                clock.sleep(ms(100)).await;
-                let hog = rival(&hub, &["state", "class", "restarts", "samples"]).await;
-                clock.sleep(ms(400)).await;
-                let samples = name("plant.tally.status.samples");
-                let kept = status.iter().filter(|(name, _)| *name != samples);
-                hub.set_definitions(kept.map(|(name, def)| (name, def)));
-                clock.sleep(ms(700)).await;
-                let held = fill(&hog);
-                clock.sleep(ms(20_000)).await;
-                drop(held);
-            });
-            let (clock, start) = (node.clock(), node.clock().now());
-            let result = Supervisor::new(inputs)
-                .run("tally", connector, &config(), &Token::new())
-                .await;
-            result.expect("the run returns ok");
-            clock.now() - start
+        let run = |ctx: Context<()>| async move {
+            ctx.count("samples").set(1);
+            ctx.clock().sleep(ms(1_500)).await;
+            Ok(())
+        };
+        let returned = timed(run, |scene| async move {
+            let clock = scene.node.clock();
+            clock.sleep(ms(100)).await;
+            let hog =
+                rival(&scene.hub, &["state", "class", "restarts", "samples"]).await;
+            clock.sleep(ms(400)).await;
+            scene.remove("samples");
+            clock.sleep(ms(700)).await;
+            let held = fill(&hog);
+            clock.sleep(ms(20_000)).await;
+            drop(held);
         });
         assert_eq!(returned, ms(1_500), "no change of state waits after 1 s");
     }
 
     #[test]
     fn returns_at_once_when_the_pool_fills_after_a_failed_disk() {
-        let returned = run_on(|node, tasks| async move {
-            let kind = Counted(|ctx: Context<()>| async move {
-                ctx.count("samples").set(1);
-                ctx.clock().sleep(ms(1_100)).await;
-                ctx.count("samples").set(2);
-                ctx.clock().sleep(ms(1_400)).await;
-                Ok(())
-            });
-            let kinds = Table::new().with("tally", kind);
-            let inputs =
-                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
-            let (connector, counts) = (name("plant.tally"), [name("samples")]);
-            let status = testing::create_status(&connector, &counts, STATUS);
-            inputs
-                .hub
-                .set_definitions(status.iter().map(|(name, def)| (name, def)));
-            let (hub, clock, failer) = (inputs.hub.clone(), node.clock(), node.clone());
-            tasks.spawn(async move {
-                clock.sleep(ms(100)).await;
-                let hog = rival(&hub, &["state", "class", "restarts", "samples"]).await;
-                clock.sleep(ms(400)).await;
-                failer.fail_file(RING.as_ref(), env::files::Operation::Sync);
-                clock.sleep(ms(1_700)).await;
-                let held = fill(&hog);
-                clock.sleep(ms(20_000)).await;
-                drop(held);
-            });
-            let (clock, start) = (node.clock(), node.clock().now());
-            let result = Supervisor::new(inputs)
-                .run("tally", connector, &config(), &Token::new())
-                .await;
-            result.expect("the run returns ok");
-            clock.now() - start
+        let run = |ctx: Context<()>| async move {
+            ctx.count("samples").set(1);
+            ctx.clock().sleep(ms(1_100)).await;
+            ctx.count("samples").set(2);
+            ctx.clock().sleep(ms(1_400)).await;
+            Ok(())
+        };
+        let returned = timed(run, |scene| async move {
+            let clock = scene.node.clock();
+            clock.sleep(ms(100)).await;
+            let hog =
+                rival(&scene.hub, &["state", "class", "restarts", "samples"]).await;
+            clock.sleep(ms(400)).await;
+            scene
+                .node
+                .fail_file(RING.as_ref(), env::files::Operation::Sync);
+            clock.sleep(ms(1_700)).await;
+            let held = fill(&hog);
+            clock.sleep(ms(20_000)).await;
+            drop(held);
         });
         assert_eq!(returned, ms(2_500), "no change of state waits after 2 s");
     }
@@ -1001,41 +971,24 @@ mod tests {
     fn wakes_nothing_at_a_count_set_after_its_status_channels_are_removed() {
         let polls = Arc::new(AtomicUsize::new(0));
         let counted = Arc::clone(&polls);
-        run_on(|node, tasks| async move {
-            let kind = Counted(move |ctx: Context<()>| {
-                let polls = Arc::clone(&counted);
-                async move {
-                    ctx.count("samples").set(1);
-                    ctx.clock().sleep(ms(1_500)).await;
-                    ctx.count("samples").set(2);
-                    let mut sleep = pin!(ctx.clock().sleep(Span::SECOND));
-                    poll_fn(|cx| {
-                        polls.fetch_add(1, Ordering::Relaxed);
-                        sleep.as_mut().poll(cx)
-                    })
-                    .await;
-                    Ok(())
-                }
-            });
-            let kinds = Table::new().with("tally", kind);
-            let inputs =
-                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
-            let (connector, counts) = (name("plant.tally"), [name("samples")]);
-            let status = testing::create_status(&connector, &counts, STATUS);
-            inputs
-                .hub
-                .set_definitions(status.iter().map(|(name, def)| (name, def)));
-            let (hub, clock) = (inputs.hub.clone(), node.clock());
-            tasks.spawn(async move {
-                clock.sleep(ms(500)).await;
-                let samples = name("plant.tally.status.samples");
-                let kept = status.iter().filter(|(name, _)| *name != samples);
-                hub.set_definitions(kept.map(|(name, def)| (name, def)));
-            });
-            let result = Supervisor::new(inputs)
-                .run("tally", connector, &config(), &Token::new())
+        let run = move |ctx: Context<()>| {
+            let polls = Arc::clone(&counted);
+            async move {
+                ctx.count("samples").set(1);
+                ctx.clock().sleep(ms(1_500)).await;
+                ctx.count("samples").set(2);
+                let mut sleep = pin!(ctx.clock().sleep(Span::SECOND));
+                poll_fn(|cx| {
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    sleep.as_mut().poll(cx)
+                })
                 .await;
-            result.expect("the run returns ok");
+                Ok(())
+            }
+        };
+        timed(run, |scene| async move {
+            scene.node.clock().sleep(ms(500)).await;
+            scene.remove("samples");
         });
         let polls = polls.load(Ordering::Relaxed);
         assert_eq!(polls, 2, "a poll to start the sleep, and one at its end");
@@ -1046,45 +999,28 @@ mod tests {
         let polls = Arc::new(AtomicUsize::new(0));
         let runs = Arc::new(AtomicUsize::new(0));
         let (counted, started) = (Arc::clone(&polls), Arc::clone(&runs));
-        run_on(|node, tasks| async move {
-            let kind = Counted(move |ctx: Context<()>| {
-                let polls = Arc::clone(&counted);
-                let first = started.fetch_add(1, Ordering::Relaxed) == 0;
-                async move {
-                    if first {
-                        ctx.count("samples").set(1);
-                        ctx.clock().sleep(ms(2_000)).await;
-                        return Err(Error::Retry("busy".into()));
-                    }
-                    ctx.count("samples").set(2);
-                    let mut sleep = pin!(ctx.clock().sleep(ms(3_000)));
-                    poll_fn(|cx| {
-                        polls.fetch_add(1, Ordering::Relaxed);
-                        sleep.as_mut().poll(cx)
-                    })
-                    .await;
-                    Ok(())
+        let run = move |ctx: Context<()>| {
+            let polls = Arc::clone(&counted);
+            let first = started.fetch_add(1, Ordering::Relaxed) == 0;
+            async move {
+                if first {
+                    ctx.count("samples").set(1);
+                    ctx.clock().sleep(ms(2_000)).await;
+                    return Err(Error::Retry("busy".into()));
                 }
-            });
-            let kinds = Table::new().with("tally", kind);
-            let inputs =
-                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
-            let (connector, counts) = (name("plant.tally"), [name("samples")]);
-            let status = testing::create_status(&connector, &counts, STATUS);
-            inputs
-                .hub
-                .set_definitions(status.iter().map(|(name, def)| (name, def)));
-            let (hub, clock) = (inputs.hub.clone(), node.clock());
-            tasks.spawn(async move {
-                clock.sleep(ms(1_500)).await;
-                let samples = name("plant.tally.status.samples");
-                let kept = status.iter().filter(|(name, _)| *name != samples);
-                hub.set_definitions(kept.map(|(name, def)| (name, def)));
-            });
-            let result = Supervisor::new(inputs)
-                .run("tally", connector, &config(), &Token::new())
+                ctx.count("samples").set(2);
+                let mut sleep = pin!(ctx.clock().sleep(ms(3_000)));
+                poll_fn(|cx| {
+                    polls.fetch_add(1, Ordering::Relaxed);
+                    sleep.as_mut().poll(cx)
+                })
                 .await;
-            result.expect("the run returns ok");
+                Ok(())
+            }
+        };
+        timed(run, |scene| async move {
+            scene.node.clock().sleep(ms(1_500)).await;
+            scene.remove("samples");
         });
         assert_eq!(runs.load(Ordering::Relaxed), 2, "one restart");
         let polls = polls.load(Ordering::Relaxed);
@@ -1093,84 +1029,51 @@ mod tests {
 
     #[test]
     fn waits_for_a_full_pool_after_its_status_channels_are_removed() {
-        let returned = run_on(|node, tasks| async move {
-            let kind = Counted(|ctx: Context<()>| async move {
-                ctx.clock().sleep(ms(1_500)).await;
-                Ok(())
-            });
-            let kinds = Table::new().with("tally", kind);
-            let inputs =
-                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
-            let (connector, counts) = (name("plant.tally"), [name("samples")]);
-            let status = testing::create_status(&connector, &counts, STATUS);
-            inputs
-                .hub
-                .set_definitions(status.iter().map(|(name, def)| (name, def)));
-            let (hub, clock) = (inputs.hub.clone(), node.clock());
-            tasks.spawn(async move {
-                let hog = rival(&hub, &["state"]).await;
-                clock.sleep(ms(500)).await;
-                let held = fill(&hog);
-                let samples = name("plant.tally.status.samples");
-                let kept = status.iter().filter(|(name, _)| *name != samples);
-                hub.set_definitions(kept.map(|(name, def)| (name, def)));
-                clock.sleep(ms(20_000)).await;
-                drop(held);
-            });
-            let (clock, start) = (node.clock(), node.clock().now());
-            let result = Supervisor::new(inputs)
-                .run("tally", connector, &config(), &Token::new())
-                .await;
-            result.expect("the run returns ok");
-            clock.now() - start
+        let run = |ctx: Context<()>| async move {
+            ctx.clock().sleep(ms(1_500)).await;
+            Ok(())
+        };
+        let returned = timed(run, |scene| async move {
+            let hog = rival(&scene.hub, &["state"]).await;
+            scene.node.clock().sleep(ms(500)).await;
+            let held = fill(&hog);
+            scene.remove("samples");
+            scene.node.clock().sleep(ms(20_000)).await;
+            drop(held);
         });
         assert_eq!(returned, ms(21_500), "state 3 waits until the pool frees");
     }
 
     #[test]
     fn waits_for_a_full_pool_after_its_disk_failed() {
-        let returned = run_on(|node, tasks| async move {
-            let kind = Counted(|ctx: Context<()>| async move {
-                ctx.count("samples").set(1);
-                ctx.clock().sleep(ms(1_500)).await;
-                Ok(())
-            });
-            let kinds = Table::new().with("tally", kind);
-            let inputs =
-                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
-            let (connector, counts) = (name("plant.tally"), [name("samples")]);
-            let status = testing::create_status(&connector, &counts, STATUS);
-            inputs
-                .hub
-                .set_definitions(status.iter().map(|(name, def)| (name, def)));
-            let (hub, clock, failer) = (inputs.hub.clone(), node.clock(), node.clone());
-            tasks.spawn(async move {
-                clock.sleep(ms(100)).await;
-                let mut hog = rival(&hub, &["state"]).await;
-                clock.sleep(ms(400)).await;
-                failer.fail_file(RING.as_ref(), env::files::Operation::Sync);
-                clock.sleep(ms(700)).await;
-                let mut held = fill(&hog);
-                clock.sleep(ms(200)).await;
-                let one = held.pop().expect("one draft");
-                let written = hog.write(Label::Path(Path::Live), one);
-                assert!(
-                    matches!(
-                        written,
-                        Err(hub::writer::Failure::Home(hub::home::Error::Disk(_)))
-                    ),
-                    "the shard failed on disk at 1.4 s: {written:?}"
-                );
-                held.extend(fill(&hog));
-                clock.sleep(ms(19_800)).await;
-                drop(held);
-            });
-            let (clock, start) = (node.clock(), node.clock().now());
-            let result = Supervisor::new(inputs)
-                .run("tally", connector, &config(), &Token::new())
-                .await;
-            result.expect("the run returns ok");
-            clock.now() - start
+        let run = |ctx: Context<()>| async move {
+            ctx.count("samples").set(1);
+            ctx.clock().sleep(ms(1_500)).await;
+            Ok(())
+        };
+        let returned = timed(run, |scene| async move {
+            let clock = scene.node.clock();
+            clock.sleep(ms(100)).await;
+            let mut hog = rival(&scene.hub, &["state"]).await;
+            clock.sleep(ms(400)).await;
+            scene
+                .node
+                .fail_file(RING.as_ref(), env::files::Operation::Sync);
+            clock.sleep(ms(700)).await;
+            let mut held = fill(&hog);
+            clock.sleep(ms(200)).await;
+            let one = held.pop().expect("one draft");
+            let written = hog.write(Label::Path(Path::Live), one);
+            assert!(
+                matches!(
+                    written,
+                    Err(hub::writer::Failure::Home(hub::home::Error::Disk(_)))
+                ),
+                "the shard failed on disk at 1.4 s: {written:?}"
+            );
+            held.extend(fill(&hog));
+            clock.sleep(ms(19_800)).await;
+            drop(held);
         });
         assert_eq!(returned, ms(21_500), "state 3 waits until the pool frees");
     }
@@ -1867,6 +1770,58 @@ mod tests {
 
     /// The ring file of the test shard, which `fail_file` fails.
     const RING: &str = "shard-0/ring";
+
+    /// What the scenario of [`timed`] gets.
+    struct Scene {
+        hub: hub::Hub,
+        node: sim::node::Node,
+        /// The status definitions of `plant.tally`.
+        status: Vec<(Name, Definition)>,
+    }
+
+    impl Scene {
+        /// Removes the status channel `plant.tally.status.<suffix>`.
+        fn remove(&self, suffix: &str) {
+            let removed = name(&format!("plant.tally.status.{suffix}"));
+            let kept = self.status.iter().filter(|(name, _)| *name != removed);
+            self.hub
+                .set_definitions(kept.map(|(name, def)| (name, def)));
+        }
+    }
+
+    /// Runs `run` as the kind of `plant.tally`, with the count `samples`, while
+    /// `scenario` runs in a task of the node. Returns the length of the call, which
+    /// must return `Ok`.
+    fn timed<F, R, S, T>(run: F, scenario: S) -> Span
+    where
+        F: Fn(Context<()>) -> R + Send + Sync + 'static,
+        R: Future<Output = Result<(), Error>>,
+        S: FnOnce(Scene) -> T + Send + 'static,
+        T: Future<Output = ()> + 'static,
+    {
+        run_on(|node, tasks| async move {
+            let kinds = Table::new().with("tally", Counted(run));
+            let inputs =
+                create_config(&node, tasks.clone(), kinds, "plant.tally").await;
+            let (connector, counts) = (name("plant.tally"), [name("samples")]);
+            let status = testing::create_status(&connector, &counts, STATUS);
+            inputs
+                .hub
+                .set_definitions(status.iter().map(|(name, def)| (name, def)));
+            let hub = inputs.hub.clone();
+            tasks.spawn(scenario(Scene {
+                hub,
+                node: node.clone(),
+                status,
+            }));
+            let (clock, start) = (node.clock(), node.clock().now());
+            let result = Supervisor::new(inputs)
+                .run("tally", connector, &config(), &Token::new())
+                .await;
+            result.expect("the run returns ok");
+            clock.now() - start
+        })
+    }
 
     /// A writer of the subject `plant.other` with authority 1 on the status channels
     /// of `plant.tally` that `suffixes` name.
