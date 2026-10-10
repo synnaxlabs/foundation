@@ -84,7 +84,7 @@ impl Supervisor {
         } = &*self.0;
         let mut backoff = retry::Backoff::new(clock, entropy.rng(), RESTART);
         while !cancel.cancelled() {
-            let token = Ended(cancel.child());
+            let token = Cancels(cancel.child());
             let group = Group::new(tasks.clone());
             let ctx = Context::new(
                 name.clone(),
@@ -115,9 +115,9 @@ impl Supervisor {
 }
 
 /// A run's token, cancelled when the run returned or its future dropped.
-struct Ended(cancel::Token);
+struct Cancels(cancel::Token);
 
-impl Drop for Ended {
+impl Drop for Cancels {
     fn drop(&mut self) {
         self.0.cancel();
     }
