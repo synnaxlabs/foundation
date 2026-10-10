@@ -12,16 +12,23 @@ mod children;
 #[path = "common/sockets.rs"]
 mod sockets;
 
+use rustix::net::{AddressFamily, SocketType};
+
 #[test]
 fn no_child_holds_a_socket_that_os_holds() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_io()
         .build()
         .expect("a current-thread runtime builds");
+    // Stands in for a socket that the parent of this process leaves open, as cargo
+    // leaves the socket of a download.
+    let _inherited = rustix::net::socket(AddressFamily::INET, SocketType::DGRAM, None)
+        .expect("a UDP socket opens");
+    let inherited = children::Inherited::list();
     let net = os::net();
     let held = runtime.block_on(async {
         let _sockets = sockets::open(&net).await;
-        children::held()
+        inherited.held()
     });
     assert_eq!(held, Vec::<String>::new());
 }
