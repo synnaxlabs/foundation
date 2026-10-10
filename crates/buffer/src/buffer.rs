@@ -8,6 +8,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::future::poll_fn;
 use std::mem;
+use std::num::NonZeroU8;
 use std::path::{self, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
@@ -19,15 +20,16 @@ use env::clock::Clock;
 use env::entropy::Entropy;
 use env::files::{self, File, Files, Mode};
 use env::tasks::Tasks;
-use types::channel::{Slot, Slots};
+use types::channel::{self, Slot, Slots};
 use types::frame::Path;
+use types::hash;
 use types::time::Span;
 
 use crate::entry::{self, ENTRIES_MAX, Entry};
 use crate::group::{self, Closed, Group, META_LEN, Sealed};
 use crate::header::{self, Header};
 use crate::log::{self, Found, Logs, Mark, Tail};
-use crate::read::{Read, Reading};
+use crate::read::{self, Read, Reading, Stored};
 use crate::record::{self, ALIGN, AREA_START, Body};
 use crate::wal::{self, Cursor, Layout, Limit, Step, Unfit, Window, Writer};
 
@@ -488,6 +490,57 @@ impl Buffer {
             return Err(Error::Files(failed.clone()));
         }
         walked.map(|()| reading.finish())
+    }
+
+    /// The newest durable entry with `tag` on `path` of each index that has one, with
+    /// the index's slot, in no order. It skips records that a trim hid, and a trim
+    /// frees no record that the call reads. It reads only the table of each record
+    /// that holds an entry it gives, once, then the bytes of each entry it gives.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Files`] when a ring read fails and [`Error::Pool`] when the pool has
+    /// no block for a table or an entry; the buffer goes on. When a commit's file call
+    /// fails before the call ends, the error that ended the buffer.
+    pub async fn newest(
+        &self,
+        path: Path,
+        tag: NonZeroU8,
+    ) -> Result<Vec<(Slot, Stored)>, Error> {
+        let found = self.search(path, tag).await;
+        // After the reads: a ring read after a failed sync gives `Poisoned`.
+        if let Some(failed) = &self.shared.state.borrow().failed {
+            return Err(Error::Files(failed.clone()));
+        }
+        found
+    }
+
+    /// The newest durable entry with `tag` on `path` of each index, as
+    /// [`newest`](Self::newest) gives, with the error of the first failed read. It
+    /// takes the records when called, so a record made during the call is not read.
+    async fn search(
+        &self,
+        path: Path,
+        tag: NonZeroU8,
+    ) -> Result<Vec<(Slot, Stored)>, Error> {
+        let Shared {
+            file, pool, layout, ..
+        } = &*self.shared;
+        let mut records = self.shared.state.borrow().logs.tagged(path, tag);
+        records.sort_unstable_by_key(|&(offset, ..)| offset);
+        let mut found = Vec::with_capacity(records.len());
+        for record in records.chunk_by(|a, b| a.0 == b.0) {
+            let [(offset, ..), ..] = *record else {
+                unreachable!("invariant: a chunk is not empty");
+            };
+            let wanted: hash::Map<channel::Key, Slot> = record
+                .iter()
+                .map(|&(_, slot, index)| (index, slot))
+                .collect();
+            let place = AREA_START + layout.place(offset);
+            found.extend(read::newest(file, pool, place, path, tag, &wanted).await?);
+        }
+        Ok(found)
     }
 
     /// Gives `reading` the records of `path` of the index at `slot` until it ends.
@@ -999,7 +1052,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use block::Heap;
-    use types::channel;
     use types::time::Stamp;
 
     use super::*;
@@ -1219,6 +1271,58 @@ mod tests {
             (None, vec![], Mark::at(9)),
         ];
         assert_eq!(*reads, expected);
+    }
+
+    /// No commit trims yet, so the test hides records as a trim will. `newest` gives
+    /// the tagged entry of the oldest record that is not hidden, and skips it once
+    /// that record is hidden, also when later records of its path are not hidden.
+    #[test]
+    fn newest_skips_the_records_that_a_trim_hid() {
+        let mut sim = sim::Sim::new(sim::Config::default());
+        let node = sim.node(sim::node::Config::default());
+        let found = Arc::new(Mutex::new(Vec::new()));
+        let given = Arc::clone(&found);
+        with_buffer(
+            &mut sim,
+            &node,
+            "write",
+            |buffer, mut slots, pool| async move {
+                let one = slots.index(channel::Key::from_u128(1));
+                let part = pool.alloc(100).expect("a block").freeze();
+                let tagged = Entry {
+                    len: 0,
+                    tag: 1,
+                    ..entry(1, one, Path::Live, 0, &part)
+                };
+                buffer.append([tagged]).expect("the ring has room");
+                buffer.committed().await.expect("commits");
+                for first in [0, 3] {
+                    let batch = [entry(1, one, Path::Live, first, &part)];
+                    buffer.append(batch).expect("the ring has room");
+                    buffer.committed().await.expect("commits");
+                }
+                let firsts = async || {
+                    let newest = buffer
+                        .newest(Path::Live, NonZeroU8::MIN)
+                        .await
+                        .expect("reads");
+                    newest
+                        .iter()
+                        .map(|(slot, stored)| (*slot, stored.first))
+                        .collect()
+                };
+                let mut found: Vec<Vec<(Slot, u64)>> = vec![firsts().await];
+                for offset in [4096, 8192] {
+                    buffer.shared.state.borrow_mut().logs.hide(offset);
+                    found.push(firsts().await);
+                }
+                *given.lock().expect("no panic held the lock") = found;
+                buffer
+            },
+        );
+        let found = found.lock().expect("no panic held the lock");
+        let tagged = vec![(Slot::new(0), 0)];
+        assert_eq!(*found, [tagged.clone(), tagged, vec![]]);
     }
 
     /// The durable end counts the entries with no samples at its seq. A read that
