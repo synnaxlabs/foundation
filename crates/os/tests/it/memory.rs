@@ -55,7 +55,7 @@ const MEMINFO: &str = "MemTotal:       16777216 kB\n\
 const V2_MOUNT: &str = "37 31 0:31 / /sys/fs/cgroup rw,nosuid shared:8 - \
                         cgroup2 cgroup2 rw,nsdelegate\n";
 
-fn v2(name: &str) -> Root {
+fn create_v2(name: &str) -> Root {
     let root = Root::new(name);
     root.write("proc/meminfo", MEMINFO)
         .write("proc/self/cgroup", "0::/a/b\n")
@@ -65,7 +65,7 @@ fn v2(name: &str) -> Root {
 
 #[test]
 fn the_room_of_a_v2_cgroup_under_mem_available_is_the_available_memory() {
-    let root = v2("v2");
+    let root = create_v2("v2");
     root.write("sys/fs/cgroup/a/memory.max", format!("{}\n", 512 * MIB))
         .write("sys/fs/cgroup/a/memory.current", format!("{}\n", 100 * MIB))
         .write("sys/fs/cgroup/a/memory.stat", "inactive_file 0\n")
@@ -77,7 +77,7 @@ fn the_room_of_a_v2_cgroup_under_mem_available_is_the_available_memory() {
 
 #[test]
 fn the_least_room_of_the_cgroup_and_each_above_it_counts() {
-    let root = v2("v2-least");
+    let root = create_v2("v2-least");
     root.write("sys/fs/cgroup/a/memory.max", format!("{}\n", 512 * MIB))
         .write("sys/fs/cgroup/a/memory.current", format!("{}\n", 500 * MIB))
         .write("sys/fs/cgroup/a/memory.stat", "inactive_file 0\n")
@@ -89,7 +89,7 @@ fn the_least_room_of_the_cgroup_and_each_above_it_counts() {
 
 #[test]
 fn a_cgroup_over_its_limit_has_no_room() {
-    let root = v2("v2-over");
+    let root = create_v2("v2-over");
     root.write("sys/fs/cgroup/a/b/memory.max", format!("{MIB}\n"))
         .write("sys/fs/cgroup/a/b/memory.current", format!("{}\n", 2 * MIB))
         .write("sys/fs/cgroup/a/b/memory.stat", "inactive_file 0\n");
@@ -98,7 +98,7 @@ fn a_cgroup_over_its_limit_has_no_room() {
 
 #[test]
 fn with_no_limit_the_available_memory_is_mem_available() {
-    let root = v2("v2-max");
+    let root = create_v2("v2-max");
     root.write("sys/fs/cgroup/a/memory.max", "max\n")
         .write("sys/fs/cgroup/a/memory.current", "4096\n")
         .write("sys/fs/cgroup/a/memory.stat", "inactive_file 0\n")
@@ -110,7 +110,7 @@ fn with_no_limit_the_available_memory_is_mem_available() {
 
 #[test]
 fn a_cgroup_room_over_mem_available_leaves_mem_available() {
-    let root = v2("v2-more");
+    let root = create_v2("v2-more");
     root.write(
         "sys/fs/cgroup/a/memory.max",
         format!("{}\n", 64 * 1024 * MIB),
@@ -380,7 +380,7 @@ fn a_line_of_the_cgroup_list_with_no_colon_is_an_error() {
 
 #[test]
 fn a_line_of_mountinfo_with_no_separator_is_an_error() {
-    let root = v2("v2-no-separator");
+    let root = create_v2("v2-no-separator");
     root.write(
         "proc/self/mountinfo",
         "37 31 0:31 / /cg rw cgroup2 cgroup2 rw\n",
@@ -402,7 +402,7 @@ fn a_line_of_mountinfo_with_no_separator_is_an_error() {
 /// Page cache that the kernel can drop is not used memory.
 #[test]
 fn the_inactive_file_pages_of_a_cgroup_are_room() {
-    let root = v2("v2-cache");
+    let root = create_v2("v2-cache");
     root.write("sys/fs/cgroup/a/b/memory.max", format!("{}\n", 256 * MIB))
         .write(
             "sys/fs/cgroup/a/b/memory.current",
@@ -437,7 +437,7 @@ fn inactive_file_pages_over_the_usage_leave_the_whole_limit() {
 
 #[test]
 fn a_cgroup_whose_stat_has_no_inactive_file_pages_is_an_error() {
-    let root = v2("v2-no-stat");
+    let root = create_v2("v2-no-stat");
     root.write("sys/fs/cgroup/a/b/memory.max", format!("{MIB}\n"))
         .write("sys/fs/cgroup/a/b/memory.current", "0\n")
         .write("sys/fs/cgroup/a/b/memory.stat", "active_file 0\n");
@@ -523,7 +523,7 @@ fn a_mem_available_over_u64_bytes_saturates() {
 
 #[test]
 fn a_limit_that_is_no_number_is_an_error() {
-    let root = v2("v2-bad");
+    let root = create_v2("v2-bad");
     root.write("sys/fs/cgroup/a/b/memory.max", "lots\n")
         .write("sys/fs/cgroup/a/b/memory.current", "0\n")
         .write("sys/fs/cgroup/a/b/memory.stat", "inactive_file 0\n");
@@ -557,7 +557,7 @@ fn a_cgroup_list_that_cannot_be_read_is_an_error() {
 
 #[test]
 fn a_limit_that_cannot_be_read_is_an_error() {
-    let root = v2("v2-dir");
+    let root = create_v2("v2-dir");
     fs::create_dir_all(root.0.join("sys/fs/cgroup/a/b/memory.max")).unwrap();
     let file = root.0.join("sys/fs/cgroup/a/b/memory.max");
     assert_eq!(
@@ -571,7 +571,7 @@ fn a_limit_that_cannot_be_read_is_an_error() {
 
 #[test]
 fn a_short_line_of_mountinfo_is_an_error() {
-    let root = v2("v2-short");
+    let root = create_v2("v2-short");
     root.write("proc/self/mountinfo", "37 31 0:31 /\n");
     let file = root.0.join("proc/self/mountinfo");
     assert_eq!(
@@ -587,7 +587,7 @@ fn a_short_line_of_mountinfo_is_an_error() {
 }
 
 /// Each backslash and three digits in a mount point decodes as an octal byte, or
-/// stays as it is. A NUL and a `/` cannot be a byte of a directory name.
+/// stays as it is. A decoded `/` splits the path, and a decoded NUL fails the read.
 #[test]
 fn each_escape_of_a_mount_point_decodes_as_an_octal_byte_or_stays() {
     let root = Root::new("v2-escapes");
@@ -599,7 +599,6 @@ fn each_escape_of_a_mount_point_decodes_as_an_octal_byte_or_stays() {
                 let escape = [b'\\', a, b, c];
                 let digits = std::str::from_utf8(&escape[1..]).unwrap();
                 let point = match u8::from_str_radix(digits, 8) {
-                    Ok(0 | b'/') => continue,
                     Ok(byte) => vec![b'c', byte, b'g'],
                     Err(_) => [b"c".as_slice(), &escape, b"g"].concat(),
                 };
@@ -610,12 +609,27 @@ fn each_escape_of_a_mount_point_decodes_as_an_octal_byte_or_stays() {
                 ]
                 .concat();
                 let dir = Path::new(OsStr::from_bytes(&point));
-                root.write("proc/self/mountinfo", line)
-                    .write(dir.join("memory.max"), format!("{MIB}\n"))
+                root.write("proc/self/mountinfo", line);
+                if point.contains(&0) {
+                    let file = root.0.join(dir).join("memory.max");
+                    assert_eq!(
+                        root.error(),
+                        (
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "{}: file name contained an unexpected NUL byte",
+                                file.display()
+                            )
+                        )
+                    );
+                    continue;
+                }
+                root.write(dir.join("memory.max"), format!("{MIB}\n"))
                     .write(dir.join("memory.current"), "0\n")
                     .write(dir.join("memory.stat"), "inactive_file 0\n");
                 assert_eq!(root.bytes(), MIB, "{}", String::from_utf8_lossy(&escape));
-                fs::remove_dir_all(root.0.join(dir)).unwrap();
+                let top = dir.iter().next().unwrap();
+                fs::remove_dir_all(root.0.join(top)).unwrap();
             }
         }
     }
