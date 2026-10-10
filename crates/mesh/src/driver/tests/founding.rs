@@ -1,5 +1,5 @@
-//! Tests of the founding that the first open of a mesh directory keeps, and that each
-//! later open checks `Config::founding` against.
+//! Tests of the founding that an open whose log holds no record keeps, and that each
+//! open whose log holds a record checks `Config::founding` against.
 
 use env::files::{self, Mode};
 
@@ -263,7 +263,8 @@ fn a_reopen_with_other_homes_is_refused() {
     run_with(&mut sim, &node, region);
 }
 
-/// A failed file call on the founding file, at the first open and at a later one.
+/// A failed file call on the founding file, at an open whose log holds no record and
+/// at one whose log holds a record.
 #[test]
 fn a_failed_call_on_the_founding_file_gives_the_files_error() {
     let failed = |sim: &mut Sim, node: &sim::node::Node, region| {
@@ -340,8 +341,8 @@ fn a_log_with_no_founding_is_refused() {
     let error = refused(&mut sim, &node, region);
     let path = PathBuf::from(FILE);
     assert_eq!(error, Error::Unfounded { path });
-    let text = "the log of the mesh directory holds a record, but founding is not there \
-                or does not read back whole";
+    let text = "the log of the mesh directory holds a record, but founding is not \
+                there or does not read back whole";
     assert_eq!(error.to_string(), text);
 }
 

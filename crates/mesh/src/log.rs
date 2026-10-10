@@ -37,10 +37,10 @@ use env::files::{self, File, Files, Mode};
 use raft::{Entry, Hard, Term};
 
 use crate::bytes::{
-    block, put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
+    put_optional_key, put_optional_proof, take, take_bool, take_key, take_proof,
 };
 use crate::entry;
-use crate::file::{self, CHECK, check, chunk, narrow, read, wide};
+use crate::file::{self, Blocks, CHECK, check, narrow, wide};
 
 const VERSION: u16 = 1;
 /// The bytes of a record before its body: the header check, the version, the number,
@@ -159,7 +159,7 @@ impl From<block::Error> for Error {
 pub(crate) struct Log {
     files: Files,
     dir: PathBuf,
-    pool: Rc<Pool>,
+    blocks: Blocks,
     // The file that holds the end of the log, and its number.
     file: File,
     number: u64,
@@ -205,7 +205,7 @@ impl Log {
         dir: PathBuf,
         pool: Rc<Pool>,
     ) -> Result<(Self, Stored), Error> {
-        chunk(&pool)?;
+        let blocks = Blocks::new(pool)?;
         files.create_dir(&dir).await?;
         let lock = files.open(&dir.join(LOCK), Mode::Create { len: 0 }).await?;
         let names = files.list(&dir).await?;
@@ -213,7 +213,7 @@ impl Log {
         let mut segments = Vec::new();
         for path in sequence(&dir, names)? {
             let file = files.open(&path, Mode::Write).await?;
-            segments.push(read(&file, &pool).await?);
+            segments.push(blocks.read(&file).await?);
             open.push(file);
         }
         let scan = scan(&dir, &segments)?;
@@ -232,7 +232,7 @@ impl Log {
                 .get_mut(scan.offset..)
                 .expect("invariant: the log ends in its end file")
                 .fill(0);
-            write_in_blocks(&file, &pool, 0, &mut &bytes[..]).await?;
+            blocks.write(&file, 0, &mut &bytes[..]).await?;
             file
         } else {
             let mode = Mode::Create { len: SEGMENT };
@@ -248,7 +248,7 @@ impl Log {
         let log = Self {
             files,
             dir,
-            pool,
+            blocks,
             file,
             number,
             offset: wide(scan.offset),
@@ -259,6 +259,11 @@ impl Log {
             _lock: lock,
         };
         Ok((log, scan.stored))
+    }
+
+    /// The blocks that the log reads and writes in.
+    pub(crate) fn blocks(&self) -> &Blocks {
+        &self.blocks
     }
 
     /// Writes `hard`, when it is given, and `entries` as one record. The entries
@@ -316,7 +321,7 @@ impl Log {
             // The zeros get their own sync: with one sync, a power cut can keep the
             // record and not the zeros.
             let zeros = vec![0; narrow(end.saturating_sub(at))];
-            write_in_blocks(&self.file, &self.pool, at, &mut &zeros[..]).await?;
+            self.blocks.write(&self.file, at, &mut &zeros[..]).await?;
             self.file.sync().await?;
             self.stale = None;
         }
@@ -341,7 +346,7 @@ impl Log {
         }
         let end = start.saturating_add(len);
         let mut rest = &record[..];
-        let written = write_in_blocks(&self.file, &self.pool, start, &mut rest).await;
+        let written = self.blocks.write(&self.file, start, &mut rest).await;
         if written.is_err() && rest.len() < record.len() {
             self.stale = Some((start.saturating_add(wide(rest.len())), end));
         }
@@ -389,32 +394,6 @@ fn sequence(dir: &Path, mut names: Vec<PathBuf>) -> Result<Vec<PathBuf>, Error> 
         }
     }
     Ok(paths.into_iter().flatten().collect())
-}
-
-// Writes `bytes` at `at` of `file`, one block at a time, from the end of `bytes` to
-// its start, and takes each block that it wrote off the end of `bytes`. Each block but
-// the one at the end ends at a multiple of the block size in the file, so no two
-// blocks share a sector.
-async fn write_in_blocks(
-    file: &File,
-    pool: &Pool,
-    at: u64,
-    bytes: &mut &[u8],
-) -> Result<(), Error> {
-    let chunk = chunk(pool)?;
-    while !bytes.is_empty() {
-        let end = narrow(at).saturating_add(bytes.len());
-        let over = end
-            .checked_rem(chunk)
-            .expect("invariant: a block of the log is one sector or more");
-        let len = if over == 0 { chunk } else { over }.min(bytes.len());
-        let (rest, part) = bytes.split_at(bytes.len().saturating_sub(len));
-        let block = block(pool, part)?;
-        let offset = at.saturating_add(wide(rest.len()));
-        file.write_at(offset, &[block]).await?;
-        *bytes = rest;
-    }
-    Ok(())
 }
 
 // What the files hold, and where the log ends.
@@ -782,6 +761,7 @@ mod tests {
     use types::time::Span;
 
     use super::*;
+    use crate::bytes::block;
     use crate::bytes::{PRESENT, VOTE};
     use crate::common::create_pool;
 
@@ -1171,7 +1151,11 @@ mod tests {
         sim.run_on(node, move |node, _| async move {
             let log = file("log-0");
             let file = node.files().open(&log, Mode::Read).await.unwrap();
-            let bytes = read(&file, &create_pool()).await.unwrap();
+            let bytes = Blocks::new(create_pool())
+                .unwrap()
+                .read(&file)
+                .await
+                .unwrap();
             bytes[narrow(end)..].iter().all(|&byte| byte == 0)
         })
         .unwrap()
@@ -1291,12 +1275,6 @@ mod tests {
 
     async fn odd_open(node: &sim::node::Node) -> Result<(Log, Stored), Error> {
         Log::open(node.files(), DIR.into(), odd_pool()).await
-    }
-
-    #[test]
-    fn a_block_is_the_most_whole_sectors_that_the_pool_gives() {
-        assert_eq!(chunk(&odd_pool()), Ok(3 * SECTOR));
-        assert_eq!(chunk(&create_pool()), Ok(CHUNK));
     }
 
     // The header of the second record is at bytes 1,770 to 1,804, in one sector and
@@ -2539,8 +2517,10 @@ mod tests {
                 let config = block::Config { budget: 4096 };
                 let memory = block::Heap::new(config.reservation());
                 let pool = Rc::new(Pool::new(config, memory));
-                let held = pool.alloc(pool.largest()).unwrap();
-                let expected = pool.alloc(chunk(&pool).unwrap()).unwrap_err();
+                let largest = pool.largest();
+                let held = pool.alloc(largest).unwrap();
+                let chunk = largest - largest % SECTOR;
+                let expected = pool.alloc(chunk).unwrap_err();
                 let error = Log::open(node.files(), DIR.into(), Rc::clone(&pool))
                     .await
                     .unwrap_err();
@@ -3305,7 +3285,11 @@ mod tests {
                 .run_on(&node, |node, _| async move {
                     let log = file("log-0");
                     let file = node.files().open(&log, Mode::Read).await.unwrap();
-                    let bytes = read(&file, &create_pool()).await.unwrap();
+                    let bytes = Blocks::new(create_pool())
+                        .unwrap()
+                        .read(&file)
+                        .await
+                        .unwrap();
                     bytes[SECTOR..6 * SECTOR]
                         .chunks(SECTOR)
                         .all(|sector| sector == [0; SECTOR] || sector == [2; SECTOR])

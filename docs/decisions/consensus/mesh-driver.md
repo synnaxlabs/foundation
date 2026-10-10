@@ -320,10 +320,10 @@
   that does not open stops the node with `Error::Blob`. Decided by
   `laptop.architect-2`, 2026-10-08T11:50:51Z:
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059230722.
-  Amended (2026-10-08, PR 2 of #1209): the first open of the mesh directory keeps
-  `Config::founding` in the file `founding` in `Config::dir`, beside `log`, so the
-  `Stray` rule of MESH LOG holds. The file is an 8-byte check of the rest (the first
-  bytes of `types::digest::Digest::of`), the format version (1), and
+  Amended (2026-10-08, PR 2 of #1209): an open of the mesh directory whose log holds no
+  record keeps `Config::founding` in the file `founding` in `Config::dir`, beside `log`,
+  so the `Stray` rule of MESH LOG holds. The file is an 8-byte check of the rest (the
+  first bytes of `types::digest::Digest::of`), the format version (1), and
   `region::Founding::encode`: the prefix, a count and each member in key order, the
   voters, a count and each definition in name order, and a count and each home in
   channel key order. An open whose log holds no record is a first open: it takes the

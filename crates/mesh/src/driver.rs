@@ -219,7 +219,8 @@ impl Mesh {
         let files = config.files.clone();
         let (log, stored) = open_log(config.files, &config.dir, config.pool).await?;
         let logged = stored != log::Stored::default();
-        founding::keep(&files, &config.dir, &pool, &config.founding, logged).await?;
+        let blocks = log.blocks();
+        founding::keep(&files, &config.dir, blocks, &config.founding, logged).await?;
         let used = used::open(Opening {
             files: &files,
             dir: &config.dir,
@@ -1257,6 +1258,7 @@ mod tests {
     use crate::card;
     use crate::change::{CHUNKS_MAX, Unknown};
     use crate::common::{self, create_pool, key, message, private, proven, public};
+    use crate::file::Blocks;
     use crate::region::Unfit;
     use crate::status::Many;
     use crate::ticket::Options;
@@ -5662,7 +5664,8 @@ mod tests {
     /// Writes the founding of `config` to its directory, as a first open does.
     async fn found(config: &Config) {
         let (files, dir) = (&config.files, &config.dir);
-        super::founding::keep(files, dir, &config.pool, &config.founding, false)
+        let blocks = Blocks::new(Rc::clone(&config.pool)).unwrap();
+        super::founding::keep(files, dir, &blocks, &config.founding, false)
             .await
             .unwrap();
     }

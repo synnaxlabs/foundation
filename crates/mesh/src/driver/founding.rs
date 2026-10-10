@@ -9,12 +9,10 @@
 
 use std::path::Path;
 
-use block::Pool;
 use env::files::{Files, Mode};
 
-use crate::bytes::block;
 use crate::error::Error;
-use crate::file::{self, CHECK};
+use crate::file::{self, Blocks, CHECK};
 use crate::region::Founding;
 
 /// The name of the founding file in a mesh directory.
@@ -31,17 +29,17 @@ const VERSION: u16 = 1;
 /// - [`Error::Founding`] when `dir` holds another founding.
 /// - [`Error::Unfounded`] when the log holds a record and `dir` holds no founding, or
 ///   a founding that does not read back whole.
-/// - [`Error::Pool`] when the pool has no block, or no block of one sector.
+/// - [`Error::Pool`] when the pool has no block.
 /// - [`Error::Files`] when a file call fails.
 pub(super) async fn keep(
     files: &Files,
     dir: &Path,
-    pool: &Pool,
+    blocks: &Blocks,
     given: &Founding,
     logged: bool,
 ) -> Result<(), Error> {
     if !logged {
-        return write(files, dir, pool, &given.encode()).await;
+        return write(files, dir, blocks, &given.encode()).await;
     }
     let path = dir.join(FILE);
     let unfounded = || Error::Unfounded { path: path.clone() };
@@ -50,7 +48,7 @@ pub(super) async fn keep(
         return Err(unfounded());
     }
     let opened = files.open(&path, Mode::Read).await.map_err(Error::Files)?;
-    let stored = file::read(&opened, pool).await;
+    let stored = blocks.read(&opened).await;
     opened.close().await;
     let stored = stored?;
     let (check, rest) = stored.split_first_chunk::<CHECK>().ok_or_else(unfounded)?;
@@ -74,7 +72,7 @@ pub(super) async fn keep(
 async fn write(
     files: &Files,
     dir: &Path,
-    pool: &Pool,
+    blocks: &Blocks,
     given: &[u8],
 ) -> Result<(), Error> {
     let mut rest = VERSION.to_le_bytes().to_vec();
@@ -85,17 +83,12 @@ async fn write(
     files.remove(&path).await.map_err(Error::Files)?;
     files.remove(&new).await.map_err(Error::Files)?;
     let len = file::wide(bytes.len());
-    let mut file = files
+    let mut opened = files
         .open(&new, Mode::Create { len })
         .await
         .map_err(Error::Files)?;
-    let mut at = 0;
-    for part in bytes.chunks(file::chunk(pool).map_err(Error::Pool)?) {
-        let block = block(pool, part).map_err(Error::Pool)?;
-        file.write_at(at, &[block]).await.map_err(Error::Files)?;
-        at = at.saturating_add(file::wide(part.len()));
-    }
-    file.rename(&path).await.map_err(Error::Files)?;
-    file.close().await;
+    blocks.write(&opened, 0, &mut &bytes[..]).await?;
+    opened.rename(&path).await.map_err(Error::Files)?;
+    opened.close().await;
     files.sync_dir(dir).await.map_err(Error::Files)
 }
