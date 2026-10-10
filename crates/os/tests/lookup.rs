@@ -12,13 +12,14 @@ mod children;
 #[test]
 #[cfg_attr(not(target_os = "linux"), ignore = "needs glibc")]
 fn no_child_holds_a_socket_of_a_lookup() {
+    let baseline = children::Baseline::list();
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("a current-thread runtime builds");
     // Ends before the first child, for a socket that the C library keeps open.
     let found = runtime.block_on(os::net().resolve("localhost", 80));
     found.expect("localhost has an address");
-    let held = children::held_while(1, async |net| {
+    let held = children::held_while(&baseline, 1, async |net| {
         let found = net.resolve("localhost", 80).await;
         found.expect("localhost has an address");
     });
