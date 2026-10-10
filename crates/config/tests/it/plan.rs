@@ -3011,6 +3011,28 @@ fn refuses_a_connector_that_writes_a_status_channel_of_another() {
     assert_eq!(found, [expected]);
 }
 
+/// A kind cannot write a status channel of its own connector either.
+#[test]
+fn refuses_a_connector_that_writes_its_own_status_channel() {
+    let text = COUNTED.replace("writes = []", "writes = [\"c.status.time\"]");
+    let documents = documents(&[&text]);
+    let found = config::check(&documents, &kinds()).expect_err("problems");
+    let span = documents[0].blocks[0].labels[0].span;
+    let mut expected = Diagnostic::new(
+        Code::new("config.implied-channel"),
+        span,
+        "the connector `c` implies the channel `c.status.time`, so the connector `c` \
+         cannot write it"
+            .into(),
+        "Write another channel from the connector `c`".into(),
+    );
+    expected.notes.push(Note {
+        span: span.expect("a span"),
+        text: "the connector".into(),
+    });
+    assert_eq!(found, [expected]);
+}
+
 #[test]
 fn refuses_a_connector_whose_status_names_are_too_long() {
     let long = "c".repeat(244);

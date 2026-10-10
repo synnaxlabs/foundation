@@ -425,7 +425,7 @@ impl<'a> Model<'a> {
 
     /// Reports whether `connector` writes `index` or a channel on it.
     fn feeds(&self, connector: &Connector<'_>, index: &Name) -> bool {
-        connector.writes.names().any(|name| {
+        connector.writes.channels().iter().any(|name| {
             name == index || self.index_of.get(name).copied() == Some(index)
         })
     }
@@ -517,7 +517,7 @@ fn wrong(found: &Found<'_>, channels: &BTreeMap<Name, Channel>) -> Vec<Diagnosti
 
 /// An index, as the rules after `config.wrong-channel` read it.
 struct Index<'f> {
-    /// Each connector that writes the index or a channel on it, in name order.
+    /// Each connector whose kind writes the index or a channel on it, in name order.
     writers: Vec<&'f Connector<'f>>,
     /// Where [`place`] puts the index, with the node of its first writer, or, for an
     /// index that a connector implies, where it puts the connector.

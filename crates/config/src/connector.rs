@@ -7,6 +7,7 @@ use spec::channel::{Data, Kind};
 use spec::connector::Connector;
 use spec::data_type::DataType;
 use spec::definition;
+use std::collections::BTreeMap;
 use types::name::{self, Name};
 
 use crate::{Definition, Entry, Found, LONG_NAME, span};
@@ -82,10 +83,9 @@ pub(crate) struct Writes {
 }
 
 impl Writes {
-    /// Each channel that it writes: those of its kind, then those it implies.
-    pub(crate) fn names(&self) -> impl Iterator<Item = &Name> {
-        let implied = self.implied.iter().map(|(name, _)| name);
-        self.channels.iter().chain(implied)
+    /// The channels that its kind writes.
+    pub(crate) fn channels(&self) -> &[Name] {
+        &self.channels
     }
 
     /// Each index that it implies.
@@ -141,17 +141,23 @@ pub(crate) fn writes(
 
 /// Adds each channel that each connector implies to the entries, with the span of the
 /// connector's label. Reports `config.implied-channel` at each block whose key is, in
-/// any ASCII case, an implied channel. A connector whose name repeats implies nothing,
-/// as `found` holds only its last block, which depends on the order of the files.
+/// any ASCII case, an implied channel, and at each connector whose kind writes one. A
+/// connector whose name repeats implies and writes nothing, as `found` holds only its
+/// last block, which depends on the order of the files.
 pub(crate) fn imply(found: &mut Found<'_>) {
-    for (connector, writes) in &found.writes {
+    let repeats = |connector: &Name| {
         let lower = connector.as_str().to_ascii_lowercase();
-        if found.labels[lower.as_str()].len() > 1 {
+        found.labels[lower.as_str()].len() > 1
+    };
+    let mut owners = BTreeMap::new();
+    for (connector, writes) in &found.writes {
+        if repeats(connector) {
             continue;
         }
         let at = found.entries[connector].label_span;
         for (name, kind) in &writes.implied {
             let lower = name.as_str().to_ascii_lowercase();
+            owners.insert(lower.clone(), (connector, name, at));
             let Some(labels) = found.labels.get(lower.as_str()) else {
                 let definition = Definition::Channel(kind.clone());
                 let entry = Entry {
@@ -162,21 +168,51 @@ pub(crate) fn imply(found: &mut Found<'_>) {
                 continue;
             };
             for (label, _) in labels {
-                let mut diagnostic = Diagnostic::new(
-                    IMPLIED_CHANNEL,
+                found.diagnostics.push(implied(
                     label.span,
-                    format!(
-                        "the connector `{connector}` implies the channel `{name}`, so \
-                         a block cannot have its name"
-                    ),
+                    "so a block cannot have its name",
                     "Give the block another name".into(),
-                );
-                diagnostic.notes.extend(at.map(|span| Note {
-                    span,
-                    text: "the connector".into(),
-                }));
-                found.diagnostics.push(diagnostic);
+                    (connector, name, at),
+                ));
             }
         }
     }
+    for (writer, writes) in &found.writes {
+        if repeats(writer) {
+            continue;
+        }
+        for channel in &writes.channels {
+            let lower = channel.as_str().to_ascii_lowercase();
+            let Some(&owner) = owners.get(&lower) else {
+                continue;
+            };
+            found.diagnostics.push(implied(
+                found.entries[writer].label_span,
+                &format!("so the connector `{writer}` cannot write it"),
+                format!("Write another channel from the connector `{writer}`"),
+                owner,
+            ));
+        }
+    }
+}
+
+/// The `config.implied-channel` diagnostic at `at` of the channel `name` that
+/// `connector`, at `label`, implies.
+fn implied(
+    at: Option<Span>,
+    then: &str,
+    fix: String,
+    (connector, name, label): (&Name, &Name, Option<Span>),
+) -> Diagnostic {
+    let mut diagnostic = Diagnostic::new(
+        IMPLIED_CHANNEL,
+        at,
+        format!("the connector `{connector}` implies the channel `{name}`, {then}"),
+        fix,
+    );
+    diagnostic.notes.extend(label.map(|span| Note {
+        span,
+        text: "the connector".into(),
+    }));
+    diagnostic
 }

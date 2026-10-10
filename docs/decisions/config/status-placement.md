@@ -7,11 +7,12 @@
   status names places nothing, as any placement that selects no channel, with no
   diagnostic (`laptop.architect-2`, 2026-10-10T16:07:40Z,
   https://github.com/synnaxlabs/foundation/issues/1821#issuecomment-6099496528). Only
-  the connector may write its status (#2295 will refuse another writer), so the index
-  can have no other home, and a rule that lets a placement give it one only makes an
-  error that no file can fix. Lost: an ordinary index, which makes each file that places
-  a connector also select `<c>.status.time`, and a pattern of `spec::placement` that
-  selects the status names with the connector, a special case for one kind of name in a
-  crate that knows no connectors. Only `config` places indexes, so no other crate
-  changes. Decided by `laptop.architect-2` (2026-10-10T15:41:24Z,
+  the connector writes its status: `config.implied-channel` refuses each connector whose
+  kind writes a status channel (#2295), so the index can have no other home, and a rule
+  that lets a placement give it one only makes an error that no file can fix. Lost: an
+  ordinary index, which makes each file that places a connector also select
+  `<c>.status.time`, and a pattern of `spec::placement` that selects the status names
+  with the connector, a special case for one kind of name in a crate that knows no
+  connectors. Only `config` places indexes, so no other crate changes. Decided by
+  `laptop.architect-2` (2026-10-10T15:41:24Z,
   https://github.com/synnaxlabs/foundation/issues/1821#issuecomment-6099218399).
