@@ -305,12 +305,13 @@ enum Source {
     Remote(Box<Remote>),
 }
 
-/// A reader session at this node's home, with the credit of a complete one and the
-/// charge of each frame it gave back.
+/// A reader session at this node's home, with the credit of a complete one until it
+/// gave an end, and the charge of each frame it gave back.
 #[derive(Debug)]
 struct Local {
     session: Session,
-    /// `None` once the session gave an end, so no later ack moves the home position.
+    /// `None` for a latest session, and once `next` gave an end, so no later ack moves
+    /// the home position.
     credit: Option<(Credit, u64)>,
 }
 
@@ -412,9 +413,10 @@ impl Reader {
                 if named.is_some() {
                     return Err(Error::Remote { home });
                 }
-                let remote = Remote::open(state, home, keys, index, mode).await?;
+                let (remote, slot) =
+                    Remote::open(state, home, keys, index, mode).await?;
                 return Ok(Self {
-                    index: remote.index(),
+                    index: slot,
                     source: Source::Remote(Box::new(remote)),
                     frame: None,
                 });

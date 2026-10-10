@@ -121,14 +121,15 @@ impl Remote {
     /// and their index `index` at `home`, another node. Spawns the task of the
     /// session, which dials the home, opens the session, and then takes its frames,
     /// and waits until the home opened it. A removal of a channel during the open
-    /// ends the session at its first take.
+    /// ends the session at its first take. Returns the session and the slot of its
+    /// index.
     pub(super) async fn open(
         state: &Rc<RefCell<State>>,
         home: types::node::Key,
         data: Vec<(channel::Key, Type)>,
         index: channel::Key,
         mode: Mode,
-    ) -> Result<Self, Error> {
+    ) -> Result<(Self, channel::Slot), Error> {
         let keys = data.iter().map(|&(key, _)| key).chain([index]).collect();
         let queue = Rc::new(RefCell::new(Queue::default()));
         state.borrow_mut().remotes.add(keys, &queue);
@@ -148,8 +149,9 @@ impl Remote {
             Arc::clone(&set),
         );
         state.borrow().tasks.spawn(task);
+        let slot = set.entries()[set.groups()[0]].slot;
         let slots = set.entries().iter().map(|entry| entry.slot);
-        let lens = Lens::new(&set, slots, set.entries()[set.groups()[0]].slot);
+        let lens = Lens::new(&set, slots, slot);
         let remote = Self {
             queue,
             credit: (mode == Mode::Complete).then_some(0),
@@ -158,13 +160,7 @@ impl Remote {
             streak: Streak::default(),
         };
         poll_fn(|cx| remote.queue.borrow_mut().poll_open(cx)).await?;
-        Ok(remote)
-    }
-
-    /// The slot of the reader's index.
-    pub(super) fn index(&self) -> channel::Slot {
-        let set = &self.lens.set;
-        set.entries()[set.groups()[0]].slot
+        Ok((remote, slot))
     }
 
     /// Adds the charge of `frame`, which the reader gave back, to the credit.
