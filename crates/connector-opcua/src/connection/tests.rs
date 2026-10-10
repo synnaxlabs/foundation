@@ -2656,3 +2656,5 @@ fn a_stopped_server_is_deleted_when_its_loop_has_nothing_due() {
             .expect("the run ends");
     }
 }
+
+mod probe;
