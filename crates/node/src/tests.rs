@@ -182,6 +182,28 @@ fn stop_before_the_shards_run_ends_them_and_repeats_freely() {
 }
 
 #[test]
+fn a_stopper_from_another_thread_stops_its_node() {
+    fn sendable<T: Send + Sync + 'static>(_: &T) {}
+    let mut run = start(7, 2, &[]);
+    let stopper = run.node.stopper();
+    sendable(&stopper);
+    assert_eq!(run.sim.run_for(Span::HOUR), Ok(()));
+    stopper.clone().stop();
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(run.node.join(), Ok(()));
+}
+
+#[test]
+fn a_stop_after_the_node_ended_does_nothing() {
+    let mut run = start(7, 2, &[]);
+    let stopper = run.node.stopper();
+    run.node.stop();
+    assert_eq!(run.sim.run(), Ok(()));
+    assert_eq!(run.node.join(), Ok(()));
+    stopper.stop();
+}
+
+#[test]
 fn a_panic_in_one_shard_stops_the_others() {
     for seed in 0..32 {
         let mut run = start(seed, 3, &[(1, Fault::Panic)]);
@@ -1975,7 +1997,7 @@ mod hub {
             .iter()
             .find(|&(present, _)| present == entry)
             .expect("the view holds the series");
-        let mut out = vec![0; count * 8];
+        let mut out = Vec::new();
         codec::decode(entries[entry].data_type, count, bytes, &mut out)
             .expect("decodes");
         let (chunks, _) = out.as_chunks::<8>();
@@ -4534,7 +4556,8 @@ mod port {
         }
 
         /// A task that panics after the group stops, before the node sees the stop:
-        /// `join` gives the panic. At [`WRITE`], the sim runs the group's stop first.
+        /// `join` gives the panic. At [`WRITE`], three idle tasks that wake at that
+        /// instant make the sim run the group's stop first.
         #[test]
         fn a_panic_before_the_node_sees_the_group_stop_gives_the_panic() {
             let mut sim = sim::Sim::new(sim::Config::default());
@@ -4542,6 +4565,13 @@ mod port {
             let node = start_alone(&host);
             let at =
                 sim::node::Config::default().monotonic + OPEN + Span::from_nanos(WRITE);
+            for _ in 0..3 {
+                let own = host.clone();
+                node.spawn(move |_| async move {
+                    own.clock().sleep_until(at).await;
+                    std::future::pending::<()>().await;
+                });
+            }
             let own = host.clone();
             node.spawn(move |_| async move {
                 own.clock().sleep_until(at).await;

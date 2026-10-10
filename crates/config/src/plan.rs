@@ -185,10 +185,7 @@ impl Plan {
         let mut definitions = applied.clone();
         for (name, change) in &self.changes {
             let stored = definitions.remove(name);
-            let new = change.new.as_ref().map(|entry| match &entry.definition {
-                Definition::Spec(definition) => definition.kind(),
-                Definition::Channel(_) => definition::Kind::Channel,
-            });
+            let new = change.new.as_ref().map(|entry| entry.definition.kind());
             let kinds = stored
                 .as_ref()
                 .map(definition::Definition::kind)

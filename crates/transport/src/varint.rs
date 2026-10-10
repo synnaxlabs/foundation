@@ -169,13 +169,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "the bytes of one varint")]
     fn value_panics_when_the_bytes_are_not_one_varint() {
-        let _ = value(&[0x40]);
+        let _: u64 = value(&[0x40]);
     }
 
     #[test]
     #[should_panic(expected = "the bytes of one varint: [64, 0, 0]")]
     fn value_panics_at_a_length_no_varint_has() {
-        let _ = value(&[0x40, 0, 0]);
+        let _: u64 = value(&[0x40, 0, 0]);
     }
 
     proptest! {

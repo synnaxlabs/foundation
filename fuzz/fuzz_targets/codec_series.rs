@@ -1,5 +1,5 @@
 //! `codec::validate`, `codec::decode`, and `codec::Decoder` never panic and give the
-//! same result.
+//! same result. `decode` leaves `out` at the length that `validate` gives.
 //!
 //! Input: one byte picks the scalar, then a little-endian `u16` sample count, then
 //! the encoded series.
@@ -17,17 +17,20 @@ fuzz_target!(|bytes: &[u8]| {
     let scalar = fuzz::codec::scalar(*scalar);
     let count = usize::from(u16::from_le_bytes([*low, *high]));
     let data_type = Type::Scalar(scalar);
-    let mut out = vec![0; count * scalar.width()];
+    let mut out = Vec::new();
     let validated = codec::validate(data_type, count, series);
     if let Ok(len) = validated {
-        assert_eq!(len, out.len(), "validate gives another length");
+        assert_eq!(len, count * scalar.width(), "validate gives another length");
     }
     let decoded = codec::decode(data_type, count, series, &mut out);
     assert_eq!(
-        validated.map(|_| ()),
+        validated.clone().map(|_| ()),
         decoded,
         "validate and decode disagree"
     );
+    if let Ok(len) = validated {
+        assert_eq!(out.len(), len, "decode gives another length");
+    }
     let mut decoder = codec::Decoder::new(scalar, count, series);
     let mut vector = vec![0; codec::VECTOR_LEN * scalar.width()];
     let mut joined = Vec::new();
