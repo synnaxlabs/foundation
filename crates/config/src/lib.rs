@@ -115,7 +115,7 @@ fn checked<'a>(
         writes: BTreeMap::new(),
     };
     let mut connectors: Vec<_> = names(documents, Kind::Connector).collect();
-    connectors.sort_by_key(|(_, label)| order(label.span));
+    connectors.sort_by_key(|(_, label)| label.span);
     for (name, label) in connectors {
         let lower = name.as_str().to_ascii_lowercase().into();
         found.connectors.entry(lower).or_insert(label);
@@ -162,15 +162,9 @@ pub(crate) fn label(kind: Kind, key: &Name) -> Name {
     kind.label(key).unwrap_or_else(|| key.clone())
 }
 
-/// Sorts `diagnostics` by the [`order`] of each span.
+/// Sorts `diagnostics` by span, no span first.
 fn sort(diagnostics: &mut [Diagnostic]) {
-    diagnostics.sort_by_key(|diagnostic| order(diagnostic.span));
-}
-
-/// The key that orders `span` by its [`document::Source`], then in source order. No
-/// span comes first.
-fn order(span: Option<Span>) -> Option<(document::Source, u32)> {
-    span.map(|span| (span.source(), span.start().offset))
+    diagnostics.sort_by_key(|diagnostic| diagnostic.span);
 }
 
 /// The name and the label of each block of `kind` in `documents` whose one label

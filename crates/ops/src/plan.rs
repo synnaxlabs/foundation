@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
-use document::Source;
+use document::Span;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -179,7 +179,7 @@ pub(crate) struct Change {
 }
 
 /// Adds and changes in file order, then removals in tree key order.
-type Order = (bool, Option<(Source, u32)>, Name);
+type Order = (bool, Option<Span>, Name);
 
 impl Change {
     fn of(
@@ -214,8 +214,7 @@ impl Change {
         let label = kind
             .label(name)
             .expect("invariant: a planned change is at a tree key of its kind");
-        let at = span.map(|span| (span.source(), span.start().offset));
-        let order = (at.is_none(), at, name.clone());
+        let order = (span.is_none(), span, name.clone());
         let change = Self {
             action,
             kind: kind.as_str().to_owned(),
