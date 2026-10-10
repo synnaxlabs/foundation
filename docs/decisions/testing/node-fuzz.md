@@ -11,9 +11,10 @@
   `foundation/key/2` (NODE PORT). By `laptop.architect-2` (#1744, plan revision 3,
   item 6, 2026-10-10 03:30 UTC):
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6093320483. Each
-  one that decoded has a copy in the new form that a test decodes
-  (`docs/claude/testing.md`, "Oracles":
-  https://github.com/synnaxlabs/foundation/issues/1582#issuecomment-6045551500).
+  input of the form `foundation/key/1` that decoded has a copy in the new form that a
+  test decodes (`docs/claude/testing.md`, "Oracles", from item 33 of #1839 by
+  `laptop.director`, 2026-10-08 19:30 UTC:
+  https://github.com/synnaxlabs/foundation/issues/1839#issuecomment-6067499161).
   Trigger: the PR of #1744 that adds `admin.key` adds its form to the target, by its
   length, with its inputs (moved from PR 1b-1 by `laptop.architect`, 2026-10-10 04:15
   UTC: https://github.com/synnaxlabs/foundation/pull/2229#issuecomment-6093666647).
