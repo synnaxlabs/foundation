@@ -229,10 +229,11 @@ mod tests {
         let root = fixture().join("../..");
         let ci =
             std::fs::read_to_string(root.join(".github/workflows/ci.yaml")).unwrap();
-        let models = ci
-            .split("models:\n")
-            .nth(1)
-            .expect("ci.yaml has a models filter");
+        let models: Vec<&str> = (ci.split("models:\n").nth(1))
+            .expect("ci.yaml has a models filter")
+            .lines()
+            .map_while(|line| line.trim().strip_prefix("- "))
+            .collect();
         let metadata = metadata(&root).unwrap();
         let by_cfg = |name| select::packages(&metadata, |s| select::names_cfg(s, name));
         let tasks = [
@@ -243,7 +244,7 @@ mod tests {
         for (task, packages) in tasks {
             for select::Package { name, .. } in packages {
                 assert!(
-                    models.contains(&format!("'crates/{name}/**'")),
+                    models.contains(&format!("'crates/{name}/**'").as_str()),
                     "`cargo xtask {task}` runs `{name}`, but the `models` filter in \
                      .github/workflows/ci.yaml lacks 'crates/{name}/**'"
                 );
