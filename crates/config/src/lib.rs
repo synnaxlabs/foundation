@@ -541,6 +541,49 @@ mod tests {
         assert_eq!(spans, [at(0, 1)]);
     }
 
+    /// `block` with its label at bytes 1 to 3, one byte wider than the label of a
+    /// block at 0.
+    fn wide(mut block: Block) -> (Block, Option<Span>) {
+        let span = Span::new(Source(0), position(1), position(3));
+        block.labels[0].span = span;
+        (block, span)
+    }
+
+    #[test]
+    fn gives_the_repeat_at_the_label_that_ends_later_at_one_start() {
+        let (first, span) = wide(settings(0, 0, "A", &[]));
+        let documents = [
+            document(vec![first]),
+            document(vec![settings(0, 0, "a", &[])]),
+        ];
+        let diagnostics = check(&documents).unwrap_err();
+        let spans: Vec<_> = diagnostics
+            .iter()
+            .filter(|problem| problem.code.as_str() == "config.duplicate-name")
+            .map(|problem| problem.span)
+            .collect();
+        assert_eq!(spans, [span]);
+    }
+
+    #[test]
+    fn notes_the_connector_that_ends_first_at_one_start() {
+        let (first, _) = wide(block(0, 0, "connector", &["PLC"], &[]));
+        let documents = [
+            document(vec![first]),
+            document(vec![
+                block(0, 0, "connector", &["plc"], &[]),
+                block(0, 100, "subject", &["Plc"], &[]),
+            ]),
+        ];
+        let diagnostics = check(&documents).unwrap_err();
+        let notes: Vec<_> = diagnostics
+            .iter()
+            .filter(|problem| problem.code.as_str() == "config.subject-is-connector")
+            .flat_map(|problem| problem.notes.iter().map(|note| Some(note.span)))
+            .collect();
+        assert_eq!(notes, [at(0, 1)]);
+    }
+
     #[test]
     fn notes_no_connector_when_the_first_of_a_name_has_no_span() {
         let spanned = document(vec![
