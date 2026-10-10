@@ -51,6 +51,8 @@ exclude_re = [
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and
   # `(ALIGN << 0) * 5`.
   'crates/block/src/lib\.rs:.*replace < with <= in class_payload',
+  # At `index == CLASSES_MAX` both arms give `CLASSES_MAX`. `Ord::min` is not `const`.
+  'crates/block/src/lib\.rs:.*replace < with <= in classes$',
   # Stubs that panic until #68 fills them; #68 removes these lines.
   'crates/transport/src/datagram\.rs:',
   'crates/transport/src/session\.rs:.*Session::datagrams\b',
