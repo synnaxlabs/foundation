@@ -727,7 +727,6 @@ fn run<const N: usize>(message: &[u8]) -> Result<&[[u8; N]], Error> {
     }
 }
 
-/// The seq after `range`, or `None` past `u64::MAX`.
 fn path_byte(path: Path) -> u8 {
     match path {
         Path::Live => 0,
