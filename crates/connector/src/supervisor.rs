@@ -297,6 +297,8 @@ mod tests {
         Device(Span),
         /// Returns a config error at once.
         Config,
+        /// Returns a config error of two diagnostics at once.
+        Configs,
         /// Returns a retry error at once.
         Retry,
         /// Returns a device error at once, whose text is `a`, then 600 `é`.
@@ -365,6 +367,7 @@ mod tests {
                     Err(Error::Device("no reply".into()))
                 }
                 Some(Step::Config) => Err(Error::Config(vec![bad()])),
+                Some(Step::Configs) => Err(Error::Config(vec![bad(), worse()])),
                 Some(Step::Retry) => Err(Error::Retry("busy".into())),
                 Some(Step::Long) => Err(Error::Device(long().into())),
                 Some(Step::Abort) => {
@@ -413,6 +416,10 @@ mod tests {
 
     fn bad() -> Diagnostic {
         Diagnostic::new(BAD, None, "the config is bad".into(), "Fix it".into())
+    }
+
+    fn worse() -> Diagnostic {
+        Diagnostic::new(BAD, None, "the rate is bad".into(), "Fix it too".into())
     }
 
     fn between(from: Span, to: Span) -> Span {
@@ -629,6 +636,19 @@ mod tests {
     }
 
     #[test]
+    fn writes_no_backoff_when_the_next_run_passed_before_the_write() {
+        let (statuses, runs) = refuse_the_last_wait(vec![Step::Hold(ms(2_000))]);
+        let [_, again] = runs[..] else {
+            panic!("two runs: {runs:?}");
+        };
+        let (at, samples, _) = &statuses[2];
+        assert_eq!(samples[..2], [1, 2], "the wait: {statuses:?}");
+        assert_eq!(*at, ms(3_000), "written again 1 s after the refusal at 2 s");
+        assert_eq!(again, ms(3_000), "the run waits for the write");
+        assert_eq!(samples[3], 0, "the next run passed: {statuses:?}");
+    }
+
+    #[test]
     fn writes_the_text_of_a_retry_error() {
         let out = supervise("script", vec![Step::Retry, Step::Done], config(), None);
         let texts: Vec<_> = errors(&out.statuses).into_iter().map(|(_, t)| t).collect();
@@ -644,6 +664,23 @@ mod tests {
     }
 
     #[test]
+    fn joins_the_texts_of_the_diagnostics_of_a_config_error() {
+        let out = supervise("script", vec![Step::Configs], config(), None);
+        let text = format!("{}; {}", bad(), worse());
+        assert_eq!(out.statuses[1].2, text);
+    }
+
+    #[test]
+    fn writes_no_backoff_when_a_cancel_ends_the_wait() {
+        let steps = vec![Step::Device(Span::ZERO)];
+        let out = supervise("script", steps, config(), Some(Span::from_nanos(1)));
+        let states: Vec<_> = out.statuses.iter().map(|(_, s, _)| s[0]).collect();
+        assert_eq!(states, [0, 3, 1, 2], "a cancel in the wait");
+        assert!(out.statuses[2].1[3] > 0, "a wait: {:?}", out.statuses);
+        assert_eq!(errors(&out.statuses)[3], (Span::ZERO, "no reply"));
+    }
+
+    #[test]
     fn cuts_a_long_error_text_at_a_char_boundary() {
         let out = supervise("script", vec![Step::Long], config(), Some(ms(5_000)));
         let cut = format!("a{}", "é".repeat(511));
@@ -652,10 +689,12 @@ mod tests {
         assert!(long().starts_with(&cut));
     }
 
-    #[test]
-    fn writes_the_backoff_that_is_left_when_the_home_refused_the_wait() {
-        let (statuses, runs) = run_on(|node, tasks| async move {
-            let steps = [Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
+    /// Runs `steps` and fills the pool from 1.5 s after the start of the last run
+    /// for 1 s, so the home refuses the frame of the wait after it. The last step
+    /// holds a task for 2 s. Returns the status and the start of each run.
+    fn refuse_the_last_wait(steps: Vec<Step>) -> (Vec<Written>, Vec<Span>) {
+        let count = steps.len();
+        run_on(move |node, tasks| async move {
             let script = Script {
                 steps: Mutex::new(steps.into()),
                 ..Script::default()
@@ -678,8 +717,7 @@ mod tests {
             let (canceller, sleeper) = (token.clone(), clock.clone());
             let filled = Arc::clone(&runs);
             tasks.spawn(async move {
-                // The second run spawns a task that ends 2 s after it.
-                while filled.lock().expect("no panic under the lock").len() < 2 {
+                while filled.lock().expect("no panic under the lock").len() < count {
                     sleeper.sleep(ms(10)).await;
                 }
                 sleeper.sleep(ms(1_500)).await;
@@ -698,7 +736,13 @@ mod tests {
                 .map(|(from, _)| *from - start)
                 .collect();
             (statuses.borrow().clone(), runs)
-        });
+        })
+    }
+
+    #[test]
+    fn writes_the_backoff_that_is_left_when_the_home_refused_the_wait() {
+        let steps = vec![Step::Device(Span::ZERO), Step::Hold(ms(2_000))];
+        let (statuses, runs) = refuse_the_last_wait(steps);
         let [_, second, third] = runs[..] else {
             panic!("three runs: {runs:?}");
         };

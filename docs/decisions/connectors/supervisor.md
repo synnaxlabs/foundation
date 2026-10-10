@@ -64,7 +64,8 @@
   by the hub's clock, minus the time of the frame, so a frame written again later gives
   the wait that is left, and a frame stamped after the hub's time (below) gives a wait
   that ends at the next run. Decided by the `connector` builder in the plan on #420
-  (https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074).
+  (2026-10-10T03:22:36Z:
+  https://github.com/synnaxlabs/foundation/issues/420#issuecomment-6093259074).
 
   Each write is one frame with the last value of every status channel. Each start of a
   run writes the whole status. A change of `state`, `class`, `restarts`, `backoff`, or

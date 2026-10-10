@@ -610,10 +610,12 @@ impl Session {
 }
 
 /// The longest prefix of `text` of at most [`ERROR_MAX`] bytes that ends at a char
-/// boundary.
-fn cut(mut text: String) -> String {
-    text.truncate(text.floor_char_boundary(ERROR_MAX));
-    text
+/// boundary, which holds no more than it needs when `text` is longer.
+fn cut(text: String) -> String {
+    if text.len() <= ERROR_MAX {
+        return text;
+    }
+    text[..text.floor_char_boundary(ERROR_MAX)].to_owned()
 }
 
 /// The stamp 1 ns after `stamp`.
@@ -801,6 +803,8 @@ mod tests {
     }
 
     proptest! {
+        /// `cut` is pure, so this reaches each length and char width, which a run
+        /// through the supervisor does not.
         #[test]
         fn cuts_a_text_to_the_longest_prefix_that_fits(
             text in "(a|é|€|😀){0,1100}",
@@ -808,6 +812,9 @@ mod tests {
             let got = cut(text.clone());
             prop_assert!(text.starts_with(&got));
             prop_assert!(got.len() <= ERROR_MAX);
+            if text.len() > ERROR_MAX {
+                prop_assert!(got.capacity() <= ERROR_MAX, "holds {}", got.capacity());
+            }
             let next = text[got.len()..].chars().next();
             prop_assert!(next.is_none_or(|c| got.len() + c.len_utf8() > ERROR_MAX));
         }
