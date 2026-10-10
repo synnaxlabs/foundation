@@ -5,13 +5,14 @@
   ordinary index, which makes each file that places a connector also select
   `<c>.status.time`, and a pattern of `spec::placement` that selects the status names
   with the connector, a special case for one kind of name in a crate that knows no
-  connectors. Only `config` places indexes, so no other crate changes. Decided by
-  `laptop.architect-2` (2026-10-10T15:41:24Z,
-  https://github.com/synnaxlabs/foundation/issues/1821#issuecomment-6099218399).
-  Placement selection does not consider a status channel, so a pattern such as
-  `plant.*` that matches a status name changes nothing, and a placement whose `select`
-  matches only status names places nothing, as any placement that selects no channel,
-  with no diagnostic (`laptop.architect-2`, 2026-10-10T16:07:40Z,
+  connectors. Only `config` places indexes, so no other crate changes. Placement
+  selection does not consider a status channel, so a pattern such as `plant.*` that
+  matches a status name changes nothing. Decided by `laptop.architect-2`
+  (2026-10-10T15:41:24Z,
+  https://github.com/synnaxlabs/foundation/issues/1821#issuecomment-6099218399). A
+  placement whose `select` matches only status names places nothing, as any placement
+  that selects no channel, with no diagnostic (`laptop.architect-2`,
+  2026-10-10T16:07:40Z,
   https://github.com/synnaxlabs/foundation/issues/1821#issuecomment-6099496528, which
   supersedes the `config.empty-placement` clause of
   https://github.com/synnaxlabs/foundation/issues/1821#issuecomment-6099218399). Only
