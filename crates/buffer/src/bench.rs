@@ -162,4 +162,20 @@ mod tests {
             ring.commit(8);
         }
     }
+
+    /// Each commit moves the durable tail of each index past one more entry.
+    #[test]
+    fn each_commit_of_the_logs_syncs_one_entry_of_each_index() {
+        let mut logs = Logs::new(2, NonZeroU8::new(1));
+        for _ in 0..3 {
+            logs.commit();
+        }
+        for n in 0..2 {
+            assert_eq!(
+                logs.inner.durable(Slot::new(n), Path::Live).seq,
+                3,
+                "index {n}"
+            );
+        }
+    }
 }
