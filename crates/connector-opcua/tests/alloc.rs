@@ -118,9 +118,10 @@ fn reads(idle: usize) -> Vec<[u64; 4]> {
     sim.run_on(&node, run).expect("the run ends")
 }
 
-/// open62541 allocates for each message it sends and decodes, so a read is not free.
-/// The count is the same for each read and each count of idle connections, so a Rust
-/// allocation on the path of a message adds one to a count.
+/// open62541 allocates for each message it sends and decodes, and the sim net
+/// allocates a segment for each write, one in the ask and one in the answer. So a read
+/// is not free. The count is the same for each read and each count of idle
+/// connections, so a Rust allocation on the path of a message adds one to a count.
 fn a_read_through_the_manager_allocates_a_fixed_count() {
     for idle in [0, 15] {
         for (at, counts) in reads(idle).into_iter().enumerate() {
