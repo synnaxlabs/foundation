@@ -656,7 +656,8 @@ impl Shard {
     ///
     /// # Errors
     ///
-    /// [`reader::Error::Ack`] when the reader is open and `position` moves back.
+    /// [`reader::Error::Ack`] when the reader is open and `position` drops a path or
+    /// adds one.
     ///
     /// # Panics
     ///
@@ -4232,11 +4233,10 @@ mod tests {
                     assert_eq!(woken, [first.key.into(), other.key.into()]);
                     assert_eq!(taken(&mut shard, first.key.into(), 0), [seq(2, 1)]);
                     assert_eq!(taken(&mut shard, other.key.into(), 0), [seq(2, 1)]);
-                    let error = Error::Ack {
-                        from: live(2),
-                        to: live(1),
-                    };
-                    assert_eq!(shard.ack(first.key, live(1)), Err(error));
+                    shard.ack(first.key, live(3)).expect("forward");
+                    assert_eq!(shard.ack(first.key, live(1)), Ok(()));
+                    let again = named(&mut shard, "a", "r");
+                    assert_eq!(taken(&mut shard, again.key.into(), 0), []);
                 });
             }
 

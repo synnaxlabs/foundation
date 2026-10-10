@@ -84,7 +84,7 @@ pub struct Record {
 /// An input from a reader that breaks the delivery rules.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// An acknowledged position dropped a path, added one, or moved back on one.
+    /// An acknowledged position dropped a path or added one.
     Ack {
         /// The session's position.
         from: Position,
@@ -98,8 +98,8 @@ impl fmt::Display for Error {
         match self {
             Self::Ack { from, to } => write!(
                 f,
-                "acknowledged position must keep the reader's paths and never move \
-                 back: from {from} to {to}"
+                "acknowledged position must keep the reader's paths: from {from} to \
+                 {to}"
             ),
         }
     }
@@ -139,8 +139,8 @@ mod tests {
         };
         assert_eq!(
             error.to_string(),
-            "acknowledged position must keep the reader's paths and never move back: \
-             from live 10, backfill 4 to live 9, backfill 4"
+            "acknowledged position must keep the reader's paths: from live 10, backfill \
+             4 to live 9, backfill 4"
         );
     }
 }
