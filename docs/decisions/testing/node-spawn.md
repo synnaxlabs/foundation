@@ -28,6 +28,5 @@
   https://github.com/synnaxlabs/foundation/pull/1769#issuecomment-6051497737.
   Supersedes the panic error of
   https://github.com/synnaxlabs/foundation/issues/585#issuecomment-6043838411.
-  Amended (2026-10-10, #2266, by `laptop.architect-2`): shard 0 calls a task only once
-  the node takes sessions, as well as once each shard has opened its buffer. Approval
-  owed. Supersedes the start order of the first sentence of this record.
+  Amended (2026-10-10, #2266, approval owed): adds to "once each shard has opened its
+  buffer" in the first sentence: and once the node takes sessions.
