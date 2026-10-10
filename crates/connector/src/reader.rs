@@ -156,4 +156,5 @@ fn keep<T>(
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests;

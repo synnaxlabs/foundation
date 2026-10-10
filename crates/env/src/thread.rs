@@ -4,7 +4,9 @@
 use std::fmt;
 
 /// A started thread. Join every handle: a dropped handle leaves its thread running,
-/// and threads are never detached.
+/// and threads are never detached. One exception: `main` may drop the handle of a
+/// thread that waits only on the process, such as for a signal or a reader of standard
+/// output, just before it returns.
 ///
 /// ```
 /// fn stop(handle: env::thread::Handle) {

@@ -152,6 +152,8 @@ fn code(error: &Error) -> Option<Code> {
         | Error::Stray { .. }
         | Error::NotIndex(_)
         | Error::UnknownNode(_)
-        | Error::Homes { .. } => Some(REFUSED),
+        | Error::Homes { .. }
+        | Error::Founding { .. }
+        | Error::Unfounded { .. } => Some(REFUSED),
     }
 }
