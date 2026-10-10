@@ -39,7 +39,7 @@ pub async fn founding(
     pool: Rc<Pool>,
 ) -> Result<Option<Founding>, Error> {
     let blocks = Blocks::new(pool).map_err(Error::Pool)?;
-    let Some(body) = read(files, dir, &blocks).await? else {
+    let Some(body) = read(files, dir, &blocks, Mode::Read).await? else {
         return Ok(None);
     };
     let founding = Founding::decode(&body).ok_or_else(|| unfounded(dir))?;
@@ -66,7 +66,7 @@ pub(super) async fn keep(
     logged: bool,
 ) -> Result<(), Error> {
     let encoded = given.encode();
-    let body = match read(files, dir, blocks).await {
+    let body = match read(files, dir, blocks, Mode::Write).await {
         // A first open writes over it, and an open with a record refuses it below.
         Err(Error::Unfounded { .. }) => None,
         body => body?,
@@ -93,24 +93,20 @@ pub(super) async fn keep(
 }
 
 // The body of the founding file in `dir`, after its check and version, or `None` when
-// `dir` or the file is not there.
+// `dir` or the file is not there. A `mode` of `Mode::Write` first waits for each call
+// on the file that a dropped `keep` left to run, such as its remove; a read open does
+// not.
 async fn read(
     files: &Files,
     dir: &Path,
     blocks: &Blocks,
+    mode: Mode,
 ) -> Result<Option<Vec<u8>>, Error> {
-    let names = match files.list(dir).await {
-        Ok(names) => names,
+    let opened = match files.open(&dir.join(FILE), mode).await {
+        Ok(opened) => opened,
         Err(files::Error::NotFound { .. }) => return Ok(None),
         Err(error) => return Err(Error::Files(error)),
     };
-    if !names.iter().any(|name| name == Path::new(FILE)) {
-        return Ok(None);
-    }
-    let opened = files
-        .open(&dir.join(FILE), Mode::Read)
-        .await
-        .map_err(Error::Files)?;
     let stored = blocks.read(&opened).await;
     opened.close().await;
     let stored = stored?;

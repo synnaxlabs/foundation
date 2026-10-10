@@ -436,16 +436,20 @@ fn the_read_gives_the_founding_that_the_first_open_kept() {
     run_with(&mut sim, &node, stored);
 }
 
+/// A failed open of the founding file gives the files error, at a read and at an open
+/// of the mesh.
 #[test]
-fn a_failed_list_of_the_mesh_directory_gives_the_files_error() {
-    let (mut sim, node, _) = founded(0);
-    node.fail_file(Path::new(""), Operation::List);
+fn a_failed_open_of_the_founding_file_gives_the_files_error() {
+    let (mut sim, node, region) = founded(0);
     let io = files::Error::Io {
-        path: PathBuf::new(),
-        operation: Operation::List,
+        path: PathBuf::from(FILE),
+        operation: Operation::Open,
         code: 5,
     };
-    assert_eq!(unread(&mut sim, &node), Error::Files(io));
+    node.fail_file(Path::new(FILE), Operation::Open);
+    assert_eq!(unread(&mut sim, &node), Error::Files(io.clone()));
+    node.fail_file(Path::new(FILE), Operation::Open);
+    assert_eq!(refused(&mut sim, &node, region), Error::Files(io));
 }
 
 /// A reopen whose log holds no record writes nothing when its founding is the one in
@@ -722,6 +726,63 @@ fn a_failed_sync_of_the_directory_in_keep_gives_the_files_error() {
         code: 5,
     };
     assert_eq!(kept, Err(Error::Files(cause)));
+}
+
+/// Runs `future` until it ends or `span` passes, and drops it then. Gives whether it
+/// ended.
+async fn until(clock: &env::clock::Clock, span: Span, future: impl Future) -> bool {
+    let mut future = std::pin::pin!(future);
+    let mut sleep = std::pin::pin!(clock.sleep(span));
+    std::future::poll_fn(|cx| {
+        if future.as_mut().poll(cx).is_ready() {
+            return std::task::Poll::Ready(true);
+        }
+        sleep.as_mut().poll(cx).map(|()| false)
+    })
+    .await
+}
+
+/// A first open with the founding in the directory keeps it, also after a dropped
+/// first open with another founding whose remove of `founding` still runs.
+#[test]
+fn a_keep_after_a_dropped_keep_of_another_founding_keeps_its_founding() {
+    let mut dropped = 0_usize;
+    for run in 0..800_u64 {
+        let (seed, step) = (run / 40, i64::try_from(run % 40).unwrap());
+        let mut sim = Sim::new(sim::Config {
+            seed,
+            ..sim::Config::default()
+        });
+        let node = sim.node(sim::node::Config::default());
+        let mut region = sim
+            .run_on(&node, |node, tasks| async move {
+                create_region(&node, &tasks).await
+            })
+            .unwrap();
+        run_with(&mut sim, &node, region.clone());
+        let other = region::Founding {
+            voters: [key(1)].into(),
+            ..region.clone()
+        };
+        let founding = region.clone();
+        let (ended, kept) = sim
+            .run_on(&node, move |node, _| async move {
+                let blocks = Blocks::new(create_pool()).unwrap();
+                let (files, dir) = (node.files(), Path::new(""));
+                let span = Span::from_nanos(step.saturating_mul(5_000));
+                let first = keep(&files, dir, &blocks, &other, false);
+                let ended = until(&node.clock(), span, first).await;
+                let kept = keep(&files, dir, &blocks, &founding, false).await;
+                node.clock().sleep(TICK).await;
+                (ended, kept)
+            })
+            .unwrap();
+        dropped = dropped.saturating_add(usize::from(!ended));
+        assert_eq!(kept, Ok(()), "run {run}");
+        region.members.sort_by_key(|member| member.card.key());
+        assert_eq!(read(&mut sim, &node, ""), Some(region), "run {run}");
+    }
+    assert_ne!(dropped, 0, "no keep dropped");
 }
 
 #[test]
