@@ -95,12 +95,13 @@ const LEFT_OUT: [&str; 4] = [
 /// copy. The functions of [`CLOCKS`] pass too: [`CLOCK_CALLS`] checks each call of
 /// one. `OUTSIDE` in `connector-opcua` lists the symbols of the production build, so a
 /// new symbol outside the copy changes both lists.
-const SYMBOLS: [&str; 20] = [
+const SYMBOLS: [&str; 18] = [
     // The allocator of libc, since the check builds without `alloc.h`.
     "calloc",
     "free",
     "malloc",
     "realloc",
+    // Memory and string functions, which read only the memory that they are given.
     "memcmp",
     "memcpy",
     "memmove",
@@ -110,10 +111,7 @@ const SYMBOLS: [&str; 20] = [
     "strncmp",
     // The `errno` of the thread, which holds only the error of a call of the copy.
     "__errno_location",
-    // The compiler adds these, and no C of the copy names one: the stack protector,
-    // whose random canary reaches no result, and the table of the linker.
-    "__stack_chk_fail",
-    "__stack_chk_guard",
+    // The table of the linker, which position-independent code reads for addresses.
     "_GLOBAL_OFFSET_TABLE_",
     // `shim.c` defines each to print its name and abort.
     "UA_ConnectionManager_new_POSIX_Ethernet",
@@ -695,10 +693,12 @@ fn build<'a>(
             let mut cc = Command::new(cc);
             // `./` keeps a source such as `-x.c` or `@x.c` from being an option. Else
             // GCC gives cc1 the base name as `-dumpbase`, which cc1 reads as a
-            // response file when it starts with `@`.
+            // response file when it starts with `@`. With no stack protector, a
+            // reference to its random canary is one that the C makes.
             cc.current_dir(copy)
                 .args(flags.lines())
-                .args(["-g", "-O0", "-dumpbase", &index.to_string()])
+                .args(["-g", "-O0", "-fno-stack-protector", "-dumpbase"])
+                .arg(index.to_string())
                 .args(mode);
             spawn(cc.arg(Path::new(".").join(source)))
         };
@@ -897,15 +897,17 @@ fn symbols<'a>(
     flags: &[&str],
 ) -> Result<BTreeSet<String>, String> {
     let text = exec(Command::new("nm").arg("-P").args(flags).args(objects))?;
-    // A line that names an object has one word.
-    Ok(text
-        .lines()
-        .filter_map(|line| {
-            let mut words = line.split_whitespace();
-            let name = words.next()?;
-            words.next().map(|_| name.to_owned())
-        })
-        .collect())
+    Ok(names(&text))
+}
+
+/// The names of the symbols in `text`, the output of `nm -P`.
+fn names(text: &str) -> BTreeSet<String> {
+    text.lines()
+        // A line that names an object ends with `:`, and its path can hold a space.
+        .filter(|line| !line.ends_with(':'))
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Writes the copy of `found` to `stage`, with `LICENSE` from `src`.
@@ -1474,6 +1476,15 @@ End of search list.
                 "src/util/ua_util.c: `UA_random_seed` no longer calls a clock. Remove \
                  it from CLOCK_CALLS",
             ]
+        );
+    }
+
+    #[test]
+    fn names_skips_each_line_that_names_an_object() {
+        let text = "/tmp/a b/0.o:\nmalloc U\nUA_new T 0 10\n\n/tmp/a b/1.o:\ntime U\n";
+        assert_eq!(
+            names(text),
+            BTreeSet::from(["UA_new", "malloc", "time"].map(str::to_owned))
         );
     }
 

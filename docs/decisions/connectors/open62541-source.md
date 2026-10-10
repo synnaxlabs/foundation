@@ -30,9 +30,10 @@
   symbol) pair, such as a call of the stdout logger, which we never run. Each entry
   has its reason. A symbol goes in `SYMBOLS` only when no value that it reads from a
   clock, file, network, randomness, or the OS reaches a result of the copy. Its
-  classes: memory, string, and math functions; the allocator; `errno`; symbols that
-  the compiler adds and no C of the copy names (the stack protector, the table of
-  the linker); and the 5 constructors that `shim.c` defines to abort. A symbol is
+  classes: memory, string, and math functions; the allocator; `errno`; the table of
+  the linker; and the 5 constructors that `shim.c` defines to abort. The check builds
+  with no stack protector, so a reference to its random canary is one that the C
+  makes. A symbol is
   outside the copy when no object exports it: a `static` function of one file does
   not hide a call of the OS function of its name from another. A pair of
   `FILE_SYMBOLS` with no reference fails, so a file that the build leaves out loses
