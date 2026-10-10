@@ -3036,3 +3036,61 @@ fn a_session_that_ends_with_a_refusal_while_a_credit_is_due_sends_no_credit() {
         },
     );
 }
+
+/// Sends the head of a frame of one sample on `path` at `seq`, its ends, and its body.
+async fn send_at(sender: &mut Sender, path: Path, seq: u64) {
+    let head = Reply::Head(Head {
+        path,
+        range: Range { seq, count: 1 },
+        series: 2,
+    });
+    send(sender, head.encoded_len(), |out| head.encode(out)).await;
+    send(sender, 2 * ends::LEN, |out| {
+        ends::encode([(0, 8), (1, 16)], out);
+    })
+    .await;
+    send(sender, 16, |out| out.fill(1)).await;
+}
+
+#[test]
+fn a_reader_acks_each_position_that_it_gave_after_a_frame_of_a_lower_seq() {
+    remote(
+        16,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (_, mut sender, _receiver) = fake_open(&transport).await;
+            send_at(&mut sender, Path::Live, 10).await;
+            send_at(&mut sender, Path::Backfill, 3).await;
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let mut reader = test.reader(&["value"], Mode::Complete).await;
+            let first = reader.next().await.expect("a frame").position();
+            let second = reader.next().await.expect("a frame").position();
+            reader.ack(second);
+            reader.ack(first);
+        },
+    );
+}
+
+#[test]
+fn a_reader_gives_the_highest_position_after_a_frame_that_ends_past_the_highest_seq() {
+    remote(
+        16,
+        sim::link::Config::default(),
+        |node, _, transport, steps| async move {
+            let (_, mut sender, _receiver) = fake_open(&transport).await;
+            send_at(&mut sender, Path::Live, u64::MAX).await;
+            until(&node.clock(), &steps.done).await;
+        },
+        |test, _| async move {
+            let mut reader = test.reader(&["value"], Mode::Latest).await;
+            let position = reader.next().await.expect("a frame").position();
+            assert!(
+                format!("{position:?}").ends_with(&format!("live: {} }}", u64::MAX)),
+                "{position:?}"
+            );
+            reader.ack(position);
+        },
+    );
+}

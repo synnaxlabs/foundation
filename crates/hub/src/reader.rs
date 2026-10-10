@@ -95,7 +95,7 @@ impl<'a> Received<'a> {
     #[must_use]
     pub fn position(&self) -> Position {
         let position = self.lens.after(&self.view);
-        self.given.set(position.live);
+        self.given.set(self.given.get().max(position.live));
         position
     }
 }
@@ -146,9 +146,10 @@ impl Lens {
         let range = view
             .range(self.group)
             .expect("invariant: a frame holds the range of each group");
+        // A home at another node can send a range that ends past `u64::MAX`.
         Position {
             index: self.index,
-            live: range.seq + u64::from(range.count),
+            live: range.seq.saturating_add(u64::from(range.count)),
         }
     }
 }
@@ -311,8 +312,8 @@ pub struct Reader {
     source: Source,
     /// The slot of the reader's index.
     index: channel::Slot,
-    /// The `live` of the last position that [`Received::position`] gave, or 0. The
-    /// positions of a reader rise, so it is the highest.
+    /// The highest `live` of a position that [`Received::position`] gave, or 0. A home
+    /// at another node can send a frame of a lower seq.
     given: Cell<u64>,
     /// The frame that the last [`Received`] lends.
     frame: Option<Frame>,
