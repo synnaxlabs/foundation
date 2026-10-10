@@ -111,7 +111,7 @@ fn decode_a_frame(bencher: Bencher<'_, '_>, series: u32) {
     let mut out = [0; 18];
     head(series).encode(&mut out);
     let mut reader = opened(series);
-    bencher.bench_local(|| {
+    let mut frame = || {
         reader
             .decode(divan::black_box(&out))
             .expect("the head decodes");
@@ -125,7 +125,10 @@ fn decode_a_frame(bencher: Bencher<'_, '_>, series: u32) {
             }
             other => panic!("the body did not decode: {other:?}"),
         }
-    });
+    };
+    // A test runs the bench once, so this shows that one reader takes a frame again.
+    frame();
+    bencher.bench_local(frame);
 }
 
 /// Decodes a body of `messages` messages of 1 024 bytes, with where each starts.
@@ -137,7 +140,7 @@ fn decode_a_body(bencher: Bencher<'_, '_>, messages: u32) {
     ends::encode([(0, messages * 1_024)], &mut run);
     let body = vec![7; usize::try_from(messages * 1_024).expect("a u32 fits a usize")];
     let mut reader = opened(1);
-    bencher.bench_local(|| {
+    let mut frame = || {
         reader.decode(&out).expect("the head decodes");
         reader.decode(&run).expect("the ends decode");
         body.chunks(1_024).fold(0, |sum: usize, message| {
@@ -147,7 +150,9 @@ fn decode_a_body(bencher: Bencher<'_, '_>, messages: u32) {
                 other => panic!("the body did not decode: {other:?}"),
             }
         })
-    });
+    };
+    frame();
+    bencher.bench_local(frame);
 }
 
 #[divan::bench]
