@@ -3173,6 +3173,7 @@ mod port {
             let millis = i64::try_from(key >> 80).unwrap();
             let wall = super::super::hub::WALL / 1_000_000;
             assert!((wall..wall + 1_000).contains(&millis), "{millis} at {wall}");
+            assert_ne!(made[64..96], made[32..64], "the seal key is its own");
             let public = PrivateKey(made[32..64].try_into().unwrap()).public();
             let node = Node::start(config(&host, Size::MEBIBYTE, Box::new(heap)));
             assert_eq!(dial(&mut sim, &host, public), Ok(Peer::Node(public)));

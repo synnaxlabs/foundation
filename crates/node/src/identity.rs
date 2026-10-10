@@ -193,6 +193,27 @@ mod tests {
         );
     }
 
+    /// The inputs of the fuzz corpus in this form decode, as their old forms did.
+    #[test]
+    fn decodes_the_inputs_of_the_corpus() {
+        let valid: &[u8; LEN] =
+            include_bytes!("../../../oracles/fuzz/node_identity/valid-2");
+        let body: &[u8; BODY] =
+            include_bytes!("../../../oracles/fuzz/node_identity/valid-body-2");
+        let mut summed = [0; LEN];
+        summed[..BODY].copy_from_slice(body);
+        summed[BODY..].copy_from_slice(&crc32c::crc32c(body).to_le_bytes());
+        for bytes in [valid, &summed] {
+            let identity = decode(bytes).expect("decodes");
+            assert_eq!(
+                identity.key,
+                types::node::Key::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10)
+            );
+            assert_eq!(identity.private_key.0, [7; 32]);
+            assert_eq!(identity.opener.expose(), &[5; 32]);
+        }
+    }
+
     #[test]
     fn refuses_zero_bytes() {
         assert!(decode(&[0; LEN]).is_none());
