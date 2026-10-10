@@ -3209,7 +3209,7 @@ fn a_reader_stops_the_stream_as_malformed_when_a_head_ends_past_the_highest_seq(
         },
         series: 2,
     });
-    message[10] = 1;
+    message[10..14].copy_from_slice(&1u32.to_le_bytes());
     ends_at_a_head(
         20,
         message,
