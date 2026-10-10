@@ -320,3 +320,52 @@
   that does not open stops the node with `Error::Blob`. Decided by
   `laptop.architect-2`, 2026-10-08T11:50:51Z:
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059230722.
+  Amended (2026-10-08, PR 2 of #1209): an open of the mesh directory whose log holds no
+  record keeps `Config::founding` in the file `founding` in `Config::dir`, beside `log`,
+  so the `Stray` rule of MESH LOG holds. The file is an 8-byte check of the rest (the
+  first bytes of `types::digest::Digest::of`), the format version (1), and
+  `region::Founding::encode`: the prefix, a count and each member in key order, the
+  voters, a count and each definition in name order, and a count and each home in
+  channel key order. An open whose log holds no record is a first open: it takes the
+  lock of the log, removes `founding`, writes `founding.new`, renames it to `founding`,
+  and syncs the directory, before `raft` writes a record. So a crash before the first
+  record leaves a first open, also with another founding (`laptop.architect`,
+  2026-10-09T23:35:56Z:
+  https://github.com/synnaxlabs/foundation/pull/2200#issuecomment-6091088392). This
+  supersedes the later open of the plan
+  (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063177321), which
+  reads and compares `founding` at each open after the first. It also supersedes the
+  rule of https://github.com/synnaxlabs/foundation/issues/1209 that a crash before the
+  log exists leaves a first open only for the same set. Each open whose log holds a
+  record compares `founding` with `Config::founding`, its members in key order, before
+  `raft` starts. Another value gives `Error::Founding { stored, given }`, each a
+  `Box<region::Founding>`. Its text names the first field that differs: the prefix and
+  the voters in the form "the mesh was founded with voters {stored}, not {given}", and
+  for the members, the definitions, and the homes the first key in key order whose value
+  differs or is in only one of the two. A text of the homes names the index by the tree
+  key of its `Definition::Channel` in `stored`, or by its key when no definition has it:
+  "the mesh was founded with another home of index {name}", "... with a home of index
+  {name}, which the config lacks", and "... with no home of index {name}"
+  (`laptop.architect`, 2026-10-09T23:18:27Z:
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6090902577). A log
+  with a record and no `founding`, or a `founding` that fails its check, its version, or
+  its decode, gives `Error::Unfounded { path }`. A failed file call on `founding` gives
+  `Error::Files`, and a pool with no block for it gives `Error::Pool`, not `Error::Log`,
+  which names a part that did not fail (`laptop.architect`, 2026-10-08T16:10:01Z:
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6064069802). This
+  supersedes `Error::Voters` of the rules of
+  https://github.com/synnaxlabs/foundation/issues/1209 and the digest form
+  `Error::Founding { stored: Digest, given: Digest }` of
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6056362876, because
+  the whole value is the unit of the check (`laptop.architect`, 2026-10-08T10:34:50Z:
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6057978189).
+  Proposed by `box1.builder-4`
+  (https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063177321), and
+  decided by `laptop.architect`, 2026-10-08T15:26:10Z, with the text for the members and
+  the definitions:
+  https://github.com/synnaxlabs/foundation/issues/1209#issuecomment-6063246600. The lock
+  of the log comes before the write of `founding`, not after it as in the plan, so two
+  opens of one directory never write it at once. Lost: a digest of the whole value in
+  the file, because the operator cannot see which field differs and the region does not
+  read back; one variant per field, four variants for one contract; the root of the
+  definitions alone, because the file is then not the whole value.

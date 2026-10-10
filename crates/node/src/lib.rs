@@ -87,14 +87,14 @@ pub struct Config<M> {
     /// key, both from the file `node.key` in the data directory. Only `node` reads that
     /// file, so until the node founds its region itself (#1744), only the tests of
     /// `node`, and the `acceptance` lab, which writes the file first with
-    /// `create_key`, give `Some`. Give the same value at each start: the node keeps
-    /// no copy of it, and until the mesh stores it (#1209), a log opened with another
-    /// value checks proofs against the wrong voters and starts at another spec. A patch
-    /// until the node keeps its region in its data directory when it founds or joins
-    /// one, and reads it at each start (#1744). The hub of each task knows each channel
-    /// of the region's spec in use, at the open and after each spec change that takes
-    /// effect. At the first start, that is the founding's `definitions`, or no channel
-    /// when `spec::region::check` gives them problems.
+    /// `create_key`, give `Some`. A start whose mesh log holds no record keeps the
+    /// region in the data directory. A start whose log holds a record and that gives
+    /// another region stops the node, and [`Node::join`] gives [`Error::Mesh`] with
+    /// [`mesh::Error::Founding`]. A patch until the node reads its region from its data
+    /// directory at each start (#1744). The hub of each task knows each channel of the
+    /// region's spec in use, at the open and after each spec change that takes effect.
+    /// At a start whose log holds no record, that is the founding's `definitions`, or
+    /// no channel when `spec::region::check` gives them problems.
     pub region: Option<mesh::region::Founding>,
     /// The node's name. The first start on a data directory keeps it in the file
     /// `name`; a later start with another name stops with [`Error::Renamed`]. Get it

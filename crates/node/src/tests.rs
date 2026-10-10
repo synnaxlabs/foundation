@@ -3582,7 +3582,7 @@ mod port {
         const OPEN: Span = Span::from_nanos(10_000_000);
         /// The time after [`OPEN`], in nanoseconds, at which a write of [`LOG`] that
         /// fails from [`OPEN`] stops the group in the sim.
-        const WRITE: i64 = 1_793_161_050;
+        const WRITE: i64 = 1_793_467_039;
 
         /// Why the group stops when a write of [`LOG`] fails.
         fn write_failed() -> ::mesh::Stopped {
@@ -4648,6 +4648,30 @@ mod port {
             let node = Arc::into_inner(node).expect("shard 0 dropped the task");
             let node = node.into_inner().expect("no panic holds the lock");
             assert_eq!(node.join(), Ok(()));
+        }
+
+        /// A restart with another region, after the log holds a record, stops the
+        /// node, and `join` gives the region that the first start kept.
+        #[test]
+        fn a_restart_with_another_region_stops_the_node() {
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let node = start_alone(&hosts[0]);
+            // Past the longest election timeout, so the node votes for itself.
+            let elected = Span::from_nanos(3 * Span::SECOND.nanos());
+            assert_eq!(sim.run_for(elected), Ok(()));
+            node.stop();
+            assert_eq!(sim.run(), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+            let mut members = pair(&hosts);
+            let node = start(&hosts[0], region(&members));
+            assert_eq!(sim.run(), Ok(()));
+            members.sort_by_key(|member| member.card.key());
+            let error = ::mesh::Error::Founding {
+                stored: Box::new(region(&[member(OWN, &KEY, &hosts[0])])),
+                given: Box::new(region(&members)),
+            };
+            assert_eq!(node.join(), Err(Error::Mesh(error)));
         }
 
         /// A chunk store that does not open stops the node, and `join` gives why.
