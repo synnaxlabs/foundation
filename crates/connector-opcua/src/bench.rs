@@ -573,6 +573,32 @@ mod tests {
         check_on(link, 0, async |_| ());
     }
 
+    /// The stream of the connect opens after 200 s, so the deadline panic comes at
+    /// 60 s of `clock`.
+    #[test]
+    fn the_deadline_of_a_connect_is_one_minute() {
+        let link = sim::link::Config {
+            delay: Span::from_nanos(100_000_000_000),
+            ..sim::link::Config::default()
+        };
+        let mut sim = Sim::new(sim::Config {
+            link,
+            ..sim::Config::default()
+        });
+        let node = sim.node(node::Config::default());
+        sim.run_on(&node, move |node, _| async move {
+            let (clock, address) = (node.clock(), node.addresses()[0]);
+            let start = clock.now();
+            let scope =
+                Manager::scope(node.clock(), node.net(), address, 0, async |_| ());
+            let panic = caught(scope).await.expect_err("the connect does not end");
+            assert_eq!(clock.now() - start, Span::from_nanos(60_000_000_000));
+            let message = panic.downcast_ref::<String>().map(String::as_str);
+            assert_eq!(message, Some("0 of 1 clients connected in 1m"));
+        })
+        .expect("the run ends");
+    }
+
     /// The minimal config of a server takes 100 sessions.
     #[test]
     fn a_scope_takes_more_clients_than_the_sessions_of_a_minimal_server() {
