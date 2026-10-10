@@ -182,7 +182,8 @@ impl Node {
     /// data directory that another node holds or that was made for another shard
     /// count, a key file that is not valid, a file `name` that holds another name or
     /// that no node wrote, or a buffer or a mesh that does not open stops the node, and
-    /// [`Node::join`] returns its error. Its `# Errors` gives which error comes first.
+    /// [`Node::join`] returns its error. The `# Errors` of [`Node::join`] gives which
+    /// error comes first.
     ///
     /// # Panics
     ///
@@ -384,18 +385,18 @@ impl Node {
     /// # Errors
     ///
     /// The first failure: [`Error::Disk`] for a disk budget that holds no ring on each
-    /// shard, [`Error::Port`] for a port that did not bind, [`Error::Pool`] for a pool
-    /// budget that does not fit this host, [`Error::Start`] for a shard that could not
-    /// start or pin, or [`Error::Memory`] for a shard with no memory, else
-    /// [`Error::Shards`] or [`Error::Directory`] for a data directory that shard 0
-    /// could not claim, else [`Error::Buffer`] for the first shard by core whose
-    /// buffer did not open, [`Error::Budget`] or [`Error::Directory`] for a file
-    /// `budget` that shard 0 could not read or write, [`Error::Key`] or
-    /// [`Error::Directory`] for a key file that shard 0 could not read or write,
-    /// [`Error::Blob`] for a chunk store or [`Error::Mesh`] for a mesh that did not
-    /// open, or [`Error::Transport`] or [`Error::Group`], whichever the node sees stop
-    /// first, else [`Error::Panicked`] for the first shard by core that panicked. Any
-    /// failed shard stops the node.
+    /// shard, [`Error::Port`] for a port that did not bind, [`Error::Pool`] for a part
+    /// of the pool budget that needs a reservation of more than `usize::MAX` bytes,
+    /// [`Error::Start`] for a shard that could not start or pin, or [`Error::Memory`]
+    /// for a shard with no memory, else [`Error::Shards`] or [`Error::Directory`] for a
+    /// data directory that shard 0 could not claim, else [`Error::Buffer`] for the
+    /// first shard by core whose buffer did not open, [`Error::Budget`] or
+    /// [`Error::Directory`] for a file `budget` that shard 0 could not read or write,
+    /// [`Error::Key`] or [`Error::Directory`] for a key file that shard 0 could not
+    /// read or write, [`Error::Blob`] for a chunk store or [`Error::Mesh`] for a mesh
+    /// that did not open, or [`Error::Transport`] or [`Error::Group`], whichever the
+    /// node sees stop first, else [`Error::Panicked`] for the first shard by core that
+    /// panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
             // The shard sets `failed` on its own thread, so read it after the join.
