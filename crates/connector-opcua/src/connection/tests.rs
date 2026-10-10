@@ -2854,10 +2854,11 @@ unsafe extern "C" fn address(
 }
 
 /// Each read gives C its bytes in the one read buffer of the manager, which the manager
-/// makes only when a stream opens, at 64 KiB, and never clears: a short read leaves the
-/// bytes of a longer one past its end. It reads the private `State.read`: C sees only
-/// the bytes of a read, which the 64 KiB stream buffers of `OPTIONS` also cap, no
-/// warning names it, and the counting-allocator tests make no manager.
+/// makes only when a stream opens, at 64 KiB, and never clears: a short read, or the
+/// drain of a closing stream, leaves the bytes of a longer read past its end. It reads
+/// the private `State.read`: C sees only the bytes of a read, which the 64 KiB stream
+/// buffers of `OPTIONS` also cap, no warning names it, and the counting-allocator tests
+/// make no manager.
 #[test]
 fn each_read_is_in_the_one_buffer_of_the_manager() {
     let mut network = Network::new();
@@ -2876,6 +2877,8 @@ fn each_read_is_in_the_one_buffer_of_the_manager() {
             };
             side.drive(Span::from_nanos(50_000_000)).await;
             let before = buffer(&side);
+            side.drive(Span::SECOND).await;
+            assert_eq!(side.close(3), Status::GOOD);
             side.drive(Span::SECOND).await;
             ((before, buffer(&side)), side.calls())
         })
