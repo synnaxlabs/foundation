@@ -5111,3 +5111,21 @@ fn regression_initial_coalescing_large_cid() {
     pair.time += Duration::from_secs(5);
     pair.drive_client(); // this used to try to build a packet without enough datagram space
 }
+
+/// With no Handshake keys, a client's close goes in the Initial space alone and ends the
+/// pending close, so it leaves with no pacing, also right after the first Initial.
+#[test]
+fn a_close_before_the_first_answer_leaves_with_no_pacing() {
+    let _guard = subscribe();
+    let mut pair = Pair::default();
+    let ch = pair.begin_connect(client_config());
+    let now = pair.time;
+    let mut buf = Vec::new();
+    let conn = pair.client_conn_mut(ch);
+    assert!(conn.poll_transmit(now, NonZeroUsize::MIN, &mut buf).is_some());
+    conn.close(now, VarInt::from_u32(0), Bytes::new());
+    buf.clear();
+    let close = conn.poll_transmit(now, NonZeroUsize::MIN, &mut buf);
+    assert!(close.is_some(), "the pacer held the close of a client");
+    assert!(conn.poll_transmit(now, NonZeroUsize::MIN, &mut buf).is_none());
+}

@@ -115,6 +115,7 @@ pub struct Context<C> {
     config: C,
     cancel: cancel::Token,
     tasks: Tasks,
+    status: status::Status,
     // Its `tasks` field is the shard's, which no run counts: spawn only through
     // `self.tasks`.
     inputs: Rc<supervisor::Config>,
@@ -127,6 +128,7 @@ impl<C> Context<C> {
         config: C,
         cancel: cancel::Token,
         tasks: Tasks,
+        status: status::Status,
         inputs: Rc<supervisor::Config>,
     ) -> Self {
         Self {
@@ -134,6 +136,7 @@ impl<C> Context<C> {
             config,
             cancel,
             tasks,
+            status,
             inputs,
         }
     }
@@ -145,6 +148,7 @@ impl<C> Context<C> {
             config,
             cancel: self.cancel,
             tasks: self.tasks,
+            status: self.status,
             inputs: self.inputs,
         }
     }
@@ -198,6 +202,18 @@ impl<C> Context<C> {
             channels,
         };
         self.inputs.hub.writer(config).await
+    }
+
+    /// The count `name` of the connector's status, `<connector>.status.<name>`, to
+    /// set from the kind's data path. The call searches the names of the counts, so
+    /// take each count once, before the data path.
+    ///
+    /// # Panics
+    ///
+    /// When the kind's `check` did not name `name` as a count.
+    #[must_use]
+    pub fn count(&self, name: &str) -> status::Count {
+        self.status.count(name)
     }
 
     /// Connects streams and datagrams.
@@ -370,6 +386,7 @@ impl<K: Kind> Erased for K {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests {
     use document::value::{self, Value};
     use document::{Attribute, Map, Position, Source};
@@ -693,12 +710,13 @@ mod tests {
         let (early, late, out, ctx_name, n) = run_on(|node, tasks| async move {
             let token = Token::new();
             let inputs =
-                Rc::new(create_config(&node, tasks.clone(), Table::new()).await.0);
+                Rc::new(create_config(&node, tasks.clone(), Table::new(), "a").await);
             let ctx = Context::new(
                 name("plant.counter"),
                 3,
                 token.clone(),
                 tasks.clone(),
+                status::Status::new(Vec::new()),
                 inputs,
             );
             let clock = node.clock();
@@ -725,8 +743,9 @@ mod tests {
     fn gives_a_new_random_source_on_each_call() {
         let (a, b) = run_on(|node, tasks| async move {
             let inputs =
-                Rc::new(create_config(&node, tasks.clone(), Table::new()).await.0);
-            let ctx = Context::new(name("a"), (), Token::new(), tasks, inputs);
+                Rc::new(create_config(&node, tasks.clone(), Table::new(), "a").await);
+            let status = status::Status::new(Vec::new());
+            let ctx = Context::new(name("a"), (), Token::new(), tasks, status, inputs);
             (ctx.rng().next_u64(), ctx.rng().next_u64())
         });
         assert_ne!(a, b);

@@ -6,7 +6,7 @@
 | Commandable parameter | The kind declares it; the connector config marks it commandable; value = a channel plus an ack under the connector's name; files give the starting value (index layout: X24) | Subjects with access and authority | The kind, through `ctx` | `connector` (library), the kind |
 | Run state | The `running` commandable parameter | As above | As above | `connector` |
 | Shared endpoint | Memory: an endpoint registry on the kind value (process lifetime) | The kind | Connectors of that kind on the node | `connector` (endpoint component) |
-| Connector status channels | Channels under the connector's name | The kind through `ctx.status()` | People, agents, tools | `connector` |
+| Connector status channels | Channels under the connector's name | `Supervisor::run`, with the kind's counts through `Context::count` (CONNECTOR STATUS) | People, agents, tools | `connector` |
 | Node status channels | Channels under the node's name (definitions: X27) | `node`'s collector through `hub`, from each crate's pulled values | People, agents, tools, rebalancers | `node` |
 | Quarantine | Per out connector: a hold on the original data plus an error record (samples on a channel under the connector's name); size on a status channel | The kind, through a library component | `ops` list, retry, drop | `connector` |
 | Secret value | Never in files, plans, or output. Built-in store: region state ciphertexts. External stores through adapters. References by name in kind config | `secret set` (person or CI) | `ctx.secret()` on the connector's node | `secret` (seal and open; `ops` seals, `node` opens), resolver (X40) |

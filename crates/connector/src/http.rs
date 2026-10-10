@@ -488,4 +488,5 @@ impl std::error::Error for Failure {
 }
 
 #[cfg(test)]
+#[cfg(not(loom))]
 mod tests;

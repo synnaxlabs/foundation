@@ -1,9 +1,9 @@
 - **PLAN SURFACE (#1082, 2026-10-08)** `config::plan::plan(documents, base, applied,
   members, kinds)` gives a `config::plan::Plan { base, changes, homes }`, or
   diagnostics. `base` is the `spec::Pointer { version, root }` of the applied spec.
-  `version` is 0 before the first apply, and one more at each apply. `applied` is the
-  definitions of the spec at `base`, by tree key, with no problem from
-  `spec::region::check`: the spec that a node uses (#1741).
+  `version` is 0 before the first apply, and one more at each apply that moves the
+  pointer (SPEC CHANGE). `applied` is the definitions of the spec at `base`, by tree
+  key, with no problem from `spec::region::check`: the spec that a node uses (#1741).
   `config::plan::Plan::changes` maps each tree key to a `config::plan::Change { old, new
   }`, which holds the digest of the stored bytes and the `Entry` of the files. The
   stored bytes are the `encode` of each applied definition: `decode` takes only
