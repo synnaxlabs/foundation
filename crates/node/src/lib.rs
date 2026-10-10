@@ -839,8 +839,9 @@ impl Serve {
         let freed = transport.ended();
         let (inbox, time) = (self.inbox, self.time);
         // Each part that holds the transport or the node's stop drops as this block
-        // ends, on each path, or is a task of the hub, which ends as `hub::Hub::new`
-        // states. So the port is freed before `lock` drops.
+        // ends, on each path, or is a task of the mesh, awaited below, or of the hub,
+        // which ends as `hub::Hub::new` states. So the port is freed before `lock`
+        // drops.
         let served = async move {
             let mesh = match mesh {
                 Ok(mesh) => mesh,
