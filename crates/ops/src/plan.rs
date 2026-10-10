@@ -41,7 +41,7 @@ pub(crate) fn plan(
     let plan = config::plan::plan(&documents, base, applied, members, kinds)
         .map_err(failed)?;
     let mut changes: Vec<(Order, Change)> = lines(&plan, applied)
-        .map(|(name, line)| Change::of(name, line, applied, &paths))
+        .map(|(name, line)| Change::of(name, line, &paths))
         .collect();
     changes.sort_by(|(a, _), (b, _)| a.cmp(b));
     let changes: Vec<Change> = changes.into_iter().map(|(_, change)| change).collect();
@@ -123,6 +123,11 @@ pub(crate) struct Counts {
 impl Counts {
     /// The count of each action that `plan` shows for `planned` on `applied`, the
     /// definitions at its base.
+    ///
+    /// # Panics
+    ///
+    /// When `planned` changes or removes a definition that `applied` does not hold,
+    /// which [`config::plan::Plan::definitions`] refuses.
     pub(crate) fn of(
         planned: &config::plan::Plan,
         applied: &BTreeMap<Name, Definition>,
@@ -133,7 +138,7 @@ impl Counts {
             removed: 0,
         };
         for (_, line) in lines(planned, applied) {
-            let count = match line.map_or(Action::Remove, |(action, _)| action) {
+            let count = match line.action() {
                 Action::Add => &mut counts.added,
                 Action::Change => &mut counts.changed,
                 Action::Remove => &mut counts.removed,
@@ -183,49 +188,69 @@ pub(crate) struct Change {
 /// Adds and changes in file order, then removals in tree key order.
 type Order = (bool, Option<Span>, Name);
 
-/// Each line of `planned` on `applied`, by tree key: `None` for the removal of the
-/// stored definition, else the action on the new one. A change that replaces a stored
+/// One line of a plan at a tree key.
+#[derive(Clone, Copy)]
+enum Line<'a> {
+    /// A new definition.
+    Add(&'a config::Entry),
+    /// A new value of a stored definition of the same kind.
+    Change(&'a config::Entry),
+    /// The removal of a stored definition.
+    Remove(&'a Definition),
+}
+
+impl Line<'_> {
+    const fn action(self) -> Action {
+        match self {
+            Self::Add(_) => Action::Add,
+            Self::Change(_) => Action::Change,
+            Self::Remove(_) => Action::Remove,
+        }
+    }
+}
+
+/// Each line of `planned` on `applied`, by tree key. A change that replaces a stored
 /// definition of another kind gives a removal and an add.
 fn lines<'a>(
     planned: &'a config::plan::Plan,
-    applied: &BTreeMap<Name, Definition>,
-) -> impl Iterator<Item = (&'a Name, Option<(Action, &'a config::Entry)>)> {
+    applied: &'a BTreeMap<Name, Definition>,
+) -> impl Iterator<Item = (&'a Name, Line<'a>)> {
     planned.changes.iter().flat_map(|(name, change)| {
-        let lines = match (applied.get(name), &change.new, &change.old) {
-            (Some(stored), Some(new), _) if stored.kind() != new.definition.kind() => {
-                vec![None, Some((Action::Add, new))]
+        let stored = || {
+            applied.get(name).expect(
+                "invariant: a plan changes or removes only an applied definition",
+            )
+        };
+        let lines = match (&change.old, &change.new) {
+            (None, Some(new)) => vec![Line::Add(new)],
+            (Some(_), Some(new)) => {
+                let stored = stored();
+                if stored.kind() == new.definition.kind() {
+                    vec![Line::Change(new)]
+                } else {
+                    vec![Line::Remove(stored), Line::Add(new)]
+                }
             }
-            (_, Some(new), Some(_)) => vec![Some((Action::Change, new))],
-            (_, Some(new), None) => vec![Some((Action::Add, new))],
-            (_, None, _) => vec![None],
+            (_, None) => vec![Line::Remove(stored())],
         };
         lines.into_iter().map(move |line| (name, line))
     })
 }
 
 impl Change {
-    /// The line of `action` on `new`, or of the removal of the stored definition at
-    /// `name` when `new` is `None`.
-    fn of(
-        name: &Name,
-        new: Option<(Action, &config::Entry)>,
-        applied: &BTreeMap<Name, Definition>,
-        paths: &[PathBuf],
-    ) -> (Order, Self) {
-        let (action, kind, span, definition) = if let Some((action, entry)) = new {
-            let definition =
-                if let config::Definition::Spec(definition) = &entry.definition {
-                    Some(definition)
-                } else {
-                    None
-                };
-            let kind = entry.definition.kind();
-            (action, kind, entry.label_span, definition)
-        } else {
-            let stored = applied
-                .get(name)
-                .expect("invariant: a removal is of an applied definition");
-            (Action::Remove, stored.kind(), None, Some(stored))
+    /// The output of `line` at the tree key `name`.
+    fn of(name: &Name, line: Line<'_>, paths: &[PathBuf]) -> (Order, Self) {
+        let (kind, span, definition) = match line {
+            Line::Add(entry) | Line::Change(entry) => {
+                let definition =
+                    if let config::Definition::Spec(definition) = &entry.definition {
+                        Some(definition)
+                    } else {
+                        None
+                    };
+                (entry.definition.kind(), entry.label_span, definition)
+            }
+            Line::Remove(stored) => (stored.kind(), None, Some(stored)),
         };
         let fingerprints = match definition {
             Some(Definition::Subject(subject)) => subject
@@ -240,7 +265,7 @@ impl Change {
             .expect("invariant: a planned change is at a tree key of its kind");
         let order = (span.is_none(), span, name.clone());
         let change = Self {
-            action,
+            action: line.action(),
             kind: kind.as_str().to_owned(),
             name: label.to_string(),
             place: span.map(|span| Place::of(span, paths)),

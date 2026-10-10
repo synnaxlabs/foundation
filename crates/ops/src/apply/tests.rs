@@ -307,6 +307,25 @@ fn rogue(planned: &config::plan::Plan, kind: &str, node: &str) -> config::plan::
 }
 
 #[test]
+fn refuses_a_change_of_a_definition_that_is_not_applied() {
+    solo(|_, mesh| async move {
+        let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;
+        let entry = planned.changes[&name("plc")].new.as_ref().expect("an add");
+        let config::Definition::Spec(plc) = entry.definition.clone() else {
+            panic!("plc is in the spec");
+        };
+        let cases = [
+            one(&planned, "plc", Some(&plc), None),
+            one(&planned, "plc", Some(&plc), Some(plc.clone())),
+        ];
+        for planned in cases {
+            let mismatch = config::plan::Error::Mismatch { name: name("plc") };
+            refuses(&mesh, &planned.encode(), &kinds(), Error::Plan(mismatch)).await;
+        }
+    });
+}
+
+#[test]
 fn refuses_a_plan_that_plan_refuses_and_proposes_nothing() {
     solo(|_, mesh| async move {
         let (_, planned) = plan_on(&mesh, &[("plant.hcl", PLANT)]).await;

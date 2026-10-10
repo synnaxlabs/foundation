@@ -55,21 +55,24 @@ pub(crate) async fn apply(
             pointer,
         });
     }
-    let counts = Counts::of(&planned, &applied);
     let homes = planned.homes.len();
-    let pointer = if planned.changes.is_empty() && planned.homes.is_empty() {
-        pointer
+    let (pointer, counts) = if planned.changes.is_empty() && planned.homes.is_empty() {
+        (pointer, Counts::of(&planned, &applied))
     } else {
         let definitions = planned.definitions(&applied, key).map_err(Error::Plan)?;
+        // `Counts::of` panics on a change of a definition that `definitions` refuses.
+        let counts = Counts::of(&planned, &applied);
         config::plan::check(&definitions, &mesh.names(), kinds)
             .map_err(|diagnostics| Error::config(diagnostics, &[]))?;
-        mesh.apply(planned.base, definitions, planned.homes)
+        let pointer = mesh
+            .apply(planned.base, definitions, planned.homes)
             .await
             .map_err(|error| match error {
                 mesh::Error::Stale { base, pointer } => Error::Stale { base, pointer },
                 mesh::Error::Stopped(stopped) => Error::Stopped(stopped),
                 error => Error::Apply(error),
-            })?
+            })?;
+        (pointer, counts)
     };
     Ok(Applied {
         file: file.to_owned(),
