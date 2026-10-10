@@ -11,13 +11,13 @@
   `Vec`. Rust defines no read of such a byte on any target, so no sound read exists,
   and Miri stops at one. This is a patch. The long-term fix is a freeze read (Rust RFC
   3605); when Rust has one, `freed_holding` uses it and the exception goes. A binary
-  that bounds the memory of a structure holds `counting::Bytes`, one atomic count of
-  the bytes it holds; a binary holds one counting allocator, `Allocator` or `Bytes`.
-  `Allocator` does not keep that count: a benchmark must not pay for a count that only
-  a test reads, or its baseline moves with no product change, as
+  that bounds the memory of a structure holds `counting::Bytes`, an atomic count of the
+  bytes it holds and of the most it held; a binary holds one counting allocator,
+  `Allocator` or `Bytes`. `Allocator` does not keep that count: a benchmark must not pay
+  for a count that only a test reads, or its baseline moves with no product change, as
   `transport/benches/send.rs` did (+4.2% to +11.2% at p50). Lost: `Allocator` keeps
-  `held` (that cost in each counting binary); a `bool` at construction (a branch on
-  each allocation and free, and a `held` that must panic when it is false);
+  `held` (that cost in each counting binary); a `bool` at construction (a branch on each
+  allocation and free, and a `held` that must panic when it is false);
   `Allocator<const HELD: bool>` (no branch, but `Allocator<true>` says nothing at the
   call site, and no caller needs both counts in one binary). Decided by
   `laptop.architect` on 2026-10-07T16:28:07Z
