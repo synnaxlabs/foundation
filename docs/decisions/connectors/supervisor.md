@@ -72,7 +72,7 @@
   measured from the frame's time after round 1 of PR #2227 (finding 2,
   2026-10-10T03:55:58Z:
   https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6093511014), and by
-  the node's clock after round 2 (finding 1:
+  the node's clock after round 2 (finding 1, 2026-10-10T05:36:36Z:
   https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6094269805). The
   `backoff` text is approved by `laptop.architect` (2026-10-10T05:38:31Z:
   https://github.com/synnaxlabs/foundation/pull/2227#issuecomment-6094282904). The cut
