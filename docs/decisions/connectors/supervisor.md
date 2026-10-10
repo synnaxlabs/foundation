@@ -14,7 +14,11 @@
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616).
   Supersedes "At a spec change, `node` cancels each run and awaits it before it starts
   the new supervisor" of
-  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072411231. After a
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072411231. A
+  connector that a change adds starts at once, unless the last run of its name has
+  not returned: then it starts after that run returned, so no two runs write one set
+  of status channels (`box2.builder-7`, the request on #2261, 2026-10-10:
+  https://github.com/synnaxlabs/foundation/pull/2261#issuecomment-6094794911). After a
   run returns, the supervisor waits, with no timeout, until each task that the run
   spawned through `Context::tasks` ended, and only then starts its backoff. A task
   that does not end at the cancel is a defect of its kind (`laptop.architect-2`,
@@ -44,8 +48,9 @@
   `Ok` from `run` ends the connector.
   `Config` returns to the caller, which calls `run` again when the spec changes the
   connector (R12-4) (`laptop.architect-2`, 2026-10-09T05:10:43Z:
-  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616). The class of each restart error reaches the connector's status
-  (CONNECTOR STATUS), and its text with #420.
+  https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6074718616). The
+  class of each restart error reaches the connector's status (CONNECTOR STATUS), and
+  its text with #420.
   Decided by the `connector` builder in the plan on #338, after `/eb-review`; approved
   by the coordinator (#338), with the reset after a long run approved on #338 later.
 - **CONNECTOR STATUS** `Supervisor::run` writes the status channels of its connector,
