@@ -20,7 +20,7 @@ use std::task::{Context, Poll, Waker};
 use env::clock::{Clock, Sleep};
 use env::net::{self, Listener, Net, Tcp, tcp};
 use env::rng::Rng;
-use types::time::{Monotonic, Span};
+use types::time::Span;
 
 use crate::event::Loop;
 use crate::ffi::{self, Bytes, Status};
@@ -110,6 +110,7 @@ impl Manager {
             #[cfg(feature = "sim")]
             moves: Cell::new(0),
             ends: RefCell::new(VecDeque::new()),
+            closes: Cell::new(0),
             closed: UnsafeCell::new(ffi::DelayedCallback {
                 next: ptr::null_mut(),
                 callback: closed,
@@ -267,6 +268,8 @@ struct State {
     moves: Cell<usize>,
     /// The connections whose `CLOSING` the next run of the loop gives.
     ends: RefCell<VecDeque<usize>>,
+    /// The count of streams that have started to close.
+    closes: Cell<u64>,
     /// The delayed callback that gives each `CLOSING`. C writes its `next`.
     closed: UnsafeCell<ffi::DelayedCallback>,
     queued: Cell<bool>,
@@ -334,6 +337,7 @@ impl State {
                         linger: self.clock.sleep_until(self.clock.now() + LINGER),
                         shut: false,
                         drained: false,
+                        order: self.closes.replace(self.closes.get() + 1),
                     },
                     stream @ (Stream::Closing { .. } | Stream::Closed) => {
                         connection.stream = stream;
@@ -345,14 +349,14 @@ impl State {
         self.bound_closes();
     }
 
-    /// Drops the stream that has closed longest when more than [`CLOSES`] close.
+    /// Drops the stream that started to close first when more than [`CLOSES`] close.
     fn bound_closes(&self) {
         let mut count = 0;
-        let mut oldest: Option<(Monotonic, usize)> = None;
+        let mut oldest: Option<(u64, usize)> = None;
         for (id, connection) in self.table.borrow().iter() {
-            if let Stream::Closing { linger, .. } = &connection.stream {
+            if let Stream::Closing { order, .. } = &connection.stream {
                 count += 1;
-                let close = (linger.deadline(), *id);
+                let close = (*order, *id);
                 oldest = Some(oldest.map_or(close, |o| o.min(close)));
             }
         }
@@ -608,6 +612,8 @@ enum Stream {
         shut: bool,
         /// The peer closed its side.
         drained: bool,
+        /// The count of closes before this one.
+        order: u64,
     },
     Closed,
 }
@@ -639,7 +645,7 @@ enum Failure {
     Net(&'static str, net::Error),
     /// The close took [`LINGER`].
     Lingered,
-    /// More than [`CLOSES`] streams close, and this one has closed longest.
+    /// More than [`CLOSES`] streams close, and this one started to close first.
     Displaced,
 }
 
@@ -693,6 +699,7 @@ impl Connection {
                 linger,
                 shut,
                 drained,
+                ..
             } => {
                 if Pin::new(linger).poll(cx).is_ready() {
                     return Err(Failure::Lingered);

@@ -2731,8 +2731,9 @@ fn closes_past_the_bound() {
     let closing: Vec<usize> = (3..=102).collect();
     assert_eq!(held, (1 + 100 + CLOSES, closing));
 }
-/// A close past [`CLOSES`] drops the stream that has closed longest, with a warning:
-/// stream 2 at the last accept, then 3 to 102 as the shutdown closes each channel.
+/// A close past [`CLOSES`] drops the stream that started to close first, with a
+/// warning: stream 2 at the last accept, then 3 to 102 as the shutdown closes each
+/// channel.
 #[test]
 fn a_close_past_the_bound_drops_the_oldest_closing_stream() {
     let stderr = stderr("closes_past_the_bound");
@@ -2749,4 +2750,66 @@ fn a_close_past_the_bound_drops_the_oldest_closing_stream() {
         })
         .collect();
     assert_eq!(dropped, expected);
+}
+
+/// A close past [`CLOSES`] from inside a run of the loop drops a stream that leaves
+/// the table in the same drive.
+#[test]
+fn a_stream_that_a_close_past_the_bound_drops_leaves_in_the_same_drive() {
+    let mut network = Network::new();
+    for i in 0..=CLOSES {
+        let i = i64::try_from(i).expect("a small count");
+        network.hold(Span::from_nanos((i + 1) * 1_000_000));
+    }
+    let counts = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            let accepted = side.connections();
+            for id in 2..=101 {
+                assert_eq!(side.close(id), Status::GOOD);
+            }
+            side.drive(Span::from_nanos(10_000_000)).await;
+            let closing = side.connections();
+            let first = Cell::new(true);
+            side.manager
+                .drive(|_| {
+                    if first.replace(false) {
+                        assert_eq!(side.close(102), Status::GOOD);
+                        Poll::Pending
+                    } else {
+                        Poll::Ready(())
+                    }
+                })
+                .await;
+            (accepted, closing, side.connections())
+        })
+        .expect("the run ends");
+    assert_eq!(counts, (102, 102, 101));
+}
+
+/// Of the streams that start to close at one instant, a close past [`CLOSES`] drops
+/// the first to close, not the one with the lowest key.
+#[test]
+fn a_close_past_the_bound_drops_the_first_to_close_at_one_instant() {
+    let mut network = Network::new();
+    for i in 0..=CLOSES {
+        let i = i64::try_from(i).expect("a small count");
+        network.hold(Span::from_nanos((i + 1) * 1_000_000));
+    }
+    let closing = network
+        .sim
+        .run_on(&network.local.clone(), |node, _| async move {
+            let side = Side::listening(&node, listener(&node));
+            assert_eq!(side.listen(PORT), Status::GOOD);
+            side.drive(Span::SECOND).await;
+            for id in (2..=102).rev() {
+                assert_eq!(side.close(id), Status::GOOD);
+            }
+            side.closing()
+        })
+        .expect("the run ends");
+    assert_eq!(closing, (2..=101).collect::<Vec<_>>());
 }
