@@ -53,10 +53,9 @@
   reference is an undefined symbol that a relocation names, and it is outside the copy
   when no object exports it: approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2232#issuecomment-6093780083,
-  2026-10-10 04:30 UTC). The
-  check fails on every reference to a clock function that is not a call, also one in
-  code. A call relocation counts as a call only in a section that `objdump -d`
-  disassembles. Decided by `laptop.architect-2`
+  2026-10-10 04:30 UTC). The check fails on every reference to a clock function that
+  is not a call, also one in code. A call relocation counts as a call only in a section
+  that `objdump -d` disassembles. Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/1848#issuecomment-6058446715,
   2026-10-08 11:03 UTC). Supersedes the clock address rule of
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6057554572. The
