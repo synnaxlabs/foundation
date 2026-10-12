@@ -694,7 +694,17 @@
   timed out make more than one, and a read past the 16 first waits until one of them
   ends. A read sends the timeout hint 0, so neither open62541 (2^32 - 1 ms, 49.7 days)
   nor the server ends it, and it stays in flight until the server answers it or the
-  channel closes. An open62541 timeout ends a request on the client only, so the count
+  channel closes.
+  An abort chunk (Part 6, 6.7.3) is an answer: a local change of the copy ends its
+  request with the Error of the abort, or with `BadDecodingError` when it holds no
+  Error. The release drops the abort and never ends the request. Decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/2505#issuecomment-6134670336,
+  2026-10-12 23:35 UTC). Lost: a finite open62541 timeout for a read again, which also
+  ends the requests that the server still holds, so the count leaves them out; a close
+  of the channel on an abort, which fails each other read and the session for one
+  answer; and a count in Rust or in the shim, where no seam sees chunks.
+  An open62541 timeout ends a request on the client only, so the count
   would not have the requests that the server still holds. The read gives `BadTimeout`
   at the request timeout of the client, its wait included. When no read ends in that
   wait, it gives `BadTooManyOperations`: the server holds 16 requests, and the client
