@@ -112,6 +112,12 @@ typedef LIST_HEAD(UA_AsyncServiceList, AsyncServiceCall) UA_AsyncServiceList;
 void
 __Client_AsyncService_removeAll(UA_Client *client, UA_StatusCode statusCode);
 
+/* Ends the request of requestId with the Error of body, the body of an abort chunk
+ * (Part 6, 6.7.3), or with BadDecodingError when body holds no Error. */
+void
+__Client_AsyncService_abort(UA_Client *client, UA_UInt32 requestId,
+                            const UA_ByteString *body);
+
 typedef struct CustomCallback {
     UA_UInt32 callbackId;
 

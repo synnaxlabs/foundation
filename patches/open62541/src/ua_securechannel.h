@@ -388,11 +388,13 @@ UA_MessageContext_abort(UA_MessageContext *mc);
 UA_StatusCode
 UA_SecureChannel_loadBuffer(UA_SecureChannel *channel, const UA_ByteString buffer);
 
+/* When aborted is not NULL, an abort chunk is returned as a final chunk is, with its
+ * body as the payload, and sets aborted. When it is NULL, each abort is dropped. */
 UA_StatusCode
 UA_SecureChannel_getCompleteMessage(UA_SecureChannel *channel,
                                     UA_MessageType *messageType, UA_UInt32 *requestId,
                                     UA_ByteString *payload, UA_Boolean *copied,
-                                    UA_DateTime nowMonotonic);
+                                    UA_Boolean *aborted, UA_DateTime nowMonotonic);
 
 UA_StatusCode
 UA_SecureChannel_persistBuffer(UA_SecureChannel *channel);

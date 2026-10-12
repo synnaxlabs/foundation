@@ -2203,12 +2203,17 @@ __Client_networkCallback(UA_ConnectionManager *cm, uintptr_t connectionId,
         UA_UInt32 requestId = 0;
         UA_ByteString payload = UA_BYTESTRING_NULL;
         UA_Boolean copied = false;
+        UA_Boolean aborted = false;
         res = UA_SecureChannel_getCompleteMessage(&client->channel, &messageType, &requestId,
-                                                  &payload, &copied, nowMonotonic);
-        if(res != UA_STATUSCODE_GOOD || payload.length == 0)
+                                                  &payload, &copied, &aborted,
+                                                  nowMonotonic);
+        if(res != UA_STATUSCODE_GOOD || (payload.length == 0 && !aborted))
             break;
-        res = processServiceResponse(client, &client->channel,
-                                     messageType, requestId, &payload);
+        if(aborted)
+            __Client_AsyncService_abort(client, requestId, &payload);
+        else
+            res = processServiceResponse(client, &client->channel,
+                                         messageType, requestId, &payload);
         if(copied)
             UA_ByteString_clear(&payload);
 

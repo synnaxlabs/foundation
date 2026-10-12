@@ -866,7 +866,8 @@ serverNetworkCallbackLocked(UA_ConnectionManager *cm, uintptr_t connectionId,
         UA_ByteString payload = UA_BYTESTRING_NULL;
         UA_Boolean copied = false;
         retval = UA_SecureChannel_getCompleteMessage(channel, &messageType, &requestId,
-                                                     &payload, &copied, nowMonotonic);
+                                                     &payload, &copied, NULL,
+                                                     nowMonotonic);
         if(retval != UA_STATUSCODE_GOOD || payload.length == 0)
             break;
         retval = processSecureChannelMessage(bpm->sc.server, channel,
@@ -1340,7 +1341,8 @@ serverReverseConnectCallbackLocked(UA_ConnectionManager *cm, uintptr_t connectio
         UA_ByteString payload = UA_BYTESTRING_NULL;
         UA_Boolean copied = false;
         retval = UA_SecureChannel_getCompleteMessage(context->channel, &messageType,
-                                                     &requestId, &payload, &copied, nowMonotonic);
+                                                     &requestId, &payload, &copied,
+                                                     NULL, nowMonotonic);
         if(retval != UA_STATUSCODE_GOOD || payload.length == 0)
             break;
         retval = processSecureChannelMessage(bpm->sc.server, context->channel,

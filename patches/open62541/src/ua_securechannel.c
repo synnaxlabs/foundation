@@ -933,7 +933,7 @@ UA_StatusCode
 UA_SecureChannel_getCompleteMessage(UA_SecureChannel *channel,
                                     UA_MessageType *messageType, UA_UInt32 *requestId,
                                     UA_ByteString *payload, UA_Boolean *copied,
-                                    UA_DateTime nowMonotonic) {
+                                    UA_Boolean *aborted, UA_DateTime nowMonotonic) {
     UA_Chunk chunk, *pchunk;
     UA_StatusCode res = UA_STATUSCODE_GOOD;
 
@@ -941,7 +941,9 @@ UA_SecureChannel_getCompleteMessage(UA_SecureChannel *channel,
     /* Extract+decode the next chunk from the buffer */
     memset(&chunk, 0, sizeof(UA_Chunk));
     res = extractCompleteChunk(channel, &chunk, nowMonotonic);
-    if(chunk.bytes.length == 0 || res != UA_STATUSCODE_GOOD)
+    /* An abort with no Error has an empty body */
+    UA_Boolean returned = aborted && chunk.chunkType == UA_CHUNKTYPE_ABORT;
+    if((chunk.bytes.length == 0 && !returned) || res != UA_STATUSCODE_GOOD)
         return res; /* Error or no complete chunk could be extracted */
 
     /* Process the chunk */
@@ -949,6 +951,10 @@ UA_SecureChannel_getCompleteMessage(UA_SecureChannel *channel,
     case UA_CHUNKTYPE_ABORT:
         /* Remove all chunks received so far. Then continue extracting chunks. */
         deleteChunks(channel);
+        if(aborted) {
+            *aborted = true;
+            break; /* No chunk is left, so the abort is a message of one chunk */
+        }
         if(chunk.copied)
             UA_ByteString_clear(&chunk.bytes);
         goto extract_chunk;

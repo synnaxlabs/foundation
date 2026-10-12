@@ -853,6 +853,27 @@ __Client_AsyncService_cancel(UA_Client *client, AsyncServiceCall *ac,
 }
 
 void
+__Client_AsyncService_abort(UA_Client *client, UA_UInt32 requestId,
+                            const UA_ByteString *body) {
+    AsyncServiceCall *ac;
+    LIST_FOREACH(ac, &client->asyncServiceCalls, pointers) {
+        if(ac->requestId == requestId)
+            break;
+    }
+    if(!ac) {
+        UA_LOG_WARNING(client->config.logging, UA_LOGCATEGORY_CLIENT,
+                       "Request with unknown RequestId %u", requestId);
+        return;
+    }
+    size_t offset = 0;
+    UA_StatusCode error;
+    if(UA_UInt32_decodeBinary(body, &offset, &error) != UA_STATUSCODE_GOOD)
+        error = UA_STATUSCODE_BADDECODINGERROR;
+    LIST_REMOVE(ac, pointers);
+    __Client_AsyncService_cancel(client, ac, error);
+}
+
+void
 __Client_AsyncService_removeAll(UA_Client *client, UA_StatusCode statusCode) {
     /* Make this function reentrant. One of the async callbacks could indirectly
      * operate on the list. Moving all elements to a local list before iterating
