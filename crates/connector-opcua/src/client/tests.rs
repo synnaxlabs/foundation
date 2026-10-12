@@ -752,3 +752,172 @@ fn a_read_of_a_namespace_that_the_server_adds_after_the_connect_gets_its_value()
     });
     assert_eq!(reads, (Ok(value), 2, Ok(2.5), Ok(2.5)));
 }
+
+/// The body of an abort chunk with the Error `BadResponseTooLarge` and a null Reason.
+const TOO_LARGE: [u8; 8] = [0x00, 0x00, 0xB9, 0x80, 0xFF, 0xFF, 0xFF, 0xFF];
+
+/// Forwards the bytes of one stream from `listener` to `server`. While `aborts` is
+/// above 0, it makes the next final MSG chunk from the server an abort chunk: its
+/// message, security, and sequence headers, then `body` (Part 6, 6.7.3).
+async fn abort_proxy(
+    net: Net,
+    listener: &mut env::net::Listener,
+    server: SocketAddr,
+    aborts: &Cell<u16>,
+    body: &[u8],
+) {
+    let mut down = poll_fn(|cx| listener.poll_accept(cx))
+        .await
+        .expect("the accept works");
+    let options = tcp::Options {
+        send_buffer_bytes: 1 << 16,
+        recv_buffer_bytes: 1 << 16,
+        unsent_bytes_max: NonZeroUsize::new(1 << 14).expect("not 0"),
+        delayed: false,
+    };
+    let mut up = net
+        .connect(&tcp::Config {
+            remote: server,
+            options,
+        })
+        .await
+        .expect("the server accepts");
+    let (mut to_server, mut from_server, mut to_client) =
+        (Vec::new(), Vec::new(), Vec::new());
+    let mut buffer = vec![0u8; 1 << 16];
+    poll_fn(|cx| {
+        loop {
+            let mut moved = false;
+            match down.poll_read(cx, &mut buffer) {
+                Poll::Ready(Ok(n)) if n > 0 => {
+                    to_server.extend_from_slice(&buffer[..n]);
+                    moved = true;
+                }
+                Poll::Ready(_) => return Poll::Ready(()),
+                Poll::Pending => {}
+            }
+            match up.poll_read(cx, &mut buffer) {
+                Poll::Ready(Ok(n)) if n > 0 => {
+                    from_server.extend_from_slice(&buffer[..n]);
+                    moved = true;
+                }
+                Poll::Ready(_) => return Poll::Ready(()),
+                Poll::Pending => {}
+            }
+            while from_server.len() >= 8 {
+                let size = u32::from_le_bytes(from_server[4..8].try_into().expect("4"));
+                let size = usize::try_from(size).expect("fits");
+                if from_server.len() < size {
+                    break;
+                }
+                let mut chunk: Vec<u8> = from_server.drain(..size).collect();
+                if &chunk[..4] == b"MSGF" && aborts.get() > 0 {
+                    // The policy None adds nothing past the 24 bytes of headers.
+                    chunk.truncate(24);
+                    chunk[3] = b'A';
+                    chunk.extend_from_slice(body);
+                    let size = u32::try_from(chunk.len()).expect("fits");
+                    chunk[4..8].copy_from_slice(&size.to_le_bytes());
+                    aborts.set(aborts.get() - 1);
+                }
+                to_client.extend_from_slice(&chunk);
+            }
+            if !to_server.is_empty()
+                && let Poll::Ready(Ok(n)) =
+                    up.poll_write(cx, &[std::io::IoSlice::new(&to_server)])
+            {
+                to_server.drain(..n);
+                moved = true;
+            }
+            if !to_client.is_empty()
+                && let Poll::Ready(Ok(n)) =
+                    down.poll_write(cx, &[std::io::IoSlice::new(&to_client)])
+            {
+                to_client.drain(..n);
+                moved = true;
+            }
+            if !moved {
+                return Poll::Pending;
+            }
+        }
+    })
+    .await;
+}
+
+/// The answers of `aborts` reads whose answers the server aborts with `body`, then of
+/// two reads that it answers in full, and the value of the server.
+fn read_aborted(
+    aborts: u16,
+    body: &'static [u8],
+) -> (
+    Vec<Result<f64, Status>>,
+    Result<f64, Status>,
+    Result<f64, Status>,
+    f64,
+) {
+    run(0, async move |node| {
+        serve(&node, 4, async |mut peer| {
+            let local = SocketAddr::new(node.addresses()[0], PORT + 1);
+            let listen = tcp::Listen {
+                local,
+                backlog: 4,
+                options: tcp::Options {
+                    send_buffer_bytes: 1 << 16,
+                    recv_buffer_bytes: 1 << 16,
+                    unsent_bytes_max: NonZeroUsize::new(1 << 14).expect("not 0"),
+                    delayed: false,
+                },
+            };
+            let mut listener = node.net().listen(&listen).expect("the port is free");
+            let server = SocketAddr::new(node.addresses()[0], PORT);
+            let left = Cell::new(0u16);
+            let mut proxy =
+                pin!(abort_proxy(node.net(), &mut listener, server, &left, body));
+            let url = format!("opc.tcp://{local}");
+            let value = peer.value;
+            let mut reads = pin!(async {
+                let mut client = peer.connect(&url).await.expect("the client connects");
+                // open62541 reads the namespace array after the connect.
+                assert_eq!(client.read(VALUE).await, Ok(peer.value));
+                left.set(aborts);
+                let mut aborted = Vec::new();
+                for _ in 0..aborts {
+                    aborted.push(client.read(VALUE).await);
+                }
+                assert_eq!(left.get(), 0, "the server answered each read");
+                let after = client.read(VALUE).await;
+                let again = client.read(VALUE).await;
+                client.close().await;
+                (aborted, after, again)
+            });
+            let mut ended = false;
+            let (aborted, after, again) = poll_fn(|cx| {
+                if !ended {
+                    ended = proxy.as_mut().poll(cx).is_ready();
+                }
+                reads.as_mut().poll(cx)
+            })
+            .await;
+            (aborted, after, again, value)
+        })
+        .await
+    })
+    .0
+}
+
+/// An abort chunk answers its read with its Error, so after 16 of them the client
+/// holds no read and a later read that the server answers in full gives the value.
+#[test]
+fn a_read_after_16_aborted_answers_gives_the_value() {
+    let (aborted, after, again, value) = read_aborted(16, &TOO_LARGE);
+    assert_eq!(aborted, vec![Err(Status::BAD_RESPONSE_TOO_LARGE); 16]);
+    assert_eq!((after, again), (Ok(value), Ok(value)));
+}
+
+/// An abort chunk with no Error ends its read with `BadDecodingError`.
+#[test]
+fn an_abort_with_no_error_ends_its_read_with_bad_decoding_error() {
+    let (aborted, after, again, value) = read_aborted(1, &[]);
+    assert_eq!(aborted, vec![Err(Status::BAD_DECODING_ERROR)]);
+    assert_eq!((after, again), (Ok(value), Ok(value)));
+}

@@ -38,6 +38,10 @@ impl Status {
     pub(crate) const BAD_TOO_MANY_SESSIONS: Self = Self(0x8056_0000);
     #[cfg(test)]
     pub(crate) const BAD_SERVER_NOT_CONNECTED: Self = Self(0x800D_0000);
+    #[cfg(test)]
+    pub(crate) const BAD_RESPONSE_TOO_LARGE: Self = Self(0x80B9_0000);
+    #[cfg(test)]
+    pub(crate) const BAD_DECODING_ERROR: Self = Self(0x8007_0000);
 
     /// Gives the name of the code, such as `BadNodeIdUnknown`.
     pub(crate) fn name(self) -> &'static str {
