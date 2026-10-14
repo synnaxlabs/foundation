@@ -1,8 +1,9 @@
 //! `append` makes no heap allocation once the buffer has taken a batch of each
 //! shape: its slots, its entry count, and whether it closes the open record. Nor
-//! does a `Commit` that waits and drops, or a commit of the logs that marks a range
-//! and trims. This binary has no test harness: the count covers each thread, and a
-//! harness allocates on its own thread at any time.
+//! does a `Commit` that waits and drops, a commit of the logs that marks a range
+//! and trims, or the entry of a path that a trim emptied. This binary has no test
+//! harness: the count covers each thread, and a harness allocates on its own thread
+//! at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
@@ -98,19 +99,64 @@ fn wait_once(buffer: &Buffer, commit: u64) {
     }
 }
 
-/// Each trim drops the range that the commit before marked, so the ranges stay in
-/// the memory that the warm-up gave them.
-fn marked_trims_take_no_allocation() {
-    let mut logs = buffer::bench::Logs::new(4);
-    for _ in 0..64 {
-        logs.mark();
+/// The allocations of 1024 calls of `commit` on logs of `indexes` indexes, after
+/// 512 calls that warm them up, which span two laps of the logs.
+fn commits(indexes: u32, mut commit: impl FnMut(&mut buffer::bench::Logs)) -> u64 {
+    let mut logs = buffer::bench::Logs::new(indexes);
+    for _ in 0..512 {
+        commit(&mut logs);
     }
-    let ((), n) = ALLOCATOR.count(|| {
-        for _ in 0..1024 {
-            logs.mark();
-        }
-    });
+    ALLOCATOR
+        .count(|| {
+            for _ in 0..1024 {
+                commit(&mut logs);
+            }
+        })
+        .1
+}
+
+/// A slow path gets `entries` entries, each in a record of its own that a read
+/// holds, with a carry record of its tail after the last. Then a commit with no
+/// entry trims to the carry record and empties its runs.
+fn slow(logs: &mut buffer::bench::Logs, entries: u64) {
+    for held in 1..entries {
+        logs.trim(1, held);
+    }
+    logs.carry();
+    logs.commit(0);
+}
+
+/// Each trim drops the range that the commit before marked, so the ranges stay in
+/// the memory that the warm-up gave them. The runs of the other shapes swing inside
+/// a lap, so the room of each lap holds the runs of the next.
+fn logs_take_no_allocation() {
+    let n = commits(4, buffer::bench::Logs::mark);
     assert_eq!(n, 0, "{n} allocations in 1024 marked trims");
+    let mut entries = 0;
+    let n = commits(4, |logs| {
+        entries = entries % 4 + 1;
+        slow(logs, entries);
+    });
+    assert_eq!(
+        n, 0,
+        "{n} allocations in 1024 trims that empty 4 slow paths"
+    );
+    let n = commits(4, |logs| slow(logs, 6));
+    assert_eq!(
+        n, 0,
+        "{n} allocations in 1024 trims after 6 entries of 4 paths"
+    );
+    let n = commits(64, |logs| logs.trim(64, 0));
+    assert_eq!(
+        n, 0,
+        "{n} allocations in 1024 trims of 64 paths, one of them slow"
+    );
+    let mut commit = 0;
+    let n = commits(4, |logs| {
+        logs.trim(1, commit % 8);
+        commit += 1;
+    });
+    assert_eq!(n, 0, "{n} allocations in 1024 trims of a read that holds 8");
 }
 
 fn main() {
@@ -119,7 +165,7 @@ fn main() {
         1,
         "the allocator counts"
     );
-    marked_trims_take_no_allocation();
+    logs_take_no_allocation();
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     let clock = node.clock();

@@ -31,6 +31,10 @@ waker = { path = "../waker" }
 name = "alloc"
 harness = false
 
+[[test]]
+name = "memory"
+harness = false
+
 [[bench]]
 name = "wal"
 harness = false

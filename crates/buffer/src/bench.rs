@@ -10,6 +10,9 @@ use crate::log::Carried;
 use crate::record::{ALIGN, BLOCK};
 use crate::wal::{Ends, Layout, Position, Writer};
 
+/// The area of the ring of [`Logs`]: 256 records of a block.
+const AREA: u64 = 256 * BLOCK;
+
 /// The body lengths of the records of a commit, in turn.
 const LENS: [usize; 5] = [8, 8, ALIGN, 8, 2 * ALIGN];
 
@@ -62,7 +65,7 @@ impl Ring {
             let record = Position::new(plan.next, self.chain).expect("aligned");
             self.ends.push(Ends { wrap, record });
         }
-        let tail = self.writer.trimmed(None, |offset| offset);
+        let tail = self.writer.trimmed(|offset| offset);
         self.writer.committed(self.ends.drain(..), tail);
     }
 }
@@ -81,15 +84,28 @@ impl Logs {
     /// The logs of `indexes` indexes on the live path.
     #[must_use]
     pub fn new(indexes: u32) -> Self {
+        Self::of(indexes, 1, Some(Stamp::from_nanos(1)))
+    }
+
+    /// The logs of `indexes` indexes on the live path, whose entries have no
+    /// samples and come at the seq of the entry before. Each sync in a later
+    /// record marks a range.
+    #[must_use]
+    pub fn empty(indexes: u32) -> Self {
+        Self::of(indexes, 0, None)
+    }
+
+    /// The logs of `indexes` indexes whose entries hold `len` samples up to `last`.
+    fn of(indexes: u32, len: u32, last: Option<Stamp>) -> Self {
         let headers = (0..indexes)
             .map(|n| {
                 let header = Header {
                     index: channel::Key::from_u128(u128::from(n) + 1),
                     path: Path::Live,
                     first: 0,
-                    len: 1,
+                    len,
                     stored_at: Stamp::from_nanos(1),
-                    last: Some(Stamp::from_nanos(1)),
+                    last,
                     tag: 0,
                     bytes: 8,
                 };
@@ -97,7 +113,7 @@ impl Logs {
             })
             .collect();
         Self {
-            inner: crate::log::Logs::default(),
+            inner: crate::log::Logs::new(AREA),
             headers,
             offset: BLOCK,
             commits: 0,
@@ -106,42 +122,36 @@ impl Logs {
     }
 
     /// One commit of one record that holds `entries` data entries of each index. It
-    /// first hides the earlier records, as a trim that keeps up, so each log holds
-    /// one run. Then it syncs each entry.
+    /// first hides the records before the oldest holder, as a trim that keeps up, so
+    /// each log holds the run of its holder. Then it syncs each entry.
     pub fn commit(&mut self, entries: u32) {
-        self.inner.hide(self.offset);
+        self.keep_up();
         for (slot, header) in &mut self.headers {
             for _ in 0..entries {
                 self.inner
                     .sync(*slot, header, self.offset)
                     .expect("entries in order");
-                header.first += 1;
+                header.first += u64::from(header.len);
             }
         }
         self.offset += BLOCK;
     }
 
     /// One commit as `commit(1)`, with an append of each entry, then a carry record
-    /// in the next record that holds the durable tail of each index.
+    /// in the next record that holds the durable tail of each index, so the hide of
+    /// the next commit drops the run of each index.
     pub fn carry(&mut self) {
-        self.inner.hide(self.offset);
+        self.keep_up();
         for (slot, header) in &mut self.headers {
             self.inner.append(*slot, header).expect("entries in order");
             self.inner
                 .sync(*slot, header, self.offset)
                 .expect("entries in order");
-            header.first += 1;
+            header.first += u64::from(header.len);
         }
         self.offset += BLOCK;
         for (slot, header) in &self.headers {
-            let durable = self.inner.durable(*slot, header.path);
-            let tail = crate::carry::Tail {
-                index: header.index,
-                path: header.path,
-                seq: durable.seq,
-                given: 0,
-                stamp: durable.stamp,
-            };
+            let tail = self.inner.end(*slot, header.path);
             self.inner
                 .carry(*slot, &tail, self.offset)
                 .expect("the durable tail");
@@ -153,7 +163,7 @@ impl Logs {
     pub fn append(&mut self) {
         for (slot, header) in &mut self.headers {
             self.inner.append(*slot, header).expect("entries in order");
-            header.first += 1;
+            header.first += u64::from(header.len);
         }
     }
 
@@ -161,8 +171,8 @@ impl Logs {
     /// and syncs one data entry of each index but the last, which syncs one each
     /// `period` commits, so its item is the last of its record. Then it takes the
     /// idle tails before the record, at most one per index, and hides the records
-    /// before the oldest holder, or before the record `held` commits back, as a
-    /// read that holds it, when that one is older.
+    /// before the landing of the oldest holder, or of the record `held` commits
+    /// back, as a read that holds it, when that one is older.
     pub fn trim(&mut self, period: u32, held: u64) {
         let slow = self.commits.is_multiple_of(period);
         self.commits = self.commits.wrapping_add(1);
@@ -172,14 +182,15 @@ impl Logs {
             self.inner
                 .sync(*slot, header, self.offset)
                 .expect("entries in order");
-            header.first += 1;
+            header.first += u64::from(header.len);
         }
         self.tails.clear();
         self.inner
             .idle(self.offset, self.headers.len(), &mut self.tails);
         let kept = self.inner.kept().expect("a path has a synced entry");
         let read = self.offset.saturating_sub(held * BLOCK).max(BLOCK);
-        self.inner.hide(kept.min(read));
+        let landing = self.inner.marked().land(kept.min(read));
+        self.inner.hide(landing);
         self.offset += BLOCK;
     }
 
@@ -188,10 +199,7 @@ impl Logs {
     /// syncs one entry with no samples of each index at the seq of its durable
     /// tail, then carries the durable end of each index in the next record.
     pub fn mark(&mut self) {
-        if let Some(kept) = self.inner.kept() {
-            let landing = self.inner.marked().land(kept);
-            self.inner.hide(landing);
-        }
+        self.keep_up();
         for (slot, header) in &self.headers {
             let empty = Header {
                 len: 0,
@@ -214,6 +222,15 @@ impl Logs {
         }
         self.inner.carried(&self.tails, self.offset);
         self.offset += BLOCK;
+    }
+
+    /// Hides the records before the landing of the oldest holder, as a trim that
+    /// keeps up.
+    fn keep_up(&mut self) {
+        if let Some(kept) = self.inner.kept() {
+            let landing = self.inner.marked().land(kept);
+            self.inner.hide(landing);
+        }
     }
 }
 
@@ -247,9 +264,10 @@ mod tests {
     }
 
     /// Each commit moves the durable tail of each index past one more entry, and
-    /// each log keeps one run. It reads the private logs: `commit` gives nothing back,
-    /// and only the `logs` bench calls it, so no caller sees a commit that skips the
-    /// sync or the hide.
+    /// each log keeps two runs: the run of its holder, and the new one. It reads the
+    /// private logs: `commit` gives nothing back, and only the `logs` bench and the
+    /// `alloc` and `memory` tests call it, whose counts do not change when a commit
+    /// skips the hide.
     #[test]
     fn each_commit_of_the_logs_syncs_one_entry_of_each_index() {
         let mut logs = Logs::new(2);
@@ -259,7 +277,7 @@ mod tests {
         for n in 0..2 {
             let slot = Slot::new(n);
             assert_eq!(logs.inner.durable(slot, Path::Live).seq, 6, "index {n}");
-            assert_eq!(logs.inner.runs(slot, Path::Live).count(), 1, "index {n}");
+            assert_eq!(logs.inner.runs(slot, Path::Live).count(), 2, "index {n}");
         }
     }
 
@@ -272,6 +290,20 @@ mod tests {
         for n in 0..2 {
             let slot = Slot::new(n);
             assert_eq!(logs.inner.durable(slot, Path::Live).seq, 2, "index {n}");
+        }
+        assert_eq!(logs.inner.kept(), Some(4 * BLOCK));
+    }
+
+    /// On logs whose entries have no samples, each carry record holds the durable
+    /// given of each index, which grows past 0.
+    #[test]
+    fn a_carry_of_logs_with_no_samples_holds_the_tail_of_each_index() {
+        let mut logs = Logs::empty(2);
+        logs.carry();
+        logs.carry();
+        for n in 0..2 {
+            let tail = logs.inner.end(Slot::new(n), Path::Live);
+            assert_eq!((tail.seq, tail.given), (0, 2), "index {n}");
         }
         assert_eq!(logs.inner.kept(), Some(4 * BLOCK));
     }

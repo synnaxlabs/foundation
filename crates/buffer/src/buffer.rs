@@ -451,11 +451,7 @@ impl State {
         if !TRIM {
             return Trim::default();
         }
-        let kept = self.kept();
-        let logs = &self.logs;
-        let tail = self
-            .writer
-            .trimmed(kept, |offset| logs.marked().land(offset));
+        let tail = self.trimmed();
         let checkpoint = tail.zip(pool.alloc(ALIGN).ok()).map(|(tail, mut block)| {
             self.logs.hide(tail.offset());
             self.header = self.header.next(tail);
@@ -470,6 +466,15 @@ impl State {
             checkpoint,
             carry: self.carry(pool),
         }
+    }
+
+    /// The tail of a trim that keeps the oldest record that a path or a read holds,
+    /// and lands out of each marked range.
+    fn trimmed(&mut self) -> Option<wal::Position> {
+        let kept = self.kept().unwrap_or(u64::MAX);
+        let logs = &self.logs;
+        self.writer
+            .trimmed(|offset| logs.marked().land(offset.min(kept)))
     }
 
     /// Plans the carry record of the paths whose holder is before the reach of the
@@ -1078,7 +1083,7 @@ async fn walk(
     slots: &mut Slots,
 ) -> Result<(Cursor, Logs), Error> {
     let mut cursor = Cursor::new(header.layout, header.tail, pool.largest());
-    let mut logs = Logs::default();
+    let mut logs = Logs::new(header.layout.area());
     loop {
         let Window { place, len } = cursor.window();
         let bytes = file.read_at(AREA_START + place, pool.alloc(len)?).await?;
@@ -1588,7 +1593,7 @@ mod tests {
                     buffer.committed().await.expect("commits");
                 }
                 let state = buffer.shared.state.borrow();
-                let trimmed = state.writer.trimmed(None, |offset| offset);
+                let trimmed = state.writer.trimmed(|offset| offset);
                 *found.lock().expect("no panic held the lock") =
                     Some(trimmed.unwrap_or(state.header.tail));
                 drop(state);
@@ -1828,10 +1833,7 @@ mod tests {
                 let trimmed = || {
                     let mut state = buffer.shared.state.borrow_mut();
                     let kept = state.kept();
-                    let tail = state
-                        .writer
-                        .trimmed(kept, |offset| state.logs.marked().land(offset))
-                        .unwrap_or(state.header.tail);
+                    let tail = state.trimmed().unwrap_or(state.header.tail);
                     (kept, tail.offset())
                 };
                 let mut tails = Vec::new();
@@ -2147,8 +2149,8 @@ mod tests {
                     }
                     commit_each(&buffer, (1, one), &part, 0..55).await;
                     let mut state = buffer.shared.state.borrow_mut();
-                    let kept = state.kept();
-                    let want = state.writer.trimmed(kept, |offset| offset);
+                    let kept = state.kept().unwrap_or(u64::MAX);
+                    let want = state.writer.trimmed(|offset| offset.min(kept));
                     *found.lock().expect("no panic held the lock") = Some((
                         want.map(crate::wal::Position::offset),
                         state.header.tail.offset(),

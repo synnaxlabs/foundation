@@ -1,7 +1,8 @@
 //! The time to sync the durable logs of a shard at each commit, for each entry: one
 //! record with data entries of each index, after a trim that hides each older record.
 //! Also the time to append an entry, to carry a tail, the time of a commit that
-//! trims to the oldest holder, and the time of a commit that marks a range.
+//! trims to the oldest holder, and the time of a commit that marks a range. Also
+//! the time of a sync and a trim of entries with no samples, which mark ranges.
 
 use buffer::bench::Logs;
 use divan::Bencher;
@@ -87,6 +88,37 @@ fn mark(bencher: Bencher<'_, '_>, indexes: u32) {
         logs.mark();
     }
     bencher.counter(count(indexes)).bench_local(|| logs.mark());
+}
+
+/// Each entry has no samples and comes at the seq of the entry before, in a new
+/// record, so each sync marks a range that merges with the one before.
+#[divan::bench(args = [1, 64, 256])]
+fn sync_empty(bencher: Bencher<'_, '_>, indexes: u32) {
+    bencher
+        .counter(count(indexes))
+        .with_inputs(|| empty(indexes))
+        .bench_local_refs(|logs| logs.commit(1));
+}
+
+/// As `trim`, with the entries of `sync_empty`, so each landing searches the
+/// ranges.
+#[divan::bench(args = [64, 256])]
+fn trim_marked(bencher: Bencher<'_, '_>, indexes: u32) {
+    bencher
+        .counter(count(indexes))
+        .with_inputs(|| empty(indexes))
+        .bench_local_refs(|logs| logs.trim(64, 0));
+}
+
+/// Logs of entries with no samples, with the runs of 12 records and room for one
+/// more, so the timed commit takes no allocation. No holder moves, so each input is
+/// new and the runs do not grow over the samples.
+fn empty(indexes: u32) -> Logs {
+    let mut logs = Logs::empty(indexes);
+    for _ in 0..12 {
+        logs.commit(1);
+    }
+    logs
 }
 
 fn trimmed(indexes: u32, held: u64) -> Logs {
