@@ -315,11 +315,14 @@ jobs:
         run: |
           git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
           # A mutant can allocate in a loop. The cap leaves 3 GiB of the VM to the
-          # runner agent, so the kernel kills the test, and the job reports the mutant.
+          # runner agent, so the kernel kills the test. OOMPolicy=continue keeps
+          # cargo-mutants up (the default stops the whole scope), so the job reports the
+          # mutant.
           cap=$(( $(awk '/^MemTotal:/ {print $2}' /proc/meminfo) - 3145728 ))K
           status=0
           sudo -E systemd-run --quiet --scope -p MemoryMax="$cap" -p MemorySwapMax=0 \
-            --uid="$(id -u)" --gid="$(id -g)" -- env "PATH=$PATH" \
+            -p OOMPolicy=continue --uid="$(id -u)" --gid="$(id -g)" -- \
+            env "PATH=$PATH" \
             cargo mutants --in-diff "$RUNNER_TEMP/diff.patch" --jobs 4 \
             --shard "$SHARD/4" --sharding round-robin || status=$?
           # A timeout is a mutant that made a test hang, so a test caught it. Exit 3
