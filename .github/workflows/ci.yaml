@@ -301,6 +301,19 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Temporary: a process that allocates in a loop dies under the cap, and the job
+      # goes on.
+      - name: Trial of the memory cap
+        run: |
+          max=$(($(awk '/^MemTotal:/ {print $2}' /proc/meminfo) - 2097152))K
+          status=0
+          sudo --preserve-env systemd-run --scope --quiet --uid="$(id -u)" \
+            --gid="$(id -g)" -p MemoryMax="$max" -p MemorySwapMax=0 \
+            -p OOMPolicy=continue -- env PATH="$PATH" HOME="$HOME" \
+            python3 -c 'b = []
+          while True: b.append(b"x" * (1 << 26))' || status=$?
+          echo "The allocating process ended with $status under a cap of $max"
+          [ "$status" -eq 137 ]
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-mutants@27.1.0
@@ -309,7 +322,8 @@ jobs:
           TMPDIR: ${{ runner.temp }}
           SHARD: ${{ matrix.shard }}
         run: |
-          git diff origin/main...HEAD > "$RUNNER_TEMP/diff.patch"
+          # Temporary: the diff of #2491, for the trial table.
+          git diff d24bf32afd1826a0b223f172797fa5fc5ce9137f^1 d24bf32afd1826a0b223f172797fa5fc5ce9137f > "$RUNNER_TEMP/diff.patch"
           # A mutant can allocate in a loop. The cap makes the kernel kill its test, the
           # largest process, before the VM runs out of memory and the job loses its
           # runner. OOMPolicy=continue keeps cargo-mutants up, so it reports the mutant.
@@ -318,7 +332,90 @@ jobs:
           sudo --preserve-env systemd-run --scope --quiet --uid="$(id -u)" \
             --gid="$(id -g)" -p MemoryMax="$max" -p MemorySwapMax=0 \
             -p OOMPolicy=continue -- env PATH="$PATH" HOME="$HOME" \
-            cargo mutants --in-diff "$RUNNER_TEMP/diff.patch" --jobs 4 \
+            bash -c 'cargo mutants --in-diff "$RUNNER_TEMP/diff.patch" --jobs 4 \
+            --shard "$SHARD/4" --sharding round-robin; s=$?
+            echo "Temporary: peak $(cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.peak)"
+            exit $s' || status=$?
+          # A timeout is a mutant that made a test hang, so a test caught it. Exit 3
+          # (timeout) wins over exit 2 (missed), so read the missed list too.
+          if [ "$status" -eq 3 ] && [ ! -s mutants.out/missed.txt ]; then
+            cat mutants.out/timeout.txt
+            status=0
+          fi
+          exit "$status"
+
+  # Temporary: the old self-hosted shards on the diff of #2491, for the trial table.
+  trial-self-hosted:
+    needs: changes
+    if: >-
+      !cancelled() && needs.changes.outputs.rust != 'false' &&
+      github.event_name == 'pull_request'
+    # A mutant that hangs runs until its timeout, so the run needs parallel jobs and
+    # memory that the 2-core hosted runner lacks. Each shard runs a fourth of the
+    # mutants, round robin, on its own runner. The rule that a missed mutant fails CI
+    # is in `docs/claude/testing.md`.
+    name: trial self-hosted shard ${{ matrix.shard }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    runs-on: [self-hosted, Linux, ARM64]
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      # A mutant can allocate in a loop until the host runs out of memory. Each runner
+      # unit on the host has a cap, the caps leave 2 GiB of the host free, and the
+      # unit's OOMPolicy=continue keeps the runner up, so only a test process dies
+      # (#803). Hosts whose template sets none of this: #898.
+      - name: Check the memory cap of the runner
+        run: |
+          set -o pipefail
+          c=$(cut -d: -f3 /proc/self/cgroup)
+          case $c in
+            /system.slice/actions.runner.*.service) ;;
+            *) echo "::error::The job runs in $c, in no runner unit (#898)."; exit 1 ;;
+          esac
+          total=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
+          # systemd reads each runner unit, also one that is stopped and has no cgroup.
+          units=$(systemctl list-unit-files --plain --no-legend 'actions.runner.*' |
+            cut -d' ' -f1)
+          grep -qxF "${c##*/}" <<< "$units" ||
+            { echo "::error::systemd lists no unit ${c##*/} (#898)."; exit 1; }
+          sum=0
+          for u in $units; do
+            p=$(systemctl show -p OOMPolicy --value "$u")
+            [ "$p" = continue ] ||
+              { echo "::error::OOMPolicy of $u is '$p' (#803, #898)."; exit 1; }
+            m=$(systemctl show -p MemoryMax --value "$u")
+            [ "$m" != infinity ] ||
+              { echo "::error::$u has no MemoryMax (#803, #898)."; exit 1; }
+            # A longer cap is past any host, and the sum of such caps can wrap.
+            [ "${#m}" -le 15 ] ||
+              { echo "::error::$u has MemoryMax $m, past the host (#803)."; exit 1; }
+            sum=$((sum + m / 1024))
+          done
+          [ "$sum" -le $((total - 2097152)) ] || {
+            echo "::error::The runner caps take $sum KiB of $total KiB (#803)."
+            exit 1
+          }
+          echo "The runner caps take $sum KiB of $total KiB"
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Add cargo to the path
+        run: echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-mutants@27.1.0
+      - name: Mutants in the diff
+        env:
+          TMPDIR: ${{ runner.temp }}
+          SHARD: ${{ matrix.shard }}
+        run: |
+          git diff d24bf32afd1826a0b223f172797fa5fc5ce9137f^1 d24bf32afd1826a0b223f172797fa5fc5ce9137f > "$RUNNER_TEMP/diff.patch"
+          status=0
+          cargo mutants --in-diff "$RUNNER_TEMP/diff.patch" --jobs 4 \
             --shard "$SHARD/4" --sharding round-robin || status=$?
           # A timeout is a mutant that made a test hang, so a test caught it. Exit 3
           # (timeout) wins over exit 2 (missed), so read the missed list too.
