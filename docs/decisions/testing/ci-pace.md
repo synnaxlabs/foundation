@@ -19,3 +19,19 @@
   take four caps that the sum check already bounds. Cost: each shard that gets a mutant
   builds and tests the code without mutants, so a PR with four or more mutants spends
   four baselines in place of one.
+  Amended (2026-10-15, #2727 and #2733): the mutants shards run on GitHub-hosted
+  `ubuntu-latest` (x86) runners, and the ARM jobs on `ubuntu-24.04-arm`, a fresh VM per
+  job. ARM RUNNER gives the person's words. No runner keeps a build in
+  `$HOME/target/<runner>`: the ARM `test` job keeps it with `Swatinem/rust-cache`, and a
+  shard keeps only the registry, because cargo-mutants builds in copies of the tree. A
+  shard checks no runner unit. `cargo mutants` runs in a systemd scope with `MemoryMax`
+  at the memory of the VM less 3 GiB, no swap, and `OOMPolicy=continue`: the kernel
+  kills a test that allocates in a loop, cargo-mutants goes on, and the shard reports
+  the mutant. With the default policy (`stop`), systemd stops the whole scope, and the
+  shard fails with no report
+  (https://github.com/synnaxlabs/foundation/actions/runs/38786221688). A mutant in code
+  under `target_arch` for the other CPU is missed, now in aarch64 code as before in x86
+  code. Supersedes "Each runner keeps its build in `$HOME/target/<runner>`, outside the
+  workspace, and deletes it past 25 GiB.", "on its own ARM runner", and "Each shard
+  checks the memory cap of its runner unit (#803), so four shards at once take four caps
+  that the sum check already bounds."
