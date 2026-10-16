@@ -64,8 +64,12 @@ PR at round 1. A missing approval, OK, or link that "Done" asks for is no findin
 defer.
 
 The range after round 3 holds only these:
-- merges of `main`, and the commits that fix what a merge broke;
+- merges of `main`, and the commits that fix what a merge broke (a conflict, or code, a
+  build, or a test of the PR that the merge makes fail; a rule that the merge brings in
+  breaks nothing, so a finding against it is a finding of round 3);
 - the fix of each defect of round 3, with its test;
+- each input that `docs/claude/testing.md`, "Fuzzing", asks for, in a commit that
+  changes nothing else;
 - the `Text fixes:` items of round 3, applied as "Second round" step 2 says;
 - each change that an approval or OK of "Done" asks for. The PR links the comment that
   asks for it.

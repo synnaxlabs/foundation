@@ -100,7 +100,7 @@ cargo xtask layers && cargo xtask globals && cargo xtask oracles
 cargo test -p <crates> --all-features
 cargo hack check -p <crates> --each-feature --no-dev-deps
 p=$(mktemp) && git diff origin/main...HEAD > "$p"
-cargo mutants --in-diff "$p" --jobs 4
+env -u CARGO_TARGET_DIR cargo mutants --in-diff "$p" --jobs 4
 ```
 
 - Each missed mutant is a missing test. Exit 3 with an empty `mutants.out/missed.txt` is

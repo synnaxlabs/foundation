@@ -176,13 +176,15 @@ again once to prove that the failure replays (r16 59).
   cannot run yet is `#[ignore = "waits on #<n>"]`, with each open issue that it waits
   on. So is a test in `crates/node/tests/it/` that runs the `foundation` binary as the
   acceptance scenario of an open milestone, as its plan issue names it, and cannot run
-  yet. The PR that closes such an issue removes it from each reason, and removes the
-  `#[ignore]` when no issue is left. A test that needs a tool of one OS, and that CI
-  runs on that OS, is `#[cfg_attr(not(target_os = "<os>"), ignore = "needs <tool>")]`,
-  never `#[cfg(target_os = ...)]`, which hides it on another OS with no reason. A test
-  binary with no harness (`harness = false`) has no `ignore`, so there such a check is
-  `#[cfg(target_os = "<os>")]` with the comment `// needs <tool>` on its gate. A test
-  of a behavior that differs by OS checks it on each OS that the crate builds for: with
+  yet. The PR that closes such an issue, or that makes such a test run before its issue
+  closes, removes the issue from the reason of each test that no longer waits on it, and
+  removes the `#[ignore]` when no issue is left. A test that needs a tool of one OS, and
+  that CI runs on that OS, is
+  `#[cfg_attr(not(target_os = "<os>"), ignore = "needs <tool>")]`, never
+  `#[cfg(target_os = ...)]`, which hides it on another OS with no reason. A test binary
+  with no harness (`harness = false`) has no `ignore`, so there such a check is
+  `#[cfg(target_os = "<os>")]` with the comment `// needs <tool>` on its gate. A test of
+  a behavior that differs by OS checks it on each OS that the crate builds for: with
   `#[cfg(target_os = ...)]` on its expected value, as `UNLINK_DIRECTORY` in
   `crates/os/tests/it/files.rs` does, or with one test for each OS. A behavior has no
   test on another OS only when that OS does not have it, when no test can fix its value

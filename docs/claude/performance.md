@@ -10,7 +10,9 @@ that runs once per frame or data message makes 100M calls per second divided by 
 samples that one call carries. The report states that number and its source: a decision,
 a documented workload, or a measured per-frame cost that shows P1 cannot hold with
 smaller frames on the cores of the measured machine. With no source, the path counts as
-once per sample. The other limits are in `docs/decisions/memory/p1.md`. The judgment
+once per sample. Code that runs only in a program (`program`, `sdk`) uses no CPU of the
+node. It counts only against the latest-mode p99, when it is on the path of a
+latest-mode read. The other limits are in `docs/decisions/memory/p1.md`. The judgment
 states how often the path runs (per sample, frame, session, or start), its absolute cost
 against the P1 budget, the noise of the machine, and what the change buys. The cost is
 the cost on the `os` driver. A judgment with no `os` measure gives each `os` number that
