@@ -23,8 +23,8 @@ For each changed function a frame or sample passes through, answer:
 6. What wakes whom, and is it checked with loom or shuttle?
 
 Run the benchmarks for the crates touched (`cargo bench -p <crate>`) on the base of the
-PR and on its head, and report both numbers with the machine. The base is the commit of
-`main` that the PR holds, or, for a stacked PR, the head of the PR below it. Never infer
+PR and on its head, and report both numbers with the machine. The base is the newest commit of
+`main` that the PR holds (`git merge-base <head> origin/main`), or, for a stacked PR, the newest commit of the PR below it that the PR holds. Never infer
 a number you did not measure. A report without both numbers is not a review. For code in
 a crate's `src/` that exists only for tests and benchmarks, such as a counting
 `GlobalAlloc`, also run each benchmark that runs it in its timed loop, in each crate.

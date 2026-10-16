@@ -91,3 +91,9 @@
   crate does not build with it (`laptop.director`, 2026-10-12T15:56:11Z, edited at
   2026-10-12T18:32:41Z:
   https://github.com/synnaxlabs/foundation/issues/2367#issuecomment-6127816867).
+  Amended (2026-10-16): each compare of a PR in this record, also the diff of the
+  disassembly of the #2044 amendment, compares the base of the PR with its head, as
+  `.claude/agents/performance.md` states the base. Decided by `laptop.director`,
+  2026-10-16T09:02:58Z:
+  https://github.com/synnaxlabs/foundation/pull/2846#issuecomment-6211989872. Supersedes
+  "at `main`" of the #2044 amendment above.
