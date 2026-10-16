@@ -10,7 +10,7 @@ that runs once per frame or data message makes 100M calls per second divided by 
 samples that one call carries. The report states that number and its source: a decision,
 a documented workload, or a measured per-frame cost that shows P1 cannot hold with
 smaller frames on the cores of the measured machine. With no source, the path counts as
-once per sample. Code that runs only in a program (`program`, `sdk`) uses no CPU of the
+once per sample. Code that runs only in a program (`program`, `sdk`) uses no CPU, idle memory, or start time of the
 node. It counts against the latest-mode p99 when it is on the path of a latest-mode
 read, and against the bytes per sample of what it sends to a node. The other limits are
 in `docs/decisions/memory/p1.md`. The judgment states how often the path runs (per

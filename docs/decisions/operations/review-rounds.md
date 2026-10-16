@@ -109,7 +109,7 @@
   https://github.com/synnaxlabs/foundation/pull/2455#issuecomment-6197325644.
   Amended (2026-10-16, items 53 and 54 of #2041): after round 3, the PR also changes by
   each input that `docs/claude/testing.md`, "Fuzzing", asks for, in a commit that
-  changes nothing else, and a finding of round 3 that asks for such an input is no
+  changes nothing else, and the PR body gives the arm that each input reaches and how the author checked it, and a finding of round 3 that asks for such an input is no
   deferral (`laptop.director`, 2026-10-16T01:38:42Z:
   https://github.com/synnaxlabs/foundation/pull/2782#issuecomment-6206056542). What a
   merge broke is a conflict, or code, a build, or a test of the PR that the merge makes
@@ -118,6 +118,6 @@
   round 3, a rule that a merge of `main` brings in breaks nothing, so a finding against
   it is a finding of round 3 (`laptop.director`, 2026-10-15T22:38:25Z:
   https://github.com/synnaxlabs/foundation/pull/2723#issuecomment-6203726515).
-  Supersedes "or changes" of that ruling. Supersedes, for such an input, "Each other
+  Supersedes "or changes" of that ruling. Supersedes, for an input that "Fuzzing" asks for, "Each other
   finding is a deferral" and "After round 3, the PR changes only by these changes"
   above.

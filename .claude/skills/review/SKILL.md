@@ -70,7 +70,7 @@ The range after round 3 holds only these:
   breaks nothing, so a finding against it is a finding of round 3);
 - the fix of each defect of round 3, with its test;
 - each input that `docs/claude/testing.md`, "Fuzzing", asks for, in a commit that
-  changes nothing else;
+  changes nothing else, with the arm that it reaches and how the author checked it in the PR body;
 - the `Text fixes:` items of round 3, applied as "Second round" step 2 says;
 - each change that an approval or OK of "Done" asks for. The PR links the comment that
   asks for it.
