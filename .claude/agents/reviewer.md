@@ -16,11 +16,11 @@ A PR gets at most 3 review rounds, and rounds 2 and 3 see only the fix commits, 
 than the first round of a PR that replaces another. So report every finding that you can
 show in this one report, never a few at a time. A finding that you hold back may never
 be reviewed. In round 3, mark each finding `defect` that is wrong behavior, data loss, a
-crash, or an oracle weakening: the author fixes only those, each `Text fixes:` item, and
-each missing approval, OK, or link that "Done" of the `review` skill asks for, and each
-other one goes to an issue. Mark each other finding `design flaw` that is a design flaw
-(`review` skill, "Round cap"): it goes to an issue only with the OK of its design
-approver.
+crash, or an oracle weakening: the author fixes only those, each `Text fixes:` item,
+each input that `docs/claude/testing.md`, "Fuzzing", asks for, and each missing
+approval, OK, or link that "Done" of the `review` skill asks for, and each other one
+goes to an issue. Mark each other finding `design flaw` that is a design flaw (`review`
+skill, "Round cap"): it goes to an issue only with the OK of its design approver.
 
 Spend the review on what costs the most after merge, in this order: wrong behavior, data
 loss, a crash, a race, or code that breaks a decision; a design flaw (`review` skill,

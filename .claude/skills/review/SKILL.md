@@ -57,11 +57,12 @@ After round 3, no other round runs. Each round comment numbered 3 gives each fin
 mark of its reviewer: `defect` (wrong behavior, data loss, a crash, or an oracle
 weakening), `design flaw`, or no mark. The author fixes each finding marked `defect` in
 this PR, with a test that fails without the fix, and CI checks it. A defect is never
-deferred. Each other finding of round 3 is a deferral ("Findings" step 3) on the last
-round comment (above). The deferral of a design flaw needs the explicit OK of its design
-approver. Without that OK, the author closes the PR, and the new design starts as a new
-PR at round 1. A missing approval, OK, or link that "Done" asks for is no finding to
-defer.
+deferred. Each other finding of round 3, other than a missing input that
+`docs/claude/testing.md`, "Fuzzing", asks for, is a deferral ("Findings" step 3) on the
+last round comment (above). The deferral of a design flaw needs the explicit OK of its
+design approver. Without that OK, the author closes the PR, and the new design starts as
+a new PR at round 1. A missing approval, OK, or link that "Done" asks for is no finding
+to defer.
 
 The range after round 3 holds only these:
 - merges of `main`, and the commits that fix what a merge broke (a conflict, or code, a

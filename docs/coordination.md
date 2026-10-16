@@ -51,7 +51,7 @@ lockf -k ~/.cache/foundation-heavy.lock <command>
 
 Unset `CARGO_TARGET_DIR` for `cargo mutants`: each copy builds in its own target. With
 it set, the copies run each other's binaries, and a result is wrong in either direction
-(#2526).
+(https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6208749857).
 
 A benchmark starts only when `uptime` shows a load under 8, and its PR names the load.
 Builds and the PR gates do not take the lock. On 2026-10-05 the load reached 170, and a
