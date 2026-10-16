@@ -116,7 +116,7 @@
   merge broke is a conflict, or code, a build, or a test of the PR that the merge makes
   fail (`laptop.director`, 2026-10-15T22:38:44Z:
   https://github.com/synnaxlabs/foundation/issues/2041#issuecomment-6203730794). After
-  round 3, a rule that a merge of `main` brings in breaks nothing, so a finding against
+  round 3, a rule that a merge of `main` brings in and that only a review checks breaks nothing, so a finding against
   it is a finding of round 3 (`laptop.director`, 2026-10-15T22:38:25Z:
   https://github.com/synnaxlabs/foundation/pull/2723#issuecomment-6203726515).
   Supersedes "or changes" of that ruling. Supersedes, for an input that "Fuzzing" asks

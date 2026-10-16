@@ -66,7 +66,7 @@ to defer.
 
 The range after round 3 holds only these:
 - merges of `main`, and the commits that fix what a merge broke (a conflict, or code, a
-  build, or a test of the PR that the merge makes fail; a rule that the merge brings in
+  build, or a test of the PR that the merge makes fail; a rule that the merge brings in and that only a review checks
   breaks nothing, so a finding against it is a finding of round 3);
 - the fix of each defect of round 3, with its test;
 - each input that `docs/claude/testing.md`, "Fuzzing", asks for, in a commit that
