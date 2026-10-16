@@ -82,7 +82,10 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   (r16 2). The exceptions are in R16-10: a crate re-exports, under the same name in one
   of its modules, an item that its own public surface names, for callers that may not
   depend on the home of the item (`hub::home::Error`, `home::reader::Next`).
-- Fields are all private, or all public on plain data with no invariant (r16 4).
+- Fields are all private, or all public on plain data with no invariant (r16 4). An
+  invariant is a property that code relies on when it takes the type. A relation that
+  only the function that returns the value states is a postcondition of that function,
+  and the value is plain data.
 - A type with an invariant has a fallible constructor and no `From` that can panic
   (r16 5).
 - A `bool` or `Option` argument that callers pass as a literal becomes two functions

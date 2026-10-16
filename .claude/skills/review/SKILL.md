@@ -336,8 +336,10 @@ nothing checked again. So when round 1 led to fix commits:
    `Public surface:`, `Hot path:`, and `Build or use:` lines for the range. The round
    comment adds each item of the first to its own `Public surface:` line, copies the
    second, and copies the third after its findings. When the `Hot path:` line names a
-   function, run `performance` again on the range, and update the Performance section
-   with its numbers.
+   function, run `performance` again on the functions that the range changes, at the
+   head against the base of the PR, and update the Performance section with its numbers.
+   A run against an earlier commit of the PR shows where a cost came from, and is no
+   finding.
 2. Handle their findings as above. A round that has a finding gets another round, up to
    round 3 (Round cap). A finding in text only (a `.md` file, a `.rs` comment line that,
    trimmed, starts with `//` and is not a doctest line, the PR title or body, an end
