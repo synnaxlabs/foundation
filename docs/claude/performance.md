@@ -10,16 +10,16 @@ that runs once per frame or data message makes 100M calls per second divided by 
 samples that one call carries. The report states that number and its source: a decision,
 a documented workload, or a measured per-frame cost that shows P1 cannot hold with
 smaller frames on the cores of the measured machine. With no source, the path counts as
-once per sample. Code that runs only in a program (`program`, `sdk`) uses no CPU, idle memory, or start time of the
-node. It counts against the latest-mode p99 when it is on the path of a latest-mode
-read, and against the bytes per sample of what it sends to a node. The other limits are
-in `docs/decisions/memory/p1.md`. The judgment states how often the path runs (per
-sample, frame, session, or start), its absolute cost against the P1 budget, the noise of
-the machine, and what the change buys. The cost is the cost on the `os` driver. A
-judgment with no `os` measure gives each `os` number that the PR, its rounds, or its
-deferrals hold, and the architect judges on the largest. The architect accepts or
-rejects it on those facts. A slowdown under the cost limit needs nothing but its
-numbers.
+once per sample. Code that runs only in a program (`program`, `sdk`) uses no CPU, idle
+memory, or start time of the node. It counts against the latest-mode p99 when it is on
+the path of a latest-mode read, and against the bytes per sample of what it sends to a
+node. The other limits are in `docs/decisions/memory/p1.md`. The judgment states how
+often the path runs (per sample, frame, session, or start), its absolute cost against
+the P1 budget, the noise of the machine, and what the change buys. The cost is the cost
+on the `os` driver. A judgment with no `os` measure gives each `os` number that the PR,
+its rounds, or its deferrals hold, and the architect judges on the largest. The
+architect accepts or rejects it on those facts. A slowdown under the cost limit needs
+nothing but its numbers.
 
 Evidence: `docs/research/r1-thread-model.md`, `docs/research/r11-memory-sync.md`, and
 `docs/research/r11-mem-bench/`. The numbers below are from an M3 Max. Rerun on Linux
