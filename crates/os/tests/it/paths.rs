@@ -428,8 +428,27 @@ fn within_makes_a_directory_of_a_name_longer_than_the_host_takes_as_free() {
     });
 }
 
+/// A hidden folder outside the folders that a program moves away tells no name that it
+/// holds.
+#[test]
+fn within_tells_no_name_of_a_moved_hidden_folder_outside_the_folders() {
+    let scratch = Scratch::new();
+    let base = scratch.0.canonicalize().unwrap();
+    for name in ["work", "out", "out/h", "out/h/s"] {
+        fs::create_dir(base.join(name)).unwrap();
+    }
+    let within = os::paths()
+        .within(&[base.join("work")], &[base.join("out/h")])
+        .unwrap();
+    fs::rename(base.join("out/h"), base.join("out/z")).unwrap();
+    for name in ["out/z/s/x", "out/z/t/x"] {
+        let path = base.join(name);
+        assert_eq!(within.read(&path, 1), Err(Error::Outside), "{name}");
+    }
+}
+
 /// A link that does not resolve, in a hidden folder that a program moves away, is under
-/// that folder by its place, as a new name there is.
+/// that folder by its place for each call, as a new name there is.
 #[test]
 fn within_hides_a_link_that_does_not_resolve_in_a_moved_hidden_folder() {
     run(|host| {
@@ -446,13 +465,71 @@ fn within_hides_a_link_that_does_not_resolve_in_a_moved_hidden_folder() {
         .unwrap();
         for name in [
             "work/moved/new",
+            "work/moved/none/x",
             "work/moved/loop",
+            "work/moved/loop/x",
             "work/moved/to-none",
+            "work/moved/to-none/x",
             "work/moved/sub/loop",
         ] {
-            let made = within.make_dir(&base.join(name));
-            assert_eq!(made, Err(Error::Hidden), "{name}");
+            let path = base.join(name);
+            let reached = [
+                within.read(&path, 1).map(|_| ()),
+                within.write(&path, b"x"),
+                within.make_dir(&path),
+            ];
+            assert_eq!(reached, [Err(Error::Hidden); 3], "{name}");
         }
+    });
+}
+
+/// A long path of names that each resolve stops at the longest path that the host
+/// takes.
+#[cfg(target_os = "linux")]
+#[test]
+fn within_stops_a_long_path_of_steps_that_resolve() {
+    run(|host| {
+        let (within, base) = cases::within_work(host);
+        fs::create_dir(base.join("work/s")).unwrap();
+        let path = base.join("work").join("s/../".repeat(50_000)).join("a.hcl");
+        let name_too_long = Error::Io { code: 36 };
+        assert_eq!(within.read(&path, 1), Err(name_too_long));
+    });
+}
+
+/// A relative path that the host takes, but not once it is joined to the working
+/// directory, still passes each step.
+#[cfg(target_os = "linux")]
+#[test]
+fn within_checks_a_relative_path_longer_once_joined_by_its_own_prefixes() {
+    run(|host| {
+        let (_, base) = cases::within_work(host);
+        fs::create_dir(base.join("work/s")).unwrap();
+        let hidden = base.join("work/data");
+        let within = host.paths.within(&["/".into()], slice::from_ref(&hidden));
+        let within = within.unwrap();
+        let working = host.paths.resolve(Path::new(".")).unwrap();
+        let up = "../".repeat(working.components().count() - 1);
+        let long = |name: &str| {
+            let mut path = Path::new(&up).join(base.strip_prefix("/").unwrap());
+            path.push("work");
+            let pads = (4095 - path.join(name).as_os_str().len() - 1) / 5;
+            path.push("s/../".repeat(pads));
+            // The host takes the path, but not the join of its directory.
+            let joined = working.join(&path).as_os_str().len();
+            path.push(name);
+            assert!(path.as_os_str().len() < 4096 && joined > 4096, "{joined}");
+            path
+        };
+        let got = [
+            within.read(&long("data/admin.key"), 1).map(|_| ()),
+            within.write(&long("data/admin.key"), b"y"),
+            within.make_dir(&long("data/made")),
+        ];
+        assert_eq!(got, [Err(Error::Hidden); 3]);
+        let read = host.paths.read(&hidden.join("admin.key"), 1);
+        assert_eq!(read, Ok(Found::File(b"x".to_vec())));
+        assert!(!hidden.join("made").exists());
     });
 }
 

@@ -979,3 +979,143 @@
   https://github.com/synnaxlabs/foundation/pull/3000#issuecomment-6230570417; the end in
   `/` or `/.`, 2026-10-17T06:28:33Z,
   https://github.com/synnaxlabs/foundation/pull/3000#issuecomment-6230686685).
+  Amended (2026-10-17T06:28:34Z, #3005): on a handle of `within`, a path that does not
+  resolve is checked by the deepest prefix of its components that resolves, with the key
+  of the file at that prefix. Components drop an end `/` and `/.`. A relative path
+  starts at the working directory, as `.` (2026-10-17T07:40:31Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6231315185). An error
+  of that check wins, `Hidden` over `Outside`; else the call gives the error of its
+  resolve. So a hidden file at a path that ends in `/` or `/.`, or with a name after it,
+  gives `Hidden`, not `Io` 20, on `read`, `write`, and `make_dir`; `<hidden>/none/x`
+  gives `Hidden`, not `NotFound`; and a path outside the folders that does not resolve
+  gives `Outside`, not `NotFound`. The arm of `make_dir` still checks its name in its
+  resolved directory, and there each error of the key of the name is no key, not the
+  error of the call, since an error before the check, such as `Io` 40 for a loop, tells
+  what a hidden folder holds. The walk runs only after a failed resolve. Supersedes "A
+  path that does not resolve fails with the error of its resolve" of the amendment of
+  2026-10-16T04:52:58Z, and "The cost of the resolve error of a path: a tool can learn
+  whether a directory outside the folders is there" of the amendment of
+  2026-10-16T05:41:58Z. Lost: a driver call that gives the deepest resolved prefix, one
+  walk but a new seam that `os` and `sim` must both keep, for a path that only fails; a
+  lexical drop of the end `/` only, which leaves `<hidden>/none/x`. Decided by
+  `laptop.architect-2` (2026-10-17T06:28:34Z,
+  https://github.com/synnaxlabs/foundation/issues/3005#issuecomment-6230686853). The
+  rule of the key of the name in `make_dir` is the text that the architecture review of
+  #3000 asked for
+  (https://github.com/synnaxlabs/foundation/pull/3000#issuecomment-6230706661).
+  Amended (2026-10-17T07:45:44Z, #3005): on a handle of `within`, the limits hold on
+  each step of every path, not only of a path that does not resolve. Take each prefix of
+  the components of the path, in order, without an end `/` or `/.`, the whole path last.
+  A relative path starts at the working directory: the steps of that directory come
+  first, each prefix of the resolved working directory, then each prefix of the path as
+  given, never a prefix of their join, since a join can be longer than the host takes
+  where neither is. So a relative path and the absolute path that it names give one
+  result where the host takes both. `../work/a` with the working directory `/out` gives
+  `Outside`, as `/out/../work/a` does. So when the working directory is outside the
+  folders and not on the way to one, a relative path gives `Outside` when a `..` takes
+  the path above the working directory or its file is outside; the fix of `ops.outside`
+  of #2919 names that directory, so the user gives an absolute path. A prefix resolves
+  as `resolve` does, and the walk stops at the first prefix that does not resolve. Each
+  prefix that resolves is checked as the whole path is, but a prefix short of the whole
+  path is checked against the folders only when a `..` after it takes the path above it,
+  by count: each name after it adds one, each `..` takes one away, and it is checked
+  when the count goes below zero, with the names of the working directory below it
+  counted first; or when nothing is there, and then also passes when it is a directory
+  on the way to a folder, by key. The hidden folders hold on each prefix that passes the
+  folders of each limit. A path through another mount of a folder, such as
+  `/System/Volumes/Data` on macOS or a bind mount on Linux, or through a link outside
+  the folders that names one, gives what the folder's own path gives, as #2898 rules.
+  The name of the first prefix that does not resolve is checked at its place, in the
+  resolved prefix before it, with no key, as a new name there is. The first step that
+  fails gives its error. When each passes and the path does not resolve, the call gives
+  the error of its resolve. So `workshop/../work/a.hcl` gives `Outside`,
+  `work/data/../a.hcl` gives `Hidden`, and a loop or a link to nothing in a hidden
+  folder that a program moves away gives `Hidden` on `read` and `write` too. `make_dir`
+  makes the directory only when each step passes. When the path did not resolve, the
+  call checks it again after it makes it, and a path with no last name, such as one that
+  ends in `..`, gets the error of the driver. The check gives an error of a step apart
+  from the result of the resolve, so an error of a step, such as `Io` of a key, makes
+  nothing. The cost is one resolve and one check for each name of the path, and for a
+  relative path one resolve of the working directory and one check for each of its
+  names, on each call of such a handle. Only `foundation mcp` of #2919 makes one. The
+  walk resolves each prefix, and a resolve on `os` walks each name of its prefix, so the
+  cost grows with the cube of the depth: a read of a file 1905 names deep in a folder
+  takes 72 s on `os` (Linux, Xeon Platinum 8488C, release), where the free handle takes
+  214 µs, and the call blocks its thread for that time. Only `foundation mcp` makes such
+  a call, in a process of its own, so no node waits on it. A resolve on `os` fails past
+  the longest path that the host takes, which bounds the walk, and a path stops at its
+  first step that does not resolve. #3018 removes this cost. The cost that stays until
+  #3018: a symbolic link in the folders that names nothing passes by its own place and
+  gives `NotFound`, while one that names a file outside gives `Outside`, or `Hidden` for
+  a file in a hidden folder, so a tool can learn whether the target of such a link is
+  there. Supersedes "the deepest prefix" rule and the rule of the key of the name in
+  `make_dir` of the amendment of 2026-10-17T06:28:34Z; the check of a name in `make_dir`
+  of the amendment of 2026-10-17T06:14:25Z is now a step of the walk for each call, with
+  no key, which supersedes its "with the key of the file at that name". It also
+  supersedes "a path that does not resolve, such as a link to nothing or a loop, passes
+  the limits by its own place" of the amendment of 2026-10-16T08:08:47Z. A step meets
+  the hidden folders only when it passes the folders of each limit, so a step that the
+  folders of a limit refuse gives `Outside`, also beside a hidden folder that is not
+  there: with the folder `/work` and nothing at the hidden folder `/out/h`, `/out/x` and
+  `/out/y` give `Outside`, whether each is there or not. A short step that is there,
+  that no `..` takes the path above, and that the folders of a limit refuse, passes, and
+  the end decides: `/out/h/a` and `/out/h/s/x` give `Outside`, whether `/out/h` is there
+  or a program moves it away, and a link in `/out/h` that names a folder leads there, as
+  a link outside the folders does. A handle of `/plans` within the handle of `/work`
+  gives `Outside` for each name in `/work`. It also supersedes "also when it is not
+  under the folders of another limit, and `Outside` is only for a path not under the
+  folders" of the amendment of 2026-10-16T08:08:47Z, and the shape decision "`Hidden`
+  wins over the `Outside` of another limit" of
+  https://github.com/synnaxlabs/foundation/pull/2869#issuecomment-6217809418, and
+  "`Hidden` over `Outside`" of the amendment of 2026-10-17T06:28:34Z
+  (https://github.com/synnaxlabs/foundation/issues/3005#issuecomment-6230686853). This
+  supersedes "in the deepest directory on its way that is there gives `Hidden`" of the
+  amendment of 2026-10-16T17:13:18Z for a directory that is not under a folder. For the
+  name of the first prefix that does not resolve, it supersedes "each other error is the
+  error of the call" of the amendment of 2026-10-16T17:13:18Z: that name takes no key,
+  since an error of its key, such as `Io` 40 for a loop, tells what a hidden folder
+  holds. Lost: the check only after a failed resolve, since
+  `/etc/foo/../../<base>/work/a.hcl` resolves only when `/etc/foo` is there, so it reads
+  `a.hcl` or gives `Outside`, which tells whether `/etc/foo` is there; `Hidden` over
+  `Outside` across prefixes, since `x/../work/data/y` then gives `Hidden` when the
+  outside `x` is there and `Outside` when it is not; a step at or above the end of the
+  walk, which needs a second pass and refuses a link outside the folders that names a
+  folder where a mount passes
+  (https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6236577385); the
+  check of each step that any `..` follows, since `/out/in/x/../a` through a link
+  `/out/in` to a folder then gives `Outside` where `/out/in/a` reads; `Hidden` for each
+  name in a directory that is not under a folder, beside a hidden folder that is not
+  there, which also refuses a name that is there; `Hidden` for a path under a hidden
+  folder that the folders of a limit refuse, which tells whether that folder is there
+  and which names it holds; `Hidden` over the `Outside` of another limit, whose fix
+  takes one step fewer, since a handle within another then tells which hidden folders
+  the other has outside its own folders. Decided by `laptop.architect-2`
+  (2026-10-17T07:45:44Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6231358043; the check
+  of the name at its place and the arm of `make_dir`, 2026-10-17T07:54:32Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6231433128; the
+  working directory as the first steps of a relative path, and the error of a step apart
+  from the resolve, 2026-10-17T08:13:25Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6231604694; the cost
+  and its deferral to #3018, 2026-10-17T08:19:29Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6231662179; the walk
+  of a relative path by its own prefixes, 2026-10-17T08:53:56Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6231983300; `make_dir`
+  of a path with no last name, 2026-10-17T08:44:48Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6231896085; the walk
+  of the working directory first, 2026-10-17T16:01:56Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6236262586; the check
+  of a short step against the folders only before a `..`, 2026-10-17T16:24:25Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6236577385; the check
+  of a short step where nothing is there, 2026-10-17T16:30:59Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6236681131; the count
+  of the `..` that takes the path above a step, 2026-10-17T16:38:50Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6236820865; the
+  folders of a limit before its hidden folders, 2026-10-17T16:59:11Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6237152656; the hidden
+  folders only on a step that the folders of each limit hold, 2026-10-17T17:16:50Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6237413267; the
+  `Outside` of another limit over `Hidden`, 2026-10-17T17:27:38Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6237608685; the
+  supersede of "`Hidden` over `Outside`" of 2026-10-17T06:28:34Z, 2026-10-17T17:38:58Z,
+  https://github.com/synnaxlabs/foundation/pull/3016#issuecomment-6237821711).
