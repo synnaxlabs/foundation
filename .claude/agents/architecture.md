@@ -37,7 +37,8 @@ Check:
   source.
 - No defense in depth: a second guard for a bug fixed elsewhere, or an error skipped
   to hide a defect.
-- Public surfaces or crate dependencies that changed without an `interface` issue.
+- A crate dependency or a public surface that changed without the `interface` issue
+  that `docs/coordination.md`, "Interface changes", asks for.
 - The 14 red flags in `docs/claude/design.md`. Name each one you find.
 - Complexity: does each new public item, field, and parameter earn its place? Callers
   that repeat the same steps mean the surface is wrong, not that a helper is missing.

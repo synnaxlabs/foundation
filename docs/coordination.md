@@ -166,13 +166,14 @@ dependency:
 
 A builder may change anything private inside the crates of its issue without asking.
 
-Two cases skip the interface issue:
-
-- A crate with no public surface yet gets one in its builder's first PR. The architect
-  reviews that surface before the PR merges.
-- An additive change to a builder's own crate that a locked decision already requires.
-  The architect approves it in a comment on the issue, and the builder makes it in its
-  PR.
+A change to the public surface of a crate of the builder's issue, also the first
+surface of a crate, skips the interface issue when no crate outside the issue uses an
+item that the change removes or changes. The plan on the issue, the PR, or the crate's
+architect in a comment on either gives the exact change, and the architect decides it
+as step 2 says before the PR merges (`laptop.director`, 2026-10-17T05:58:56Z,
+https://github.com/synnaxlabs/foundation/pull/2999#issuecomment-6230437331, and the OK
+of `laptop.architect`, 2026-10-17T07:53:30Z,
+https://github.com/synnaxlabs/foundation/pull/2993#issuecomment-6231424805).
 
 ## Cloud machines
 
@@ -225,6 +226,11 @@ budget, its limits, and step 3. Step 4 checks each by its instance, because they
   posts the person's decision on an issue or PR from the factory account, it is the
   person's own OK, approval, or waiver (also as box engineer). A builder acts on it at
   once. The person never has to comment on GitHub.
+- **While `laptop.coordinator` is paused.** While `laptop.monitor` says that
+  `laptop.coordinator` is paused, send `laptop.monitor` each link and message that a
+  skill or this doc sends to `laptop.coordinator`, because `laptop.monitor` admits in
+  its place (`laptop.monitor`, factory message `c9b2b7da`,
+  https://github.com/synnaxlabs/foundation/issues/1839#issuecomment-6231345513).
 - **The person reviews only what only the person can decide.** The architect decides the
   rest inside the decisions the person made, in a comment on the issue. The builder adds
   the ruling to `docs/decisions/` in the code PR, so the record and the code merge

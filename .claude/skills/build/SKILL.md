@@ -29,8 +29,7 @@ when its PR merges, `mcp__factory__next` clears it and starts `/build` again.
    (the first time, `gh label create "owner:$FACTORY_NAME"`). If it then has a second
    `owner:` label, remove yours and take the next one.
 4. Day lane: when fewer than two `ready` issues remain, file the next ones on the
-   milestone path (goal, crates, tests that must pass, decisions section)
-   and send the links to `laptop.coordinator`, which adds `ready`.
+   milestone path (Rules).
 5. An issue labeled `model:fable`: ask your engineer to switch with `/model` first.
 
 Read only this before you plan: the issue and its comments, the records of
@@ -153,4 +152,12 @@ take the next issue meanwhile.
   comment link.
 - Send the architect only a change to the public surface or to the meaning of a ruling.
   A fix of wording or links in a ruling needs no new approval.
+- Each issue that you file (step 4, or for your issue: its later steps, a deferral of a
+  finding of your PR, or an issue that your PR waits on) states its goal, crates, tests
+  that must pass, and decisions section, with a `crate:` label for each of its crates.
+  Send its link to `laptop.coordinator` when you file it, which admits it
+  (`/coordinate`, "Admit"). Claim it (step 3) only when step 2 takes it. Your next
+  state comment on your issue links each one that you file for it.
+- While `laptop.monitor` says that `laptop.coordinator` is paused, send to
+  `laptop.monitor` each link that this skill sends to `laptop.coordinator`.
 - Before you stop, comment your state on the issue: done, next step, open questions.
