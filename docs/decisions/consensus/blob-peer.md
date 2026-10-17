@@ -29,7 +29,10 @@
   the chunk's length is under it. A put over a file of the chunk's length takes no new
   room, so the floor does not refuse it: a node whose disk is under the floor still
   starts, and puts its founding chunks again (`laptop.architect`, 2026-10-11T05:27:01Z:
-  https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6105825342). One
+  https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6105825342). A disk
+  that is under the floor takes no new file, also not the empty chunk
+  (`laptop.architect`, 2026-10-11T10:37:28Z:
+  https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6108145440). One
   check in `Store::put` covers the puts of a peer, the chunks that a get stores, and
   local puts. The floor bounds what a peer may fill and is not a reservation: the room
   of the other puts in flight is not counted, so the overshoot is at most one chunk for

@@ -28,8 +28,8 @@ pub struct Config {
     /// put bodies and the reply heads of [`peer::serve`]. Its largest block bounds a
     /// chunk.
     pub pool: Rc<Pool>,
-    /// The bytes the store leaves free on the disk. A put that takes new room and
-    /// would leave fewer gives [`Error::Floor`].
+    /// The bytes the store leaves free on the disk. A put that would leave fewer gives
+    /// [`Error::Floor`], unless a file of the chunk's length is at its name.
     pub floor_bytes: u64,
 }
 
@@ -47,8 +47,8 @@ pub enum Error {
         /// The digest of the bytes.
         found: Digest,
     },
-    /// A put that takes new room would leave less free on the disk than
-    /// [`Config::floor_bytes`]. Nothing is written.
+    /// A put would leave less free on the disk than [`Config::floor_bytes`], and no
+    /// file of the chunk's length is at its name. Nothing is written.
     Floor {
         /// The bytes of the chunk.
         len: usize,
@@ -96,9 +96,9 @@ impl std::error::Error for Error {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Status {
     /// The times a get made a digest absent because the bytes of its file did not hash
-    /// to it. A file that a put of this open left before its end adds none. A file
-    /// that a crash tore adds one, and so does one that a put of an earlier open left
-    /// before its end.
+    /// to it. A file that a crash tore adds one, and so does one that a put of an
+    /// earlier open left before its end. A file that a put of this open left after
+    /// its first call that can make or change the file adds none, whatever it held.
     pub corruptions: u64,
     /// The gets and puts that gave [`Error::Files`]. A full disk
     /// (`files::Error::Full`) is not one.
@@ -120,7 +120,8 @@ impl From<block::Error> for Error {
 /// What the store knows of one digest.
 enum State {
     /// A file of the name was listed at open (serial 0), or a dropped put left one
-    /// (its serial). Its bytes may be torn or not durable.
+    /// after its first call that can make or change the file (its serial). Its bytes
+    /// may be torn or not durable.
     Listed(u64),
     /// A put returned in this open: its serial.
     Held(u64),
@@ -216,8 +217,9 @@ impl Store {
     /// than the floor, and [`Error::Files`] when a file call fails, among them `Full`
     /// when the disk has no room; the chunk then reads as absent. A put over a file
     /// of the chunk's length takes no new room, so the floor does not refuse it. Each
-    /// other put counts the whole chunk as new room. The floor does not count the
-    /// puts in flight.
+    /// other put counts the whole chunk as new room, so a disk that is under the floor
+    /// takes no new file, also not the empty chunk. The floor does not count the puts
+    /// in flight.
     pub async fn put(&self, digest: Digest, chunk: &Block) -> Result<(), Error> {
         let put = async {
             let largest = self.pool.largest();
@@ -430,9 +432,10 @@ struct Flight<'a> {
 }
 
 impl<'a> Flight<'a> {
-    /// Takes `digest` from the state it is in, which is not `Writing`.
+    /// Takes `digest` from the state it is in, which is absent or `Listed`. A drop
+    /// before the create of [`Flight::write`] leaves that state.
     fn new(store: &'a Store, digest: Digest) -> Self {
-        store
+        let before = store
             .chunks
             .borrow_mut()
             .insert(digest, State::Writing(BTreeMap::new()));
@@ -442,7 +445,7 @@ impl<'a> Flight<'a> {
             store,
             digest,
             serial,
-            after: Some(State::Listed(serial)),
+            after: before,
         }
     }
 
@@ -454,8 +457,10 @@ impl<'a> Flight<'a> {
         written
     }
 
-    /// Writes `chunk` to the file of the digest, durably.
-    async fn write(&self, chunk: &Block) -> Result<(), Error> {
+    /// Writes `chunk` to the file of the digest, durably. From its create, the first
+    /// call that can make or change the file, a drop leaves the digest `Listed` by the
+    /// serial of this flight.
+    async fn write(&mut self, chunk: &Block) -> Result<(), Error> {
         let store = self.store;
         let path = store.path(self.digest);
         let len =
@@ -472,6 +477,7 @@ impl<'a> Flight<'a> {
             });
         }
         let mode = Mode::Create { len };
+        self.after = Some(State::Listed(self.serial));
         let file = match store.files.open(&path, mode).await {
             // A file of another length at the name is not the chunk.
             Err(files::Error::Length { .. }) => {
@@ -660,6 +666,15 @@ mod tests {
         file.expect("the dropped put left a file").close().await;
     }
 
+    /// Fails unless the file of `digest` holds `bytes`.
+    async fn assert_bytes(node: &sim::node::Node, digest: Digest, bytes: &[u8]) {
+        let file = node.files().open(&path(digest), Mode::Read).await.unwrap();
+        let space = create_pool(BUDGET).alloc(bytes.len()).unwrap();
+        let read = file.read_at(0, space).await;
+        file.close().await;
+        assert_eq!(&read.unwrap().freeze()[..], bytes);
+    }
+
     /// Fails when the fault on `Open` of `path` is not armed: a call took it.
     async fn assert_no_open(node: &sim::node::Node, path: &Path) {
         let error = node.files().open(path, Mode::Read).await.unwrap_err();
@@ -807,6 +822,43 @@ mod tests {
                     floor_bytes: free_bytes + 1,
                 };
                 assert_eq!(error, expected);
+            })
+            .unwrap();
+        }
+
+        // A new file takes a name in the directory, which the free bytes do not show.
+        #[test]
+        fn of_the_empty_chunk_with_no_file_under_the_floor_gives_floor() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 0);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                let free_bytes = node.files().free().await.unwrap();
+                let store = open_leaving(&node, free_bytes + 1).await;
+                let error = store.put(digest, &block).await.unwrap_err();
+                let expected = Error::Floor {
+                    len: 0,
+                    free_bytes,
+                    floor_bytes: free_bytes + 1,
+                };
+                assert_eq!(error, expected);
+                let listed = node.files().list(Path::new(DIR)).await.unwrap();
+                assert_eq!(listed, Vec::<PathBuf>::new());
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn of_the_empty_chunk_over_an_empty_file_under_the_floor_stores_it() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 0);
+                create_empty(&node, &path(digest)).await;
+                let free_bytes = node.files().free().await.unwrap();
+                let store = open_leaving(&node, free_bytes + 1).await;
+                store.put(digest, &block).await.unwrap();
+                let got = store.get(digest).await.unwrap().unwrap();
+                assert_eq!(&got[..], &block[..]);
             })
             .unwrap();
         }
@@ -1877,6 +1929,60 @@ mod tests {
                 assert_absent(&store, digest).await;
                 assert!(second.await.unwrap().is_none());
                 assert_eq!(store.status(), status(1, 0));
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn counts_one_for_a_torn_listed_file_after_a_put_dropped_before_its_create() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                let (_, other) = chunk(8, 3000);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                {
+                    let mut put = pin!(store.put(digest, &block));
+                    assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                }
+                node.clock().sleep(Span::from_nanos(200_000)).await;
+                assert_bytes(&node, digest, &other).await;
+                assert_absent(&store, digest).await;
+                assert_eq!(store.status(), status(1, 0));
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn counts_none_for_a_torn_listed_file_after_a_put_dropped_in_its_create() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let (digest, block) = chunk(7, 3000);
+                let (_, other) = chunk(8, 3000);
+                node.files().create_dir(Path::new(DIR)).await.unwrap();
+                create_file(&node, &path(digest), &other).await;
+                let store = open(&node).await.unwrap();
+                drop_put(&node, &store, digest, &block).await;
+                assert_bytes(&node, digest, &other).await;
+                assert_absent(&store, digest).await;
+                assert_eq!(store.status(), status(0, 0));
+            })
+            .unwrap();
+        }
+
+        #[test]
+        fn a_put_dropped_before_its_create_leaves_no_state_for_a_digest_with_no_file() {
+            let (mut sim, node) = create_default_node(0);
+            sim.run_on(&node, |node, _| async move {
+                let store = open(&node).await.unwrap();
+                let (digest, block) = chunk(7, 3000);
+                {
+                    let mut put = pin!(store.put(digest, &block));
+                    assert_eq!(poll_once(&mut put).await, Poll::Pending);
+                }
+                let text = format!("{store:?}");
+                assert!(!text.contains("Listed"), "{text}");
             })
             .unwrap();
         }

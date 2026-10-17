@@ -71,6 +71,15 @@
   on a sound disk in normal work). Supersedes "`corruptions` keeps its rule" (item 3 of
   https://github.com/synnaxlabs/foundation/issues/2362#issuecomment-6106191288) and its
   doc of the field.
+  Amended (`laptop.architect`, 2026-10-11T20:14:21Z,
+  https://github.com/synnaxlabs/foundation/issues/1229#issuecomment-6113261777): a put
+  marks the file of its digest as left by a put of this open only from its open with
+  `Mode::Create`, its first call that can make or change the file. A put that is
+  dropped before that call leaves the state of the digest as it was, so a file that a
+  crash tore still adds one to `corruptions`. Cost: a put that is dropped during that
+  open marks the file, also when the open did not run. Lost: the mark from the start of
+  the put, which made a get of a torn file that the put did not change add none, and
+  gave a digest with no file the state of a listed file.
   `Store::get` and `Store::put` are not a hot path. Each runs one time for each chunk
   call of `blob::peer` and of `mesh`. A chunk holds bytes of a spec tree or of an
   upgrade binary (BQ1). So a chunk message is a control message, and its rate does not
