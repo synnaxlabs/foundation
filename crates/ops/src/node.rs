@@ -2,7 +2,6 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use env::clock::Clock;
 use serde_json::Value;
@@ -23,11 +22,10 @@ pub struct Node {
     pub(crate) mesh: mesh::Mesh,
     pub(crate) keys: Box<dyn Fn() -> channel::Key>,
     pub(crate) front_ends: FrontEnds,
-    pub(crate) kinds: Arc<connector::kind::Table>,
+    pub(crate) supervisor: connector::supervisor::Supervisor,
     pub(crate) hub: hub::Hub,
     pub(crate) clock: Clock,
     pub(crate) name: Name,
-    pub(crate) secrets: secret::Resolver,
     pub(crate) roots: Failures,
 }
 
@@ -40,18 +38,17 @@ pub struct Config {
     pub keys: Box<dyn Fn() -> channel::Key>,
     /// The syntax of each file extension.
     pub front_ends: FrontEnds,
-    /// Each connector kind of the node.
-    pub kinds: Arc<connector::kind::Table>,
+    /// The connector supervisor of the node. `plan` and `apply` check with its kinds,
+    /// and `plan` reads each secret of each connector of the node through its secrets,
+    /// as a run does. A remote `plan` reads only those of each connector that its
+    /// subject may apply.
+    pub supervisor: connector::supervisor::Supervisor,
     /// The hub of the node, through which `status` reads the status channels.
     pub hub: hub::Hub,
     /// The clock of the node, on which `status` waits for the status channels.
     pub clock: Clock,
     /// The name of the node.
     pub name: Name,
-    /// The resolver through which `plan` reads each secret of each connector of the
-    /// node, as a run does. A remote `plan` reads only those of each connector that its
-    /// subject may apply.
-    pub secrets: secret::Resolver,
     /// The failures of the read of the OS roots of the node. `status` gives them to a
     /// subject with `read` on the name of the node.
     pub roots: Failures,
@@ -65,22 +62,20 @@ impl Node {
             mesh,
             keys,
             front_ends,
-            kinds,
+            supervisor,
             hub,
             clock,
             name,
-            secrets,
             roots,
         } = config;
         Self {
             mesh,
             keys,
             front_ends,
-            kinds,
+            supervisor,
             hub,
             clock,
             name,
-            secrets,
             roots,
         }
     }
@@ -123,7 +118,7 @@ impl Node {
     ///
     /// The JSON error that `apply --json` writes.
     pub async fn apply(&self, path: &Path, bytes: &[u8]) -> Result<Value, Value> {
-        apply::file(path, bytes, &self.mesh, &self.kinds, &self.keys)
+        apply::file(path, bytes, &self.mesh, self.supervisor.kinds(), &self.keys)
             .await
             .map(|applied| crate::value(&applied))
             .map_err(|e| e.json())

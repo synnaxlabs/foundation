@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use connector::cancel;
 use connector::kind::{self, Channels, Context, Table};
-use connector::supervisor::{self, Supervisor};
+use connector::supervisor::Supervisor;
 use document::Document;
 use document::diagnostic::Diagnostic;
 use env::paths::Paths;
@@ -272,6 +272,12 @@ fn escapes_a_newline_in_the_text_of_an_error() {
     });
 }
 
+/// A supervisor of the kinds of [`kinds`] on `fixture`.
+fn supervisor(fixture: &Fixture) -> Supervisor {
+    let secrets = connector::testing::create_secrets(fixture.sim.files());
+    crate::common::create_supervisor(fixture, kinds(), secrets)
+}
+
 /// The node of `mesh` on `fixture`, with the kinds of [`kinds`].
 fn create_node(fixture: &Fixture, mesh: mesh::Mesh) -> Node {
     create_node_on(fixture, mesh, Failures::new(String::new(), Vec::new()))
@@ -289,11 +295,10 @@ fn create_node_on(fixture: &Fixture, mesh: mesh::Mesh, roots: Failures) -> Node 
         mesh,
         keys: Box::new(key),
         front_ends: front_ends(),
-        kinds: Arc::new(kinds()),
+        supervisor: supervisor(fixture),
         hub: fixture.hub.clone(),
         clock: fixture.sim.clock(),
         name: fixture.name.clone(),
-        secrets: connector::testing::create_secrets(fixture.sim.files()),
         roots,
     })
 }
@@ -331,16 +336,7 @@ async fn applied_alone(node: &Node, text: &str) {
 /// Runs a supervisor of each connector `names` of the spec of `node`, as the node
 /// does, until the run ends. Gives the token that cancels each run.
 async fn supervise(fixture: &Fixture, node: &Node, names: &[&str]) -> cancel::Token {
-    let supervisor = Supervisor::new(supervisor::Config {
-        kinds: Arc::new(kinds()),
-        clock: fixture.sim.clock(),
-        entropy: fixture.sim.entropy(),
-        net: fixture.sim.net(),
-        roots: connector::http::Roots::default(),
-        tasks: fixture.tasks.clone(),
-        hub: fixture.hub.clone(),
-        secrets: connector::testing::create_secrets(fixture.sim.files()),
-    });
+    let supervisor = supervisor(fixture);
     let spec = node.mesh().spec().await.expect("a spec");
     let cancel = cancel::Token::new();
     for connector in names {

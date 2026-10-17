@@ -10,9 +10,16 @@ use spec::definition;
 use std::collections::{BTreeMap, BTreeSet};
 use types::name::{self, Name};
 
-use crate::{Definition, Entry, Found, LONG_NAME, span};
+use crate::{
+    Definition, Entry, Found, LONG_NAME, duplicate, private_key, span, unfilled,
+};
 
 const IMPLIED_CHANNEL: Code = Code::new("config.implied-channel");
+const NO_CONNECTOR: Code = Code::new("config.no-connector");
+
+const KIND_FIX: &str = "Add a `kind` attribute with the connector's kind";
+const NODE_FIX: &str =
+    "Add a `node` attribute with the name of the node that runs it, such as \"edge\"";
 
 /// The keys that `check` reads. The kind reads each other key and block.
 const KEYS: [&str; 2] = ["kind", "node"];
@@ -25,11 +32,8 @@ pub(crate) fn check(
     block: &Block,
     key: Option<&Name>,
 ) -> Option<Definition> {
-    let fix = "Add a `kind` attribute with the connector's kind";
-    let kind = found.required(block, "kind", read::name, fix.into());
-    let fix = "Add a `node` attribute with the name of the node that runs it, such as \
-               \"edge\"";
-    let node = found.required(block, "node", read::name, fix.into());
+    let kind = found.required(block, "kind", read::name, KIND_FIX.into());
+    let node = found.required(block, "node", read::name, NODE_FIX.into());
     let config = match Checked::new(config(block)) {
         Ok(config) => config,
         Err(error) => {
@@ -60,6 +64,145 @@ pub(crate) fn check(
     Some(Definition::Spec(definition::Definition::Connector(
         connector,
     )))
+}
+
+/// The `connector` block with the label `name` in `documents`: its kind, its node, and
+/// its body without `kind` and `node`. It runs no check of a kind. Of the other
+/// blocks, it reads only private keys, labels, and the bodies of the `connector`
+/// blocks whose label is `name` in any ASCII case.
+///
+/// # Errors
+///
+/// `config.private-key` at each private key in `documents`, and then no other problem.
+/// Else the problems that [`check`](crate::check) gives at each `connector` block whose
+/// label is `name` in any ASCII case, other than those of its kind and
+/// `config.implied-channel`, which the other connectors decide, as it gives them when
+/// no other block holds a `fill`: `config.unfilled` and `config.bad-fill` in its body,
+/// and then no other problem; else `config.reserved-name` and `config.duplicate-name`
+/// at its label; else `config.no-connector` when no `connector` block has the label
+/// `name`, with the names of the connector blocks that `check` takes in the fix; else
+/// the problems of `kind` and `node` in the block, and `document.too-deep` when its
+/// body nests deeper than `document::encoding::Checked` takes, in span order; else
+/// `config.long-name` at its label when a status name that it has with no kind is
+/// longer than [`Name::MAX_BYTES`].
+pub fn find(documents: &[Document], name: &Name) -> Result<Connector, Vec<Diagnostic>> {
+    let alarms = private_key::alarms(documents);
+    if !alarms.is_empty() {
+        return Err(alarms);
+    }
+    let blocks = crate::blocks(documents);
+    let connector = definition::Kind::Connector;
+    let lower = name.as_str().to_ascii_lowercase();
+    let at_name = |key: &Name| key.as_str().to_ascii_lowercase() == lower;
+    let bodies = crate::names(&blocks, connector)
+        .filter(|(key, ..)| at_name(key))
+        .map(|(.., block)| &block.body);
+    let unfilled = unfilled::problems(bodies);
+    if !unfilled.is_empty() {
+        return Err(unfilled);
+    }
+    let Labels {
+        problems,
+        names,
+        found,
+    } = labels(&blocks, &lower);
+    if !problems.is_empty() {
+        return Err(problems);
+    }
+    let Some(block) = found.and_then(|(key, block)| (&key == name).then_some(block))
+    else {
+        let fix = if names.is_empty() {
+            format!("Add a `connector` block with the name {:?}", name.as_str())
+        } else {
+            let names: Vec<_> = names.iter().map(Name::as_str).collect();
+            format!("Use one of {names:?}")
+        };
+        let message = format!(
+            "no `connector` block of the files has the name {:?}",
+            name.as_str()
+        );
+        return Err(vec![Diagnostic::new(NO_CONNECTOR, None, message, fix)]);
+    };
+    let kind = crate::required(block, "kind", read::name, KIND_FIX.into());
+    let node = crate::required(block, "node", read::name, NODE_FIX.into());
+    let config = Checked::new(config(block)).map_err(|error| Diagnostic::from(&error));
+    match (kind, node, config) {
+        (Ok(kind), Ok(node), Ok(config)) => {
+            let at = block.labels.first().and_then(|label| label.span);
+            writes(name, Channels::default(), at).map_err(|problem| vec![problem])?;
+            Ok(Connector::new(kind, node, config))
+        }
+        (kind, node, config) => {
+            let mut problems: Vec<_> = [kind.err(), node.err(), config.err()]
+                .into_iter()
+                .flatten()
+                .collect();
+            crate::sort(&mut problems);
+            Err(problems)
+        }
+    }
+}
+
+/// What `check` makes of the labels of `blocks` at one name in ASCII lower case.
+struct Labels<'a> {
+    /// The problems at each `connector` label at the name.
+    problems: Vec<Diagnostic>,
+    /// The key of each `connector` block that `check` takes, at any name.
+    names: BTreeSet<Name>,
+    /// The first `connector` block that `check` takes at the name, with its key.
+    found: Option<(Name, &'a Block)>,
+}
+
+/// The labels of `blocks`, in span order, at the name `lower` in ASCII lower case.
+fn labels<'a>(blocks: &[&'a Block], lower: &str) -> Labels<'a> {
+    let connector = definition::Kind::Connector;
+    let at_name = |key: &Name| key.as_str().to_ascii_lowercase() == lower;
+    let mut at = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut labels = Labels {
+        problems: Vec::new(),
+        names: BTreeSet::new(),
+        found: None,
+    };
+    for &block in blocks {
+        let (Some(&(kind, _)), [label]) = (
+            crate::KINDS
+                .iter()
+                .find(|(kind, _)| kind.as_str() == &*block.keyword),
+            block.labels.as_slice(),
+        ) else {
+            continue;
+        };
+        match crate::key(label, kind) {
+            Ok(key) => {
+                let first = seen.insert(key.as_str().to_ascii_lowercase());
+                if kind == connector && first {
+                    labels.names.insert(key.clone());
+                }
+                if at_name(&key) {
+                    at.push((label, kind));
+                    if kind == connector {
+                        labels.found = labels.found.or(Some((key, block)));
+                    }
+                }
+            }
+            Err(problem) => {
+                if kind == connector
+                    && read::label(label).is_ok_and(|key| at_name(&key))
+                {
+                    labels.problems.push(problem);
+                }
+            }
+        }
+    }
+    // `check` reports a repeat at the later block, so only a later `connector` counts.
+    if let Some((&first, later)) = at.split_first() {
+        let later = later.iter().filter(|(_, kind)| *kind == connector);
+        let at = std::iter::once(first).chain(later.copied()).collect();
+        let at = duplicate::Labels::from([(lower.into(), at)]);
+        labels.problems.extend(duplicate::in_labels(&at));
+    }
+    labels
 }
 
 /// The body of `block` without the keys that `check` reads.

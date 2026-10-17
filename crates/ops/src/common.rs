@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use connector::kind::{self, Channels, Context, Table};
+use connector::supervisor::{self, Supervisor};
 use document::Document;
 use document::diagnostic::Diagnostic;
 use env::files::{self, Operation};
@@ -165,13 +166,30 @@ pub(crate) fn create_config(
         mesh,
         keys: Box::new(key),
         front_ends,
-        kinds: Arc::new(create_kinds()),
+        supervisor: create_supervisor(fixture, create_kinds(), secrets),
         hub: fixture.hub.clone(),
         clock: fixture.sim.clock(),
         name: fixture.name.clone(),
-        secrets,
         roots: crate::roots::Failures::new(String::new(), Vec::new()),
     }
+}
+
+/// A supervisor of `kinds` on `fixture`, which reads secrets through `secrets`.
+pub(crate) fn create_supervisor(
+    fixture: &Fixture,
+    kinds: Table,
+    secrets: secret::Resolver,
+) -> Supervisor {
+    Supervisor::new(supervisor::Config {
+        kinds: Arc::new(kinds),
+        clock: fixture.sim.clock(),
+        entropy: fixture.sim.entropy(),
+        net: fixture.sim.net(),
+        roots: connector::http::Roots::default(),
+        tasks: fixture.tasks.clone(),
+        hub: fixture.hub.clone(),
+        secrets,
+    })
 }
 
 /// The plan of `files` on `applied` at `base`, as `Node::plan` makes it with no read

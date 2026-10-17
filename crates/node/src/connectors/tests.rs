@@ -192,6 +192,16 @@ impl Kind for Sink {
     }
 }
 
+/// The runs of the node `NODE` on a supervisor of `config`, on its tasks.
+fn runs(config: connector::supervisor::Config) -> Runs {
+    let tasks = config.tasks.clone();
+    Runs::new(
+        connector::supervisor::Supervisor::new(config),
+        tasks,
+        name(NODE),
+    )
+}
+
 /// `config` with its tasks counted, and the count of its tasks that have not ended.
 fn count(
     mut config: connector::supervisor::Config,
@@ -320,7 +330,7 @@ fn record(steps: Vec<Step>, scene: Scene) -> Recorded {
         let hub = config.hub.clone();
         let clock = node.clock();
         let start = clock.now();
-        let mut runs = Runs::new(config, name(NODE));
+        let mut runs = runs(config);
         let (mut names, mut live) = (Vec::new(), Vec::new());
         for (at, spec) in steps {
             clock.sleep_until(start + at).await;
@@ -720,7 +730,7 @@ fn starts_of_write(flush: Span) -> Result<(usize, usize), ::sim::Error> {
         let hub = config.hub.clone();
         let clock = node.clock();
         let start = clock.now();
-        let mut runs = Runs::new(config, name(NODE));
+        let mut runs = runs(config);
         let first = definitions(&[("plant.a", "write", NODE, 0)]);
         hub.set_definitions(&first);
         runs.apply(&first);
@@ -791,8 +801,7 @@ fn removal_as_the_mesh_time_arrives(seed: u64) -> (usize, usize) {
         let start = clock.now();
         let (config, _) = create(&node, &tasks, kinds, Mesh::Late(ms(1_000))).await;
         let hub = config.hub.clone();
-        let runs =
-            std::rc::Rc::new(std::cell::RefCell::new(Runs::new(config, name(NODE))));
+        let runs = std::rc::Rc::new(std::cell::RefCell::new(runs(config)));
         let mut placed = definitions(&[("plant.a", "quick", NODE, 0)]);
         // The channels of `plant.b` let a probe learn when the mesh time arrives.
         let probe = definitions(&[("plant.b", "quick", "plant.edge", 0)]);
@@ -962,7 +971,7 @@ fn a_removal_ends_the_wait_of_its_connector_for_the_other_first_opens() {
         let start = clock.now();
         let (config, live) = create(&node, &tasks, kinds, Mesh::Late(ms(5_000))).await;
         let hub = config.hub.clone();
-        let mut runs = Runs::new(config, name(NODE));
+        let mut runs = runs(config);
         let placed =
             definitions(&[("plant.a", "none", NODE, 0), ("plant.b", "quick", NODE, 0)]);
         hub.set_definitions(&placed);
@@ -1128,7 +1137,7 @@ fn change_at_the_mesh_time(seed: u64, yields: usize) -> Option<bool> {
         let clock = node.clock();
         let start = clock.now();
         let hub = config.hub.clone();
-        let mut runs = Runs::new(config, name(NODE));
+        let mut runs = runs(config);
         let mut apply = |version| {
             let spec = [
                 ("plant.a", "sink", NODE, version),
@@ -1238,7 +1247,7 @@ fn respec(
         let hub = config.hub.clone();
         let clock = node.clock();
         let start = clock.now();
-        let mut runs = Runs::new(config, name(NODE));
+        let mut runs = runs(config);
         hub.set_definitions(&first);
         runs.apply(&first);
         clock.sleep_until(start + ms(1_000)).await;
@@ -1393,7 +1402,7 @@ fn in_region(
             secrets,
         };
         let clock = node.clock();
-        let mut runs = Runs::new(config, name(NODE));
+        let mut runs = runs(config);
         let mut apply = async |(spec, channels): (Vec<Placed>, Vec<_>)| {
             let mut definitions = definitions(&spec);
             definitions.extend(channels);

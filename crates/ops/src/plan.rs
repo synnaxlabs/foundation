@@ -79,7 +79,7 @@ impl Documents {
         applied: &BTreeMap<Name, Definition>,
         readable: impl Fn(&Name) -> bool,
     ) -> Result<(Output, config::plan::Plan), Error> {
-        let entries = config::check(&self.documents, &node.kinds)
+        let entries = config::check(&self.documents, node.supervisor.kinds())
             .map_err(|diagnostics| Error::config(diagnostics, &self.sources))?;
         let mut calls = Vec::new();
         for (name, entry) in &entries {
@@ -93,7 +93,7 @@ impl Documents {
         }
         let mut unresolved = Vec::new();
         for (source, span) in calls {
-            if let Err(error) = node.secrets.get(&source).await {
+            if let Err(error) = node.supervisor.secrets().get(&source).await {
                 unresolved.push(self::unresolved(
                     span,
                     format!("the secret {source}: {error}"),
@@ -102,7 +102,7 @@ impl Documents {
         }
         let members = node.mesh.names();
         match (
-            self.changes(base, applied, &members, &node.kinds),
+            self.changes(base, applied, &members, node.supervisor.kinds()),
             unresolved.is_empty(),
         ) {
             (Ok(planned), true) => Ok(planned),

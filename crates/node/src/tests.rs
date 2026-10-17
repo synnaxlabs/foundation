@@ -4732,28 +4732,39 @@ pub(crate) mod port {
             start(host, region(&[member(OWN, &KEY, host)]))
         }
 
-        /// The operations of the member `key` of `mesh` on `hub`, as a node makes them,
-        /// with the secrets on `files`.
+        /// The operations of the member `key` of `mesh` on `hub` and `tasks`, as a node
+        /// makes them, with the clock, network, and secrets of `host`.
         fn operations(
             mesh: &::mesh::Mesh,
             key: types::node::Key,
             hub: &::hub::Hub,
-            clock: env::clock::Clock,
+            host: &sim::node::Node,
+            tasks: &env::tasks::Tasks,
             time: &clock::Reader,
             entropy: &env::entropy::Entropy,
-            files: env::files::Files,
         ) -> Rc<ops::Node> {
             let member = mesh.member(key).expect("the peer is a member");
             let name = member.card.card().name.clone();
+            let secrets = connector::testing::create_secrets(host.files());
+            let supervisor =
+                connector::supervisor::Supervisor::new(connector::supervisor::Config {
+                    kinds: Arc::new(crate::kinds()),
+                    clock: host.clock(),
+                    entropy: entropy.clone(),
+                    net: host.net(),
+                    roots: connector::http::Roots::default(),
+                    tasks: tasks.clone(),
+                    hub: hub.clone(),
+                    secrets,
+                });
             Rc::new(ops::Node::new(ops::Config {
                 mesh: mesh.clone(),
                 keys: crate::channel_keys(time, entropy),
                 front_ends: crate::front_ends(),
-                kinds: Arc::new(crate::kinds()),
+                supervisor,
                 hub: hub.clone(),
-                clock,
+                clock: host.clock(),
                 name,
-                secrets: connector::testing::create_secrets(files),
                 roots: ops::roots::Failures::new(String::new(), Vec::new()),
             }))
         }
@@ -6521,9 +6532,7 @@ pub(crate) mod port {
                 } = open(&own, &tasks, identity, founding).await;
                 let settings = crate::Settings::default();
                 let clock = own.clock();
-                let files = own.files();
-                let ops =
-                    operations(&mesh, key, &hub, clock.clone(), &time, &entropy, files);
+                let ops = operations(&mesh, key, &hub, &own, &tasks, &time, &entropy);
                 let port = route::accept(
                     transport,
                     crate::task::Handles {

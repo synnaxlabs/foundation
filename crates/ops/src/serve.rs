@@ -418,7 +418,7 @@ impl<'a> Check<'a> {
 /// The reply of `plan` of `files`: its output, then the plan file.
 async fn plan(node: &Node, subject: &Name, files: &[File]) -> Result<Body, Error> {
     let files = Documents::read(files, &node.front_ends)?;
-    let names = files.names(&node.kinds)?;
+    let names = files.names(node.supervisor.kinds())?;
     let spec = used::spec(&node.mesh).await?;
     let check = Check::new(&spec, subject);
     check.names(Action::Plan, &names)?;
@@ -486,7 +486,9 @@ async fn apply(node: &Node, subject: &Name, bytes: &[u8]) -> Result<Body, Error>
     if plan.changes.is_empty() && plan.homes.is_empty() {
         return Err(check.denied(Action::Apply, On::Nothing));
     }
-    let effect = apply::apply(plan, spec, &node.mesh, &node.kinds, &node.keys).await?;
+    let effect =
+        apply::apply(plan, spec, &node.mesh, node.supervisor.kinds(), &node.keys)
+            .await?;
     Ok(Body::line(&Answer::Done { output: &effect })?)
 }
 

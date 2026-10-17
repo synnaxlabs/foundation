@@ -1240,29 +1240,29 @@ impl Serve {
                     let member =
                         member.expect("invariant: a mesh opens only on a member");
                     let name = member.card.card().name.clone();
-                    let kinds = Arc::new(kinds());
+                    let supervisor = connector::supervisor::Supervisor::new(
+                        connector::supervisor::Config {
+                            kinds: Arc::new(kinds()),
+                            clock: clock.clone(),
+                            entropy: entropy.clone(),
+                            net,
+                            roots: trusted,
+                            tasks: tasks.clone(),
+                            hub: hub.clone(),
+                            secrets,
+                        },
+                    );
                     let ops = Rc::new(ops::Node::new(ops::Config {
                         mesh: mesh.clone(),
                         keys: channel_keys(&time, &entropy),
                         front_ends: front_ends(),
-                        kinds: Arc::clone(&kinds),
+                        supervisor: supervisor.clone(),
                         hub: hub.clone(),
                         clock: clock.clone(),
                         name: name.clone(),
-                        secrets: secrets.clone(),
                         roots: ops::roots::Failures::new(text, failures),
                     }));
-                    let config = connector::supervisor::Config {
-                        kinds,
-                        clock: clock.clone(),
-                        entropy,
-                        net,
-                        roots: trusted,
-                        tasks: tasks.clone(),
-                        hub: hub.clone(),
-                        secrets,
-                    };
-                    let runs = connectors::Runs::new(config, name);
+                    let runs = connectors::Runs::new(supervisor, tasks.clone(), name);
                     (Some(ops), Some(follow(mesh, hub.clone(), runs).await))
                 } else {
                     drop((text, failures));

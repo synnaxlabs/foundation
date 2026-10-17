@@ -16,6 +16,8 @@ mod subject;
 mod unfilled;
 mod walk;
 
+pub use self::connector::find as connector;
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use ::connector::kind::Table;
@@ -134,26 +136,20 @@ fn checked<'a>(
     if !unfilled.is_empty() {
         return Err(unfilled);
     }
-    let mut blocks: Vec<_> = documents
-        .iter()
-        .flat_map(|document| &document.blocks)
-        .collect();
-    // At a repeated key, the first block in span order is kept, no span first, then in
-    // the order of `documents`. `duplicate::in_labels` relies on this order.
-    blocks.sort_by_key(|block| block.labels.first().and_then(|label| label.span));
+    let blocks = blocks(documents);
     let mut found = Found {
         entries: BTreeMap::new(),
         diagnostics: Vec::new(),
         labels: BTreeMap::new(),
         channels: names(&blocks, Kind::Channel)
-            .map(|(name, _)| name)
+            .map(|(name, _, _)| name)
             .collect(),
         connectors: BTreeMap::new(),
         kinds,
         blocks: BTreeMap::new(),
         writes: BTreeMap::new(),
     };
-    for (name, label) in names(&blocks, Kind::Connector) {
+    for (name, label, _) in names(&blocks, Kind::Connector) {
         let lower = name.as_str().to_ascii_lowercase().into();
         found.connectors.entry(lower).or_insert(label);
     }
@@ -205,19 +201,81 @@ fn sort(diagnostics: &mut [Diagnostic]) {
     diagnostics.sort_by_key(|diagnostic| diagnostic.span);
 }
 
-/// The name and the label of each block of `kind` in `blocks` whose one label reads as
-/// a name, in the order of `blocks`. `check` reports each other label.
+/// The blocks of `documents` in span order of their first label, no span first, then
+/// in the order of `documents`. At a repeated key, the first block in this order is
+/// kept, and `duplicate::in_labels` relies on it.
+fn blocks(documents: &[Document]) -> Vec<&Block> {
+    let mut blocks: Vec<_> = documents
+        .iter()
+        .flat_map(|document| &document.blocks)
+        .collect();
+    blocks.sort_by_key(|block| block.labels.first().and_then(|label| label.span));
+    blocks
+}
+
+/// The name, the label, and the block of each block of `kind` in `blocks` whose one
+/// label reads as a name, in the order of `blocks`. `check` reports each other label.
 fn names<'a>(
     blocks: &[&'a Block],
     kind: Kind,
-) -> impl Iterator<Item = (Name, &'a Label)> {
+) -> impl Iterator<Item = (Name, &'a Label, &'a Block)> {
     blocks
         .iter()
         .filter(move |block| &*block.keyword == kind.as_str())
         .filter_map(|block| match block.labels.as_slice() {
-            [label] => Some((read::label(label).ok()?, label)),
+            [label] => Some((read::label(label).ok()?, label, *block)),
             _ => None,
         })
+}
+
+/// The tree key of `label`, a label of a block of `kind`.
+///
+/// # Errors
+///
+/// `config.long-name` when the key is too long for `kind`, `config.reserved-name` when
+/// a segment starts with `@`, and the problem of `read::label` when it is not a name.
+fn key(label: &Label, kind: Kind) -> Result<Name, Diagnostic> {
+    let keyword = kind.as_str();
+    match kind.key(&label.text) {
+        Ok(key) => Ok(key),
+        Err(key::Error::Long { most }) => Err(Diagnostic::new(
+            LONG_NAME,
+            label.span,
+            format!(
+                "the name {:?} is {} bytes, and the most for the `{keyword}` block is \
+                 {most}",
+                label.text,
+                label.text.len()
+            ),
+            format!("Shorten the name to at most {most} bytes"),
+        )),
+        Err(key::Error::Name(_)) => Err(read::label(label)
+            .expect_err("invariant: `read::label` refuses each label that `Kind::key` refuses as a name")),
+        Err(error @ key::Error::Reserved) => Err(Diagnostic::new(
+            RESERVED_NAME,
+            label.span,
+            format!(
+                "{:?} has a segment that starts with `@`, which is reserved",
+                label.text
+            ),
+            error.fix().into(),
+        )),
+    }
+}
+
+/// The attribute `key` of `block` as `read` reads it.
+///
+/// # Errors
+///
+/// `document.missing-attribute` with `fix` when the block has none, and the problem of
+/// `read`.
+fn required<T>(
+    block: &Block,
+    key: &str,
+    read: impl FnOnce(&Value) -> Result<T, Diagnostic>,
+    fix: String,
+) -> Result<T, Diagnostic> {
+    read::required(&block.body, &of(block), block.keyword_span, key, read, fix)
 }
 
 /// The channel and connector names of the Documents, the connector kinds, and what
@@ -251,42 +309,9 @@ impl<'a> Found<'a> {
     /// the label's span, only for the first block at the key in any ASCII case.
     /// [`duplicate::in_labels`] reports a key that repeats.
     fn key(&mut self, block: &'a Block, kind: Kind) -> Option<(Name, Option<Span>)> {
-        let keyword = kind.as_str();
         let fix = "Give the block one label, its name, such as \"site_a.budget\"";
         let [label] = self.report(read::labels::<1>(block, fix.into())).ok()?;
-        let key = match kind.key(&label.text) {
-            Ok(key) => key,
-            Err(key::Error::Long { most }) => {
-                self.diagnostics.push(Diagnostic::new(
-                    LONG_NAME,
-                    label.span,
-                    format!(
-                        "the name {:?} is {} bytes, and the most for the `{keyword}` \
-                         block is {most}",
-                        label.text,
-                        label.text.len()
-                    ),
-                    format!("Shorten the name to at most {most} bytes"),
-                ));
-                return None;
-            }
-            Err(key::Error::Name(_)) => {
-                self.report(read::label(label)).ok()?;
-                unreachable!("`read::label` refuses each label that `Kind::key` does");
-            }
-            Err(error @ key::Error::Reserved) => {
-                self.diagnostics.push(Diagnostic::new(
-                    RESERVED_NAME,
-                    label.span,
-                    format!(
-                        "{:?} has a segment that starts with `@`, which is reserved",
-                        label.text
-                    ),
-                    error.fix().into(),
-                ));
-                return None;
-            }
-        };
+        let key = self.report(key(label, kind)).ok()?;
         let first = duplicate::add(&mut self.labels, &key, label, kind);
         first.then_some((key, label.span))
     }
@@ -352,8 +377,7 @@ impl<'a> Found<'a> {
         read: impl FnOnce(&Value) -> Result<T, Diagnostic>,
         fix: String,
     ) -> Result<T, Reported> {
-        let at = block.keyword_span;
-        self.report(read::required(&block.body, &of(block), at, key, read, fix))
+        self.report(required(block, key, read, fix))
     }
 
     /// Reports that `block` has none of the attributes `keys`.

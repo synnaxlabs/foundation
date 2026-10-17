@@ -60,6 +60,19 @@ impl Supervisor {
         Self(Rc::new(config))
     }
 
+    /// The kinds of the connectors that the supervisor runs.
+    #[must_use]
+    pub fn kinds(&self) -> &kind::Table {
+        &self.0.kinds
+    }
+
+    /// The sources that [`kind::Context::secret`] reads for the connectors of the
+    /// supervisor.
+    #[must_use]
+    pub fn secrets(&self) -> &secret::Resolver {
+        &self.0.secrets
+    }
+
     /// Browses the device of the connector block `config` of `kind` as `query`
     /// asks, with the network, clock, randomness, and secrets of the supervisor. It
     /// connects apart from any run of the connector and keeps no state after it
@@ -956,6 +969,16 @@ mod tests {
             Err(Error::Config(diagnostics)) => diagnostics,
             other => panic!("a config error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn gives_the_kinds_of_its_config() {
+        let kinds = run_on(|node, tasks| async move {
+            let kinds = Table::new().with("script", Script::default());
+            let inputs = create_config(&node, tasks, kinds, "plant.script").await;
+            format!("{:?}", Supervisor::new(inputs).kinds())
+        });
+        assert_eq!(kinds, "{\"script\"}");
     }
 
     #[test]

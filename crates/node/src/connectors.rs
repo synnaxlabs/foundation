@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use connector::cancel;
-use connector::supervisor::{self, Supervisor};
+use connector::supervisor::Supervisor;
+use env::tasks::Tasks;
 use spec::connector::Connector;
 use spec::definition::Definition;
 use types::channel;
@@ -138,11 +139,11 @@ impl Loop {
 
 impl Runs {
     /// Runs no connector of the node `node`, its name in the region, yet. Each loop is
-    /// a future on the tasks of `supervisor`, on a supervisor made from it.
-    pub(crate) fn new(supervisor: supervisor::Config, node: Name) -> Self {
+    /// a future on `tasks`, the tasks of the shard of `supervisor`.
+    pub(crate) fn new(supervisor: Supervisor, tasks: Tasks, node: Name) -> Self {
         Self {
-            scope: Scope::new(supervisor.tasks.clone()),
-            supervisor: Supervisor::new(supervisor),
+            scope: Scope::new(tasks),
+            supervisor,
             opens: Rc::new(Opens {
                 pending: Cell::new(0),
                 settled: RefCell::new(cancel::Token::new()),
