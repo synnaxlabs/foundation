@@ -614,11 +614,17 @@
   the `ops::cli` sentence by `laptop.architect` (2026-10-11 08:10 UTC,
   https://github.com/synnaxlabs/foundation/issues/1744#issuecomment-6106994274). One
   bound holds for a read: the bytes of a file, or the bytes of the entry paths of a
-  directory. A path that ends in `/`, `.`, or `..` names a directory, and the empty path
-  names nothing. `env::paths::names_directory` holds the rule for the text of a path,
-  and each driver asks it. Lost: a copy in each driver. The copy of `os` lost its `..`
-  arm once, and the cases that both drivers share passed (rounds 4 and 5 of #2424;
-  `laptop.architect-2`, 2026-10-11T20:23:25Z:
+  directory. Past the bound, the read gives `Found::Large` with the `Kind` of what is at
+  the path, so a caller tells a large file from a large directory with one read. Lost:
+  two variants `LargeFile` and `LargeDirectory`, whose names repeat "Large"; a field
+  `directory: bool`, a bool where a type belongs (`laptop.architect-2`,
+  2026-10-17T04:33:58Z,
+  https://github.com/synnaxlabs/foundation/issues/2526#issuecomment-6229681928). A path
+  that ends in `/`, `.`, or `..` names a directory, and the empty path names nothing.
+  `env::paths::names_directory` holds the rule for the text of a path, and each driver
+  asks it. Lost: a copy in each driver. The copy of `os` lost its `..` arm once, and the
+  cases that both drivers share passed (rounds 4 and 5 of #2424; `laptop.architect-2`,
+  2026-10-11T20:23:25Z:
   https://github.com/synnaxlabs/foundation/pull/2424#issuecomment-6113352507, item 2).
   It splits the text where `std::path::is_separator` says, so on Windows it also splits
   at `\`. Each other rule of a Windows path, as a drive, a device name, or a verbatim

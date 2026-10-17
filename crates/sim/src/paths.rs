@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
-use env::paths::{Error, Found, Key, names_directory};
+use env::paths::{Error, Found, Key, Kind, names_directory};
 
 use crate::{DIRECTORY, EXISTS, LOOP, NOT_DIRECTORY};
 
@@ -45,7 +45,7 @@ impl Paths {
         let at = self.check(node, path)?;
         if let Some((_, Entry::File(bytes))) = self.entries.get(&(node, at.clone())) {
             if bytes.len() > most {
-                return Ok(Found::Large);
+                return Ok(Found::Large(Kind::File));
             }
             return Ok(Found::File(bytes.clone()));
         }
@@ -60,7 +60,7 @@ impl Paths {
         let entries: Vec<_> = names.into_iter().map(|name| path.join(name)).collect();
         let size = entries.iter().map(|entry| entry.as_os_str().len());
         if size.fold(0_usize, usize::saturating_add) > most {
-            return Ok(Found::Large);
+            return Ok(Found::Large(Kind::Directory));
         }
         Ok(Found::Directory(entries))
     }

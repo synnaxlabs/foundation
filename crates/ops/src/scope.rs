@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use env::paths::{self, Found, Paths};
+use env::paths::{self, Found, Kind, Paths};
 use wire::hub::client::BODY_BYTES_MAX;
 
 use crate::error::{Error, Unread, Unusable, Unwritten};
@@ -70,14 +70,11 @@ impl Scope {
             let mut folders = Vec::with_capacity(files.len());
             for file in files {
                 let resolved = resolve(file)?;
-                // A directory with entries is `Large` too, and only it reads with an
-                // end in `/`.
                 match paths.read(&resolved, 0) {
-                    Ok(Found::Directory(_)) => folders.push(resolved),
-                    Ok(Found::Large) if paths.read(&resolved.join(""), 0).is_ok() => {
+                    Ok(Found::Directory(_) | Found::Large(Kind::Directory)) => {
                         folders.push(resolved);
                     }
-                    Ok(Found::File(_) | Found::Large) => {
+                    Ok(Found::File(_) | Found::Large(Kind::File)) => {
                         return Err(folder(file, Unusable::File));
                     }
                     Err(error) => return Err(folder(file, Unusable::Failed(error))),
@@ -183,8 +180,10 @@ impl Scope {
         };
         match self.paths.read(path, most()) {
             Ok(Found::File(bytes)) => Ok(bytes),
-            Ok(Found::Large) => Err(Error::LargeRequest),
-            Ok(Found::Directory(_)) => Err(unread(Unread::Directory)),
+            Ok(Found::Large(Kind::File)) => Err(Error::LargeRequest),
+            Ok(Found::Directory(_) | Found::Large(Kind::Directory)) => {
+                Err(unread(Unread::Directory))
+            }
             Err(paths::Error::NotFound) => Err(unread(Unread::NotFound)),
             Err(paths::Error::Io { code }) => Err(unread(Unread::Io { code })),
             Err(

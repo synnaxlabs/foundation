@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::slice;
 
-use env::paths::{Error, Found, Paths};
+use env::paths::{Error, Found, Kind, Paths};
 
 /// What a case runs on.
 pub(crate) struct Host<'a> {
@@ -114,8 +114,8 @@ pub(crate) fn a_file_over_the_bound_reads_large(host: &Host<'_>) {
     let (paths, dir) = (host.paths, host.dir);
     let path = dir.join("plant.hcl");
     paths.write(&path, b"node {}").unwrap();
-    assert_eq!(paths.read(&path, 6), Ok(Found::Large));
-    assert_eq!(paths.read(&path, 0), Ok(Found::Large));
+    assert_eq!(paths.read(&path, 6), Ok(Found::Large(Kind::File)));
+    assert_eq!(paths.read(&path, 0), Ok(Found::Large(Kind::File)));
 }
 
 pub(crate) fn a_directory_lists_in_name_order(host: &Host<'_>) {
@@ -146,7 +146,8 @@ pub(crate) fn a_directory_whose_paths_pass_the_bound_reads_large(host: &Host<'_>
     let size = entries.iter().map(|entry| entry.as_os_str().len()).sum();
     let listed = Ok(Found::Directory(entries.to_vec()));
     assert_eq!(paths.read(&config, size), listed);
-    assert_eq!(paths.read(&config, size - 1), Ok(Found::Large));
+    let large = Ok(Found::Large(Kind::Directory));
+    assert_eq!(paths.read(&config, size - 1), large);
 }
 
 pub(crate) fn a_path_with_nothing_is_not_found(host: &Host<'_>) {

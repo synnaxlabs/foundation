@@ -417,10 +417,20 @@ impl Key {
 pub enum Found {
     /// A file of at most `most` bytes: its bytes.
     File(Vec<u8>),
-    /// A file of more than `most` bytes, or a directory whose entry paths hold more.
-    Large,
+    /// A file of more than `most` bytes, or a directory whose entry paths hold more:
+    /// which of the two.
+    Large(Kind),
     /// A directory: the path of each entry, in name order.
     Directory(Vec<PathBuf>),
+}
+
+/// What is at a path: a file or a directory.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// A regular file.
+    File,
+    /// A directory.
+    Directory,
 }
 
 /// Why a call of [`Paths`] failed.
@@ -535,7 +545,7 @@ mod tests {
                     Err(Error::NotFound)
                 }
                 Some("dir") => Ok(Found::Directory(vec![path.join("a")])),
-                _ if self.0.borrow().len() > most => Ok(Found::Large),
+                _ if self.0.borrow().len() > most => Ok(Found::Large(Kind::File)),
                 _ => Ok(Found::File(self.0.borrow().clone())),
             }
         }
@@ -625,7 +635,7 @@ mod tests {
             clone.read(Path::new("a"), 3),
             Ok(Found::File(b"xyz".to_vec()))
         );
-        assert_eq!(clone.read(Path::new("a"), 2), Ok(Found::Large));
+        assert_eq!(clone.read(Path::new("a"), 2), Ok(Found::Large(Kind::File)));
         let entries = Found::Directory(vec![PathBuf::from("dir/a")]);
         assert_eq!(paths.read(Path::new("dir"), 0), Ok(entries));
         assert_eq!(paths.read(Path::new(""), 0), Err(Error::NotFound));
