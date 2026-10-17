@@ -34,6 +34,7 @@ pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
     ("config", "connector-influx"),
     ("ops", "config-hcl"),
     ("ops", "transport"),
+    ("node", "sdk"),
 ];
 
 /// Every crate with its layer and the workspace crates it may depend on.
@@ -254,6 +255,11 @@ pub(crate) const CRATES: &[Crate] = &[
         name: "acceptance",
         layer: 4,
         deps: Deps::Any,
+    },
+    Crate {
+        name: "sdk",
+        layer: 4,
+        deps: Deps::Only(&["program", "transport", "os", "env", "types", "block"]),
     },
 ];
 

@@ -16,7 +16,8 @@ use crate::thread::{Error, Handle};
 /// ```
 pub type Main = Box<dyn FnOnce(Tasks) -> Task + Send>;
 
-/// Starts shards. Only `node` holds it, so only `node` decides where shards run.
+/// Starts shards. Only a composition root holds it, `node` or `sdk`, so only it decides
+/// where shards run.
 /// Clones start shards in the same place.
 ///
 /// ```

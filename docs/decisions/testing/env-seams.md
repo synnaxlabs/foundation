@@ -6,6 +6,13 @@
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6073808019).
   Supersedes the ENV SEAMS and `Driver` texts of item 4 of
   https://github.com/synnaxlabs/foundation/pull/2056#issuecomment-6072358016.
+  Amended (2026-10-17, #2923): outside the binary, `sdk` takes its clock, entropy,
+  network, and the shard of its client from `os` (`laptop.architect-2`,
+  2026-10-17T00:22:08Z,
+  https://github.com/synnaxlabs/foundation/pull/2933#issuecomment-6227271021, and
+  2026-10-17T17:32:45Z,
+  https://github.com/synnaxlabs/foundation/pull/3048#issuecomment-6237701374). So a
+  composition root holds `Shards`: `node`, or `sdk` for a client.
   Amended (2026-10-10, #2064): `tasks::Group` is the one counting group of `env`. It
   counts each task spawned through the `Tasks` that `Group::tasks` gives until the
   task's future has dropped, and `Group::ended` gives an `Ended` that resolves only

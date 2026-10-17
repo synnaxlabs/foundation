@@ -183,6 +183,20 @@ impl Session {
     pub async fn closed(&self) -> Error {
         self.0.closed().await
     }
+
+    /// The error that [`closed`](Self::closed) gives, or `None` while `closed` would
+    /// wait. It does not wait. After a [`close`](Self::close), it is `None` until the
+    /// transport's task sends the close.
+    ///
+    /// ```
+    /// fn open(session: &transport::Session) -> bool {
+    ///     session.ended().is_none()
+    /// }
+    /// ```
+    #[must_use]
+    pub fn ended(&self) -> Option<Error> {
+        self.0.ended()
+    }
 }
 
 impl fmt::Debug for Session {

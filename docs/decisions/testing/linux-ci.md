@@ -16,8 +16,9 @@
     or a defect that its issue fixes. A test whose value on the OS is known asserts it
     with a `cfg` on its expected value. The PR that closes an issue removes each item
     that names only that issue, and removes the issue from an item that names others.
-    The lists only shrink. The ONE NODE milestone does not close while a list holds a
-    crate or a test.
+    The lists only shrink, other than this: a new crate enters a list only with the
+    open issues of the `os` items that it needs. The ONE NODE milestone does not close
+    while a list holds a crate or a test.
   - For `/review`, CI does not run an OS for a crate or a test on the list of that OS
     (`laptop.director`,
     https://github.com/synnaxlabs/foundation/pull/2960#issuecomment-6229528745).
@@ -69,3 +70,7 @@
     it is not the slowest job of the run. The times of the three jobs go on #2954, and
     a feature job that becomes the slowest job of the run goes back to `laptop.monitor`
     with its time.
+  - A new crate on a list: the person, relayed by `laptop.monitor` at
+    2026-10-17T17:30:12Z
+    (https://github.com/synnaxlabs/foundation/pull/3048#issuecomment-6237654845):
+    "Yeah fine". So `sdk` is on the Windows lists with #682 and #2955.

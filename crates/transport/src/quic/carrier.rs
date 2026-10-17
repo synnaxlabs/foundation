@@ -434,6 +434,11 @@ impl Session {
         })
     }
 
+    /// What `closed` gives, or `None` while it would wait. Registers no waker.
+    pub(crate) fn ended(&self) -> Option<Error> {
+        self.state.borrow_mut().slot(self.key).end.clone()
+    }
+
     /// Waits until the session ends, and gives why.
     pub(crate) async fn closed(&self) -> Error {
         poll_fn(|cx| {

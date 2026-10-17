@@ -611,6 +611,42 @@ mod tests {
     }
 
     #[test]
+    fn ended_gives_a_close_once_the_task_sends_it() {
+        let (mut sim, _, _) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                side.session.close(Code(3));
+                assert_eq!(side.session.ended(), None);
+                let closed = side.session.closed().await;
+                assert_eq!(closed, Error::Closed { code: Code(3) });
+                assert_eq!(side.session.ended(), Some(closed));
+            },
+            |side| async move {
+                drop(side.session.closed().await);
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
+    fn ended_gives_none_while_open_and_the_close_after_the_end() {
+        let (mut sim, _, _) = testing::sessions(
+            0,
+            |config| config,
+            |side| async move {
+                assert_eq!(side.session.ended(), None);
+            },
+            |side| async move {
+                let closed = Error::PeerClosed { code: Code(0) };
+                assert_eq!(side.session.closed().await, closed);
+                assert_eq!(side.session.ended(), Some(closed));
+            },
+        );
+        assert_eq!(sim.run(), Ok(()));
+    }
+
+    #[test]
     fn a_refused_config_frees_the_socket() {
         testing::run(0, |shard| {
             let at = SocketAddr::new(shard.ip(), testing::PORT);

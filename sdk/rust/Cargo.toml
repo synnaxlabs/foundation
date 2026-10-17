@@ -1,0 +1,22 @@
+[package]
+name = "sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+block = { path = "../../crates/block" }
+env = { path = "../../crates/env" }
+os = { path = "../../crates/os", features = ["net"] }
+program = { path = "../../crates/program" }
+tokio = { workspace = true, features = ["sync"] }
+tracing = { workspace = true }
+transport = { path = "../../crates/transport" }
+types = { path = "../../crates/types" }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt"] }
+
+[lints]
+workspace = true

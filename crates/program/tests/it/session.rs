@@ -244,7 +244,7 @@ async fn read_request(session: &transport::Session) -> Incoming {
 }
 
 /// A close with a code of `Refusal` gives the refusal, and a close with 0 or another
-/// code gives the transport error.
+/// code gives the transport error, also as the error that ended the session.
 #[test]
 fn gives_the_close_of_a_node_after_admission() {
     let cases = [
@@ -270,11 +270,47 @@ fn gives_the_close_of_a_node_after_admission() {
             },
             move |session, node| {
                 Box::pin(async move {
+                    assert_eq!(session.ended(), None);
                     node.clock().sleep(QUIET).await;
                     node.clock().sleep(QUIET).await;
+                    assert_eq!(session.ended(), Some(error.clone()));
                     assert_eq!(session.request(b"ab").await, Err(error));
                 })
             },
+        );
+    }
+}
+
+/// A request that the node's close ends and `ended` give one error, whichever of the
+/// request and the renewal runs first after the close.
+#[test]
+fn ended_gives_the_close_that_a_request_gave_at_each_seed() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    for seed in 0..64 {
+        let seen = Arc::clone(&seen);
+        by_hand(
+            seed,
+            move |session, node| async move {
+                let _request = read_request(&session).await;
+                session.close(Code(99));
+                node.clock().sleep(QUIET).await;
+            },
+            move |session, _| {
+                Box::pin(async move {
+                    let error = session.request(b"ab").await.unwrap_err();
+                    seen.lock().unwrap().push((seed, error, session.ended()));
+                })
+            },
+        );
+    }
+    let closed = Error::Transport(transport::Error::PeerClosed { code: Code(99) });
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 64);
+    for (seed, error, ended) in seen.iter() {
+        assert_eq!(
+            (error, ended.as_ref()),
+            (&closed, Some(&closed)),
+            "seed {seed}"
         );
     }
 }
@@ -560,6 +596,31 @@ fn closes_the_session_on_a_challenge_that_is_not_valid() {
     );
 }
 
+/// A call of `ended` on an open session takes constant time and memory, so a
+/// program can ask it as often as it likes.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test bounds its own run time"
+)]
+fn ended_on_an_open_session_stays_cheap() {
+    let elapsed = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&elapsed);
+    with_session(127, move |session, _| async move {
+        let start = std::time::Instant::now();
+        for _ in 0..100_000 {
+            assert_eq!(session.ended(), None);
+        }
+        *kept.lock().unwrap() = Some(start.elapsed());
+        assert_eq!(session.request(b"ab").await, Ok(b"ba".to_vec()));
+    });
+    let elapsed = elapsed.lock().unwrap().expect("ran");
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "100000 calls of `ended` took {elapsed:?}"
+    );
+}
+
 /// Each request after the end of the renewal gives the error that ended it, not only
 /// the first.
 #[test]
@@ -579,6 +640,7 @@ fn gives_the_error_of_the_renewal_to_each_later_request() {
             let ended = Err(Error::Message(wire::hub::client::Error::Kind {
                 kind: 0xff,
             }));
+            assert_eq!(session.ended(), ended.clone().err());
             assert_eq!(session.request(b"ab").await, ended);
             assert_eq!(session.request(b"cd").await, ended);
         },

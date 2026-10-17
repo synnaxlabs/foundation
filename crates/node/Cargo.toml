@@ -61,6 +61,10 @@ node = { path = ".", features = ["sim"] }
 proptest = { workspace = true }
 sim = { path = "../sim" }
 
+# Under `--cfg loom`, Tokio has no `net`.
+[target.'cfg(not(loom))'.dev-dependencies]
+sdk = { path = "../../sdk/rust" }
+
 [[test]]
 name = "erase"
 harness = false

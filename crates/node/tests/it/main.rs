@@ -11,6 +11,7 @@ mod one_node;
 mod port;
 mod quickstart;
 mod rig;
+mod sdk;
 #[cfg(unix)]
 mod secret;
 #[cfg(unix)]

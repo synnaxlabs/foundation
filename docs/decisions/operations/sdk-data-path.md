@@ -1,7 +1,14 @@
 - **SDK DATA PATH (adopts D12 for Python)** The Python SDK wraps the Rust SDK `sdk`
   with PyO3, so the wire, the TLS pin, the hello, and the frame decode have one
-  implementation. `sdk` must not depend on `os`, so that the wheels can run on Windows
-  too (a term of the person). The person decided on 2026-10-15 at 17:40 UTC ("Ok, let's
+  implementation. `sdk` takes its clock, entropy, network, and the shard of its client
+  from `os`, so the wheels run where `os` runs: Linux, macOS, and Windows ("not cross
+  compilation but full 3 platform support", the person, relayed by `laptop.monitor`,
+  2026-10-16:
+  https://github.com/synnaxlabs/foundation/pull/2933#issuecomment-6226448657).
+  The Windows wheels of the gate (#2923) wait on the clock (#682) and the network
+  (#2955) of `os` on Windows. The term that `sdk` does not depend on `os` was a proposal
+  of `laptop.monitor`, not the person's words, and is withdrawn (the same link). The
+  person decided on 2026-10-15 at 17:40 UTC ("Ok, let's
   do A", relayed by `laptop.monitor`, quoted at
   https://github.com/synnaxlabs/foundation/issues/2177#issuecomment-6198508264), with
   these reservations: "my main reservations for A is the end user DX and the build
