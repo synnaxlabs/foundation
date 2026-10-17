@@ -14,8 +14,8 @@
 //!   `w.*` and one of `w.0`, so each other key set is larger.
 //! - `named <line>`: the same, and the reader names each entry of each view.
 //!
-//! Each line has its own hub, as nothing frees its ring. A debug build, which
-//! `cargo test` makes, runs one small case, so a test run stays fast.
+//! Each line has its own hub. A debug build, which `cargo test` makes, runs one small
+//! case, so a test run stays fast.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 

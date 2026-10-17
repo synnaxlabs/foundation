@@ -1,10 +1,14 @@
 //! Test helpers that the modules of `home` reuse.
 
+use std::future::poll_fn;
 use std::ops::RangeInclusive;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Poll;
 
 use proptest::prelude::*;
 use types::channel::{self, Slot};
+use types::frame::Path;
 use types::frame::key_set::{Group, Interner, KeySet};
 use types::sample::{Scalar, Sides, Type};
 
@@ -166,4 +170,22 @@ pub(crate) fn intern(groups: &[Group<'_>]) -> Arc<KeySet> {
         .filter(|&n| groups.iter().any(|group| group.index == key(Slot::new(n))))
         .collect();
     create_interner(&indexes, groups).intern(groups)
+}
+
+/// A read through `reader` of the live path at `slot` from seq 0, polled once: it
+/// waits on its file read, so no trim passes its record until it drops, and the
+/// ring can fill.
+///
+/// # Panics
+///
+/// When the read does not wait.
+pub(crate) async fn hold(
+    reader: &buffer::Reader,
+    slot: Slot,
+) -> Pin<Box<impl Future<Output = Result<buffer::Read, buffer::Error>> + '_>> {
+    let mut read =
+        Box::pin(reader.read(slot, Path::Live, buffer::Mark::at(0), usize::MAX));
+    let first = poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await;
+    assert!(first.is_pending(), "the read waits on a file read");
+    read
 }

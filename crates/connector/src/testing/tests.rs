@@ -395,11 +395,12 @@ fn a_refused_config_opens_a_connector_that_ends_with_its_diagnostics() {
     );
 }
 
-/// A run whose status reader sleeps until the buffer has no room reads its status up to
-/// the frames lost for no room, with no end. No write frees the ring, so no frame comes
-/// after them.
+/// A run whose status reader sleeps past the room of the ring of its home reads each
+/// status frame, with no gap: the first, then one for the counts of each second. Each
+/// commit trims the frames before it, so the home applies each frame, and the frames
+/// fit the window of the reader.
 #[test]
-fn a_run_reads_its_status_up_to_the_frames_lost_for_no_room_after_a_long_sleep() {
+fn a_run_whose_status_reader_sleeps_past_its_ring_reads_each_frame() {
     on_rig(
         || Table::new().with("ticks", Ticks::default()),
         |mut rig, clock| async move {
@@ -419,10 +420,11 @@ fn a_run_reads_its_status_up_to_the_frames_lost_for_no_room_after_a_long_sleep()
                 })
                 .await;
                 let Some(received) = received else { break };
-                received.expect("a status frame");
+                let received = received.expect("a status frame");
+                assert_eq!(received.gap(), None, "frame {taken}");
                 taken += 1;
             }
-            assert_eq!(taken, 1_020);
+            assert_eq!(taken, 1_101);
         },
     );
 }

@@ -108,6 +108,8 @@ struct Test {
     commit: home::Commit,
     /// The node's region, which the hub holds too.
     region: Option<hub::Region>,
+    /// A reader of the ring of the home, for [`Test::hold`]. It holds the ring open.
+    ring: buffer::Reader,
     hub: Hub,
 }
 
@@ -136,11 +138,11 @@ impl Test {
             entropy: node.entropy(),
             layout,
             commit: COMMIT,
-            trimmed: false,
         };
         let buffer = buffer::Buffer::open(config, interner.slots())
             .await
             .expect("opens");
+        let ring = buffer.reader();
         let home = home::Shard::open(home::Config {
             shard: 0,
             buffer,
@@ -182,8 +184,28 @@ impl Test {
             unsynced: Some(unsynced),
             commit,
             region,
+            ring,
             hub,
         }
+    }
+
+    /// A read of the live path of `time` in the ring from seq 0, polled once: it
+    /// waits on its file read, so no trim passes its record until it drops, and the
+    /// ring can fill.
+    ///
+    /// # Panics
+    ///
+    /// When the read does not wait.
+    async fn hold(
+        &self,
+    ) -> Pin<Box<impl Future<Output = Result<buffer::Read, buffer::Error>> + '_>> {
+        let from = buffer::Mark::at(0);
+        let mut read =
+            Box::pin(self.ring.read(Slot::new(0), Path::Live, from, usize::MAX));
+        let first =
+            std::future::poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await;
+        assert!(first.is_pending(), "the read waits on a file read");
+        read
     }
 
     /// Runs the node's mesh clock and returns once the node has mesh time.
@@ -1184,6 +1206,7 @@ fn drops_the_home_once_the_hub_and_each_session_drop() {
             pool,
             clock,
             commit,
+            ring,
             hub,
             ended,
             ..
@@ -1191,7 +1214,7 @@ fn drops_the_home_once_the_hub_and_each_session_drop() {
         drop(writer);
         clock.sleep(SETTLE).await;
         assert_eq!(ended.get(), 0, "the hub holds the home");
-        drop((hub, reader, commit));
+        drop((hub, reader, commit, ring));
         clock.sleep(SETTLE).await;
         assert_eq!(Rc::strong_count(&pool), 1, "only the test holds the pool");
         assert_eq!(ended.get(), 2, "the commit and gate tasks ended");
@@ -1211,12 +1234,13 @@ fn ends_the_commit_task_once_each_session_that_outlives_the_hub_drops() {
             pool,
             clock,
             commit,
+            ring,
             hub,
             ended,
             ..
         } = test;
         clock.sleep(SETTLE).await;
-        drop((hub, commit));
+        drop((hub, commit, ring));
         clock.sleep(SETTLE).await;
         assert_eq!(ended.get(), 0, "the sessions hold the home");
         assert_eq!(write(&mut writer, &[now], &[7]), [applied(0)]);
@@ -1326,12 +1350,13 @@ fn ends_the_commit_task_in_its_commit_wait_once_the_hub_drops() {
             pool,
             clock,
             commit,
+            ring,
             hub,
             ended,
             ..
         } = test;
         clock.sleep(Span::from_nanos(1)).await;
-        drop((hub, reader, writer, commit));
+        drop((hub, reader, writer, commit, ring));
         clock.sleep(Span::from_nanos(1)).await;
         assert_eq!(ended.get(), 2, "the tasks ended before the commit");
         clock.sleep(SETTLE).await;
@@ -1357,12 +1382,13 @@ fn drops_the_commit_it_waits_for_with_the_hub() {
             clock,
             ended,
             mut commit,
+            ring,
             hub,
             pause,
             ..
         } = test;
         pause.pause();
-        drop((hub, reader, writer));
+        drop((hub, reader, writer, ring));
         assert_eq!((&mut commit).await, Ok(()));
         let open = || async {
             node.files()
@@ -2093,10 +2119,10 @@ fn gives_a_complete_reader_its_waiting_frames_then_the_missed_ones_from_disk() {
     });
 }
 
-/// A reader that sleeps while a writer writes one frame each second gets each frame
-/// that the hub applied: frames of 128 samples pass the window before they fill the
-/// ring, and come later from disk. Frames of 1 sample fill the ring first. The frames
-/// lost for no room end nothing.
+/// A reader that sleeps while a writer writes one frame each second, and a read holds
+/// the first, gets each frame that the hub applied: frames of 128 samples pass the
+/// window before they fill the ring, and come later from disk. Frames of 1 sample
+/// fill the ring first. The frames lost for no room end nothing.
 #[test]
 fn gives_a_complete_reader_that_sleeps_past_its_window_or_its_ring_each_applied_frame()
 {
@@ -2104,11 +2130,15 @@ fn gives_a_complete_reader_that_sleeps_past_its_window_or_its_ring_each_applied_
         run(21, move |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
             let mut writer = test.writer("a", &["value"]).await;
+            let mut held = None;
             let mut outcomes = Vec::new();
             for _ in 0..1_100 {
                 let stamps: Vec<_> = (test.now()..).take(samples).collect();
                 outcomes.extend(write(&mut writer, &stamps, &scrambled(&stamps)));
                 test.clock.sleep(Span::SECOND).await;
+                if held.is_none() {
+                    held = Some(test.hold().await);
+                }
             }
             let applied = outcomes
                 .iter()

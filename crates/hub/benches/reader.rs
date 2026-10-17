@@ -30,9 +30,10 @@
 //!   `Pending`.
 //! - `complete wait`: each later poll of `next` on the drained complete reader, which
 //!   grants nothing and gives `Pending`.
-//! - `lost write`: after the rounds above, the bench writes until the ring has no
-//!   room, as nothing frees it until #160. Then each `Writer::write` of its own rounds
-//!   finds no room, gives `Outcome::Lost`, and wakes the latest reader with its frame.
+//! - `lost write`: after the rounds above, a read holds the oldest record of the ring,
+//!   so no trim frees it, and the bench writes until the ring has no room. Then each
+//!   `Writer::write` of its own rounds finds no room, gives `Outcome::Lost`, and wakes
+//!   the latest reader with its frame.
 //!
 //! A `next` that gives `Pending` while a frame waits is the yield after a run of
 //! frames: it is polled again, and only the poll that gives the frame is timed. Any
@@ -54,18 +55,26 @@ mod common;
 mod node;
 mod table;
 
-use std::pin::pin;
+use std::path::PathBuf;
+use std::pin::{Pin, pin};
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
+use block::{Heap, Pool};
+
 use common::{SETTLE, name, unnamed};
+use hub::Hub;
 use hub::home::Outcome;
 use hub::reader::{Mode, Position, Reader, Received};
 use hub::writer::{self, Writer};
 use table::Line;
 use types::authority::Authority;
+use types::channel::Slot;
+use types::frame::key_set::Interner;
 use types::frame::{Draft, Label, Path, View};
+use types::time::{Span, Stamp};
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
@@ -73,7 +82,7 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 /// Frames per round. A round fits the window of a complete reader.
 const FRAMES: usize = 64;
 /// `WARMUP + ROUNDS` commits, under the 341 of `FRAMES` frames that the ring of
-/// `home::testing::shard` holds.
+/// [`open`] holds.
 const WARMUP: usize = 20;
 const ROUNDS: usize = 200;
 /// More rounds than fill the ring.
@@ -117,7 +126,7 @@ impl Count {
 
 /// The `timer` line and the lines that it is the floor of.
 async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Line>) {
-    let (hub, mut stamp) = common::hub(&node, tasks).await;
+    let (hub, ring, mut stamp) = open(&node, tasks).await;
     let config = writer::Config {
         subject: name("bench"),
         authority: Authority(1),
@@ -179,10 +188,84 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
             line.close(round >= WARMUP);
         }
     }
+    let held = hold(&ring).await;
     fill(&node, &mut writer, &mut complete_reader, &mut stamp).await;
     let mut lines = Vec::from(lines);
     lines.push(lose(&mut writer, &mut latest_reader, stamp));
+    drop(held);
     (timer, lines)
+}
+
+/// A hub as `common::hub` gives, a reader of the ring of its home, and the node's mesh
+/// time now.
+async fn open(
+    node: &sim::node::Node,
+    tasks: env::tasks::Tasks,
+) -> (Hub, buffer::Reader, i64) {
+    let config = block::Config::new(1 << 23).expect("the budget fits");
+    let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
+    let (clock, mesh) = clock::Clock::new(node.clock());
+    let wall = node.wall();
+    tasks.spawn(async move { clock.run(wall).await });
+    let mut interner = Interner::new();
+    let config = buffer::Config {
+        files: node.files(),
+        dir: PathBuf::from("shard-0"),
+        pool,
+        clock: node.clock(),
+        tasks: tasks.clone(),
+        entropy: node.entropy(),
+        layout: buffer::Layout::new(1 << 22, 1 << 16).expect("a ring"),
+        commit: Span::from_nanos(10_000_000),
+    };
+    let buffer = buffer::Buffer::open(config, interner.slots())
+        .await
+        .expect("opens");
+    let ring = buffer.reader();
+    let home = home::Shard::open(home::Config {
+        shard: 0,
+        buffer,
+        clock: mesh.clone(),
+        limits: home::order::Limits {
+            earliest: Stamp::from_nanos(1),
+            ahead: Span::SECOND,
+        },
+    })
+    .await
+    .expect("opens");
+    let now = loop {
+        if let Some(now) = home.now() {
+            break now;
+        }
+        node.clock().sleep(Span::from_nanos(1)).await;
+    };
+    let hub = Hub::new(hub::Config {
+        home,
+        interner,
+        tasks,
+        node: types::node::Key::from_u128(1),
+        time: mesh,
+        entropy: node.entropy(),
+        region: None,
+    });
+    hub.set_definitions(&common::definitions(&[]));
+    (hub, ring, now.nanos())
+}
+
+/// A read of the live path of `time` from seq 0 on `ring`, polled once: it waits on
+/// its file read, so no trim passes its record until it drops.
+///
+/// # Panics
+///
+/// When the read does not wait.
+async fn hold(
+    ring: &buffer::Reader,
+) -> Pin<Box<impl Future<Output = Result<buffer::Read, buffer::Error>> + '_>> {
+    let from = buffer::Mark::at(0);
+    let mut read = Box::pin(ring.read(Slot::new(0), Path::Live, from, usize::MAX));
+    let first = std::future::poll_fn(|cx| Poll::Ready(read.as_mut().poll(cx))).await;
+    assert!(first.is_pending(), "the read waits on a file read");
+    read
 }
 
 /// Takes and acks the `FRAMES` frames that wait for `reader`, a complete reader, then

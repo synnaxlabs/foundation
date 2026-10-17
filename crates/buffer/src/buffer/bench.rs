@@ -18,8 +18,7 @@ use crate::wal::{Layout, Writer};
 /// The bytes of the one part of each data entry.
 const PART: usize = 100;
 
-/// The commit task of a buffer with [`Config::trimmed`](super::Config::trimmed), with
-/// no file, over a ring that opened empty.
+/// The commit task of a buffer with no file, over a ring that opened empty.
 #[derive(Debug)]
 pub struct Deadline {
     state: State,
@@ -115,7 +114,7 @@ impl Deadline {
             .expect("the ring and the pool have room for the group");
         take(&mut state.open, &mut state.logs, &mut self.batch);
         let (checkpoint, carrying) =
-            state.deadline(&self.pool, Some(self.tails_max), &mut self.sealed);
+            state.deadline(&self.pool, self.tails_max, &mut self.sealed);
         let tails = carrying
             .as_ref()
             .map_or(0, |carrying| carrying.carried.tails().len());

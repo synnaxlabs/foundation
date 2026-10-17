@@ -567,13 +567,14 @@ fn seq_after_restart(n: u64, first: Option<BTreeMap<Name, Definition>>) -> u64 {
         let super::Test {
             node,
             mut commit,
+            ring,
             hub,
             mesh,
             tasks,
             clock,
             ..
         } = test;
-        drop((hub, writer));
+        drop((hub, writer, ring));
         assert_eq!((&mut commit).await, Ok(()));
         drop(commit);
         clock.sleep(SETTLE).await;
@@ -616,7 +617,6 @@ pub(super) async fn reopen(
         entropy: node.entropy(),
         layout,
         commit: super::COMMIT,
-        trimmed: false,
     };
     let buffer = buffer::Buffer::open(ring, interner.slots())
         .await

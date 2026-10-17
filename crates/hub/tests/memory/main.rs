@@ -24,22 +24,19 @@ mod region;
 mod sessions;
 
 use std::cell::Cell;
-use std::path::PathBuf;
 use std::pin::pin;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Waker};
 
 use agent::{Agent, SUBJECT, name, reset_with};
-use block::{Heap, Pool};
 use hub::reader::{self, Mode};
 use hub::serve;
 use sessions::{closed_after, rules, serve_each, sessions};
 use transport::{Class, Code};
 use types::channel;
-use types::frame::key_set::Interner;
 use types::name::Selector;
-use types::time::{Span, Stamp};
+use types::time::Span;
 use wire::hub::client::{self, BODY_BYTES_MAX, OPEN_BYTES_MAX, Place};
 use wire::hub::{BUSY, Open, keys};
 
@@ -49,7 +46,7 @@ static ALLOCATOR: counting::Bytes = counting::Bytes::new();
 /// The opens over which the heap does not grow.
 const MANY: usize = 1000;
 /// The opens of a named reader after which the commits of its named entries wrapped
-/// the ring of 1024 blocks that [`trimmed_hub`] gives. Until then the sim disk grows
+/// the ring of 1024 blocks that [`common::hub`] gives. Until then the sim disk grows
 /// the heap by each block.
 const WRAPPED: usize = 1500;
 
@@ -340,7 +337,7 @@ fn holds_the_same_bytes_over_many_opens_of_a_named_reader() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, |node, tasks| async move {
-        let hub = trimmed_hub(&node, tasks).await;
+        let hub = common::hub(&node, tasks).await.0;
         let config = || reader::Config {
             select: Selector::new(["value"]).expect("a selector"),
             mode: Mode::Complete,
@@ -363,57 +360,6 @@ fn holds_the_same_bytes_over_many_opens_of_a_named_reader() {
         assert_eq!(ALLOCATOR.held(), wrapped, "bytes held after {MANY} opens");
     })
     .expect("the run ends");
-}
-
-/// A hub as [`common::hub`] gives, on a ring whose commits trim it, so that its
-/// named entries wrap it. Entries with no samples on many paths can stall a trim until
-/// #2796; the named entries of this hub are on one path.
-async fn trimmed_hub(node: &sim::node::Node, tasks: env::tasks::Tasks) -> hub::Hub {
-    let config = block::Config::new(1 << 23).expect("the budget fits");
-    let pool = Rc::new(Pool::new(config.clone(), Heap::new(config.reservation())));
-    let (clock, mesh) = clock::Clock::new(node.clock());
-    let wall = node.wall();
-    tasks.spawn(async move { clock.run(wall).await });
-    let mut interner = Interner::new();
-    let config = buffer::Config {
-        files: node.files(),
-        dir: PathBuf::from("shard-0"),
-        pool,
-        clock: node.clock(),
-        tasks: tasks.clone(),
-        entropy: node.entropy(),
-        layout: buffer::Layout::new(1 << 22, 1 << 16).expect("a ring"),
-        commit: Span::from_nanos(10_000_000),
-        trimmed: true,
-    };
-    let buffer = buffer::Buffer::open(config, interner.slots())
-        .await
-        .expect("opens");
-    let home = home::Shard::open(home::Config {
-        shard: 0,
-        buffer,
-        clock: mesh.clone(),
-        limits: home::order::Limits {
-            earliest: Stamp::from_nanos(1),
-            ahead: Span::SECOND,
-        },
-    })
-    .await
-    .expect("opens");
-    while home.now().is_none() {
-        node.clock().sleep(Span::from_nanos(1)).await;
-    }
-    let hub = hub::Hub::new(hub::Config {
-        home,
-        interner,
-        tasks,
-        node: types::node::Key::from_u128(1),
-        time: mesh,
-        entropy: node.entropy(),
-        region: None,
-    });
-    hub.set_definitions(&common::definitions(&[]));
-    hub
 }
 
 /// The channels that the wide read of

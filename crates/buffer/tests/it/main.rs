@@ -75,8 +75,6 @@ struct Shard {
     clock: Clock,
     tasks: Tasks,
     entropy: Entropy,
-    /// The opens of [`Shard::open`] trim, as [`Config::trimmed`] states.
-    trimmed: bool,
 }
 
 impl Shard {
@@ -90,7 +88,6 @@ impl Shard {
             entropy: self.entropy.clone(),
             layout,
             commit: COMMIT,
-            trimmed: self.trimmed,
         };
         Buffer::open(config, slots).await
     }
@@ -510,7 +507,6 @@ fn shard_on(node: sim::node::Node, tasks: Tasks) -> Shard {
         tasks,
         entropy: node.entropy(),
         disk: Disk::Sim(node),
-        trimmed: false,
     }
 }
 
@@ -1423,14 +1419,13 @@ fn a_reopen_syncs_the_ring_twice() {
 }
 
 /// An open syncs the header and the records that it walked, as read, before it
-/// writes a new byte, with a trim and with none: when that sync fails, the ring holds
-/// what it held before the open.
+/// writes a new byte, in a ring of 64 blocks that it does not trim and in one of 7
+/// that it trims: when that sync fails, the ring holds what it held before the open.
 #[test]
 fn an_open_whose_first_sync_fails_leaves_the_ring_as_it_was() {
-    for trimmed in [false, true] {
+    for blocks in [64, 7] {
         run_on_memory(21, move |shard| async move {
-            let shard = Shard { trimmed, ..shard };
-            let ring = layout(7 * BLOCK, BODY_MAX);
+            let ring = layout(blocks * BLOCK, BODY_MAX);
             let mut slots = Slots::new();
             let buffer = shard.open(ring, &mut slots).await.expect("opens");
             let a = slots.index(key(1));
@@ -1450,12 +1445,9 @@ fn an_open_whose_first_sync_fails_leaves_the_ring_as_it_was() {
                 operation: Operation::Sync,
                 code: 5,
             });
-            assert_eq!(reopened, Err(failed), "trimmed: {trimmed}");
+            assert_eq!(reopened, Err(failed), "{blocks} blocks");
             let changed = shard.bytes().await != before;
-            assert!(
-                !changed,
-                "trimmed: {trimmed}: the open wrote before its sync"
-            );
+            assert!(!changed, "{blocks} blocks: the open wrote before its sync");
         });
     }
 }
@@ -2191,7 +2183,6 @@ fn node_config(node: &sim::node::Node, tasks: Tasks, dir: &str) -> Config {
         entropy: node.entropy(),
         layout: layout(AREA, BODY_MAX),
         commit: COMMIT,
-        trimmed: false,
     }
 }
 
@@ -2206,22 +2197,19 @@ fn each_cut(seeds: Range<u64>, step: i64, mut at: impl FnMut(u64, i64) -> bool) 
     }
 }
 
-/// Starts an open of the ring on `node`, which trims when `trimmed`, and stops the
-/// node with `crash` `cut` nanoseconds into it. Returns whether the open had ended.
+/// Starts an open of the ring on `node`, and stops the node with `crash` `cut`
+/// nanoseconds into it. Returns whether the open had ended.
 fn cut_an_open(
     sim: &mut sim::Sim,
     node: &sim::node::Node,
-    (cut, trimmed): (i64, bool),
+    cut: i64,
     crash: sim::Crash,
 ) -> bool {
     let ended = Arc::new(AtomicBool::new(false));
     let flag = Arc::clone(&ended);
     let own = node.clone();
     drop(on_node(node, "cut", move |tasks| async move {
-        let config = Config {
-            trimmed,
-            ..node_config(&own, tasks, DIR)
-        };
+        let config = node_config(&own, tasks, DIR);
         let _buffer = Buffer::open(config, &mut Slots::new())
             .await
             .expect("the open ends well");
@@ -2242,7 +2230,7 @@ fn cut_the_first_open(
     crash: sim::Crash,
 ) -> (sim::Sim, sim::node::Node, bool) {
     let (mut sim, node) = create_node(seed);
-    let ended = cut_an_open(&mut sim, &node, (cut, false), crash);
+    let ended = cut_an_open(&mut sim, &node, cut, crash);
     (sim, node, ended)
 }
 
@@ -2409,7 +2397,7 @@ fn a_crash_while_a_ring_is_made_again_leaves_a_ring_that_opens() {
             for layout in [old, new] {
                 let (mut sim, node) = create_node(seed);
                 create_unwritten(&mut sim, &node, lens[0]);
-                ended = cut_an_open(&mut sim, &node, (cut, false), crash);
+                ended = cut_an_open(&mut sim, &node, cut, crash);
                 let (found, opened, len) = open_with(&mut sim, &node, layout);
                 let at = format!("seed {seed}, {crash:?} at {cut} ns, {layout:?}");
                 assert!(found == Found::Written || !ended, "{at}");
@@ -2473,7 +2461,7 @@ fn a_crash_in_an_open_leaves_a_ring_that_opens_in_the_room_of_one() {
             if unwritten {
                 create_unwritten(&mut sim, &node, len);
             }
-            let ended = cut_an_open(&mut sim, &node, (cut, false), crash);
+            let ended = cut_an_open(&mut sim, &node, cut, crash);
             let opened = open_with(&mut sim, &node, new);
             let at = format!("seed {seed}, {crash:?} at {cut} ns, {unwritten}");
             assert_eq!((opened.1, opened.2), (Ok(new), len), "{at}");
@@ -3219,7 +3207,7 @@ fn a_power_cut_during_a_restart_over_an_old_one_keeps_the_entries() {
             );
         })
         .expect("the run ends");
-        let ended = cut_an_open(&mut sim, &node, (cut, false), sim::Crash::Power);
+        let ended = cut_an_open(&mut sim, &node, cut, sim::Crash::Power);
         let recovered = sim.run_on(&node, |node, tasks| async move {
             let mut slots = Slots::new();
             let config = node_config(&node, tasks, DIR);
@@ -4210,27 +4198,31 @@ fn opens_with_no_data_after_an_entry_leave_room_for_the_next() {
 }
 
 /// Each record leaves a block free for the restart record of the next open, so a
-/// full ring reopens. With no trim, it then takes no entry before its tail moves.
+/// full ring reopens. Each record holds the tail of its own path, so no trim frees
+/// one, and the ring takes no entry before a tail moves.
 #[test]
 fn a_full_ring_reopens_into_the_block_that_its_records_leave_free() {
     run(21, |shard| async move {
         let ring = layout(7 * BLOCK, BODY_MAX);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
-        let a = slots.index(key(1));
         let parts = Parts::from(shard.block(3900));
-        for seq in 0..3 {
+        for index in 1..4 {
+            let slot = slots.index(key(index));
             buffer
-                .append([entry(1, a, Path::Live, seq, 1, None, parts.clone())])
+                .append([entry(index, slot, Path::Live, 0, 1, None, parts.clone())])
                 .expect("the record has room");
         }
         buffer.committed().await.expect("commits");
         drop(buffer);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("reopens");
+        for index in 1..4 {
+            let slot = slots.index(key(index));
+            assert_eq!(buffer.tail(slot, Path::Live), tail(1, None), "{index}");
+        }
         let a = slots.index(key(1));
-        assert_eq!(buffer.tail(a, Path::Live), tail(3, None));
-        let full = buffer.append([entry(1, a, Path::Live, 3, 1, None, parts.clone())]);
+        let full = buffer.append([entry(1, a, Path::Live, 1, 1, None, parts.clone())]);
         assert_eq!(
             full,
             Err(Rejected::Full {
@@ -4248,10 +4240,6 @@ fn a_full_ring_reopens_into_the_block_that_its_records_leave_free() {
 #[test]
 fn an_open_that_trims_adds_no_sync() {
     run_on_memory(21, |shard| async move {
-        let shard = Shard {
-            trimmed: true,
-            ..shard
-        };
         let ring = layout(7 * BLOCK, BODY_MAX);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
@@ -4292,10 +4280,6 @@ fn an_open_that_trims_adds_no_sync() {
 #[test]
 fn an_open_after_a_cut_commit_frees_past_the_headroom() {
     run_on_memory(167, |shard| async move {
-        let shard = Shard {
-            trimmed: true,
-            ..shard
-        };
         let ring = layout(19 * BLOCK, 4 * to_usize(BLOCK) - 9);
         let record = |a: Slot, seq: u64, blocks: u64| {
             let parts = Parts::from(shard.block(to_usize(blocks * BLOCK) - 400));
@@ -4358,10 +4342,6 @@ fn drain(pool: &Pool) -> Vec<block::Unique> {
 #[test]
 fn a_crash_after_a_commit_with_no_carry_block_opens() {
     run_on_memory(169, |shard| async move {
-        let shard = Shard {
-            trimmed: true,
-            ..shard
-        };
         let ring = layout(AREA, BODY_MAX);
         let mut slots = Slots::new();
         let buffer = shard.open(ring, &mut slots).await.expect("opens");
@@ -4455,10 +4435,6 @@ async fn create_carried_ring(shard: &Shard, tails: &[Vec<u8>], free: u64) {
 #[test]
 fn an_open_of_a_ring_with_no_free_block_frees_its_oldest_records() {
     run_on_memory(163, |shard| async move {
-        let shard = Shard {
-            trimmed: true,
-            ..shard
-        };
         let tails = [carried(1, 3, 0, Some(30)), carried(2, 2, 0, Some(40))];
         create_carried_ring(&shard, &tails, 0).await;
         let ring = layout(AREA, BODY_MAX);
@@ -4506,10 +4482,6 @@ fn an_open_of_a_ring_with_no_free_block_frees_its_oldest_records() {
 #[test]
 fn an_open_that_kept_stops_gives_full() {
     run(165, |shard| async move {
-        let shard = Shard {
-            trimmed: true,
-            ..shard
-        };
         let tails = [carried(2, 2, 0, Some(40))];
         create_carried_ring(&shard, &tails, 0).await;
         let file = shard.bytes().await;
@@ -4557,13 +4529,10 @@ fn a_cut_at_each_file_call_of_an_open_that_trims_keeps_each_tail() {
                 create_carried_ring(&shard_on(node, tasks), &tails, free).await;
             })
             .expect("the ring is made");
-            let ended = cut_an_open(&mut sim, &node, (cut, true), sim::Crash::Power);
+            let ended = cut_an_open(&mut sim, &node, cut, sim::Crash::Power);
             let opened = sim.run_on(&node, |node, tasks| async move {
                 let mut slots = Slots::new();
-                let config = Config {
-                    trimmed: true,
-                    ..node_config(&node, tasks, DIR)
-                };
+                let config = node_config(&node, tasks, DIR);
                 let buffer = Buffer::open(config, &mut slots).await?;
                 let (a, b) = (slots.index(key(1)), slots.index(key(2)));
                 let tails = [a, b].map(|slot| buffer.tail(slot, Path::Live));
@@ -4601,10 +4570,7 @@ fn start_open(
     let gave = Arc::clone(&ended);
     let own = node.clone();
     drop(on_node(node, name, move |tasks| async move {
-        let config = Config {
-            trimmed: true,
-            ..node_config(&own, tasks, DIR)
-        };
+        let config = node_config(&own, tasks, DIR);
         let opened = Buffer::open(config, &mut Slots::new()).await;
         *gave.lock().expect("no panic") =
             Some(opened.as_ref().map(drop).map_err(Clone::clone));
@@ -4679,10 +4645,7 @@ fn a_cut_open_after_a_failed_sync_of_an_open_that_trims_keeps_each_tail() {
                 let (mut sim, node, ..) = fail_then_cut(seed, fault, cut);
                 let opened = sim.run_on(&node, |node, tasks| async move {
                     let mut slots = Slots::new();
-                    let config = Config {
-                        trimmed: true,
-                        ..node_config(&node, tasks, DIR)
-                    };
+                    let config = node_config(&node, tasks, DIR);
                     let buffer = Buffer::open(config, &mut slots).await?;
                     let (a, b) = (slots.index(key(1)), slots.index(key(2)));
                     Ok::<_, Error>([a, b].map(|slot| buffer.tail(slot, Path::Live)))
@@ -4709,7 +4672,6 @@ fn fail_a_commit_then_cut(
     let (mut sim, node) = create_node(seed);
     let trimmed = sim.run_on(&node, move |node, tasks| async move {
         let shard = Shard {
-            trimmed: true,
             ..shard_on(node, tasks)
         };
         let mut slots = Slots::new();
@@ -4769,10 +4731,7 @@ fn a_cut_open_after_a_failed_sync_of_a_commit_that_trims_keeps_each_tail() {
                 let (mut sim, node, ..) = fail_a_commit_then_cut(seed, failed, cut);
                 let opened = sim.run_on(&node, |node, tasks| async move {
                     let mut slots = Slots::new();
-                    let config = Config {
-                        trimmed: true,
-                        ..node_config(&node, tasks, DIR)
-                    };
+                    let config = node_config(&node, tasks, DIR);
                     let buffer = Buffer::open(config, &mut slots).await?;
                     Ok::<_, Error>(buffer.tail(slots.index(key(1)), Path::Live))
                 });
@@ -7835,7 +7794,6 @@ fn refused_after_entries_with_no_samples_at_a_seq(
     drop(on_node(&node, "stall", move |tasks| async move {
         let config = Config {
             layout: layout(32 * BLOCK, BODY_MAX),
-            trimmed: true,
             ..node_config(&own, tasks, DIR)
         };
         let pool = Rc::clone(&config.pool);

@@ -5,8 +5,10 @@
 //! most 1472 bytes and 64 KiB, and then the reads of a program. The bench holds the
 //! future of `Link::serve` and polls it by hand, so a timed poll is the home's work for
 //! the frames it sends. After each round of `FRAMES` frames, the bench waits until the
-//! peer has read each of them, so no timed poll waits on the transport. Each line gives
-//! ns per frame:
+//! peer has read each of them, so no timed poll waits on the transport, and then past
+//! the commit of the round. The writes of a round take no sim time, so with no wait
+//! one commit takes the writes of many rounds, more than the ring holds. Each line
+//! gives ns per frame:
 //!
 //! - `timer`: an empty closure, the floor of each timed poll.
 //! - `narrow 1472`, `narrow 64k`: a latest session of 64 channels on one index, whose
@@ -90,9 +92,6 @@ const ROUNDS: usize = 50;
 const RUN: usize = (WARMUP + ROUNDS) * FRAMES;
 /// Samples per series of a `wide` frame.
 const SAMPLES: usize = 256;
-/// A ring that holds each frame of the run, as nothing frees a ring until #160: 64
-/// times the ring of `home::testing::shard`.
-const AREA: u64 = 1 << 28;
 /// A pool of 4 times the budget of `home::testing::shard`. A size class keeps its
 /// range while one of its blocks is in use, so the lines before `two sets 1472` hold
 /// most of 8 MiB. In some orders of the tasks, 8 MiB then has no room for a frame of
@@ -392,6 +391,7 @@ async fn bench(
                     }
                 }
                 read(&node, &progress, frames).await;
+                node.clock().sleep(common::SETTLE).await;
                 timer.close(round >= WARMUP);
                 line.close(round >= WARMUP);
             }
@@ -531,8 +531,8 @@ async fn take(
     }
 }
 
-/// A hub on a new shard whose ring holds the run, with the channels of each shape
-/// defined, and the node's mesh time now.
+/// A hub on the shard of [`create_shard`], with the channels of each shape defined,
+/// and the node's mesh time now.
 async fn create_hub(node: &sim::node::Node, tasks: Tasks) -> (Hub, i64) {
     let (home, interner, now, time) = create_shard(node, tasks.clone()).await;
     let hub = Hub::new(hub::Config {
@@ -636,8 +636,8 @@ fn draft(writer: &Writer, samples: usize, stamp: &mut i64) -> Draft {
     draft
 }
 
-/// `home::testing::shard` on a ring of `AREA` and a pool of `BUDGET`, its interner,
-/// the mesh time once the clock has one, and the reader of that time. #160 removes it.
+/// `home::testing::shard` with a pool of `BUDGET`: a shard on a new ring of 4 MiB,
+/// its interner, the mesh time once the clock has one, and the reader of that time.
 async fn create_shard(
     node: &sim::node::Node,
     tasks: Tasks,
@@ -655,9 +655,8 @@ async fn create_shard(
         clock: node.clock(),
         tasks,
         entropy: node.entropy(),
-        layout: buffer::Layout::new(AREA, 1 << 16).expect("a ring"),
+        layout: buffer::Layout::new(1 << 22, 1 << 16).expect("a ring"),
         commit: Span::from_nanos(10_000_000),
-        trimmed: false,
     };
     let buffer = buffer::Buffer::open(config, interner.slots())
         .await

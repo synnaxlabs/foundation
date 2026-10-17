@@ -14,7 +14,6 @@ fn refused_with_paths(seed: u64, paths: u32, empty: bool) -> Option<(u64, Reject
     drop(on_node(&node, "stall", move |tasks| async move {
         let config = Config {
             layout: layout(24 * BLOCK, BODY_MAX),
-            trimmed: true,
             ..node_config(&own, tasks, DIR)
         };
         let clock = own.clock();
@@ -94,7 +93,6 @@ fn a_reopen_after_trims_counts_on_from_the_holder_of_entries_with_no_samples() {
     sim.run_on(&node, |node, tasks| async move {
         let config = || Config {
             layout: layout(32 * BLOCK, BODY_MAX),
-            trimmed: true,
             ..node_config(&node, tasks.clone(), DIR)
         };
         let first = config();
@@ -148,7 +146,6 @@ fn a_full_ring_writes_one_checkpoint_for_each_step() {
         .run_on(&node, |node, tasks| async move {
             let config = || Config {
                 layout: layout(512 * BLOCK, 4 * 4096 - 9),
-                trimmed: true,
                 ..node_config(&node, tasks.clone(), DIR)
             };
             let first = config();
