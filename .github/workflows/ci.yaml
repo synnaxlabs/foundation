@@ -10,6 +10,7 @@ on:
       - 'bench/**'
       - 'fuzz/**'
       - 'xtask/**'
+      - 'sdk/**'
       - 'oracles/**'
       - 'patches/**'
       - 'Cargo.toml'
@@ -63,6 +64,7 @@ jobs:
               - 'bench/**'
               - 'fuzz/**'
               - 'xtask/**'
+              - 'sdk/**'
               - 'oracles/**'
               - 'patches/**'
               - 'Cargo.toml'
@@ -138,6 +140,7 @@ jobs:
               - --exclude xtask # #2238
               - --exclude ops # #2971
               - --exclude sdk # #682, #2955
+              - --exclude sdk-python # #682, #2955
             untested:
               - --exclude sim # #2973
               - --exclude secret # #2973
@@ -225,6 +228,7 @@ jobs:
               - --exclude xtask # #2238
               - --exclude ops # #2971
               - --exclude sdk # #682, #2955
+              - --exclude sdk-python # #682, #2955
     runs-on: ${{ matrix.runner }}
     env:
       RUST: ${{ needs.changes.outputs.rust }}

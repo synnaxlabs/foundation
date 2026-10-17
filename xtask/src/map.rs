@@ -261,6 +261,11 @@ pub(crate) const CRATES: &[Crate] = &[
         layer: 4,
         deps: Deps::Only(&["program", "transport", "os", "env", "types", "block"]),
     },
+    Crate {
+        name: "sdk-python",
+        layer: 4,
+        deps: Deps::Only(&["sdk", "types"]),
+    },
 ];
 
 /// Every connector kind crate, named `connector-<kind>`.

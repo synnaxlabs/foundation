@@ -1,0 +1,155 @@
+name: SDK
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/**'
+      - 'sdk/**'
+      - 'patches/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.cargo/**'
+      - 'rust-toolchain*'
+      - '.github/workflows/sdk.yaml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # A skipped job counts as passed, so the jobs skip only when this filter ran and found
+  # no change. A merge queue push skips them, because the queue already ran them.
+  changes:
+    if: github.event_name != 'push' || github.actor == 'github-merge-queue[bot]'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      code: ${{ github.event_name == 'push' && 'false' || steps.filter.outputs.code }}
+    steps:
+      - if: github.event_name == 'merge_group'
+        uses: actions/checkout@v4
+      - if: github.event_name != 'push'
+        uses: dorny/paths-filter@0e4a8c6effa4802afeda77dc8d303f8176d7dfad # v3.0.4
+        id: filter
+        with:
+          base: ${{ github.event.merge_group.base_sha }}
+          ref: ${{ github.event.merge_group.head_sha }}
+          filters: |
+            code:
+              - 'crates/**'
+              - 'sdk/**'
+              - 'patches/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.cargo/**'
+              - 'rust-toolchain*'
+              - '.github/workflows/sdk.yaml'
+
+  # The node that each gate connects to. Windows waits on #682 and #2955.
+  node:
+    needs: changes
+    if: "!cancelled() && needs.changes.outputs.code != 'false'"
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15-intel, macos-15]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build -p node --release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: node-${{ matrix.runner }}
+          path: target/release/foundation
+          if-no-files-found: error
+
+  wheel:
+    needs: changes
+    if: "!cancelled() && needs.changes.outputs.code != 'false'"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64
+          - runner: macos-15-intel
+            target: x86_64
+          - runner: macos-15
+            target: aarch64
+          # The test-only functions of the module, for `tests/test_sim.py`.
+          - runner: ubuntu-24.04
+            target: x86_64
+            sim: true
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      # On Linux, it builds in the `manylinux_2_28` container. The profile is `wheel`
+      # (`pyproject.toml`).
+      - uses: PyO3/maturin-action@3e2bdf6ba6453a61e649744019b8a2d906c7eb38 # v1.51.0
+        with:
+          maturin-version: v1.15.0
+          working-directory: sdk/python
+          target: ${{ matrix.target }}
+          manylinux: '2_28'
+          args: --out dist ${{ matrix.sim && '--features sim' || '' }}
+      - run: ls -l sdk/python/dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.runner }}${{ matrix.sim && '-sim' || '' }}
+          path: sdk/python/dist/*.whl
+          if-no-files-found: error
+
+  # Installs the wheel on a runner with only Python, in a new venv, and runs the tests
+  # against the node. Python 3.11 is the oldest that the wheel supports. The `sim`
+  # wheel also runs `test_sim.py`.
+  gate:
+    needs: [node, wheel]
+    if: "!cancelled() && needs.node.result == 'success' && needs.wheel.result == 'success'"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            tests: test_client.py
+          - runner: ubuntu-24.04-arm
+            tests: test_client.py
+          - runner: macos-15-intel
+            tests: test_client.py
+          - runner: macos-15
+            tests: test_client.py
+          - runner: ubuntu-24.04
+            sim: true
+            tests: test_*.py
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: sdk/python/tests
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/download-artifact@v4
+        with:
+          name: node-${{ matrix.runner }}
+          path: node
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel-${{ matrix.runner }}${{ matrix.sim && '-sim' || '' }}
+          path: wheel
+      - run: |
+          chmod +x node/foundation
+          python -m venv venv
+          venv/bin/pip install wheel/*.whl
+      - env:
+          FOUNDATION_NODE: ${{ github.workspace }}/node/foundation
+        run: |
+          venv/bin/python -m unittest discover -s sdk/python/tests \
+            -p '${{ matrix.tests }}' -v

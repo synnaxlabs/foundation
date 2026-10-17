@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "xtask", "bench/*", "sdk/rust"]
+members = ["crates/*", "xtask", "bench/*", "sdk/rust", "sdk/python"]
 exclude = ["docs", "patches", ".claude"]
 
 [workspace.package]
@@ -163,6 +163,12 @@ panic = "abort"
 codegen-units = 1
 lto = "fat"
 debug = "line-tables-only"
+
+# The Python wheels: a panic of the client gives the caller an exception, not an abort
+# (SDK CLIENT).
+[profile.wheel]
+inherits = "release"
+panic = "unwind"
 
 # Local patches: docs/dependencies.md.
 [patch.crates-io]

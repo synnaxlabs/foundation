@@ -45,6 +45,10 @@ fn each_error_names_its_cause() {
     );
 }
 
+// These tests build the client through the private `Client::start`, with a `main`
+// that panics or fails. `connect` is `start` with `run` as its `main`, and no public
+// input makes a correct client's thread panic.
+
 /// A client whose thread sends `Ok`, waits for its end, and then runs `after`.
 fn client(after: impl FnOnce() -> Result<(), Error> + Send + 'static) -> Client {
     let started = Client::start(|_, outcome, ended| async move {

@@ -22,6 +22,11 @@ allow = [
 ]
 unused-allowed-license = "allow"
 
+# Under `pyo3`, at build time only (docs/dependencies.md).
+[[licenses.exceptions]]
+crate = "target-lexicon"
+allow = ["Apache-2.0 WITH LLVM-exception"]
+
 # Workspace crates set `publish = false` and have no license.
 [licenses.private]
 ignore = true

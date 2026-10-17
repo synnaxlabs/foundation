@@ -219,4 +219,7 @@ exclude_re = [
   'crates/node/src/status\.rs:.*replace < with (==|>)$',
   # A stub that panics until PR B2 of #432 fills it; B2 removes this line.
   'crates/connector-modbus/src/kind\.rs:.*replace <impl kind::Kind for Kind>::run ->',
+  # The module builds only into a wheel, and no Rust test can link Python. The `gate`
+  # and `sim` jobs of `sdk.yaml` run `sdk/python/tests` on each wheel.
+  '^sdk/python/src/',
 ]

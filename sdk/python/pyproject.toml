@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "synnax-foundation"
+description = "The Python SDK of Foundation"
+requires-python = ">=3.11"
+dynamic = ["version"]
+
+[tool.maturin]
+python-source = "python"
+module-name = "foundation._native"
+profile = "wheel"
