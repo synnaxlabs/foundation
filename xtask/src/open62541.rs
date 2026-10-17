@@ -18,11 +18,12 @@ pub(crate) const URL: &str = "https://github.com/open62541/open62541.git";
 const DEST: &str = "patches/open62541";
 
 /// The `cmake` options of our build: no architecture, so the event loop and the clock
-/// are ours, and no feature the connector does not use.
+/// are ours, encryption on the OpenSSL interface, which the copy builds against the
+/// libcrypto of aws-lc ([`Crypto`]), and no feature the connector does not use.
 const OPTIONS: [&str; 11] = [
     "-DUA_ARCHITECTURE=none",
     "-DUA_MULTITHREADING=0",
-    "-DUA_ENABLE_ENCRYPTION=OFF",
+    "-DUA_ENABLE_ENCRYPTION=OPENSSL",
     "-DUA_ENABLE_PUBSUB=OFF",
     "-DUA_ENABLE_XML_ENCODING=OFF",
     "-DUA_ENABLE_JSON_ENCODING=OFF",
@@ -43,9 +44,9 @@ const CLOCKS: [&str; 3] = [
 
 /// The only (file, function, symbol, access) keys with which a function references a
 /// symbol outside the copy that [`SYMBOLS`] does not admit. A clock counts only as a
-/// call. A test of `connector-opcua` names the function of each clock key and fails
-/// when its reason becomes false.
-const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 20] = [
+/// call. A test of `connector-opcua` names the function of each key of [`CLOCKS`] and
+/// fails when its reason becomes false. [`AWS_LC_KEYS`] holds the keys of aws-lc.
+const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 25] = [
     // `isdigit` reads the locale, which stays C: nothing calls `setlocale`.
     (
         "deps/musl_inet_pton.c",
@@ -69,12 +70,45 @@ const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 20] = [
     ),
     // `strtod` reads the decimal point of the locale, which stays C.
     ("deps/parse_num.c", "parseDouble", "strtod", Access::Call),
+    // Formats a byte of a digest as hex, which reads no locale.
+    (
+        "plugins/crypto/openssl/certificategroup.c",
+        "UA_CertificateUtils_getThumbprint",
+        "sprintf",
+        Access::Call,
+    ),
     // `UA_Server_runUntilInterrupt`, which we never call.
     (
         "plugins/ua_config_default.c",
         "interruptServer",
         "UA_DateTime_nowMonotonic",
         Access::Call,
+    ),
+    // The prompt on the terminal for the password of an encrypted key, in the default
+    // configs with encryption, which `connector-opcua` never calls.
+    (
+        "plugins/ua_config_default.c",
+        "readPrivateKeyPassword",
+        "fgets",
+        Access::Call,
+    ),
+    (
+        "plugins/ua_config_default.c",
+        "readPrivateKeyPassword",
+        "fwrite",
+        Access::Call,
+    ),
+    (
+        "plugins/ua_config_default.c",
+        "readPrivateKeyPassword",
+        "stdin",
+        Access::Address,
+    ),
+    (
+        "plugins/ua_config_default.c",
+        "readPrivateKeyPassword",
+        "stdout",
+        Access::Address,
     ),
     // The build date of a server config, for the test server only. In
     // `connector-opcua`, `link::the_production_code_builds_no_server` checks it.
@@ -142,8 +176,7 @@ const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 20] = [
         "access",
         Access::Call,
     ),
-    // ECC user tokens, which need an ECC policy. Encryption is off and
-    // `connector-opcua` adds no policy, so a client has only the policy `None`.
+    // ECC user tokens, which need an ECC policy. The copy compiles none.
     (
         "src/util/ua_encryptedsecret.c",
         "encryptUserIdentityTokenEcc",
@@ -179,6 +212,192 @@ const FUNCTION_SYMBOLS: [(&str, &str, &str, Access); 20] = [
     ),
 ];
 
+/// The (file, function, symbol, access) keys of each call of a function of aws-lc that
+/// [`AWS_LC`] does not admit, by its name without the prefix of [`Crypto`]. A key
+/// admits only the name with the prefix. A test of `connector-opcua` names the function
+/// of each key of [`AWS_LC_INPUTS`] and fails when its reason becomes false.
+const AWS_LC_KEYS: [(&str, &str, &str, Access); 26] = [
+    // Gives the time of a certificate, which is never NULL, so it reads no clock.
+    (
+        "plugins/crypto/openssl/certificategroup.c",
+        "UA_CertificateUtils_getExpirationDate",
+        "ASN1_TIME_to_tm",
+        Access::Call,
+    ),
+    // The validity of a certificate against the OS clock. No node checks a
+    // certificate: `connector-opcua` adds no security policy.
+    (
+        "plugins/crypto/openssl/certificategroup.c",
+        "openSSL_verifyChain",
+        "X509_cmp_current_time",
+        Access::Call,
+    ),
+    // With no callback, an encrypted PEM makes aws-lc read a password from the
+    // console. No node loads a key or a certificate: `connector-opcua` adds no
+    // security policy (#3017).
+    (
+        "plugins/crypto/openssl/certificategroup.c",
+        "UA_CertificateUtils_comparePublicKeys",
+        "PEM_read_bio_X509",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/certificategroup.c",
+        "UA_CertificateUtils_comparePublicKeys",
+        "PEM_read_bio_X509_REQ",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/certificategroup.c",
+        "openSSLLoadLeafCertificate",
+        "PEM_read_bio_X509",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/certificategroup.c",
+        "reloadCertificates",
+        "PEM_read_bio_X509_CRL",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_LoadPemCertificate",
+        "PEM_read_bio_X509",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_LoadPemCrl",
+        "PEM_read_bio_X509_CRL",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_LoadPrivateKey",
+        "PEM_read_bio_PrivateKey",
+        Access::Call,
+    ),
+    // The callback gives the password of the argument, so it reads no console.
+    (
+        "plugins/crypto/openssl/certificategroup.c",
+        "UA_CertificateUtils_decryptPrivateKey",
+        "PEM_read_bio_PrivateKey",
+        Access::Call,
+    ),
+    // The randomness of aws-lc, which TLS RANDOMNESS admits: the nonces of a channel,
+    // and the padding, salt, and blinding of RSA. Nothing branches on the bytes.
+    (
+        "plugins/crypto/openssl/securitypolicy_aes128sha256rsaoaep.c",
+        "UA_Sym_Aes128Sha256RsaOaep_generateNonce",
+        "RAND_bytes",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_aes256sha256rsapss.c",
+        "UA_Sym_Aes256Sha256RsaPss_generateNonce",
+        "RAND_bytes",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_basic256sha256.c",
+        "UA_Sym_Basic256Sha256_generateNonce",
+        "RAND_bytes",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_Openssl_RSA_Private_Decrypt",
+        "EVP_PKEY_decrypt",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_Openssl_RSA_Private_Sign",
+        "EVP_DigestSignFinal",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_Openssl_RSA_Public_Encrypt",
+        "EVP_PKEY_encrypt",
+        Access::Call,
+    ),
+    // A new key and a signing request, for the certificate push of a server, which no
+    // node runs.
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_CreateSigningRequest",
+        "EC_KEY_generate_key",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_CreateSigningRequest",
+        "RAND_seed",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_CreateSigningRequest",
+        "RSA_generate_key_ex",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_CreateSigningRequest",
+        "X509_REQ_sign",
+        Access::Call,
+    ),
+    // Keys and signatures of the ECC policies, which the copy leaves out.
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_ECC_GenerateKey",
+        "EVP_PKEY_keygen",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_EdDSA_Ed25519_Sign",
+        "EVP_DigestSign",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_EdDSA_Ed448_Sign",
+        "EVP_DigestSign",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_X25519_GenerateKey",
+        "EVP_PKEY_keygen",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_OpenSSL_X448_GenerateKey",
+        "EVP_PKEY_keygen",
+        Access::Call,
+    ),
+    (
+        "plugins/crypto/openssl/securitypolicy_common.c",
+        "UA_Openssl_ECDSA_Sign",
+        "EVP_DigestSignFinal",
+        Access::Call,
+    ),
+];
+
+/// The functions of aws-lc that the copy calls and that read the clock on each call or,
+/// with no password callback, the console. `ASN1_TIME_to_tm` reads the clock only on a
+/// NULL time, which its key states the copy never gives.
+const AWS_LC_INPUTS: [&str; 5] = [
+    "PEM_read_bio_PrivateKey",
+    "PEM_read_bio_X509",
+    "PEM_read_bio_X509_CRL",
+    "PEM_read_bio_X509_REQ",
+    "X509_cmp_current_time",
+];
+
 /// The release files that the copy holds and the library of our options does not
 /// compile. A `.c` file goes in `sources.txt`, so it builds with `flags.txt`.
 const EXTRA: [&str; 2] = [
@@ -186,6 +405,33 @@ const EXTRA: [&str; 2] = [
     "arch/common/timer.c",
     // The shim includes it to hold a `UA_Timer` in the loop.
     "arch/common/timer.h",
+];
+
+/// The sources of the library that the copy leaves out. `shim.c` defines each symbol
+/// of them that the copy references, to print its name and abort, so a call fails
+/// loudly. A node keeps its certificates in its config, not in files of the copy.
+const OMITTED: [&str; 14] = [
+    // The file stores of certificates, which read and write files and watch them with
+    // inotify.
+    "plugins/crypto/ua_certificategroup_filestore.c",
+    "plugins/crypto/ua_filestore_common.c",
+    "plugins/crypto/ua_securitypolicy_filestore.c",
+    // Makes a key and a self-signed certificate from the OS clock. No file of the copy
+    // references it.
+    "plugins/crypto/openssl/create_certificate.c",
+    // The deprecated and ECC policies. A node uses only `Basic256Sha256`,
+    // `Aes128_Sha256_RsaOaep`, and `Aes256_Sha256_RsaPss`, and the user token of an ECC
+    // policy reads the clock. `shim.c` defines each constructor to abort.
+    "plugins/crypto/openssl/securitypolicy_basic128rsa15.c",
+    "plugins/crypto/openssl/securitypolicy_basic256.c",
+    "plugins/crypto/openssl/securitypolicy_eccbrainpoolp256r1.c",
+    "plugins/crypto/openssl/securitypolicy_eccbrainpoolp384r1.c",
+    "plugins/crypto/openssl/securitypolicy_ecccurve25519.c",
+    "plugins/crypto/openssl/securitypolicy_ecccurve448.c",
+    "plugins/crypto/openssl/securitypolicy_eccnistp256.c",
+    "plugins/crypto/openssl/securitypolicy_eccnistp256_aesgcm.c",
+    "plugins/crypto/openssl/securitypolicy_eccnistp256_chachapoly.c",
+    "plugins/crypto/openssl/securitypolicy_eccnistp384.c",
 ];
 
 /// The flags of the upstream compile, other than `-D`, `-I`, and `-std`, that change
@@ -221,7 +467,7 @@ const NO_DOLLARS: &str = "-fno-dollars-in-identifiers";
 /// file, network, randomness, or process state, except the allocator, with its reason.
 /// A new symbol outside the copy also goes in `OUTSIDE` in `connector-opcua`, which
 /// lists the symbols of the production build.
-const SYMBOLS: [&str; 16] = [
+const SYMBOLS: [&str; 30] = [
     // The allocator of libc, since the check builds without `alloc.h`. It returns
     // addresses that the OS places at random, so no result of the copy may depend on
     // an address.
@@ -237,28 +483,183 @@ const SYMBOLS: [&str; 16] = [
     "strcmp",
     "strlen",
     "strncmp",
+    "strncpy",
+    "strtok_r",
     // `shim.c` defines each to print its name and abort.
+    "UA_CertificateGroup_Filestore",
     "UA_ConnectionManager_new_POSIX_Ethernet",
     "UA_ConnectionManager_new_POSIX_TCP",
     "UA_ConnectionManager_new_POSIX_UDP",
     "UA_EventLoop_new_POSIX",
     "UA_InterruptManager_new_POSIX",
+    "UA_SecurityPolicy_Basic128Rsa15",
+    "UA_SecurityPolicy_Basic256",
+    "UA_SecurityPolicy_EccBrainpoolP256r1",
+    "UA_SecurityPolicy_EccBrainpoolP384r1",
+    "UA_SecurityPolicy_EccCurve25519",
+    "UA_SecurityPolicy_EccCurve448",
+    "UA_SecurityPolicy_EccNistP256",
+    "UA_SecurityPolicy_EccNistP256AesGcm",
+    "UA_SecurityPolicy_EccNistP256ChaChaPoly",
+    "UA_SecurityPolicy_EccNistP384",
+    "UA_SecurityPolicy_Filestore",
 ];
 
+/// The functions of aws-lc that any file of the copy may call, by name without the
+/// prefix of [`Crypto`]. Each reads no clock, file, network, randomness, or process
+/// state, other than the features of the processor, by which aws-lc picks the code of
+/// an algorithm and not its result.
+#[rustfmt::skip]
+const AWS_LC: [&str; 144] = [
+    "ASN1_INTEGER_cmp", "BIO_free", "BIO_new_mem_buf", "BIO_reset", "BN_bin2bn",
+    "BN_bn2binpad", "BN_free", "BN_new", "BN_set_word", "ECDSA_SIG_free",
+    "ECDSA_SIG_get0", "ECDSA_SIG_new", "ECDSA_SIG_set0", "ECDSA_size",
+    "EC_GROUP_get_curve_name", "EC_KEY_free", "EC_KEY_get0_group",
+    "EC_KEY_new_by_curve_name", "EC_curve_nist2nid", "EVP_CIPHER_CTX_block_size",
+    "EVP_CIPHER_CTX_ctrl", "EVP_CIPHER_CTX_free", "EVP_CIPHER_CTX_new",
+    "EVP_CIPHER_CTX_set_padding", "EVP_DecryptFinal_ex", "EVP_DecryptInit_ex",
+    "EVP_DecryptUpdate", "EVP_DigestSignInit", "EVP_DigestSignUpdate",
+    "EVP_DigestVerify", "EVP_DigestVerifyFinal", "EVP_DigestVerifyInit",
+    "EVP_DigestVerifyUpdate", "EVP_EncryptFinal_ex", "EVP_EncryptInit_ex",
+    "EVP_EncryptUpdate", "EVP_MD_CTX_create", "EVP_MD_CTX_destroy", "EVP_MD_CTX_free",
+    "EVP_MD_CTX_new", "EVP_PKEY_CTX_add1_hkdf_info", "EVP_PKEY_CTX_free",
+    "EVP_PKEY_CTX_new", "EVP_PKEY_CTX_new_id", "EVP_PKEY_CTX_set1_hkdf_key",
+    "EVP_PKEY_CTX_set1_hkdf_salt", "EVP_PKEY_CTX_set_ec_paramgen_curve_nid",
+    "EVP_PKEY_CTX_set_hkdf_md", "EVP_PKEY_CTX_set_rsa_mgf1_md",
+    "EVP_PKEY_CTX_set_rsa_oaep_md", "EVP_PKEY_CTX_set_rsa_padding",
+    "EVP_PKEY_CTX_set_rsa_pss_saltlen", "EVP_PKEY_assign_EC_KEY", "EVP_PKEY_assign_RSA",
+    "EVP_PKEY_base_id", "EVP_PKEY_cmp", "EVP_PKEY_copy_parameters",
+    "EVP_PKEY_decrypt_init", "EVP_PKEY_derive", "EVP_PKEY_derive_init",
+    "EVP_PKEY_derive_set_peer", "EVP_PKEY_encrypt_init", "EVP_PKEY_free",
+    "EVP_PKEY_get0_EC_KEY", "EVP_PKEY_get0_RSA", "EVP_PKEY_get1_tls_encodedpoint",
+    "EVP_PKEY_get_raw_public_key", "EVP_PKEY_keygen_init", "EVP_PKEY_new",
+    "EVP_PKEY_new_raw_public_key", "EVP_PKEY_paramgen", "EVP_PKEY_paramgen_init",
+    "EVP_PKEY_set1_tls_encodedpoint", "EVP_aes_128_cbc", "EVP_aes_128_gcm",
+    "EVP_aes_256_cbc", "EVP_chacha20_poly1305", "EVP_get_digestbyname", "EVP_sha1",
+    "EVP_sha256", "EVP_sha384", "GENERAL_NAME_free", "HMAC", "OBJ_txt2nid",
+    "OPENSSL_cleanse", "OPENSSL_free", "OPENSSL_sk_free", "OPENSSL_sk_new_null",
+    "OPENSSL_sk_num", "OPENSSL_sk_pop_free_ex", "OPENSSL_sk_push", "OPENSSL_sk_value",
+    "RSA_free", "RSA_new", "RSA_size", "X509V3_EXT_conf_nid",
+    "X509_CRL_digest", "X509_CRL_free", "X509_CRL_get_REVOKED", "X509_CRL_get_issuer",
+    "X509_EXTENSION_free", "X509_NAME_add_entry_by_txt", "X509_NAME_cmp",
+    "X509_NAME_dup", "X509_NAME_free", "X509_NAME_new", "X509_NAME_oneline",
+    "X509_REQ_add_extensions", "X509_REQ_free", "X509_REQ_get_pubkey", "X509_REQ_new",
+    "X509_REQ_set_pubkey", "X509_REQ_set_subject_name", "X509_REQ_set_version",
+    "X509_REVOKED_get0_serialNumber", "X509_check_private_key", "X509_cmp",
+    "X509_digest", "X509_free", "X509_get0_pubkey", "X509_get0_serialNumber",
+    "X509_get_ext", "X509_get_ext_by_NID", "X509_get_ext_d2i",
+    "X509_get_extension_flags", "X509_get_issuer_name", "X509_get_key_usage",
+    "X509_get_notAfter", "X509_get_notBefore", "X509_get_pubkey",
+    "X509_get_subject_name", "X509_verify", "d2i_AutoPrivateKey", "d2i_ECDSA_SIG",
+    "d2i_PrivateKey_bio", "d2i_X509", "d2i_X509_CRL", "d2i_X509_CRL_bio",
+    "d2i_X509_REQ_bio", "d2i_X509_bio", "i2d_ECDSA_SIG", "i2d_PrivateKey", "i2d_X509",
+    "i2d_X509_REQ",
+];
+
+/// The header of the symbol prefix, which the build script of `connector-opcua` also
+/// reads.
+const PREFIX_HEADER: &str = "openssl/boringssl_prefix_symbols.h";
+
+/// The libcrypto that the copy builds against: the aws-lc of the one `aws-lc-sys` in
+/// `Cargo.lock`, which `connector-opcua` links.
+pub(crate) struct Crypto {
+    /// Its include directories in the source of `aws-lc-sys`, `generated-include`
+    /// first: `aws-lc/include` holds an empty `boringssl_prefix_symbols.h`.
+    include: Vec<PathBuf>,
+    /// The prefix of each of its symbols, with the `_` that ends it.
+    prefix: String,
+}
+
+impl Crypto {
+    /// The `aws-lc-sys` of `Cargo.lock` in the workspace at `root`.
+    ///
+    /// # Errors
+    ///
+    /// A `cargo metadata` that fails, a lock with no `aws-lc-sys` or more than one, and
+    /// the errors of [`Crypto::read_prefix`].
+    pub(crate) fn locked(root: &Path) -> Result<Self, String> {
+        let graph = crate::graph(root)?;
+        let packages: Vec<&Value> = graph["packages"]
+            .as_array()
+            .ok_or("cargo metadata has no packages")?
+            .iter()
+            .filter(|package| package["name"] == "aws-lc-sys")
+            .collect();
+        let [package] = packages[..] else {
+            return Err(format!(
+                "Cargo.lock holds {} packages `aws-lc-sys`, not one",
+                packages.len()
+            ));
+        };
+        let dir = package["manifest_path"]
+            .as_str()
+            .and_then(|manifest| Path::new(manifest).parent())
+            .ok_or("aws-lc-sys has no manifest path")?;
+        let include = vec![dir.join("generated-include"), dir.join("aws-lc/include")];
+        // The line that the build script of `connector-opcua` reads.
+        let prefix = Self::read_prefix(&include[0].join(PREFIX_HEADER))?;
+        Ok(Self { include, prefix })
+    }
+
+    /// The prefix that the `boringssl_prefix_symbols.h` at `header` defines.
+    ///
+    /// # Errors
+    ///
+    /// A header that cannot be read, and one with no `BORINGSSL_PREFIX` with a prefix.
+    fn read_prefix(header: &Path) -> Result<String, String> {
+        let text = std::fs::read_to_string(header)
+            .map_err(|e| format!("{}: {e}", header.display()))?;
+        Self::prefix(&text)
+            .ok_or_else(|| format!("{} has no BORINGSSL_PREFIX", header.display()))
+    }
+
+    /// The prefix of the line `#define BORINGSSL_PREFIX <prefix>` of `header`, with the
+    /// `_` that ends it, or `None` when it has no such line with a `<prefix>`.
+    fn prefix(header: &str) -> Option<String> {
+        header
+            .lines()
+            .find_map(|line| line.strip_prefix("#define BORINGSSL_PREFIX "))
+            .map(str::trim)
+            .filter(|prefix| !prefix.is_empty())
+            .map(|prefix| format!("{prefix}_"))
+    }
+
+    /// The `-isystem` flags of its include directories, so [`includes`] admits each
+    /// header in them as a system header.
+    fn flags(&self) -> impl Iterator<Item = std::ffi::OsString> {
+        self.include
+            .iter()
+            .flat_map(|dir| ["-isystem".into(), dir.into()])
+    }
+
+    /// Whether `symbol` is a function of [`AWS_LC`].
+    fn admits(&self, symbol: &str) -> bool {
+        symbol
+            .strip_prefix(&self.prefix)
+            .is_some_and(|name| AWS_LC.contains(&name))
+    }
+}
+
 /// Clones `tag` of `url` into `target/open62541/`, builds it with [`OPTIONS`], and
-/// replaces `patches/open62541/` with its compiled sources, the headers in the clone
-/// that they include, each file of [`EXTRA`], `LICENSE`, `sources.txt` (each `.c`
-/// file), `flags.txt` (the `-D`, `-I`, and `-std` flags and the [`CODE_FLAGS`] of each
-/// compile, then [`NO_DOLLARS`]), and `VERSION` (tag and commit).
-/// Then it gives what [`check`] gives for the new copy. Needs Linux, `git`, `cmake`,
-/// Python 3, GCC as `cc` for x86-64 or aarch64, and GNU `objdump` and `nm`.
+/// replaces `patches/open62541/` with its compiled sources less [`OMITTED`], the
+/// headers in the clone that they include, each file of [`EXTRA`], `LICENSE`,
+/// `sources.txt` (each `.c` file), `flags.txt` (the `-D`, `-I`, and `-std` flags and
+/// the [`CODE_FLAGS`] of each compile, then [`NO_DOLLARS`]), and `VERSION` (tag and
+/// commit). Then it gives what [`check`] gives for the new copy. Needs Linux, `git`,
+/// `cmake`, Python 3, GCC as `cc` for x86-64 or aarch64, and GNU `objdump` and `nm`.
 ///
 /// # Errors
 ///
 /// A step that fails, a flag of a compile that is neither [`kept`] nor [`left_out`],
-/// a file of [`EXTRA`] that the release does not have or the library holds, and each
-/// error of [`check`]. On an error, `patches/open62541/` does not change.
-pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> {
+/// a file of [`EXTRA`] that the release does not have or the library holds, a file of
+/// [`OMITTED`] that the library does not compile, and each error of [`check`]. On an
+/// error, `patches/open62541/` does not change.
+pub(crate) fn run(
+    root: &Path,
+    crypto: &Crypto,
+    url: &str,
+    tag: &str,
+) -> Result<(), Vec<String>> {
     let work = root.join("target/open62541");
     let (src, build, stage) = (work.join("src"), work.join("build"), work.join("copy"));
     let trees = Trees {
@@ -268,7 +669,7 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
     let commit = compile(&work, &trees, url, tag).map_err(|e| vec![e])?;
     let found = collect(&trees).map_err(|e| vec![e])?;
     write(&stage, &src, &found, &format!("{tag}\n{commit}")).map_err(|e| vec![e])?;
-    inspect(&stage, &work.join("check"), Path::new("cc"))?;
+    inspect(&stage, &work.join("check"), Path::new("cc"), crypto)?;
     let dest = root.join(DEST);
     remove(&dest)
         .and_then(|()| {
@@ -290,18 +691,18 @@ pub(crate) fn run(root: &Path, url: &str, tag: &str) -> Result<(), Vec<String>> 
 /// A line of `flags.txt` other than a `-D`, `-I`, or `-std` flag with its value, one of
 /// [`CODE_FLAGS`], or [`NO_DOLLARS`], a `flags.txt` with no line [`NO_DOLLARS`], a
 /// build that fails, an `#include` or `#import` of a header outside both the copy and
-/// the system directories, a reference to a symbol outside the copy that neither
-/// [`SYMBOLS`] nor [`FUNCTION_SYMBOLS`] admits, a listed key with no reference, a
-/// reference outside a function that [`SYMBOLS`] does not admit, any reference to a
-/// clock function other than a call, such as its address in code or data, through which
-/// any code can call it, each inlined function, an `#include_next`, a `#line` directive
-/// or line marker in a `.c` or `.h` file of the copy, a `cc` that is not GCC or that
-/// builds for neither x86-64 nor aarch64, a symbol whose name holds a character other
-/// than an ASCII letter, a digit, `_`, `.`, or `$`, and each instruction whose key the
-/// list of its architecture does not admit.
-pub(crate) fn check(root: &Path) -> Result<(), Vec<String>> {
+/// the system directories, a reference to a symbol outside the copy that none of
+/// [`SYMBOLS`], [`FUNCTION_SYMBOLS`], [`AWS_LC`], and [`AWS_LC_KEYS`] admits, a listed
+/// key with no reference, a reference outside a function that [`SYMBOLS`] does not
+/// admit, any reference to a clock function other than a call, such as its address in
+/// code or data, through which any code can call it, each inlined function, an
+/// `#include_next`, a `#line` directive or line marker in a `.c` or `.h` file of the
+/// copy, a `cc` that is not GCC or that builds for neither x86-64 nor aarch64, a symbol
+/// whose name holds a character other than an ASCII letter, a digit, `_`, `.`, or `$`,
+/// and each instruction whose key the list of its architecture does not admit.
+pub(crate) fn check(root: &Path, crypto: &Crypto) -> Result<(), Vec<String>> {
     let out = root.join("target/open62541/check");
-    inspect(&root.join(DEST), &out, Path::new("cc"))
+    inspect(&root.join(DEST), &out, Path::new("cc"), crypto)
 }
 
 /// Clones and builds `tag` of `url` in `work`, and gives its commit.
@@ -349,8 +750,13 @@ fn collect(trees: &Trees<'_>) -> Result<Found, String> {
         .map_err(|e| format!("compile_commands.json: {e}"))?;
     let mut files = BTreeSet::new();
     let mut flags: Option<Vec<String>> = None;
+    let mut omitted = BTreeSet::new();
     for entry in entries(&commands, trees.build)? {
         let file = trees.relative(&entry.source)?;
+        if OMITTED.iter().any(|omit| file == Path::new(omit)) {
+            omitted.insert(file);
+            continue;
+        }
         let these = trees
             .flags(&entry.arguments)
             .map_err(|e| format!("{}: {e}", file.display()))?;
@@ -368,6 +774,13 @@ fn collect(trees: &Trees<'_>) -> Result<Found, String> {
             }
         }
         files.insert((entry.source, file));
+    }
+    for omit in OMITTED {
+        if !omitted.contains(Path::new(omit)) {
+            return Err(format!(
+                "{omit}: OMITTED lists it, and the library does not compile it"
+            ));
+        }
     }
     for extra in EXTRA {
         let from = trees.src.join(extra);
@@ -558,9 +971,14 @@ fn arguments(command: &str) -> Vec<String> {
     arguments
 }
 
-/// Builds the copy in `copy` into `out` with the compiler `cc`, a name that `PATH`
-/// finds or an absolute path, and gives each error of [`check`].
-fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
+/// Builds the copy in `copy` into `out` against `crypto` with the compiler `cc`, a
+/// name that `PATH` finds or an absolute path, and gives each error of [`check`].
+fn inspect(
+    copy: &Path,
+    out: &Path,
+    cc: &Path,
+    crypto: &Crypto,
+) -> Result<(), Vec<String>> {
     let read = |name: &str| {
         std::fs::read_to_string(copy.join(name))
             .map_err(|e| vec![format!("{}: {e}", copy.join(name).display())])
@@ -573,14 +991,16 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
     remove(out)
         .and_then(|()| std::fs::create_dir_all(out).map_err(|e| format!("{e}")))
         .map_err(|e| vec![e])?;
-    let (macros, verbose) =
-        spawn(Command::new(cc).args(["-xc", "-E", "-dM", "-v", "/dev/null"]))
-            .and_then(wait)
-            .map_err(|e| vec![e])?;
+    let mut probe = Command::new(cc);
+    probe
+        .args(crypto.flags())
+        .args(["-xc", "-E", "-dM", "-v", "/dev/null"]);
+    let (macros, verbose) = spawn(&mut probe).and_then(wait).map_err(|e| vec![e])?;
     gcc(&macros).map_err(|e| vec![e])?;
     let architecture = Architecture::read(&macros).map_err(|e| vec![e])?;
     let dirs = system_dirs(&verbose);
-    let objects = build(copy, &sources, &flags, out, cc).map_err(|e| vec![e])?;
+    let objects =
+        build(copy, &sources, &flags, out, cc, crypto).map_err(|e| vec![e])?;
     let exported = symbols(
         objects.iter().map(|(_, object, _)| object.as_path()),
         &["--defined-only", "--extern-only"],
@@ -609,7 +1029,7 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
         problems.extend(
             found
                 .into_iter()
-                .filter_map(|found| uses.add(source, found)),
+                .filter_map(|found| uses.add(source, found, crypto)),
         );
         let info = exec(Command::new("objdump").arg("--dwarf=info").arg(&object));
         for function in inlined(&info.map_err(|e| vec![e])?) {
@@ -618,7 +1038,7 @@ fn inspect(copy: &Path, out: &Path, cc: &Path) -> Result<(), Vec<String>> {
                  caller"
             ));
         }
-        for problem in includes(&preprocessed, copy, &flags, &dirs) {
+        for problem in includes(&preprocessed, copy, &flags, &dirs, &crypto.include) {
             problems.push(format!("{source}: {problem}"));
         }
     }
@@ -717,14 +1137,16 @@ fn inside(path: &Path) -> bool {
 
 /// An error for each `#include_next`, and each `#include` or `#import` in a file of
 /// the copy, as `preprocessed` (the output of `cc -E -dI` in `copy`) shows it, that
-/// finds a header outside both the copy and the system directories `dirs`. It finds
-/// the header as `cc` does, through the `-I` directories `flags` gives. Unlike
-/// `cc -H`, `-dI` also shows an `#include` of a header that the unit included before.
+/// finds a header outside both the copy and the system directories `dirs`, or a
+/// header under `openssl/` outside the directories `crypto`. It finds the header as
+/// `cc` does, through the `-I` directories `flags` gives. Unlike `cc -H`, `-dI` also
+/// shows an `#include` of a header that the unit included before.
 fn includes(
     preprocessed: &str,
     copy: &Path,
     flags: &str,
     dirs: &[PathBuf],
+    crypto: &[PathBuf],
 ) -> Vec<String> {
     let quoted: Vec<&Path> = flags
         .lines()
@@ -771,6 +1193,17 @@ fn includes(
             .chain(system)
             .find(|(path, _)| copy.join(path).is_file())
         {
+            Some((path, true))
+                if name.starts_with("openssl/")
+                    && !crypto
+                        .iter()
+                        .any(|dir| path.starts_with(files::normalize(dir))) =>
+            {
+                format!(
+                    "includes {}, a header of OpenSSL outside the crypto",
+                    path.display()
+                )
+            }
             Some((_, true)) => continue,
             Some((path, false)) if inside(&path) => continue,
             Some((path, false)) => {
@@ -810,13 +1243,15 @@ fn system_dirs(verbose: &str) -> Vec<PathBuf> {
 }
 
 /// Compiles and preprocesses each source of `sources` in `copy` into `out` at once
-/// with `cc`, and gives each (source, object, the output of `cc -E -dI`).
+/// with `cc` against `crypto`, and gives each (source, object, the output of
+/// `cc -E -dI`).
 fn build<'a>(
     copy: &Path,
     sources: &'a str,
     flags: &str,
     out: &Path,
     cc: &Path,
+    crypto: &Crypto,
 ) -> Result<Vec<(&'a str, PathBuf, String)>, String> {
     let mut children = Vec::new();
     for (index, source) in sources.lines().enumerate() {
@@ -829,6 +1264,7 @@ fn build<'a>(
             // reference to its random canary is one that the C makes.
             cc.current_dir(copy)
                 .args(flags.lines())
+                .args(crypto.flags())
                 .args(["-g", "-O0", "-fno-stack-protector", "-dumpbase"])
                 .arg(index.to_string())
                 .args(mode);
@@ -983,13 +1419,15 @@ fn references(
 struct Uses {
     /// Each key of a reference that [`Uses::add`] gives to [`FUNCTION_SYMBOLS`].
     keys: BTreeSet<(String, String, String, Access)>,
+    /// Each key of a reference to a function of aws-lc, for [`AWS_LC_KEYS`].
+    crypto: BTreeSet<(String, String, String, Access)>,
 }
 
 impl Uses {
     /// Adds `found`, a reference of `file`, and gives its error when
     /// [`FUNCTION_SYMBOLS`] cannot admit it: the address of a clock function, or a
-    /// reference outside a function that [`SYMBOLS`] does not admit.
-    fn add(&mut self, file: &str, found: Reference) -> Option<String> {
+    /// reference outside a function that neither [`SYMBOLS`] nor `crypto` admits.
+    fn add(&mut self, file: &str, found: Reference, crypto: &Crypto) -> Option<String> {
         let Reference {
             place,
             access,
@@ -1001,7 +1439,7 @@ impl Uses {
                  it escapes FUNCTION_SYMBOLS"
             ));
         }
-        if SYMBOLS.contains(&symbol.as_str()) {
+        if SYMBOLS.contains(&symbol.as_str()) || crypto.admits(&symbol) {
             return None;
         }
         let Place {
@@ -1014,15 +1452,40 @@ impl Uses {
                  through it escapes FUNCTION_SYMBOLS"
             ));
         };
-        self.keys
-            .insert((file.to_owned(), function, symbol, access));
+        let (keys, symbol) = match symbol.strip_prefix(&crypto.prefix) {
+            Some(name) => (&mut self.crypto, name.to_owned()),
+            None => (&mut self.keys, symbol),
+        };
+        keys.insert((file.to_owned(), function, symbol, access));
         None
     }
 
-    /// An error for each key that [`FUNCTION_SYMBOLS`] does not list, and for each
-    /// listed key with no reference.
+    /// An error for each key that [`FUNCTION_SYMBOLS`] or [`AWS_LC_KEYS`] does not
+    /// list, and for each listed key with no reference.
     fn mismatches(&self) -> Vec<String> {
-        let listed: BTreeSet<(String, String, String, Access)> = FUNCTION_SYMBOLS
+        let plain = &FUNCTION_SYMBOLS;
+        let mut errors = Self::compare(&self.keys, plain, "FUNCTION_SYMBOLS", &CLOCKS);
+        let crypto = &AWS_LC_KEYS;
+        errors.extend(Self::compare(
+            &self.crypto,
+            crypto,
+            "AWS_LC_KEYS",
+            &AWS_LC_INPUTS,
+        ));
+        errors
+    }
+
+    /// An error for each key of `keys` that `list`, named `name`, does not hold, and
+    /// for each key of `list` that `keys` does not hold. The error of a key whose
+    /// symbol is in `inputs`, which read a clock or the console, asks for a check of
+    /// its reason.
+    fn compare(
+        keys: &BTreeSet<(String, String, String, Access)>,
+        list: &[(&str, &str, &str, Access)],
+        name: &str,
+        inputs: &[&str],
+    ) -> Vec<String> {
+        let listed: BTreeSet<(String, String, String, Access)> = list
             .iter()
             .map(|&(file, function, symbol, access)| {
                 (
@@ -1033,33 +1496,33 @@ impl Uses {
                 )
             })
             .collect();
-        let new = self.keys.difference(&listed).map(|(file, function, symbol, access)| {
+        let new = keys.difference(&listed).map(|(file, function, symbol, access)| {
             let verb = access.verb();
-            if CLOCKS.contains(&symbol.as_str()) {
+            if inputs.contains(&symbol.as_str()) {
                 format!(
-                    "{file}: `{function}` {verb} `{symbol}`, a global clock function. \
-                     Find whether a node runs it; if not, add it to FUNCTION_SYMBOLS \
-                     with the reason and a check of the reason in connector-opcua"
+                    "{file}: `{function}` {verb} `{symbol}`, which reads a clock or \
+                     the console. Find whether a node runs it; if not, add it to \
+                     {name} with the reason and a check of the reason in \
+                     connector-opcua"
                 )
             } else {
                 format!(
                     "{file}: `{function}` {verb} `{symbol}`, which no list admits. \
                      Find whether a node runs it; if not, or if it reads no clock, \
-                     file, network, randomness, or process state, add it to \
-                     FUNCTION_SYMBOLS with the reason"
+                     file, network, randomness, or process state, add it to {name} \
+                     with the reason"
                 )
             }
         });
-        let gone =
-            listed
-                .difference(&self.keys)
-                .map(|(file, function, symbol, access)| {
-                    format!(
-                        "{file}: `{function}` no longer {} `{symbol}`. Remove it from \
-                 FUNCTION_SYMBOLS",
-                        access.verb()
-                    )
-                });
+        let gone = listed
+            .difference(keys)
+            .map(|(file, function, symbol, access)| {
+                format!(
+                    "{file}: `{function}` no longer {} `{symbol}`. Remove it from \
+                     {name}",
+                    access.verb()
+                )
+            });
         new.chain(gone).collect()
     }
 }
@@ -1706,9 +2169,11 @@ Disassembly of section .text.stamp:
                 ("sys/stdio.h", ""),
                 ("sys/stdint.h", ""),
                 ("sys/openssl/ssl.h", ""),
+                ("crypto/openssl/evp.h", ""),
             ],
         );
-        let dirs = [root.join("sys/x"), root.join("sys")];
+        let crypto = [root.join("crypto")];
+        let dirs = [crypto[0].clone(), root.join("sys/x"), root.join("sys")];
         let out = root.join("out.h");
         let preprocessed = format!(
             "\
@@ -1724,6 +2189,7 @@ Disassembly of section .text.stamp:
 #include <time.h>
 #include <sys/time.h>
 #include <openssl/ssl.h>
+#include <openssl/evp.h>
 #include UA_X
 #import <none.h>
 #include_next <stdio.h>
@@ -1741,10 +2207,14 @@ Disassembly of section .text.stamp:
         );
         let flags = "-DX\n-Iinclude\n-Ideps\n-std=c99\n";
         assert_eq!(
-            includes(&preprocessed, &root.join("copy"), flags, &dirs),
+            includes(&preprocessed, &root.join("copy"), flags, &dirs, &crypto),
             [
                 "includes <local.h>, which no include directory holds".to_owned(),
                 "includes src/../../out.h, which is outside the copy".to_owned(),
+                format!(
+                    "includes {}, a header of OpenSSL outside the crypto",
+                    root.join("sys/openssl/ssl.h").display()
+                ),
                 "includes UA_X, which is not a file name".to_owned(),
                 "includes <none.h>, which no include directory holds".to_owned(),
                 "uses #include_next <stdio.h>, which the check cannot follow"
@@ -1822,7 +2292,7 @@ Disassembly of section .text.stamp:
         let old = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, format!("#line 1 \"gen.y\"\n{old}")).unwrap();
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![
                 "src/util/ua_util.c:1: holds a line directive, which moves the file \
                  that the include check reads"
@@ -1883,7 +2353,7 @@ Disassembly of section .text.stamp:
                       echo '#define __GNUC__ 13' >&2\n";
         let cc = create_cc(&dir, script);
         assert_eq!(
-            inspect(&dir.join("copy"), &dir.join("out"), &cc),
+            inspect(&dir.join("copy"), &dir.join("out"), &cc, &crypto()),
             Err(vec!["cc is not GCC, which the check needs".to_owned()])
         );
         remove(&dir).unwrap();
@@ -1923,7 +2393,12 @@ Disassembly of section .text.stamp:
                 &[("copy/sources.txt", "a.c\n"), ("copy/flags.txt", flags)],
             );
             assert_eq!(
-                inspect(&dir.join("copy"), &dir.join("out"), Path::new("/no/cc")),
+                inspect(
+                    &dir.join("copy"),
+                    &dir.join("out"),
+                    Path::new("/no/cc"),
+                    &crypto()
+                ),
                 Err(problems),
                 "{flags:?}"
             );
@@ -1945,7 +2420,7 @@ Disassembly of section .text.stamp:
         );
         let cc = create_cc(&dir, "#!/bin/sh\necho \"LC_ALL=$LC_ALL\" >&2\nexit 1\n");
         assert_eq!(
-            inspect(&dir.join("copy"), &dir.join("out"), &cc),
+            inspect(&dir.join("copy"), &dir.join("out"), &cc, &crypto()),
             Err(vec![format!("{} failed: LC_ALL=C\n", cc.display())])
         );
         remove(&dir).unwrap();
@@ -2193,11 +2668,23 @@ End of search list.
         )
     }
 
+    /// [`unlisted`] for a function of aws-lc, which goes in [`AWS_LC_KEYS`].
+    fn unlisted_crypto(file: &str, function: &str, symbol: &str) -> String {
+        unlisted(file, function, Access::Call, symbol)
+            .replace("FUNCTION_SYMBOLS", "AWS_LC_KEYS")
+    }
+
     /// The error of [`Uses::mismatches`] for a clock call that no list admits.
     fn unlisted_clock(file: &str, function: &str) -> String {
+        unlisted_input(file, function, "UA_DateTime_now", "FUNCTION_SYMBOLS")
+    }
+
+    /// The error of [`Uses::mismatches`] for a call of `symbol`, which reads a clock or
+    /// the console, that `list` does not admit.
+    fn unlisted_input(file: &str, function: &str, symbol: &str, list: &str) -> String {
         format!(
-            "{file}: `{function}` calls `UA_DateTime_now`, a global clock function. \
-             Find whether a node runs it; if not, add it to FUNCTION_SYMBOLS with the \
+            "{file}: `{function}` calls `{symbol}`, which reads a clock or the \
+             console. Find whether a node runs it; if not, add it to {list} with the \
              reason and a check of the reason in connector-opcua"
         )
     }
@@ -2212,21 +2699,46 @@ End of search list.
         )
     }
 
+    /// The symbol prefix of [`crypto`].
+    const PREFIX: &str = "fixture_";
+
+    /// A [`Crypto`] with no include directory and the symbol prefix [`PREFIX`].
+    fn crypto() -> Crypto {
+        Crypto {
+            include: Vec::new(),
+            prefix: PREFIX.to_owned(),
+        }
+    }
+
     /// A [`Uses`] with each reference that the lists admit, other than those of
     /// `left_out`.
     fn listed(left_out: &[&str]) -> Uses {
         let mut uses = Uses::default();
-        for &(file, function, symbol, access) in &FUNCTION_SYMBOLS {
+        for (file, function, symbol, access) in keys() {
             if !left_out.contains(&function) {
-                let found = labeled(".text", function, access, symbol);
-                assert_eq!(uses.add(file, found), None);
+                let found = labeled(".text", function, access, &symbol);
+                assert_eq!(uses.add(file, found, &crypto()), None);
             }
         }
         uses
     }
 
+    /// Each key of [`FUNCTION_SYMBOLS`] and [`AWS_LC_KEYS`], with the symbol as the
+    /// copy names it: a function of aws-lc with the prefix [`PREFIX`].
+    fn keys() -> impl Iterator<Item = (&'static str, &'static str, String, Access)> {
+        let plain = FUNCTION_SYMBOLS
+            .iter()
+            .map(|&(file, function, symbol, access)| {
+                (file, function, symbol.to_owned(), access)
+            });
+        let crypto = AWS_LC_KEYS.iter().map(|&(file, function, symbol, access)| {
+            (file, function, format!("{PREFIX}{symbol}"), access)
+        });
+        plain.chain(crypto)
+    }
+
     #[test]
-    fn a_test_of_connector_opcua_names_the_function_of_each_clock_key() {
+    fn a_test_of_connector_opcua_names_the_function_of_each_clock_and_console_key() {
         let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let link = workspace.join("crates/connector-opcua/src/link.rs");
         let text = std::fs::read_to_string(link).unwrap();
@@ -2241,19 +2753,26 @@ End of search list.
                 doc.copied().collect::<Vec<_>>().join(" ")
             })
             .collect();
-        for (_, function, symbol, _) in FUNCTION_SYMBOLS {
-            if CLOCKS.contains(&symbol) {
-                let name = format!("`{function}`");
-                assert!(docs.iter().any(|doc| doc.contains(&name)), "{function}");
-            }
+        let plain = FUNCTION_SYMBOLS
+            .iter()
+            .filter(|key| CLOCKS.contains(&key.2));
+        let crypto = AWS_LC_KEYS
+            .iter()
+            .filter(|key| AWS_LC_INPUTS.contains(&key.2));
+        for (_, function, _, _) in plain.chain(crypto) {
+            let name = format!("`{function}`");
+            assert!(docs.iter().any(|doc| doc.contains(&name)), "{function}");
         }
     }
 
     #[test]
     fn uses_names_a_new_reference_and_a_listed_one_that_is_gone() {
         let mut uses = listed(&[]);
-        assert_eq!(uses.add("src/ua_types.c", call("UA_new", "memcpy")), None);
-        assert_eq!(uses.add("src/ua_types.c", data("memcpy")), None);
+        assert_eq!(
+            uses.add("src/ua_types.c", call("UA_new", "memcpy"), &crypto()),
+            None
+        );
+        assert_eq!(uses.add("src/ua_types.c", data("memcpy"), &crypto()), None);
         assert_eq!(uses.mismatches(), Vec::<String>::new());
         let mut uses = listed(&["UA_random_seed", "UA_Log_Syslog_log"]);
         let found = [
@@ -2263,7 +2782,7 @@ End of search list.
             ("src/ua_types.c", call("UA_open", "socket")),
         ];
         for (file, found) in found {
-            assert_eq!(uses.add(file, found), None);
+            assert_eq!(uses.add(file, found, &crypto()), None);
         }
         assert_eq!(
             uses.mismatches(),
@@ -2294,7 +2813,7 @@ End of search list.
     fn uses_names_the_address_of_a_symbol_that_its_function_may_only_call() {
         let mut uses = listed(&[]);
         let found = labeled(".text", "parseDouble", Access::Address, "strtod");
-        assert_eq!(uses.add("deps/parse_num.c", found), None);
+        assert_eq!(uses.add("deps/parse_num.c", found, &crypto()), None);
         assert_eq!(
             uses.mismatches(),
             [unlisted(
@@ -2303,6 +2822,106 @@ End of search list.
                 Access::Address,
                 "strtod"
             )]
+        );
+    }
+
+    /// A function of [`AWS_LC`] needs the prefix of the [`Crypto`], and a key of
+    /// [`AWS_LC_KEYS`] admits only the name with the prefix.
+    #[test]
+    fn uses_admits_a_function_of_aws_lc_only_with_the_prefix() {
+        let mut uses = listed(&[]);
+        let file = "plugins/crypto/openssl/securitypolicy_common.c";
+        let admitted = [call("UA_nonce", "fixture_HMAC"), data("fixture_BIO_free")];
+        for found in admitted {
+            assert_eq!(uses.add(file, found, &crypto()), None);
+        }
+        assert_eq!(uses.mismatches(), Vec::<String>::new());
+        let found = [
+            call("UA_nonce", "RAND_bytes"),
+            call("UA_nonce", "other_RAND_bytes"),
+            call("UA_verify", "fixture_X509_cmp_current_time"),
+            call("UA_verify", "fixture_fixture_RAND_bytes"),
+        ];
+        let group = "plugins/crypto/openssl/certificategroup.c";
+        let unprefixed = call("openSSL_verifyChain", "X509_cmp_current_time");
+        assert_eq!(uses.add(group, unprefixed, &crypto()), None);
+        for found in found {
+            assert_eq!(uses.add(file, found, &crypto()), None);
+        }
+        assert_eq!(
+            uses.mismatches(),
+            [
+                unlisted(
+                    group,
+                    "openSSL_verifyChain",
+                    Access::Call,
+                    "X509_cmp_current_time"
+                ),
+                unlisted(file, "UA_nonce", Access::Call, "RAND_bytes"),
+                unlisted(file, "UA_nonce", Access::Call, "other_RAND_bytes"),
+                unlisted_input(
+                    file,
+                    "UA_verify",
+                    "X509_cmp_current_time",
+                    "AWS_LC_KEYS"
+                ),
+                unlisted_crypto(file, "UA_verify", "fixture_RAND_bytes"),
+            ]
+        );
+    }
+
+    #[test]
+    fn crypto_prefix_reads_a_define_with_a_prefix() {
+        let header =
+            "#define BORINGSSL_PREFIX_SYMBOLS_H\n#define BORINGSSL_PREFIX a_1 \n";
+        assert_eq!(Crypto::prefix(header), Some("a_1_".to_owned()));
+        for header in [
+            "#define BORINGSSL_PREFIX_SYMBOLS_H\n",
+            "#define BORINGSSL_PREFIX \n",
+        ] {
+            assert_eq!(Crypto::prefix(header), None, "{header}");
+        }
+    }
+
+    #[test]
+    fn crypto_read_prefix_names_the_header() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let crypto = Crypto::locked(workspace).unwrap();
+        let empty = crypto.include[1].join(PREFIX_HEADER);
+        assert_eq!(
+            Crypto::read_prefix(&empty),
+            Err(format!("{} has no BORINGSSL_PREFIX", empty.display()))
+        );
+        let missing = crypto.include[1].join("missing.h");
+        let e = std::fs::read_to_string(&missing).unwrap_err();
+        assert_eq!(
+            Crypto::read_prefix(&missing),
+            Err(format!("{}: {e}", missing.display()))
+        );
+    }
+
+    #[test]
+    fn crypto_locked_finds_the_aws_lc_sys_of_the_lock() {
+        let workspace = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let crypto = Crypto::locked(workspace).unwrap();
+        let name = crypto.prefix.strip_prefix("aws_lc_").unwrap();
+        let version = name.strip_suffix('_').unwrap();
+        assert!(
+            version.split('_').all(|n| n.parse::<u32>().is_ok()),
+            "{name}"
+        );
+        let [generated, include] = &crypto.include[..] else {
+            panic!("{:?}", crypto.include);
+        };
+        assert!(generated.ends_with("generated-include"));
+        let prefixes = generated.join(PREFIX_HEADER);
+        let text = std::fs::read_to_string(prefixes).unwrap();
+        let prefix = crypto.prefix.strip_suffix('_').unwrap();
+        assert!(text.contains(&format!("#define BORINGSSL_PREFIX {prefix}\n")));
+        assert!(include.join("openssl/base.h").is_file());
+        assert_eq!(
+            Crypto::locked(&crate::fixture()).err(),
+            Some("Cargo.lock holds 0 packages `aws-lc-sys`, not one".to_owned())
         );
     }
 
@@ -2328,15 +2947,19 @@ End of search list.
             ))
         };
         let found = labeled(".text", "UA_new", Access::Address, CLOCKS[0]);
-        assert_eq!(uses.add("src/ua_types.c", found), address("`UA_new`"));
         assert_eq!(
-            uses.add("src/ua_types.c", data(CLOCKS[0])),
+            uses.add("src/ua_types.c", found, &crypto()),
+            address("`UA_new`")
+        );
+        assert_eq!(
+            uses.add("src/ua_types.c", data(CLOCKS[0]), &crypto()),
             address("the section `.data.rel`")
         );
         assert_eq!(
             uses.add(
                 "src/ua_types.c",
-                unlabeled(".data.rel.ro", Access::Call, CLOCKS[0])
+                unlabeled(".data.rel.ro", Access::Call, CLOCKS[0]),
+                &crypto()
             ),
             Some(
                 "src/ua_types.c: the section `.data.rel.ro` references \
@@ -2346,7 +2969,7 @@ End of search list.
             )
         );
         assert_eq!(
-            uses.add("deps/parse_num.c", data("strtod")),
+            uses.add("deps/parse_num.c", data("strtod"), &crypto()),
             Some(
                 "deps/parse_num.c: the section `.data.rel` references `strtod` outside \
                  a function, so a use through it escapes FUNCTION_SYMBOLS"
@@ -2354,14 +2977,14 @@ End of search list.
             )
         );
         assert_eq!(
-            uses.add("plugins/ua_log_syslog.c", data("syslog")),
+            uses.add("plugins/ua_log_syslog.c", data("syslog"), &crypto()),
             Some(
                 "plugins/ua_log_syslog.c: the section `.data.rel` references `syslog` \
                  outside a function, so a use through it escapes FUNCTION_SYMBOLS"
                     .to_owned()
             )
         );
-        assert_eq!(uses.add("src/ua_types.c", data("memcpy")), None);
+        assert_eq!(uses.add("src/ua_types.c", data("memcpy"), &crypto()), None);
     }
 
     /// A directory of the test `name`, empty, in the temporary directory, with a
@@ -2427,8 +3050,17 @@ End of search list.
             "__errno_location" => "errno = n;".to_owned(),
             "strtod" => "(void)strtod(\"1\", 0);".to_owned(),
             "abort" => "if (n) abort();".to_owned(),
-            "fprintf" | "stderr" => "fprintf(stderr, \"%d\", n);".to_owned(),
-            "fflush" | "stdout" => "fflush(stdout);".to_owned(),
+            "fprintf" => "fprintf(stderr, \"%d\", n);".to_owned(),
+            "fflush" => "fflush(stdout);".to_owned(),
+            "fgets" => "{ char b[8]; (void)fgets(b, 8, stdin); }".to_owned(),
+            "fwrite" => "fwrite(\"x\", 1, 1, stdout);".to_owned(),
+            "sprintf" => "{ char b[16]; sprintf(b, \"%d\", n); }".to_owned(),
+            "stderr" | "stdin" | "stdout" => {
+                format!("{{ FILE *volatile f = {symbol}; (void)f; }}")
+            }
+            crypto if crypto.starts_with(PREFIX) => {
+                format!("{{ extern int {crypto}(int); (void){crypto}(n); }}")
+            }
             "printf" => "printf(\"%d\", n);".to_owned(),
             "puts" => "puts(\"x\");".to_owned(),
             "syslog" => "syslog(LOG_INFO, \"x\");".to_owned(),
@@ -2438,16 +3070,15 @@ End of search list.
         }
     }
 
-    /// C text of `file` that references each symbol at its place in
-    /// [`FUNCTION_SYMBOLS`].
+    /// C text of `file` that references each symbol at its place in [`keys`].
     fn uses(file: &str) -> String {
         let mut functions = std::collections::BTreeMap::<_, Vec<_>>::new();
-        for &(f, function, symbol, _) in &FUNCTION_SYMBOLS {
+        for (f, function, symbol, _) in keys() {
             if f == file {
                 functions
                     .entry(function)
                     .or_default()
-                    .push(statement(symbol));
+                    .push(statement(&symbol));
             }
         }
         let mut text = "#include <ctype.h>\n#include <errno.h>\n#include <stdio.h>\n\
@@ -2468,31 +3099,37 @@ End of search list.
         exec(Command::new("git").arg("init").arg("-q").arg(repo)).unwrap();
         let util = "#include \"open62541/config.h\"\n".to_owned()
             + &uses("src/util/ua_util.c");
+        let files: BTreeSet<&str> = keys()
+            .map(|(file, ..)| file)
+            .filter(|&file| file != "src/util/ua_util.c")
+            .collect();
+        let (plugins, object): (Vec<&str>, Vec<&str>) =
+            files.iter().partition(|file| file.starts_with("plugins/"));
+        let cmake = format!(
+            "cmake_minimum_required(VERSION 3.20)\nproject(fixture C)\n\
+             set(CMAKE_C_STANDARD 99)\n\
+             configure_file(config.h.in src_generated/open62541/config.h)\n\
+             file(WRITE ${{CMAKE_BINARY_DIR}}/other.h \"\")\n\
+             include_directories(include ${{CMAKE_BINARY_DIR}}/src_generated)\n\
+             add_compile_definitions(NAME=\"a b\")\n\
+             add_compile_options(-fno-strict-aliasing -Wall -pipe -flto=auto \
+             -fno-fat-lto-objects)\n\
+             file(GLOB more src/more/*.c)\n\
+             add_library(open62541-object OBJECT src/util/ua_util.c {} \
+             ${{more}})\n\
+             add_library(open62541-plugins OBJECT {} {})\n\
+             add_library(open62541 STATIC $<TARGET_OBJECTS:open62541-object> \
+             $<TARGET_OBJECTS:open62541-plugins>)\n\
+             add_executable(tool tools/tool.c)\n",
+            object.join(" "),
+            plugins.join(" "),
+            OMITTED.join(" "),
+        );
         create_files(
             repo,
             &[
                 ("LICENSE", "license\n"),
-                (
-                    "CMakeLists.txt",
-                    "cmake_minimum_required(VERSION 3.20)\nproject(fixture C)\n\
-                     set(CMAKE_C_STANDARD 99)\n\
-                     configure_file(config.h.in src_generated/open62541/config.h)\n\
-                     file(WRITE ${CMAKE_BINARY_DIR}/other.h \"\")\n\
-                     include_directories(include ${CMAKE_BINARY_DIR}/src_generated)\n\
-                     add_compile_definitions(NAME=\"a b\")\n\
-                     add_compile_options(-fno-strict-aliasing -Wall -pipe -flto=auto \
-                     -fno-fat-lto-objects)\n\
-                     file(GLOB more src/more/*.c)\n\
-                     add_library(open62541-object OBJECT src/util/ua_util.c \
-                     src/util/ua_encryptedsecret.c deps/musl_inet_pton.c \
-                     deps/parse_num.c src/server/ua_discovery.c \
-                     src/server/ua_services_discovery.c ${more})\n\
-                     add_library(open62541-plugins OBJECT plugins/ua_config_default.c \
-                     plugins/ua_log_stdout.c plugins/ua_log_syslog.c)\n\
-                     add_library(open62541 STATIC $<TARGET_OBJECTS:open62541-object> \
-                     $<TARGET_OBJECTS:open62541-plugins>)\n\
-                     add_executable(tool tools/tool.c)\n",
-                ),
+                ("CMakeLists.txt", &cmake),
                 ("config.h.in", "#define CONFIG 1\n"),
                 ("src/util/ua_util.c", &util),
                 ("tools/tool.c", "int main(void) { return 0; }\n"),
@@ -2500,16 +3137,10 @@ End of search list.
                 ("arch/common/timer.h", "#include <stdio.h>\n"),
             ],
         );
-        for path in [
-            "src/util/ua_encryptedsecret.c",
-            "plugins/ua_config_default.c",
-            "plugins/ua_log_stdout.c",
-            "plugins/ua_log_syslog.c",
-            "deps/musl_inet_pton.c",
-            "deps/parse_num.c",
-            "src/server/ua_discovery.c",
-            "src/server/ua_services_discovery.c",
-        ] {
+        for path in OMITTED {
+            create_files(repo, &[(path, "int omitted;\n")]);
+        }
+        for path in files {
             create_files(repo, &[(path, &uses(path))]);
         }
         let clock = b"/* Andr\xe9 */\nlong long UA_DateTime_now(void);\n\
@@ -2542,7 +3173,7 @@ End of search list.
         tag(&repo, "v1");
         create_files(&root, before);
         let url = format!("file://{}", repo.display());
-        let result = run(&root, &url, "v1");
+        let result = run(&root, &crypto(), &url, "v1");
         (root, repo, result)
     }
 
@@ -2571,6 +3202,11 @@ End of search list.
                 "deps/parse_num.c",
                 "flags.txt",
                 "include/clock.h",
+                "plugins/crypto/openssl/certificategroup.c",
+                "plugins/crypto/openssl/securitypolicy_aes128sha256rsaoaep.c",
+                "plugins/crypto/openssl/securitypolicy_aes256sha256rsapss.c",
+                "plugins/crypto/openssl/securitypolicy_basic256sha256.c",
+                "plugins/crypto/openssl/securitypolicy_common.c",
                 "plugins/ua_config_default.c",
                 "plugins/ua_log_stdout.c",
                 "plugins/ua_log_syslog.c",
@@ -2586,6 +3222,11 @@ End of search list.
         assert_eq!(
             read("sources.txt"),
             "arch/common/timer.c\ndeps/musl_inet_pton.c\ndeps/parse_num.c\n\
+             plugins/crypto/openssl/certificategroup.c\n\
+             plugins/crypto/openssl/securitypolicy_aes128sha256rsaoaep.c\n\
+             plugins/crypto/openssl/securitypolicy_aes256sha256rsapss.c\n\
+             plugins/crypto/openssl/securitypolicy_basic256sha256.c\n\
+             plugins/crypto/openssl/securitypolicy_common.c\n\
              plugins/ua_config_default.c\nplugins/ua_log_stdout.c\n\
              plugins/ua_log_syslog.c\nsrc/server/ua_discovery.c\n\
              src/server/ua_services_discovery.c\nsrc/util/ua_encryptedsecret.c\n\
@@ -2610,7 +3251,7 @@ End of search list.
                 std::fs::read(repo.join(path)).unwrap()
             );
         }
-        assert_eq!(check(&root), Ok(()));
+        assert_eq!(check(&root, &crypto()), Ok(()));
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
@@ -2656,6 +3297,69 @@ End of search list.
         );
         assert!(root.join("patches/open62541/kept.c").exists());
         remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
+    fn run_refuses_a_file_of_omitted_that_the_library_does_not_compile() {
+        let (root, repo, result) = run_on("omitted", |repo| {
+            let cmake = repo.join("CMakeLists.txt");
+            let text = std::fs::read_to_string(&cmake).unwrap();
+            let text = text.replace(" plugins/crypto/ua_filestore_common.c", "");
+            std::fs::write(&cmake, text).unwrap();
+        });
+        assert_eq!(
+            result,
+            Err(vec![
+                "plugins/crypto/ua_filestore_common.c: OMITTED lists it, and the \
+                 library does not compile it"
+                    .to_owned()
+            ])
+        );
+        assert!(root.join("patches/open62541/kept.c").exists());
+        remove(&root).and_then(|()| remove(&repo)).unwrap();
+    }
+
+    /// A header of the [`Crypto`] is outside the copy, and the check reads it as a
+    /// system header, as the build of `connector-opcua` does.
+    #[test]
+    #[cfg_attr(
+        not(target_os = "linux"),
+        ignore = "needs GCC, GNU objdump, and GNU nm"
+    )]
+    fn check_builds_against_the_headers_of_the_crypto() {
+        let dir = temp("crypto");
+        let source =
+            "#include <openssl/fixture.h>\nint UA_free(void) { return BIO_free(); }\n";
+        create_files(
+            &dir,
+            &[
+                ("copy/sources.txt", "a.c\n"),
+                ("copy/flags.txt", "-fno-dollars-in-identifiers\n"),
+                ("copy/a.c", source),
+                (
+                    "crypto/openssl/fixture.h",
+                    "#define BIO_free fixture_BIO_free\nint BIO_free(void);\n",
+                ),
+            ],
+        );
+        let crypto = Crypto {
+            include: vec![dir.join("crypto")],
+            prefix: PREFIX.to_owned(),
+        };
+        assert_eq!(
+            inspect(
+                &dir.join("copy"),
+                &dir.join("out"),
+                Path::new("cc"),
+                &crypto
+            ),
+            Err(Uses::default().mismatches())
+        );
+        remove(&dir).unwrap();
     }
 
     #[test]
@@ -2812,7 +3516,7 @@ End of search list.
             std::fs::write(&cmake, text).unwrap();
         });
         assert_eq!(result, Ok(()));
-        assert_eq!(check(&root), Ok(()));
+        assert_eq!(check(&root, &crypto()), Ok(()));
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
@@ -2881,7 +3585,7 @@ End of search list.
             )
         };
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err([
                 "-O2",
                 "-include",
@@ -2901,7 +3605,7 @@ End of search list.
              long long later(void) { return hidden(); }\n",
         );
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![unlisted_clock("src/util/ua_util.c", "hidden")])
         );
         remove(&root).and_then(|()| remove(&repo)).unwrap();
@@ -2986,7 +3690,7 @@ End of search list.
         let old = std::fs::read_to_string(&path).unwrap();
         let (text, errors) = reads();
         std::fs::write(&path, old + text).unwrap();
-        assert_eq!(check(&root), Err(errors));
+        assert_eq!(check(&root, &crypto()), Err(errors));
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
@@ -3013,7 +3717,7 @@ End of search list.
              int UA_lock(pthread_mutex_t *m) { return pthread_mutex_lock(m); }\n",
         );
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![
                 unlisted(
                     "src/util/ua_encryptedsecret.c",
@@ -3056,7 +3760,7 @@ End of search list.
              int UA_connect(void) { return socket(2, 1, 0); }\n",
         );
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![unlisted(
                 "src/util/ua_util.c",
                 "UA_connect",
@@ -3085,7 +3789,7 @@ End of search list.
         )
         .unwrap();
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![unlisted(
                 "src/util/ua_encryptedsecret.c",
                 "UA_lastError",
@@ -3115,7 +3819,7 @@ End of search list.
         );
         append("src/util/ua_util.c", "void (*UA_stop)(void) = abort;\n");
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![
                 "src/util/ua_util.c: the section `.data.rel` references `abort` \
                  outside a function, so a use through it escapes FUNCTION_SYMBOLS"
@@ -3157,7 +3861,7 @@ End of search list.
              UA_rng_require();\n}\n",
         );
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![
                 unlisted(
                     "deps/parse_num.c",
@@ -3211,7 +3915,7 @@ End of search list.
             "UA_conv = strtod;\n(void)strtod(",
         );
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![unlisted(
                 "deps/parse_num.c",
                 "parseDouble",
@@ -3264,7 +3968,7 @@ End of search list.
             )
         };
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![
                 refused(" h"),
                 refused("getpid\r"),
@@ -3322,7 +4026,7 @@ End of search list.
 "#;
         std::fs::write(&path, old + asm).unwrap();
         let file = "src/util/ua_util.c";
-        let found = check(&root);
+        let found = check(&root, &crypto());
         remove(&root).and_then(|()| remove(&repo)).unwrap();
         assert_eq!(
             found,
@@ -3356,7 +4060,7 @@ End of search list.
         let path = root.join("patches/open62541/src/util/ua_util.c");
         let old = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, old + "void $x(void) { abort(); }\n").unwrap();
-        let found = check(&root);
+        let found = check(&root, &crypto());
         remove(&root).and_then(|()| remove(&repo)).unwrap();
         assert_eq!(
             found,
@@ -3385,7 +4089,7 @@ End of search list.
         let hidden = "#define UA_HIDE$ 1\n#ifndef UA_HIDE\n\
                       void hide(void) { (void)getpid(); }\n#endif\n";
         std::fs::write(copy.join(source), read(source) + hidden).unwrap();
-        let found = check(&root);
+        let found = check(&root, &crypto());
         let index = read("sources.txt").lines().position(|s| s == source);
         let checked = root.join(format!("target/open62541/check/{}.o", index.unwrap()));
         let flags = read("flags.txt");
@@ -3425,7 +4129,7 @@ End of search list.
         let path = root.join("patches/open62541/src/util/ua_encryptedsecret.c");
         let old = std::fs::read_to_string(&path).unwrap();
         std::fs::write(&path, old + "__asm__(\".globl UA_outside\");\n").unwrap();
-        assert_eq!(check(&root), Ok(()));
+        assert_eq!(check(&root, &crypto()), Ok(()));
         remove(&root).and_then(|()| remove(&repo)).unwrap();
     }
 
@@ -3448,7 +4152,7 @@ End of search list.
         )
         .unwrap();
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![unlisted(
                 "src/util/ua_encryptedsecret.c",
                 "UA_now",
@@ -3478,7 +4182,7 @@ End of search list.
         )
         .unwrap();
         assert_eq!(
-            check(&root),
+            check(&root, &crypto()),
             Err(vec![
                 "plugins/ua_log_stdout.c: inlines `helper`, so a clock call in it \
                  hides in its caller"
@@ -3500,7 +4204,8 @@ End of search list.
         let root = temp("committed");
         std::os::unix::fs::symlink(workspace.join("patches"), root.join("patches"))
             .unwrap();
-        assert_eq!(check(&root), Ok(()));
+        let crypto = Crypto::locked(workspace).unwrap();
+        assert_eq!(check(&root, &crypto), Ok(()));
         remove(&root).unwrap();
     }
 
@@ -3515,16 +4220,19 @@ End of search list.
         let (copy, out) = (root.join(DEST), temp("rng"));
         let read = |name| std::fs::read_to_string(copy.join(name)).unwrap();
         let (sources, flags) = (read("sources.txt"), read("flags.txt"));
-        let objects = build(&copy, &sources, &flags, &out, Path::new("cc")).unwrap();
+        let crypto = Crypto::locked(root).unwrap();
+        let objects =
+            build(&copy, &sources, &flags, &out, Path::new("cc"), &crypto).unwrap();
         let library = out.join("libopen62541.a");
         let mut ar = Command::new("ar");
         ar.arg("rcs").arg(&library);
         exec(ar.args(objects.iter().map(|(_, object, _)| object))).unwrap();
         let driver = out.join("rng");
+        // The driver links no aws-lc, so it drops each section that no draw reaches.
         let mut cc = Command::new("cc");
         cc.current_dir(&copy)
             .args(flags.lines())
-            .arg("-pthread")
+            .args(["-pthread", "-Wl,--gc-sections"])
             .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("src/open62541/rng.c"))
             .arg(&library)
             .arg("-o")

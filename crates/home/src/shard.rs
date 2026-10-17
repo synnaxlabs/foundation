@@ -1214,7 +1214,7 @@ mod tests {
     use std::time::Instant;
 
     use block::{Pool, Unique};
-    use buffer::Layout;
+    use buffer::{Layout, Mark};
     use env::clock::Clock;
     use env::entropy::Entropy;
     use env::files::{Mode, Operation};
@@ -1266,6 +1266,9 @@ mod tests {
         reader: clock::Reader,
         tasks: Tasks,
         entropy: Entropy,
+        /// Whether each ring that [`Test::create_buffer`] makes trims its tail when an
+        /// append does not fit.
+        trimmed: bool,
     }
 
     impl Test {
@@ -1282,6 +1285,7 @@ mod tests {
                 node,
                 pool: Rc::new(pool),
                 tasks,
+                trimmed: false,
             }
         }
 
@@ -1349,7 +1353,7 @@ mod tests {
                 entropy: self.entropy.clone(),
                 layout: Layout::new(area, body_max).expect("a ring"),
                 commit: COMMIT,
-                trimmed: false,
+                trimmed: self.trimmed,
             };
             let mut assigned = Slots::new();
             for n in 0..slots {
@@ -4628,6 +4632,45 @@ mod tests {
                 shard.committed().await.expect("the commit ends");
                 assert_eq!(woken(&mut shard), [reader]);
                 assert_eq!(taken(&mut shard, reader, 0), [seq(4, 1)]);
+            });
+        }
+
+        /// The session takes seq 0, spends its credit, and misses the later frames
+        /// while the ring trims them. Its read from disk gives the frames from the
+        /// first seq the ring holds, with no frame for the trimmed seqs between.
+        #[test]
+        fn gives_a_trimmed_range_as_a_jump_in_seq() {
+            run(7041, |test| async move {
+                let test = Test {
+                    trimmed: true,
+                    ..test
+                };
+                let mut shard = test.shard(AREA).await;
+                let session = shard.open_complete(Slot::new(0), 1, Charge::Whole).key;
+                let reader = reader::Key::from(session);
+                let set = two_indexes();
+                let a = shard.open_writer(writer("a", 1, &set)).expect("synced");
+                write(&test, &mut shard, a, &[10]);
+                shard.committed().await.expect("the commit ends");
+                assert_eq!(woken(&mut shard), [reader]);
+                assert_eq!(taken(&mut shard, reader, 0), [seq(0, 1)]);
+                let mut wakes = Vec::new();
+                for stamp in 2..=300 {
+                    write(&test, &mut shard, a, &[stamp * 10]);
+                    shard.committed().await.expect("the commit ends");
+                    wakes.extend(woken(&mut shard));
+                }
+                assert_eq!(wakes, [reader]);
+                // The buffer of the shard gives the first seq that the ring holds: no
+                // call of `Shard` gives it.
+                let ring = shard.buffer.reader();
+                let read = ring.read(Slot::new(0), Path::Live, Mark::at(1), 1).await;
+                let gap = read.expect("the read ends").gap.expect("a trim");
+                assert_eq!(gap.start, 1);
+                shard.grant(session, CREDIT);
+                let frames = caught_up(&mut shard, session, 0).await;
+                let held: Vec<_> = (gap.end..300).map(|s| seq(s, 1)).collect();
+                assert_eq!(frames, held);
             });
         }
 

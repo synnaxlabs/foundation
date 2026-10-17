@@ -31,9 +31,16 @@
   Supersedes https://github.com/synnaxlabs/foundation/pull/89 in its clause that
   `buffer` trims below the floor, past retention (by store time), and under disk
   pressure. A resume takes, per path, the position the reader's `hub` presents, then the
-  position at this home, then the home's fallback. A position below the floor or past
-  the head is accepted as is; the `buffer` read reports any gap (B2). A resume starts a
-  `buffer` read at `Mark::at(position)`, so the entries with no samples at the position
+  position at this home, then the home's fallback. A position below the floor is
+  accepted as is; the `buffer` read reports any gap (B2). A presented live position past
+  the live tail takes the live tail, so a reader whose seqs a restart or a shed lost
+  gets the new frames at those seqs (#274 C; `laptop.architect`, 2026-10-14T01:45:42Z,
+  item 9 of
+  https://github.com/synnaxlabs/foundation/issues/274#issuecomment-6159035426).
+  Supersedes https://github.com/synnaxlabs/foundation/pull/89 in its clause that a
+  presented live position past the head is accepted as is. A presented backfill
+  position past the head is accepted as is. A resume starts a `buffer` read at
+  `Mark::at(position)`, so the entries with no samples at the position
   come again. Between reads, the caller keeps the mark the last read gave, in memory
   (#510). Named readers write a position record at once when they open, close, or are
   taken over, and on the home's interval when the position changed. A session open at a

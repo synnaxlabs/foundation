@@ -11,6 +11,7 @@ publish = false
 
 [workspace.dependencies]
 aws-lc-rs = { version = "1.18.1", default-features = false, features = ["aws-lc-sys"] }
+aws-lc-sys = { version = "0.45.0", default-features = false }
 base64ct = "1.8.3"
 blake3 = "1.8.7"
 bytes = { version = "1.12.1", default-features = false, features = ["std"] }

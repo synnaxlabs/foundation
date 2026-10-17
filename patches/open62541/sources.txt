@@ -12,6 +12,11 @@ deps/parse_num.c
 deps/pcg_basic.c
 deps/utf8.c
 deps/ziptree.c
+plugins/crypto/openssl/certificategroup.c
+plugins/crypto/openssl/securitypolicy_aes128sha256rsaoaep.c
+plugins/crypto/openssl/securitypolicy_aes256sha256rsapss.c
+plugins/crypto/openssl/securitypolicy_basic256sha256.c
+plugins/crypto/openssl/securitypolicy_common.c
 plugins/crypto/ua_certificategroup_none.c
 plugins/crypto/ua_securitypolicy_none.c
 plugins/ua_accesscontrol_default.c

@@ -162,7 +162,7 @@ mod tests {
     use super::*;
     use crate::complete::Charge;
     use crate::readers::tests::{
-        Frames, drained, dropped, number, read, reader, taken as complete_taken,
+        Frames, drained, dropped, floor, number, read, reader, taken as complete_taken,
     };
     use crate::{Next, Position, Reader, Record, Start, complete};
 
@@ -288,7 +288,7 @@ mod tests {
                 closed: Some(at(3)),
             };
             assert_eq!(drained(&mut readers), [closed]);
-            assert_eq!(readers.floor(), Some(live(5)));
+            assert_eq!(floor(&readers), Some(live(5)));
             assert_eq!(readers.deadline(), Some(at(13)));
         }
 
@@ -298,7 +298,7 @@ mod tests {
             let old = complete(&mut readers, "a", live(5));
             readers.close(old.into(), Some(at(1)));
             let latest = readers.open_named_latest(reader("s", "a"), at(2)).key;
-            assert_eq!(readers.floor(), Some(live(5)));
+            assert_eq!(floor(&readers), Some(live(5)));
             let named = Reader::Named {
                 reader: reader("s", "a"),
                 hold: Span::from_nanos(10),
@@ -321,7 +321,7 @@ mod tests {
             readers.close(key.into(), None);
             assert!(!readers.changed(), "a latest session changed the records");
             assert_eq!(readers.records().count(), 0);
-            assert_eq!(readers.floor(), None);
+            assert_eq!(floor(&readers), None);
             assert_eq!(readers.deadline(), None);
         }
     }

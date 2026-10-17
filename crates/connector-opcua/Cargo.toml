@@ -6,13 +6,16 @@ rust-version.workspace = true
 publish.workspace = true
 
 [features]
-open62541 = ["dep:cc"]
+open62541 = ["dep:aws-lc-sys", "dep:cc"]
 # Exposes `bench` to the `run`, `manager`, `client`, `kind`, and `value` benches,
 # `fuzz` to the fuzz target, both to the `alloc` and `memory` tests, and `sim` to the
 # tests of other crates.
 sim = ["open62541"]
 
 [dependencies]
+# The libcrypto of the OpenSSL plugins of open62541. Its `links` gives `build.rs` its
+# headers.
+aws-lc-sys = { workspace = true, optional = true }
 block = { path = "../block" }
 connector = { path = "../connector" }
 document = { path = "../document" }

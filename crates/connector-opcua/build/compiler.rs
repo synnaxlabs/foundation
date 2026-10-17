@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cc::{Build, Tool};
 
@@ -29,28 +29,112 @@ pub(crate) struct Builds {
     pub(crate) address_sanitized: bool,
 }
 
-/// Gives the builds of [`builds`] under the sanitizers of the Rust build, as
-/// [`Builds::sanitize`] does. `env` gives the variables of a build script, and the
-/// shim build holds `src/server.c`, with the `src` folder of the copy on its include
-/// path, when it sets `CARGO_FEATURE_SIM`.
+/// The libcrypto of `aws-lc-sys` that the OpenSSL plugins of the copy call.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct Libcrypto {
+    /// Its include directory.
+    pub(crate) include: PathBuf,
+    /// The prefix of each of its symbols, with the `_` that ends it.
+    pub(crate) prefix: String,
+}
+
+/// Gives the libcrypto of `aws-lc-sys` of `vars`, the variables of a build script: its
+/// [`include`] directory, and the [`prefix`] of the header
+/// `openssl/boringssl_prefix_symbols.h` in it.
 ///
 /// # Errors
 ///
-/// The error of [`Builds::sanitize`], or of [`check`] on the compiler that it picks.
+/// The error of [`include`] or of [`prefix`], or the path of the header and its error
+/// when it does not read.
+pub(crate) fn libcrypto(vars: &[(String, String)]) -> Result<Libcrypto, String> {
+    let include = include(vars)?;
+    let header = include.join("openssl/boringssl_prefix_symbols.h");
+    let text = std::fs::read_to_string(&header)
+        .map_err(|e| format!("{}: {e}", header.display()))?;
+    Ok(Libcrypto {
+        prefix: prefix(&text)?,
+        include,
+    })
+}
+
+/// Gives the include directory of the libcrypto of `aws-lc-sys`, from `vars`, the
+/// variables of a build script. Cargo gives a build script the `links` metadata of each
+/// direct dependency, and the name of the `links` of `aws-lc-sys` holds its version.
+///
+/// # Errors
+///
+/// When `vars` holds no variable `DEP_AWS_LC_<version>_INCLUDE`, or more than one.
+pub(crate) fn include(vars: &[(String, String)]) -> Result<PathBuf, String> {
+    let found: Vec<_> = vars
+        .iter()
+        .filter(|(name, _)| {
+            name.strip_prefix("DEP_AWS_LC_")
+                .and_then(|rest| rest.strip_suffix("_INCLUDE"))
+                .is_some_and(|version| {
+                    version.split('_').all(|n| n.parse::<u32>().is_ok())
+                })
+        })
+        .collect();
+    match <[_; 1]>::try_from(found) {
+        Ok([(_, dir)]) => Ok(PathBuf::from(dir)),
+        Err(found) => Err(format!(
+            "connector-opcua: the build script has {} variables \
+             DEP_AWS_LC_<version>_INCLUDE, not one: {found:?}",
+            found.len()
+        )),
+    }
+}
+
+/// Gives the prefix of each symbol of the libcrypto of `aws-lc-sys`, with the `_` that
+/// ends it, from `header`, the text of its `openssl/boringssl_prefix_symbols.h`.
+///
+/// # Errors
+///
+/// When `header` has no line `#define BORINGSSL_PREFIX <prefix>` with a `<prefix>`
+/// that is not empty.
+pub(crate) fn prefix(header: &str) -> Result<String, String> {
+    let prefix = header
+        .lines()
+        .find_map(|line| line.strip_prefix("#define BORINGSSL_PREFIX "))
+        .map(str::trim)
+        .filter(|prefix| !prefix.is_empty());
+    prefix.map(|prefix| format!("{prefix}_")).ok_or_else(|| {
+        "connector-opcua: the headers of aws-lc-sys define no BORINGSSL_PREFIX"
+            .to_owned()
+    })
+}
+
+/// Gives the builds of [`builds`] under the sanitizers of the Rust build, as
+/// [`Builds::sanitize`] does, and the [`libcrypto`] of `vars`, whose include directory
+/// is on the include path of the library only. `vars` holds the variables of a build
+/// script, and the shim build holds `src/server.c`, with the `src` folder of the copy
+/// on its include path, when they set `CARGO_FEATURE_SIM`.
+///
+/// # Errors
+///
+/// The error of [`libcrypto`], of [`Builds::sanitize`], or of [`check`] on the
+/// compiler that it picks.
 pub(crate) fn configure(
     copy: &Path,
     flags: &str,
     sources: &str,
-    env: impl Fn(&str) -> Option<String>,
-) -> Result<Builds, String> {
+    vars: &[(String, String)],
+) -> Result<(Builds, Libcrypto), String> {
+    let env = |name: &str| {
+        let var = vars.iter().find(|(var, _)| var == name);
+        var.map(|(_, value)| value.clone())
+    };
+    let libcrypto = libcrypto(vars)?;
     let mut builds = builds(copy, flags, sources);
+    // Only the OpenSSL plugins of the copy include the headers of the libcrypto.
+    builds.library.include(&libcrypto.include);
     if env("CARGO_FEATURE_SIM").is_some() {
         sim(&mut builds.shim, copy);
     }
     builds.sanitize(env)?;
     // After `sanitize`, which can replace the compiler with clang.
     check(&builds.library.get_compiler())?;
-    Ok(builds)
+    Ok((builds, libcrypto))
 }
 
 /// Adds the test server `src/server.c` to `shim`, the shim build of the copy at

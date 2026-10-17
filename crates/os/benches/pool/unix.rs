@@ -1,16 +1,9 @@
-//! A `block` pool over OS memory under pressure: the system calls of each alloc and
-//! the first write of each page it gives back.
-
 use block::{Config, Pool};
 use divan::Bencher;
 use os::memory::Memory;
 
 const SMALL: usize = 8000;
 const LARGE: usize = 16_384;
-
-fn main() {
-    divan::main();
-}
 
 fn create_pool(budget: usize) -> Pool {
     let budget = u64::try_from(budget).expect("a usize fits in a u64");

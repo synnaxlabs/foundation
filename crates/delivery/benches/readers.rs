@@ -1,7 +1,6 @@
 //! The cost of one acknowledgment, which runs per message, by an unnamed and by a named
-//! reader, of one live frame to the
-//! complete readers, and of one frame from disk to a complete reader, which run per
-//! frame, and of one floor, which the home reads when `buffer` trims.
+//! reader, of one live frame to the complete readers, and of one frame from disk to a
+//! complete reader, which run per frame.
 
 use std::sync::Arc;
 
@@ -340,10 +339,4 @@ fn release_places_alternating(bencher: Bencher<'_, '_>, channels: usize) {
         divan::black_box(readers.take(key.into()));
         divan::black_box(readers.take(key.into()));
     });
-}
-
-#[divan::bench(args = [1, 16, 256])]
-fn floor(bencher: Bencher<'_, '_>, sessions: usize) {
-    let (readers, _) = opened(sessions, 0);
-    bencher.bench_local(|| divan::black_box(&readers).floor());
 }

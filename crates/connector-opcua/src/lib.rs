@@ -46,6 +46,10 @@ mod unwind;
 #[cfg(feature = "open62541")]
 mod value;
 
+// The copy calls the libcrypto of `aws-lc-sys`, and no Rust here names the crate, which
+// rustc links only when it is named.
+#[cfg(feature = "open62541")]
+use aws_lc_sys as _;
 #[cfg(feature = "open62541")]
 pub use config::Config;
 #[cfg(feature = "open62541")]
@@ -111,7 +115,8 @@ mod tests {
 
     /// The builds of `compiler::builds`, for `TARGET` and with the compiler `path`.
     fn builds(path: &str) -> compiler::Builds {
-        let mut builds = compiler::builds(Path::new("/copy"), "-std=c99", "a.c");
+        let copy = Path::new("/copy");
+        let mut builds = compiler::builds(copy, "-std=c99", "a.c");
         for build in [&mut builds.library, &mut builds.shim] {
             child::tool(build.compiler(path), TARGET);
         }
@@ -274,10 +279,20 @@ mod tests {
         if !child::running() {
             return;
         }
-        let configure = |vars| {
-            let builds = compiler::configure(Path::new("/copy"), "", "a.c", env(vars));
-            builds.map(|builds| builds.address_sanitized)
+        let configure_in = |vars: Vars<'_>| {
+            let vars: Vec<_> = vars
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+                .collect();
+            compiler::configure(Path::new("/copy"), "", "a.c", &vars)
         };
+        let include = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/libcrypto");
+        let configure_with = |vars: Vars<'_>| {
+            let libcrypto = [("DEP_AWS_LC_0_45_0_INCLUDE", include)];
+            configure_in(&[vars, &libcrypto].concat())
+        };
+        let configure =
+            |vars| configure_with(vars).map(|(builds, _)| builds.address_sanitized);
         assert_eq!(
             configure(&[]),
             Err("connector-opcua: the compiler /missing/cl.exe is like MSVC; flags.txt \
@@ -289,8 +304,7 @@ mod tests {
         assert_eq!(configure(&[FUZZING]), Ok(false));
         assert_eq!(configure(&[(SANITIZE, "thread")]), Err(refusal("thread")));
         let server = |vars| {
-            let builds = compiler::configure(Path::new("/copy"), "", "a.c", env(vars));
-            let shim = builds.unwrap().shim;
+            let shim = configure_with(vars).unwrap().0.shim;
             let file = shim.get_files().any(|file| file.ends_with("src/server.c"));
             let internal = Path::new("/copy/src").display().to_string();
             let args = args(&tool(shim, "/missing/gcc"));
@@ -298,6 +312,74 @@ mod tests {
         };
         assert_eq!(server(&[FUZZING]), (false, false));
         assert_eq!(server(&[FUZZING, ("CARGO_FEATURE_SIM", "1")]), (true, true));
+        let (builds, libcrypto) = configure_with(&[FUZZING]).unwrap();
+        let expected = compiler::Libcrypto {
+            include: include.into(),
+            prefix: "aws_lc_0_45_0_".to_owned(),
+        };
+        assert_eq!(libcrypto, expected);
+        let library = args(&tool(builds.library, "/missing/gcc"));
+        assert_eq!(includes(&library), [include]);
+        let missing = |vars: Vars<'_>| configure_in(&[&[FUZZING], vars].concat());
+        assert_eq!(
+            missing(&[]).map(|(_, libcrypto)| libcrypto),
+            Err("connector-opcua: the build script has 0 variables \
+                 DEP_AWS_LC_<version>_INCLUDE, not one: []"
+                .to_string())
+        );
+        let header = Path::new("/crypto/openssl/boringssl_prefix_symbols.h");
+        let error = std::fs::read_to_string(header).unwrap_err();
+        assert_eq!(
+            missing(&[("DEP_AWS_LC_0_45_0_INCLUDE", "/crypto")]).map(|(_, l)| l),
+            Err(format!("{}: {error}", header.display()))
+        );
+    }
+
+    #[test]
+    fn include_takes_the_one_include_of_aws_lc() {
+        let vars = |vars: &[(&str, &str)]| {
+            let vars = vars.iter().map(|(n, v)| ((*n).to_owned(), (*v).to_owned()));
+            compiler::include(&vars.collect::<Vec<_>>())
+        };
+        let include = ("DEP_AWS_LC_0_45_0_INCLUDE", "/a");
+        let others = [
+            ("DEP_AWS_LC_0_45_0_ROOT", "/b"),
+            ("DEP_AWS_LC_FIPS_0_13_0_INCLUDE", "/c"),
+            ("DEP_AWS_LC_INCLUDE", "/d"),
+            ("DEP_AWS_LC_0_4X_0_INCLUDE", "/e"),
+        ];
+        assert_eq!(vars(&[others[0], include, others[1]]), Ok("/a".into()));
+        let error = |count: usize, found: &str| {
+            Err(format!(
+                "connector-opcua: the build script has {count} variables \
+                 DEP_AWS_LC_<version>_INCLUDE, not one: {found}"
+            ))
+        };
+        assert_eq!(vars(&others), error(0, "[]"));
+        let two = ("DEP_AWS_LC_0_46_0_INCLUDE", "/f");
+        assert_eq!(
+            vars(&[include, two]),
+            error(
+                2,
+                "[(\"DEP_AWS_LC_0_45_0_INCLUDE\", \"/a\"), \
+                 (\"DEP_AWS_LC_0_46_0_INCLUDE\", \"/f\")]"
+            )
+        );
+    }
+
+    #[test]
+    fn prefix_reads_the_define_of_aws_lc() {
+        let header = "#ifndef X\n#define BORINGSSL_PREFIX aws_lc_0_45_0 \n#endif\n";
+        assert_eq!(compiler::prefix(header), Ok("aws_lc_0_45_0_".to_owned()));
+        let error =
+            "connector-opcua: the headers of aws-lc-sys define no BORINGSSL_PREFIX";
+        for header in [
+            "#define BORINGSSL_PREFIX_SYMBOLS_H\n",
+            "#define BORINGSSL_PREFIX \n",
+            "#define BORINGSSL_PREFIX\n",
+        ] {
+            assert_eq!(compiler::prefix(header), Err(error.to_owned()), "{header}");
+        }
     }
 
     /// `configure` checks the compiler that `sanitize` picks, so a sanitizer moves a
@@ -333,8 +415,9 @@ mod tests {
             return;
         }
         let copy = Path::new("/copy");
+        let flags = "-Ideps\n-Iinclude\n-std=c99";
         let compiler::Builds { library, shim, .. } =
-            compiler::builds(copy, "-Ideps\n-Iinclude\n-std=c99", "a.c\nsrc/b.c");
+            compiler::builds(copy, flags, "a.c\nsrc/b.c");
         assert_eq!(
             library.get_files().collect::<Vec<_>>(),
             [copy.join("a.c"), copy.join("src/b.c")]
@@ -361,7 +444,11 @@ mod tests {
             }
             let library = args(&tool(library.clone(), path));
             assert!(library.contains(&header), "{path}: {library:?}");
-            assert_eq!(includes(&library), dirs, "{path}: {library:?}");
+            assert_eq!(
+                includes(&library),
+                [dirs[0].as_str(), &dirs[1]],
+                "{path}: {library:?}"
+            );
             assert!(
                 library.iter().any(|a| a == "-std=c99"),
                 "{path}: {library:?}"

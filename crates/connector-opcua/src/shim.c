@@ -8,7 +8,9 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <open62541/client_config_default.h>
 #include <open62541/client_highlevel_async.h>
+#include <open62541/plugin/certificategroup_default.h>
 #include <open62541/plugin/eventloop.h>
+#include <open62541/plugin/securitypolicy_default.h>
 #include <open62541/types.h>
 #include <open62541/util.h>
 #include "mp_printf.h"
@@ -25,12 +27,6 @@
 #include <unistd.h>
 #ifdef _WIN32
 #include <windows.h>
-#endif
-
-/* The reason of the clock key of `encryptUserIdentityTokenEcc` in `cargo xtask
- * open62541` needs encryption off. */
-#ifdef UA_ENABLE_ENCRYPTION
-#error "connector-opcua builds open62541 with encryption off"
 #endif
 
 /* The global clocks give a fixed time, so no OS clock enters through the C code.
@@ -76,8 +72,10 @@ static void die(const char *format, ...) {
     abort();
 }
 
-/* The library calls these only when a config has no event loop, and ours always has
- * one, so a call is a defect. */
+/* The library calls the constructors of the POSIX loop only when a config has no event
+ * loop, and ours always has one. `cargo xtask open62541` omits the file stores and the
+ * deprecated and ECC policies, and the production code adds none. So a call is a
+ * defect. */
 static void refuse(const char *name) { die("called %s, which is not built", name); }
 
 UA_EventLoop *UA_EventLoop_new_POSIX(const UA_Logger *logger) {
@@ -109,6 +107,53 @@ UA_InterruptManager *UA_InterruptManager_new_POSIX(const UA_String name) {
     refuse("UA_InterruptManager_new_POSIX");
     return NULL;
 }
+
+#define REFUSE_RSA(name)                                                              \
+    UA_StatusCode name(UA_SecurityPolicy *policy, const UA_ByteString certificate,     \
+                       const UA_ByteString key, const UA_Logger *logger) {             \
+        (void)policy, (void)certificate, (void)key, (void)logger;                      \
+        refuse(#name);                                                                 \
+        return UA_STATUSCODE_BADINTERNALERROR;                                         \
+    }
+#define REFUSE_ECC(name)                                                              \
+    UA_StatusCode name(UA_SecurityPolicy *policy, const UA_ApplicationType type,       \
+                       const UA_ByteString certificate, const UA_ByteString key,       \
+                       const UA_Logger *logger) {                                      \
+        (void)policy, (void)type, (void)certificate, (void)key, (void)logger;          \
+        refuse(#name);                                                                 \
+        return UA_STATUSCODE_BADINTERNALERROR;                                         \
+    }
+REFUSE_RSA(UA_SecurityPolicy_Basic128Rsa15)
+REFUSE_RSA(UA_SecurityPolicy_Basic256)
+REFUSE_ECC(UA_SecurityPolicy_EccBrainpoolP256r1)
+REFUSE_ECC(UA_SecurityPolicy_EccBrainpoolP384r1)
+REFUSE_ECC(UA_SecurityPolicy_EccCurve25519)
+REFUSE_ECC(UA_SecurityPolicy_EccCurve448)
+REFUSE_ECC(UA_SecurityPolicy_EccNistP256)
+REFUSE_ECC(UA_SecurityPolicy_EccNistP256AesGcm)
+REFUSE_ECC(UA_SecurityPolicy_EccNistP256ChaChaPoly)
+REFUSE_ECC(UA_SecurityPolicy_EccNistP384)
+
+#if defined(__linux__) || defined(UA_ARCHITECTURE_WIN32)
+UA_StatusCode UA_CertificateGroup_Filestore(UA_CertificateGroup *certGroup,
+                                            UA_NodeId *certificateGroupId,
+                                            const UA_String storePath,
+                                            const UA_Logger *logger,
+                                            const UA_KeyValueMap *params) {
+    (void)certGroup, (void)certificateGroupId, (void)storePath, (void)logger,
+        (void)params;
+    refuse("UA_CertificateGroup_Filestore");
+    return UA_STATUSCODE_BADINTERNALERROR;
+}
+
+UA_StatusCode UA_SecurityPolicy_Filestore(UA_SecurityPolicy *policy,
+                                          UA_SecurityPolicy *innerPolicy,
+                                          const UA_String storePath) {
+    (void)policy, (void)innerPolicy, (void)storePath;
+    refuse("UA_SecurityPolicy_Filestore");
+    return UA_STATUSCODE_BADINTERNALERROR;
+}
+#endif
 
 /* `src/ffi.rs` mirrors these and asserts the same sizes. */
 _Static_assert(sizeof(UA_NodeId) == 24, "UA_NodeId changed");

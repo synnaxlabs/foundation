@@ -7,9 +7,8 @@
   (https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050922367,
   2026-10-08 02:27 UTC). A test of `connector-opcua` names the function of each clock
   key of `FUNCTION_SYMBOLS` and fails when its reason becomes false. For example,
-  `shim.c` fails the build with `UA_ENABLE_ENCRYPTION`, and a test fails when the Rust
-  or `shim.c` names a security policy, so a client has only the policy `None`, and
-  `encryptUserIdentityTokenEcc` needs an ECC policy. Approved by `laptop.architect`
+  the copy compiles no ECC policy, which `encryptUserIdentityTokenEcc` needs (#2934,
+  below). Approved by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/pull/2246#issuecomment-6094588326,
   2026-10-10 06:19 UTC) and `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2246#issuecomment-6099193878,
@@ -47,11 +46,16 @@
   a `static` function of one file does not hide a call of the OS function of its name
   from another. A key of `FUNCTION_SYMBOLS` with no reference fails, so a file that the
   build leaves out loses its keys. A new outside symbol also goes in `OUTSIDE` in
-  `connector-opcua`, which lists the outside symbols of the production build. A header
-  list is not a check: a listed header can include another (`pthread.h` includes
-  `time.h`). So the check refuses no system header, and each header that the copy
-  includes must be in the copy or in a system directory as `cc` finds it. Lost: a header
-  list, and a deny list of OS symbols, which passes a call that it does not name.
+  `connector-opcua`, or in `PLUGINS` when only one file of the copy may name it, which
+  list the outside symbols of the production build. Until #3029, the checks admit a
+  name of `PLUGINS` in each file of the copy. The words "or in `PLUGINS` when only one
+  file of the copy may name it" and this sentence: approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/3013#issuecomment-6231994142,
+  2026-10-17 08:55 UTC). A header list is not a check: a listed header can include
+  another (`pthread.h` includes `time.h`). So the check
+  refuses no system header, and each header that the copy includes must be in the copy
+  or in a system directory as `cc` finds it. Lost: a header list, and a deny list of OS
+  symbols, which passes a call that it does not name.
   Decided by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/issues/1884#issuecomment-6060989375,
   2026-10-08 13:31 UTC). Supersedes the closed list of system headers of
@@ -810,3 +814,45 @@
   by `laptop.architect-2` at `8ab776da8`
   (https://github.com/synnaxlabs/foundation/pull/2450#issuecomment-6128818932,
   2026-10-12 16:59 UTC).
+  #2934 builds the copy with `UA_ENABLE_ENCRYPTION_OPENSSL` against the `libcrypto` of
+  the one `aws-lc-sys` of `Cargo.lock`, not a second crypto library. Directed by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6225109838,
+  2026-10-16 21:32 UTC) and approved by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230838999,
+  2026-10-17 06:46 UTC). The `build.rs` of `connector-opcua` takes the headers from
+  `DEP_AWS_LC_<version>_INCLUDE`, the `include` of the `links` key of `aws-lc-sys`: the
+  headers that its build script puts in its `OUT_DIR/include`. `cargo xtask open62541`
+  builds no `aws-lc-sys`, so it checks the copy against the headers of its source,
+  `generated-include` and then `aws-lc/include`. Both read the symbol prefix from the
+  `BORINGSSL_PREFIX` line of `openssl/boringssl_prefix_symbols.h`. The check admits in
+  any file each function of aws-lc in `AWS_LC`, which reads no clock, file, network,
+  randomness, or process state, by its name after the prefix. `AWS_LC_KEYS` keys each
+  other call of aws-lc by its file and function, with its reason: each call that draws
+  (TLS RANDOMNESS), each call that reads the clock, and each PEM reader, which with no
+  password callback reads a password from the console (#3017). `AWS_LC_INPUTS` lists the
+  functions of aws-lc that read the clock or the console, and a test fails when no test
+  of `connector-opcua` names the function of each of their keys. `OMITTED` in `cargo
+  xtask open62541` is the closed list of the release files that the library compiles and
+  the copy leaves out, each with its reason: the file stores, `create_certificate.c`,
+  and each policy file other than `Basic256Sha256`, `Aes128_Sha256_RsaOaep`,
+  `Aes256_Sha256_RsaPss`, and their common code. So the copy compiles only the three
+  current policies and `None`, and the production code adds no other. `shim.c` defines
+  each symbol that the rest of the copy names from a left-out file to print its name and
+  abort, and a test calls each one. A test fails on another policy file in
+  `sources.txt`. A test fails when the production code names a policy or a certificate
+  group, or a function `UA_CertificateUtils_*`, other than at its stub in `shim.c`, and
+  a test fails when the objects of `shim.c` or `server.c` name aws-lc or a symbol of
+  `PLUGINS`. `UA_Openssl_Init` of `securitypolicy_common.c` writes a `static` flag with
+  no lock. The build defines no `OPENSSL_API_COMPAT`, so the flag guards no call, and
+  #2934 PR 1b removes it from the copy. Lost: the about 35 file and clock calls of the
+  left-out files, each keyed in `FUNCTION_SYMBOLS`; and a copy of each deprecated and
+  ECC policy file. Decided by `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6230888200,
+  2026-10-17 06:51 UTC). The `UA_Openssl_Init` sentences: decided by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/3013#issuecomment-6231556855,
+  2026-10-17 08:08 UTC). The `AWS_LC_INPUTS` and `PLUGINS` sentences: approved by
+  `laptop.architect-2`
+  (https://github.com/synnaxlabs/foundation/pull/3013#issuecomment-6231723849,
+  2026-10-17 08:26 UTC).
