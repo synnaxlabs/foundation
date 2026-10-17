@@ -1570,14 +1570,10 @@ fn stub(line: &str) -> Option<&str> {
 }
 
 /// Checks the reasons of the clock keys of `encryptUserIdentityTokenEcc` and
-/// `openSSL_verifyChain`, and of the PEM keys of
-/// `UA_CertificateUtils_comparePublicKeys`, `UA_CertificateUtils_decryptPrivateKey`,
-/// `openSSLLoadLeafCertificate`, `reloadCertificates`, `UA_OpenSSL_LoadPemCertificate`,
-/// `UA_OpenSSL_LoadPemCrl`, and `UA_OpenSSL_LoadPrivateKey`, in `cargo xtask
-/// open62541`: the default config of a client has only the policy `None`, and the
-/// production code names no security policy, no certificate group, no certificate
-/// function, and no function that adds one, other than at the stubs of `shim.c` that
-/// abort.
+/// `openSSL_verifyChain` in `cargo xtask open62541`: the default config of a client
+/// has only the policy `None`, and the production code names no security policy, no
+/// certificate group, no certificate function, and no function that adds one, other
+/// than at the stubs of `shim.c` that abort.
 #[test]
 fn the_production_code_gives_a_client_no_security_policy() {
     let policy = |name: &str| {

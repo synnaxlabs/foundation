@@ -35,6 +35,9 @@ mod kind;
 mod link;
 #[cfg(feature = "open62541")]
 mod node;
+#[cfg(test)]
+#[cfg(feature = "open62541")]
+mod pem;
 #[cfg(feature = "open62541")]
 #[cfg(any(test, feature = "sim"))]
 mod server;

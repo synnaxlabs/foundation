@@ -67,20 +67,22 @@ typedef struct UA_Openssl_P_SHA1_Ctx_ {
 #define UA_Openssl_P_SHA1_SEED(ctx)   ((ctx)->A + SHA1_DIGEST_LENGTH)
 #define UA_Openssl_P_SHA1_SECRET(ctx) ((ctx)->A + SHA1_DIGEST_LENGTH +(ctx)->seedLen)
 
+/* OpenSSL 1.1 and later, and aws-lc, need no init call, so `UA_Openssl_Init` keeps no
+ * state. */
+#ifdef OPENSSL_API_COMPAT
+#error "the copy builds no OpenSSL API before 1.1"
+#endif
+
 void
-UA_Openssl_Init(void) {
-    /* VxWorks7 has initialized the openssl. */
-#ifndef __VXWORKS__
-    static UA_Int16 bInit = 0;
-    if(bInit == 1)
-        return;
-#if defined(OPENSSL_API_COMPAT) && (OPENSSL_API_COMPAT < 0x10100000L)
-    /* only needed, if OpenSSL < V1.1 */
-    OpenSSL_add_all_algorithms();
-    ERR_load_crypto_strings();
-#endif
-    bInit = 1;
-#endif
+UA_Openssl_Init(void) {}
+
+int
+UA_OpenSSL_refusePassword(char *buf, int size, int rwflag, void *userdata) {
+    (void)buf;
+    (void)size;
+    (void)rwflag;
+    (void)userdata;
+    return -1;
 }
 
 static int UA_OpenSSL_RSA_Key_Size(EVP_PKEY * key){
@@ -1391,7 +1393,7 @@ UA_OpenSSL_LoadPrivateKey(const UA_ByteString *privateKey) {
     if(result == NULL) {
         /* Try to read PEM encoded private key */
         (void)BIO_reset(bio);
-        result = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+        result = PEM_read_bio_PrivateKey(bio, NULL, UA_OpenSSL_refusePassword, NULL);
     }
     BIO_free(bio);
 
@@ -1446,7 +1448,7 @@ UA_OpenSSL_LoadPemCertificate(const UA_ByteString *certificate) {
 
     BIO* bio = NULL;
     bio = BIO_new_mem_buf((void *) certificate->data, (int) certificate->length);
-    result = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+    result = PEM_read_bio_X509(bio, NULL, UA_OpenSSL_refusePassword, NULL);
     BIO_free(bio);
 
     return result;
@@ -1478,7 +1480,7 @@ UA_OpenSSL_LoadPemCrl(const UA_ByteString *crl) {
 
     BIO* bio = NULL;
     bio = BIO_new_mem_buf((void *) crl->data, (int) crl->length);
-    result = PEM_read_bio_X509_CRL(bio, NULL, NULL, NULL);
+    result = PEM_read_bio_X509_CRL(bio, NULL, UA_OpenSSL_refusePassword, NULL);
     BIO_free(bio);
 
     return result;

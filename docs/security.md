@@ -372,6 +372,11 @@ state on `main`.
   from it. OPEN62541 SOURCE bars it for each nonce, key, and session token of Foundation
   code, and states what a security policy that encrypts, or an OPC UA server of
   Foundation, changes first. Neither is built.
+- A certificate that a server sends is untrusted input, and so is a key or a
+  certificate that the node loads. No PEM read of the open62541 copy waits on the
+  console or sets a signal handler: each refuses an encrypted PEM that it has no
+  password for, and a password that does not fit in the buffer of aws-lc (OPEN62541
+  SOURCE).
 
 ### Encoded series
 
@@ -546,5 +551,6 @@ directory (`node::budget::decode`, #2174), the parsers of `/proc/self/mountinfo`
 reply of its node (`ops::serve`, #2563), the newest handoff record of each index in the
 ring (`home::handoff::read`, #2278), the newest named reader entry of each index in
 the ring (`home::named::read`, #2278), the buffer entry that a complete reader reads from
-disk (`home::stored::Decoder::frame`, #2738), and the chunk processing of open62541
-(`ua_securechannel.c`, #1990).
+disk (`home::stored::Decoder::frame`, #2738), the chunk processing of open62541
+(`ua_securechannel.c`, #1990), and the read of the certificate that an OPC UA server
+sends (`openSSLLoadLeafCertificate` of the OpenSSL plugins, #3058).

@@ -55,6 +55,10 @@ _UA_BEGIN_DECLS
 void saveDataToFile(const char *fileName, const UA_ByteString *str);
 void UA_Openssl_Init(void);
 
+/* The password callback of each PEM read that has no password: it refuses an
+ * encrypted PEM. aws-lc prompts on the console when a read passes no callback. */
+int UA_OpenSSL_refusePassword(char *buf, int size, int rwflag, void *userdata);
+
 UA_StatusCode
 UA_copyCertificate(UA_ByteString *dst, const UA_ByteString *src);
 

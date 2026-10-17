@@ -319,7 +319,7 @@ reloadCertificates(UA_CertificateGroup *certGroup) {
         if(crl == NULL) {
             /* Try to load PEM encoded CRL */
             (void)BIO_reset(bio);
-            crl = PEM_read_bio_X509_CRL(bio, NULL, NULL, NULL);
+            crl = PEM_read_bio_X509_CRL(bio, NULL, UA_OpenSSL_refusePassword, NULL);
         }
         BIO_free(bio);
 
@@ -338,7 +338,7 @@ reloadCertificates(UA_CertificateGroup *certGroup) {
         if(crl == NULL) {
             /* Try to load PEM encoded Issuer CRL */
             (void)BIO_reset(bio);
-            crl = PEM_read_bio_X509_CRL(bio, NULL, NULL, NULL);
+            crl = PEM_read_bio_X509_CRL(bio, NULL, UA_OpenSSL_refusePassword, NULL);
         }
         BIO_free(bio);
 
@@ -402,7 +402,7 @@ openSSLLoadLeafCertificate(UA_ByteString cert, size_t *offset) {
     *offset += cert.length;
 
     BIO *bio = BIO_new_mem_buf((void *) cert.data, (int)cert.length);
-    X509 *result = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+    X509 *result = PEM_read_bio_X509(bio, NULL, UA_OpenSSL_refusePassword, NULL);
     BIO_free(bio);
     return result;
 }
@@ -942,7 +942,7 @@ UA_CertificateUtils_comparePublicKeys(const UA_ByteString *certificate1,
     X509_REQ *csr1 = NULL;
     X509_REQ *csr2 = NULL;
     /* Try to read the certificate as PEM first */
-    cert1 = PEM_read_bio_X509(dataBio1, NULL, 0, NULL);
+    cert1 = PEM_read_bio_X509(dataBio1, NULL, UA_OpenSSL_refusePassword, NULL);
     if(!cert1) {
         /* If PEM read fails, reset BIO and try reading as DER */
         (void)BIO_reset(dataBio1);
@@ -951,7 +951,7 @@ UA_CertificateUtils_comparePublicKeys(const UA_ByteString *certificate1,
     /* Try to read as a csr */
     if(!cert1) {
         (void)BIO_reset(dataBio1);
-        csr1 = PEM_read_bio_X509_REQ(dataBio1, NULL, 0, NULL);
+        csr1 = PEM_read_bio_X509_REQ(dataBio1, NULL, UA_OpenSSL_refusePassword, NULL);
         if(!csr1) {
             (void)BIO_reset(dataBio1);
             csr1 = d2i_X509_REQ_bio(dataBio1, NULL);
@@ -963,7 +963,7 @@ UA_CertificateUtils_comparePublicKeys(const UA_ByteString *certificate1,
         return UA_STATUSCODE_BADINTERNALERROR;
     }
 
-    cert2 = PEM_read_bio_X509(dataBio2, NULL, 0, NULL);
+    cert2 = PEM_read_bio_X509(dataBio2, NULL, UA_OpenSSL_refusePassword, NULL);
     if(!cert2) {
         /* If PEM read fails, reset BIO and try reading as DER */
         (void)BIO_reset(dataBio2);
@@ -972,7 +972,7 @@ UA_CertificateUtils_comparePublicKeys(const UA_ByteString *certificate1,
     /* Try to load as a csr */
     if(!cert2) {
         (void)BIO_reset(dataBio2);
-        csr2 = PEM_read_bio_X509_REQ(dataBio2, NULL, 0, NULL);
+        csr2 = PEM_read_bio_X509_REQ(dataBio2, NULL, UA_OpenSSL_refusePassword, NULL);
         if(!csr2) {
             (void)BIO_reset(dataBio2);
             csr2 = d2i_X509_REQ_bio(dataBio2, NULL);
@@ -1072,8 +1072,10 @@ static int
 privateKeyPasswordCallback(char *buf, int size, int rwflag, void *userdata) {
     (void) rwflag;
     UA_ByteString *pw = (UA_ByteString*)userdata;
-    if(pw->length <= (size_t)size)
-        memcpy(buf, pw->data, pw->length);
+    /* aws-lc refuses the PEM only on a result below 0. */
+    if(pw->length > (size_t)size)
+        return -1;
+    memcpy(buf, pw->data, pw->length);
     return (int)pw->length;
 }
 
