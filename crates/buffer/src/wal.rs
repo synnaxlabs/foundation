@@ -72,7 +72,7 @@ const _: () = assert!(entry::table_len(1) <= BODY_MIN, "a body holds one entry")
 /// Bytes of the whole blocks that hold a record header and the largest entry table.
 const TABLE: usize = (HEADER_LEN + entry::TABLE_MAX).next_multiple_of(ALIGN);
 const _: () = assert!(
-    carry::body_len(carry::TAILS_MAX) <= TABLE - HEADER_LEN,
+    carry::body_len(carry::TAILS_MAX, 0, 0) <= TABLE - HEADER_LEN,
     "the walk holds a full carry body whole"
 );
 
@@ -262,7 +262,9 @@ impl Layout {
     /// [`Rejected::Large`](crate::Rejected::Large) with
     /// [`Limit::Body`](crate::Limit::Body). Each entry of a larger batch adds to the
     /// record's table, so its entries hold less in all. A shard's pool can bound an
-    /// entry lower, with [`Limit::Block`](crate::Limit::Block).
+    /// entry lower, with [`Limit::Block`](crate::Limit::Block). An entry with a
+    /// nonzero tag holds at most [`ENTRY_MAX_MIN`](Self::ENTRY_MAX_MIN), with
+    /// [`Limit::Tagged`](crate::Limit::Tagged).
     #[must_use]
     pub fn entry_max(self) -> usize {
         self.body_max - entry::table_len(1)
@@ -279,7 +281,9 @@ impl Layout {
     /// parts in all, against the limits of one record of this ring, as
     /// [`Buffer::append`](crate::Buffer::append) does before it queues the batch.
     /// It does not check [`Limit::Block`](crate::Limit::Block), which
-    /// [`Buffer::block_max`](crate::Buffer::block_max) gives.
+    /// [`Buffer::block_max`](crate::Buffer::block_max) gives, or
+    /// [`Limit::Tagged`](crate::Limit::Tagged), which only an entry with a nonzero
+    /// tag meets.
     ///
     /// # Errors
     ///
@@ -314,7 +318,8 @@ impl Layout {
     }
 }
 
-/// A limit of one record, or of the pool block that holds one entry.
+/// A limit of one record, of the pool block that holds one entry, or of an entry
+/// with a nonzero tag.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Limit {
     /// More entries than one record holds.
@@ -342,6 +347,14 @@ pub enum Limit {
         /// [`Buffer::block_max`](crate::Buffer::block_max).
         max: usize,
     },
+    /// An entry with a nonzero tag whose parts, joined, pass
+    /// [`Layout::ENTRY_MAX_MIN`]: a carry record of one block must hold it.
+    Tagged {
+        /// Bytes of the entry's parts.
+        len: usize,
+        /// [`Layout::ENTRY_MAX_MIN`].
+        max: usize,
+    },
 }
 
 impl fmt::Display for Limit {
@@ -365,6 +378,11 @@ impl fmt::Display for Limit {
                 f,
                 "an entry has {len} bytes of parts, and an entry of this buffer holds \
                  at most {max}"
+            ),
+            Self::Tagged { len, max } => write!(
+                f,
+                "an entry with a tag has {len} bytes of parts, and an entry with a tag \
+                 holds at most {max}"
             ),
         }
     }
@@ -586,7 +604,7 @@ impl Writer {
     ///
     /// When `tails` is more than [`Layout::tails_max`].
     pub(crate) fn carry(&mut self, tails: usize) -> Result<Plan, Full> {
-        self.plan(Kind::Carry, carry::body_len(tails))
+        self.plan(Kind::Carry, carry::body_len(tails, 0, 0))
     }
 
     /// The most tails that a carry record planned now may hold: the fewer of
@@ -2800,7 +2818,7 @@ mod tests {
                 .expect("the restart record goes over the last one");
             assert_eq!(ring.writer.head(), 17 * 4096);
             let plan = ring.writer.carry(1).expect("the owed block is free");
-            let body = vec![0; carry::body_len(1)];
+            let body = vec![0; carry::body_len(1, 0, 0)];
             let (sealed, ends) = plan.seal(ring.head.chain, [&body[..]]);
             ring.apply(&sealed, &body, false);
             ring.head = ends.record;

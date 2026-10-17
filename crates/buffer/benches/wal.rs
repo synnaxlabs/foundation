@@ -83,6 +83,19 @@ fn deadline(bencher: Bencher<'_, '_>, indexes: u32) {
         .bench_local(|| deadline.commit(divan::black_box(1)));
 }
 
+/// As [`deadline`], with each entry of tag 1, so each sync copies its 100 bytes into
+/// the copy that it replaces.
+#[divan::bench(args = [1, 32], sample_size = SAMPLE_SIZE)]
+fn deadline_tagged(bencher: Bencher<'_, '_>, indexes: u32) {
+    let mut deadline = Deadline::tagged(indexes, 64 + PHASE);
+    for _ in 0..2 * 64 {
+        deadline.commit(1);
+    }
+    bencher
+        .counter(ItemsCount::new(usize::try_from(indexes).expect("fits")))
+        .bench_local(|| deadline.commit(divan::black_box(1)));
+}
+
 /// The last of 32 indexes appends one entry each 4096 deadlines, so the deadline
 /// after 13 carries its tail and fills the record with the tails of the other 31.
 #[divan::bench]

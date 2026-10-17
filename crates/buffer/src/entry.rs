@@ -109,9 +109,11 @@ pub struct Entry {
     pub samples: Option<Samples>,
     /// Mesh time at which the home stored it. A retention `keep` counts from it.
     pub stored_at: Stamp,
-    /// A tag the caller gives and reads back. The buffer gives it no meaning, apart
-    /// from 0: [`Buffer::newest`](crate::Buffer::newest) never gives an entry of tag
-    /// 0, and compares each other tag with the tag its caller gives.
+    /// A tag the caller gives and reads back. Tag 0 marks samples. Each other tag
+    /// marks a state entry: the buffer keeps the newest entry of each nonzero tag on
+    /// each path of an index until a trim passes its record, and
+    /// [`Buffer::newest`](crate::Buffer::newest) gives it. Such an entry holds at
+    /// most [`Layout::ENTRY_MAX_MIN`](crate::Layout::ENTRY_MAX_MIN) bytes.
     pub tag: u8,
     /// The bytes, written in place; see [`Parts`].
     pub parts: Parts,
@@ -192,7 +194,7 @@ impl Header {
         }
     }
 
-    fn encode(&self) -> [u8; HEADER_LEN] {
+    pub(crate) fn encode(&self) -> [u8; HEADER_LEN] {
         let mut out = [0; HEADER_LEN];
         let mut rest: &mut [u8] = &mut out;
         for field in [
@@ -412,7 +414,19 @@ pub(crate) fn parse(start: &[u8], len: usize) -> Result<Headers<'_>, Invalid> {
     assert!(start.len() <= len, "invariant: the body holds its start");
     let offset = table_end(start)?;
     let table = start.get(4..offset).ok_or(Invalid::Truncated)?;
-    Ok(Headers { table, offset, len })
+    Ok(headers(table, offset, len))
+}
+
+/// Gives each header of `table`, headers back to back with no count, as
+/// [`parse`] does. The bytes of the first start at body offset `offset`, in a body
+/// of `len` bytes.
+///
+/// # Panics
+///
+/// When `offset` is past `len`.
+pub(crate) fn headers(table: &[u8], offset: usize, len: usize) -> Headers<'_> {
+    assert!(offset <= len, "invariant: the body holds its table");
+    Headers { table, offset, len }
 }
 
 /// The size of the table at the start of the body that begins with `start`: the

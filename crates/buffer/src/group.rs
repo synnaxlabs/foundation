@@ -162,15 +162,22 @@ impl Group {
         let len = batch.iter().map(|entry| entry.parts.bytes()).sum::<usize>();
         let layout = writer.layout();
         layout.check(count, parts, len).map_err(Rejected::Large)?;
-        let over = batch
-            .iter()
-            .map(|entry| entry.parts.bytes())
-            .find(|&bytes| bytes > block_max);
-        if let Some(len) = over {
-            return Err(Rejected::Large(Limit::Block {
-                len,
-                max: block_max,
-            }));
+        let max = Layout::ENTRY_MAX_MIN;
+        let mut tagged = None;
+        for entry in batch {
+            let len = entry.parts.bytes();
+            if len > block_max {
+                return Err(Rejected::Large(Limit::Block {
+                    len,
+                    max: block_max,
+                }));
+            }
+            if tagged.is_none() && entry.tag != 0 && len > max {
+                tagged = Some(Limit::Tagged { len, max });
+            }
+        }
+        if let Some(limit) = tagged {
+            return Err(Rejected::Large(limit));
         }
         layout
             .check(
@@ -318,6 +325,24 @@ pub(crate) fn end_block(mut block: Unique, header: &[u8; record::HEADER_LEN]) ->
     block.freeze().skip(start)
 }
 
+/// Takes from the front of `writes` the blocks of an entry of `bytes` bytes. Each
+/// entry has whole blocks, so the bytes split at a block end.
+fn parts<'a>(writes: &mut &'a [Block], bytes: u32) -> &'a [Block] {
+    let bytes = usize::try_from(bytes).expect("invariant: an entry fits in usize");
+    let mut sum = 0_usize;
+    let count = writes
+        .iter()
+        .take_while(|part| {
+            let before = sum;
+            sum = sum.saturating_add(part.len());
+            before < bytes
+        })
+        .count();
+    let (parts, rest) = writes.split_at(count);
+    *writes = rest;
+    parts
+}
+
 /// A group whose record is complete: each of its [`writes`](Self::writes) goes at
 /// its place in the area.
 #[derive(Debug)]
@@ -359,6 +384,26 @@ impl Sealed {
     /// The slot of each header, in the same order.
     pub(crate) fn slots(&self) -> &[Slot] {
         &self.group.slots
+    }
+
+    /// Each entry with a nonzero tag, in order: its slot, its header, and its parts.
+    pub(crate) fn tagged(&self) -> impl Iterator<Item = (Slot, &Header, &[Block])> {
+        let group = &self.group;
+        let headers = if group.headers.iter().any(|header| header.tag != 0) {
+            group.headers.as_slice()
+        } else {
+            &[]
+        };
+        // `seal` put the record header and the table at `writes[0]`.
+        let mut writes = group.writes.get(1..).unwrap_or_default();
+        group
+            .slots
+            .iter()
+            .zip(headers)
+            .filter_map(move |(&slot, header)| {
+                let parts = parts(&mut writes, header.bytes);
+                (header.tag != 0).then_some((slot, header, parts))
+            })
     }
 
     /// Drops the entries and the blocks and gives the group back with its capacity.
@@ -424,7 +469,7 @@ mod tests {
                 len: NonZeroU32::new(2).expect("not 0"),
                 last: Some(Stamp::from_nanos(9)),
             }),
-            tag: 3,
+            tag: 0,
             bytes: 99,
         }
     }
@@ -770,6 +815,19 @@ mod tests {
                 let headers: Vec<Header> = stored.iter().map(|(header, _)| *header).collect();
                 prop_assert_eq!(sealed.headers(), headers.as_slice());
                 prop_assert_eq!(sealed.slots(), slots.as_slice());
+                let tagged: Vec<(Slot, Header, Vec<u8>)> = sealed
+                    .tagged()
+                    .map(|(slot, header, parts)| {
+                        (slot, *header, parts.iter().flat_map(|part| part.to_vec()).collect())
+                    })
+                    .collect();
+                let wanted: Vec<(Slot, Header, Vec<u8>)> = slots
+                    .iter()
+                    .zip(&stored)
+                    .filter(|(_, (header, _))| header.tag != 0)
+                    .map(|(&slot, (header, bytes))| (slot, *header, bytes.clone()))
+                    .collect();
+                prop_assert_eq!(tagged, wanted);
                 group = sealed.clear();
                 prop_assert!(group.is_empty());
                 expected.push(stored);
@@ -1201,6 +1259,74 @@ mod tests {
             &mut batch,
         );
         assert_eq!(pushed, Ok(0..1), "an entry at block_max fits");
+    }
+
+    #[test]
+    fn block_and_body_come_before_a_tagged_entry() {
+        let mut area = Area::with_body_max(60_000);
+        let tagged = parts(&area.pool, &[&[7; 2_500], &[7; 2_500]]);
+        let block = parts(&area.pool, &[&[7; 3_500], &[7; 3_500]]);
+        let big = vec![7; 31_000];
+        let body = parts(&area.pool, &[&big, &big]);
+        area.pool = pool(1 << 16);
+        assert_eq!(area.block_max(), 6_657);
+        let tag = Header {
+            tag: 3,
+            ..header(1, Path::Live, 0)
+        };
+        let batch = [
+            entry(tag, tagged.clone()),
+            entry(header(2, Path::Live, 0), block),
+        ];
+        let limit = Limit::Block {
+            len: 7_000,
+            max: 6_657,
+        };
+        assert_large(&mut area, &batch, limit);
+        let batch = [entry(tag, tagged), entry(header(2, Path::Live, 0), body)];
+        let limit = Limit::Body {
+            len: table_len(2) + 67_000,
+            max: 60_000,
+        };
+        assert_large(&mut area, &batch, limit);
+    }
+
+    #[test]
+    fn refuses_a_tagged_entry_over_entry_max_min() {
+        let mut area = Area::with_body_max(60_000);
+        let over = parts(&area.pool, &[&[7; 2_000], &[7; 2_033]]);
+        let at = parts(&area.pool, &[&[7; 4_032]]);
+        area.pool = pool(1 << 16);
+        assert_eq!(area.block_max(), 6_657);
+        let tagged = Header {
+            tag: 3,
+            ..header(1, Path::Live, 0)
+        };
+        let batch = [
+            entry(header(2, Path::Live, 0), Parts::default()),
+            entry(tagged, over.clone()),
+        ];
+        let limit = Limit::Tagged {
+            len: 4_033,
+            max: 4_032,
+        };
+        assert_large(&mut area, &batch, limit);
+        assert_eq!(
+            limit.to_string(),
+            "an entry with a tag has 4033 bytes of parts, and an entry with a tag \
+             holds at most 4032"
+        );
+        let samples = Header { tag: 0, ..tagged };
+        let mut group = Group::default();
+        let mut batch = vec![entry(samples, over), entry(tagged, at)];
+        let pushed = push(
+            &mut group,
+            &area.pool,
+            area.block_max(),
+            &area.writer,
+            &mut batch,
+        );
+        assert_eq!(pushed, Ok(0..2), "tag 0 and a tagged entry at the most fit");
     }
 
     proptest! {

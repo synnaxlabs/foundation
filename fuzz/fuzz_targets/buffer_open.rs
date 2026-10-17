@@ -97,7 +97,8 @@ const CHECK_LAST: Stamp = Stamp::from_nanos(9);
 /// The tag of the first entry of the build and of the check. Each entry takes the
 /// next tag, fills its bytes with it, and is stored at it. The tags of the build
 /// start again after 128 entries, below the tags of the check, so entries that
-/// share a tag differ in `first`.
+/// share a tag differ in `first`. A build entry over [`Layout::ENTRY_MAX_MIN`]
+/// bytes is appended with tag 0, as a nonzero tag holds at most that.
 const BUILD_TAG: u8 = 0x01;
 const CHECK_TAG: u8 = 0x81;
 /// The last offset of a ring.
@@ -757,6 +758,7 @@ async fn build(shard: &Shard, input: &Input) -> Built {
                 (one, _) => Parts::from(one),
             };
             parts += append.parts.len();
+            let large = append.parts.iter().sum::<usize>() > Layout::ENTRY_MAX_MIN;
             let entry = Entry {
                 index: key(append.index),
                 slot: slots[append.index],
@@ -764,7 +766,7 @@ async fn build(shard: &Shard, input: &Input) -> Built {
                 first,
                 samples,
                 stored_at: stored_at(tag),
-                tag,
+                tag: if large { 0 } else { tag },
                 parts: blocks,
             };
             let given = Given::from(&entry);

@@ -96,8 +96,7 @@ const INTERVAL: Span = Span::from_nanos(1_000_000_000);
 ///         earliest: Stamp::from_nanos(1),
 ///         ahead: Span::from_nanos(1_000_000_000),
 ///     },
-/// })
-/// .await?;
+/// });
 /// assert!(shard.carry(index, stamps));
 /// let charge = home::reader::complete::Charge::Whole;
 /// let reader = shard.open_complete(index, 1 << 20, charge).key;
@@ -309,24 +308,19 @@ impl Shard {
     /// the newest records of the named readers of each index, which its carry
     /// restores. It needs no mesh time.
     ///
-    /// # Errors
-    ///
-    /// The error of [`Buffer::newest`](buffer::Buffer::newest).
-    ///
     /// # Panics
     ///
     /// When a handoff record or a named entry does not decode: another version or a
     /// defect wrote it.
-    pub async fn open(config: Config) -> Result<Self, buffer::Error> {
+    pub fn open(config: Config) -> Self {
         let Config {
             shard,
             buffer,
             clock,
             limits,
         } = config;
-        let holders = handoff::newest(&buffer).await?;
+        let holders = handoff::newest(&buffer);
         let (records, named) = named::Parts::newest(&buffer)
-            .await?
             .into_iter()
             .map(|(slot, (parts, held))| ((slot, held), (slot, parts)))
             .unzip();
@@ -336,7 +330,7 @@ impl Shard {
             .into_iter()
             .map(|(slot, last)| (slot, Gate::recover(last, now, grace)))
             .collect();
-        Ok(Self {
+        Self {
             number: shard,
             buffer,
             clock,
@@ -351,7 +345,7 @@ impl Shard {
             kept,
             named,
             tick: None,
-        })
+        }
     }
 
     /// Carries the index `key` at `slot`, with no connected writer. `key` must be the
@@ -1307,7 +1301,7 @@ mod tests {
             while self.reader.now().mesh.is_none() {
                 self.clock.sleep(Span::from_nanos(1)).await;
             }
-            Self::with(shard, buffer, self.reader.clone()).await
+            Self::with(shard, buffer, self.reader.clone())
         }
 
         /// A shard over the ring of the node that never has mesh time, with no index
@@ -1316,18 +1310,18 @@ mod tests {
             let buffer = self.create_buffer(AREA, BODY_MAX, 4).await;
             // A clock that never runs never has mesh time.
             let (_, reader) = clock::Clock::new(self.clock.clone());
-            Self::with(0, buffer, reader).await
+            Self::with(0, buffer, reader)
         }
 
         /// A shard of the number `shard` over `buffer`, with the clocks of `reader`.
-        async fn with(shard: u32, buffer: Buffer, reader: clock::Reader) -> Shard {
+        fn with(shard: u32, buffer: Buffer, reader: clock::Reader) -> Shard {
             let config = Config {
                 shard,
                 buffer,
                 clock: reader,
                 limits: LIMITS,
             };
-            Shard::open(config).await.expect("opens")
+            Shard::open(config)
         }
 
         /// Mesh time now: the midpoint of the clock's interval.
@@ -3540,7 +3534,7 @@ mod tests {
             let set = two_indexes();
             let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
             let (clock, reader) = clock::Clock::new(test.clock.clone());
-            let mut shard = Test::with(0, buffer, reader).await;
+            let mut shard = Test::with(0, buffer, reader);
             assert!(shard.carry(Slot::new(0), key(Slot::new(0))));
             assert!(shard.carry(Slot::new(2), key(Slot::new(2))));
             test.clock.sleep(GRACE).await;
@@ -3731,26 +3725,21 @@ mod tests {
     }
 
     #[test]
-    fn open_gives_the_error_of_a_failed_read_of_a_handoff() {
+    fn restores_control_with_no_read_of_a_handoff() {
         let (mut sim, node) = cut_after(182, false);
         sim.run_on(&node, |node, tasks| async move {
             let test = Test::new(node, tasks);
+            let set = two_indexes();
             let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
             test.node.fail_file(FilePath::new(RING), Operation::ReadAt);
-            let config = Config {
-                shard: 0,
-                buffer,
-                clock: test.reader.clone(),
-                limits: LIMITS,
-            };
-            let failed = env::files::Error::Io {
-                path: PathBuf::from(RING),
-                operation: Operation::ReadAt,
-                code: 5,
-            };
+            let mut shard = test.numbered(0, buffer).await;
+            assert!(shard.carry(Slot::new(0), key(Slot::new(0))));
+            assert!(shard.carry(Slot::new(2), key(Slot::new(2))));
+            let b = shard.open_writer(writer("b", 1, &set)).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
             assert_eq!(
-                Shard::open(config).await.err(),
-                Some(buffer::Error::Files(failed))
+                shard.write(b, LIVE, next),
+                Ok(&[refused(0, Refusal::Reserved), refused(2, Refusal::Reserved)][..])
             );
         })
         .expect("the run after the cut ends");
@@ -3764,7 +3753,7 @@ mod tests {
             let set = two_indexes();
             let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
             let (clock, reader) = clock::Clock::new(test.clock.clone());
-            let mut shard = Test::with(0, buffer, reader).await;
+            let mut shard = Test::with(0, buffer, reader);
             assert_eq!(shard.now(), None);
             let wall = test.node.wall();
             test.tasks.spawn(async move { clock.run(wall).await });
@@ -4389,7 +4378,7 @@ mod tests {
             run(98, |test| async move {
                 let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
                 let (clock, mesh) = clock::Clock::new(test.clock.clone());
-                let mut shard = Test::with(0, buffer, mesh.clone()).await;
+                let mut shard = Test::with(0, buffer, mesh.clone());
                 assert!(shard.carry(Slot::new(0), key(Slot::new(0))));
                 assert!(shard.carry(Slot::new(2), key(Slot::new(2))));
                 let complete = complete(&mut shard, Slot::new(0));
@@ -6442,7 +6431,7 @@ mod tests {
                         let test = Test::new(node, tasks);
                         let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
                         let (clock, reader) = clock::Clock::new(test.clock.clone());
-                        let mut shard = Test::with(0, buffer, reader).await;
+                        let mut shard = Test::with(0, buffer, reader);
                         assert!(shard.carry(Slot::new(0), common::key(Slot::new(0))));
                         assert!(shard.deadline().is_some(), "the records wait");
                         let wall = test.node.wall();
@@ -6960,9 +6949,8 @@ mod tests {
 
                 /// The count of the records of `reader` in the newest named entries
                 /// of the index at slot 0 in the buffer of `shard`.
-                async fn records_of(shard: &Shard, reader: &named::Key) -> usize {
-                    let newest = crate::named::Parts::newest(&shard.buffer).await;
-                    let newest = newest.expect("the newest entries");
+                fn records_of(shard: &Shard, reader: &named::Key) -> usize {
+                    let newest = crate::named::Parts::newest(&shard.buffer);
                     let records = newest.get(&Slot::new(0)).map(|(_, records)| records);
                     let records = records.into_iter().flatten();
                     records.filter(|record| record.reader == *reader).count()
@@ -6984,7 +6972,7 @@ mod tests {
                         open_k(shard);
                     };
                     restart(214, before, async |_, shard: &mut Shard| {
-                        assert_eq!(records_of(shard, &longest(0)).await, 1);
+                        assert_eq!(records_of(shard, &longest(0)), 1);
                         let k = open_longest(shard, longest(0));
                         let k = k.expect("its record is in one part").key;
                         shard.committed().await.expect("the commit ends");
@@ -7014,7 +7002,7 @@ mod tests {
                             }
                         };
                         restart(215, before, async move |_, shard: &mut Shard| {
-                            let records = records_of(shard, &longest(0)).await;
+                            let records = records_of(shard, &longest(0));
                             let expected = usize::from(steps != 2 && steps != 3);
                             assert_eq!(records, expected, "after step {steps}");
                             let k = open_longest(shard, longest(0));
@@ -7248,8 +7236,7 @@ mod tests {
                             tick(&test, &mut shard).await;
                         }
                         shard.committed().await.expect("the commit ends");
-                        let newest = crate::named::Parts::newest(&shard.buffer).await;
-                        let newest = newest.expect("the newest entries");
+                        let newest = crate::named::Parts::newest(&shard.buffer);
                         assert_eq!(newest[&Slot::new(2)].1, [], "the hold ended");
                     });
                 }
@@ -8176,9 +8163,7 @@ mod tests {
                 buffer,
                 clock: mesh.clone(),
                 limits: LIMITS,
-            })
-            .await
-            .expect("opens");
+            });
             assert!(shard.carry(Slot::new(0), key(Slot::new(0))));
             assert!(shard.carry(Slot::new(2), key(Slot::new(2))));
             let set = two_indexes();
@@ -8247,7 +8232,7 @@ mod tests {
             while mesh.now().mesh.is_none() {
                 test.clock.sleep(Span::from_nanos(1)).await;
             }
-            let mut shard = Test::with(0, buffer, mesh).await;
+            let mut shard = Test::with(0, buffer, mesh);
             assert!(shard.carry(Slot::new(0), key(Slot::new(0))));
             assert!(shard.carry(Slot::new(2), key(Slot::new(2))));
             let set = two_indexes();

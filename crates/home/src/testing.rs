@@ -85,9 +85,7 @@ pub async fn unsynced_shard(env: Env, delay: Span) -> (Shard, Interner, clock::R
             earliest: Stamp::from_nanos(1),
             ahead: Span::from_nanos(1_000_000_000),
         },
-    })
-    .await
-    .expect("opens");
+    });
     (shard, interner, mesh)
 }
 

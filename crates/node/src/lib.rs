@@ -460,17 +460,16 @@ impl Node {
     /// [`Error::Mesh`], [`Error::Key`], or [`Error::Directory`] for a stored name that
     /// it could not read or a name it could not keep, else [`Error::Port`] for a port
     /// that did not bind, else [`Error::Buffer`] for the first shard by core whose
-    /// buffer, or the home over it, did not open, [`Error::Budget`] or
-    /// [`Error::Directory`] for a file `budget` that shard 0 could not read or write,
-    /// [`Error::Key`], [`Error::Admin`], or [`Error::Directory`] for a key file that
-    /// shard 0 could not read or write, [`Error::Transport`] for a value of
-    /// [`Config::settings`] that the transport refuses, [`Error::Blob`] for a chunk
-    /// store or [`Error::Mesh`] for a stored region or a mesh that did not open,
-    /// [`Error::Directory`] for a file `address` that shard 0 could not write, or
-    /// [`Error::Transport`] or [`Error::Group`], whichever the node sees stop first,
-    /// else [`Error::Directory`] for a file `address` that shard 0 could not write
-    /// empty, else [`Error::Panicked`] for the first shard by core that panicked. Any
-    /// failed shard stops the node.
+    /// buffer did not open, [`Error::Budget`] or [`Error::Directory`] for a file
+    /// `budget` that shard 0 could not read or write, [`Error::Key`], [`Error::Admin`],
+    /// or [`Error::Directory`] for a key file that shard 0 could not read or write,
+    /// [`Error::Transport`] for a value of [`Config::settings`] that the transport
+    /// refuses, [`Error::Blob`] for a chunk store or [`Error::Mesh`] for a stored
+    /// region or a mesh that did not open, [`Error::Directory`] for a file `address`
+    /// that shard 0 could not write, or [`Error::Transport`] or [`Error::Group`],
+    /// whichever the node sees stop first, else [`Error::Directory`] for a file
+    /// `address` that shard 0 could not write empty, else [`Error::Panicked`] for the
+    /// first shard by core that panicked. Any failed shard stops the node.
     pub fn join(self) -> Result<(), Error> {
         let shards = self.shards.into_iter().map(|shard| {
             // The shard sets `failed` on its own thread, so read it after the join.
@@ -863,18 +862,14 @@ impl Open {
             commit: COMMIT,
             trimmed: false,
         };
-        let opened = async {
-            let buffer = buffer::Buffer::open(config, interner.slots()).await?;
-            let config = home::Config {
-                shard: self.shard,
-                buffer,
-                clock: self.clock,
-                limits: LIMITS,
-            };
-            home::Shard::open(config).await
-        };
-        match opened.await {
-            Ok(shard) => {
+        match buffer::Buffer::open(config, interner.slots()).await {
+            Ok(buffer) => {
+                let shard = home::Shard::open(home::Config {
+                    shard: self.shard,
+                    buffer,
+                    clock: self.clock,
+                    limits: LIMITS,
+                });
                 self.give.give(interner);
                 Some(shard)
             }
@@ -1440,7 +1435,7 @@ pub enum Error {
         /// Why the OS gave none.
         error: os::memory::Error,
     },
-    /// The buffer of the shard on `core`, or the home over it, did not open.
+    /// The buffer of the shard on `core` did not open.
     Buffer {
         /// The core of the shard.
         core: usize,

@@ -397,9 +397,7 @@ async fn trimmed_hub(node: &sim::node::Node, tasks: env::tasks::Tasks) -> hub::H
             earliest: Stamp::from_nanos(1),
             ahead: Span::SECOND,
         },
-    })
-    .await
-    .expect("opens");
+    });
     while home.now().is_none() {
         node.clock().sleep(Span::from_nanos(1)).await;
     }

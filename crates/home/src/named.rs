@@ -113,25 +113,19 @@ impl Parts {
     /// absent. It reads the tags of the parts from part 0 up, to the first tag that no
     /// index has an entry of.
     ///
-    /// # Errors
-    ///
-    /// The error of [`Buffer::newest`].
-    ///
     /// # Panics
     ///
     /// When a named entry does not decode, as [`read`] says, or a key is in two parts.
-    pub(crate) async fn newest(
-        buffer: &Buffer,
-    ) -> Result<hash::Map<Slot, (Self, Vec<Record>)>, buffer::Error> {
+    pub(crate) fn newest(buffer: &Buffer) -> hash::Map<Slot, (Self, Vec<Record>)> {
         let mut found: hash::Map<Slot, (Self, Vec<Record>)> = hash::Map::default();
         for part in 0..PARTS {
-            let newest = buffer.newest(Path::Live, tag(part)).await?;
+            let newest = buffer.newest(Path::Live, tag(part));
             if newest.is_empty() {
                 break;
             }
-            for (slot, stored) in newest {
+            for (slot, bytes) in newest {
                 let (parts, records) = found.entry(slot).or_default();
-                for record in read(&stored.bytes) {
+                for record in read(&bytes) {
                     let state = Kept::Held(Fields::from(&record));
                     parts
                         .keys
@@ -141,7 +135,7 @@ impl Parts {
                 parts.sort();
             }
         }
-        Ok(found)
+        found
     }
 
     /// Appends the parts that `records` change, as [`append`](Self::append) does,

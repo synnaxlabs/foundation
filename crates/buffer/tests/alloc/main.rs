@@ -166,6 +166,31 @@ fn logs_take_no_allocation() {
     assert_eq!(n, 0, "{n} allocations in 1024 trims of a read that holds 8");
 }
 
+/// After the warm-up, a deadline of 32 tagged entries copies each into the bytes
+/// of the copy it replaces, so it allocates no more than one of untagged entries.
+fn tagged_deadlines_take_no_allocation() {
+    let count = |mut deadline: buffer::bench::Deadline| {
+        for _ in 0..2 * 64 {
+            deadline.commit(1);
+        }
+        ALLOCATOR
+            .count(|| {
+                for _ in 0..1024 {
+                    deadline.commit(1);
+                }
+            })
+            .1
+    };
+    let blocks = 64 + buffer::bench::PHASE;
+    let untagged = count(buffer::bench::Deadline::new(32, blocks));
+    let tagged = count(buffer::bench::Deadline::tagged(32, blocks));
+    assert_eq!(
+        (untagged, tagged),
+        (0, 0),
+        "allocations in 1024 deadlines of 32 entries, untagged and tagged"
+    );
+}
+
 fn main() {
     assert_eq!(
         ALLOCATOR.count(|| drop(Box::new(1_u8))).1,
@@ -173,6 +198,13 @@ fn main() {
         "the allocator counts"
     );
     logs_take_no_allocation();
+    tagged_deadlines_take_no_allocation();
+    shard_calls_take_no_allocation();
+}
+
+/// After the warm-up, appends and waits on a buffer allocate nothing, and a read
+/// allocates only what it gives and its file calls.
+fn shard_calls_take_no_allocation() {
     let mut sim = sim::Sim::new(sim::Config::default());
     let node = sim.node(sim::node::Config::default());
     let (clock, entropy) = (node.clock(), node.entropy());
