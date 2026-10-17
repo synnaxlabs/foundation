@@ -17,6 +17,7 @@ rustls = { workspace = true, features = ["tls12"] }
 rustls-webpki.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true
+tracing.workspace = true
 block = { path = "../block" }
 codec = { path = "../codec" }
 env = { path = "../env" }

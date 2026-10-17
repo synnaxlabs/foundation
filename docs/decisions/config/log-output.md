@@ -31,17 +31,35 @@
   integers and booleans as JSON numbers and booleans, and each other value a string.
   By `laptop.architect-2` (items 2 and 3 of 2026-10-15T20:27:52Z,
   https://github.com/synnaxlabs/foundation/issues/2606#issuecomment-6201604736).
+  The fields of each span of the event at the level or above come before the fields
+  of the event, outer span first, with no span name. A key appears once in a line: a
+  field of an inner span or of the event replaces a field of an outer span with the
+  same key, at its own place, so a span field `message` cannot hide the message of
+  the event. In a text line, the key `mesh_time` is the line's: a field of that name
+  is left out, also near mesh time, where the line gives no `mesh_time`, so no field
+  reads as the time of the line. A JSON line keeps the field in `fields`. By
+  `laptop.architect-2` (item 1 of 2026-10-17T17:22:08Z,
+  https://github.com/synnaxlabs/foundation/issues/2606#issuecomment-6237505740; item
+  2 of 2026-10-17T18:45:36Z,
+  https://github.com/synnaxlabs/foundation/pull/3053#issuecomment-6238847435).
   (4) `node::log` builds the `fmt` layer of `tracing-subscriber` with a `FormatEvent`
   of its own, which reads `clock::log::Reader::now` once for each line and writes the
   whole line, with `log_internal_errors(false)`, so a failed write drops the line and
   `fmt` writes nothing of its own to stderr. A `LevelFilter` of `--log-level` is under
-  it. `fmt` keeps the buffer of each thread, the one write of each line, and the span
-  fields that a later step needs. Features `fmt`, `registry`, and `std` only: no
-  `ansi`, `json`, or `tracing-serde`. By `laptop.architect-2` (2026-10-15T20:28:52Z,
+  it. `fmt` keeps the buffer of each thread and the one write of each line. Its
+  `FormatFields` writes nothing, so no layer formats a value while it holds the lock
+  of a span, and an event that a `Debug` or a `Display` writes cannot wait on that
+  lock (`laptop.architect-2`, B of 2026-10-17T18:08:57Z,
+  https://github.com/synnaxlabs/foundation/pull/3053#issuecomment-6238313830). A private
+  `Layer` keeps the typed fields of each span for item (3), since `fmt` keeps them only
+  as one `String` for each span (2026-10-17T17:22:08Z, link of item (3)). Features
+  `fmt`, `registry`, and `std` only: no `ansi`, `json`, or `tracing-serde`. By
+  `laptop.architect-2` (2026-10-15T20:28:52Z,
   https://github.com/synnaxlabs/foundation/issues/2606#issuecomment-6201622804).
-  Lost: a `Layer` of our own, which builds again what `fmt` gives; the `json` format
-  of `fmt`, which needs a second clock read or a splice for `mesh_time`. The writer
-  of `fmt` puts each line in the queue of item 9, so no event waits on stderr.
+  Lost: a `Layer` of our own for each line, which builds again what `fmt` gives; the
+  `json` format of `fmt`, which needs a second clock read or a splice for
+  `mesh_time`. The writer of `fmt` puts each line in the queue of item 9, so no event
+  waits on stderr.
   (5) No dispatch is global (crate map rule 9, `clippy.toml`). `Node::start` makes the
   dispatch from `Config::log` and gives it to its shards through `Shards::logged`.
   `node::Log` holds the writer and the `ops::Log` that `start` parses, whose default
@@ -161,3 +179,37 @@
   count of drops: the byte cap, the panic line past the bound, the drop until the take,
   and the end of a run in the take each need one step over the queue and the counts,
   which a second lock beside the channel would give, at the cost of two locks to order.
+  (10) Each `connector::supervisor::Supervisor::open` whose config checks makes the
+  span `connector` at ERROR, with the fields `connector` and `kind`, and the status
+  writer gives it as the parent of each of its events, so that each status line has
+  them at each level. No poll enters the span: an enter and an exit cost 7.4 ns, 740
+  ms/s at once per sample (P1 judgment rejected, `laptop.architect-2`,
+  2026-10-17T18:01:03Z,
+  https://github.com/synnaxlabs/foundation/pull/3053#issuecomment-6238199449). A live
+  span `connector` holds 632 B the first time and 297 B after. It is no idle memory,
+  as a node with default settings runs no connector (`laptop.architect-2`,
+  2026-10-17T18:17:23Z,
+  https://github.com/synnaxlabs/foundation/pull/3053#issuecomment-6238435066). The
+  status writer writes these events (target `connector::status`): INFO `running` with
+  `restarts`; `ended` with `Ok` at INFO, with `Device` or `Retry` at WARN, and with
+  `Config` at ERROR, each error with `class` (`config`, `device`, or `retry`) and
+  `error`, the cut text of the `error` channel; INFO `restarting` with `backoff`; INFO
+  `stopped`. A show, a clear, or a note of the running kind writes WARN `error` with
+  `error`, INFO `cleared`, or INFO `note` with `note`, only when the status writer
+  takes a new value for the next frame: of `error` or `class` for a show or a clear,
+  and of `note` for a note. The channels get that value, other than when the pool has
+  no block for the frame or the home does not apply it and a later value replaces it
+  before the next write, or when the hub refuses the frame as `Removed` or it fails on
+  disk, after which the writer writes no frame and no such line. A connector writes at
+  most two such lines each second: one `error` or `cleared`, and one `note`. A count
+  writes no event.
+  By `laptop.architect-2` (item 2 of 2026-10-17T17:22:08Z,
+  https://github.com/synnaxlabs/foundation/issues/2606#issuecomment-6237505740; A of
+  2026-10-17T18:08:57Z,
+  https://github.com/synnaxlabs/foundation/pull/3053#issuecomment-6238313830; items 1
+  to 3 of 2026-10-17T18:34:35Z,
+  https://github.com/synnaxlabs/foundation/pull/3053#issuecomment-6238662426;
+  2026-10-17T18:39:43Z,
+  https://github.com/synnaxlabs/foundation/pull/3053#issuecomment-6238748209; item 1
+  of 2026-10-17T18:45:36Z,
+  https://github.com/synnaxlabs/foundation/pull/3053#issuecomment-6238847435).

@@ -216,18 +216,22 @@ impl Status {
     pub(crate) fn note(&self, note: &dyn fmt::Display) {
         let note = cut(&note.to_string());
         self.change(|run| {
-            let changed = run.note != note;
+            if run.note == note {
+                return false;
+            }
             run.note = note;
-            changed
+            true
         });
     }
 
     /// Stages `new`, unless it is the error that the run shows, or no run runs.
     fn set(&self, new: Shown) {
         self.change(|run| {
-            let changed = run.error != new;
+            if run.error == new {
+                return false;
+            }
             run.error = new;
-            changed
+            true
         });
     }
 
@@ -350,6 +354,15 @@ impl Class {
         (class, cut(&text))
     }
 
+    /// The name of the class in a line of the log.
+    fn name(self) -> &'static str {
+        match self {
+            Self::Config => "config",
+            Self::Device => "device",
+            Self::Retry => "retry",
+        }
+    }
+
     /// The value of `class` for `class`.
     fn code(class: Option<Self>) -> u8 {
         class.map_or(0, |class| class as u8)
@@ -423,6 +436,8 @@ impl fmt::Debug for Values {
 pub(crate) struct Writer {
     session: RefCell<Session>,
     values: Rc<Values>,
+    /// The parent of each event of the status.
+    span: tracing::Span,
     clock: Clock,
     cancel: cancel::Token,
 }
@@ -431,11 +446,13 @@ impl Writer {
     /// Opens the writer of the status channels of `connector`, whose kind named
     /// `counts`, as the connector, and gives the status that it writes. `clock` times
     /// the writes. `cancel` is the token of the call: it ends each wait for the home,
-    /// and after it [`Self::start`] writes nothing.
+    /// and after it [`Self::start`] writes nothing. Each event of the writer has `span`
+    /// as its parent.
     pub(crate) async fn open(
         hub: &hub::Hub,
         connector: &Name,
         counts: Vec<Name>,
+        span: tracing::Span,
         clock: Clock,
         cancel: cancel::Token,
     ) -> Result<(Self, Status), hub::writer::Error> {
@@ -498,6 +515,7 @@ impl Writer {
         let writer = Self {
             session: RefCell::new(session),
             values: Rc::clone(&status.0),
+            span,
             clock,
             cancel,
         };
@@ -517,6 +535,8 @@ impl Writer {
             }
             session.started = true;
             session.phase = Phase::Running;
+            let restarts = session.restarts;
+            tracing::info!(parent: &self.span, restarts, "running");
         });
         self.values.run.replace(Some(Run::default()));
         true
@@ -531,6 +551,18 @@ impl Writer {
     ) -> impl Future<Output = ()> + use<'_> {
         self.values.run.take();
         let (class, error) = Class::with_text(end);
+        let span = &self.span;
+        match class {
+            None => tracing::info!(parent: span, "ended"),
+            Some(class @ Class::Config) => {
+                let class = class.name();
+                tracing::error!(parent: span, class, error = error.as_str(), "ended");
+            }
+            Some(class @ (Class::Device | Class::Retry)) => {
+                let class = class.name();
+                tracing::warn!(parent: span, class, error = error.as_str(), "ended");
+            }
+        }
         self.set(move |session| {
             session.class = class;
             session.error.set(&mut session.series, error);
@@ -545,12 +577,14 @@ impl Writer {
         self.applied().await;
         let next = self.clock.now() + span;
         self.change(|session| session.phase = Phase::Waiting(next));
+        tracing::info!(parent: &self.span, backoff = %span, "restarting");
         next
     }
 
     /// Writes `state` 2.
     pub(crate) async fn stop(&self) {
         self.set(|session| session.phase = Phase::Stopped).await;
+        tracing::info!(parent: &self.span, "stopped");
     }
 
     /// Writes the change of state that `change` makes, after [`Self::applied`], so
@@ -588,7 +622,7 @@ impl Writer {
         change(&mut session);
         let now = self.clock.now();
         session.unapplied.get_or_insert(now);
-        session.write(&self.values, now);
+        session.write(&self.values, &self.span, now);
     }
 
     /// Polls `run` to its end. Meanwhile it writes the status that a kind staged or
@@ -648,7 +682,9 @@ impl Writer {
         }
         if self.values.staged.get() {
             let now = self.clock.now();
-            self.session.borrow_mut().write(&self.values, now);
+            self.session
+                .borrow_mut()
+                .write(&self.values, &self.span, now);
         }
     }
 }
@@ -712,16 +748,24 @@ impl Session {
     /// When the draft or the home refuses the frame for a cause that only a defect
     /// gives, which includes `Backwards` on the frame written again and a frame larger
     /// than the largest block of the pool.
-    fn write(&mut self, values: &Values, now: Monotonic) {
+    fn write(&mut self, values: &Values, span: &tracing::Span, now: Monotonic) {
         values.staged.set(false);
         if let Some(run) = &*values.run.borrow() {
             match &run.error {
                 Shown::Nothing => {}
                 Shown::Cleared => {
+                    if self.class.is_some() || !self.error.value.is_empty() {
+                        tracing::info!(parent: span, "cleared");
+                    }
                     self.class = None;
-                    self.error.set(&mut self.series, String::new());
+                    if !self.error.value.is_empty() {
+                        self.error.set(&mut self.series, String::new());
+                    }
                 }
                 Shown::Error(text) => {
+                    if self.class != Some(Class::Retry) || self.error.value != *text {
+                        tracing::warn!(parent: span, error = text.as_str(), "error");
+                    }
                     self.class = Some(Class::Retry);
                     if self.error.value != *text {
                         self.error.set(&mut self.series, text.clone());
@@ -729,6 +773,7 @@ impl Session {
                 }
             }
             if self.note.value != run.note {
+                tracing::info!(parent: span, note = run.note.as_str(), "note");
                 self.note.set(&mut self.series, run.note.clone());
             }
         }

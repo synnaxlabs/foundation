@@ -61,8 +61,14 @@ fn read(steps: Vec<Step>, select: &'static [&'static str]) -> Option<Reading> {
                 .collect();
         hub.set_definitions(definitions.iter());
         let clock = node.clock();
-        let opened =
-            Writer::open(&hub, &connector, counts, clock.clone(), Token::new());
+        let opened = Writer::open(
+            &hub,
+            &connector,
+            counts,
+            tracing::Span::none(),
+            clock.clone(),
+            Token::new(),
+        );
         let mut open = Some(opened.await.expect("the writer opens"));
         for step in steps {
             if let Step::Program(columns) = step {

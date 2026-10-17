@@ -17,6 +17,8 @@ exclude_re = [
   # The bits of the type id and of the array flag of a mask are disjoint, so `^` gives
   # the mask that `|` gives.
   'crates/connector-opcua/src/server\.rs:.*replace \| with \^ in doubles$',
+  # The body of `Unformatted::format_fields` is `Ok(())`, which the mutant gives.
+  'crates/node/src/log\.rs:.*replace <impl FormatFields<.w> for Unformatted>::format_fields',
   # Benchmarks ship in no binary; the run itself checks them.
   '^bench/',
   # `main` reads the arguments and calls a task. Each task has its own tests.
