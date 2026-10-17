@@ -82,11 +82,25 @@ impl Decoder {
     }
 }
 
-/// The buffers of [`split`], which a shard keeps from one write to the next.
-#[derive(Debug, Default)]
+/// The buffers and encoders of [`split`], which a shard keeps from one write to the
+/// next.
+#[derive(Debug)]
 pub struct Scratch {
     split: split::Scratch,
+    encoders: Box<[codec::Encoder]>,
     groups: Vec<u32>,
+}
+
+impl Scratch {
+    /// Empty buffers, and an encoder for each entry of `set`.
+    #[must_use]
+    pub fn new(set: &KeySet) -> Self {
+        Self {
+            split: split::Scratch::default(),
+            encoders: split::encoders(set),
+            groups: Vec::new(),
+        }
+    }
 }
 
 /// Checks `draft`, a writer's frame of `set`, and splits it: it encodes each raw
@@ -104,7 +118,7 @@ pub fn split(
     draft: Draft,
     mut index: impl FnMut(Draft),
 ) -> usize {
-    let mut split = scratch.split.split(set, draft);
+    let mut split = scratch.split.split(set, &mut scratch.encoders, draft);
     scratch.groups.clear();
     let mut walked = 0;
     while let Some((group, stamps)) = split.next() {

@@ -30,7 +30,11 @@ fn main() {
     for form in [Form::Raw, Form::Encoded] {
         let case =
             Case::new("long f32", 2, samples, form, &[Type::Scalar(Scalar::F32)]);
-        check(&case, &block::Pool::heap(POOL), &mut Scratch::default());
+        check(
+            &case,
+            &block::Pool::heap(POOL),
+            &mut Scratch::new(&case.set),
+        );
     }
     divan::main();
 }
@@ -208,7 +212,7 @@ fn check(case: &Case, pool: &block::Pool, scratch: &mut Scratch) {
 #[divan::bench(args = cases(), sample_count = 1000, sample_size = 16)]
 fn split(bencher: Bencher<'_, '_>, case: &Case) {
     let pool = block::Pool::heap(POOL);
-    let mut scratch = Scratch::default();
+    let mut scratch = Scratch::new(&case.set);
     check(case, &pool, &mut scratch);
     bencher
         .counter(ItemsCount::new(case.series))

@@ -554,7 +554,7 @@ mod tests {
             let group = set.entries()[0].group;
             draft.set_count(group, 1);
             let mut scratch = split::Scratch::default();
-            let mut split = scratch.split(&set, draft);
+            let mut split = scratch.split(&set, &mut split::encoders(&set), draft);
             let frame = split.frame(&pool, group).expect("room");
             let frame = frame.freeze(Path::Live);
             let stamp = Stamp::from_nanos(1);

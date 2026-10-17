@@ -50,7 +50,7 @@ enum Create {
     Strings(fn() -> Vec<&'static str>),
 }
 
-const SHAPES: [Shape; 31] = [
+const SHAPES: [Shape; 33] = [
     Shape::new("adc16.s1", Scalar::I16, create_adc16_s1, 3.933, EVERY),
     Shape::new("adc16.s256", Scalar::I16, create_adc16_s256, 1.352, FULL),
     Shape::new("adc16.white", Scalar::I16, create_adc16_white, 0.994, FULL),
@@ -58,6 +58,8 @@ const SHAPES: [Shape; 31] = [
     Shape::new("adc24.s100", Scalar::I32, create_adc24_s100, 3.131, FULL),
     Shape::new("f64.cal", Scalar::F64, create_f64_cal, 1.604, FULL),
     Shape::new("f32.cal", Scalar::F32, create_f32_cal, 2.989, EVERY),
+    Shape::new("f64.dec2", Scalar::F64, create_f64_dec2, 11.9, EVERY),
+    Shape::new("f64.slow", Scalar::F64, create_f64_slow, 156.0, FULL),
     Shape::new("u8.state", Scalar::U8, create_state, 229.0, EVERY),
     Shape::new("u32.state", Scalar::U32, create_state, 422.0, FULL),
     Shape::new("ts.fixed", Scalar::Stamp, create_ts_fixed, 339.6, FULL),
@@ -335,6 +337,27 @@ fn create_f32_cal() -> Vec<i64> {
         i64::from(volt.to_bits())
     });
     volts.collect()
+}
+
+/// A temperature in °C with two decimal places, as `f64` bits.
+fn create_f64_dec2() -> Vec<i64> {
+    decimals(adc(&mut Random(8), 24, 200.0, 3.0), 2_500, 100.0)
+}
+
+/// A setpoint with one decimal place that steps every few hundred samples, as `f64`
+/// bits.
+fn create_f64_slow() -> Vec<i64> {
+    decimals(adc(&mut Random(9), 24, 50.0, 0.0), 200, 10.0)
+}
+
+/// The `f64` bits of `(offset + count) / power` for each count.
+fn decimals(counts: Vec<i64>, offset: i64, power: f64) -> Vec<i64> {
+    let decimal = |count: i64| {
+        #[expect(clippy::cast_precision_loss, reason = "counts fit 24 bits")]
+        let count = (offset + count) as f64;
+        (count / power).to_bits().cast_signed()
+    };
+    counts.into_iter().map(decimal).collect()
 }
 
 /// One of 4 states, each held for 1,000 to 9,999 samples.
