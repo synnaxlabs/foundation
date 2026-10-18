@@ -171,21 +171,13 @@ macro_rules! suite {
         }
 
         #[test]
-        #[should_panic(
-            expected = "the scenario ran past 90s of plant time, where the ring of the \
-                        rig's home can lose a status (#160)"
-        )]
-        fn fails_past_the_ring() {
-            $crate::scenarios::fails_past_the_ring(&$suite);
+        fn shows_a_loss_after_two_minutes() {
+            $crate::scenarios::shows_a_loss_after_two_minutes(&$suite);
         }
 
         #[test]
-        #[should_panic(
-            expected = "the scenario ran past 90s of plant time, where the ring of the \
-                        rig's home can lose a status (#160)"
-        )]
-        fn fails_50_ms_past_the_ring() {
-            $crate::scenarios::fails_50_ms_past_the_ring(&$suite);
+        fn heals_after_an_absence_of_90_s() {
+            $crate::scenarios::heals_after_an_absence_of_90_s(&$suite);
         }
     };
 }
@@ -207,9 +199,6 @@ const HOLD: Span = Span::from_nanos(10_000_000_000);
 const LOST: Span = Span::from_nanos(30_000_000_000);
 /// How soon a connector heals: the backoff cap of 1 min, plus 10 s.
 const HEAL: Span = Span::from_nanos(70_000_000_000);
-/// The longest plant time of a scenario. The ring of the rig's home fills after about
-/// 100 s for each kind with a suite, and then can lose a status, until #3050 trims it.
-const RING: Span = Span::from_nanos(90_000_000_000);
 /// How soon [`Run::stop`] returns.
 const STOP: Span = Span::from_nanos(5_000_000_000);
 /// The name of each connector of the scenarios.
@@ -452,15 +441,8 @@ where
             end.cancel();
         });
     drop(started.expect("the plant shard starts"));
-    let mut ran = Span::ZERO;
     while !done.cancelled() {
-        assert!(
-            ran < RING,
-            "the scenario ran past {RING} of plant time, where the ring of the rig's \
-             home can lose a status (#160)"
-        );
         sim.run_for(STEP).expect("the run goes on");
-        ran = Span::from_nanos(ran.nanos() + STEP.nanos());
         if crash.cancelled() && !crashed.cancelled() {
             sim.crash(&host, Crash::Power);
             crashed.cancel();
@@ -704,18 +686,47 @@ pub(crate) fn stops_at_a_write_channel_that_no_spec_defines(suite: &'static Suit
     });
 }
 
-/// A scenario that runs 1 s past [`RING`] fails.
-pub(crate) fn fails_past_the_ring(suite: &'static Suite) {
-    run(suite, direct, |scene| async move {
-        let past = Span::from_nanos(RING.nanos() + Span::SECOND.nanos());
-        scene.node.clock().sleep(past).await;
+/// Runs 2 min, then the simulator stops: an error of class Device or Retry within
+/// [`LOST`].
+pub(crate) fn shows_a_loss_after_two_minutes(suite: &'static Suite) {
+    run(suite, direct, move |scene| async move {
+        let config = scene.setup().await;
+        let served = scene.serve();
+        let mut run = scene.supervise(config).await;
+        scene.running(&mut run, START, 0).await;
+        scene
+            .node
+            .clock()
+            .sleep(Span::from_nanos(120_000_000_000))
+            .await;
+        scene.stop(served).await;
+        let reading = run.until(LOST, |reading| reading.error.is_some()).await;
+        let class = reading.error.as_ref().map(|(class, _)| *class);
+        assert!(
+            matches!(class, Some(Class::Device | Class::Retry)),
+            "{reading:?}"
+        );
+        run.stop().await.expect("the run ends with no error");
     });
 }
 
-/// A scenario that runs 50 ms past [`RING`] fails.
-pub(crate) fn fails_50_ms_past_the_ring(suite: &'static Suite) {
-    run(suite, direct, |scene| async move {
-        let past = Span::from_nanos(RING.nanos() + 50_000_000);
-        scene.node.clock().sleep(past).await;
+/// With no simulator for 90 s after the check of the backoff form ends (for `Run`,
+/// 100 s after the backoff form shows), then the simulator starts: the connector
+/// heals.
+pub(crate) fn heals_after_an_absence_of_90_s(suite: &'static Suite) {
+    run(suite, direct, move |scene| async move {
+        let config = scene.setup().await;
+        let mut run = scene.supervise(config).await;
+        let reading = scene.backed_off(&mut run).await;
+        let from = scene.progress(&reading);
+        scene
+            .node
+            .clock()
+            .sleep(Span::from_nanos(90_000_000_000))
+            .await;
+        let served = scene.serve();
+        scene.running(&mut run, HEAL, from).await;
+        run.stop().await.expect("the run ends with no error");
+        scene.stop(served).await;
     });
 }

@@ -138,8 +138,14 @@
   refusal figures after 396 and 398 commits and the rise against a reach at the low mark
   are approved by `laptop.architect` (#2943, 2026-10-16T23:14:08Z, item 4):
   https://github.com/synnaxlabs/foundation/pull/2943#issuecomment-6226442923.
-  As built (#160 step 3d): with `Config::trimmed`, the open trims as a commit does, with
-  nothing queued. After its walk, each open first syncs the header and the records that
+  As built (#160 step 3d): the open trims as a commit does, with nothing queued. The
+  switch `Config::trimmed` is removed, so the open and each commit trim in each build.
+  Decided by `laptop.architect` (#160, 2026-10-14T19:58:03Z):
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6177123224, and
+  item 5 of
+  https://github.com/synnaxlabs/foundation/issues/160#issuecomment-6207224353
+  (2026-10-16T03:13:34Z).
+  After its walk, each open first syncs the header and the records that
   it walked, as read, before it writes a new byte (S4): a failed sync of an earlier open
   or commit in the same boot can leave its checkpoint in the cache only, where the walk
   reads it, and a checkpoint never passes a record that is not durable. With a trim, the

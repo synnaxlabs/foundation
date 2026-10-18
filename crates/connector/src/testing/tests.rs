@@ -10,7 +10,7 @@ use document::diagnostic::{Code, Diagnostic};
 use env::clock::Clock;
 use hub::reader::{Mode, Reader};
 use types::authority::Authority;
-use types::channel;
+use types::channel::{self, Slot};
 use types::name::{Name, Selector};
 use types::time::Span;
 
@@ -491,11 +491,12 @@ fn a_refused_config_opens_a_connector_that_ends_with_its_diagnostics() {
     );
 }
 
-/// A run whose status reader sleeps until the buffer has no room reads its status up to
-/// the frames lost for no room, with no end. No write frees the ring, so no frame comes
-/// after them.
+/// A run whose status reader sleeps past the room of the ring of its home reads each
+/// status frame, with no gap: the first, then one for the counts of each second. The
+/// commits trim the oldest frames when the ring needs their room, so the home applies
+/// each frame, and the frames fit the window of the reader.
 #[test]
-fn a_run_reads_its_status_up_to_the_frames_lost_for_no_room_after_a_long_sleep() {
+fn a_run_whose_status_reader_sleeps_past_its_ring_reads_each_frame() {
     on_rig(
         || Table::new().with("ticks", Ticks::default()),
         |rig, clock| async move {
@@ -515,10 +516,33 @@ fn a_run_reads_its_status_up_to_the_frames_lost_for_no_room_after_a_long_sleep()
                 })
                 .await;
                 let Some(received) = received else { break };
-                received.expect("a status frame");
+                let received = received.expect("a status frame");
+                assert_eq!(received.gap(), None, "frame {taken}");
                 taken += 1;
             }
-            assert_eq!(taken, 1_020);
+            assert_eq!(taken, 1_101);
+        },
+    );
+}
+
+/// A status frame after a gap panics: a hold keeps the ring of the home from a trim,
+/// so it fills and the home loses the status frames that have no room.
+#[test]
+#[should_panic(expected = "the rig lost the status seqs 1021..1102")]
+fn next_panics_on_a_status_frame_after_a_gap() {
+    on_rig(
+        || Table::new().with("ticks", Ticks::default()),
+        |rig, clock| async move {
+            let config = Document::default();
+            let mut run = rig.supervise("ticks", name("plant.ticks"), config).await;
+            run.next().await;
+            // The status index takes the first slot.
+            let held = hub::testing::hold(rig.hub(), Slot::new(0));
+            clock.sleep(Span::from_nanos(1_100_000_000_000)).await;
+            drop(held);
+            for _ in 0..2_000 {
+                run.next().await;
+            }
         },
     );
 }

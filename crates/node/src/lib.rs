@@ -860,7 +860,6 @@ impl Open {
             entropy: self.entropy,
             layout: self.layout,
             commit: COMMIT,
-            trimmed: false,
         };
         match buffer::Buffer::open(config, interner.slots()).await {
             Ok(buffer) => {

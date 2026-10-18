@@ -29,7 +29,7 @@ use hub::reader::Mode;
 use spec::channel::{Channel, Data};
 use spec::data_type::DataType;
 use spec::definition::Definition;
-use types::channel;
+use types::channel::{self, Slot};
 use types::name::{Name, Selector};
 use types::sample::{Scalar, Type};
 use types::time::{Monotonic, Span};
@@ -179,7 +179,8 @@ pub(crate) fn run(
 /// frame, and each status of the connector that the home applied, in order. Read `i`
 /// goes into a channel of the type `scalars[i % scalars.len()]`, and the first
 /// `bad(i)` reads of write `i` (from 0) are Bad. `measure` calls the work that it gets
-/// once.
+/// once. When `held`, a read holds the first status frame of the run from its arrival
+/// to the end of the run, so no trim frees the ring.
 ///
 /// # Panics
 ///
@@ -190,6 +191,7 @@ pub(crate) fn writes(
     count: usize,
     bad: impl Fn(usize) -> usize + Send + Sync + 'static,
     measure: impl Fn(&mut dyn FnMut()) -> u64 + Send + Sync + 'static,
+    held: bool,
 ) -> (Vec<u64>, Vec<Reading>) {
     let measures = Arc::<Mutex<Vec<u64>>>::default();
     let kind = Measured {
@@ -207,10 +209,16 @@ pub(crate) fn writes(
         let mut status = status(&inputs.hub).await;
         let readings = Rc::new(RefCell::new(Vec::new()));
         let into = Rc::clone(&readings);
+        let hub = inputs.hub.clone();
         tasks.spawn(async move {
+            let mut read = None;
             while let Ok(received) = status.next().await {
                 let reading = Reading::of(&received).expect("a whole status");
                 into.borrow_mut().push(reading);
+                if held && read.is_none() {
+                    // The status index takes the first slot: its frame is the first.
+                    read = Some(hub::testing::hold(&hub, Slot::new(0)));
+                }
             }
         });
         let supervisor = Supervisor::new(inputs);

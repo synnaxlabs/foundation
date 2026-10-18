@@ -750,7 +750,6 @@ mod buffer {
                 layout: ::buffer::Layout::new(64 << 20, crate::BODY_MAX)
                     .expect("the test sizes make a ring"),
                 commit: crate::COMMIT,
-                trimmed: false,
             };
             let mut slots = Slots::new();
             let buffer = Buffer::open(config, &mut slots).await.expect("opens");

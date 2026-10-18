@@ -560,19 +560,22 @@ mod tests {
         let min = need_of_every_split(Layout::ENTRY_MAX_MIN);
         assert_eq!(block_max(&pool(min - 1)), Err(min));
         assert_eq!(block_max(&pool(min)), Ok(4_096));
+        assert!(pool(min).largest() >= META_LEN);
         assert_eq!(block_max(&pool(1_000)), Err(min));
     }
 
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(256))]
 
-        /// `block_max` is the largest length whose need fits the budget.
+        /// `block_max` is the largest length whose need fits the budget, and a pool
+        /// that it accepts holds a block of `META_LEN` bytes.
         #[test]
         fn block_max_is_the_most_that_fits(budget in 62_272usize..=1 << 22) {
             let pool = pool(budget);
             let largest = pool.largest();
             let max = block_max(&pool).expect("the floor fits");
             let starts = class_starts(largest);
+            prop_assert!(largest >= META_LEN);
             prop_assert!(max <= largest);
             prop_assert!(need(&starts, max) <= budget);
             prop_assert!(max == largest || need(&starts, max + 1) > budget);

@@ -1,6 +1,7 @@
 //! A hub for the tests and benches of `hub` and the crates above it.
 
-pub use home::testing::Env;
+pub use home::testing::{Env, Hold};
+use types::channel::Slot;
 use types::time::{Span, Stamp};
 
 use crate::{Config, Hub};
@@ -47,4 +48,9 @@ fn create_hub(
         entropy,
         region: None,
     })
+}
+
+/// [`home::testing::hold`] on the home of `hub`.
+pub fn hold(hub: &Hub, slot: Slot) -> Hold {
+    home::testing::hold(&hub.0.borrow().home, slot)
 }

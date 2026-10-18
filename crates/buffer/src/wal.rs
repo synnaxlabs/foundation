@@ -271,8 +271,7 @@ impl Layout {
     }
 
     /// The most tails that one carry record of this layout holds: the fewer of
-    /// [`carry::TAILS_MAX`] and the tails that fit `body_max`. A pool whose largest
-    /// block holds fewer lowers it for a buffer.
+    /// [`carry::TAILS_MAX`] and the tails that fit `body_max`.
     pub(crate) fn tails_max(self) -> usize {
         carry::count(self.body_max)
     }

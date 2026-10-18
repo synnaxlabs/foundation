@@ -616,7 +616,6 @@ pub(super) async fn reopen(
         entropy: node.entropy(),
         layout,
         commit: super::COMMIT,
-        trimmed: false,
     };
     let buffer = buffer::Buffer::open(ring, interner.slots())
         .await

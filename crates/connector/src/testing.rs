@@ -248,13 +248,17 @@ impl Run {
     ///
     /// # Panics
     ///
-    /// When the kind's check failed, so the connector has no status, or the status
-    /// reader ends.
+    /// When the kind's check failed, so the connector has no status, the status
+    /// reader ends, or a status frame has a gap: the rig lost statuses to a trim or
+    /// for no room.
     pub async fn next(&mut self) -> Reading {
         let reader = self.reader.as_mut();
         let reader = reader.expect("a connector whose check failed has no status");
         let received = reader.next().await;
         let received = received.unwrap_or_else(|end| panic!("the status ends: {end}"));
+        if let Some(gap) = received.gap() {
+            panic!("the rig lost the status seqs {gap:?}");
+        }
         let reading = Reading::of(&received);
         reading.expect("invariant: each status frame holds the whole status")
     }

@@ -136,7 +136,6 @@ impl Test {
             entropy: node.entropy(),
             layout,
             commit: COMMIT,
-            trimmed: false,
         };
         let buffer = buffer::Buffer::open(config, interner.slots())
             .await
@@ -2091,10 +2090,10 @@ fn gives_a_complete_reader_its_waiting_frames_then_the_missed_ones_from_disk() {
     });
 }
 
-/// A reader that sleeps while a writer writes one frame each second gets each frame
-/// that the hub applied: frames of 128 samples pass the window before they fill the
-/// ring, and come later from disk. Frames of 1 sample fill the ring first. The frames
-/// lost for no room end nothing.
+/// A reader that sleeps while a writer writes one frame each second, and a read holds
+/// the first, gets each frame that the hub applied: frames of 128 samples pass the
+/// window before they fill the ring, and come later from disk. Frames of 1 sample
+/// fill the ring first. The frames lost for no room end nothing.
 #[test]
 fn gives_a_complete_reader_that_sleeps_past_its_window_or_its_ring_each_applied_frame()
 {
@@ -2102,11 +2101,15 @@ fn gives_a_complete_reader_that_sleeps_past_its_window_or_its_ring_each_applied_
         run(21, move |test| async move {
             let mut reader = test.reader(&["value"], Mode::Complete).await;
             let mut writer = test.writer("a", &["value"]).await;
+            let mut held = None;
             let mut outcomes = Vec::new();
             for _ in 0..1_100 {
                 let stamps: Vec<_> = (test.now()..).take(samples).collect();
                 outcomes.extend(write(&mut writer, &stamps, &scrambled(&stamps)));
                 test.clock.sleep(Span::SECOND).await;
+                if held.is_none() {
+                    held = Some(hub::testing::hold(&test.hub, Slot::new(0)));
+                }
             }
             let applied = outcomes
                 .iter()

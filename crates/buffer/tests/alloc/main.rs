@@ -230,7 +230,6 @@ fn shard_calls_take_no_allocation() {
                 layout: Layout::new(256 * 4096, BODY_MAX)
                     .expect("the sizes make a ring"),
                 commit: COMMIT,
-                trimmed: false,
             };
             let buffer = Buffer::open(config, &mut slots).await.expect("opens");
             for index in 0..WIDE {

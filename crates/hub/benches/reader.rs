@@ -30,9 +30,10 @@
 //!   `Pending`.
 //! - `complete wait`: each later poll of `next` on the drained complete reader, which
 //!   grants nothing and gives `Pending`.
-//! - `lost write`: after the rounds above, the bench writes until the ring has no
-//!   room, as nothing frees it until #160. Then each `Writer::write` of its own rounds
-//!   finds no room, gives `Outcome::Lost`, and wakes the latest reader with its frame.
+//! - `lost write`: after the rounds above, a read holds the oldest record of the ring,
+//!   so no trim frees it, and the bench writes until the ring has no room. Then each
+//!   `Writer::write` of its own rounds finds no room, gives `Outcome::Lost`, and wakes
+//!   the latest reader with its frame.
 //!
 //! A `next` that gives `Pending` while a frame waits is the yield after a run of
 //! frames: it is polled again, and only the poll that gives the frame is timed. Any
@@ -65,6 +66,7 @@ use hub::reader::{Mode, Position, Reader, Received};
 use hub::writer::{self, Writer};
 use table::Line;
 use types::authority::Authority;
+use types::channel::Slot;
 use types::frame::{Draft, Label, Path, View};
 
 #[global_allocator]
@@ -179,9 +181,11 @@ async fn bench(node: sim::node::Node, tasks: env::tasks::Tasks) -> (Line, Vec<Li
             line.close(round >= WARMUP);
         }
     }
+    let held = hub::testing::hold(&hub, Slot::new(0));
     fill(&node, &mut writer, &mut complete_reader, &mut stamp).await;
     let mut lines = Vec::from(lines);
     lines.push(lose(&mut writer, &mut latest_reader, stamp));
+    drop(held);
     (timer, lines)
 }
 

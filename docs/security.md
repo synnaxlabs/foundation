@@ -336,8 +336,9 @@ state on `main`.
   a body of 4 to 54 bytes stopped the node at its first `append`).
 - Fuzzed: `buffer_open`, which opens the ring and reads each path back. Its inputs
   reach a record of four blocks, an entry table of four blocks, a tail at each block
-  of the area, a wrap record, a full ring, and the end of the offsets. Fixed: #392
-  (three ways a ring lost data it reported durable or could not open), #566 (a write
+  of the area, a wrap record, a full ring, the end of the offsets, a trim of the open
+  and of a commit, and a carry record. Fixed: #392 (three ways a ring lost data it
+  reported durable or could not open), #566 (a write
   of a dead process could land on a ring that a new process opened), #572 (`append`
   took a record over the pool's largest block, and then each open failed), #657 (an
   open reported durable the records a killed process never synced), #553 (a power cut

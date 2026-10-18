@@ -1,9 +1,13 @@
 //! A shard for the tests and benches of `home` and the crates above it.
 
+use std::fmt;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context, Waker};
 
 use block::{Heap, Pool};
+use types::channel::Slot;
 use types::frame::key_set::Interner;
 use types::time::{Span, Stamp};
 
@@ -29,9 +33,10 @@ pub struct Env {
 ///
 /// It makes a ring of 4 MiB when `shard-0` holds none, and opens the one there
 /// otherwise. A write waits at most 10 ms for its commit to start, and longer while an
-/// earlier commit runs. A commit takes whole 4 KiB blocks, and nothing frees the ring
-/// until #160, so a new ring fills after about a thousand commits of one frame of a
-/// stamp and an `i64` sample.
+/// earlier commit runs. A commit takes whole 4 KiB blocks, and frees the oldest
+/// records that no path needs when the ring needs their room. While a read of
+/// [`hold`] holds its first record, a new ring fills after 1021 commits of one frame of
+/// a stamp and an `i64` sample.
 ///
 /// # Panics
 ///
@@ -72,7 +77,6 @@ pub async fn unsynced_shard(env: Env, delay: Span) -> (Shard, Interner, clock::R
         entropy: env.entropy,
         layout: buffer::Layout::new(1 << 22, 1 << 16).expect("a ring"),
         commit: Span::from_nanos(10_000_000),
-        trimmed: false,
     };
     let buffer = buffer::Buffer::open(config, interner.slots())
         .await
@@ -89,6 +93,39 @@ pub async fn unsynced_shard(env: Env, delay: Span) -> (Shard, Interner, clock::R
     (shard, interner, mesh)
 }
 
+/// A read in progress of the first record of the live path of the index at `slot`,
+/// polled once. No trim frees that record or a later one until the hold drops, so
+/// the ring can fill. It holds the ring open.
+///
+/// # Panics
+///
+/// When that path holds no record, so the read does not wait on its file read.
+pub fn hold(shard: &Shard, slot: Slot) -> Hold {
+    let reader = shard.reader();
+    let mut read: Pin<Box<dyn Future<Output = Result<buffer::Read, buffer::Error>>>> =
+        Box::pin(async move {
+            let from = types::log::Mark::at(0);
+            reader
+                .read(slot, types::frame::Path::Live, from, usize::MAX)
+                .await
+        });
+    let first = read.as_mut().poll(&mut Context::from_waker(Waker::noop()));
+    assert!(first.is_pending(), "the read waits on a file read");
+    Hold { _read: read }
+}
+
+/// A read that [`hold`] keeps in progress until the drop.
+#[must_use = "the hold ends at its drop"]
+pub struct Hold {
+    _read: Pin<Box<dyn Future<Output = Result<buffer::Read, buffer::Error>>>>,
+}
+
+impl fmt::Debug for Hold {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Hold").finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::ops::Range;
@@ -98,7 +135,6 @@ mod tests {
     use env::files::Mode;
     use types::authority::Authority;
     use types::channel;
-    use types::channel::Slot;
     use types::frame::key_set::{Group, KeySet};
     use types::frame::{Draft, Form, Label, Path as Route};
     use types::sample::{Scalar, Type};
@@ -245,23 +281,28 @@ mod tests {
     }
 
     #[test]
-    fn fills_a_new_ring_at_1020_one_frame_commits() {
+    fn fills_a_new_ring_at_1021_one_frame_commits() {
         let commits = run(
             sim::node::Config::default(),
             |_, mut shard, mut interner, now| async move {
                 let (writer, set) =
                     open_writer(&mut shard, &mut interner, Scalar::I64, 1);
+                let mut held = None;
                 let mut commits = 0;
                 let mut stamp = now.nanos();
                 while commit(&mut shard, writer, &set, stamp..stamp + 1).await {
                     commits += 1;
                     stamp += 1;
+                    if held.is_none() {
+                        held = Some(hold(&shard, set.entries()[0].slot));
+                    }
                 }
                 commits
             },
         );
 
-        assert_eq!(commits, 1020);
+        // The trim of a commit frees the restart record of the open.
+        assert_eq!(commits, 1021);
     }
 
     /// The polls of 256 channels of `scalar` that a new ring takes, with a wait for
@@ -271,6 +312,7 @@ mod tests {
             sim::node::Config::default(),
             move |_, mut shard, mut interner, now| async move {
                 let (writer, set) = open_writer(&mut shard, &mut interner, scalar, 256);
+                let mut held = None;
                 let mut taken = 0;
                 loop {
                     for _ in 0..batch {
@@ -287,6 +329,9 @@ mod tests {
                         taken += 1;
                     }
                     shard.committed().await.expect("commits");
+                    if held.is_none() {
+                        held = Some(hold(&shard, set.entries()[0].slot));
+                    }
                 }
             },
         )
@@ -310,15 +355,15 @@ mod tests {
                 (Scalar::I8, 340, 441),
                 (Scalar::I16, 340, 441),
                 (Scalar::I32, 340, 441),
-                (Scalar::I64, 340, 379),
+                (Scalar::I64, 340, 380),
                 (Scalar::U8, 340, 441),
                 (Scalar::U16, 340, 441),
                 (Scalar::U32, 340, 441),
-                (Scalar::U64, 340, 379),
+                (Scalar::U64, 340, 380),
                 (Scalar::F32, 340, 441),
-                (Scalar::F64, 340, 379),
-                (Scalar::Stamp, 340, 379),
-                (Scalar::Span, 340, 379),
+                (Scalar::F64, 340, 380),
+                (Scalar::Stamp, 340, 380),
+                (Scalar::Span, 340, 380),
                 (Scalar::Uuid, 255, 272),
             ]
         );
@@ -346,17 +391,33 @@ mod tests {
                     super::shard(env(&node, tasks)).await;
                 let (writer, set) =
                     open_writer(&mut shard, &mut interner, Scalar::I64, 1);
+                let held = hold(&shard, set.entries()[0].slot);
+                assert_eq!(format!("{held:?}"), "Hold { .. }");
                 let mut commits = 0;
                 while commit(&mut shard, writer, &set, stamp..stamp + 1).await {
                     commits += 1;
                     stamp += 1;
                 }
+                drop(held);
                 commits
             })
             .expect("the run ends");
 
-        // The 10 commits before the open keep their blocks.
-        assert!(commits <= 1020 - 10, "{commits}");
+        // The read holds the 10 commits before the open, so they and the restart
+        // record of the open keep their blocks.
+        assert_eq!(commits, 1021 - 11);
+    }
+
+    #[test]
+    #[should_panic(expected = "the read waits on a file read")]
+    fn a_hold_of_a_path_with_no_record_panics() {
+        run(
+            sim::node::Config::default(),
+            |_, mut shard, mut interner, _| async move {
+                let (_, set) = open_writer(&mut shard, &mut interner, Scalar::I64, 1);
+                let _held = hold(&shard, set.entries()[0].slot);
+            },
+        );
     }
 
     #[test]

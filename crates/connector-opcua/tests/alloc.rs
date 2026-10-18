@@ -251,7 +251,7 @@ fn a_write_of_a_frame_of_any_type_allocates_nothing() {
     ];
     for (scalars, bad, bads) in runs {
         let count = |work: &mut dyn FnMut()| ALLOCATOR.count(work).1;
-        let writes = kind::writes(64, scalars, 100, bad, count).0;
+        let writes = kind::writes(64, scalars, 100, bad, count, false).0;
         assert_eq!(
             writes[20..],
             [0; 80],

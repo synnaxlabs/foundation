@@ -1,6 +1,7 @@
-//! A connector of the `opcua` kind whose writes fill the ring of its home, which the
-//! test home never trims (#160), ends its call with `Ok` in bounded sim steps, and its
-//! status shows the lost writes.
+//! A connector of the `opcua` kind whose writes pass the room of the ring of its home
+//! ends its call with `Ok` in bounded sim steps. The commits trim the ring when it
+//! needs room, so no write is lost, and the last status is the end of the run. While a
+//! read holds the ring, the writes fill it, and the status shows the lost writes.
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
@@ -25,6 +26,35 @@ fn a_run_that_writes_past_the_ring_of_its_home_returns_ok() {
             work();
             0
         },
+        false,
+    );
+    assert_eq!(writes.len(), 8_000, "each write of the run");
+    let last = status.last().expect("the home applied a status");
+    let counts = [
+        ("bad", 0),
+        ("in", 2_048_000),
+        ("lost", 0),
+        ("missed", 0),
+        ("mistyped", 0),
+        ("uncertain", 0),
+    ];
+    let counts = counts.map(|(count, n)| (count.parse().expect("a name"), n));
+    assert_eq!(last.state, State::Stopped);
+    assert_eq!(last.counts, BTreeMap::from(counts));
+}
+
+#[test]
+fn a_run_that_writes_past_a_held_ring_of_its_home_returns_ok() {
+    let (writes, status) = kind::writes(
+        256,
+        &[Scalar::F64],
+        8_000,
+        |_| 0,
+        |work| {
+            work();
+            0
+        },
+        true,
     );
     assert_eq!(writes.len(), 8_000, "each write of the run");
     // The full ring drops the status frames after this one, the end of the run too,
