@@ -807,10 +807,10 @@ fn the_error_of_an_answer_other_than_204_names_the_address() {
     }
 }
 
-/// The error of an address with no port names its host alone.
+/// The error of an address with no port, or with an empty one, names its host alone.
 #[test]
 fn the_error_of_an_answer_at_an_address_with_no_port_names_its_host() {
-    for address in ["http://server"] {
+    for address in ["http://server", "http://server:"] {
         let errors = run_at_server(move |node, tasks| async move {
             let plant = Plant::on_port(node, tasks, 80).await;
             (plant.answers.borrow_mut())

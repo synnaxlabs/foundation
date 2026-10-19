@@ -170,6 +170,8 @@ fn answered(
     status: StatusCode,
     body: &[u8],
 ) -> Option<Read> {
+    // An empty port names no port.
+    let at = at.as_str().strip_suffix(':').unwrap_or(at.as_str());
     let text = String::from_utf8_lossy(body);
     let text = text.trim();
     let token = matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN);
