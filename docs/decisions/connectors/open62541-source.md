@@ -1075,6 +1075,24 @@
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256452096). An issuer
   entry keeps the load of the release (`laptop.architect-2`, 2026-10-18 22:07 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593, item 2).
+  aws-lc reads PEM in the pieces of `BIO_gets`, at most 253 bytes each, and drops the
+  bytes of 0x20 or less as a `char` at the end of each, so where `char` is signed it
+  also drops 0x80 to 0xFF. One trust file gives the same trust on each CPU target: a
+  line of a PEM block that ends in a byte of 0x80 to 0xFF, after its last byte of 0x21
+  to 0x7F, makes the load refuse the trust, before aws-lc reads it. Text outside the
+  blocks keeps any bytes (`laptop.monitor`, kind (f), 2026-10-19 17:04 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868). The
+  check is in C, at the start of the PEM branch of `openSSLLoadEachCertificate`, so both
+  loads of a trust pass it. It reads each piece of a block, from a piece that starts
+  `-----BEGIN ` and ends in `-----` through the next piece that starts `-----END `, not
+  only those two lines. The client gives `client::Refusal::Line { number }`, the line
+  from 1 counted by `\n`, since the check runs before aws-lc counts certificates; the
+  caller that reads the trust file puts its path before that text (`laptop.architect-2`,
+  2026-10-19 18:24 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216). Lost: a
+  check in Rust in `Client::connect`, which copies the DER rule; a check in the kind,
+  which other callers skip; and aws-lc patched to compare as unsigned, which gives no
+  refusal and no line.
   The validity check of the own certificate and the map of each refusal in `kind.rs`
   move to PR 2b (`laptop.architect-2`, 2026-10-18 21:37 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255457069, items 1
