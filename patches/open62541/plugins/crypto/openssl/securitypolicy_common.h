@@ -59,6 +59,12 @@ void UA_Openssl_Init(void);
  * encrypted PEM. aws-lc prompts on the console when a read passes no callback. */
 int UA_OpenSSL_refusePassword(char *buf, int size, int rwflag, void *userdata);
 
+/* Gives the BIO that each PEM read of `pem` reads, which the caller frees. Gives
+ * NULL with `line` set to the line, from 1, of the first piece of a PEM block that
+ * aws-lc reads in two ways by the sign of `char`, or NULL with `line` 0 when there
+ * is no memory. */
+BIO *UA_OpenSSL_PemBio(const UA_ByteString *pem, size_t *line);
+
 UA_StatusCode
 UA_copyCertificate(UA_ByteString *dst, const UA_ByteString *src);
 
@@ -229,9 +235,6 @@ UA_OpenSSL_LoadCertificate(const UA_ByteString *certificate,
 
 X509 *
 UA_OpenSSL_LoadDerCertificate(const UA_ByteString *certificate);
-
-X509 *
-UA_OpenSSL_LoadPemCertificate(const UA_ByteString *certificate);
 
 X509_CRL *
 UA_OpenSSL_LoadCrl(const UA_ByteString *crl);

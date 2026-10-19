@@ -85,6 +85,56 @@ UA_OpenSSL_refusePassword(char *buf, int size, int rwflag, void *userdata) {
     return -1;
 }
 
+/* Gives the line, from 1 and counted by `\n`, of the first piece of a PEM block in
+ * `pem` that aws-lc reads in two ways by the sign of `char`, else 0. aws-lc reads
+ * the pieces of `BIO_gets` (at most 253 bytes, each through its `\n`) and drops the
+ * bytes of 0x20 or less as a `char` at the end of each, so it keeps the bytes through
+ * the last one of 0x21 to 0x7F where `char` is signed, and more where it is unsigned
+ * only when a byte after them is 0x80 to 0xFF. A block runs from a piece that starts
+ * `-----BEGIN ` and whose kept bytes hold no NUL and end in `-----`, through the next
+ * piece whose kept bytes start `-----END `. */
+static size_t
+openSSLAmbiguousLine(const UA_ByteString pem) {
+    const UA_Byte *at = pem.data;
+    const UA_Byte *end = pem.data + pem.length;
+    size_t line = 1;
+    UA_Boolean inside = false;
+    while(at < end) {
+        size_t left = (size_t)(end - at);
+        size_t length = 0;
+        while(length < left && length < 253 && at[length++] != '\n') {}
+        size_t kept = length;
+        UA_Boolean high = false;
+        while(kept > 0 && (at[kept - 1] <= ' ' || at[kept - 1] >= 0x80)) {
+            high |= at[kept - 1] >= 0x80;
+            kept--;
+        }
+        size_t text = 0;
+        while(text < kept && at[text] != '\0')
+            text++;
+        UA_Boolean begins = kept >= 16 && text == kept &&
+                            memcmp(at, "-----BEGIN ", 11) == 0 &&
+                            memcmp(at + kept - 5, "-----", 5) == 0;
+        if((inside || begins) && high)
+            return line;
+        if(begins)
+            inside = true;
+        else if(kept >= 10 && memcmp(at, "-----END ", 9) == 0)
+            inside = false;
+        line += at[length - 1] == '\n';
+        at += length;
+    }
+    return 0;
+}
+
+BIO *
+UA_OpenSSL_PemBio(const UA_ByteString *pem, size_t *line) {
+    *line = openSSLAmbiguousLine(*pem);
+    if(*line > 0)
+        return NULL;
+    return BIO_new_mem_buf((void *)pem->data, (ossl_ssize_t)pem->length);
+}
+
 static int UA_OpenSSL_RSA_Key_Size(EVP_PKEY * key){
 #if(OPENSSL_VERSION_NUMBER >= 0x30000000L)
     return EVP_PKEY_get_size(key);
@@ -1378,41 +1428,66 @@ cleanup:
     return retval;
 }
 
-EVP_PKEY *
-UA_OpenSSL_LoadPrivateKey(const UA_ByteString *privateKey) {
+/* Loads `privateKey`, DER then PEM, and writes to `line` the line at which
+ * `UA_OpenSSL_PemBio` refuses it, else 0. */
+static EVP_PKEY *
+openSSLLoadPrivateKey(const UA_ByteString *privateKey, size_t *line) {
+    *line = 0;
     if(privateKey->length == 0)
         return NULL;
-
-    EVP_PKEY *result = NULL;
-    BIO *bio = NULL;
-
-    bio = BIO_new_mem_buf((void *) privateKey->data, (int) privateKey->length);
-    /* Try to read DER encoded private key */
-    result = d2i_PrivateKey_bio(bio, NULL);
-
-    if(result == NULL) {
-        /* Try to read PEM encoded private key */
-        (void)BIO_reset(bio);
-        result = PEM_read_bio_PrivateKey(bio, NULL, UA_OpenSSL_refusePassword, NULL);
-    }
+    const unsigned char *at = privateKey->data;
+    EVP_PKEY *result = d2i_AutoPrivateKey(NULL, &at, (long)privateKey->length);
+    if(result)
+        return result;
+    BIO *bio = UA_OpenSSL_PemBio(privateKey, line);
+    if(!bio)
+        return NULL;
+    result = PEM_read_bio_PrivateKey(bio, NULL, UA_OpenSSL_refusePassword, NULL);
     BIO_free(bio);
-
     return result;
+}
+
+EVP_PKEY *
+UA_OpenSSL_LoadPrivateKey(const UA_ByteString *privateKey) {
+    size_t line;
+    return openSSLLoadPrivateKey(privateKey, &line);
+}
+
+size_t
+UA_CertificateUtils_keyLine(const UA_ByteString *key) {
+    size_t line;
+    EVP_PKEY_free(openSSLLoadPrivateKey(key, &line));
+    return line;
+}
+
+/* Loads `certificate`, DER then PEM, and writes to `line` the line at which
+ * `UA_OpenSSL_PemBio` refuses it, else 0. */
+static X509 *
+openSSLLoadCertificate(const UA_ByteString *certificate, size_t *line) {
+    *line = 0;
+    X509 *result = UA_OpenSSL_LoadDerCertificate(certificate);
+    if(result)
+        return result;
+    BIO *bio = UA_OpenSSL_PemBio(certificate, line);
+    if(!bio)
+        return NULL;
+    result = PEM_read_bio_X509(bio, NULL, UA_OpenSSL_refusePassword, NULL);
+    BIO_free(bio);
+    return result;
+}
+
+size_t
+UA_CertificateUtils_certificateLine(const UA_ByteString *certificate) {
+    size_t line;
+    X509_free(openSSLLoadCertificate(certificate, &line));
+    return line;
 }
 
 X509 *
 UA_OpenSSL_LoadCertificate(const UA_ByteString *certificate,
                            int keyType) {
-    X509 * result = NULL;
-
-    /* Try to decode DER encoded certificate */
-    result = UA_OpenSSL_LoadDerCertificate(certificate);
-
-    if(result == NULL) {
-        /* Try to decode PEM encoded certificate */
-        result = UA_OpenSSL_LoadPemCertificate(certificate);
-    }
-
+    size_t line;
+    X509 *result = openSSLLoadCertificate(certificate, &line);
     if(!result)
         return NULL;
 
@@ -1442,18 +1517,6 @@ UA_OpenSSL_LoadDerCertificate(const UA_ByteString *certificate) {
     return d2i_X509(NULL, &pData, (long) certificate->length);
 }
 
-X509 *
-UA_OpenSSL_LoadPemCertificate(const UA_ByteString *certificate) {
-    X509 * result = NULL;
-
-    BIO* bio = NULL;
-    bio = BIO_new_mem_buf((void *) certificate->data, (int) certificate->length);
-    result = PEM_read_bio_X509(bio, NULL, UA_OpenSSL_refusePassword, NULL);
-    BIO_free(bio);
-
-    return result;
-}
-
 X509_CRL *
 UA_OpenSSL_LoadCrl(const UA_ByteString *crl) {
     X509_CRL * result = NULL;
@@ -1476,13 +1539,12 @@ UA_OpenSSL_LoadDerCrl(const UA_ByteString *crl) {
 
 X509_CRL *
 UA_OpenSSL_LoadPemCrl(const UA_ByteString *crl) {
-    X509_CRL * result = NULL;
-
-    BIO* bio = NULL;
-    bio = BIO_new_mem_buf((void *) crl->data, (int) crl->length);
-    result = PEM_read_bio_X509_CRL(bio, NULL, UA_OpenSSL_refusePassword, NULL);
+    size_t line;
+    BIO *bio = UA_OpenSSL_PemBio(crl, &line);
+    if(!bio)
+        return NULL;
+    X509_CRL *result = PEM_read_bio_X509_CRL(bio, NULL, UA_OpenSSL_refusePassword, NULL);
     BIO_free(bio);
-
     return result;
 }
 
