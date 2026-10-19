@@ -1,7 +1,8 @@
 //! Signs this node's claims and checks the claims of other nodes. A node signs a
 //! [`Claim`] with its node key. A grant signs `foundation/grant/1`, the voter, the
 //! grant byte, the term, and the candidate. A change signs `foundation/voters/1`, the
-//! leader, the term, the index, the incoming voters, and the outgoing voters.
+//! leader, the term, the index, the incoming voters, the outgoing voters, and the
+//! public key of each voter that it adds.
 
 use std::fmt;
 
@@ -9,7 +10,7 @@ use raft::{Body, Claim, Message, Raft, Ready, Signature};
 use types::ed25519::{Pair, PrivateKey, PublicKey};
 use types::node;
 
-use crate::bytes::{put_grant, put_key, put_keys, put_position};
+use crate::bytes::{put_grant, put_key, put_keys, put_position, put_public_keys};
 
 const GRANT: &[u8] = b"foundation/grant/1";
 const CHANGE: &[u8] = b"foundation/voters/1";
@@ -214,12 +215,18 @@ fn statement(claim: &Claim<'_>) -> Vec<u8> {
             put_key(candidate, &mut bytes);
             bytes
         }
-        Claim::Change { leader, at, voters } => {
+        Claim::Change {
+            leader,
+            at,
+            voters,
+            public_keys: keys,
+        } => {
             let mut bytes = CHANGE.to_vec();
             put_key(leader, &mut bytes);
             put_position(at, &mut bytes);
             put_keys(&voters.incoming, &mut bytes);
             put_keys(&voters.outgoing, &mut bytes);
+            put_public_keys(voters, keys, &mut bytes);
             bytes
         }
     }
@@ -509,26 +516,50 @@ mod tests {
     }
 
     #[test]
-    fn the_signed_bytes_of_a_change_are_the_tag_leader_position_and_voters() {
+    fn the_signed_bytes_of_a_change_are_the_tag_leader_position_voters_and_keys() {
         let mut expected = b"foundation/voters/1".to_vec();
         expected.extend([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([7, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([5, 0, 0, 0, 0, 0, 0, 0]);
-        expected.extend([2, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([3, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([12, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([1, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([0xa9; 32]);
+        expected.extend([0xac; 32]);
         let voters = Voters {
-            incoming: [key(3), key(9)].into(),
+            incoming: [key(3), key(9), key(12)].into(),
             outgoing: [key(3)].into(),
         };
+        let public = |byte| PublicKey::new([byte; 32]).unwrap();
+        let keys = [(key(9), public(0xa9)), (key(12), public(0xac))].into();
         let claim = Claim::Change {
             leader: key(3),
             at: common::at(7, 5),
             voters: &voters,
+            public_keys: &keys,
         };
         assert_eq!(statement(&claim), expected);
+    }
+
+    #[test]
+    fn a_change_signs_its_voters_and_public_keys_in_the_form_of_its_entry() {
+        let entry = common::voters_entry(1, written(), joint());
+        let Data::Voters(change) = &entry.data else {
+            unreachable!()
+        };
+        let mut bytes = Vec::new();
+        crate::entry::encode(std::slice::from_ref(&entry), &mut bytes);
+        let (position, form) = (&bytes[..16], &bytes[17..]);
+        let voters_and_public_keys = &form[..2 * (8 + 3 * 16) + 32];
+        let mut signed = CHANGE.to_vec();
+        put_key(key(1), &mut signed);
+        signed.extend(position);
+        signed.extend(voters_and_public_keys);
+        let signature = change.signature.unwrap().0;
+        assert_eq!(public(1).verify(&signed, &signature), Ok(()));
     }
 
     // The joint configuration that leader 1 wrote at index 2 of `TERM`.
@@ -561,10 +592,12 @@ mod tests {
         let change = signed_change();
         assert_eq!(change.votes, proven().proof.unwrap());
         let joint = joint();
+        let keys = common::public_keys(&joint);
         let claim = Claim::Change {
             leader: key(1),
             at: written(),
             voters: &joint,
+            public_keys: &keys,
         };
         let signature = change.signature;
         assert_eq!(verify(&claim, signature, members(&[1, 2, 3])), Ok(()));
@@ -574,10 +607,12 @@ mod tests {
     fn verify_panics_for_a_signer_with_no_key() {
         let change = signed_change();
         let joint = joint();
+        let keys = common::public_keys(&joint);
         let claim = Claim::Change {
             leader: key(1),
             at: written(),
             voters: &joint,
+            public_keys: &keys,
         };
         let panic = std::panic::catch_unwind(|| {
             verify(&claim, change.signature, members(&[2, 3])).unwrap();
@@ -599,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn a_change_signature_moved_to_another_position_voters_or_leader_is_forged() {
+    fn a_change_signature_moved_to_another_position_voters_keys_or_leader_is_forged() {
         let signature = signed_change().signature;
         let members = members(&[1, 2, 3]);
         let joint = joint();
@@ -608,13 +643,22 @@ mod tests {
             outgoing: BTreeSet::new(),
             ..joint.clone()
         };
+        let keys = common::public_keys(&joint);
+        let relayed = [(key(4), public(5))].into();
+        let none = BTreeMap::new();
         let moved = [
-            (key(1), later, &joint),
-            (key(1), written(), &left),
-            (key(2), written(), &joint),
+            (key(1), later, &joint, &keys),
+            (key(1), written(), &left, &none),
+            (key(2), written(), &joint, &keys),
+            (key(1), written(), &joint, &relayed),
         ];
-        for (leader, at, voters) in moved {
-            let claim = Claim::Change { leader, at, voters };
+        for (leader, at, voters, keys) in moved {
+            let claim = Claim::Change {
+                leader,
+                at,
+                voters,
+                public_keys: keys,
+            };
             let forged = Err(Error::Forged { signer: leader });
             assert_eq!(verify(&claim, signature, &members), forged, "{claim:?}");
         }

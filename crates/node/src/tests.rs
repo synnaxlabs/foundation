@@ -7010,22 +7010,23 @@ pub(crate) mod port {
             }
         }
 
-        /// A home that the peer sets, while it holds readers at the node's home,
-        /// commits while the readers leave its mesh a stream to the node.
+        /// A home that the peer sets, while its readers at the node's home take each
+        /// stream that they may, commits.
         #[test]
         fn readers_at_a_home_leave_the_mesh_a_stream() {
+            let streams = crate::Settings::default().streams_max.get();
+            let held = usize::try_from(streams).expect("fits");
             for seed in 0..8 {
-                assert!(set_with_readers(seed, 63), "seed {seed}");
+                for count in [held, held + 1] {
+                    set_with_readers(seed, count, held);
+                }
             }
-            // A known bug: 64 readers take each stream, so a peer that is a follower
-            // cannot forward the change. #2019 asserts that each seed commits.
-            let committed = (0..8).filter(|&seed| set_with_readers(seed, 64)).count();
-            assert!(committed < 8, "64 readers: {committed} of 8 seeds commit");
         }
 
-        /// Whether a home that the peer sets, while it holds `count` readers at the
-        /// node's home, commits in a run of `seed`.
-        fn set_with_readers(seed: u64, count: usize) -> bool {
+        /// Sets a home from the peer in a run of `seed`, 10 s after it asks for `count`
+        /// readers at the node's home, and asserts that it commits, that `held` of them
+        /// opened before it and after it, and that none failed.
+        fn set_with_readers(seed: u64, count: usize, held: usize) {
             let case = (seed, count);
             let mut sim = sim::Sim::new(sim::Config {
                 seed,
@@ -7035,35 +7036,48 @@ pub(crate) mod port {
             let founding = paired(&hosts, OWN);
             let node = start(&hosts[0], founding.clone());
             assert_eq!(sim.run_for(TEN), Ok(()), "case {case:?}");
-            let results = Arc::new(Mutex::new((0, Vec::new())));
+            let results = Arc::new(Mutex::new(Vec::new()));
             let out = Arc::clone(&results);
             peer_hub(&hosts[1], founding, move |hub, mesh, host| async move {
-                host.clock().sleep(Span::SECOND).await;
-                let mut readers = Vec::new();
-                for _ in 0..count {
-                    let mode = ::hub::reader::Mode::Latest;
-                    let reader = hub.reader(unnamed("plant.value", mode)).await;
-                    readers.push(reader.expect("the reader opens"));
-                    out.lock().unwrap().0 += 1;
-                }
-                let set = mesh.set_home(INDEX, OTHER.0).await;
-                out.lock().unwrap().1.push(set);
-                std::future::pending::<()>().await;
+                let clock = host.clock();
+                clock.sleep(Span::SECOND).await;
+                let (opened, failed) = (Cell::new(0), Cell::new(false));
+                let readers = async {
+                    let mut readers = Vec::new();
+                    for _ in 0..count {
+                        let mode = ::hub::reader::Mode::Latest;
+                        let reader = hub.reader(unnamed("plant.value", mode)).await;
+                        // One past `held` waits until the node stops, then fails.
+                        let Ok(reader) = reader else {
+                            failed.set(true);
+                            break;
+                        };
+                        readers.push(reader);
+                        opened.set(opened.get() + 1);
+                    }
+                    std::future::pending::<()>().await;
+                };
+                let set = async {
+                    clock.sleep(TEN).await;
+                    let before = opened.get();
+                    let set = mesh.set_home(INDEX, OTHER.0).await;
+                    let after = (opened.get(), failed.get());
+                    out.lock().unwrap().push((before, set, after));
+                    std::future::pending::<()>().await;
+                };
+                let (mut readers, mut set) = (pin!(readers), pin!(set));
+                poll_fn(|cx| {
+                    assert!(readers.as_mut().poll(cx).is_pending());
+                    set.as_mut().poll(cx)
+                })
+                .await;
             });
             assert_eq!(sim.run_for(Span::MINUTE), Ok(()), "case {case:?}");
-            let committed = {
-                let (opened, set) = &*results.lock().unwrap();
-                assert_eq!(*opened, count, "case {case:?}");
-                match set.as_slice() {
-                    [] => false,
-                    [Ok(())] => true,
-                    other => panic!("{case:?}: {other:?}"),
-                }
-            };
+            let results = results.lock().unwrap().clone();
+            assert_eq!(results, [(held, Ok(()), (held, false))], "case {case:?}");
             node.stop();
             assert_eq!(sim.run_for(TEN), Ok(()), "case {case:?}");
             assert_eq!(node.join(), Ok(()), "case {case:?}");
-            committed
         }
 
         /// The peer reads the frames that a task of the node, the home, writes.
@@ -7105,6 +7119,58 @@ pub(crate) mod port {
             });
             assert_eq!(sim.run_for(TWENTY), Ok(()));
             assert_eq!(read.lock().unwrap().take(), Some(Ok(vec![7])));
+            node.stop();
+            assert_eq!(sim.run_for(TEN), Ok(()));
+            assert_eq!(node.join(), Ok(()));
+        }
+
+        /// Each of the most readers that the peer may open at the node's home reads
+        /// the frames that the node writes, in order and with none lost.
+        #[test]
+        fn each_of_the_most_readers_at_a_home_reads() {
+            use super::super::hub::{samples, write, writer};
+            let streams = crate::Settings::default().streams_max.get();
+            let most = usize::try_from(streams).expect("fits");
+            let mut sim = sim::Sim::new(sim::Config::default());
+            let hosts = [keyed(&mut sim, 2), keyed(&mut sim, 2)];
+            let founding = paired(&hosts, OWN);
+            let node = start(&hosts[0], founding.clone());
+            let clock = hosts[0].clock();
+            node.spawn(move |hub| async move {
+                let mut writer = writer(&hub, &["plant.value"]).await;
+                for at in 0..2000 {
+                    write(&mut writer, super::super::hub::WALL + at, 7);
+                    clock.sleep(Span::from_nanos(10_000_000)).await;
+                }
+                std::future::pending::<()>().await;
+            });
+            let read = Arc::new(Mutex::new(Vec::new()));
+            let out = Arc::clone(&read);
+            peer_hub(&hosts[1], founding, move |hub, _, _| async move {
+                let mut readers = Vec::new();
+                for _ in 0..most {
+                    let mode = ::hub::reader::Mode::Complete;
+                    let reader = hub.reader(unnamed("plant.value", mode)).await;
+                    readers.push(reader.expect("the reader opens"));
+                }
+                for reader in &mut readers {
+                    let (mut stamps, mut values) = (Vec::new(), Vec::new());
+                    for _ in 0..3 {
+                        let received = reader.next().await.expect("a frame");
+                        stamps.extend(samples(&received, 1));
+                        values.extend(samples(&received, 2));
+                    }
+                    let first = stamps[0];
+                    let stamps = stamps.iter().map(|stamp| stamp - first);
+                    let read: (Vec<i64>, _) =
+                        (stamps.take(3).collect(), values[..3].to_vec());
+                    out.lock().unwrap().push(read);
+                }
+                std::future::pending::<()>().await;
+            });
+            assert_eq!(sim.run_for(TWENTY), Ok(()));
+            let each = (vec![0, 1, 2], vec![7; 3]);
+            assert_eq!(*read.lock().unwrap(), vec![each; most]);
             node.stop();
             assert_eq!(sim.run_for(TEN), Ok(()));
             assert_eq!(node.join(), Ok(()));

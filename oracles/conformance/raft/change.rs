@@ -5,8 +5,8 @@
 use raft::{Body, Change, Data, Entry, Error, Grant, Hard, Role, Voters};
 
 use crate::common::{
-    ELECTION, accept_all, at_term, elect, leader, noop, position, proof, reply, set,
-    start,
+    ELECTION, accept_all, at_term, elect, keyed, leader, noop, position, proof, reply,
+    set, start,
 };
 
 fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
@@ -16,13 +16,14 @@ fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
     }
 }
 
-/// The configuration entry node 1 writes at `index` in `term`, with its votes from
-/// `elected` as the proof.
-fn config(term: u64, index: u64, voters: Voters, elected: &[u8]) -> Entry {
+/// The configuration entry node 1 writes at `index` in `term`, which binds the keys of
+/// `keys`, with its votes from `elected` as the proof.
+fn config(term: u64, index: u64, voters: Voters, keys: &[u8], elected: &[u8]) -> Entry {
     Entry {
         at: position(term, index),
         data: Data::Voters(Change {
             voters,
+            public_keys: keyed(keys),
             votes: proof(Grant::Vote, 1, elected),
             signature: None,
         }),
@@ -34,16 +35,22 @@ fn step_config() {
     let (mut raft, mut disk) = leader(2);
     disk.store(raft.ready());
     let index = disk.last();
-    let at = raft.propose_voters(set(&[1, 2])).unwrap();
+    let at = raft.propose_voters(keyed(&[1, 2])).unwrap();
     assert_eq!(at, position(1, index + 1));
     disk.store(raft.ready());
     assert_eq!(disk.last(), index + 1);
     assert_eq!(
         disk.entries.last(),
-        Some(&config(1, index + 1, voters(&[1, 2], &[1, 2]), &[1, 2]))
+        Some(&config(
+            1,
+            index + 1,
+            voters(&[1, 2], &[1, 2]),
+            &[],
+            &[1, 2]
+        ))
     );
     assert_eq!(
-        raft.propose_voters(set(&[1, 2])),
+        raft.propose_voters(keyed(&[1, 2])),
         Err(Error::ChangePending { at })
     );
 }
@@ -54,10 +61,10 @@ fn step_config() {
 fn step_ignore_config() {
     let (mut raft, mut disk) = leader(2);
     disk.store(raft.ready());
-    let at = raft.propose_voters(set(&[1, 2])).unwrap();
+    let at = raft.propose_voters(keyed(&[1, 2])).unwrap();
     disk.store(raft.ready());
     let index = disk.last();
-    let error = raft.propose_voters(set(&[1, 2])).unwrap_err();
+    let error = raft.propose_voters(keyed(&[1, 2])).unwrap_err();
     assert_eq!(error, Error::ChangePending { at });
     assert_eq!(
         error.to_string(),
@@ -74,13 +81,13 @@ fn new_leader_pending_config() {
     for (entries, pending) in [
         (vec![noop(1, 1)], None),
         (
-            vec![noop(1, 1), config(1, 2, voters(&[1, 2], &[]), &[1, 2])],
+            vec![noop(1, 1), config(1, 2, voters(&[1, 2], &[]), &[], &[1, 2])],
             Some(position(1, 2)),
         ),
     ] {
         let (mut raft, mut disk) = start(1, &[1, 2], ELECTION, at_term(1), entries, 0);
         elect(&mut raft, &mut disk, &[2]);
-        let result = raft.propose_voters(set(&[1, 2]));
+        let result = raft.propose_voters(keyed(&[1, 2]));
         assert_eq!(result.err(), pending.map(|at| Error::ChangePending { at }));
     }
 }
@@ -91,7 +98,7 @@ fn new_leader_pending_config() {
 fn add_node() {
     let (mut raft, mut disk) = leader(1);
     disk.store(raft.ready());
-    raft.propose_voters(set(&[1, 2])).unwrap();
+    raft.propose_voters(keyed(&[1, 2])).unwrap();
     assert_eq!(raft.voters(), &voters(&[1, 2], &[1]));
     accept_all(&mut raft, &mut disk);
     assert_eq!(raft.voters(), &voters(&[1, 2], &[]));
@@ -99,8 +106,8 @@ fn add_node() {
         disk.committed,
         [
             noop(1, 1),
-            config(1, 2, voters(&[1, 2], &[1]), &[1]),
-            config(1, 3, voters(&[1, 2], &[]), &[1])
+            config(1, 2, voters(&[1, 2], &[1]), &[2], &[1]),
+            config(1, 3, voters(&[1, 2], &[]), &[], &[1])
         ]
     );
 }
@@ -112,7 +119,7 @@ fn add_node_check_quorum() {
     for _ in 0..ELECTION - 1 {
         raft.tick(0);
     }
-    raft.propose_voters(set(&[1, 2])).unwrap();
+    raft.propose_voters(keyed(&[1, 2])).unwrap();
     raft.tick(0);
     assert_eq!(raft.role(), Role::Leader);
     for _ in 0..ELECTION {
@@ -126,14 +133,14 @@ fn add_node_check_quorum() {
 fn remove_node() {
     let (mut raft, mut disk) = leader(2);
     disk.store(raft.ready());
-    raft.propose_voters(set(&[1])).unwrap();
+    raft.propose_voters(keyed(&[1])).unwrap();
     disk.store(raft.ready());
     raft.step(reply(2, 1, Body::AppendReply { last: 2 }))
         .unwrap();
     assert_eq!(raft.voters(), &voters(&[1], &[]));
     assert_eq!(disk.store(raft.ready()).len(), 1);
     assert_eq!(disk.committed(), 3);
-    assert_eq!(raft.propose_voters(set(&[])), Err(Error::NoVoters));
+    assert_eq!(raft.propose_voters(keyed(&[])), Err(Error::NoVoters));
 }
 
 /// etcd commits the proposal after the caller applies the change; here the leave is
@@ -142,7 +149,7 @@ fn remove_node() {
 fn commit_after_remove_node() {
     let (mut raft, mut disk) = leader(2);
     disk.store(raft.ready());
-    let joint = raft.propose_voters(set(&[1])).unwrap();
+    let joint = raft.propose_voters(keyed(&[1])).unwrap();
     disk.store(raft.ready());
     assert_eq!(disk.committed(), 0);
     raft.propose(b"hello".to_vec()).unwrap();
@@ -153,12 +160,12 @@ fn commit_after_remove_node() {
         disk.committed,
         [
             noop(1, 1),
-            config(1, 2, voters(&[1], &[1, 2]), &[1, 2]),
+            config(1, 2, voters(&[1], &[1, 2]), &[], &[1, 2]),
             Entry {
                 at: position(1, 3),
                 data: Data::Bytes(b"hello".to_vec()),
             },
-            config(1, 4, voters(&[1], &[]), &[1, 2]),
+            config(1, 4, voters(&[1], &[]), &[], &[1, 2]),
         ]
     );
     raft.propose(b"world".to_vec()).unwrap();
