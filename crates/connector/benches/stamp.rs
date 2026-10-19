@@ -6,6 +6,8 @@
 //!   its two reads of mesh time and the rule of the stamp.
 //! - `before`: `Fit::before` of a fit that bounds the clock, one value later in device
 //!   time each call.
+//! - `between`: `Fit::between` of that fit, one read 1 us later in device time each
+//!   call.
 //! - `old`: `Fit::before` of a fit whose newest reading is 1 s later in device time,
 //!   one value later in device time each call, up to that reading.
 //! - `mesh`: `Fit::mesh` of that fit.
@@ -59,6 +61,7 @@ fn main() {
             }),
             request(&writer),
             before(),
+            between(),
             old(),
             mesh(),
             sample(),
@@ -97,6 +100,20 @@ fn before() -> Line {
         device += 1_000;
         let arrived = Stamp::from_nanos(i64::try_from(device).expect("small") + 500);
         let fitted = black_box(fit.before(Monotonic(device), black_box(arrived)));
+        assert_eq!(fitted, Fitted::Kept, "a true reading fits");
+    })
+}
+
+/// The line `between`.
+fn between() -> Line {
+    let mut fit = fit();
+    let mut device = 0;
+    time("between", || {
+        device += 1_000;
+        let sent = Stamp::from_nanos(i64::try_from(device).expect("small") + 400);
+        let answered = sent + Span::from_nanos(100);
+        let fitted =
+            black_box(fit.between(Monotonic(device), sent, black_box(answered)));
         assert_eq!(fitted, Fitted::Kept, "a true reading fits");
     })
 }
