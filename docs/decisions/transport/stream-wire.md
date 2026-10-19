@@ -186,7 +186,9 @@
   adds no round trip. The hello has its own one-way stream: a node lets the peer open
   `streams_max` + 2 one-way streams, and does not give back the credit of the peer's
   hello stream when it ends, so after the hello the peer has at most `streams_max` + 1
-  open. The last of them is for a `Command` stream (COMMAND STREAM, #2019).
+  open. The last of them is for a `Command` stream (COMMAND STREAM, #2019;
+  `laptop.architect-2`, 2026-10-19T13:55:48Z:
+  https://github.com/synnaxlabs/foundation/issues/2019#issuecomment-6268935147).
   Until the peer's hello arrives, a node opens and accepts no stream; a peer whose hello
   has not arrived twice the idle timeout after the handshake breaks the protocol, with
   the reason `a peer with no hello`. A check that comes after the idle timeout was also

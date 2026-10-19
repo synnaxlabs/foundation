@@ -33,7 +33,11 @@
   differ); mesh forwards on one-way streams with request numbers (MESH WIRE changes, and
   a one-way stream of another class can still take the credit). Decided by
   `laptop.architect-2` for `transport` and `node` (2026-10-19T13:55:48Z:
-  https://github.com/synnaxlabs/foundation/issues/2019#issuecomment-6268935147) and by
+  https://github.com/synnaxlabs/foundation/issues/2019#issuecomment-6268935147; the
+  rule, 2026-10-19T14:46:18Z:
+  https://github.com/synnaxlabs/foundation/pull/3374#issuecomment-6270018710; the `+1`
+  in `quic/settings.rs` and the credit that a `Command` holds, 2026-10-19T14:56:54Z:
+  https://github.com/synnaxlabs/foundation/pull/3374#issuecomment-6270248934) and by
   `laptop.architect` for `hub` and `mesh` (2026-10-19T13:56:48Z:
   https://github.com/synnaxlabs/foundation/issues/2019#issuecomment-6268955917), on the
   plan https://github.com/synnaxlabs/foundation/issues/2019#issuecomment-6268783749.
