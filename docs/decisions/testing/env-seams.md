@@ -128,16 +128,16 @@
   the local address, and don't-fragment. `os` binds with `rustix`, with `IPV6_V6ONLY`
   off on an IPv6 socket, and routes as `sim` does: a socket on `::` sends IPv4 as
   `::ffff:a.b.c.d`, and any other socket that gets a destination of the other family
-  gives `Unreachable`. A UDP bind to `[::]:0` first tries the port of a closed IPv4
-  probe on `0.0.0.0:0`, up to 8 times, and then lets the kernel pick: on macOS the
-  kernel can give it the port of a held `127.0.0.1` socket, which then gets each
-  datagram to that port (#3422,
+  gives `Unreachable`. A UDP bind to `[::]:0` first tries up to 8 ports, each from a
+  new IPv4 probe on `0.0.0.0:0` that it closes. When a probe fails or no such port
+  binds, whatever the error, the kernel picks: on macOS the kernel can give it the
+  port of a held `127.0.0.1` socket, which then gets each datagram to that port (#3422,
   https://github.com/synnaxlabs/foundation/issues/3422#issuecomment-6276973048). A
   `Transmit` goes out in one `sendmsg`, with GSO, or one per datagram after the kernel
-  refuses GSO; there is no `sendmmsg`. A `Transmit` holds at
-  most `TRANSMIT_BYTES_MAX`, so a GSO batch gets `EMSGSIZE` only when its segment is
-  over the path MTU. Then each full segment is lost, and `os` sends the short last
-  datagram alone (`laptop.architect-2`, 2026-10-09 22:36 UTC,
+  refuses GSO; there is no `sendmmsg`. A `Transmit` holds at most `TRANSMIT_BYTES_MAX`,
+  so a GSO batch gets `EMSGSIZE` only when its segment is over the path MTU. Then each
+  full segment is lost, and `os` sends the short last datagram alone
+  (`laptop.architect-2`, 2026-10-09 22:36 UTC,
   https://github.com/synnaxlabs/foundation/pull/2193#issuecomment-6090406742).
   After `EIO` or `EINVAL` on a GSO send, `noq-udp` sends the first datagram alone. Only
   when it goes out does `noq-udp` store 1 as its `max_gso_segments`, and from then on
