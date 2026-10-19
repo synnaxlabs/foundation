@@ -843,3 +843,288 @@ proptest! {
         }
     }
 }
+
+/// The inputs of the fuzz target `wire_hub_write` give the frames and ends that their
+/// names state.
+mod corpus {
+    use super::*;
+
+    /// How a stream of a fuzz input ends.
+    #[derive(Debug, PartialEq)]
+    enum End {
+        /// The input ended, with what `finish` gave.
+        Finished(Result<(), Error>),
+        /// A message gave an error.
+        Message(Error),
+        /// A draft's layout gave an error.
+        Layout(types::frame::Error),
+    }
+
+    /// The name of the input `$file` of the fuzz target `wire_hub_write`, and its
+    /// bytes.
+    macro_rules! corpus {
+        ($file:literal) => {
+            (
+                $file,
+                include_bytes!(concat!(
+                    "../../../../../../oracles/fuzz/wire_hub_write/",
+                    $file
+                ))
+                .as_slice(),
+            )
+        };
+    }
+
+    /// The set of the first byte of an input: an index, then `places - 1` channels of
+    /// `I64`, where bit 3 makes the second half of the places a second group.
+    fn create_input_set(first: u8) -> Arc<KeySet> {
+        let places = usize::from(first & 0b111) + 1;
+        let split = if first & 0b1000 != 0 && places > 1 {
+            places.div_ceil(2)
+        } else {
+            usize::MAX
+        };
+        let channels = (0..places).map(|entry| {
+            let index = if entry >= split { split } else { 0 };
+            let data = if entry == index {
+                Scalar::Stamp
+            } else {
+                Scalar::I64
+            };
+            let n = u128::try_from(entry).expect("at most 8 places") + 1;
+            (key(n), Type::Scalar(data), index)
+        });
+        Arc::new(KeySet::ordered(channels).expect("a valid set"))
+    }
+
+    /// The ranges of each frame that the fuzz input `bytes` gives, `None` for a frame
+    /// skipped on a full pool, and how its stream ends.
+    fn drive(bytes: &[u8]) -> (Vec<Option<Vec<(u32, Range)>>>, End) {
+        let (&first, mut bytes) = bytes.split_first().expect("the input has a byte");
+        let pool = create_pool();
+        let mut frames = Frames::new(create_input_set(first));
+        let mut seen = Vec::new();
+        loop {
+            let step = match frames.due() {
+                Err(error) => return (seen, End::Layout(error)),
+                Ok(Due::Draft { layout, form }) => match layout.draft(&pool, form) {
+                    Ok(draft) => frames.draft(draft),
+                    Err(_) => {
+                        frames.skip();
+                        seen.push(None);
+                        continue;
+                    }
+                },
+                Ok(Due::Body(_) | Due::Message) => {
+                    let Some((&len, rest)) = bytes.split_first() else {
+                        return (seen, End::Finished(frames.finish()));
+                    };
+                    let (message, rest) =
+                        rest.split_at(usize::from(len).min(rest.len()));
+                    bytes = rest;
+                    match frames.decode(message) {
+                        Ok(step) => step,
+                        Err(error) => return (seen, End::Message(error)),
+                    }
+                }
+            };
+            if let Step::Frame { draft, .. } = step {
+                seen.push(Some(draft.ranges().collect()));
+            }
+        }
+    }
+
+    /// The ranges of a frame: each group, and its count from seq 0.
+    fn ranges(groups: &[(u32, u32)]) -> Option<Vec<(u32, Range)>> {
+        let ranges = groups
+            .iter()
+            .map(|&(group, count)| (group, Range { seq: 0, count }));
+        Some(ranges.collect())
+    }
+
+    fn cut(received: usize, len: Option<usize>) -> End {
+        End::Finished(Err(Error::Cut {
+            received,
+            len: len.and_then(NonZeroUsize::new),
+        }))
+    }
+
+    #[test]
+    fn gives_the_frames_and_end_of_each_input_of_a_run_of_counts() {
+        let run = |items, remain| End::Message(Error::Run { items, remain });
+        let done = || End::Finished(Ok(()));
+        let one = |count| ranges(&[(0, count)]);
+        let both = ranges(&[(0, 1), (1, 1)]);
+        let cases = [
+            (corpus!("body_cut_grouped"), vec![], cut(54, Some(59))),
+            (
+                corpus!("body_empty_grouped"),
+                vec![],
+                End::Message(Error::Empty),
+            ),
+            (
+                corpus!("body_past_grouped"),
+                vec![],
+                End::Message(Error::Body {
+                    len: 40,
+                    remain: 32,
+                }),
+            ),
+            (
+                corpus!("counts_cut"),
+                vec![],
+                End::Message(Error::Length { len: 3 }),
+            ),
+            (corpus!("counts_end"), vec![], cut(23, Some(59))),
+            (
+                corpus!("counts_index_repeat"),
+                vec![],
+                End::Layout(types::frame::Error::Unordered { entry: 0, last: 0 }),
+            ),
+            (corpus!("counts_over_run"), vec![], run(2, 1)),
+            (
+                corpus!("counts_samples"),
+                vec![],
+                End::Message(Error::Samples),
+            ),
+            (
+                corpus!("cut_node_body"),
+                vec![None],
+                cut(34, Some(100_991_015)),
+            ),
+            (corpus!("node_body_cut"), vec![], cut(28, Some(39))),
+            (
+                corpus!("ends_bad_grouped"),
+                vec![],
+                End::Message(Error::Length { len: 5 }),
+            ),
+            (
+                corpus!("ends_cut_grouped"),
+                vec![],
+                End::Message(Error::Length { len: 7 }),
+            ),
+            (
+                corpus!("ends_empty_grouped"),
+                vec![],
+                End::Message(Error::Empty),
+            ),
+            (corpus!("ends_over_run_grouped"), vec![], run(2, 1)),
+            (corpus!("ends_whole_cut_grouped"), vec![], cut(15, None)),
+            (
+                corpus!("frame_backfill_encoded_grouped"),
+                vec![one(2)],
+                done(),
+            ),
+            (corpus!("frame_cut_grouped"), vec![one(2)], done()),
+            (corpus!("frame_grouped"), vec![one(2)], done()),
+            (corpus!("frame_no_body_grouped"), vec![one(1)], done()),
+            (corpus!("frame_node_grouped"), vec![one(1)], done()),
+            (
+                corpus!("head_empty_grouped"),
+                vec![],
+                End::Message(Error::Empty),
+            ),
+            (
+                corpus!("head_form_grouped"),
+                vec![],
+                End::Message(Error::Form { byte: 2 }),
+            ),
+            (
+                corpus!("head_kind_grouped"),
+                vec![],
+                End::Message(Error::Kind { kind: 1 }),
+            ),
+            (
+                corpus!("head_long_grouped"),
+                vec![],
+                End::Message(Error::Length { len: 8 }),
+            ),
+            (corpus!("head_only_grouped"), vec![], cut(7, None)),
+            (
+                corpus!("head_places_grouped"),
+                vec![],
+                End::Message(Error::Places {
+                    series: 3,
+                    places: 2,
+                }),
+            ),
+            (
+                corpus!("head_series_grouped"),
+                vec![],
+                End::Message(Error::Series),
+            ),
+            (
+                corpus!("head_short_grouped"),
+                vec![],
+                End::Message(Error::Length { len: 6 }),
+            ),
+            (
+                corpus!("head_stamp_form_grouped"),
+                vec![],
+                End::Message(Error::Stamp),
+            ),
+            (
+                corpus!("head_time_grouped"),
+                vec![],
+                End::Message(Error::Path { byte: 3 }),
+            ),
+            (
+                corpus!("index_absent_grouped"),
+                vec![],
+                End::Layout(types::frame::Error::IndexAbsent { entry: 1, index: 0 }),
+            ),
+            (
+                corpus!("layout_before_grouped"),
+                vec![],
+                End::Layout(types::frame::Error::End(BadEnd::Before {
+                    end: 8,
+                    start: 16,
+                })),
+            ),
+            (
+                corpus!("pool_full_grouped"),
+                vec![None],
+                cut(75, Some(4_194_315)),
+            ),
+            (
+                corpus!("skip_cut_grouped"),
+                vec![None],
+                cut(25_498, Some(98_331)),
+            ),
+            (corpus!("skip_frame_grouped"), vec![None, one(2)], done()),
+            (corpus!("two_frames_grouped"), vec![one(2), one(1)], done()),
+            (corpus!("two_groups"), vec![both.clone()], done()),
+            (corpus!("two_groups_counts_cut"), vec![], cut(43, Some(79))),
+            (corpus!("two_groups_counts_over_run"), vec![], run(3, 2)),
+            (
+                corpus!("two_groups_counts_samples"),
+                vec![],
+                End::Message(Error::Samples),
+            ),
+            (
+                corpus!("two_groups_counts_split"),
+                vec![both.clone()],
+                done(),
+            ),
+            (corpus!("two_groups_node"), vec![both.clone()], done()),
+            (
+                corpus!("two_groups_second"),
+                vec![ranges(&[(1, 1)])],
+                done(),
+            ),
+            (
+                corpus!("two_groups_skip"),
+                vec![None],
+                cut(812, Some(131_119)),
+            ),
+            (
+                corpus!("two_groups_two_frames"),
+                vec![both.clone(), both],
+                done(),
+            ),
+        ];
+        for ((name, bytes), frames, end) in cases {
+            assert_eq!(drive(bytes), (frames, end), "{name}");
+        }
+    }
+}
