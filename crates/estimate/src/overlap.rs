@@ -131,6 +131,10 @@ impl Overlap {
     }
 
     fn narrow(&mut self, reading: Reading) -> Result<(), Error> {
+        // Before widening, which can uncross the edges.
+        if reading.low.zip(reading.high).is_some_and(|(l, h)| l > h) {
+            return Err(Error::Disjoint);
+        }
         let reading = reading.widened_to(self.newest, self.drift);
         let at = reading.at;
         // From `at` on, every edge moves at `drift`, so this order holds. Of equal
@@ -511,6 +515,13 @@ mod tests {
 
     mod when_older {
         use super::*;
+
+        #[test]
+        fn refuses_one_with_its_low_edge_above_its_high_edge() {
+            let mut overlap = overlap(200_000, &[m(SECOND_NS, 0, 0)]).expect("valid");
+            let crossed = Push::Both(0, 5, 4);
+            assert_eq!(crossed.push(&mut overlap), Err(Error::Disjoint));
+        }
 
         #[test]
         fn narrows_from_the_newest_time_on() {
