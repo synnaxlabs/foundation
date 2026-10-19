@@ -271,6 +271,7 @@ impl Homed {
         let writer = ::home::writer::Writer {
             subject,
             authority,
+            via: borrowed.node,
             lease,
             set: Arc::clone(&set),
         };

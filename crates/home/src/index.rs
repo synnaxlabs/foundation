@@ -177,6 +177,7 @@ mod tests {
         Writer {
             subject: subject.parse().expect("a valid name"),
             authority: Authority(authority),
+            via: types::node::Key::from_u128(1),
         }
     }
 
