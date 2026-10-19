@@ -465,6 +465,21 @@ impl Server {
         unsafe { ffi::test::shim_server_end(self.raw(), status.0) };
     }
 
+    /// Sets the most notifications of a Publish answer that the server grants.
+    #[cfg(test)]
+    pub(crate) fn set_per_publish(&self, most: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_publishes(self.raw(), most) };
+    }
+
+    /// Gives the most notifications of a Publish answer of the first subscription of
+    /// the server, 0 for none.
+    #[cfg(test)]
+    pub(crate) fn per_publish(&self) -> u32 {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_per_publish(self.raw()) }
+    }
+
     /// Counts each Browse, `CreateMonitoredItems`, and Publish request that the server
     /// processes from now, and the most continuation points that one session holds.
     ///

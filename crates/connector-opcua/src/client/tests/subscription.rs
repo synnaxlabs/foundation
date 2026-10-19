@@ -9,9 +9,10 @@ use types::quality::Quality;
 use types::time::Span;
 
 use super::{Peer, READS, drop_reads, numbered, run, serve};
+use crate::client::service::Item;
 use crate::client::subscription::{Change, Revised, Sampled};
 use crate::client::{Client, PUBLISHES};
-use crate::ffi::Status;
+use crate::ffi::{self, Status};
 use crate::node::Node;
 use crate::unwind::caught;
 use crate::value::{Fault, Value};
@@ -140,7 +141,8 @@ fn a_refused_call_gives_its_status_to_each_item() {
 }
 
 /// Runs `body` on a client subscribed to the Double of [`add_level`] with a queue of
-/// `queue`, after its first change, and gives its output.
+/// `queue`, after its first change, and gives its output. The server grants each
+/// count of notifications of a Publish answer that the client asks for.
 fn on_level<T: Send + 'static>(
     queue: u32,
     body: impl AsyncFnOnce(&mut Peer<'_>, &mut Client, &Cell<f64>) -> T + Send + 'static,
@@ -148,6 +150,7 @@ fn on_level<T: Send + 'static>(
     run(0, async move |node| {
         serve(&node, 4, async |mut peer| {
             let level = add_level(&peer);
+            peer.server.set_per_publish(u32::MAX);
             let mut client = peer.connected().await;
             let nodes = [numbered(0)];
             let revised = client.subscribe(INTERVAL, &nodes, SAMPLING, queue).await;
@@ -168,6 +171,21 @@ fn on_level<T: Send + 'static>(
         .await
     })
     .0
+}
+
+/// A Publish answer holds the most changes that fit the receive limit of the client,
+/// and the buffer of the client holds the changes of [`PUBLISHES`] answers.
+#[test]
+fn a_publish_answer_holds_the_most_changes_that_fit_the_client() {
+    let (most, fits, held) = on_level(4, async |peer, client, _| {
+        let most = usize::try_from(peer.server.per_publish()).expect("fits");
+        let bytes =
+            |count: usize| ffi::shim_publish_bytes() + count * Item::Change.bytes();
+        let fits = (bytes(most) <= client.takes, bytes(most + 1) <= client.takes);
+        (most, fits, client.changes.capacity())
+    });
+    assert_eq!(fits, (true, false), "{most}");
+    assert!(held >= usize::from(PUBLISHES) * 4, "{held}");
 }
 
 /// A queue of 2 with 3 changes in one publishing interval drops the oldest, and the

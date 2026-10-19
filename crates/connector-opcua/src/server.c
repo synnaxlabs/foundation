@@ -152,6 +152,18 @@ void shim_server_end(UA_Server *server, UA_StatusCode status) {
         sub->statusChange = status;
 }
 
+/* Sets the most notifications of a Publish answer that `server` grants. */
+void shim_server_publishes(UA_Server *server, UA_UInt32 most) {
+    UA_Server_getConfig(server)->maxNotificationsPerPublish = most;
+}
+
+/* Gives the most notifications of a Publish answer of the first subscription of
+ * `server`, 0 for none. */
+UA_UInt32 shim_server_per_publish(UA_Server *server) {
+    UA_Subscription *sub = LIST_FIRST(&server->subscriptions);
+    return sub ? sub->notificationsPerPublish : 0;
+}
+
 /* The counts of a `shim_counter`. */
 typedef struct {
     /* The Browse requests. */
