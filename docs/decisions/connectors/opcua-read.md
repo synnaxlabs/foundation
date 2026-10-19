@@ -191,8 +191,10 @@
   gives it, with no drop. While a change waits, the client sends no Publish request, so
   at most the answers of the `PUBLISHES` requests in flight wait in it, as section 4 of
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272 sizes the
-  buffer, and later values wait in the queues of the server, the oldest dropped. The
-  change buffers grow as needed in PR 4b of #2622, and the reserve of `PUBLISHES`
+  buffer, and later values wait in the queues of the server, the oldest dropped. A
+  change that waits past the revised lifetime of the subscription ends it: the server
+  deletes it, and `changes` ends as its doc states, after it gives the waiting changes.
+  The change buffers grow as needed in PR 4b of #2622, and the reserve of `PUBLISHES`
   answers at `subscribe` comes in PR 4c with its counting test, which merges before PR 5
   (`laptop.architect-2`, 2026-10-19T21:52:11Z,
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669).
