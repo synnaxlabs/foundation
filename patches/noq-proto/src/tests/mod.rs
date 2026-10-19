@@ -5226,3 +5226,44 @@ fn ack_only_packet_acks_only_the_paths_with_a_due_ack() -> TestResult {
     assert_eq!(pair.stats(Server).frame_tx.path_acks, path_acks + 1);
     Ok(())
 }
+
+/// A server that anti-amplification blocks sends no ACK-only packet, also with an ACK due.
+///
+/// No crate of the workspace reaches this state. The patch sends an ACK-only packet on an
+/// unvalidated path only in the handshake (`may_send_data`). There a `transport` client
+/// sends no 0-RTT, so each datagram that makes an ACK due holds an Initial of at least 1200
+/// bytes. It gives the server 3600 bytes of budget, more than the server sends past its
+/// budget at the `transport` initial MTU of 1200.
+#[test]
+fn no_ack_only_packet_when_anti_amplification_blocks() {
+    let _guard = subscribe();
+    const MTU: u16 = 8000;
+    let mut endpoint = EndpointConfig::default();
+    endpoint.max_udp_payload_size(MTU).unwrap();
+    let (cert, key) = big_cert_and_key();
+    let mut server = server_config_with_cert(cert.clone(), key);
+    let mut transport = TransportConfig::default();
+    transport.initial_mtu(MTU);
+    server.transport_config(Arc::new(transport));
+    let mut pair = Pair::new(Arc::new(endpoint), server);
+    pair.mtu = MTU.into();
+
+    pair.begin_connect(client_config_with_certs(vec![cert]));
+    pair.drive_client();
+    // The first datagram of the server goes past its budget of 3 times the client's
+    // Initial by more than the 3 times of a second Initial.
+    pair.drive_server();
+    pair.client.inbound.clear();
+    pair.time += Duration::from_secs(2);
+    pair.drive_client();
+    assert!(
+        !pair.server.inbound.is_empty(),
+        "the client sends its Initial again"
+    );
+
+    pair.server.drive(pair.time);
+    assert!(
+        pair.server.outbound.is_empty(),
+        "the server sends a datagram"
+    );
+}
