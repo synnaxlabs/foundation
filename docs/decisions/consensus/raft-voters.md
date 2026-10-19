@@ -44,7 +44,9 @@
   the leave on the node, such as a configuration that makes it a voter again. A removed
   node that answered nothing over a whole quorum check period is released at that check
   instead, and the next configuration releases any that is still a peer. A follower
-  releases the removed nodes when the leave commits. A removed node that missed its
+  releases the removed nodes when the leave commits. A learner (`Raft::set_learners`,
+  RAFT SURFACE) is the exception: it gets each entry past the leave, and no release,
+  quorum check, or configuration drops it. A removed node that missed its
   release learns it from `mesh`, not `raft`: `mesh` admits a `raft` request only from a
   voter of the newest configuration that the node knows: the newest in its log, or a
   newer one that a link of the request's chain proves. A link proves a configuration
