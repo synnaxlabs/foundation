@@ -114,14 +114,14 @@ def quick(call) -> object:
 
 class Node:
     """`foundation start --name edge` in a new directory, with a budget of 1 GiB of
-    pool and 8 MiB of disk for each core. It goes with #3064."""
+    pool and `disk` bytes of disk for each core. It goes with #3064."""
 
-    def __init__(self) -> None:
+    def __init__(self, disk: int = 8 << 20) -> None:
         self.dir = tempfile.TemporaryDirectory(prefix="foundation-python-")
         self.data = os.path.join(self.dir.name, "foundation-data")
         os.makedirs(os.path.join(self.data, "data"))
         with open(os.path.join(self.data, "data", "budget"), "wb") as file:
-            file.write(budget(1 << 30, os.cpu_count() * (8 << 20)))
+            file.write(budget(1 << 30, os.cpu_count() * disk))
         self.process = subprocess.Popen(
             [os.environ["FOUNDATION_NODE"], "start", "--name", "edge"],
             cwd=self.dir.name,
