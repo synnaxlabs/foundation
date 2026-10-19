@@ -106,9 +106,9 @@ impl Writer {
         })
     }
 
-    /// The channels of the writer: the key, sample type, and name of each place.
-    /// Place `n` is `Config::channels[n]`, then the index when `Config::channels`
-    /// does not name it.
+    /// The channels of the writer: the key, sample type, name, and place of the index
+    /// of each place. Place `n` is `Config::channels[n]`, then the index when
+    /// `Config::channels` does not name it.
     #[must_use]
     pub fn places(&self) -> &[Place] {
         &self.places
@@ -274,8 +274,9 @@ impl Writer {
     }
 }
 
-/// The places of the calls of a writer of `channels`, the place of the node of each,
-/// and the place of the index, from the places of the node and the place of its index.
+/// The places of the calls of a writer of `channels`, each naming the place of the
+/// index among them, the place of the node of each, and the place of the index, from
+/// the places of the node and the place of its index.
 ///
 /// # Panics
 ///
@@ -295,7 +296,11 @@ fn ordered(
         nodes.push(index);
         nodes.len() - 1
     });
-    let places = nodes.iter().map(|&n| node[n].clone()).collect();
+    let place = |&n: &usize| Place {
+        index: at,
+        ..node[n].clone()
+    };
+    let places = nodes.iter().map(place).collect();
     (places, nodes, at)
 }
 
