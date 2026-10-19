@@ -458,7 +458,7 @@ fn refuses_a_writer_of_no_channel_or_over_the_cap_with_nothing_sent() {
         let got = session.writer(config(&[], 1)).await;
         let error = got.map(drop).unwrap_err();
         assert_eq!(error, Error::Unnamed);
-        assert_eq!(error.to_string(), "the writer names no channel");
+        assert_eq!(error.to_string(), "the stream names no channel");
         let over = Config {
             authority: Authority(1),
             lease: None,

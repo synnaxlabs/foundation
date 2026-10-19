@@ -71,6 +71,13 @@ impl Reader {
         &self.places
     }
 
+    /// The place of the index of the reader's channels, whose samples are the stamps
+    /// of each frame. A frame of at least one sample holds its series.
+    #[must_use]
+    pub fn index(&self) -> usize {
+        self.set().groups()[0]
+    }
+
     /// The key set of each frame, from [`KeySet::ordered`]. Its entries are the
     /// places, in order. Its slots are the reader's own, not the node's, and its key is
     /// the one key of each set from `KeySet::ordered`, so it does not tell two readers
@@ -95,7 +102,7 @@ impl Reader {
     }
 
     /// The next frame. Its series are encoded, and its entries index
-    /// [`Reader::set`]. It holds a block of [`Config::frames`](crate::Config::frames)
+    /// [`Reader::set`]. It holds a block of [`Config::reads`](crate::Config::reads)
     /// until it drops, and a frame that finds the pool full waits for a block. A frame
     /// whose call drops goes on at the next call. After a gap, [`Reader::lost`] gives
     /// it.
@@ -133,7 +140,7 @@ impl Reader {
                 Due::Draft(layout) => {
                     let shared = &self.session.0;
                     let draft = shared
-                        .retry(|| layout.draft(&shared.frames, Form::Encoded))
+                        .retry(|| layout.draft(&shared.reads, Form::Encoded))
                         .await?;
                     self.frames.draft(draft)
                 }
@@ -182,7 +189,7 @@ impl Reader {
         if lost.is_empty() {
             return;
         }
-        let index = &self.places[self.set().groups()[0]].name;
+        let index = &self.places[self.index()].name;
         let (start, end) = (lost.start, lost.end);
         tracing::warn!(
             %index,
