@@ -136,9 +136,8 @@ impl Frames {
     /// ends, then [`Error::Run`], then, for the counts after its last end, the errors
     /// of a message of the run of counts. For a message of the run of counts, the
     /// errors of its bytes, then [`Error::Run`] and [`Error::Samples`]. For a body
-    /// message,
-    /// [`Error::Empty`] and [`Error::Body`]. The frames stay as they were. The caller
-    /// then stops the stream as `MALFORMED`.
+    /// message, [`Error::Empty`] and [`Error::Body`]. The frames stay as they were. The
+    /// caller then stops the stream as `MALFORMED`.
     ///
     /// # Panics
     ///

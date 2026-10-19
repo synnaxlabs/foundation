@@ -1101,9 +1101,9 @@ fn stops_a_write_whose_ends_pass_the_share_as_busy() {
     assert_eq!(home.served[0], Err(share.clone()));
     assert_eq!(
         share.to_string(),
-        "40 bytes of a body or of the ends or names of a write do not fit under the \
-         share of 16777216 bytes of subject ops.agent: its open requests, reads, and \
-         writes hold 16777177 bytes"
+        "40 bytes of a body or of the ends, counts, or names of a write do not fit \
+         under the share of 16777216 bytes of subject ops.agent: its open requests, \
+         reads, and writes hold 16777177 bytes"
     );
 }
 
