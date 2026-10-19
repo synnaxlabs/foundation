@@ -129,21 +129,12 @@ pub(crate) fn configure(
     // Only the OpenSSL plugins of the copy include the headers of the libcrypto.
     builds.library.include(&libcrypto.include);
     if env("CARGO_FEATURE_SIM").is_some() {
-        sim(&mut builds.shim, copy);
+        builds.shim.file(Path::new(SRC).join("server.c"));
     }
     builds.sanitize(env)?;
     // After `sanitize`, which can replace the compiler with clang.
     check(&builds.library.get_compiler())?;
     Ok((builds, libcrypto))
-}
-
-/// Adds the test server `src/server.c` to `shim`, the shim build of the copy at
-/// `copy`.
-pub(crate) fn sim(shim: &mut Build, copy: &Path) {
-    shim.file(Path::new(SRC).join("server.c"));
-    // The test server reads the continuation points of a session, which have no public
-    // header.
-    shim.include(copy.join("src"));
 }
 
 /// Gives the builds of the open62541 copy at `copy` and of `src/shim.c`
@@ -168,8 +159,11 @@ pub(crate) fn builds(copy: &Path, flags: &str, sources: &str) -> Builds {
             shim.flag(flag);
         }
     }
-    // `shim.c` builds its event loop on the copy's timer, which has no public header.
+    // `shim.c` builds its event loop on the copy's timer, and sends the Publish
+    // requests of a client, and the test server reads the continuation points of a
+    // session: none has a public header.
     shim.include(copy.join("arch/common"));
+    shim.include(copy.join("src"));
     // A test compiles `shim.c` from its standard input, so `shim.h` is on the path.
     shim.include(SRC);
     for source in sources.lines() {
