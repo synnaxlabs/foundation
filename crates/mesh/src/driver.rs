@@ -18,7 +18,7 @@ use env::tasks::{self, Tasks};
 use raft::{Admission, Data, Entry, Position, Raft, Ready, Start, Voters};
 use spec::Pointer;
 use spec::tree::Chunks;
-use transport::{Code, Session, Transport};
+use transport::{Address, Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::{PrivateKey, PublicKey};
@@ -48,9 +48,12 @@ mod bound;
 mod founding;
 mod home;
 mod join;
+mod peer;
 mod propose;
 mod send;
 mod stream;
+
+pub(crate) use peer::CHUNKS;
 pub(crate) mod used;
 mod version;
 
@@ -133,6 +136,7 @@ pub struct Mesh {
     tasks: tasks::Group,
     pool: Rc<Pool>,
     store: Rc<blob::Store>,
+    transport: Rc<Transport>,
     clock: Clock,
     cards: Rc<version::Cards>,
     entropy: Entropy,
@@ -214,11 +218,10 @@ impl Mesh {
                 bytes_min: message::BYTES_MIN,
             });
         }
-        let transport = Rc::clone(&config.transport);
         let mesh = Self::start(config).await?;
         let senders = Senders {
             group: Rc::downgrade(&mesh.group),
-            transport,
+            transport: Rc::clone(&mesh.transport),
             pool: Rc::clone(&mesh.pool),
             tasks: mesh.tasks.clone(),
         };
@@ -243,7 +246,6 @@ impl Mesh {
                 .map_err(Error::Member)?;
         check_members(&state, config.key, &config.private_key, &voters)?;
         put(&config.store, &config.pool, &chunks, &tree.chunks).await?;
-        let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
         let files = &config.files;
         let (log, stored) = open_log(files, &config.dir, Rc::clone(&pool)).await?;
@@ -282,7 +284,7 @@ impl Mesh {
         tasks.tasks().spawn(run(
             weak,
             log,
-            signer,
+            Signer::new(config.key, &config.private_key),
             config.clock.clone(),
             config.entropy.clone(),
         ));
@@ -291,6 +293,7 @@ impl Mesh {
             tasks,
             pool,
             store: config.store,
+            transport: config.transport,
             clock: config.clock,
             cards: Rc::new(cards),
             entropy: config.entropy,
@@ -672,6 +675,25 @@ impl Watch {
     }
 }
 
+// The slot of a call in `Group::calls`, which it frees when it drops.
+struct Call<'a> {
+    group: &'a RefCell<Group>,
+    slot: u64,
+}
+
+impl<'a> Call<'a> {
+    fn new(group: &'a RefCell<Group>) -> Self {
+        let slot = group.borrow_mut().slot();
+        Self { group, slot }
+    }
+}
+
+impl Drop for Call<'_> {
+    fn drop(&mut self) {
+        self.group.borrow_mut().calls.remove(&self.slot);
+    }
+}
+
 // The state of a watch that gives a value each time its key `K` changes: its waker's
 // place in `Group::watches`, which it frees when it drops, and the last key given.
 struct Slot<K> {
@@ -921,6 +943,14 @@ impl Group {
             Some(cause) => Err(Error::Pool(cause.clone())),
             None => Ok(()),
         }
+    }
+
+    // The public key of member `key` and the addresses of its card, as the group
+    // holds them now.
+    fn contact(&self, key: node::Key) -> Option<(PublicKey, Vec<Address>)> {
+        let member = self.state.member(key)?;
+        let addresses = member.card.card().addresses.as_slice().to_vec();
+        Some((member.public_key(), addresses))
     }
 
     // Gives `raft` an input, and wakes each call when the leader or the term changes.
@@ -1377,6 +1407,7 @@ mod tests {
     use types::node::SealKey;
     use wire::Protocol;
 
+    use super::peer::within;
     use super::*;
     use crate::card;
     use crate::change::{CHUNKS_MAX, Unknown};
@@ -1475,6 +1506,10 @@ mod tests {
         configurations: BTreeMap<u8, BTreeSet<u8>>,
         /// The spec change that each node proposes next.
         applies: BTreeMap<u8, Proposal>,
+        /// The base and the definitions that each node gives `Mesh::apply` next.
+        changes: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
+        /// The node that answers no blob stream.
+        silent: Option<u8>,
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
@@ -1727,7 +1762,8 @@ mod tests {
     }
 
     /// Serves each stream of each session that a peer opens to `transport`, as `node`
-    /// does. The group refuses no message of a cluster.
+    /// does, and holds each blob stream with no answer when node `id` is silent. The
+    /// group refuses no message of a cluster.
     async fn accept(
         mesh: Mesh,
         transport: Rc<Transport>,
@@ -1749,8 +1785,27 @@ mod tests {
                         let Ok(Some(header)) = incoming.receiver.recv().await else {
                             return;
                         };
-                        let protocol = wire::header::decode(&header).unwrap();
-                        assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+                        let (protocol, _) = wire::header::decode(&header).unwrap();
+                        if protocol == Protocol::Blob {
+                            let silent = board.lock().unwrap().silent == Some(id);
+                            if silent {
+                                std::future::pending::<()>().await;
+                            }
+                            let served = blob::peer::serve(&mesh.store, incoming).await;
+                            // A test arms each fault of the files.
+                            if let Err(error) = served {
+                                let armed = matches!(
+                                    error,
+                                    blob::peer::Error::Stream(_)
+                                        | blob::peer::Error::Store(blob::Error::Files(
+                                            _
+                                        ))
+                                );
+                                assert!(armed, "a voter refused a put: {error}");
+                            }
+                            return;
+                        }
+                        assert_eq!(protocol, Protocol::Mesh);
                         match mesh.serve(peer, incoming).await {
                             Ok(()) | Err(Error::Stream(_) | Error::Soon) => {}
                             Err(error @ Error::Contested { .. }) => {
@@ -1886,21 +1941,31 @@ mod tests {
     }
 
     /// Proposes the spec change that the board gives node `id`, as `Mesh::apply`
-    /// does after its count of the holders, and puts the result on the board.
+    /// does after its count of the holders, or calls `Mesh::apply` on the base and the
+    /// definitions that it gives, and puts the result on the board.
     async fn apply(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
         loop {
             clock.sleep(TICK).await;
-            let Some(spec) = board.lock().unwrap().applies.remove(&id) else {
-                continue;
+            let (spec, change) = {
+                let mut board = board.lock().unwrap();
+                (board.applies.remove(&id), board.changes.remove(&id))
             };
-            let Proposal {
-                base,
-                root,
-                chunks,
-                holders,
-                homes,
-            } = spec;
-            let result = mesh.settle_spec(base, root, chunks, holders, homes).await;
+            let result = match (spec, change) {
+                (Some(spec), _) => {
+                    let Proposal {
+                        base,
+                        root,
+                        chunks,
+                        holders,
+                        homes,
+                    } = spec;
+                    mesh.settle_spec(base, root, chunks, holders, homes).await
+                }
+                (None, Some((base, definitions))) => {
+                    mesh.apply(base, definitions, BTreeMap::new()).await
+                }
+                (None, None) => continue,
+            };
             let pointer = mesh.pointer();
             board.lock().unwrap().applied.push((id, pointer, result));
         }
@@ -2717,23 +2782,6 @@ mod tests {
         let last = Position::default();
         assert_eq!(asked.body, Body::PreVote { last });
         asked.term
-    }
-
-    /// What `future` gives, or `None` when it waits for longer than `limit`.
-    async fn within<F: Future>(
-        clock: &Clock,
-        limit: Span,
-        future: F,
-    ) -> Option<F::Output> {
-        let mut future = pin!(future);
-        let mut end = clock.sleep(limit);
-        poll_fn(|cx| {
-            if let Poll::Ready(output) = future.as_mut().poll(cx) {
-                return Poll::Ready(Some(output));
-            }
-            Pin::new(&mut end).poll(cx).map(|()| None)
-        })
-        .await
     }
 
     /// Gives the output of `future` when it does not wait.
@@ -5949,13 +5997,13 @@ mod tests {
                         .await;
                 let refused = Mesh::open(config).await.err().unwrap();
                 let limit = Error::Limit {
-                    bytes_max: 50_354,
-                    bytes_min: 50_355,
+                    bytes_max: 51_378,
+                    bytes_min: 51_379,
                 };
                 assert_eq!(refused, limit);
                 assert_eq!(
                     refused.to_string(),
-                    "this node takes messages of at most 50354 bytes, below the 50355 \
+                    "this node takes messages of at most 51378 bytes, below the 51379 \
                      bytes of an append of the largest record"
                 );
             });

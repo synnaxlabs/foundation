@@ -67,6 +67,13 @@
   `Session` that the node refused with a code raises `Refused`, a subclass of
   `ConnectionError` (SDK PYTHON WRITER in
   `docs/decisions/operations/sdk-python-writer.md`).
+  `Memory`, the refusal of the memory of the pool of the frames of the readers, raises
+  `MemoryError` (`laptop.architect-2`, 2026-10-19T14:39:03Z,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289).
+  `Decode`, a series of a read that does not decode, raises `ConnectionError`: it
+  breaks the protocol of the node, as the `Stream` errors that map there
+  (`laptop.architect-2`, 2026-10-19T12:21:56Z, item 2 of
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6267089707).
   No Python test reaches `Bind`, so the Rust table test of the map, with a real `Bind`,
   is its only test (`laptop.architect-2`, 2026-10-18T15:00:03Z,
   https://github.com/synnaxlabs/foundation/pull/3193#issuecomment-6251395290).

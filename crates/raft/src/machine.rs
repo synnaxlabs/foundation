@@ -107,8 +107,11 @@ impl Ready {
     /// grant it sends, and the votes and the signature of each change it wrote, in
     /// `entries`, in `committed`, in each chain, and in each append. Another node's
     /// grant or change keeps the signature it came with, so it has one when the
-    /// caller checked its message (see [`Raft::claims`]).
+    /// caller checked its message (see [`Raft::claims`]). It calls `sign` once for
+    /// each distinct claim, also when many messages carry it.
     pub fn sign(&mut self, mut sign: impl FnMut(&Claim<'_>) -> Signature) {
+        let mut signed = Signed::default();
+        let mut sign = |claim: &Claim<'_>| signed.of(claim, &mut sign);
         if let Some(hard) = &mut self.hard
             && let Some(proof) = &mut hard.proof
         {
@@ -119,6 +122,80 @@ impl Ready {
         }
         for message in &mut self.messages {
             message.sign(&mut sign);
+        }
+    }
+}
+
+// The claims that one `Ready::sign` signed, with their signatures. A `Ready` holds
+// few distinct claims, so a scan finds one.
+#[derive(Default)]
+struct Signed {
+    grants: Vec<(Claim<'static>, Signature)>,
+    changes: Vec<SignedChange>,
+}
+
+struct SignedChange {
+    leader: node::Key,
+    at: Position,
+    voters: Voters,
+    public_keys: BTreeMap<node::Key, PublicKey>,
+    signature: Signature,
+}
+
+impl Signed {
+    // The signature of `claim`: the one it got before, else a new one from `sign`.
+    fn of(
+        &mut self,
+        claim: &Claim<'_>,
+        sign: &mut impl FnMut(&Claim<'_>) -> Signature,
+    ) -> Signature {
+        match *claim {
+            Claim::Grant {
+                voter,
+                grant,
+                term,
+                candidate,
+            } => {
+                // A grant borrows nothing, so its copy is a `Claim<'static>`.
+                let claim = Claim::Grant {
+                    voter,
+                    grant,
+                    term,
+                    candidate,
+                };
+                if let Some(&(_, signature)) =
+                    self.grants.iter().find(|(signed, _)| *signed == claim)
+                {
+                    return signature;
+                }
+                let signature = sign(&claim);
+                self.grants.push((claim, signature));
+                signature
+            }
+            Claim::Change {
+                leader,
+                at,
+                voters,
+                public_keys,
+            } => {
+                let same = |signed: &&SignedChange| {
+                    (signed.leader, signed.at) == (leader, at)
+                        && signed.voters == *voters
+                        && signed.public_keys == *public_keys
+                };
+                if let Some(signed) = self.changes.iter().find(same) {
+                    return signed.signature;
+                }
+                let signature = sign(claim);
+                self.changes.push(SignedChange {
+                    leader,
+                    at,
+                    voters: voters.clone(),
+                    public_keys: public_keys.clone(),
+                    signature,
+                });
+                signature
+            }
         }
     }
 }
@@ -135,10 +212,12 @@ pub struct Raft {
     in_force: Position,
     // The configuration before `voters`.
     before: Voters,
-    // The other voters in force, plus the nodes that the configuration in force
-    // removed, until a release, a quorum check, or the next configuration drops them.
-    // Never this node.
+    // The other voters in force, the learners, plus the nodes that the configuration
+    // in force removed or a call to `set_learners` left out, until a release, a quorum
+    // check, or the next configuration drops them. Never this node.
     peers: BTreeMap<node::Key, Peer>,
+    // What `set_learners` gave, less this node. A voter in it is not a learner.
+    learners: BTreeSet<node::Key>,
     // The first answer of each other voter to the current campaign.
     answers: BTreeMap<node::Key, Answer>,
     // The tick of the last `removed` answer of each voter in force.
@@ -173,7 +252,8 @@ pub struct Raft {
 impl Raft {
     /// Builds a follower. When the last entry has a higher term than `hard`, the
     /// node starts at that term with no vote: a crash came between the two writes of
-    /// one [`Ready`], and the first [`ready`](Self::ready) gives the new `hard`.
+    /// one [`Ready`], and the first [`ready`](Self::ready) gives the new `hard`. The
+    /// node has no learners until [`set_learners`](Self::set_learners).
     ///
     /// # Errors
     ///
@@ -225,6 +305,7 @@ impl Raft {
             in_force,
             before,
             peers,
+            learners: BTreeSet::new(),
             answers: BTreeMap::new(),
             removals: BTreeMap::new(),
             ticks: 0,
@@ -517,9 +598,12 @@ impl Raft {
     ///   reject names an index past this node's log.
     ///
     /// A message for a lower term is stale: it is answered or dropped with no check.
-    /// A reply is dropped with no check when its sender is not in [`Raft::voters`],
-    /// unless the configuration in force removed the sender and this node still sends
-    /// to it. The node's state does not change on an error.
+    /// A reply is dropped with no check when its sender is neither in
+    /// [`Raft::voters`] nor a learner ([`set_learners`](Self::set_learners)), unless
+    /// the configuration in force removed the sender or a later call to
+    /// [`set_learners`](Self::set_learners) left it out, and this node has not released
+    /// it yet. A learner's reply moves only its own progress. The node's state does not
+    /// change on an error.
     pub fn step(&mut self, message: Message) -> Result<(), Error> {
         if !self.reads(&message)? {
             self.answer_stale(message.from, &message.body);
@@ -538,6 +622,25 @@ impl Raft {
             self.handle(from, term, body, proof);
         }
         Ok(())
+    }
+
+    /// Sets the nodes that get the log and have no vote: `keys`, less this node.
+    /// While the configuration in force holds a key as a voter, it is a voter and not
+    /// a learner. A leader sends each learner heartbeats and appends as it does a
+    /// voter, and never counts its answer toward a commit, an election, or the quorum
+    /// check. A learner stays until a later call leaves it out: neither the quorum
+    /// check nor a change of the configuration releases it. A node that a later call
+    /// leaves out, and that the configuration in force does not hold, is released as a
+    /// node that a change removed is. This node never sends a learner a PreVote or a
+    /// Vote. Each node keeps the set, so a node that becomes leader has it.
+    pub fn set_learners(&mut self, keys: impl IntoIterator<Item = node::Key>) {
+        self.learners = keys.into_iter().collect();
+        self.learners.remove(&self.key);
+        let last = self.log.last().index;
+        for &key in &self.learners {
+            self.peers.entry(key).or_insert_with(|| Peer::new(last));
+        }
+        self.release_removed();
     }
 
     /// Each claim of `message`, from another node to this one, that
@@ -742,8 +845,9 @@ impl Raft {
         leave.index.max(self.log.first_of(self.term))
     }
 
-    // Releases the nodes a committed change removed: they leave the peers. A leader
-    // keeps one until it holds all it gets, and sends it the commit as it goes.
+    // Releases each peer that is neither a voter nor a learner, once the last change
+    // commits. A leader keeps one until it holds all it gets, and sends it the commit
+    // as it goes.
     fn release_removed(&mut self) {
         if !self.log.settled() {
             return;
@@ -754,7 +858,7 @@ impl Raft {
             .peers
             .iter()
             .filter(|&(&key, peer)| {
-                !self.voters.contains(key)
+                !full(&self.voters, &self.learners, key)
                     && (!leader || peer.progress.matched() >= end)
             })
             .map(|(&key, _)| key)
@@ -865,9 +969,9 @@ impl Raft {
         self.sync_voters();
     }
 
-    // Puts the log's configuration in force. The peers become its other voters and
-    // the nodes it removed: the other voters of the configuration before it. A new peer
-    // starts at the end of the log.
+    // Puts the log's configuration in force. The peers become its other voters, the
+    // nodes it removed (the other voters of the configuration before it), and the
+    // learners. A new peer starts at the end of the log.
     fn sync_voters(&mut self) {
         let (at, voters) = self.log.voters();
         // Equal voters at another position still change who was removed.
@@ -880,7 +984,8 @@ impl Raft {
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
         let keep = others(&self.log, self.key);
-        self.peers.retain(|key, _| keep.contains(key));
+        self.peers
+            .retain(|key, _| keep.contains(key) || self.learners.contains(key));
         for key in keep {
             let peer = self.peers.entry(key).or_insert_with(|| Peer::new(last));
             // A node a change adds counts as heard until the next quorum check, even
@@ -910,8 +1015,8 @@ impl Raft {
     }
 
     // Sends each follower in `range` the entries from its `next` that fit, and the
-    // commit index, unless the leader waits for its reply. A node that a change
-    // removed gets entries only up to `removed_end`.
+    // commit index, unless the leader waits for its reply. A peer that is neither a
+    // voter nor a learner gets entries only up to `removed_end`.
     fn send_appends<R: RangeBounds<node::Key>>(&mut self, range: R) {
         let commit = self.log.committed();
         let removed_end = self.removed_end();
@@ -926,7 +1031,7 @@ impl Raft {
                 .log
                 .at(next - 1)
                 .expect("invariant: a follower's next entry follows the leader's log");
-            let end = if self.voters.contains(to) {
+            let end = if full(&self.voters, &self.learners, to) {
                 self.log.last().index
             } else {
                 removed_end
@@ -1151,10 +1256,11 @@ impl Raft {
                 .voters
                 .quorum(|key| key == self.key || self.peer(key).active)
                 .is_ok();
-            // A removed node that answered nothing since the last check is released.
-            let voters = &self.voters;
+            // A peer that is neither a voter nor a learner, and that answered nothing
+            // since the last check, is released.
+            let (voters, learners) = (&self.voters, &self.learners);
             self.peers
-                .retain(|&key, peer| peer.active || voters.contains(key));
+                .retain(|&key, peer| peer.active || full(voters, learners, key));
             // A peer silent through a check may have lost the leader with its hard
             // state, so it gets the votes again.
             for peer in self.peers.values_mut() {
@@ -1277,7 +1383,7 @@ impl Raft {
         let unanswered: Vec<node::Key> = self
             .peers
             .keys()
-            .filter(|&&peer| !self.answers.contains_key(&peer))
+            .filter(|&&peer| !self.answers.contains_key(&peer) && !self.learner(peer))
             .copied()
             .collect();
         for to in unanswered {
@@ -1398,6 +1504,10 @@ impl Raft {
             || (!self.log.settled() && self.before.contains(self.key))
     }
 
+    fn learner(&self, key: node::Key) -> bool {
+        self.learners.contains(&key) && !self.voters.contains(key)
+    }
+
     fn peer(&self, key: node::Key) -> &Peer {
         self.peers
             .get(&key)
@@ -1410,10 +1520,13 @@ impl Raft {
             .expect("invariant: `step` drops a reply from a node that is not a peer")
     }
 
-    // Sends `body` to each peer, with `proof`.
+    // Sends `body` to each peer that is not a learner, with `proof`.
     fn broadcast(&mut self, term: Term, body: &Body, proof: Option<&Proof>) {
         let chain = self.chain(term, proof);
         for &to in self.peers.keys() {
+            if self.learner(to) {
+                continue;
+            }
             let mut message = Message {
                 from: self.key,
                 to,
@@ -1479,6 +1592,11 @@ fn fit(fits: fn(&Message) -> bool, message: &mut Message) {
         );
         message.chain.remove(0);
     }
+}
+
+// Whether `key` gets the whole log: a voter in force, or a learner.
+fn full(voters: &Voters, learners: &BTreeSet<node::Key>, key: node::Key) -> bool {
+    voters.contains(key) || learners.contains(&key)
 }
 
 // The nodes that `log` keeps a peer for on node `key`: every node but `key`.
@@ -1706,6 +1824,40 @@ mod tests {
             assert_eq!(ready.hard, None);
             assert_eq!(ready.messages.len(), 2);
             assert_eq!(raft.ready(), Ready::default());
+        }
+
+        // The hard proof and each vote request carry node 1's pre-vote.
+        #[test]
+        fn signs_a_claim_that_many_messages_carry_once() {
+            let mut raft = raft(&[1, 2, 3, 4, 5], Hard::default());
+            raft.campaign();
+            for from in [2, 3] {
+                let granted = Body::PreVoteReply { answer: GRANTED };
+                raft.step(message(from, 1, granted)).unwrap();
+            }
+            assert_eq!(raft.role(), Role::Candidate);
+            let mut ready = raft.ready();
+            let mut claims = Vec::new();
+            ready.sign(|claim| {
+                claims.push(format!("{claim:?}"));
+                Signature([7; 64])
+            });
+            let claim = Claim::Grant {
+                voter: key(1),
+                grant: Grant::PreVote,
+                term: Term(1),
+                candidate: key(1),
+            };
+            assert_eq!(claims, [format!("{claim:?}")]);
+            let own = |proof: &Option<Proof>| proof.as_ref().unwrap().voters[&key(1)];
+            let votes: Vec<Option<Signature>> = ready
+                .messages
+                .iter()
+                .filter(|m| matches!(m.body, Body::Vote { .. }))
+                .map(|m| own(&m.proof))
+                .collect();
+            assert_eq!(votes, [Some(Signature([7; 64])); 4]);
+            assert_eq!(own(&ready.hard.unwrap().proof), Some(Signature([7; 64])));
         }
 
         #[test]
@@ -4280,6 +4432,207 @@ mod tests {
         }
     }
 
+    mod learners {
+        use super::*;
+
+        fn to(messages: &[Message]) -> Vec<node::Key> {
+            messages.iter().map(|m| m.to).collect()
+        }
+
+        fn committed(raft: &mut Raft) -> Vec<u64> {
+            raft.ready()
+                .committed
+                .iter()
+                .map(|entry| entry.at.index)
+                .collect()
+        }
+
+        fn accepted(raft: &mut Raft, from: u8, last: u64) {
+            raft.step(message(from, 1, Body::AppendReply { last }))
+                .unwrap();
+        }
+
+        // A node that becomes leader has the set it got as a follower.
+        #[test]
+        fn a_leader_sends_a_learner_each_entry_and_the_commit() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            accepted(&mut raft, 9, 1);
+            assert_eq!(committed(&mut raft), [1]);
+            let at = raft.propose(b"x".to_vec()).unwrap();
+            let messages = sent(&mut raft);
+            let entry = Entry {
+                at,
+                data: Data::Bytes(b"x".to_vec()),
+            };
+            let to_9 = messages.iter().find(|m| m.to == key(9)).unwrap();
+            assert_eq!(to_9.body, append(position(1, 1), vec![entry], 1));
+            accepted(&mut raft, 9, 2);
+            assert_eq!(committed(&mut raft), []);
+            accepted(&mut raft, 2, 2);
+            assert_eq!(committed(&mut raft), [2]);
+            raft.tick(0);
+            let heartbeat = sent(&mut raft)
+                .into_iter()
+                .find(|m| m.to == key(9))
+                .unwrap();
+            assert_eq!(heartbeat.body, Body::Heartbeat { commit: 2 });
+        }
+
+        #[test]
+        fn an_answer_of_learners_commits_no_entry() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(4), key(5)]);
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 4, 1);
+            accepted(&mut raft, 5, 1);
+            assert_eq!(committed(&mut raft), []);
+            accepted(&mut raft, 2, 1);
+            assert_eq!(committed(&mut raft), [1]);
+        }
+
+        #[test]
+        fn grants_of_learners_elect_no_leader_and_get_no_request() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(4), key(5)]);
+            raft.campaign();
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
+            for (granted, role) in [
+                (Body::PreVoteReply { answer: GRANTED }, Role::Candidate),
+                (Body::VoteReply { answer: GRANTED }, Role::Leader),
+            ] {
+                raft.step(message(4, 1, granted.clone())).unwrap();
+                raft.step(message(5, 1, granted.clone())).unwrap();
+                assert_ne!(raft.role(), role);
+                assert_eq!(sent(&mut raft), []);
+                raft.step(message(2, 1, granted)).unwrap();
+                assert_eq!(raft.role(), role);
+                let messages = sent(&mut raft);
+                if role == Role::Candidate {
+                    assert_eq!(to(&messages), [key(2), key(3)]);
+                }
+            }
+        }
+
+        #[test]
+        fn a_late_pre_vote_asks_no_learner_for_a_vote() {
+            let mut raft = raft(&[1, 2, 3, 4, 5], Hard::default());
+            raft.set_learners([key(9)]);
+            raft.campaign();
+            for from in [2, 3] {
+                let granted = Body::PreVoteReply { answer: GRANTED };
+                raft.step(message(from, 1, granted)).unwrap();
+            }
+            assert_eq!(raft.role(), Role::Candidate);
+            sent(&mut raft);
+            let granted = Body::PreVoteReply { answer: GRANTED };
+            raft.step(message(4, 1, granted)).unwrap();
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(4), key(5)]);
+        }
+
+        #[test]
+        fn the_quorum_check_never_releases_a_silent_learner() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            for _ in 0..3 {
+                raft.step(message(2, 1, Body::HeartbeatReply)).unwrap();
+                tick_times(&mut raft, 10);
+                assert_eq!(raft.role(), Role::Leader);
+            }
+            sent(&mut raft);
+            raft.tick(0);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(9)]);
+        }
+
+        #[test]
+        fn a_voter_in_the_set_stays_a_voter() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(2), key(3)]);
+            raft.campaign();
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            assert_eq!(committed(&mut raft), [1]);
+        }
+
+        #[test]
+        fn the_set_leaves_out_this_node() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            raft.set_learners([key(1), key(9)]);
+            raft.tick(0);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(9)]);
+        }
+
+        #[test]
+        fn a_silent_learner_that_a_call_leaves_out_goes_at_the_quorum_check() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            raft.set_learners([key(8)]);
+            sent(&mut raft);
+            raft.tick(0);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(8), key(9)]);
+            raft.step(message(2, 1, Body::HeartbeatReply)).unwrap();
+            tick_times(&mut raft, 10);
+            sent(&mut raft);
+            raft.tick(0);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(8)]);
+        }
+
+        #[test]
+        fn a_learner_that_a_call_leaves_out_and_holds_the_log_goes_at_once() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            accepted(&mut raft, 9, 1);
+            sent(&mut raft);
+            raft.set_learners([]);
+            let messages = sent(&mut raft);
+            assert_eq!(to(&messages), [key(9)]);
+            assert_eq!(messages[0].body, Body::Heartbeat { commit: 1 });
+            raft.tick(0);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
+        }
+
+        #[test]
+        fn a_learner_that_a_call_leaves_out_is_read_until_its_release() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            raft.set_learners([]);
+            sent(&mut raft);
+            let reply = message(9, 1, Body::AppendReply { last: 5 });
+            assert_eq!(
+                raft.step(reply),
+                Err(Error::IndexPastLog { index: 5, last: 1 })
+            );
+            accepted(&mut raft, 9, 1);
+            assert_eq!(to(&sent(&mut raft)), [key(9)]);
+            raft.tick(0);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
+        }
+
+        #[test]
+        fn a_late_pre_vote_asks_a_voter_in_the_set() {
+            let mut raft = raft(&[1, 2, 3, 4, 5], Hard::default());
+            raft.set_learners([key(4), key(5)]);
+            raft.campaign();
+            for from in [2, 3] {
+                let granted = Body::PreVoteReply { answer: GRANTED };
+                raft.step(message(from, 1, granted)).unwrap();
+            }
+            sent(&mut raft);
+            let granted = Body::PreVoteReply { answer: GRANTED };
+            raft.step(message(4, 1, granted)).unwrap();
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(4), key(5)]);
+        }
+    }
+
     mod config {
         use super::*;
 
@@ -4952,6 +5305,147 @@ mod tests {
                 assert_eq!(raft.role(), Role::Leader);
                 assert_eq!(past, Vec::<u64>::new(), "answers: {answers}");
             }
+        }
+
+        // Node 4 counts while the configuration holds it, and stays a learner after
+        // the configuration removes it.
+        #[test]
+        fn a_learner_that_a_change_adds_and_removes_stays_a_learner() {
+            let mut raft = leader();
+            raft.set_learners([key(4)]);
+            raft.propose_voters(keyed(&[1, 2, 3, 4])).unwrap();
+            accept(&mut raft, &[2, 3], 2);
+            accept(&mut raft, &[2, 3], 3);
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3, 4], &[]));
+            raft.propose(b"x".to_vec()).unwrap();
+            accept(&mut raft, &[2, 4], 4);
+            assert_eq!(raft.ready().committed.last().unwrap().at.index, 4);
+            raft.propose_voters(keyed(&[1, 2, 3])).unwrap();
+            accept(&mut raft, &[2, 3], 5);
+            accept(&mut raft, &[2, 3, 4], 6);
+            assert_eq!(raft.ready().committed.last().unwrap().at.index, 6);
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3], &[]));
+            sent(&mut raft);
+            let at = raft.propose(b"y".to_vec()).unwrap();
+            let entry = Entry {
+                at,
+                data: Data::Bytes(b"y".to_vec()),
+            };
+            let messages = sent(&mut raft);
+            let to_4 = messages.iter().find(|m| m.to == key(4)).unwrap();
+            assert_eq!(to_4.body, append(position(1, 6), vec![entry], 6));
+            accept(&mut raft, &[4], 7);
+            assert_eq!(raft.ready().committed, []);
+            for _ in 0..3 {
+                raft.step(message(2, 1, Body::HeartbeatReply)).unwrap();
+                tick_times(&mut raft, 10);
+                assert_eq!(raft.role(), Role::Leader);
+            }
+            sent(&mut raft);
+            raft.tick(0);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(4)]);
+        }
+
+        #[test]
+        fn a_change_keeps_a_learner_in_no_configuration() {
+            let mut raft = leader();
+            raft.set_learners([key(9)]);
+            raft.propose_voters(keyed(&[1, 2, 4])).unwrap();
+            sent(&mut raft);
+            raft.tick(0);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(4), key(9)]);
+        }
+
+        #[test]
+        fn a_removed_voter_keeps_its_progress_through_a_later_change() {
+            let mut raft = leader();
+            raft.set_learners([key(4)]);
+            raft.propose_voters(keyed(&[1, 2, 3, 4])).unwrap();
+            accept(&mut raft, &[2, 3], 2);
+            accept(&mut raft, &[2, 3, 4], 3);
+            raft.propose_voters(keyed(&[1, 2, 3])).unwrap();
+            accept(&mut raft, &[2, 3], 4);
+            accept(&mut raft, &[2, 3], 5);
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3], &[]));
+            raft.propose_voters(keyed(&[1, 2, 3, 5])).unwrap();
+            sent(&mut raft);
+            raft.tick(0);
+            let to_4 = sent(&mut raft).into_iter().find(|m| m.to == key(4));
+            assert_eq!(to_4.unwrap().body, Body::Heartbeat { commit: 3 });
+        }
+
+        #[test]
+        fn a_call_that_leaves_a_voter_out_keeps_its_peer() {
+            let mut raft = leader();
+            raft.set_learners([key(2), key(9)]);
+            accept(&mut raft, &[9], 1);
+            raft.set_learners([]);
+            sent(&mut raft);
+            raft.tick(0);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
+        }
+
+        #[test]
+        fn signs_each_claim_of_a_change_once() {
+            let mut raft = leader();
+            raft.propose_voters(keyed(&[1, 2, 4])).unwrap();
+            let mut ready = raft.ready();
+            let mut claims = Vec::new();
+            ready.sign(|claim| {
+                claims.push(format!("{claim:?}"));
+                Signature([u8::try_from(claims.len()).unwrap(); 64])
+            });
+            let joint = voters(&[1, 2, 4], &[1, 2, 3]);
+            let added = keyed(&[4]);
+            let vote = Claim::Grant {
+                voter: key(1),
+                grant: Grant::Vote,
+                term: Term(1),
+                candidate: key(1),
+            };
+            let change = Claim::Change {
+                leader: key(1),
+                at: position(1, 2),
+                voters: &joint,
+                public_keys: &added,
+            };
+            assert_eq!(claims, [format!("{vote:?}"), format!("{change:?}")]);
+            assert_eq!(to(&ready.messages), [key(2), key(3), key(4)]);
+            let [to_2, to_3, to_4] = &ready.messages[..] else {
+                panic!("a message to each of 2, 3, and 4");
+            };
+            assert_eq!(to_2.body.entries(), ready.entries);
+            assert_eq!(to_3.body.entries(), ready.entries);
+            let votes = &to_4.proof.as_ref().unwrap().voters;
+            assert_eq!(votes[&key(1)], Some(Signature([1; 64])));
+        }
+
+        // Through `Signed::of`, as no call of `Ready::sign` can show the compare of
+        // `public_keys`: only a change that this node writes is unsigned, and a leader
+        // writes one change at a position.
+        #[test]
+        fn signs_a_change_again_for_other_public_keys() {
+            let joint = voters(&[1, 2, 4], &[1, 2, 3]);
+            let (added, none) = (keyed(&[4]), BTreeMap::new());
+            let change = |public_keys| Claim::Change {
+                leader: key(1),
+                at: position(1, 2),
+                voters: &joint,
+                public_keys,
+            };
+            let mut signed = Signed::default();
+            let mut count = 0;
+            let mut sign = |_: &Claim<'_>| {
+                count += 1;
+                Signature([count; 64])
+            };
+            let signatures = [
+                signed.of(&change(&added), &mut sign),
+                signed.of(&change(&none), &mut sign),
+                signed.of(&change(&added), &mut sign),
+            ];
+            let [one, two] = [1, 2].map(|n| Signature([n; 64]));
+            assert_eq!(signatures, [one, two, one]);
         }
 
         // Node 5's vote arrives after the change that removes it is in force. Node 5
