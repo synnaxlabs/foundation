@@ -519,7 +519,8 @@ pub enum Error {
     },
     /// No message of its kind has this length.
     Length {
-        /// The bytes of the message.
+        /// The bytes of the message, or of the counts after the last end of a message
+        /// of the run of ends.
         len: usize,
     },
     /// An open names no channel.
@@ -568,11 +569,11 @@ pub enum Error {
         /// The seq plus the count of the head before it, or the open position.
         end: u64,
     },
-    /// A message of a run has more keys or ends than remain in the run.
+    /// A message of a run has more keys, ends, or counts than remain in the run.
     Run {
-        /// The keys or ends of the message.
+        /// The keys, ends, or counts of the message.
         items: usize,
-        /// The keys or ends that remain in the run.
+        /// The keys, ends, or counts that remain in the run.
         remain: u32,
     },
     /// A message of a body has more bytes than remain in the body.

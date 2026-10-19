@@ -301,9 +301,9 @@ pub enum Reply {
         /// What the home did with the group.
         outcome: Outcome,
     },
-    /// Each frame among the first `frames` frames of the stream that holds `group`,
-    /// and whose `group` its home took, is on disk at that home. `frames` never goes
-    /// back, and never passes the frames whose groups each got an [`Outcome`].
+    /// Of the first `frames` frames of the stream, each frame that holds `group`, and
+    /// whose `group` its home took, is on disk at that home. `frames` never goes back,
+    /// and never passes the frames whose groups each got an [`Outcome`].
     Stored {
         /// The group that it covers.
         group: u32,
@@ -678,17 +678,18 @@ impl Replies {
             } => self.outcome(frame, group, outcome)?,
             Reply::Stored { group, frames } => {
                 let state = open(&mut self.groups, group)?;
-                let answered = self.answered;
-                let bound = if frames < state.stored {
-                    state.stored
-                } else {
-                    answered
-                };
-                if frames < state.stored || frames > answered {
+                if frames < state.stored {
                     return Err(Error::Stored {
                         group,
                         frames,
-                        bound,
+                        bound: state.stored,
+                    });
+                }
+                if frames > self.answered {
+                    return Err(Error::Stored {
+                        group,
+                        frames,
+                        bound: self.answered,
                     });
                 }
                 state.settle(&mut self.unsettled, |state| state.stored = frames);
@@ -730,7 +731,7 @@ impl Replies {
             .ok()
             .and_then(|at| self.groups.get_mut(at))
         else {
-            unreachable!("invariant: `sent` checks each group of a frame")
+            unreachable!("invariant: `sent` checks group {group} of frame {frame}")
         };
         match (state.ended, outcome) {
             (Some(end), Outcome::Ended(given)) if given == end => {}

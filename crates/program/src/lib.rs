@@ -553,9 +553,9 @@ pub enum Error {
         /// The form of the frame.
         form: Form,
     },
-    /// The write of each group ended with a frame that its home took and whose `Stored`
-    /// did not come, so it may not be on disk: the place of the group's index, and why
-    /// it ended. The other groups go on.
+    /// Each group that it names ended with a frame that its home took and whose
+    /// `Stored` did not come, so that frame may not be on disk. Each item is the place
+    /// of the index of the group and why the group ended. The other groups go on.
     /// [`Writer::stored`] gives it once each taken frame of every other group is on
     /// disk, and again at each later call, so an `Ok` never says that a frame of an
     /// ended group is on disk. [`Writer::finish`] gives it after `Finished`.

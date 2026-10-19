@@ -280,38 +280,28 @@ impl Frames {
         };
         let mut next = self.next;
         let (ends, last) = next.ends(message)?;
-        let counts = match time {
-            Time::Frame(_) => self.counts.strict_add(self.indexes(ends.clone())),
-            Time::Node => 0,
-        };
+        let len = ends.len();
+        let mut indexes = 0_u32;
+        match time {
+            Time::Frame(_) => self.assembly.ends(ends, last, |set, place| {
+                indexes = indexes.strict_add(u32::from(index(set, place)));
+            }),
+            Time::Node => self.assembly.ends(ends, last, |_, _| {}),
+        }
+        let counts = self.counts.strict_add(indexes);
         let (early, uncounted) = if early.is_empty() {
             (&[][..], counts)
         } else {
-            Self::checked(early, counts)?
+            Self::checked(early, counts).inspect_err(|_| {
+                self.assembly.drop_ends(len);
+            })?
         };
         self.next = next;
         self.counts = counts;
-        self.assembly.ends(ends, last);
         self.early
             .extend(early.iter().map(|&bytes| u32::from_le_bytes(bytes)));
         self.counted = counts.strict_sub(uncounted);
         Ok(Step::More)
-    }
-
-    /// The ends among `ends` whose place is the index of its group. A place that the
-    /// set does not hold is none: the layout refuses it.
-    fn indexes(&self, ends: ends::Iter<'_>) -> u32 {
-        let set = self.assembly.set();
-        let indexes = ends
-            .filter(|&(place, _)| {
-                let place = to_usize(place);
-                set.entries().get(place).is_some_and(|entry| {
-                    set.groups().get(to_usize(entry.group)) == Some(&place)
-                })
-            })
-            .count();
-        u32::try_from(indexes)
-            .expect("invariant: a message holds at most u32::MAX ends")
     }
 
     /// Starts the run of counts of a draft or a skip with the counts that came before
@@ -392,6 +382,14 @@ impl Frames {
             time: head.time,
         }
     }
+}
+
+/// Whether `place` is the index of its group. A place that `set` does not hold is not:
+/// the layout refuses it.
+fn index(set: &KeySet, place: usize) -> bool {
+    set.entries()
+        .get(place)
+        .is_some_and(|entry| set.groups().get(to_usize(entry.group)) == Some(&place))
 }
 
 #[cfg(test)]
