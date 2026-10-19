@@ -14,6 +14,8 @@ pub(crate) struct Server([u8; 0]);
 pub(crate) struct Counts {
     pub(crate) browses: usize,
     pub(crate) points: usize,
+    pub(crate) monitors: usize,
+    pub(crate) publishes: usize,
 }
 
 /// `UA_LifecycleState` of a server.
@@ -311,6 +313,8 @@ unsafe extern "C" {
     pub(crate) fn shim_server_reads(server: *mut Server, most: u32);
     pub(crate) fn shim_server_references(server: *mut Server, most: u32);
     pub(crate) fn shim_server_browses(server: *mut Server, browse: u32, translate: u32);
+    pub(crate) fn shim_server_monitors(server: *mut Server, most: u32);
+    pub(crate) fn shim_server_end(server: *mut Server, status: u32);
     pub(crate) fn shim_server_count(server: *mut Server) -> *const Counts;
     pub(crate) fn UA_Client_getConnectionAttribute(
         client: *mut super::Client,
