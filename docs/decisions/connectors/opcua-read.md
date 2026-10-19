@@ -101,7 +101,11 @@
   an answer is an error (`laptop.architect-2`, 2026-10-19T00:31:17Z,
   https://github.com/synnaxlabs/foundation/pull/3268#issuecomment-6257117078).
   A `CreateSubscription` or `CreateMonitoredItems` answer whose service result is not
-  Good fails, as open62541 then makes no subscription or item. A
+  Good, such as Uncertain or `GoodCallAgain`, gives that status: `subscribe` fails at a
+  `CreateSubscription` answer, and each item of a `CreateMonitoredItems` call gets it,
+  as open62541 then makes no subscription or item (`laptop.architect-2`,
+  2026-10-19T22:10:04Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278478978). A
   CreateSession, ActivateSession, or GetEndpoints answer of the connect that open62541
   makes still ends the connect, with `BadDecodingError`, at a code that is neither Good
   nor Bad, and a FindServers answer of such a code keeps the given URL (#3317). A close by the client, also at the timeout
@@ -180,25 +184,24 @@
   2026-10-19T20:16:27Z,
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6276383918). Lost:
   each Publish answer sized to one chunk, with 9 reads and any count of Publishes, as
-  the rule of the person then rests on a size estimate with the slack of one chunk,
-  and a Publish answer of two chunks with 9 reads of 8 chunks passes the bound. Lost: a
+  the rule of the person then rests on a size estimate with the slack of one chunk, and
+  a Publish answer of two chunks with 9 reads of 8 chunks passes the bound. Lost: a
   queue cap of `(READS + PUBLISHES) * (CHUNKS - 1)` (77 chunks, about 5 MiB a channel,
-  past the memory picked for the Pi).
-  Each change stays in the client until `changes` gives it, with no drop. The change
-  buffers grow as needed in PR 4b of #2622, and the reserve of `PUBLISHES` answers at
-  `subscribe` comes in PR 4c with its counting test, which merges before PR 5
-  (`laptop.architect-2`, 2026-10-19T21:52:11Z,
+  past the memory picked for the Pi). Each change stays in the client until `changes`
+  gives it, with no drop. The change buffers grow as needed in PR 4b of #2622, and the
+  reserve of `PUBLISHES` answers at `subscribe` comes in PR 4c with its counting test,
+  which merges before PR 5 (`laptop.architect-2`, 2026-10-19T21:52:11Z,
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669).
   `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
   `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
   interval)), and a queue of each item that holds two revised intervals. When the
   revised interval times the revised keep-alive count is over 5 min, half of the 10 min
-  timeout of a Publish request in open62541, `subscribe` fails with `BadOutOfRange`
-  and sends no Publish request: the client sends Publish requests only after this
-  check. At `BadNoSubscription` in a Publish answer, the patched open62541 deletes each
-  local subscription, so `changes` ends with `BadNoSubscription` and no Publish request
-  goes out again; the release only logs it and sends again at once
-  (`laptop.architect-2`, 2026-10-19T22:06:54Z,
+  timeout of a Publish request in open62541, `subscribe` fails with `BadOutOfRange` and
+  sends no Publish request: the client sends Publish requests only after this check. At
+  `BadNoSubscription` in a Publish answer, the patched open62541 deletes each local
+  subscription, so `changes` ends with `BadNoSubscription` and no Publish request goes
+  out again; the release only logs it and sends again at once (`laptop.architect-2`,
+  2026-10-19T22:06:54Z,
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278430237).
   Supersedes the interval and keep-alive of item 1 of
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272, and the
