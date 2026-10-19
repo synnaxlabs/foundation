@@ -92,7 +92,7 @@ async fn send(stream: &mut Stream, stamps: &[i64], values: &[i64]) {
 /// Sends a frame of `value` at place 1 that the node stamps.
 async fn send_untimed(stream: &mut Stream, value: i64) {
     let (ends, body) = frame(&[(0, &[0]), (1, &[value])]);
-    stream.frame(untimed(2), &[], &ends, &body).await;
+    stream.frame(untimed(2), &[1], &ends, &body).await;
 }
 
 /// Finishes `stream`, and gives each reply that the node sent before it finished.
@@ -431,7 +431,7 @@ fn spends_no_stamp_on_a_refused_untimed_frame() {
             let mut stream = write(&agent).await;
             send_untimed(&mut stream, 10).await;
             let (ends, body) = frame(&[(0, &[0]), (1, &[20, 20])]);
-            stream.frame(untimed(2), &[], &ends, &body).await;
+            stream.frame(untimed(2), &[1], &ends, &body).await;
             send_untimed(&mut stream, 30).await;
             assert_eq!(stream.reply().await, taken(1, 0, 1));
             assert_eq!(
@@ -468,7 +468,7 @@ fn refuses_a_frame_whose_series_do_not_hold_its_count_as_codec() {
             let codec = |frame| refused(frame, wire::hub::write::Refusal::Codec);
             for (n, stamps) in (1..).zip([&[][..], &[0, 0]]) {
                 let (ends, body) = frame(&[(0, stamps), (1, &[10])]);
-                stream.frame(untimed(2), &[], &ends, &body).await;
+                stream.frame(untimed(2), &[1], &ends, &body).await;
                 assert_eq!(stream.reply().await, codec(n), "{stamps:?}");
             }
             let (ends, body) = frame(&[(0, &[1, 2]), (1, &[10])]);
@@ -504,7 +504,7 @@ fn refuses_a_frame_while_another_writer_holds_control() {
         let waiting = |frame| refused(frame, wire::hub::write::Refusal::Waiting);
         assert_eq!(stream.reply().await, waiting(1));
         let (ends, body) = frame(&[(0, &[]), (1, &[10])]);
-        stream.frame(untimed(2), &[], &ends, &body).await;
+        stream.frame(untimed(2), &[1], &ends, &body).await;
         assert_eq!(stream.reply().await, waiting(2));
         assert_eq!(end(&mut stream).await, []);
         finish(&mut agent).await;
@@ -785,7 +785,7 @@ fn holds_no_block_for_a_stored_after_a_refused_frame() {
         agent.admit().await;
         let mut stream = write(&agent).await;
         let (ends, body) = frame(&[(0, &[]), (1, &[10])]);
-        stream.frame(untimed(2), &[], &ends, &body).await;
+        stream.frame(untimed(2), &[1], &ends, &body).await;
         let codec = refused(1, wire::hub::write::Refusal::Codec);
         assert_eq!(stream.reply().await, codec);
         agent.sleep(Span::from_nanos(START.nanos() * 3 / 2)).await;
@@ -1410,7 +1410,7 @@ fn stamps_each_group_of_an_untimed_frame_on_its_own() {
             let (mut reading, mut reader) = read(&agent).await;
             let (mut reading_b, mut reader_b) = read_of(&agent, "value-b").await;
             let (ends, body) = frame(&[(0, &[0]), (1, &[0]), (2, &[10]), (3, &[20])]);
-            stream.frame(untimed(4), &[], &ends, &body).await;
+            stream.frame(untimed(4), &[1, 1], &ends, &body).await;
             assert_eq!(stream.reply().await, taken_in(1, 0, 0, 1));
             assert_eq!(stream.reply().await, taken_in(1, 1, 0, 1));
             let (value, stamp) = next(&mut reading, &mut reader).await;

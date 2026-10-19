@@ -110,7 +110,7 @@ async fn write(
     let mut body = [0; 16];
     for n in 0..WARM + COUNTED {
         body[8..].copy_from_slice(&n.to_le_bytes());
-        stream.frame(head, &[], &[(0, 8), (1, 16)], &body).await;
+        stream.frame(head, &[1], &[(0, 8), (1, 16)], &body).await;
         progress.sent.fetch_add(1, Ordering::Relaxed);
         outcome(&mut stream, n).await;
         progress.taken.fetch_add(1, Ordering::Relaxed);

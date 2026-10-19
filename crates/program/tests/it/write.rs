@@ -715,6 +715,74 @@ fn sends_the_count_of_each_group_of_a_draft() {
     );
 }
 
+/// The places of a writer of two groups.
+fn two_groups() -> [Place; 4] {
+    [
+        place(1, STAMP, "time", 0),
+        place(2, I64, "a", 0),
+        place(3, STAMP, "other", 2),
+        place(4, I64, "b", 2),
+    ]
+}
+
+/// A draft of two groups whose group 1 holds no sample gives `Unsent`, as one whose
+/// group 0 holds none does.
+#[test]
+fn gives_unsent_for_a_group_1_of_no_sample() {
+    by_hand(
+        791,
+        move |session, node| async move {
+            let _write = opened_with(&session, &two_groups()).await;
+            node.clock().sleep(QUIET).await;
+        },
+        |session, node| {
+            Box::pin(async move {
+                let mut writer =
+                    session.writer(config(&["a", "b"], 1)).await.expect("opens");
+                let series = [(0, 8), (1, 8), (2, 8), (3, 8)];
+                let draft = writer.draft(Form::Raw, 1, &series).await.expect("a frame");
+                draft.set_count(1, 0);
+                let got = writer.write(Time::Frame(Path::Live)).await;
+                let unsent = Error::Unsent {
+                    count: 0,
+                    form: Form::Raw,
+                };
+                assert_eq!(got, Err(unsent));
+                node.clock().sleep(QUIET).await;
+            })
+        },
+    );
+}
+
+/// A frame of `Time::Node` whose group 1 holds 2 samples gives `Unsent`, as one whose
+/// group 0 holds 2 does.
+#[test]
+fn gives_unsent_for_a_node_frame_of_2_samples_in_group_1() {
+    by_hand(
+        792,
+        move |session, node| async move {
+            let _write = opened_with(&session, &two_groups()).await;
+            node.clock().sleep(QUIET).await;
+        },
+        |session, node| {
+            Box::pin(async move {
+                let mut writer =
+                    session.writer(config(&["a", "b"], 1)).await.expect("opens");
+                let series = [(0, 8), (1, 8), (2, 16), (3, 16)];
+                let draft = writer.draft(Form::Raw, 1, &series).await.expect("a frame");
+                draft.set_count(1, 2);
+                let got = writer.write(Time::Node).await;
+                let unsent = Error::Unsent {
+                    count: 2,
+                    form: Form::Raw,
+                };
+                assert_eq!(got, Err(unsent));
+                node.clock().sleep(QUIET).await;
+            })
+        },
+    );
+}
+
 /// The next message of a frame on `write`.
 async fn message(write: &mut Incoming) -> Vec<u8> {
     let message = write.receiver.recv().await.expect("receives");

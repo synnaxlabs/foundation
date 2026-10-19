@@ -393,13 +393,9 @@ fn head(case: &Case) -> Head {
     }
 }
 
-/// The run of counts of each frame of `case`: none for a head that the node stamps.
+/// The count of each group of a frame of `case`.
 fn counts(case: &Case) -> Vec<u32> {
-    if case.node {
-        Vec::new()
-    } else {
-        vec![case.count; usize::try_from(case.groups).expect("few")]
-    }
+    vec![case.count; usize::try_from(case.groups).expect("few")]
 }
 
 /// The ends and body of a frame of `case` whose first stamp is `stamp`. The data

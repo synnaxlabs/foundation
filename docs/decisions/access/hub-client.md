@@ -375,9 +375,11 @@
   `Error::Index` when its index is not a place whose index is itself, or
   `Error::Unstamped` when it is an index that is not `Stamp`, then `Error::Repeated`.
   `KeySet::ordered` checks these rules and gives `key_set::Error`, which `Opening`
-  maps to them. After the start, `client::Reader` gives `Error::ManyIndexes` for the
-  first place whose index is not that of place 0, and is then done. Ruled by
-  `laptop.architect` at 2026-10-19T15:10:51Z
+  maps to them. When `Opening` gives the start, `client::Reader` gives
+  `Error::ManyIndexes` in its place for the first place whose index is not that of
+  place 0, and is then done. This is a step: #3356 makes the node merge the reads of
+  many indexes, so that no user sees `Error::ManyIndexes` (`laptop.monitor`). Ruled
+  by `laptop.architect` at 2026-10-19T15:10:51Z
   (https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6270542720).
   `Place::index` is a `usize`, as the other places of the crate are, not the `u32` of
   the plan; the wire holds a `u32`. This replaces the lost flag of #3266 above: the
@@ -404,12 +406,16 @@
   group, frames }` and `Reply::Ended { group, end }` come and which merges before PR 2,
   are by `laptop.architect` at 2026-10-19T13:54:38Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268910604). Until
-  PR 2, `hub` never gives `Outcome::Ended`. Key choice (f) went to `laptop.monitor`
-  with the revised plan
-  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917).
+  PR 2, `hub` never gives `Outcome::Ended`. Key choice (f), the revised plan
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917), went
+  to `laptop.monitor` in a factory message, which has no link.
   Supersedes the head `{ time, form, count, series }` and the one `Outcome` for each
   frame of Amended (#2718). Lost: a count of each group in the head, which no message
-  of a small `message_bytes_max` holds for many groups.
+  of a small `message_bytes_max` holds for many groups. `wire::hub::write::Lead`
+  encodes the head, the ends, and the counts of one frame, and gives its messages for
+  a `bytes_max`. The run of counts is private to it. Approved by `laptop.architect` at
+  2026-10-19T17:45:52Z
+  (https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6273514088).
   PR 1c: `Reply::Stored { group, frames }` (kind 4, 13 bytes) counts the frames of one
   group on disk, and `Reply::Ended { group, end }` (kind 6, 6 bytes) ends the write of
   one group before each later outcome of that group, which is `Outcome::Ended`.

@@ -235,7 +235,7 @@ impl<'f> Lead<'f> {
             let most = bytes_max.strict_div(len).strict_mul(len);
             let end = run.end;
             run.step_by(most)
-                .map(move |at| at..end.min(at.strict_add(most)))
+                .map(move |at| at..end.min(at.saturating_add(most)))
         });
         iter::once(0..Head::LEN).chain(runs)
     }

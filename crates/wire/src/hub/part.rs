@@ -322,14 +322,16 @@ fn due_draft(what: &str) -> ! {
     panic!("a draft is due before {what}")
 }
 
-/// The group of each index among `ends`, in order.
+/// The group of each index among `ends`, in order. Each entry of `ends` is in `set`.
 fn groups<'a>(
     set: &'a KeySet,
     ends: &'a [(usize, usize)],
 ) -> impl Iterator<Item = u32> + 'a {
     let entries = set.entries();
     ends.iter().filter_map(move |&(entry, _)| {
-        let place = entries.get(entry)?;
+        let place = entries
+            .get(entry)
+            .expect("invariant: each end is of the set");
         (set.index(entry) == entry).then_some(place.group)
     })
 }
