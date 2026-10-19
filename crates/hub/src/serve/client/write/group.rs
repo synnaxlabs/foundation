@@ -1,8 +1,6 @@
 //! The write of one group of a write stream.
 
 use std::cell::RefCell;
-use std::pin::Pin;
-use std::task::{Context, Poll};
 
 use block::Unique;
 use types::frame::key_set::KeySet;
@@ -30,8 +28,8 @@ pub(super) enum Frame<'a> {
     Part(&'a mut Draft),
 }
 
-/// The write of one group of a stream at its home, and the `Stored` of each commit of
-/// the frames that it took, until the group ends.
+/// The write of one group of a stream at its home, and the `Stored` of the frames that
+/// it took, until the group ends.
 pub(super) struct Group {
     /// The group in the stream's set.
     number: u32,
@@ -46,15 +44,15 @@ pub(super) struct Group {
     sources: Vec<usize>,
     /// The last stamp that the home took or lost, of a frame of [`Time::Node`].
     stamped: Option<Stamp>,
-    /// The count of frames of the stream through the last one taken since the call of
-    /// the commit in `due`.
+    /// The count of frames of the stream through the last one taken since the last
+    /// [`cover`](Group::cover).
     taken: Option<u64>,
     /// The block of the next `Stored`. Outside [`Group::write`], it is `Some` exactly
     /// when `taken` is.
     next: Option<Unique>,
-    /// The commit that is due, the count of frames that it covers, and the block of its
+    /// The count of frames that the commit that is due covers, and the block of its
     /// `Stored`.
-    due: Option<(::home::Commit, u64, Unique)>,
+    covered: Option<(u64, Unique)>,
 }
 
 impl Group {
@@ -70,22 +68,25 @@ impl Group {
             stamped: None,
             taken: None,
             next: None,
-            due: None,
+            covered: None,
         }
     }
 
     /// Writes the series of the group in `frame`, frame `count` of the stream, of
     /// `time`, and gives its outcome, after the `Ended` reply and its block when the
-    /// group ends at it. First takes the block of the next `Stored` from the home's
-    /// pool when the group holds none, so each taken frame has the block of its
-    /// `Stored`. A frame that finds no block for it or for the copy of its series is
-    /// refused as `Full` or `Large`, and the home does not see it.
+    /// group ends at it. Pushes the group to `waiting` when the frame is its first
+    /// taken frame since the last [`cover`](Self::cover). First takes the block of the
+    /// next `Stored` from the home's pool when the group holds none, so each taken
+    /// frame has the block of its `Stored`. A frame that finds no block for it or for
+    /// the copy of its series is refused as `Full` or `Large`, and the home does not
+    /// see it.
     pub(super) fn write(
         &mut self,
         state: &RefCell<State>,
         frame: Frame<'_>,
         time: Time,
         count: u64,
+        waiting: &mut Vec<u32>,
     ) -> (Option<(Unique, Reply)>, Outcome) {
         if let Some(end) = self.ended {
             return (None, Outcome::Ended(end));
@@ -108,7 +109,7 @@ impl Group {
             .as_mut()
             .expect("invariant: a group that did not end writes until the finish");
         match write(writer, draft, time, &mut self.stamped) {
-            Ok(outcome) => (None, self.counted(state, count, outcome)),
+            Ok(outcome) => (None, self.counted(count, outcome, waiting)),
             Err(end) => {
                 let block = self
                     .next
@@ -128,40 +129,36 @@ impl Group {
         }
     }
 
-    /// Polls the commit that is due. Pending when none is.
-    pub(super) fn poll(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<(), env::files::Error>> {
-        match &mut self.due {
-            Some((commit, ..)) => Pin::new(commit).poll(cx),
-            None => Poll::Pending,
-        }
+    /// Moves the taken frames to the commit that is called next. Gives whether the
+    /// group took a frame since the last call.
+    pub(super) fn cover(&mut self) -> bool {
+        let Some(frames) = self.taken.take() else {
+            return false;
+        };
+        let block = self
+            .next
+            .take()
+            .expect("invariant: a taken frame has the block of its `Stored`");
+        self.covered = Some((frames, block));
+        true
     }
 
-    /// Whether a commit is due.
-    pub(super) fn due(&self) -> bool {
-        self.due.is_some()
-    }
-
-    /// Takes the due commit, which ended with `committed`, and gives the block and the
-    /// reply of its end: `Stored` and the call of the next commit, or `Ended` of
-    /// `Failed`.
+    /// The reply of the end of the commit that covers the group, `committed`, with its
+    /// block: `Stored`, or `Ended` of `Failed`. `None` when the group ended after the
+    /// commit's call.
     pub(super) fn committed(
         &mut self,
-        state: &RefCell<State>,
         committed: &Result<(), env::files::Error>,
-    ) -> (Unique, Reply) {
-        let (_, frames, block) = self.due.take().expect("invariant: a commit is due");
+    ) -> Option<(Unique, Reply)> {
+        let (frames, block) = self.covered.take()?;
         if committed.is_err() {
-            return self.end(End::Failed, block);
+            return Some(self.end(End::Failed, block));
         }
-        self.call(state);
         let group = self.number;
-        (block, Reply::Stored { group, frames })
+        Some((block, Reply::Stored { group, frames }))
     }
 
-    /// Drops the writer, so that control ends, and keeps the commits that are due.
+    /// Drops the writer, so that control ends, and keeps the taken frames.
     pub(super) fn close(&mut self) {
         self.writer = None;
     }
@@ -199,22 +196,23 @@ impl Group {
         self.writer = None;
         self.taken = None;
         self.next = None;
-        self.due = None;
+        self.covered = None;
         let group = self.number;
         (block, Reply::Ended { group, end })
     }
 
-    /// Counts a taken frame for the next commit, which this calls when none is due, and
-    /// gives `outcome`.
+    /// Counts a taken frame for the next commit, pushes the group to `waiting` when it
+    /// is the first since the last [`cover`](Self::cover), and gives `outcome`.
     fn counted(
         &mut self,
-        state: &RefCell<State>,
         count: u64,
         outcome: Outcome,
+        waiting: &mut Vec<u32>,
     ) -> Outcome {
         if let Outcome::Taken { .. } = outcome {
-            self.taken = Some(count);
-            self.call(state);
+            if self.taken.replace(count).is_none() {
+                waiting.push(self.number);
+            }
             return outcome;
         }
         self.untaken(outcome)
@@ -227,19 +225,6 @@ impl Group {
             self.next = None;
         }
         outcome
-    }
-
-    /// Calls a commit for the taken frames when none is due.
-    fn call(&mut self, state: &RefCell<State>) {
-        if self.due.is_none()
-            && let Some(frames) = self.taken.take()
-        {
-            let block = self
-                .next
-                .take()
-                .expect("invariant: a taken frame has the block of its `Stored`");
-            self.due = Some((state.borrow().home.committed(), frames, block));
-        }
     }
 }
 

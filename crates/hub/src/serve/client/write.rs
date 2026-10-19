@@ -5,7 +5,7 @@ mod group;
 use std::cell::RefCell;
 use std::future::poll_fn;
 use std::mem;
-use std::pin::pin;
+use std::pin::{Pin, pin};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::task::Poll;
@@ -221,6 +221,12 @@ struct Writes {
     pending: Vec<(u32, Unique)>,
     /// The places of the stream's set, from [`group::places`].
     places: Box<[(u32, usize)]>,
+    /// The commit that is due, of the taken frames of each group of `covered`.
+    due: Option<::home::Commit>,
+    /// Each group that the commit in `due` covers.
+    covered: Vec<u32>,
+    /// Each group that took a frame since the call of the commit in `due`.
+    waiting: Vec<u32>,
 }
 
 impl Writes {
@@ -236,6 +242,9 @@ impl Writes {
             groups,
             pending: Vec::new(),
             places: group::places(set),
+            due: None,
+            covered: Vec::new(),
+            waiting: Vec::new(),
         }
     }
 
@@ -294,18 +303,59 @@ impl Writes {
                 None => Frame::Part(part.as_mut().expect("invariant: a part is kept")),
             };
             let at = to_usize(group);
-            let (ended, outcome) =
-                self.groups[at].write(state, frame, time, self.heads);
+            let (ended, outcome) = self.groups[at].write(
+                state,
+                frame,
+                time,
+                self.heads,
+                &mut self.waiting,
+            );
             if let Some((block, reply)) = ended {
                 send(sender, block, reply).await?;
             }
             send(sender, block, reply(self.heads, group, outcome)).await?;
         }
         self.pending = pending;
+        self.call(state);
         Ok(())
     }
 
-    /// Waits for `received`, and sends the reply of each commit that ends meanwhile.
+    /// Calls a commit for the taken frames of each waiting group when none is due.
+    fn call(&mut self, state: &RefCell<State>) {
+        if self.due.is_some() {
+            return;
+        }
+        let groups = &mut self.groups;
+        self.waiting
+            .retain(|&group| groups[to_usize(group)].cover());
+        if !self.waiting.is_empty() {
+            mem::swap(&mut self.covered, &mut self.waiting);
+            self.due = Some(state.borrow().home.committed());
+        }
+    }
+
+    /// Sends the reply of each group that the due commit covered, which ended with
+    /// `committed`, then calls the next commit.
+    async fn committed(
+        &mut self,
+        state: &RefCell<State>,
+        sender: &mut Sender,
+        committed: &Result<(), env::files::Error>,
+    ) -> Result<(), Error> {
+        let mut covered = mem::take(&mut self.covered);
+        for group in covered.drain(..) {
+            if let Some((block, reply)) =
+                self.groups[to_usize(group)].committed(committed)
+            {
+                send(sender, block, reply).await?;
+            }
+        }
+        self.covered = covered;
+        self.call(state);
+        Ok(())
+    }
+
+    /// Waits for `received`, and sends the replies of each commit that ends meanwhile.
     async fn race<T>(
         &mut self,
         state: &RefCell<State>,
@@ -315,18 +365,18 @@ impl Writes {
         let mut received = pin!(received);
         loop {
             let committed = poll_fn(|cx| {
-                for (at, group) in self.groups.iter_mut().enumerate() {
-                    if let Poll::Ready(committed) = group.poll(cx) {
-                        return Poll::Ready(Err((at, committed)));
-                    }
+                if let Some(due) = &mut self.due
+                    && let Poll::Ready(committed) = Pin::new(due).poll(cx)
+                {
+                    return Poll::Ready(Err(committed));
                 }
                 received.as_mut().poll(cx).map(Ok)
             });
             match committed.await {
                 Ok(received) => return Ok(received?),
-                Err((at, committed)) => {
-                    let (block, reply) = self.groups[at].committed(state, &committed);
-                    send(sender, block, reply).await?;
+                Err(committed) => {
+                    self.due = None;
+                    self.committed(state, sender, &committed).await?;
                 }
             }
         }
@@ -342,12 +392,9 @@ impl Writes {
         for group in &mut self.groups {
             group.close();
         }
-        for group in &mut self.groups {
-            while group.due() {
-                let committed = poll_fn(|cx| group.poll(cx)).await;
-                let (block, reply) = group.committed(state, &committed);
-                send(sender, block, reply).await?;
-            }
+        while let Some(due) = self.due.take() {
+            let committed = due.await;
+            self.committed(state, sender, &committed).await?;
         }
         sender.finish()?;
         Ok(())
