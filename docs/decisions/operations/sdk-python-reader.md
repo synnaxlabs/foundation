@@ -3,10 +3,13 @@
   `sdk::read::Reader`, with the place order of `sdk`. `for frame in reader:` gives each
   frame as a `foundation.Frame`, a read-only `collections.abc.Mapping` from the name
   of each channel of the frame, the index included, to a new one-dimensional
-  `numpy.ndarray` that the program owns, with `Frame.count` and `Frame.lost`. A
-  channel of `uuid`, or of a type that is not a scalar, raises `TypeError` at the open,
-  as `numpy` has no dtype of 16-byte samples that the writer takes. The reader follows
-  the writer (SDK PYTHON WRITER): one `Mutex` taken with
+  `numpy.ndarray` that the program owns, with `Frame.count` and `Frame.lost`. A channel
+  of `uuid` reads as an array of dtype `object`, with one `uuid.UUID` for each sample,
+  made after the guard from the 16 bytes of the sample, big-endian, which costs one
+  Python object a sample (below). `laptop.architect-2` approved it
+  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278668296). Only a
+  channel of a type that is not a scalar raises `TypeError` at the open. The reader
+  follows the writer (SDK PYTHON WRITER): one `Mutex` taken with
   `MutexExt::lock_py_attached`, a check of the process before the lock, and no Python
   code while a call holds the lock. The plan
   (https://github.com/synnaxlabs/foundation/issues/3321#issuecomment-6272864204) was
@@ -45,45 +48,57 @@
   where a `str` matches `on_loss`; and each array made at the first read of its name,
   which cuts the part only for a program that reads fewer channels than it opened, and
   adds a cache to `Frame`.
-  The numbers below come from `sdk/python/bench/read.py` at 9cea9ca19, with the
-  `wheel` profile and the feature `sim` (the reader code of 8bb532882), and a release
-  node, on box1 (Xeon Platinum 8488C, 32 CPUs, load 13 to 34 by `/proc/loadavg`), in
-  µs. The reader times the part of `__next__` after `next_within` gives the frame
+  The numbers below come from `sdk/python/bench/read.py` at 13aa18851, with the `wheel`
+  profile and the feature `sim` (the reader code of 6c996bc1e), and a release node, on
+  box1 (Xeon Platinum 8488C, 32 CPUs, load 9.7 to 19.7 by `/proc/loadavg`), in µs. The
+  reader times the part of `__next__` after `next_within` gives the frame
   (`Reader._part`): the copy of each series, the arrays, the `dict`, and the `Frame`.
   Each case runs on a new node, with 64 MiB of disk per core, and times 3000 frames
-  after 50 to warm up, or the frames that fit in 48 MiB of series (in brackets). Each
-  cell gives the range over 5 passes. Places are of `f64` and do not count the index,
-  whose stamps each frame also holds. "As it comes" reads each frame after its write;
-  "queued" reads the frames after all their writes, with no wait.
+  after 50 to warm up, or the frames that fit in 48 MiB with 48 bytes for each series
+  (in brackets). Each cell gives the range over 5 passes. Places are of `f64` and do not
+  count the index, whose stamps each frame also holds. A case is places x samples.
+  "Comes" (as it comes) reads each frame after its write; "queued" reads the frames
+  after all their writes, with no wait; "whole" is the whole call of `__next__` of a
+  queued frame and the free of the frame, p50 then p99.
 
-  | Case                      | As it comes, p50 | p99       | Queued, p50 | p99       |
-  | ------------------------- | ---------------- | --------- | ----------- | --------- |
-  | 1 place, 100 samples      | 1.95-15.9        | 9.49-36.1 | 0.90-1.02   | 1.27-3.07 |
-  | 1 place, 1000 samples     | 4.85-8.49        | 16.3-24.1 | 2.16-2.36   | 2.98-7.60 |
-  | 1 place, 3000 (998)       | 5.49-15.5        | 21.6-30.3 | 5.01-10.3   | 13.5-24.3 |
-  | 16 places, 100 samples    | 7.38-21.2        | 21.9-43.1 | 4.24-6.20   | 8.24-16.0 |
-  | 64 places, 100 (917)      | 23.5-54.9        | 55.2-84.8 | 14.0-28.3   | 30.3-50.4 |
+  | Case         | Comes p50 | p99       | Queued p50 | p99       | Whole   | p99     |
+  | ------------ | --------- | --------- | ---------- | --------- | ------- | ------- |
+  | 1x100        | 2.20-7.85 | 8.49-16.5 | 0.68-0.94  | 1.41-3.58 | 10-18   | 28-38   |
+  | 1x1000       | 3.96-8.70 | 14.5-25.6 | 2.14-2.51  | 3.08-9.67 | 19-23   | 161-266 |
+  | 1x3000 (996) | 8.78-13.4 | 22.3-29.2 | 5.13-12.5  | 11.4-22.6 | 27-41   | 135-459 |
+  | 16x100       | 10.5-14.0 | 22.6-32.4 | 3.12-5.64  | 5.21-10.1 | 15-28   | 106-280 |
+  | 64x100 (863) | 24.0-28.5 | 42.5-57.1 | 15.5-22.4  | 36.5-45.3 | 62-72   | 266-683 |
+  | 1024x1 (826) | 159-242   | 245-293   | 133-229    | 182-278   | 327-531 | 571-921 |
 
-  One place of `bool`, as it comes, p50 then p99: 1.90-8.67, 8.19-22.3 at 100 samples;
-  2.78-12.5, 12.8-25.3 at 1000; and 4.25-16.2, 16.1-34.0 at 3000 (1814). The other cases
-  are frames over the largest block of the pool of frames of a writer (57344 bytes),
-  which the writer of the bench cannot send. The round trip of a `write_series` of one
-  place to the `__next__` of its frame, p50 of 400 frames: 6.6 to 10.1 ms in 4 passes,
-  and 22.9 to 35.0 ms in the pass whose load rose to 34. A complete reader gets a frame
-  only after it is on disk (B1), so the group commit and its sync set the round trip. A
-  latest reader, in one run of 200 frames of 100 samples, got each frame in 69 µs at
-  p50.
+  One place of `bool`, as it comes, p50 then p99: 2.78-7.14, 10.0-17.6 at 100 samples;
+  2.64-8.08, 11.2-23.7 at 1000; and 4.09-9.83, 9.27-24.1 at 3000 (1807). A queued frame
+  of one sample of `uuid`, in 5 more passes at load 14.3 to 15.5: p50 1.74-2.75, p99
+  4.71-7.42, against p50 0.55-0.79, p99 1.16-2.65 for one sample of `f64`. The other
+  cases are frames over the largest block of the pool of frames of a writer (57344
+  bytes), which the writer of the bench cannot send. The round trip of a `write_series`
+  of one place of 100, 1000, or 3000 samples to the `__next__` of its frame, p50 of 400
+  frames: 6.57 to 8.15 ms for a complete reader, which gets a frame only after it is on
+  disk (B1); and for a latest reader, 71.1 to 84.3 µs at 100 samples in 4 passes and 791
+  µs in the fifth, 122.8 to 841.9 µs at 1000, and 245.5 to 969.9 µs at 3000.
 
-  P1 judgment. The part costs about 0.3 to 0.4 µs for each array (the `Vec`, the `numpy`
-  array, and its item in the `dict`), from the queued cases of 1, 16, and 64 places, and
-  about 0.7 ns for each sample that it copies. A frame as it comes costs 1 to 15 µs more
-  at p50 than a queued one: the thread of the program wakes after it slept through the
-  commit of about 7 ms, with cold caches. It runs once for each frame that a Python
-  program reads, on the CPU of the program, not of the node, and adds 0 bytes per
-  sample. It is on the path of a latest-mode read, so it counts against the latest-mode
-  p99, whose limit is 2.5 µs a hop. Its p99 is over the limit in each case but the
-  queued frame of 1 place of 100 samples, at 1.27 to 3.07 µs. A cut of the part per
-  sample needs arrays that view the buffers of the `sdk` frame, which this item rejects
-  above. A cut of the part per array needs no `numpy` array for each series, which the
-  Python surface cannot give. `laptop.architect-2` accepted this judgment at 0804db16e
-  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278228544).
+  P1 judgment. The part costs about 0.13 to 0.35 µs for each array (the `Vec`, the
+  `numpy` array, and its item in the `dict`), from the queued p50 of 64 and 1024 places
+  (65 and 1025 arrays with the index) against 1 place, and 0.65 to 2.6 ns for each
+  sample that it copies, from the queued p50 of 1 place at 100, 1000, and 3000 samples
+  (two arrays a frame). In each pass, a queued frame of one sample of `uuid` costs 1.2
+  to 2.1 µs more at p50 than one of `f64`. The part alone reaches 250 µs at p99 at about
+  1024 places (182 to 293 µs). In each pass, a frame as it comes costs from 2.3 µs less
+  to 12.3 µs more at p50 than a queued one, at up to 64 places. The whole call adds 9.4
+  to 49.2 µs at p50 to the part of a queued frame at up to 64 places, and 194 to 387 µs
+  at 1024: the wait of `next_within`, the release and take of the GIL, one `getpid`, and
+  the free of the frame. It runs once for each frame that a Python program reads, on the
+  CPU of the program, not of the node, and adds 0 bytes per sample. It is on the path of
+  a latest-mode read, so it counts against the latest-mode p99, whose limit is 2.5 µs a
+  hop. Its p99 is over the limit in each case, and in at least one pass of the queued
+  frame of 1 place of 100 samples (1.41 to 3.58 µs). A cut of the part per sample needs
+  arrays that view the buffers of the `sdk` frame, which this item rejects above. A cut
+  of the part per array needs no `numpy` array for each series, which the Python surface
+  cannot give. `laptop.architect-2` accepted this judgment at 0804db16e
+  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278228544), with the
+  line of 1024 places as its trigger
+  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278668296).
