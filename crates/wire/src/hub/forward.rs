@@ -62,12 +62,14 @@ impl Forward {
 }
 
 /// The places of a forwarded write: each a position (`u32`) in the channels of the
-/// open, in ascending order. The run holds exactly [`Forward::places`] places, so the
-/// home counts them to find where it ends.
+/// open, in ascending order. The run holds exactly [`Forward::places`] places, so
+/// [`Run`] counts them to find where it ends.
 pub mod places {
     use std::slice;
 
-    use super::super::{Error, slots};
+    use super::super::{Error, run, slots};
+    use super::Forward;
+    use crate::common::rest_of_run;
 
     /// The bytes of a place.
     pub const LEN: usize = 4;
@@ -94,9 +96,9 @@ pub mod places {
         );
     }
 
-    /// The places of the run, in order.
+    /// The places of one message of the run, in order.
     #[derive(Clone, Debug)]
-    pub struct Iter<'r>(slice::Iter<'r, [u8; LEN]>);
+    pub struct Iter<'m>(slice::Iter<'m, [u8; LEN]>);
 
     impl Iterator for Iter<'_> {
         type Item = u32;
@@ -112,24 +114,56 @@ pub mod places {
 
     impl ExactSizeIterator for Iter<'_> {}
 
-    /// The places in `run`, the whole run, for an open of `channels` channels.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::Empty`] when `run` is empty, [`Error::Length`] when it is not a whole
-    /// count of places, and [`Error::Place`] for the first place that is not after
-    /// the place before it or not below `channels`.
-    pub fn decode(run: &[u8], channels: u32) -> Result<Iter<'_>, Error> {
-        let places = super::super::run::<LEN>(run)?;
-        let mut before = None;
-        for &bytes in places {
-            let place = u32::from_le_bytes(bytes);
-            if place >= channels || before.is_some_and(|before| place <= before) {
-                return Err(Error::Place { place });
+    /// The decoder of the run of places at the home: it takes each message of the run,
+    /// in order. Each place is after the place before it and below the channels, so the
+    /// run gives at most one place for each channel.
+    #[derive(Debug)]
+    pub struct Run {
+        remain: u32,
+        channels: u32,
+        before: Option<u32>,
+    }
+
+    impl Run {
+        /// A decoder of the run of `forward`, for an open of `channels` channels.
+        pub fn new(forward: Forward, channels: u32) -> Self {
+            Self {
+                remain: forward.places,
+                channels,
+                before: None,
             }
-            before = Some(place);
         }
-        Ok(Iter(places.iter()))
+
+        /// The places of the next message of the run, in order.
+        ///
+        /// # Errors
+        ///
+        /// [`Error::Empty`] when `message` is empty, [`Error::Length`] when it is not a
+        /// whole count of places, [`Error::Run`] when it holds more places than remain
+        /// (also after the run ended), and [`Error::Place`] for the first place that is
+        /// not after the place before it in the run or not below the channels.
+        pub fn decode<'m>(&mut self, message: &'m [u8]) -> Result<Iter<'m>, Error> {
+            let places = run::<LEN>(message)?;
+            let remain = rest_of_run(self.remain, places.len())?;
+            let mut before = self.before;
+            for &bytes in places {
+                let place = u32::from_le_bytes(bytes);
+                if place >= self.channels
+                    || before.is_some_and(|before| place <= before)
+                {
+                    return Err(Error::Place { place });
+                }
+                before = Some(place);
+            }
+            self.remain = remain;
+            self.before = before;
+            Ok(Iter(places.iter()))
+        }
+
+        /// Each place of the run came.
+        pub fn ended(&self) -> bool {
+            self.remain == 0
+        }
     }
 }
 
@@ -153,8 +187,20 @@ mod tests {
         out
     }
 
-    fn decode_places(run: &[u8], channels: u32) -> Result<Vec<u32>, Error> {
-        places::decode(run, channels).map(Iterator::collect)
+    /// A decoder of a run of `places` places, for an open of `channels` channels.
+    fn decoder(places: u32, channels: u32) -> places::Run {
+        places::Run::new(Forward { places }, channels)
+    }
+
+    fn decode(run: &mut places::Run, message: &[u8]) -> Result<Vec<u32>, Error> {
+        run.decode(message).map(Iterator::collect)
+    }
+
+    /// The places of `message`, as the one message of a run of its places.
+    fn decode_places(message: &[u8], channels: u32) -> Result<Vec<u32>, Error> {
+        let places =
+            u32::try_from(message.len() / places::LEN).expect("the count fits");
+        decode(&mut decoder(places.max(1), channels), message)
     }
 
     /// The first place of `places` that is not after the place before it or not
@@ -236,12 +282,12 @@ mod tests {
         }
 
         #[test]
-        fn refuses_an_empty_run() {
+        fn refuses_an_empty_message() {
             assert_eq!(decode_places(&[], 1), Err(Error::Empty));
         }
 
         #[test]
-        fn refuses_a_run_that_is_not_a_whole_count_of_places() {
+        fn refuses_a_message_that_is_not_a_whole_count_of_places() {
             for len in [1, 3, 5, 7] {
                 assert_eq!(decode_places(&vec![0; len], 2), Err(Error::Length { len }));
             }
@@ -267,6 +313,18 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_place_that_is_not_after_the_last_place_of_the_message_before() {
+            for (second, place) in [(2, 2), (1, 1)] {
+                let mut run = decoder(3, 4);
+                assert_eq!(decode(&mut run, &encode_places(&[1, 2])), Ok(vec![1, 2]));
+                assert_eq!(
+                    decode(&mut run, &encode_places(&[second])),
+                    Err(Error::Place { place })
+                );
+            }
+        }
+
+        #[test]
         fn refuses_the_first_bad_place() {
             let run = encode_places(&[2, 1, 9]);
             assert_eq!(decode_places(&run, 4), Err(Error::Place { place: 1 }));
@@ -280,9 +338,46 @@ mod tests {
 
         #[test]
         fn gives_the_count_of_places() {
-            let run = encode_places(&[0, 1, 5]);
-            let places = places::decode(&run, 6).expect("the places are valid");
+            let mut run = decoder(3, 6);
+            let message = encode_places(&[0, 1, 5]);
+            let places = run.decode(&message).expect("valid places");
             assert_eq!(places.len(), 3);
+        }
+
+        #[test]
+        fn refuses_a_message_with_more_places_than_remain() {
+            let mut run = decoder(4, 8);
+            assert_eq!(decode(&mut run, &encode_places(&[0, 1])), Ok(vec![0, 1]));
+            assert_eq!(
+                decode(&mut run, &encode_places(&[2, 3, 4])),
+                Err(Error::Run {
+                    items: 3,
+                    remain: 2
+                })
+            );
+        }
+
+        #[test]
+        fn refuses_a_message_after_the_run_ended() {
+            let mut run = decoder(1, 4);
+            assert_eq!(decode(&mut run, &encode_places(&[0])), Ok(vec![0]));
+            assert_eq!(
+                decode(&mut run, &encode_places(&[1])),
+                Err(Error::Run {
+                    items: 1,
+                    remain: 0
+                })
+            );
+        }
+
+        #[test]
+        fn ends_with_the_last_place() {
+            let mut run = decoder(3, 8);
+            assert!(!run.ended());
+            assert_eq!(decode(&mut run, &encode_places(&[0, 1])), Ok(vec![0, 1]));
+            assert!(!run.ended());
+            assert_eq!(decode(&mut run, &encode_places(&[5])), Ok(vec![5]));
+            assert!(run.ended());
         }
 
         #[test]
@@ -314,31 +409,46 @@ mod tests {
 
         proptest! {
             #[test]
-            fn round_trips(
+            fn round_trips_in_messages(
                 places in proptest::collection::btree_set(any::<u32>(), 1..64),
                 over in 1..=u32::MAX,
+                per in 1..8_usize,
             ) {
                 let places: Vec<u32> = places.into_iter().collect();
                 let last = *places.last().expect("at least one place");
                 let channels = last.saturating_add(over);
                 prop_assume!(last < channels);
-                let run = encode_places(&places);
-                prop_assert_eq!(decode_places(&run, channels), Ok(places));
+                let count = u32::try_from(places.len()).expect("the count fits");
+                let mut run = decoder(count, channels);
+                let mut iter = places.iter().copied();
+                let mut decoded = Vec::new();
+                for chunk in places.chunks(per) {
+                    prop_assert!(!run.ended());
+                    let mut message = vec![0xaa; chunk.len() * places::LEN];
+                    places::encode(iter.by_ref(), &mut message);
+                    let got = decode(&mut run, &message);
+                    prop_assert_eq!(got.as_deref(), Ok(chunk));
+                    decoded.extend_from_slice(chunk);
+                }
+                prop_assert!(run.ended());
+                prop_assert_eq!(iter.next(), None);
+                prop_assert_eq!(decoded, places);
             }
 
             #[test]
             fn refuses_the_first_place_that_breaks_the_order(
                 places in proptest::collection::vec(0..8_u32, 1..8),
                 channels in 0..10_u32,
+                per in 1..4_usize,
             ) {
-                let expected = match first_bad(&places, channels) {
-                    Some(place) => Err(Error::Place { place }),
-                    None => Ok(places.clone()),
-                };
-                prop_assert_eq!(
-                    decode_places(&encode_places(&places), channels),
-                    expected
-                );
+                let count = u32::try_from(places.len()).expect("the count fits");
+                let mut run = decoder(count, channels);
+                let refused = places
+                    .chunks(per)
+                    .find_map(|chunk| decode(&mut run, &encode_places(chunk)).err());
+                let expected = first_bad(&places, channels).map(|place| Error::Place { place });
+                prop_assert_eq!(refused, expected);
+                prop_assert_eq!(run.ended(), expected.is_none());
             }
         }
     }

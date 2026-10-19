@@ -1,13 +1,12 @@
-//! `wire::hub::forward::Forward::decode` and `places::decode` never panic, a forward
-//! that decodes encodes to its bytes, a refused forward has the refusal that its kind,
-//! its length, and its count give, the places of a run decode when each is after the
-//! one before it and below the channels, else the first that is not is refused, a run
-//! that decodes encodes to its bytes, and each valid forward and run made from the
-//! input reads back.
+//! `wire::hub::forward::Forward::decode` and `places::Run::decode` never panic, a
+//! forward that decodes encodes to its bytes, a refused forward has the refusal that its
+//! kind, its length, and its count give, each message of the run gives what a model of
+//! the run gives, a message that decodes encodes to its bytes, and each valid forward
+//! and run made from the input reads back in messages.
 //!
 //! Input: the channels of the open (`u32`), then the messages of one stream
-//! (`fuzz::messages`). The first is decoded as a forward, and the rest, joined, as the
-//! run of places.
+//! (`fuzz::messages`). The first is decoded as a forward, and each other as the next
+//! message of its run of places, until one is refused.
 
 #![no_main]
 #![expect(clippy::disallowed_methods, reason = "fuzz_target! calls File::create")]
@@ -21,7 +20,7 @@ use libfuzzer_sys::{
 use wire::hub::Error;
 use wire::hub::forward::{Forward, places};
 
-fn forward(message: &[u8]) {
+fn forward(message: &[u8]) -> Option<Forward> {
     let expected = match message {
         [] => Err(Error::Empty),
         &[kind, ..] if kind != 8 => Err(Error::Kind { kind }),
@@ -31,48 +30,47 @@ fn forward(message: &[u8]) {
     };
     let decoded = Forward::decode(message);
     assert_eq!(decoded.map(|_| ()), expected, "{message:?}");
-    if let Ok(forward) = decoded {
-        let mut out = [0; Forward::LEN];
-        forward.encode(&mut out);
-        assert_eq!(out.as_slice(), message, "the forward changed");
-    }
+    let forward = decoded.ok()?;
+    let mut out = [0; Forward::LEN];
+    forward.encode(&mut out);
+    assert_eq!(out.as_slice(), message, "the forward changed");
+    Some(forward)
 }
 
-/// The first place of `places` that is not after the place before it or not below
-/// `channels`.
-fn first_bad(places: &[u32], channels: u32) -> Option<u32> {
-    let mut before = None;
-    places.iter().copied().find(|&place| {
-        let bad = place >= channels || before.is_some_and(|before| place <= before);
-        before = Some(place);
-        bad
-    })
+/// A model of the run: the places that remain and the place before.
+struct Model {
+    remain: u32,
+    channels: u32,
+    before: Option<u32>,
 }
 
-fn run(run: &[u8], channels: u32) {
-    let (items, rest) = run.as_chunks::<{ places::LEN }>();
-    let expected = if run.is_empty() {
-        Err(Error::Empty)
-    } else if !rest.is_empty() {
-        Err(Error::Length { len: run.len() })
-    } else {
-        let items: Vec<u32> = items.iter().copied().map(u32::from_le_bytes).collect();
-        match first_bad(&items, channels) {
-            Some(place) => Err(Error::Place { place }),
-            None => Ok(items),
+impl Model {
+    fn decode(&mut self, message: &[u8]) -> Result<Vec<u32>, Error> {
+        let (items, rest) = message.as_chunks::<{ places::LEN }>();
+        if message.is_empty() {
+            return Err(Error::Empty);
         }
-    };
-    let decoded = places::decode(run, channels).map(|places| {
-        let len = places.len();
-        let places: Vec<u32> = places.collect();
-        assert_eq!(places.len(), len, "the count of places changed");
-        places
-    });
-    assert_eq!(decoded, expected, "{run:?} of {channels} channels");
-    if let Ok(decoded) = decoded {
-        let mut out = vec![0; run.len()];
-        places::encode(decoded, &mut out);
-        assert_eq!(out, run, "the run changed");
+        if !rest.is_empty() {
+            return Err(Error::Length { len: message.len() });
+        }
+        let remain = u32::try_from(items.len())
+            .ok()
+            .and_then(|count| self.remain.checked_sub(count))
+            .ok_or(Error::Run {
+                items: items.len(),
+                remain: self.remain,
+            })?;
+        let places: Vec<u32> = items.iter().copied().map(u32::from_le_bytes).collect();
+        let mut before = self.before;
+        for &place in &places {
+            if place >= self.channels || before.is_some_and(|before| place <= before) {
+                return Err(Error::Place { place });
+            }
+            before = Some(place);
+        }
+        self.remain = remain;
+        self.before = before;
+        Ok(places)
     }
 }
 
@@ -80,17 +78,39 @@ fn read(bytes: &[u8]) {
     let Some((&channels, bytes)) = bytes.split_first_chunk::<4>() else {
         return;
     };
+    let channels = u32::from_le_bytes(channels);
     let mut messages = fuzz::messages(bytes);
-    let Some(first) = messages.next() else {
+    let Some(forward) = messages.next().and_then(forward) else {
         return;
     };
-    forward(first);
-    let rest = messages.collect::<Vec<_>>().concat();
-    run(&rest, u32::from_le_bytes(channels));
+    let mut run = places::Run::new(forward, channels);
+    let mut model = Model {
+        remain: forward.places,
+        channels,
+        before: None,
+    };
+    for message in messages {
+        let expected = model.decode(message);
+        let decoded = run.decode(message).map(|places| {
+            let len = places.len();
+            let places: Vec<u32> = places.collect();
+            assert_eq!(places.len(), len, "the count of places changed");
+            places
+        });
+        assert_eq!(decoded, expected, "{message:?} of {channels} channels");
+        let Ok(decoded) = decoded else {
+            return;
+        };
+        assert_eq!(run.ended(), model.remain == 0, "the end of the run changed");
+        let mut out = vec![0; message.len()];
+        places::encode(decoded, &mut out);
+        assert_eq!(out, message, "the message changed");
+    }
 }
 
 fn write(input: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     let written: BTreeSet<u32> = input.arbitrary()?;
+    let per = usize::from(input.arbitrary::<u8>()?).max(1);
     let Some(&last) = written.last() else {
         return Ok(());
     };
@@ -104,14 +124,18 @@ fn write(input: &mut Unstructured<'_>) -> arbitrary::Result<()> {
     forward.encode(&mut out);
     assert_eq!(Forward::decode(&out), Ok(forward), "the forward changed");
 
-    let mut out = vec![0; written.len() * places::LEN];
-    places::encode(written.iter().copied(), &mut out);
-    let decoded = places::decode(&out, channels).map(Iterator::collect::<Vec<_>>);
-    assert_eq!(
-        decoded,
-        Ok(written.into_iter().collect()),
-        "the places changed"
-    );
+    let written: Vec<u32> = written.into_iter().collect();
+    let mut run = places::Run::new(forward, channels);
+    let mut places = written.iter().copied();
+    for chunk in written.chunks(per) {
+        assert!(!run.ended(), "the run ended early");
+        let mut out = vec![0; chunk.len() * places::LEN];
+        places::encode(places.by_ref(), &mut out);
+        let decoded = run.decode(&out).map(Iterator::collect::<Vec<_>>);
+        assert_eq!(decoded.as_deref(), Ok(chunk), "the places changed");
+    }
+    assert!(run.ended(), "the run did not end");
+    assert_eq!(places.next(), None, "a place was not written");
     Ok(())
 }
 
