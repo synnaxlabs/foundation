@@ -74,7 +74,7 @@ const TRIES: usize = 8;
 
 /// Binds `fd` to `local`. Port 0 on `[::]` first tries ports from `free`, which gives
 /// ports that no IPv4 socket holds: the macOS search for a free IPv6 port skips IPv4
-/// binds. When `free` gives none, or [`TRIES`] of its ports are in use, the kernel
+/// binds. When `free` gives none, or [`TRIES`] of its ports fail to bind, the kernel
 /// picks the port.
 fn bind_free(
     fd: BorrowedFd<'_>,
@@ -86,9 +86,8 @@ fn bind_free(
         for port in iter::from_fn(free).take(TRIES) {
             let mut at = local;
             at.set_port(port);
-            match bind(fd, at) {
-                Err(Error::AddressInUse { .. }) => {}
-                bound => return bound,
+            if bind(fd, at).is_ok() {
+                return Ok(());
             }
         }
     }
@@ -571,9 +570,9 @@ mod tests {
             }
         }
 
-        /// The only kill on Linux of a probe that gives no port or port 0: Linux gives
-        /// a `[::]:0` bind a port that no IPv4 socket holds with or without the probe.
-        /// On macOS `port_0_on_any_v6_skips_the_held_ipv4_ports` kills it.
+        /// No public call on Linux kills a probe that gives no port or port 0: Linux
+        /// gives a `[::]:0` bind a port that no IPv4 socket holds with or without the
+        /// probe. On macOS `port_0_on_any_v6_skips_the_held_ipv4_ports` kills it.
         #[test]
         fn free_v4_port_gives_a_port_that_ipv4_binds() {
             let port = free_v4_port().unwrap();
@@ -595,6 +594,8 @@ mod tests {
             assert_eq!(port_of(fd), port);
         }
 
+        /// No public call kills a probe of another address: a `[::1]:0` or mapped bind
+        /// gets a free port with or without it.
         #[test]
         fn other_addresses_bind_as_asked() {
             let port = free_v4_port().unwrap();
