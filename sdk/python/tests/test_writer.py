@@ -372,32 +372,32 @@ class WriterTest(unittest.TestCase):
                 "plant.a",
                 {"lease": 0.0},
                 ValueError,
-                "lease is 0.0 s, not a finite number of seconds over 0",
+                "lease is 0.0 s, outside 1 to 2^63 - 1 whole ns",
             ),
             (
                 "plant.a",
                 {"lease": 1e-12},
                 ValueError,
-                "lease is 1e-12 s, not a finite number of seconds over 0",
+                "lease is 1e-12 s, outside 1 to 2^63 - 1 whole ns",
             ),
             (
                 "plant.a",
                 # Its nanoseconds round to 2^63, one past the largest i64.
                 {"lease": 2**63 / 1e9},
                 ValueError,
-                "lease is 9223372036.854776 s, not a finite number of seconds over 0",
+                "lease is 9223372036.854776 s, outside 1 to 2^63 - 1 whole ns",
             ),
             (
                 "plant.a",
                 {"lease": float("inf")},
                 ValueError,
-                "lease is inf s, not a finite number of seconds over 0",
+                "lease is inf s, outside 1 to 2^63 - 1 whole ns",
             ),
             (
                 "plant.a",
                 {"lease": float("nan")},
                 ValueError,
-                "lease is NaN s, not a finite number of seconds over 0",
+                "lease is NaN s, outside 1 to 2^63 - 1 whole ns",
             ),
             (
                 "plant.a",
@@ -441,7 +441,7 @@ class WriterTest(unittest.TestCase):
                 self.assertIs(type(raised.exception), ValueError)
                 self.assertEqual(
                     str(raised.exception),
-                    f"lease is {lease!r} s, not a finite number of seconds over 0",
+                    f"lease is {lease!r} s, outside 1 to 2^63 - 1 whole ns",
                 )
 
     def test_the_stub_types_each_value_and_lease_that_the_module_takes(self) -> None:
