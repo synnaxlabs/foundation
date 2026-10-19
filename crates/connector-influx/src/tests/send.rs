@@ -799,6 +799,37 @@ fn the_error_of_an_answer_other_than_204_names_the_address() {
     }
 }
 
+/// The error of an address with no port names its host alone, with no default port.
+#[test]
+fn the_error_of_an_answer_at_an_address_with_no_port_names_its_host() {
+    let mut sim = ::sim::Sim::new(::sim::Config::default());
+    let node = sim.node(::sim::node::Config::default());
+    let name = ::sim::name::Config {
+        answer: ::sim::name::Answer::Addresses(vec![node.addresses()[0]]),
+        ..::sim::name::Config::default()
+    };
+    sim.name("influx", name);
+    node.make_dir(std::path::Path::new("/run/secrets"));
+    let errors = sim.run_on(&node, |node, tasks| async move {
+        let mut plant = Plant::unserved(node, tasks).await;
+        plant.address.set_port(80);
+        plant.serve();
+        (plant.answers.borrow_mut())
+            .push_back((StatusCode::SERVICE_UNAVAILABLE, "starting"));
+        let (_, errors, end) = send_one(&plant, config(string("http://influx"))).await;
+        assert!(end.is_none(), "the run goes on");
+        errors
+    });
+    assert_eq!(
+        errors.expect("the run ends"),
+        [
+            "",
+            "InfluxDB at influx answered 503 Service Unavailable: starting",
+            ""
+        ]
+    );
+}
+
 #[test]
 fn keeps_the_token_after_an_answer_other_than_401_or_403() {
     let got = run(|node, tasks| async move {
