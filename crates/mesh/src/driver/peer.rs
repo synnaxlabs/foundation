@@ -7,8 +7,9 @@ use std::task::Poll;
 
 use env::clock::Clock;
 use raft::Voters;
-use transport::Session;
+use transport::{Address, Session, Transport};
 use types::digest::Digest;
+use types::ed25519::PublicKey;
 use types::node;
 use types::time::Span;
 
@@ -95,35 +96,41 @@ impl Mesh {
 
     // Puts `digests` on `to` in calls of at most `CHUNKS` chunks, in order, and gives
     // why the first call that did not end `Ok` within `DEADLINE`, its dials included,
-    // failed. A call that failed on a session that ended dials once more: a session
-    // to a process of `to` that restarted ends only at its first use.
+    // failed. The card of `to` is read once, at the first call.
     async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<(), Miss> {
+        let contact = self.group.borrow().contact(to).ok_or(Miss::Unknown)?;
         for call in digests.chunks(CHUNKS) {
-            let put = async {
-                let session = self.dial(to).await?;
-                match blob::peer::put(&self.store, &session, call).await {
-                    Err(_) if session.ended().is_some() => {}
-                    first => return first.map_err(Miss::Put),
-                }
-                let session = self.dial(to).await?;
-                let put = blob::peer::put(&self.store, &session, call).await;
-                put.map_err(Miss::Put)
-            };
-            within(&self.clock, DEADLINE, put)
-                .await
-                .unwrap_or(Err(Miss::Deadline))?;
+            let put = on_peer(&self.transport, &contact, async |session| {
+                blob::peer::put(&self.store, session, call).await
+            });
+            match within(&self.clock, DEADLINE, put).await {
+                Some(Ok(put)) => put.map_err(Miss::Put)?,
+                Some(Err(error)) => return Err(Miss::Dial(error)),
+                None => return Err(Miss::Deadline),
+            }
         }
         Ok(())
     }
+}
 
-    // The session of the transport to member `to`, which it dials at the addresses
-    // of the card of `to` when it has none open.
-    async fn dial(&self, to: node::Key) -> Result<Session, Miss> {
-        let contact = self.group.borrow().contact(to);
-        let (public_key, addresses) = contact.ok_or(Miss::Unknown)?;
-        let dialed = self.transport.dial(public_key, &addresses).await;
-        dialed.map_err(Miss::Dial)
+/// The public key of a member and the addresses of its card.
+pub(super) type Contact = (PublicKey, Vec<Address>);
+
+// Runs `call` on the session of `transport` to the peer of `contact`, which it dials
+// when it has none open. A call that failed on a session that ended dials once more:
+// a session to a process that restarted ends only at its first use.
+async fn on_peer<T>(
+    transport: &Transport,
+    (public_key, addresses): &Contact,
+    call: impl AsyncFn(&Session) -> Result<T, blob::peer::Error>,
+) -> Result<Result<T, blob::peer::Error>, transport::Error> {
+    let session = transport.dial(*public_key, addresses).await?;
+    match call(&session).await {
+        Err(_) if session.ended().is_some() => {}
+        first => return Ok(first),
     }
+    let session = transport.dial(*public_key, addresses).await?;
+    Ok(call(&session).await)
 }
 
 /// The output of `future`, or `None` when `span` passes first.
