@@ -396,13 +396,17 @@
   also for a group that the frame does not hold. `Outcome::Ended(End)` (kind 5,
   `End::Removed` or `End::Failed`) answers a group whose writer ended. The node makes
   the draft due at the last end, and sets each count of the run into the draft, so the
-  ends of a write stream stay 16 bytes for each place (MEMORY BOUNDS). Decided by `laptop.architect` at 2026-10-19T13:14:46Z
+  ends of a write stream stay 16 bytes for each place (MEMORY BOUNDS). Decided by
+  `laptop.architect` at 2026-10-19T13:14:46Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268096380), on the
   revision https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917.
   `Error::Group` with `next`, a unit `Error::Stamp`, and PR 1c, where `Reply::Stored {
   group, frames }` and `Reply::Ended { group, end }` come and which merges before PR 2,
-  are by `laptop.architect`
+  are by `laptop.architect` at 2026-10-19T13:54:38Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268910604). Until
-  PR 1c, `hub` never gives `Outcome::Ended`. Key choice (f) went to `laptop.monitor`.
-  Lost: a count of each group in the head, which no message of a small
-  `message_bytes_max` holds for many groups.
+  PR 1c, `hub` never gives `Outcome::Ended`. Key choice (f) went to `laptop.monitor`
+  with the revised plan
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917).
+  Supersedes the head `{ time, form, count, series }` and the one `Outcome` for each
+  frame of Amended (#2718). Lost: a count of each group in the head, which no message
+  of a small `message_bytes_max` holds for many groups.
