@@ -304,6 +304,13 @@ impl Gate {
         self.seat = seat;
         self.checked = None;
         self.unrecorded = self.holder() != self.last();
+        // An equal holder takes the place of the record, so a closed record does not
+        // keep its box for the session of the holder.
+        if !self.unrecorded
+            && let Seat::Held { key, .. } = self.seat
+        {
+            self.record = Some(Record::Open(key));
+        }
     }
 
     /// The holder of a recovered seat.
@@ -700,6 +707,13 @@ mod tests {
             assert_eq!(gate.handoff(), None);
             assert_eq!(gate.deadline(), None);
             assert_eq!(write(&mut gate, a, at(6)), Ok(()));
+        }
+
+        #[test]
+        fn frees_the_record_when_its_holder_reopens() {
+            let mut gate = recovered();
+            let a = gate.open(writer("a", 100), None, at(5));
+            assert!(matches!(gate.record, Some(Record::Open(key)) if key == a));
         }
 
         #[test]
