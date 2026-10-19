@@ -233,6 +233,11 @@
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6273867884), which
   changes the cost section of the plan
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124).
+  A learner that does not answer costs the leader its queue of `QUEUE_MAX` = 64
+  messages, the oldest dropped: 10.6 kB of heartbeats, 1.3 MB for 127 such learners
+  (box2, Intel Xeon Platinum 8488C). It is the cost of a fault, not of an idle node.
+  Decided by `laptop.architect`, 2026-10-19T18:37:21Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274494595).
   A member and a `Join` hold at most 64 status entries, as the 32 of `Addresses`.
   Decided by `laptop.architect` (2026-10-07T10:44:26Z):
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. The type
