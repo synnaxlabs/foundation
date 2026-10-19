@@ -3803,13 +3803,13 @@ mod tests {
         .expect("the run after the cut ends");
     }
 
-    #[test]
-    fn open_panics_on_a_handoff_record_that_does_not_decode() {
-        let (mut sim, node) = create_node(175);
+    /// The panic message of an open of a shard whose ring holds one handoff record
+    /// with `damaged` as its body.
+    fn panic_of_open(seed: u64, damaged: Vec<u8>) -> String {
+        let (mut sim, node) = create_node(seed);
         let ended = sim.run_on(&node, |node, tasks| async move {
             let test = Test::new(node, tasks);
             let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
-            let damaged = [&handoff_at(1, VIA, "")[..], &[0xff]].concat();
             let body = test.pool.copy(&damaged).expect("the pool has a block");
             let record = Entry {
                 index: key(Slot::new(0)),
@@ -3832,10 +3832,25 @@ mod tests {
             panic!("the open panics: {ended:?}");
         };
         assert_eq!(thread, "run_on");
+        message
+    }
+
+    #[test]
+    fn open_panics_on_a_handoff_record_that_does_not_decode() {
+        let damaged = [&handoff_at(1, VIA, "")[..], &[0xff]].concat();
         let invalid = "invalid utf-8 sequence of 1 bytes from index 0";
         assert_eq!(
-            message,
+            panic_of_open(175, damaged),
             format!("the handoff subject is not UTF-8: {invalid}")
+        );
+    }
+
+    #[test]
+    fn open_panics_on_a_handoff_record_that_ends_in_its_node() {
+        let damaged = handoff_at(1, VIA, "")[..16].to_vec();
+        assert_eq!(
+            panic_of_open(176, damaged),
+            "the handoff body of 16 bytes has no node"
         );
     }
 

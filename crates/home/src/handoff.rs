@@ -179,12 +179,6 @@ mod tests {
             fn panics_on_a_node_without_a_subject() {
                 read(&bytes("")[..]);
             }
-
-            #[test]
-            #[should_panic(expected = "the handoff body of 16 bytes has no node")]
-            fn panics_on_a_body_that_ends_in_its_node() {
-                read(&bytes("")[..16]);
-            }
         }
     }
 
