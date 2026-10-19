@@ -872,9 +872,7 @@ fn keeps_the_stored_block_of_a_frame_whose_body_comes_after_a_commit() {
             let mut out = vec![0; ends.len() * wire::hub::ends::LEN];
             wire::hub::ends::encode(ends.iter().copied(), &mut out);
             stream.send(&out).await;
-            let mut out = [0; wire::hub::write::counts::LEN];
-            wire::hub::write::counts::encode([1], &mut out);
-            stream.send(&out).await;
+            stream.send(&1_u32.to_le_bytes()).await;
             agent.sleep(START).await;
             stream.send(&body).await;
             let replies = end(&mut stream).await;
