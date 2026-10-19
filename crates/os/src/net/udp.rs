@@ -570,9 +570,6 @@ mod tests {
             }
         }
 
-        /// No public call on Linux kills a probe that gives no port or port 0: Linux
-        /// gives a `[::]:0` bind a port that no IPv4 socket holds with or without the
-        /// probe. On macOS `port_0_on_any_v6_skips_the_held_ipv4_ports` kills it.
         #[test]
         fn free_v4_port_gives_a_port_that_ipv4_binds() {
             let port = free_v4_port().unwrap();

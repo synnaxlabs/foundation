@@ -129,10 +129,13 @@
   off on an IPv6 socket, and routes as `sim` does: a socket on `::` sends IPv4 as
   `::ffff:a.b.c.d`, and any other socket that gets a destination of the other family
   gives `Unreachable`. A UDP bind to `[::]:0` first tries up to 8 ports, each from a
-  new IPv4 probe on `0.0.0.0:0` that it closes. When a probe fails or no such port
-  binds, whatever the error, the kernel picks: on macOS the kernel can give it the
-  port of a held `127.0.0.1` socket, which then gets each datagram to that port (#3422,
-  https://github.com/synnaxlabs/foundation/issues/3422#issuecomment-6276973048). A
+  new IPv4 probe on `0.0.0.0:0` that it closes, because on macOS the kernel can give
+  `[::]:0` the port of a held `127.0.0.1` socket, which then gets each datagram to
+  `127.0.0.1` at that port (#3422,
+  https://github.com/synnaxlabs/foundation/issues/3422#issuecomment-6276973048). When
+  a probe fails or no such port binds, whatever the error, the kernel picks
+  (`laptop.architect-2`, 2026-10-19 21:44 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3432#issuecomment-6278065083). A
   `Transmit` goes out in one `sendmsg`, with GSO, or one per datagram after the kernel
   refuses GSO; there is no `sendmmsg`. A `Transmit` holds at most `TRANSMIT_BYTES_MAX`,
   so a GSO batch gets `EMSGSIZE` only when its segment is over the path MTU. Then each
