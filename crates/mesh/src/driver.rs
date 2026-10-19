@@ -5985,13 +5985,13 @@ mod tests {
                         .await;
                 let refused = Mesh::open(config).await.err().unwrap();
                 let limit = Error::Limit {
-                    bytes_max: 50_354,
-                    bytes_min: 50_355,
+                    bytes_max: 51_378,
+                    bytes_min: 51_379,
                 };
                 assert_eq!(refused, limit);
                 assert_eq!(
                     refused.to_string(),
-                    "this node takes messages of at most 50354 bytes, below the 50355 \
+                    "this node takes messages of at most 51378 bytes, below the 51379 \
                      bytes of an append of the largest record"
                 );
             });

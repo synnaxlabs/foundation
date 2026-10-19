@@ -857,7 +857,7 @@ fn an_apply_whose_store_fails_a_read_for_a_peer_gives_the_error_of_the_store() {
 }
 
 // Voter 1 leaves 127 voters for voter 128. With no chunk to put, each put ends `Ok`
-// at once, in the order of the keys.
+// at once, in the order of the keys. A change holds the 65 holders.
 #[test]
 fn spread_in_a_joint_configuration_counts_a_majority_of_each_half() {
     solo(|node, tasks| async move {
@@ -868,7 +868,18 @@ fn spread_in_a_joint_configuration_counts_a_majority_of_each_half() {
             incoming: keys(2..=128),
             outgoing: keys(1..=127),
         };
-        assert_eq!(mesh.spread(&voters, &[]).await, Ok(keys(1..=65)));
+        let holders = mesh.spread(&voters, &[]).await.unwrap();
+        assert_eq!(holders, keys(1..=65));
+        let change = Change::Spec {
+            base: base(),
+            root: base().root,
+            chunks: BTreeSet::new(),
+            holders,
+            homes: BTreeMap::new(),
+        };
+        let mut bytes = Vec::new();
+        change.encode(&mut bytes);
+        assert_eq!(Change::decode(&bytes), Ok(change));
     });
 }
 

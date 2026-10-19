@@ -44,8 +44,8 @@
   ends after `peer::DEADLINE` (10 s on the `env` clock) with no result. A holder is the
   node when it is a voter, or a voter whose calls each ended `Ok`; a failed dial or call
   leaves a voter no holder. A voter counts only while a half that holds it lacks a
-  majority, so the holders are at most the sum of the majorities of the halves, which
-  the voter bound of SPEC CHANGE keeps within `HOLDERS_MAX`. Once the holders are a
+  majority, so the holders are at most the sum of the majorities of the halves, at
+  most 128, which `HOLDERS_MAX` holds (SPEC CHANGE). Once the holders are a
   majority of each half, the node drops the puts still open and proposes. When the
   holders are not a majority of each half once each put ended, or at the apply, the
   call gives `Error::Quorum { held, voters }` for the first half that lacks one, the

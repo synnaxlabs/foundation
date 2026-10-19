@@ -20,7 +20,7 @@ pub struct Settings {
     pub idle: Span,
     /// The largest message of a stream. The transport takes the smaller of this and
     /// the largest block of its pool. A value under 1472 bytes stops the node with
-    /// [`crate::Error::Transport`]. For a node with a region, a value under 50 355
+    /// [`crate::Error::Transport`]. For a node with a region, a value under 51 379
     /// bytes, the bytes of an append of the largest record of the mesh, also stops it,
     /// with [`crate::Error::Mesh`]. Default 64 KiB.
     pub message_bytes_max: NonZeroUsize,

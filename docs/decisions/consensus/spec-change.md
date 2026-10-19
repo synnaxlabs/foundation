@@ -11,7 +11,7 @@
   still checks the base. Lost: a version in the record, which can disagree with the
   base. A record lists at most `CHUNKS_MAX` = 1024 digests, about 32 KiB, so that
   `message::BYTES_MIN` stays under 64 KiB, the default limit of a node; decode refuses a
-  larger count. `change::BYTES_MAX` = 50 255 bytes is the largest record of any kind: a
+  larger count. `change::BYTES_MAX` = 51 279 bytes is the largest record of any kind: a
   `Spec` change at each bound. `raft` drops the last entries of an `Append` until it
   fits `message::BYTES_MIN` = `BYTES_MAX` + 100, an `Append` of one such record with no
   proof and no link (RAFT SURFACE, MESH WIRE). So a record at the bound goes alone
@@ -27,12 +27,13 @@
   change can list them. The holders are the voters whose durable put of the listed
   chunks the proposer counted: the proposer when it is a voter, and each voter whose
   put of them from the proposer ended `Ok` (SPEC APPLY). A record lists at
-  most `HOLDERS_MAX` = 64 holders, and decode refuses a larger count, so a record at the
-  bounds of chunks and holders is 33 869 bytes. A majority of each half must fit in
-  `HOLDERS_MAX` holders, and a holder in both halves counts in each. So a configuration
-  with one set has at most 127 voters. Two halves that share no voter fit when their
-  majorities sum to at most 64. A change of voters checks this bound with #1231.
-  Decided by
+  most `HOLDERS_MAX` = 128 holders, and decode refuses a larger count, so a record at
+  the bounds of chunks and holders is 34 893 bytes. `HOLDERS_MAX` is 128, the sum of the
+  majorities of two halves of 127 voters each (MESH WIRE), so the holders that SPEC
+  APPLY counts always fit. Decided by `laptop.architect`, 2026-10-19T17:21:45Z
+  (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273042572), which
+  supersedes `HOLDERS_MAX` = 64, the voter bound, and its check by a change of voters
+  of 6060034191. The holders and decode decided by
   `laptop.architect`, 2026-10-08T12:38:01Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6060034191).
   Supersedes the voter bound and the sum of 33 873 bytes of
