@@ -190,8 +190,8 @@ pub struct Raft {
     // The configuration before `voters`.
     before: Voters,
     // The other voters in force, the learners, plus the nodes that the configuration
-    // in force removed, until a release, a quorum check, or the next configuration
-    // drops them. Never this node.
+    // in force removed or a call to `set_learners` left out, until a release, a quorum
+    // check, or the next configuration drops them. Never this node.
     peers: BTreeMap<node::Key, Peer>,
     // What `set_learners` gave, less this node. A voter in it is not a learner.
     learners: BTreeSet<node::Key>,
@@ -506,7 +506,8 @@ impl Raft {
     /// A message for a lower term is stale: it is answered or dropped with no check.
     /// A reply is dropped with no check when its sender is neither in
     /// [`Raft::voters`] nor a learner ([`set_learners`](Self::set_learners)), unless
-    /// the configuration in force removed the sender and this node still sends to
+    /// the configuration in force removed the sender or a later call to
+    /// [`set_learners`](Self::set_learners) left it out, and this node still sends to
     /// it. A learner's reply moves only its own progress. The node's state does not
     /// change on an error.
     pub fn step(&mut self, message: Message) -> Result<(), Error> {
@@ -534,9 +535,10 @@ impl Raft {
     /// a learner. A leader sends each learner heartbeats and appends as it does a
     /// voter, and never counts its answer toward a commit, an election, or the quorum
     /// check. A learner stays until a later call leaves it out: neither the quorum
-    /// check nor a change of the configuration releases it. This node never sends a
-    /// learner a PreVote or a Vote. Each node keeps the set, so a node that becomes
-    /// leader has it.
+    /// check nor a change of the configuration releases it. A node that a later call
+    /// leaves out, and that the configuration in force does not hold, is released as a
+    /// node that a change removed is. This node never sends a learner a PreVote or a
+    /// Vote. Each node keeps the set, so a node that becomes leader has it.
     pub fn set_learners(&mut self, keys: impl IntoIterator<Item = node::Key>) {
         self.learners = keys.into_iter().collect();
         self.learners.remove(&self.key);
@@ -918,8 +920,8 @@ impl Raft {
     }
 
     // Sends each follower in `range` the entries from its `next` that fit, and the
-    // commit index, unless the leader waits for its reply. A node that a change
-    // removed and that is not a learner gets entries only up to `removed_end`.
+    // commit index, unless the leader waits for its reply. A peer that is neither a
+    // voter nor a learner gets entries only up to `removed_end`.
     fn send_appends<R: RangeBounds<node::Key>>(&mut self, range: R) {
         let commit = self.log.committed();
         let removed_end = self.removed_end();
@@ -1159,7 +1161,8 @@ impl Raft {
                 .voters
                 .quorum(|key| key == self.key || self.peer(key).active)
                 .is_ok();
-            // A removed node that answered nothing since the last check is released.
+            // A peer that is neither a voter nor a learner, and that answered nothing
+            // since the last check, is released.
             let (voters, learners) = (&self.voters, &self.learners);
             self.peers
                 .retain(|&key, peer| peer.active || full(voters, learners, key));
@@ -4481,6 +4484,24 @@ mod tests {
             let messages = sent(&mut raft);
             assert_eq!(to(&messages), [key(9)]);
             assert_eq!(messages[0].body, Body::Heartbeat { commit: 1 });
+            raft.tick(0);
+            assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
+        }
+
+        #[test]
+        fn a_learner_that_a_call_leaves_out_is_read_until_its_release() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            raft.set_learners([]);
+            sent(&mut raft);
+            let reply = message(9, 1, Body::AppendReply { last: 5 });
+            assert_eq!(
+                raft.step(reply),
+                Err(Error::IndexPastLog { index: 5, last: 1 })
+            );
+            accepted(&mut raft, 9, 1);
+            assert_eq!(to(&sent(&mut raft)), [key(9)]);
             raft.tick(0);
             assert_eq!(to(&sent(&mut raft)), [key(2), key(3)]);
         }
