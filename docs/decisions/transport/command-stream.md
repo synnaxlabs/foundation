@@ -2,14 +2,14 @@
   streams of each kind, and only a `Class::Command` stream takes the last one. A one-way
   count still adds one more for the hello. A stream of another class waits while the
   peer allows one more of its kind or none. So streams of other classes get
-  `streams_max` while no `Command` stream of their kind holds credit, and
-  `streams_max` - 1 while one does, and a `Command` waits only for credit that another
-  `Command` took: a forward of a mesh proposal never waits for the readers at a home,
-  which each hold a two-way stream of the one session to it. Between nodes, only the
-  raft sender opens a one-way stream, so the one-way `Command` stream that it holds
-  takes no stream from another class. `Event::Available` wakes each waiter of the
-  session, so a `Command` that waits behind waiters of other classes still opens. The
-  rule holds on each session, with no check of the peer: a node opens no stream to a
+  `streams_max` while no `Command` stream of their kind holds credit, and one less for
+  each `Command` stream of their kind that holds credit, and a `Command` waits only for
+  credit that another `Command` took: a forward of a mesh proposal never waits for the
+  readers at a home, which each hold a two-way stream of the one session to it. Between
+  nodes, only the raft sender opens a one-way stream, so the one-way `Command` stream
+  that it holds takes no stream from another class. `Event::Available` wakes each waiter
+  of the session, so a `Command` that waits behind waiters of other classes still opens.
+  The rule holds on each session, with no check of the peer: a node opens no stream to a
   client. The `+1` is in the QUIC settings of a node (`quic/settings.rs`), so a client
   grant stays one stream of each kind. A client may open one more stream than
   `streams_max` to a node, which `program` and `sdk` keep for a `Command` stream and
