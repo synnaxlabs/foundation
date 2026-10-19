@@ -20,6 +20,8 @@ use crate::node::{Key, Node, ns0};
 use crate::value::Value;
 #[cfg(test)]
 use types::time::Span;
+#[cfg(feature = "sim")]
+use types::time::Stamp;
 
 /// A started test server of open62541 on the loop of a connection manager.
 /// [`Server::close`] deletes it, and a drop leaks it.
@@ -37,31 +39,38 @@ pub(crate) struct Server {
 #[cfg(feature = "sim")]
 #[repr(C)]
 struct Source {
-    read: unsafe extern "C" fn(*mut Source, *mut ffi::Scalar, *mut u16, *mut u32),
-    answer: Box<dyn FnMut() -> (Value, types::quality::Quality)>,
+    read: unsafe extern "C" fn(*mut Source, *mut ffi::Scalar, *mut u16, *mut u32, *mut i64),
+    answer: Box<dyn FnMut() -> Answer>,
     /// False while the add reads the variable to check its type.
     added: bool,
 }
 
-/// Answers a read of the variable of `source` into `value`, `kind`, and `status`.
+/// The answer of a read of a variable of [`Server::add_source`]: the value, its
+/// status, and its source timestamp, or `None` for the time of the read.
+#[cfg(feature = "sim")]
+pub(crate) type Answer = (Value, types::quality::Quality, Option<Stamp>);
+
+/// Answers a read of the variable of `source` into `value`, `kind`, `status`, and
+/// `ticks`, the source timestamp as a `DateTime`, or 0 for none.
 ///
 /// # Safety
 ///
-/// `source` is live, nothing else holds it, and `value`, `kind`, and `status` are
-/// places to write.
+/// `source` is live, nothing else holds it, and `value`, `kind`, `status`, and
+/// `ticks` are places to write.
 #[cfg(feature = "sim")]
 unsafe extern "C" fn read(
     source: *mut Source,
     value: *mut ffi::Scalar,
     kind: *mut u16,
     status: *mut u32,
+    ticks: *mut i64,
 ) {
     // SAFETY: as the caller ensures.
     let source = unsafe { &mut *source };
-    let (answer, quality) = if source.added {
+    let (answer, quality, stamp) = if source.added {
         (source.answer)()
     } else {
-        (Value::F64(0.0), types::quality::Quality::GOOD)
+        (Value::F64(0.0), types::quality::Quality::GOOD, None)
     };
     let (scalar, scalar_kind) = answer.raw();
     // SAFETY: as the caller ensures.
@@ -70,6 +79,9 @@ unsafe extern "C" fn read(
     unsafe { kind.write(scalar_kind) };
     // SAFETY: as the caller ensures.
     unsafe { status.write(quality.0) };
+    let time = stamp.map_or(0, |stamp| stamp.nanos().div_euclid(100) + ffi::UNIX_EPOCH);
+    // SAFETY: as the caller ensures.
+    unsafe { ticks.write(time) };
 }
 
 impl Server {
@@ -228,8 +240,8 @@ impl Server {
     }
 
     /// Adds the scalar variable `node` of the `DataType` `BaseDataType`, and answers
-    /// each read of a client with the value and the status that `answer` gives, on the
-    /// thread that drives the server.
+    /// each read of a client with the value, the status, and the source timestamp that
+    /// `answer` gives, on the thread that drives the server.
     ///
     /// # Panics
     ///
@@ -238,7 +250,7 @@ impl Server {
     pub(crate) fn add_source(
         &mut self,
         node: &Node,
-        answer: impl FnMut() -> (Value, types::quality::Quality) + 'static,
+        answer: impl FnMut() -> Answer + 'static,
     ) {
         let source = self.source(Box::new(answer), false);
         // SAFETY: the server lives, it copies the name of `node`, and the close frees
@@ -263,7 +275,8 @@ impl Server {
     }
 
     /// Makes `answer` answer each later read of the variable `node`, which open62541
-    /// adds, such as the state of the server, as [`Server::add_source`] does.
+    /// adds, such as the state of the server, as [`Server::add_source`] does, with the
+    /// time of the read as the source timestamp.
     ///
     /// # Panics
     ///
@@ -272,8 +285,12 @@ impl Server {
     pub(crate) fn set_source(
         &mut self,
         node: &Node,
-        answer: impl FnMut() -> (Value, types::quality::Quality) + 'static,
+        mut answer: impl FnMut() -> (Value, types::quality::Quality) + 'static,
     ) {
+        let answer = move || {
+            let (value, quality) = answer();
+            (value, quality, None)
+        };
         let source = self.source(Box::new(answer), true);
         // SAFETY: the server lives, and the close frees `source` after the delete.
         let status = Status(unsafe {
@@ -290,7 +307,7 @@ impl Server {
     #[cfg(feature = "sim")]
     fn source(
         &mut self,
-        answer: Box<dyn FnMut() -> (Value, types::quality::Quality)>,
+        answer: Box<dyn FnMut() -> Answer>,
         added: bool,
     ) -> NonNull<Source> {
         let source = NonNull::from(Box::leak(Box::new(Source {

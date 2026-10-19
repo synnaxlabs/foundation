@@ -234,9 +234,10 @@ void shim_client_message(UA_Client *client, UA_UInt32 size) {
  * the context that Rust holds. */
 typedef struct shim_source shim_source;
 struct shim_source {
-    /* Gives the value, its kind, and the status of a read of the variable. */
+    /* Gives the value, its kind, the status, and the source timestamp, 0 for none, of
+     * a read of the variable. */
     void (*read)(shim_source *source, shim_scalar *value, UA_UInt16 *kind,
-                 UA_StatusCode *status);
+                 UA_StatusCode *status, UA_DateTime *time);
 };
 
 static UA_StatusCode shim_source_read(UA_Server *server, const UA_NodeId *sessionId,
@@ -249,14 +250,17 @@ static UA_StatusCode shim_source_read(UA_Server *server, const UA_NodeId *sessio
     (void)sessionId;
     (void)sessionContext;
     (void)nodeId;
-    (void)includeSourceTimeStamp;
     /* The client of the crate reads no range. */
     (void)range;
     value->hasStatus = true;
     shim_source *source = nodeContext;
     shim_scalar read;
     UA_UInt16 kind;
-    source->read(source, &read, &kind, &value->status);
+    UA_DateTime time;
+    source->read(source, &read, &kind, &value->status, &time);
+    /* With no source timestamp, open62541 gives the time of the read. */
+    value->hasSourceTimestamp = includeSourceTimeStamp && time != 0;
+    value->sourceTimestamp = time;
     UA_StatusCode status =
         UA_Variant_setScalarCopy(&value->value, &read, &UA_TYPES[kind]);
     value->hasValue = status == UA_STATUSCODE_GOOD;
