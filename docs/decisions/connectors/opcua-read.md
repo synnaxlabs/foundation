@@ -194,10 +194,17 @@
   buffer, and later values wait in the queues of the server, the oldest dropped. A
   change that waits past the revised lifetime of the subscription ends it: the server
   deletes it, and `changes` ends as its doc states, after it gives the waiting changes.
-  The change buffers grow as needed in PR 4b of #2622, and the reserve of `PUBLISHES`
-  answers at `subscribe` comes in PR 4c with its counting test, which merges before PR 5
-  (`laptop.architect-2`, 2026-10-19T21:52:11Z,
-  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669).
+  At `subscribe`, the client reserves in each change buffer the changes of
+  `PUBLISHES` answers, each of the changes that the revised queues of the items hold
+  (at least 1 an item), at most the most that fit an answer. It also reserves the
+  memory of the decode of one such answer: open62541 decodes each Publish answer into
+  memory that the client keeps, and frees after the answer each block past the
+  reserved one (`laptop.architect-2`, 2026-10-19T21:52:11Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669). A
+  server that sends more changes than the queues hold grows the change buffers, which
+  do not shrink. Each buffer holds the changes of at most `PUBLISHES` answers, each at
+  most the receive limit over the 5 bytes of the smallest notification, so with the
+  doubling of a `Vec` the 2 buffers of a client hold at most about 54 MB.
   `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
   `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
   interval)), and a queue of each item that holds the samples of two revised publishing
