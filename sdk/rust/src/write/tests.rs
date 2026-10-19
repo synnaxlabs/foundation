@@ -171,6 +171,7 @@ fn a_writer_that_names_the_index_gives_it_at_its_place() {
 fn a_writer_that_names_a_channel_twice_gives_it_at_each_place() {
     let writer = opened(&["time", "count", "time", "count"]);
     let [time, count, _] = places().try_into().unwrap();
+    let (time, count) = (Place { index: 0, ..time }, Place { index: 0, ..count });
     assert_eq!(writer.places(), [time.clone(), count.clone(), time, count]);
     assert_eq!(writer.index(), 0);
 }

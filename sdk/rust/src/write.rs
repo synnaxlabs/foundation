@@ -108,7 +108,8 @@ impl Writer {
 
     /// The channels of the writer: the key, sample type, name, and place of the index
     /// of each place. Place `n` is `Config::channels[n]`, then the index when
-    /// `Config::channels` does not name it.
+    /// `Config::channels` does not name it. Each place names the first place of the
+    /// index as its index, a later place of the index too.
     #[must_use]
     pub fn places(&self) -> &[Place] {
         &self.places
