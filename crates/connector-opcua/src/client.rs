@@ -159,8 +159,8 @@ pub(crate) enum Refusal {
     Trailing { number: usize },
     /// Line `number`, from 1, of `trust`, counted by `\n`, is in a PEM block, and a piece
     /// of it that aws-lc reads (at most 253 bytes, through its `\n`) holds a byte of 0x80
-    /// to 0xFF after its last byte of 0x21 to 0x7F, which aws-lc reads in two ways by the
-    /// CPU target.
+    /// to 0xFF after its last byte of 0x21 to 0x7F, or anywhere when it has none, which
+    /// aws-lc reads in two ways by the CPU target.
     Line { number: usize },
     /// `certificate` holds no URI in its subject alternative name.
     Uri,

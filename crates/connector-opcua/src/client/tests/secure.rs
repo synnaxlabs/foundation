@@ -274,7 +274,11 @@ fn a_trust_with_a_damaged_or_empty_block_of_another_label_ends_the_connect() {
 #[test]
 fn a_trust_whose_begin_line_starts_no_block_drops_it() {
     let (other, server) = blocks();
-    for begin in ["----BEGIN CERTIFICATE-----", "-----BEGIN CERTIFICATE----"] {
+    for begin in [
+        "----BEGIN CERTIFICATE-----",
+        "-----BEGIN CERTIFICATE----",
+        "-----BEGIN CERTIFICATE-----\u{A0}x",
+    ] {
         let server = server.replacen("-----BEGIN CERTIFICATE-----", begin, 1);
         assert_eq!(
             trusting(format!("{other}{server}")),
@@ -326,8 +330,8 @@ fn a_trust_whose_end_line_names_another_label_ends_the_connect() {
     }
 }
 
-/// The refusal of a trust whose line `number` is in a PEM block and ends in a byte of
-/// 0x80 to 0xFF.
+/// The refusal of a trust whose line `number`, in a PEM block, holds a byte of 0x80 to
+/// 0xFF after its last byte of 0x21 to 0x7F.
 fn line(number: usize) -> Error {
     Error::Refused(Refusal::Line { number })
 }
@@ -352,7 +356,7 @@ fn with_tail(at: usize, tail: &[u8]) -> (Vec<u8>, usize) {
 }
 
 #[test]
-fn a_line_of_a_block_that_ends_in_a_high_byte_ends_the_connect() {
+fn a_line_of_a_block_with_a_high_byte_after_its_text_ends_the_connect() {
     let last = blocks().1.lines().count() - 1;
     for at in [0, 1, 2, last] {
         for tail in [b"\xA0".as_slice(), b" \xFF\r", b"\x80 "] {
@@ -360,6 +364,12 @@ fn a_line_of_a_block_that_ends_in_a_high_byte_ends_the_connect() {
             assert_eq!(trusting(trust), Err(line(number)), "{at} {tail:?}");
         }
     }
+}
+
+#[test]
+fn a_line_of_a_block_of_only_a_high_byte_ends_the_connect() {
+    let (trust, number) = with_tail(0, b"\n\xA0");
+    assert_eq!(trusting(trust), Err(line(number + 1)));
 }
 
 #[test]
@@ -403,6 +413,27 @@ fn a_begin_line_with_a_nul_before_its_dashes_is_text() {
 fn a_begin_line_with_no_label_and_a_high_byte_ends_the_connect() {
     let trust = [b"-----BEGIN -----\xA0\n", TRUST].concat();
     assert_eq!(trusting(trust), Err(line(1)));
+}
+
+#[test]
+fn a_begin_line_with_no_space_or_four_dashes_starts_no_block() {
+    for begin in [b"-----BEGINX-----".as_slice(), b"-----BEGIN X----"] {
+        let trust = [begin, b"\nnote \xA0\n", TRUST].concat();
+        let read = trusting(trust).expect("the client connects");
+        assert_eq!(read.answer, Ok(read.value), "{begin:?}");
+    }
+}
+
+#[test]
+fn an_end_line_of_10_bytes_ends_a_block() {
+    let trust = [b"-----BEGIN X-----\n-----END X\nnote \xA0\n", TRUST].concat();
+    assert_eq!(trusting(trust), Err(invalid(1)));
+}
+
+#[test]
+fn an_end_line_with_no_space_ends_no_block() {
+    let block = b"-----BEGIN X-----\n-----ENDXYZ\nnote \xA0\n-----END X-----\n";
+    assert_eq!(trusting([block, TRUST].concat()), Err(line(3)));
 }
 
 #[test]

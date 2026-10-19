@@ -501,10 +501,10 @@ openSSLAmbiguousLine(const UA_ByteString trust) {
  * other text and a block of another label, but fails on a block of any label that it
  * cannot read, such as an empty one, damaged base64, or an `END` line that does not
  * name its label, which counts as one more. A piece of a block with a byte of 0x80 to
- * 0xFF after its last byte of 0x21 to 0x7F fails before aws-lc reads, so each target
- * reads alike. A block with any byte after its certificate fails, also trust
- * settings, which the verify of the group does not apply. Clears the error queue of
- * the thread.
+ * 0xFF after its last byte of 0x21 to 0x7F, or anywhere when it has none, fails
+ * before aws-lc reads, so each target reads alike. A block with any byte after its
+ * certificate fails, also trust settings, which the verify of the group does not
+ * apply. Clears the error queue of the thread.
  */
 static UA_TrustLoad
 openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
