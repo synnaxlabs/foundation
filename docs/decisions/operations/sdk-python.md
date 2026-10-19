@@ -63,7 +63,10 @@
   `sdk::Error::Thread` raises `RuntimeError`, `Bind` raises `OSError`, `Session` and
   `Local` raise `ConnectionError`, and `Panicked` raises `PanicException`
   (`laptop.architect-2`, 2026-10-17T18:44:19Z,
-  https://github.com/synnaxlabs/foundation/issues/2923#issuecomment-6238826510).
+  https://github.com/synnaxlabs/foundation/issues/2923#issuecomment-6238826510). A
+  `Session` that the node refused with a code raises `Refused`, a subclass of
+  `ConnectionError` (SDK PYTHON WRITER in
+  `docs/decisions/operations/sdk-python-writer.md`).
   No Python test reaches `Bind`, so the Rust table test of the map, with a real `Bind`,
   is its only test (`laptop.architect-2`, 2026-10-18T15:00:03Z,
   https://github.com/synnaxlabs/foundation/pull/3193#issuecomment-6251395290).

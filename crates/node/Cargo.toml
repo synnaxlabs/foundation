@@ -55,6 +55,7 @@ connector-opcua = { path = "../connector-opcua", features = ["sim"] }
 counting = { path = "../counting" }
 crc32c = { workspace = true }
 divan = { workspace = true }
+document = { path = "../document", features = ["sim"] }
 http = { workspace = true }
 hub = { path = "../hub", features = ["sim"] }
 # Turns on `sim` for the bench, since the bench host runs no features.

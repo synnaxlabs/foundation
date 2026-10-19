@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, Read, Write};
 
+use connector::kind::Table;
 use serde_json::{Map, Value, json};
 
 use crate::error::Error;
@@ -68,11 +69,13 @@ pub fn line(input: &mut impl BufRead) -> io::Result<Line> {
 
 /// Answers each line that `input` gives with at most one line on `output`, until
 /// `input` ends or the reader closes `output`. A tool call reads and writes its files
-/// through `scope`, and sends its request to the node through `link`.
+/// through `scope`, and sends its request to the node through `link`. `docs` states
+/// each kind of `kinds`.
 pub(crate) async fn serve<R, C>(
     mut input: impl AsyncFnMut() -> io::Result<Line>,
     output: &mut impl Write,
     scope: &Scope,
+    kinds: &Table,
     link: &mut Link<R, C>,
 ) -> Result<(), Stop>
 where
@@ -88,7 +91,13 @@ where
             Line::Long => Some(reply(&Value::Null, Err(fault(REQUEST))).to_string()),
             // A line that is not UTF-8 is not JSON either, so "" gets the parse error.
             Line::Bytes(bytes) => {
-                respond(std::str::from_utf8(&bytes).unwrap_or(""), scope, link).await
+                respond(
+                    std::str::from_utf8(&bytes).unwrap_or(""),
+                    scope,
+                    kinds,
+                    link,
+                )
+                .await
             }
         };
         if let Some(reply) = reply {
@@ -108,6 +117,7 @@ where
 pub(crate) async fn respond<R, C>(
     message: &str,
     scope: &Scope,
+    kinds: &Table,
     link: &mut Link<R, C>,
 ) -> Option<String>
 where
@@ -115,7 +125,7 @@ where
     C: AsyncFn(&[u8]) -> Result<Vec<u8>, Failure>,
 {
     let reply = match serde_json::from_str::<Value>(message) {
-        Ok(Value::Object(message)) => answer(message, scope, link).await?,
+        Ok(Value::Object(message)) => answer(message, scope, kinds, link).await?,
         Ok(_) => reply(&Value::Null, Err(fault(REQUEST))),
         Err(_) => reply(&Value::Null, Err(fault(PARSE))),
     };
@@ -125,6 +135,7 @@ where
 async fn answer<R, C>(
     mut message: Map<String, Value>,
     scope: &Scope,
+    kinds: &Table,
     link: &mut Link<R, C>,
 ) -> Option<Value>
 where
@@ -163,7 +174,7 @@ where
         Method::Initialize => Ok(initialize()),
         Method::Ping => Ok(json!({})),
         Method::List => Ok(tools()),
-        Method::Call => call(params, scope, link).await,
+        Method::Call => call(params, scope, kinds, link).await,
     };
     Some(reply(&id, result))
 }
@@ -221,6 +232,7 @@ fn tools() -> Value {
 async fn call<R, C>(
     mut params: Map<String, Value>,
     scope: &Scope,
+    kinds: &Table,
     link: &mut Link<R, C>,
 ) -> Result<Value, Value>
 where
@@ -236,7 +248,7 @@ where
         Some(_) => return Err(fault(PARAMS)),
     };
     match operation::read(&name, arguments) {
-        Ok(request) => Ok(match request.run(scope, link).await {
+        Ok(request) => Ok(match request.run(scope, kinds, link).await {
             Ok(response) => {
                 let content = response.json();
                 json!({

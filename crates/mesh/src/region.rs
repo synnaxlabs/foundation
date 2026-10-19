@@ -15,13 +15,14 @@ use raft::{NoMajority, Voters};
 use spec::definition::Definition;
 
 use crate::bytes::{
-    put_channel, put_count, put_key, put_keys, put_name, put_prefix, take_channel,
-    take_count, take_key, take_keys, take_name, take_prefix, take_rising,
+    put_channel, put_count, put_key, put_keys, put_name, put_prefix, put_public_key,
+    take, take_channel, take_count, take_key, take_keys, take_name, take_prefix,
+    take_public_key, take_rising,
 };
 use crate::card;
 use crate::change::{self, Change, Join, Undecoded};
 use crate::member::Member;
-use crate::status::Status;
+use crate::status::{self, Status};
 use crate::ticket::{self, Options, Record};
 
 /// The region before the first entry of its log: its prefix, its founding members and
@@ -211,7 +212,7 @@ impl State {
     /// The record of the ticket with `public_key`, or `None` when none is recorded.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the join answer of #336 is the first user")
+        expect(dead_code, reason = "a later PR of #336 is the first user")
     )]
     pub(crate) fn ticket(&self, public_key: PublicKey) -> Option<&Record> {
         self.tickets.get(&public_key.to_bytes())
@@ -474,10 +475,6 @@ impl State {
 }
 
 /// What a node that joins gives the voter that admits it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the join answer of #336 is the first user")
-)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Request {
     /// The public key of the ticket that admits the node.
@@ -488,6 +485,43 @@ pub(crate) struct Request {
     pub(crate) admission: [u8; 64],
     /// The names of the node's status channels, under the node's name.
     pub(crate) status: BTreeSet<Name>,
+}
+
+impl Request {
+    /// Adds the byte form: the ticket's public key, the card, the admission, then the
+    /// count of status names and each name in rising order.
+    pub(crate) fn encode(&self, out: &mut Vec<u8>) {
+        put_public_key(self.ticket, out);
+        self.card.encode(out);
+        out.extend(self.admission);
+        put_count(self.status.len(), out);
+        for name in &self.status {
+            put_name(name, out);
+        }
+    }
+
+    /// Takes what [`Request::encode`] gives. `None` when the count of status names is
+    /// over 64, before any name is read, or when the names are not in rising order.
+    pub(crate) fn decode(bytes: &mut &[u8]) -> Option<Self> {
+        let ticket = take_public_key(bytes)?;
+        let card = card::Unchecked::decode(bytes)?;
+        let admission = take(bytes)?;
+        let mut count = *bytes;
+        if take_count(&mut count)? > u64::from(status::MAX) {
+            return None;
+        }
+        let mut names = BTreeSet::new();
+        take_rising(bytes, take_name, |name, _| {
+            names.insert(name);
+            Some(())
+        })?;
+        Some(Self {
+            ticket,
+            card,
+            admission,
+            status: names,
+        })
+    }
 }
 
 /// Why every node refuses a change. A refused change changes no state, but a refused
@@ -2098,6 +2132,65 @@ mod tests {
         assert_eq!(with([0, 1]), Some(founding));
         assert_eq!(with([1, 0]), None);
         assert_eq!(with([0, 0]), None);
+    }
+
+    // A request of node 3 by ticket 2, with `count` status names.
+    fn request(count: usize) -> Request {
+        let card = member(3).card;
+        Request {
+            ticket: public(2),
+            card: unchecked(&card),
+            admission: ticket(2).admission(&card),
+            status: (0..count).map(|i| name(&format!("plant.c.s{i}"))).collect(),
+        }
+    }
+
+    // The byte form of a request with the status names `names` in their order.
+    fn request_with(names: &[&str]) -> Vec<u8> {
+        let request = request(0);
+        let mut bytes = Vec::new();
+        put_public_key(request.ticket, &mut bytes);
+        request.card.encode(&mut bytes);
+        bytes.extend(request.admission);
+        put_count(names.len(), &mut bytes);
+        for &each in names {
+            put_name(&name(each), &mut bytes);
+        }
+        bytes
+    }
+
+    #[test]
+    fn a_request_reads_back_and_leaves_the_rest_but_no_cut_of_it_reads() {
+        let request = request(64);
+        let mut bytes = Vec::new();
+        request.encode(&mut bytes);
+        for len in 0..bytes.len() {
+            assert_eq!(Request::decode(&mut &bytes[..len]), None, "{len}");
+        }
+        bytes.push(7);
+        let mut rest = bytes.as_slice();
+        assert_eq!(Request::decode(&mut rest), Some(request));
+        assert_eq!(rest, [7]);
+    }
+
+    #[test]
+    fn a_request_with_names_out_of_order_or_twice_does_not_decode() {
+        let read =
+            |names: &[&str]| Request::decode(&mut request_with(names).as_slice());
+        assert!(read(&["plant.c.a", "plant.c.b"]).is_some());
+        assert_eq!(read(&["plant.c.b", "plant.c.a"]), None);
+        assert_eq!(read(&["plant.c.a", "plant.c.a"]), None);
+    }
+
+    #[test]
+    fn a_request_of_more_than_64_names_does_not_decode() {
+        let read = |request: Request| {
+            let mut bytes = Vec::new();
+            request.encode(&mut bytes);
+            Request::decode(&mut bytes.as_slice())
+        };
+        assert_eq!(read(request(64)), Some(request(64)));
+        assert_eq!(read(request(65)), None);
     }
 
     proptest! {

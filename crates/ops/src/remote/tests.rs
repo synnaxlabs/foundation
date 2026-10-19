@@ -249,6 +249,7 @@ impl Remote {
             &mut errors,
             paths,
             &common::front_ends(),
+            &common::create_kinds(),
             reach,
         )
         .await;
@@ -1175,6 +1176,22 @@ fn mcp_reaches_again_after_a_failure() {
     });
 }
 
+/// The `docs` tool states each kind that `cli` takes, and reaches no node.
+#[test]
+fn mcp_docs_state_each_kind_of_the_cli() {
+    solo(|fixture, mesh| async move {
+        let paths = with_site(&fixture.sim);
+        let remote = Remote::new(create_node(&fixture, mesh));
+        let messages = [call(1, "docs", &json!({}))];
+        let (run, replies) = remote.mcp(&paths, &[], &messages).await;
+        assert_eq!(run, Run::Exit(0));
+        let docs = operation::docs(&common::create_kinds());
+        assert!(docs.contains("\n## `influx`\n"), "{docs}");
+        assert_eq!(replies[0]["result"]["structuredContent"]["markdown"], docs);
+        assert_eq!(remote.calls(), (0, 0));
+    });
+}
+
 /// A call that fails before its request is an error result, and reaches no node. A
 /// plan of no file is a bad argument.
 #[test]
@@ -1500,6 +1517,7 @@ fn start_with(
     let (mut output, mut errors) = (Vec::new(), Vec::new());
     let mut input = ping.as_bytes();
     let front_ends = common::front_ends();
+    let kinds = common::create_kinds();
     let cli = crate::cli(
         args,
         async || crate::line(&mut input),
@@ -1507,6 +1525,7 @@ fn start_with(
         &mut errors,
         &paths,
         &front_ends,
+        &kinds,
         reach,
     );
     let Poll::Ready(run) = pin!(cli).poll(&mut Context::from_waker(Waker::noop()))

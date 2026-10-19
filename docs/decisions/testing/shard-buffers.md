@@ -17,6 +17,12 @@
   buffer opens (#1076); a reshard at start is the long-term path (#1077). Running the
   stored count on another core count lost: it bends C2. Decided by the architect on
   #1062:
+  https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343.
+  A part of the pool budget under the least part of a buffer gives `Error::Small`,
+  with no core, in place of `Error::Buffer` (NODE SETTINGS; decided by
+  `laptop.architect-2` on #3353, 2026-10-19T12:24:14Z,
+  https://github.com/synnaxlabs/foundation/pull/3353#issuecomment-6267131975).
+  Supersedes `Error::Buffer` for that case in
   https://github.com/synnaxlabs/foundation/pull/1062#issuecomment-6030791343. The
   count is an empty directory `shards-<n>` in the data directory, made and synced
   before `shard-0`, so a crash leaves it whole or absent. Shard 0 claims it at the

@@ -1,6 +1,8 @@
 //! What each signature in a message attests, in the order the receiver reads them,
 //! and how `Ready::sign` fills them.
 
+use std::collections::BTreeMap;
+
 use proptest::prelude::*;
 use raft::{
     Answer, Body, Change, Claim, Config, Data, Entry, Error, Grant, Hard, Link,
@@ -76,10 +78,16 @@ fn own(claim: Claim<'_>) -> Claim<'static> {
             term,
             candidate,
         },
-        Claim::Change { leader, at, voters } => Claim::Change {
+        Claim::Change {
+            leader,
+            at,
+            voters,
+            public_keys: keys,
+        } => Claim::Change {
             leader,
             at,
             voters: Box::leak(Box::new(voters.clone())),
+            public_keys: Box::leak(Box::new(keys.clone())),
         },
     }
 }
@@ -105,6 +113,7 @@ fn link(term: u64, index: u64, leader: u128, elected: &[u128], ids: &[u128]) -> 
         },
         change: Change {
             voters: voters(ids),
+            public_keys: BTreeMap::new(),
             votes: Proof {
                 grant: Grant::Vote,
                 candidate: key(leader),
@@ -135,6 +144,7 @@ fn link_claims(link: &Link) -> Vec<(Claim<'static>, Option<Signature>)> {
         leader: key(leader),
         at,
         voters: Box::leak(Box::new(link.change.voters.clone())),
+        public_keys: Box::leak(Box::new(link.change.public_keys.clone())),
     };
     claims.push((change, link.change.signature));
     claims
@@ -197,6 +207,7 @@ fn a_message_claims_its_proof_then_each_link_read_then_its_changes() {
                     index: 1,
                 },
                 voters: Box::leak(Box::new(voters)),
+                public_keys: Box::leak(Box::new(BTreeMap::new())),
             },
             Some(signature(0)),
         ),
@@ -457,6 +468,7 @@ fn an_append_claims_each_vote_then_the_change_of_each_change_it_carries() {
             index: 3,
         },
         voters: &voters,
+        public_keys: &BTreeMap::new(),
     };
     let one = [
         (vote(1), Some(signature(1))),
@@ -498,6 +510,7 @@ fn an_append_claims_its_proof_then_its_changes() {
             index: 3,
         },
         voters: &voters,
+        public_keys: &BTreeMap::new(),
     };
     let want = [
         (grant(1, 6, 1), Some(signature(1))),
@@ -608,6 +621,7 @@ fn change(with: &dyn Fn(u8) -> Option<Signature>) -> Entry {
         },
         data: Data::Voters(Change {
             voters,
+            public_keys: BTreeMap::new(),
             votes: proof,
             signature: with(0),
         }),
@@ -642,6 +656,7 @@ fn sign_fills_each_change_in_entries_committed_and_appends_and_keeps_the_rest() 
                     incoming: [key(1), key(2)].into(),
                     outgoing: [key(1), key(2), key(3)].into(),
                 },
+                public_keys: &BTreeMap::new(),
             },
             voter => Claim::Grant {
                 voter: key(u128::from(voter)),
@@ -666,6 +681,7 @@ fn a_link() -> impl Strategy<Value = Link> {
         at,
         change: Change {
             voters: voters(&[1, 2, 4]),
+            public_keys: BTreeMap::new(),
             votes,
             signature,
         },

@@ -59,6 +59,8 @@ impl<M: Fn(&mut dyn FnMut()) -> u64 + Send + Sync + 'static> kind::Kind
     for Measured<M>
 {
     type Config = Config;
+    const SCHEMA: document::schema::Body =
+        <connector_opcua::Kind as kind::Kind>::SCHEMA;
 
     fn parse(&self, config: &Document) -> Result<Config, Vec<Diagnostic>> {
         connector_opcua::Kind::default().parse(config)

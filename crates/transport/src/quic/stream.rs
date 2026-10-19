@@ -1497,7 +1497,8 @@ impl Streams {
 
     /// Opens a stream of `class` of `connection`'s `inner` in `dir`, and gives its
     /// sender, and its receiver when it goes both ways. `None` until the peer's
-    /// hello, and when the peer allows no more now.
+    /// hello, when the peer allows no more now, and, for a class other than
+    /// `Command`, when it allows only one more.
     pub(super) fn open(
         &mut self,
         inner: &mut noq_proto::Connection,
@@ -1506,7 +1507,11 @@ impl Streams {
         class: Class,
     ) -> Option<(Sender, Option<Receiver>)> {
         let peer = self.peer.hello()?;
-        let id = inner.streams().open(dir)?;
+        let mut streams = inner.streams();
+        if class != Class::Command && streams.available(dir) == 1 {
+            return None;
+        }
+        let id = streams.open(dir)?;
         let prioritized = inner.send_stream(id).set_priority(priority(class));
         prioritized.expect("invariant: a stream that opens has a send half");
         let key = Key { connection, id };
@@ -4442,7 +4447,7 @@ mod tests {
     fn past_the_limit_open_none_until_available() {
         testing::run(1, |shard| {
             let mut pair = connected(shard);
-            let mut senders: Vec<Sender> = (0..testing::STREAMS_MAX)
+            let mut senders: Vec<Sender> = (0..=testing::STREAMS_MAX)
                 .map(|_| open_sender(&mut pair, Class::Command))
                 .collect();
             let (now, key) = (pair.now(), key(&pair.client));
@@ -5133,6 +5138,29 @@ mod tests {
             end(&mut pair, &mut senders[1], &mut incoming);
             assert_eq!(announced(&mut pair), before + 2, "a wait, then a free");
             assert!(try_open(&mut pair).is_some());
+        });
+    }
+
+    #[test]
+    fn only_a_command_takes_the_last_stream_that_the_peer_allows() {
+        testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            let (now, client) = (pair.now(), key(&pair.client));
+            let endpoint = &mut pair.client.endpoint;
+            let mut open = |dir: Dir, class: Class| match dir {
+                Dir::Uni => endpoint.open_sender(now, client, class).map(drop),
+                Dir::Bi => endpoint.open(now, client, class).map(drop),
+            };
+            for dir in [Dir::Uni, Dir::Bi] {
+                for _ in 0..testing::STREAMS_MAX {
+                    assert_eq!(open(dir, Class::Complete), Some(()), "{dir:?}");
+                }
+                for class in [Class::Latest, Class::Complete, Class::CatchUp] {
+                    assert_eq!(open(dir, class), None, "{dir:?} {class:?}");
+                }
+                assert_eq!(open(dir, Class::Command), Some(()), "{dir:?}");
+                assert_eq!(open(dir, Class::Command), None, "{dir:?}");
+            }
         });
     }
 
@@ -9802,7 +9830,7 @@ mod tests {
         }
 
         #[test]
-        fn leave_the_peer_streams_max_one_way_streams() {
+        fn leave_the_peer_one_more_than_streams_max_one_way_streams() {
             testing::run(1, |shard| {
                 let one = |config: &mut Config| config.streams_max = NonZeroU32::MIN;
                 let mut pair = Pair::with(shard, Span::SECOND, DELAY, one);
@@ -9814,8 +9842,11 @@ mod tests {
                     pair.run(STEP);
                 }
                 let (now, key) = (pair.now(), key(&pair.client));
-                let opened = pair.client.endpoint.open_sender(now, key, Class::Command);
-                assert!(opened.is_some());
+                for _ in 0..2 {
+                    let opened =
+                        pair.client.endpoint.open_sender(now, key, Class::Command);
+                    assert!(opened.is_some());
+                }
                 pair.run(RUN);
                 let now = pair.now();
                 let opened = pair.client.endpoint.open_sender(now, key, Class::Command);

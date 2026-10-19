@@ -6,6 +6,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use raft::{Config, Raft, Role, Start, Voters};
 use types::node;
 
+use crate::network::keyed;
+
 const ELECTION: u32 = 10;
 
 fn key(id: u8) -> node::Key {
@@ -74,7 +76,7 @@ fn a_leader_that_restarts_with_an_unsent_leave_leads_again() {
         }
         let leader = nodes.get_mut(&3).unwrap();
         if !proposed && leader.role() == Role::Leader {
-            leader.propose_voters(set(&[1, 3])).unwrap();
+            leader.propose_voters(keyed(&[1, 3])).unwrap();
             proposed = true;
             continue;
         }

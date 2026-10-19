@@ -1,0 +1,2 @@
+# Each fuzz input is exact bytes: no end-of-line conversion at a checkout.
+* -text

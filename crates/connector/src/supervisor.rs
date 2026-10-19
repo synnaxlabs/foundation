@@ -607,6 +607,7 @@ mod tests {
     impl Kind for Script {
         /// The config has the attribute `worse`, which `check` refuses.
         type Config = bool;
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, config: &Document) -> Result<bool, Vec<Diagnostic>> {
             match config.attributes.get("bad") {
@@ -1354,6 +1355,7 @@ mod tests {
 
     impl Kind for Locked {
         type Config = ();
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())
@@ -2337,6 +2339,7 @@ mod tests {
 
     impl Kind for Wide {
         type Config = ();
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())
@@ -2749,6 +2752,7 @@ mod tests {
 
     impl Kind for Dial {
         type Config = ();
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())
@@ -2863,6 +2867,7 @@ mod tests {
 
     impl Kind for Spawner {
         type Config = ();
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())
@@ -3075,6 +3080,7 @@ mod tests {
 
     impl Kind for Tally {
         type Config = ();
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())
@@ -3120,6 +3126,7 @@ mod tests {
         R: Future<Output = Result<(), Error>>,
     {
         type Config = ();
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())
@@ -3311,7 +3318,7 @@ mod tests {
         counted(move |ctx: Context<()>| async move {
             let channels = status_names("plant.tally", &["samples"]);
             let writer = ctx.writer(channels, Authority(1), None).await;
-            let writer = writer.expect("the writer opens");
+            let writer = writer.expect("the writer opens").expect("no cancel");
             let mut held = fill(&writer);
             ctx.count("samples").set(7);
             ctx.clock().sleep(ms(900)).await;
@@ -3402,7 +3409,7 @@ mod tests {
         let kind = counted(move |ctx: Context<()>| async move {
             let channels = status_names("plant.tally", &["samples"]);
             let writer = ctx.writer(channels, Authority(1), None).await;
-            let writer = writer.expect("the writer opens");
+            let writer = writer.expect("the writer opens").expect("no cancel");
             let mut held = fill(&writer);
             ctx.error(&"x");
             ctx.clock().sleep(ms(900)).await;
@@ -3569,7 +3576,7 @@ mod tests {
         counted(|ctx: Context<()>| async move {
             let channels = status_names("plant.tally", &["samples"]);
             let writer = ctx.writer(channels, Authority(1), None).await;
-            let writer = writer.expect("the writer opens");
+            let writer = writer.expect("the writer opens").expect("no cancel");
             let mut held = fill(&writer);
             ctx.count("samples").set(7);
             ctx.clock().sleep(ms(900)).await;
@@ -3716,7 +3723,7 @@ mod tests {
         counted(|ctx: Context<()>| async move {
             let channels = status_names("plant.tally", &["samples"]);
             let writer = ctx.writer(channels, Authority(1), None).await;
-            let writer = writer.expect("the writer opens");
+            let writer = writer.expect("the writer opens").expect("no cancel");
             let clock = ctx.clock().clone();
             ctx.tasks().spawn(async move {
                 let held = fill(&writer);
@@ -4222,6 +4229,7 @@ mod tests {
 
     impl Kind for Write {
         type Config = ();
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())
@@ -4236,7 +4244,8 @@ mod tests {
             let mut writer = ctx
                 .writer(channels, self.authority, self.lease)
                 .await
-                .expect("the writer opens");
+                .expect("the writer opens")
+                .expect("no cancel");
             let mut last = None;
             for (i, sample) in self.values.iter().enumerate() {
                 if i > 0 {
@@ -4827,7 +4836,7 @@ mod tests {
                 let held = if runs == 1 {
                     let channels = status_names("plant.write", &[]);
                     let writer = ctx.writer(channels, Authority(1), None).await;
-                    let writer = writer.expect("the writer opens");
+                    let writer = writer.expect("the writer opens").expect("no cancel");
                     let mut drafts = fill(&writer);
                     ctx.clock().sleep(Span::SECOND).await;
                     drafts.extend(fill(&writer));
@@ -5205,7 +5214,7 @@ mod tests {
                 |ctx, got| async move {
                     let channels = vec![name("plant.value")];
                     let writer = ctx.writer(channels, Authority(1), None).await;
-                    let mut writer = writer.expect("opens");
+                    let mut writer = writer.expect("opens").expect("no cancel");
                     let first = got.lock().expect("no panic").is_empty();
                     let (key, sample) = if first { (2, 5) } else { (3, 7) };
                     if first {
@@ -5428,6 +5437,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn gives_no_writer_after_the_cancel_of_the_run() {
+        let read = read_through(
+            0,
+            None,
+            |ctx, got| async move {
+                ctx.cancel().cancel();
+                let channels = vec![name("plant.value")];
+                let writer = ctx.writer(channels, Authority(1), None).await;
+                let none = writer.map(|writer| writer.is_none());
+                got.lock()
+                    .expect("no panic")
+                    .push(none.map_err(diagnostics));
+                Ok(())
+            },
+            |_, _| async {},
+        );
+        assert_eq!(
+            (read.got, read.end.map_err(|e| e.to_string())),
+            (vec![Ok(true)], Ok(()))
+        );
+    }
+
     /// Runs `write` as `plant.write` on a new shard, while a writer as
     /// `plant.other` at `holder` holds `plant.value` when it is some. Gives the
     /// refusal of each write, or `None` for one the home applied.
@@ -5585,6 +5617,7 @@ mod tests {
 
     impl Kind for Mesh {
         type Config = ();
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())
@@ -5669,6 +5702,7 @@ mod tests {
 
     impl Kind for Slow {
         type Config = ();
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())
@@ -5821,6 +5855,7 @@ mod tests {
 
     impl Kind for Crawl {
         type Config = ();
+        const SCHEMA: document::schema::Body = crate::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())

@@ -161,6 +161,14 @@ pub enum Error {
         /// `Config::founding`, with its members in key order.
         given: Box<region::Founding>,
     },
+    /// The byte form of the founding of a first record is over the most that a join
+    /// answer holds, so no node could join the region. Found it with fewer definitions.
+    Unjoinable {
+        /// The bytes of the founding.
+        bytes: usize,
+        /// The most bytes of a join answer.
+        most: usize,
+    },
     /// The founding file of the mesh directory does not read back whole, or it is not
     /// there while the log holds a record.
     Unfounded {
@@ -274,6 +282,12 @@ impl fmt::Display for Error {
                  {bytes_min} bytes of an append of the largest record"
             ),
             Self::Founding { stored, given } => founded(f, stored, given),
+            Self::Unjoinable { bytes, most } => write!(
+                f,
+                "the founding of this region is {bytes} bytes, over the {most} bytes \
+                 that a join answer holds, so no node could join it; found it with \
+                 fewer definitions"
+            ),
             Self::Unfounded { path } => write!(
                 f,
                 "{} does not read back whole, or is not there while the log of the mesh \

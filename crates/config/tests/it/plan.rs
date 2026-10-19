@@ -58,6 +58,7 @@ struct Writer;
 
 impl Kind for Writer {
     type Config = (Vec<Name>, Vec<Name>);
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, config: &Document) -> Result<Self::Config, Vec<Diagnostic>> {
         let names = |attribute: &document::Attribute| {
@@ -272,6 +273,7 @@ struct Commander;
 
 impl Kind for Commander {
     type Config = connector::reader::Settings;
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(
         &self,
@@ -308,6 +310,7 @@ struct Once {
 
 impl Kind for Once {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())

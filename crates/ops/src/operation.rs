@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 use clap::error::{ContextKind, ContextValue, ErrorKind};
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
+use connector::kind::Table;
 use schemars::JsonSchema;
 use schemars::generate::SchemaSettings;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -39,8 +40,8 @@ pub(crate) const TABLE: &[Spec] = &[
     },
     Spec {
         name: "docs",
-        summary: "Print the reference for every operation, config block, and secret \
-                  source, as Markdown",
+        summary: "Print the reference for every operation, config block, connector \
+                  kind, and secret source, as Markdown",
         read_only: true,
         destructive: false,
     },
@@ -618,8 +619,9 @@ fn variants<T: JsonSchema>() -> Map<String, Value> {
         .collect()
 }
 
-/// The reference for every operation, config block, and secret source, as Markdown.
-pub(crate) fn docs() -> String {
+/// The reference for every operation, config block, kind of `kinds`, and secret
+/// source, as Markdown.
+pub(crate) fn docs(kinds: &Table) -> String {
     let yes = |flag: bool| if flag { "yes" } else { "no" };
     let sections: Vec<String> = TABLE
         .iter()
@@ -636,13 +638,14 @@ pub(crate) fn docs() -> String {
     format!(
         "# Operations\n{}{}",
         sections.concat(),
-        crate::reference::markdown(config::SCHEMA)
+        crate::reference::markdown(config::SCHEMA, kinds)
     )
 }
 
 impl Request {
     /// Runs the operation, with the files it names read and written through `scope`,
-    /// and its request to the node sent through `link`.
+    /// and its request to the node sent through `link`. `docs` states each kind of
+    /// `kinds`.
     ///
     /// # Errors
     ///
@@ -651,6 +654,7 @@ impl Request {
     pub(crate) async fn run<R, C>(
         self,
         scope: &Scope,
+        kinds: &Table,
         link: &mut Link<R, C>,
     ) -> Result<Response, Error>
     where
@@ -662,7 +666,9 @@ impl Request {
                 version: env!("CARGO_PKG_VERSION").to_owned(),
                 commit: commit(env!("FOUNDATION_COMMIT")),
             }),
-            Self::Docs(Empty {}) => Response::Docs(Reference { markdown: docs() }),
+            Self::Docs(Empty {}) => Response::Docs(Reference {
+                markdown: docs(kinds),
+            }),
             Self::Plan(Plan { files, out }) => {
                 Response::Plan(remote::plan(&files, out.as_deref(), scope, link).await?)
             }

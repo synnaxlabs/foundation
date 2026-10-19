@@ -178,6 +178,7 @@ async fn create_config_on(
         files: node.files(),
         dir: PathBuf::new(),
         clock: node.clock(),
+        time: clock::Clock::new(node.clock()).1,
         entropy: node.entropy(),
         tasks: tasks.clone(),
         transport: Rc::new(transport),
@@ -511,6 +512,7 @@ fn error_has_one_case_for_each_cause_that_a_public_call_gives() {
         | Error::Voters { .. }
         | Error::Limit { .. }
         | Error::Founding { .. }
+        | Error::Unjoinable { .. }
         | Error::Unfounded { .. }
         | Error::CardFile { .. }
         | Error::Soon => {}
