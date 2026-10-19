@@ -282,6 +282,32 @@ fn a_trust_whose_begin_line_starts_no_block_drops_it() {
 }
 
 #[test]
+fn a_begin_line_at_a_piece_of_253_bytes_of_a_long_line_starts_a_block() {
+    let (other, server) = blocks();
+    let untrusted = trusting(format!("{other}{}{server}", "x".repeat(252)));
+    assert_eq!(
+        untrusted.map(|_| ()),
+        Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED))
+    );
+    for text in [253, 506] {
+        let read = trusting(format!("{other}{}{server}", "x".repeat(text)))
+            .expect("the client connects");
+        assert_eq!(read.answer, Ok(read.value), "{text}");
+    }
+}
+
+#[test]
+fn a_begin_line_with_white_space_after_its_dashes_starts_a_block() {
+    let (other, server) = blocks();
+    for tail in [" ", "\t", "\r"] {
+        let begin = format!("-----BEGIN CERTIFICATE-----{tail}");
+        let server = server.replacen("-----BEGIN CERTIFICATE-----", &begin, 1);
+        let read = trusting(format!("{other}{server}")).expect("the client connects");
+        assert_eq!(read.answer, Ok(read.value), "{tail:?}");
+    }
+}
+
+#[test]
 fn a_trust_whose_end_line_names_another_label_ends_the_connect() {
     let (other, server) = blocks();
     for begin in [

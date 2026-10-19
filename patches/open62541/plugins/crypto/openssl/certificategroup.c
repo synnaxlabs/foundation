@@ -452,10 +452,13 @@ openSSLPushCertificate(const UA_Byte **at, const UA_Byte *end, STACK_OF(X509) *s
  * not load, with the number from 1 of the certificate that fails in `number`. A
  * bytestring that starts with a DER certificate is DER certificates back to back,
  * and bytes after the last one are one more. Else it is PEM: each block of
- * `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED CERTIFICATE`. aws-lc skips text
- * outside a block and a block of another label, but fails on a damaged or empty
- * block of any label, also one whose `END` line names another label, which counts as
- * one more. A block with any byte after its certificate fails, also trust settings,
+ * `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED CERTIFICATE`. aws-lc reads a line
+ * in pieces of at most 253 bytes, drops the bytes of 0x20 or less as a `char` at the
+ * end of each, so also 0x80 to 0xFF where `char` is signed, and starts a block at a
+ * piece from `-----BEGIN ` to `-----`. It skips other text and a block of another
+ * label, but fails on a block of any label that it cannot read, such as an empty one,
+ * damaged base64, or an `END` line that does not name its label, which counts as one
+ * more. A block with any byte after its certificate fails, also trust settings,
  * which the verify of the group does not apply. Clears the error queue of the thread.
  */
 static UA_TrustLoad
