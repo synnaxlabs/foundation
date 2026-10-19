@@ -428,20 +428,20 @@
   of `k` groups takes `k` outcome blocks before its drafts, and a pool with fewer free
   blocks stops the stream with `BUSY`. Each group takes the block of its next `Stored`
   on its own, so a stream holds at most two such blocks for each group, and none while
-  it idles. A removed channel of a group sends `Ended { group, Removed }`, and a `Disk`
-  error or a failed commit of a group sends `Ended { group, Failed }`, in the block of
-  its next or due `Stored`, also for a write of one group, in place of the reset with
-  `UNKNOWN` or `FAILED`: the failure of one group ends only that group
-  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267198734). The
-  `Ended` comes before the outcome of its frame, each later outcome of the group is
+  it idles. A channel of a group removed after its writer opens sends `Ended { group,
+  Removed }`, and a `Disk` error or a failed commit of a group sends `Ended { group,
+  Failed }`, in the block of its next or due `Stored`, also for a write of one group, in
+  place of the reset with `UNKNOWN` or `FAILED`: the failure of one group ends only that
+  group (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267198734).
+  The `Ended` comes before the outcome of its frame, each later outcome of the group is
   `Outcome::Ended`, and no `Stored` of the group follows. The other groups and the
   stream go on. A stream error, a bad frame, or `BUSY` still stops every group. Plan
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269723864 and
-  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269769681), OK by
-  `laptop.architect`
-  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269891329). The
-  test of a later open that fails after an earlier one moves to #3104, whose first
-  forward can fail after a local open
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269769681),
+  approved by `laptop.architect` at 2026-10-19T14:40:13Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269891329). Key
+  choices (9) and (d) went to `laptop.monitor`. The test of a later open that fails
+  after an earlier one moves to #3104, whose first forward can fail after a local open
   (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269834724). Lost:
   one home writer for all groups, which cannot end one group, and one block of `Stored`
   for all groups, which can pass the largest block of the pool.
