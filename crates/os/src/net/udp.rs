@@ -43,7 +43,7 @@ impl Udp {
         let fd =
             super::socket(local, SocketType::DGRAM, ipproto::UDP).map_err(io_error)?;
         configure(fd.as_fd(), config).map_err(io_error)?;
-        bind_free(fd.as_fd(), local)?;
+        bind_free(fd.as_fd(), local, free_v4_port)?;
         let socket = UdpSocket::from(fd);
         let state = UdpSocketState::new((&socket).into()).map_err(|e| from_io(&e))?;
         // Linux and macOS each set don't-fragment, so this fails only on an OS that
@@ -71,18 +71,22 @@ impl Udp {
 /// The binds that `bind_free` tries before it gives up.
 const TRIES: usize = 8;
 
-/// Binds `fd` to `local`. Port 0 on `[::]` takes a port that no IPv4 socket holds:
-/// the macOS search for a free IPv6 port skips IPv4 binds. Another socket can take
-/// that port between the probe and the bind, so it tries [`TRIES`] times.
-fn bind_free(fd: BorrowedFd<'_>, local: SocketAddr) -> Result<(), Error> {
+/// Binds `fd` to `local`. Port 0 on `[::]` takes a port from `free`, which gives one
+/// that no IPv4 socket holds: the macOS search for a free IPv6 port skips IPv4 binds.
+/// Another socket can take that port before the bind, so it tries [`TRIES`] times.
+fn bind_free(
+    fd: BorrowedFd<'_>,
+    local: SocketAddr,
+    mut free: impl FnMut() -> Result<u16, Error>,
+) -> Result<(), Error> {
     if !(local.ip() == Ipv6Addr::UNSPECIFIED && local.port() == 0) {
         return bind(fd, local);
     }
     let mut tries = 1;
     loop {
-        let mut free = local;
-        free.set_port(free_v4_port()?);
-        match bind(fd, free) {
+        let mut port = local;
+        port.set_port(free()?);
+        match bind(fd, port) {
             Err(Error::AddressInUse { .. }) if tries < TRIES => tries += 1,
             bound => return bound,
         }
@@ -438,6 +442,8 @@ fn from_codepoint(ecn: EcnCodepoint) -> Ecn {
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::OwnedFd;
+
     use super::*;
 
     const V4: Ipv4Addr = Ipv4Addr::LOCALHOST;
@@ -520,16 +526,102 @@ mod tests {
         }
 
         /// macOS gives a `[::]` bind on port 0 the port of an IPv4 bind, so a
-        /// datagram to that IPv4 address reaches the other socket (#3422).
+        /// datagram to that IPv4 address reaches the other socket (#3422). Each bind
+        /// has about a 1 in 160 chance to hit one of 100 held ports on macOS.
         #[test]
-        fn port_0_on_any_v6_skips_a_held_ipv4_port() {
-            let held = loopback();
-            let port = held.bound.local.port();
+        fn port_0_on_any_v6_skips_the_held_ipv4_ports() {
+            let held: Vec<_> = (0..100).map(|_| loopback()).collect();
+            let held: Vec<_> = held.iter().map(|u| u.bound.local.port()).collect();
             let local = SocketAddr::new(any_v6().ip(), 0);
-            for _ in 0..50_000 {
+            for _ in 0..5_000 {
                 let udp = Udp::bind(&config(local)).unwrap().0;
-                assert_ne!(udp.bound.local.port(), port);
+                assert!(!held.contains(&udp.bound.local.port()));
             }
+        }
+
+        fn any_v6_fd() -> OwnedFd {
+            let local = SocketAddr::new(any_v6().ip(), 0);
+            let fd =
+                crate::net::socket(local, SocketType::DGRAM, ipproto::UDP).unwrap();
+            configure(fd.as_fd(), &config(local)).unwrap();
+            fd
+        }
+
+        fn port_of(fd: OwnedFd) -> u16 {
+            UdpSocket::from(fd).local_addr().unwrap().port()
+        }
+
+        /// Gives each port of `ports` in turn, and counts the calls.
+        fn ports(
+            ports: &[u16],
+            calls: &mut usize,
+        ) -> impl FnMut() -> Result<u16, Error> {
+            move || {
+                *calls += 1;
+                Ok(ports[*calls - 1])
+            }
+        }
+
+        #[test]
+        fn free_v4_port_gives_a_port_that_ipv4_binds() {
+            let port = free_v4_port().unwrap();
+            assert_ne!(port, 0);
+            let local = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port);
+            let udp = Udp::bind(&config(local)).unwrap().0;
+            assert_eq!(udp.bound.local.port(), port);
+        }
+
+        #[test]
+        fn port_0_on_any_v6_binds_the_free_port() {
+            let port = free_v4_port().unwrap();
+            let fd = any_v6_fd();
+            let mut calls = 0;
+            let local = SocketAddr::new(any_v6().ip(), 0);
+            let bound = bind_free(fd.as_fd(), local, ports(&[port], &mut calls));
+            assert_eq!(bound, Ok(()));
+            assert_eq!(calls, 1);
+            assert_eq!(port_of(fd), port);
+        }
+
+        #[test]
+        fn other_addresses_bind_as_asked() {
+            let port = free_v4_port().unwrap();
+            let addresses = [v4(0), v6(0), SocketAddr::new(any_v6().ip(), port)];
+            for local in addresses {
+                let fd =
+                    crate::net::socket(local, SocketType::DGRAM, ipproto::UDP).unwrap();
+                let bound = bind_free(fd.as_fd(), local, || unreachable!());
+                assert_eq!(bound, Ok(()), "{local}");
+            }
+        }
+
+        #[test]
+        fn a_held_free_port_tries_the_next() {
+            let held = Udp::bind(&config(SocketAddr::new(any_v6().ip(), 0))).unwrap();
+            let taken = held.0.bound.local.port();
+            let port = free_v4_port().unwrap();
+            let mut given = [taken; TRIES];
+            given[TRIES - 1] = port;
+            let fd = any_v6_fd();
+            let mut calls = 0;
+            let local = SocketAddr::new(any_v6().ip(), 0);
+            let bound = bind_free(fd.as_fd(), local, ports(&given, &mut calls));
+            assert_eq!(bound, Ok(()));
+            assert_eq!(calls, TRIES);
+            assert_eq!(port_of(fd), port);
+        }
+
+        #[test]
+        fn gives_up_after_the_last_try() {
+            let held = Udp::bind(&config(SocketAddr::new(any_v6().ip(), 0))).unwrap();
+            let taken = held.0.bound.local;
+            let fd = any_v6_fd();
+            let mut calls = 0;
+            let local = SocketAddr::new(any_v6().ip(), 0);
+            let given = [taken.port(); TRIES + 1];
+            let bound = bind_free(fd.as_fd(), local, ports(&given, &mut calls));
+            assert_eq!(bound, Err(Error::AddressInUse { local: taken }));
+            assert_eq!(calls, TRIES);
         }
     }
 
