@@ -103,10 +103,12 @@ def channel(n: int) -> str:
 
 
 def connect(node: Node, channels: int = CHANNELS) -> foundation.Client:
-    """Plans and applies `channels` channels of `f64` and one of `bool` on one index
-    on `node`, and gives a client of it once the hub of the node knows them."""
+    """Plans and applies `channels` channels of `f64`, one of `bool`, and one of `uuid`
+    on one index on `node`, and gives a client of it once the hub of the node knows
+    them."""
     hcl = 'channel "w.time" { kind = "index" }\n'
     hcl += 'channel "w.flag" {\n  data_type = "bool"\n  index = "w.time"\n}\n'
+    hcl += 'channel "w.key" {\n  data_type = "uuid"\n  index = "w.time"\n}\n'
     for n in range(channels):
         hcl += f'channel "{channel(n)}" {{\n  data_type = "f64"\n'
         hcl += '  index = "w.time"\n}\n'
