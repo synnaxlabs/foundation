@@ -163,7 +163,12 @@
   the `node::Key` that its signature covers
   (`Signed::key`): the key cannot come from the public key, which can rotate, so the
   signed card is its one place (decided by `laptop.architect`, 2026-10-07T08:07:47Z:
-  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312). A
+  https://github.com/synnaxlabs/foundation/issues/1259#issuecomment-6033747312).
+  `Mesh::propose_voters` gives `raft` the public key of the applied card of each voter
+  of the set, so the joint entry binds the card key of each voter that it adds. That
+  key, under the leader's signature, proves that the node owns it (architect, #1106,
+  2026-10-19T12:43:33Z:
+  https://github.com/synnaxlabs/foundation/issues/1106#issuecomment-6267490155). A
   `Signed` comes only from `sign` or from `Unchecked::check`. `Signed::decode`
   (crate-private) checks the signature and gives `None` when it does not hold; a change
   record holds an `Unchecked` card, which each node checks at apply. Approved by

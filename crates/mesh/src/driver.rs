@@ -450,7 +450,7 @@ impl Mesh {
 
     /// Proposes `voters` as the next set of voters, and returns once the entry is on
     /// disk here. `raft` moves to the set through a joint configuration (RAFT
-    /// VOTERS).
+    /// VOTERS), whose entry binds the card key of each voter that it adds.
     ///
     /// # Errors
     ///
@@ -471,12 +471,13 @@ impl Mesh {
     ) -> Result<Position, Error> {
         check_voters(voters.len())?;
         self.proposed(|group| {
-            let mut members = voters.iter();
-            if let Some(&key) = members.find(|&&key| group.state.member(key).is_none())
-            {
-                return Err(Error::NotMember(key));
-            }
-            Ok(group.raft.propose_voters(voters)?)
+            let keyed = voters.iter().map(|&key| match group.state.member(key) {
+                Some(member) => Ok((key, member.public_key())),
+                None => Err(Error::NotMember(key)),
+            });
+            Ok(group
+                .raft
+                .propose_voters(keyed.collect::<Result<_, _>>()?)?)
         })
         .await
     }
@@ -3860,11 +3861,13 @@ mod tests {
             let keys = |ids: &[u8]| ids.iter().map(|&id| key(id)).collect();
             let votes = [1, 2, 3].map(|voter| (voter, voter));
             let proof = proven_at(2, 1, term, &votes, Body::HeartbeatReply).proof;
+            let change = Voters {
+                incoming: keys(incoming),
+                outgoing: keys(outgoing),
+            };
             Data::Voters(raft::Change {
-                voters: Voters {
-                    incoming: keys(incoming),
-                    outgoing: keys(outgoing),
-                },
+                public_keys: common::public_keys(&change),
+                voters: change,
                 votes: proof.expect("a proven message holds a proof"),
                 signature: None,
             })
@@ -3901,6 +3904,27 @@ mod tests {
                 assert_eq!(mesh.receive(public(4), proven), Ok(()));
                 assert_eq!(reply_term(&mesh, 4).await, later());
             });
+        }
+
+        // Node 1, a founder, holds the join of 4 and the change that adds it. Then 4,
+        // or founder 3, leads with the vote of 4.
+        #[test]
+        fn a_founder_follows_a_leader_with_the_vote_of_a_voter_that_its_log_adds() {
+            for leader in [4, 3] {
+                solo(move |node, tasks| async move {
+                    let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                    let mut data = changes(&[join_change(4)]);
+                    data.extend([
+                        voters(TERM, &[1, 2, 3, 4], &IDS),
+                        voters(TERM, &[1, 2, 3, 4], &[]),
+                    ]);
+                    write(&mesh, data).await;
+                    let votes = [(2, 2), (3, 3), (4, 4)];
+                    let proven = heartbeat(leader, later(), &votes);
+                    assert_eq!(mesh.receive(public(leader), proven), Ok(()));
+                    assert_eq!(reply_term(&mesh, leader).await, later());
+                });
+            }
         }
 
         #[test]
@@ -6567,6 +6591,22 @@ mod tests {
         }
 
         #[test]
+        fn binds_the_card_key_of_each_member_that_it_adds() {
+            let entries = solo_stored(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &[1, 2, 3], &[1]).await.unwrap();
+                let at = lead(&mesh, &node.clock(), home_to(1)).await;
+                let voters = [key(1), key(2), key(3)].into();
+                assert_eq!(mesh.propose_voters(voters).await, Ok(after(at, 1)));
+            });
+            let joint = entries.iter().find_map(|entry| match &entry.data {
+                Data::Voters(change) => Some(&change.public_keys),
+                Data::Empty | Data::Bytes(_) => None,
+            });
+            let cards = [(key(2), public(2)), (key(3), public(3))].into();
+            assert_eq!(joint, Some(&cards));
+        }
+
+        #[test]
         fn refuses_a_node_whose_join_is_not_applied() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2], &[2]).await.unwrap();
@@ -7471,6 +7511,14 @@ mod tests {
             let mut cut = heartbeat(links(4, &ALL));
             cut.chain[2].change.signature = Some(raft::Signature([0; 64]));
             takes(&FOUNDERS, cut, Err(unproven()));
+        }
+
+        #[test]
+        fn a_link_whose_bound_key_a_relay_changed_refuses_the_message() {
+            let mut forged = heartbeat(links(2, &ALL));
+            forged.chain[0].change.public_keys.insert(key(4), public(5));
+            let claim = Error::Claim(claim::Error::Forged { signer: key(2) });
+            takes(&FOUNDERS, forged, Err(claim));
         }
 
         #[test]

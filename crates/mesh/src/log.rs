@@ -928,6 +928,7 @@ mod tests {
     // A change of node 1 with `signature`, signed as the log takes it.
     fn change(voters: Voters, signature: u8) -> Data {
         Data::Voters(Change {
+            public_keys: crate::common::public_keys(&voters),
             voters,
             votes: Proof {
                 grant: Grant::Vote,
