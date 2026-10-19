@@ -7,7 +7,9 @@ microseconds:
   client to the `__next__` that gives its frame on a second client, p50 and p99;
 - the part of `__next__` after `sdk::read::Reader::next_within` gives the frame: the
   copy of each series, the arrays, the `dict`, and the `Frame`, p50 and p99. The
-  reader times it (`Reader._part`), with the count of frames of each case.
+  reader times it (`Reader._part`), with the count of frames of each case. Each case
+  runs twice: each frame read as it comes, and the frames read after their writes,
+  with no wait, which keeps the caches and the thread of the program warm.
 """
 
 import os
@@ -39,13 +41,14 @@ DISK = 64 << 20
 ROOM = 48 << 20
 
 
-def frames(names: list[str], samples: int, count: int,
-           dtype=np.float64) -> tuple[list[int], list[int]]:
+def frames(names: list[str], samples: int, count: int, dtype=np.float64,
+           queued: bool = False) -> tuple[list[int], list[int]]:
     """On a new node, writes `count` frames of `samples` samples of `names` and their
     stamps on one client, or fewer when they do not fit in `ROOM`, each read on a
-    second client before the next write, after 50 frames to warm up. Gives the round
-    trip and the part of each, in nanoseconds. Raises `DataLost` when the node lost a
-    frame."""
+    second client before the next write, after 50 frames to warm up. With `queued`, it
+    writes each frame first, then reads them with no wait. Gives the round trip, empty
+    with `queued`, and the part of each frame, in nanoseconds. Raises `DataLost` when
+    the node lost a frame."""
     size = samples * (len(names) * np.dtype(dtype).itemsize + 8)
     count = min(count, ROOM // size - 50)
     random = np.random.default_rng(3321)
@@ -58,16 +61,20 @@ def frames(names: list[str], samples: int, count: int,
         with connect(node) as writes, node.connect() as reads:
             with (reads.open_reader(names) as reader,
                   writes.open_writer(names, on_loss="raise") as writer):
+                if queued:
+                    for _ in range(count + 50):
+                        writer.write_series(series | {"w.time": stamps.take(samples)})
                 for n in range(count + 50):
                     began = time.perf_counter_ns()
-                    writer.write_series(series | {"w.time": stamps.take(samples)})
+                    if not queued:
+                        writer.write_series(series | {"w.time": stamps.take(samples)})
                     next(reader)
                     if n >= 50:
                         trips.append(time.perf_counter_ns() - began)
                         parts.append(reader._part)
     finally:
         node.stop()
-    return trips, parts
+    return ([] if queued else trips), parts
 
 
 def main() -> None:
@@ -86,11 +93,13 @@ def main() -> None:
                     f"block, never sent"
                 )
                 continue
-            _, parts = frames(names, samples, CALLS)
-            print(
-                f"read, {places} places, {samples} samples: {len(parts)} frames, "
-                f"after the frame p50 {p50(parts):.2f}, p99 {p99(parts):.2f}"
-            )
+            for queued in (False, True):
+                _, parts = frames(names, samples, CALLS, queued=queued)
+                print(
+                    f"read, {places} places, {samples} samples"
+                    f"{', queued' if queued else ''}: {len(parts)} frames, after "
+                    f"the frame p50 {p50(parts):.2f}, p99 {p99(parts):.2f}"
+                )
     for samples in SAMPLES:
         _, parts = frames(["w.flag"], samples, CALLS, bool)
         print(
