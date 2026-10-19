@@ -547,11 +547,12 @@ async fn run(
 ) {
     let group = Group::new(tasks);
     match connect(node, subject, group.tasks().clone()).await {
-        Ok(session) => {
+        Ok((session, bytes_max)) => {
             drop(outcome.send(Ok(())));
             // `_close` drops before the wait for the tasks, which ends each writer.
             let (_close, closed) = watch::channel(());
-            served(&session, group.tasks(), ended, requests, &closed).await;
+            let tasks = group.tasks();
+            served(&session, bytes_max, tasks, ended, requests, &closed).await;
             if let Some(error) = session.ended() {
                 drop(outcome.send(Err(Error::Session(error))));
             }
@@ -562,9 +563,11 @@ async fn run(
 }
 
 /// Serves each of `requests` in a task on `tasks` until `ended` completes or the
-/// client dropped. Each task ends when `closed` changes.
+/// client dropped. Each task ends when `closed` changes. `bytes_max` is the largest
+/// block of the session's pool of frames.
 async fn served(
     session: &program::Session,
+    bytes_max: usize,
     tasks: &Tasks,
     mut ended: oneshot::Receiver<()>,
     mut requests: Requests,
@@ -581,7 +584,8 @@ async fn served(
         let (session, closed) = (session.clone(), closed.clone());
         match open {
             Open::Write(open) => {
-                tasks.spawn(serve(write::served(session, open), closed));
+                let served = write::served(session, bytes_max, open);
+                tasks.spawn(serve(served, closed));
             }
             Open::Read(open) => {
                 tasks.spawn(serve(read::served(session, open), closed));
@@ -590,15 +594,17 @@ async fn served(
     }
 }
 
-/// A session with `node` as `subject`, on the drivers of `os` and `tasks`.
+/// A session with `node` as `subject`, on the drivers of `os` and `tasks`, and the
+/// largest block of its pool of frames.
 async fn connect(
     node: Node,
     subject: Subject,
     tasks: Tasks,
-) -> Result<program::Session, Error> {
+) -> Result<(program::Session, usize), Error> {
     let clock = os::clock();
     let entropy = os::entropy();
     let pool = Rc::new(block::Pool::heap(POOL));
+    let frames = Rc::new(block::Pool::heap(FRAMES));
     let reads = reads().map_err(Error::Memory)?;
     let transport = transport::Client::new(transport::client::Config {
         net: os::net(),
@@ -622,12 +628,11 @@ async fn connect(
         entropy,
         tasks,
         pool,
-        frames: Rc::new(block::Pool::heap(FRAMES)),
+        frames: Rc::clone(&frames),
         reads: Rc::new(reads),
     };
-    program::Session::connect(&transport, config)
-        .await
-        .map_err(Error::Session)
+    let session = program::Session::connect(&transport, config).await;
+    Ok((session.map_err(Error::Session)?, frames.largest()))
 }
 
 /// The pool of the frames of the readers of a session. It gives back the pages of the

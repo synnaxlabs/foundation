@@ -41,9 +41,7 @@ use env::clock::Clock;
 use env::net::{self, Listener, Net};
 use env::rng::Rng;
 use types::quality::Quality;
-#[cfg(test)]
-use types::time::Span;
-use types::time::{Monotonic, Stamp};
+use types::time::{Monotonic, Span, Stamp};
 
 use crate::connection::Manager;
 use crate::event;
@@ -55,8 +53,8 @@ use crate::value::Value;
 /// The sessions and secure channels of [`serve`].
 const SESSIONS: u16 = 4;
 
-/// The variables of [`serve`], each with its Double value and its status, and each
-/// read that the server answered. Clones share them.
+/// The variables of [`serve`], each with its Double value and its status, each read
+/// that the server answered, and the clock of the server. Clones share them.
 #[derive(Clone, Debug)]
 pub struct Variables(Arc<Mutex<State>>);
 
@@ -65,6 +63,8 @@ struct State {
     variables: Vec<Variable>,
     /// The status of each later read.
     quality: Quality,
+    /// The span of the server clock past the wall time of [`serve`].
+    ahead: Span,
     /// The most nodes of a Read that a server answers, set before it starts.
     #[cfg(test)]
     most: Option<u32>,
@@ -140,6 +140,7 @@ impl Variables {
         Self(Arc::new(Mutex::new(State {
             variables,
             quality: Quality::GOOD,
+            ahead: Span::ZERO,
             #[cfg(test)]
             most: None,
             #[cfg(test)]
@@ -161,6 +162,15 @@ impl Variables {
             }
         }
         state.quality = quality;
+    }
+
+    /// Puts the clock of the server `ahead` of the `wall` time of [`serve`], in the
+    /// value of `CurrentTime`, in each server and source timestamp, and in the time of
+    /// each channel token. A later call moves it, as a jump of the clock does. A
+    /// negative `ahead` puts it behind. Past the last stamp or before the first, the
+    /// clock stays there.
+    pub fn set_clock(&self, ahead: Span) {
+        self.state().ahead = ahead;
     }
 
     /// Sets the value of the variable of `text` in [`Variables::new`]. A value that is
@@ -290,9 +300,10 @@ pub struct Served {
 /// Serves `variables` on `listener` with room for 4 sessions until `until` is
 /// cancelled or the listener fails, then closes the server. It adds each namespace
 /// from 2 to the highest of `variables`. Each stream of the server has the options of
-/// `listener`. `wall` gives the wall time of the server, which a client compares with
-/// the time of each channel token: give the wall time of the client's node. Call it on
-/// a thread that `env` started. It also serves the tree of the module doc.
+/// `listener`. The server clock is the wall time of `wall` plus the span of
+/// [`Variables::set_clock`]. A client logs a warning when the time of a channel token
+/// is 10 s or more from its own: give the wall time of the client's node. Call it on a
+/// thread that `env` started. It also serves the tree of the module doc.
 ///
 /// The close stops the server and drives each stream while the delayed callbacks of
 /// open62541 drain: each stream sends what it can in that time, then a FIN. An answer
@@ -328,9 +339,13 @@ pub async fn serve(
     variables: &Variables,
     until: Token,
 ) -> Result<(), net::Error> {
+    let shifted = Variables::clone(variables);
     let time = event::Time {
         clock: Clock::clone(&clock),
-        wall: Box::new(wall),
+        wall: Box::new(move || {
+            let nanos = wall().nanos().saturating_add(shifted.state().ahead.nanos());
+            Stamp::from_nanos(nanos)
+        }),
     };
     let manager = Manager::accepting(time, net, listener, rng);
     let nodes: Vec<Node> = (variables.state().variables.iter())

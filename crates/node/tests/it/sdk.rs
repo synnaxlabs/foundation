@@ -543,7 +543,7 @@ fn a_call_that_the_writer_cannot_send_gives_its_error_and_the_writer_goes_on() {
         .collect();
     let values = vec![0; stamps.len()];
     let large = block::Error::TooLarge {
-        requested: 65584,
+        requested: 65536,
         largest: 57344,
     };
     assert_eq!(

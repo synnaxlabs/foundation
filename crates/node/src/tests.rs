@@ -846,21 +846,46 @@ mod buffer {
         let e = run.node.join().unwrap_err();
         assert_eq!(
             e,
-            Error::Buffer {
-                core: 0,
-                error: ::buffer::Error::Budget {
-                    budget: 32_768,
-                    min: 62_272,
-                },
+            Error::Small {
+                pool: budget,
+                cores: 16,
+                min: Size::from_bytes(996_352),
             }
         );
         assert_eq!(
             e.to_string(),
-            "cannot open the buffer of shard-0: a pool of 32768 bytes holds no entry \
-             of 4032 bytes: give it 62272 bytes or more"
+            "the pool budget 512KiB opens no buffer on each of 16 shards; it needs at \
+             least 973KiB"
         );
         let made = ["lock", "name", "shards-16"].map(PathBuf::from);
         assert_eq!(listed(&mut run.sim, &run.host, ""), made);
+    }
+
+    /// The least pool budget that [`Error::Small`] names opens the buffer of each
+    /// shard. One byte less gives shard 0 enough with its remainder, and shard 1 too
+    /// little.
+    #[test]
+    fn the_least_pool_budget_opens_the_buffer_of_each_shard() {
+        let least = Size::from_bytes(996_352);
+        let mut run = start_with(7, 16, &[], least, Box::new(heap));
+        let opened = Arc::new(Mutex::new(false));
+        let set = Arc::clone(&opened);
+        run.node
+            .spawn(move |_| async move { *set.lock().unwrap() = true });
+        assert_eq!(run.sim.run_for(Span::HOUR), Ok(()));
+        assert!(*opened.lock().unwrap());
+        run.node.stop();
+        assert_eq!(run.sim.run(), Ok(()));
+        assert_eq!(run.node.join(), Ok(()));
+        let under = Size::from_bytes(least.bytes() - 1);
+        let mut run = start_with(7, 16, &[], under, Box::new(heap));
+        assert_eq!(run.sim.run(), Ok(()));
+        let small = Error::Small {
+            pool: under,
+            cores: 16,
+            min: least,
+        };
+        assert_eq!(run.node.join(), Err(small));
     }
 
     #[test]
@@ -1793,6 +1818,8 @@ mod home {
             clock: clock.clone(),
             entropy: host.entropy(),
             layout: ::buffer::Layout::new(64 << 20, BODY_MAX).expect("a ring"),
+            budget: Size::from_bytes(1 << 22),
+            cores: 1,
             failed: Arc::new(OnceLock::new()),
             stop,
         };
@@ -4891,17 +4918,13 @@ pub(crate) mod port {
             assert_eq!(founds(Size::MEBIBYTE, 1900), Ok(()));
         }
 
-        /// The least pool budget of a node on two shards: twice the least part that
-        /// each buffer takes.
+        /// The least pool budget of a node on two shards, which [`Error::Small`]
+        /// names.
         fn least() -> Size {
-            let Err(Error::Buffer {
-                error: ::buffer::Error::Budget { min, .. },
-                ..
-            }) = founds(Size::from_bytes(1), 0)
-            else {
+            let Err(Error::Small { min, .. }) = founds(Size::from_bytes(1), 0) else {
                 panic!("a pool budget of 1 byte opens no buffer");
             };
-            Size::from_bytes(2 * u64::try_from(min).unwrap())
+            min
         }
 
         /// Starts a node of the region of [`pair`] on two shards with a pool budget of
@@ -8688,12 +8711,10 @@ mod budget {
     /// the next start can give other budgets.
     #[test]
     fn a_start_that_fails_before_each_buffer_opens_keeps_no_budgets() {
-        let buffer = Error::Buffer {
-            core: 0,
-            error: ::buffer::Error::Budget {
-                budget: 32_768,
-                min: 62_272,
-            },
+        let buffer = Error::Small {
+            pool: Size::from_bytes(512 << 10),
+            cores: 16,
+            min: Size::from_bytes(996_352),
         };
         let disk = Error::Disk {
             disk: Size::from_bytes(1),

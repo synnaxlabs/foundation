@@ -37,7 +37,6 @@ pub(crate) const TEST_EDGES: &[(&str, &str)] = &[
     ("ops", "clock"),
     ("node", "sdk"),
     ("sdk-python", "transport"),
-    ("sdk-python", "program"),
     ("sdk-python", "os"),
 ];
 
@@ -283,7 +282,7 @@ pub(crate) const CRATES: &[Crate] = &[
     Crate {
         name: "sdk-python",
         layer: 4,
-        deps: Deps::Only(&["sdk", "sector", "types"]),
+        deps: Deps::Only(&["sdk", "program", "sector", "types"]),
     },
 ];
 

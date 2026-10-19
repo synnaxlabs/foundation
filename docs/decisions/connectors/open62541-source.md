@@ -462,8 +462,11 @@
   tests give the monotonic time from the Unix epoch (`event::Time::monotonic`).
   Approved by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2574#issuecomment-6147681882,
-  2026-10-13 14:19 UTC). `laptop.architect-2` moved the trigger of #1992 to "exit test
-  1 of #1737 passes"
+  2026-10-13 14:19 UTC). The server clock of `sim::serve` adds the span of
+  `Variables::set_clock` (`laptop.architect-2`, 2026-10-19T12:02:54Z and 12:37:09Z:
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6266740401 and
+  https://github.com/synnaxlabs/foundation/pull/3354#issuecomment-6267372432).
+  `laptop.architect-2` moved the trigger of #1992 to "exit test 1 of #1737 passes"
   (https://github.com/synnaxlabs/foundation/issues/1992#issuecomment-6140198064,
   2026-10-13 07:03 UTC), and the person added this part to ONE NODE ("Yes thats
   fine"), relayed by `laptop.monitor`

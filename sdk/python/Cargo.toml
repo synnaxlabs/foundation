@@ -15,6 +15,8 @@ doctest = false
 sim = []
 
 [dependencies]
+numpy = "0.30.0"
+program = { path = "../../crates/program" }
 pyo3 = { version = "0.30.1", features = ["abi3-py311"] }
 sdk = { path = "../rust" }
 sector = { path = "../../crates/sector" }
@@ -22,7 +24,6 @@ types = { path = "../../crates/types" }
 
 [dev-dependencies]
 os = { path = "../../crates/os" }
-program = { path = "../../crates/program" }
 transport = { path = "../../crates/transport" }
 
 [lints]
