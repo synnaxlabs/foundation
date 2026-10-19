@@ -354,7 +354,7 @@ fn with_tail(at: usize, tail: &[u8]) -> (Vec<u8>, usize) {
 #[test]
 fn a_line_of_a_block_that_ends_in_a_high_byte_ends_the_connect() {
     let last = blocks().1.lines().count() - 1;
-    for at in [0, 1, last] {
+    for at in [0, 1, 2, last] {
         for tail in [b"\xA0".as_slice(), b" \xFF\r", b"\x80 "] {
             let (trust, number) = with_tail(at, tail);
             assert_eq!(trusting(trust), Err(line(number)), "{at} {tail:?}");
@@ -384,6 +384,7 @@ fn a_client_that_trusts_a_pem_with_utf_8_text_outside_its_blocks_reads() {
     let long = "é".repeat(200);
     for trust in [
         format!("{other}Certigna é\n{server}"),
+        format!("{other}-----BEGIN A NOTE é\na note that ends in -----é\n{server}"),
         format!("{long}\n{other}{long}\n{server}{long}"),
     ] {
         let read = trusting(trust).expect("the client connects");
