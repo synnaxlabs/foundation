@@ -848,7 +848,8 @@ fn late(id: u8) -> Missed {
 
 // The follower `p` sends no `raft` message to the follower `q`, which restarts, and
 // the leader holds each blob stream with no answer. So the apply of `p` commits only
-// when its put reaches the new process of `q`.
+// when its put reaches the new process of `q`, and only the put drops the session to
+// the old process from the group of `p`.
 #[test]
 fn an_apply_of_a_follower_counts_a_follower_that_restarted() {
     let mut cluster = Cluster::new(4);
@@ -858,6 +859,8 @@ fn an_apply_of_a_follower_counts_a_follower_that_restarted() {
     let leader = cluster.take().0[0];
     let mut followers = IDS.into_iter().filter(|&id| id != leader);
     let (p, q) = (followers.next().unwrap(), followers.next().unwrap());
+    cluster.board.lock().unwrap().cached.insert(p, q);
+    cluster.run(seconds(1));
     let node = cluster.node(q).clone();
     cluster.sim.crash(&node, Crash::Power);
     cluster.start_voter(q);
@@ -867,7 +870,9 @@ fn an_apply_of_a_follower_counts_a_follower_that_restarted() {
     cluster.change(p, base(), &definitions);
     cluster.run(seconds(5));
     let moved = pointer(1, &definitions);
-    assert_eq!(cluster.board().applied, [(p, moved, Ok(moved))]);
+    let board = cluster.board();
+    assert_eq!(board.applied, [(p, moved, Ok(moved))]);
+    assert_eq!(board.ended[&p], BTreeSet::new());
 }
 
 // The cards of voters 2 and 3 have addresses where no node answers, so the puts

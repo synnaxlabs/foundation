@@ -101,6 +101,11 @@ impl Senders {
             let Err(failure) = sent else { continue };
             match failure {
                 Failure::Pool | Failure::Unknown => {}
+                // Other protocols can use the session, so only the handle drops.
+                Failure::Transport(error) if lost(&error) => {
+                    stream = None;
+                    self.group().borrow_mut().sessions.remove(&to);
+                }
                 Failure::Transport(error) => match error {
                     // Only a peer that opens no mesh, or skipped the check of
                     // `Mesh::open`, takes less than `BYTES_MIN`.
@@ -115,25 +120,11 @@ impl Senders {
                         }
                         stream = None;
                     }
-                    // The session failed, or no dial gave one. Other protocols can
-                    // use the session, so only the handle drops.
-                    transport::Error::Unreachable { .. }
-                    | transport::Error::Closed { .. }
-                    | transport::Error::PeerClosed { .. }
-                    | transport::Error::TimedOut
-                    | transport::Error::Broken { .. }
-                    | transport::Error::Network { .. } => {
-                        stream = None;
-                        self.group().borrow_mut().sessions.remove(&to);
-                    }
                     // A stream gives `Reset` only after a dropped send, and this
                     // task ends when it drops one. Only a bind gives `Config`. Only
                     // an attempt of a dial gives `Unroutable` or `Authentication`,
                     // inside `Unreachable`.
-                    transport::Error::Reset { .. }
-                    | transport::Error::Config { .. }
-                    | transport::Error::Unroutable
-                    | transport::Error::Authentication { .. } => {
+                    error => {
                         unreachable!("invariant: a send of the mesh gives no {error}")
                     }
                 },
@@ -216,5 +207,24 @@ impl Senders {
             .sessions
             .insert(to, session.clone());
         Ok(session)
+    }
+}
+
+/// Whether `error` says that the session to the peer failed, or that no dial gave one,
+/// so that the group drops its handle of that session.
+pub(super) fn lost(error: &transport::Error) -> bool {
+    match error {
+        transport::Error::Unreachable { .. }
+        | transport::Error::Closed { .. }
+        | transport::Error::PeerClosed { .. }
+        | transport::Error::TimedOut
+        | transport::Error::Broken { .. }
+        | transport::Error::Network { .. } => true,
+        transport::Error::Unroutable
+        | transport::Error::Authentication { .. }
+        | transport::Error::Reset { .. }
+        | transport::Error::Stopped { .. }
+        | transport::Error::TooLarge { .. }
+        | transport::Error::Config { .. } => false,
     }
 }
