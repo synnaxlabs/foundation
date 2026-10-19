@@ -35,7 +35,7 @@ impl Case {
         }
     }
 
-    fn run(self, pool: Pool, needle: &Needle) {
+    fn run(self, pool: Pool, needle: Needle) {
         match self {
             Self::Lent { len, at } => lent(pool, len, at, needle),
             Self::Filled { len } => filled(pool, len, needle),
@@ -71,14 +71,14 @@ fn main() {
     let mut needles = (0..=u8::MAX).map(needle);
     let mut next = || needles.next().expect("a needle for each call");
     for case in CASES {
-        let held = freed(Pool::heap, case, &next());
+        let held = freed(Pool::heap, case, next());
         assert_eq!(
             held, 1,
             "a dropped `Pool::heap` frees the bytes of {case:?}"
         );
     }
     for case in CASES {
-        let held = freed(Pool::erased, case, &next());
+        let held = freed(Pool::erased, case, next());
         assert_eq!(
             held, 0,
             "a dropped `Pool::erased` erases the bytes of {case:?}"
@@ -95,15 +95,15 @@ fn needle(call: u8) -> Needle {
 
 /// Gives the count of freed allocations that hold `needle`, after `case` runs on the
 /// pool that `pool` gives for the case's budget and drops it.
-fn freed(pool: fn(Config) -> Pool, case: Case, needle: &Needle) -> u64 {
+fn freed(pool: fn(Config) -> Pool, case: Case, needle: Needle) -> u64 {
     let pool = pool(Config::new(case.budget()).expect("the budget fits"));
-    let ((), found) = ALLOCATOR.freed_holding(needle, || case.run(pool, needle));
+    let ((), found) = ALLOCATOR.freed_holding(&needle, || case.run(pool, needle));
     found
 }
 
 /// Drops `pool` while it lends a block of 32 bytes and one of `len` bytes, then the
 /// blocks. Block `at` holds `needle` at its end.
-fn lent(pool: Pool, len: usize, at: usize, needle: &Needle) {
+fn lent(pool: Pool, len: usize, at: usize, needle: Needle) {
     let blocks: Vec<_> = [32, len]
         .into_iter()
         .enumerate()
@@ -111,38 +111,38 @@ fn lent(pool: Pool, len: usize, at: usize, needle: &Needle) {
             let mut block = pool.alloc(len).expect("the budget has room");
             block.fill(0x11);
             if index == at {
-                block[len - needle.len()..].copy_from_slice(needle);
+                block[len - needle.len()..].copy_from_slice(&needle);
             }
             block.freeze()
         })
         .collect();
     drop(pool);
     assert!(
-        blocks.iter().any(|block| block.ends_with(needle)),
+        blocks.iter().any(|block| block.ends_with(&needle)),
         "a lent block outlives its pool"
     );
 }
 
-/// Drops `pool` while it lends a block of `len` bytes that holds copies of `needle` from
-/// end to end, then the block.
-fn filled(pool: Pool, len: usize, needle: &Needle) {
+/// Drops `pool` while it lends a block of `len` bytes that holds copies of `needle`
+/// from end to end, then the block.
+fn filled(pool: Pool, len: usize, needle: Needle) {
     let mut block = pool.alloc(len).expect("the budget has room");
     for word in block.chunks_exact_mut(needle.len()) {
-        word.copy_from_slice(needle);
+        word.copy_from_slice(&needle);
     }
     let block = block.freeze();
     drop(pool);
-    assert!(block.ends_with(needle), "a lent block outlives its pool");
+    assert!(block.ends_with(&needle), "a lent block outlives its pool");
 }
 
-/// Puts `needle` at the end of a block, purges its class, and carves the class again with a
-/// block that ends before `needle`.
-fn recarved(pool: Pool, needle: &Needle) {
+/// Puts `needle` at the end of a block, purges its class, and carves the class again
+/// with a block that ends before `needle`.
+fn recarved(pool: Pool, needle: Needle) {
     let mut first = pool.alloc(32).expect("the budget has room");
     first.fill(0x11);
     let mut second = pool.alloc(32).expect("the budget has room");
     second.fill(0x11);
-    second[32 - needle.len()..].copy_from_slice(needle);
+    second[32 - needle.len()..].copy_from_slice(&needle);
     drop(first);
     drop(second);
     pool.purge();
@@ -153,13 +153,13 @@ fn recarved(pool: Pool, needle: &Needle) {
 
 /// Carves class 2, then two blocks of class 1, whose second ends at the start of the
 /// released span of class 2 and holds `needle` at its end.
-fn pressed(pool: Pool, needle: &Needle) {
+fn pressed(pool: Pool, needle: Needle) {
     drop(pool.alloc(192).expect("the budget has room"));
     let mut first = pool.alloc(128).expect("the budget has room");
     first.fill(0x11);
     let mut second = pool.alloc(128).expect("the budget has room");
     second.fill(0x11);
-    second[128 - needle.len()..].copy_from_slice(needle);
+    second[128 - needle.len()..].copy_from_slice(&needle);
     drop(pool);
     drop(first);
     drop(second);
