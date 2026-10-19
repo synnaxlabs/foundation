@@ -94,10 +94,12 @@
   drafts of its writers, so `write_series` keeps its bound. The pool reserves about
   504 MiB of address space of the OS, with no commit charge, and gives back the pages
   of a size that it no longer uses when another size needs them, so it holds at most
-  8 MiB, and up to two partial pages more of each of its sizes. When the OS refuses
-  the reservation, `connect` gives `Memory`. A frame whose memory the OS refuses later
-  waits in `next`, which tries again until the OS gives the memory or the session
-  closes (`laptop.architect-2`, 2026-10-19T14:39:03Z,
+  8 MiB, and up to two partial pages more of each of its sizes. On macOS, the pages of
+  the free frames of a size in use that it gives to another size stay in memory until
+  the OS needs them. When the OS refuses the reservation or its first page, `connect`
+  gives `Memory`. A frame whose memory the OS refuses later waits in `next`, which
+  tries again until the OS gives the memory or the session closes
+  (`laptop.architect-2`, 2026-10-19T14:39:03Z,
   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289,
   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270455282, and
   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270555497;
@@ -111,3 +113,15 @@
   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6268640271: a frame of
   the node is at most about 1 MiB, `BODY_MAX`). The node gives its largest frame at the
   open, and the sdk sizes the pool from it, in item 1 of #3366.
+  `crates/node/benches/sdk/` gives the p50 and p99 of each round of a read. On a quiet
+  host at f176f91e9
+  (https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6272905066), a frame
+  that comes before the call of `next` takes 14.9-16.0 µs p50 and 17.9-21.4 µs p99
+  (`sdk next held`), and a call that waits before its frame comes takes the decode and
+  the leg to the caller, 2.9-8.1 µs p50 and 3.9-9.9 µs p99. Both are over the P1 limit
+  of 2.5 µs. Accepted as the price of SDK CLIENT, with no spin before the park. The
+  purge of an idle size, whose next frame faults its pages again, is accepted too: one
+  reader keeps one block of each size, which fits the budget up to the largest frame of
+  the node, and several readers of one client can purge. Its bench and judgment are item
+  1 of #3366. Decided by `laptop.architect-2` on 2026-10-19T18:05:17Z
+  (https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6273874154).
