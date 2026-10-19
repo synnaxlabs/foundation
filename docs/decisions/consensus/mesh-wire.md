@@ -32,13 +32,14 @@
   https://github.com/synnaxlabs/foundation/pull/1386#issuecomment-6038303084). A message
   that the group refuses (MESH DRIVER) changes nothing, and the receiver stops the
   stream with code 16, the first code of the mesh protocol (PROTOCOL HEADER), and resets
-  a reply half with the same code. A request from a node that a committed configuration
-  removed, when `Start.voters` or a committed `Voters` entry held it (RAFT VOTERS), gets
-  code 17 instead (`Error::Removed`). A `Change::Card` over the bound of MESH DRIVER
-  gets code 18 instead (`Error::Soon`), and the peer gives `Error::Soon` and does not
-  forward it again. A join that the leader refuses as `Error::Contested` gets code 19
-  instead, and the peer gives `Error::Contested` and does not forward it again
-  (decided by the architect, 2026-10-18T22:14:01Z:
+  a reply half with the same code. A `PreVote` or a `Vote` at or below the commit from
+  a node that a committed configuration removed, when `Start.voters` or a committed
+  `Voters` entry held it (RAFT VOTERS), gets code 17 instead (`Error::Removed`). A
+  `Change::Card` over the bound of MESH DRIVER gets code 18 instead (`Error::Soon`), and
+  the peer gives `Error::Soon` and does not forward it again. A join that the leader
+  refuses as `Error::Contested` gets code 19 instead, and the peer gives
+  `Error::Contested` and does not forward it again (decided by the architect,
+  2026-10-18T22:14:01Z:
   https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6255804864). A group
   that stopped gives code 16 on a one-way stream. On a stream that goes both ways it
   gives no mesh code: it can stop in the write of the entry, which then applies after a

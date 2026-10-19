@@ -61,14 +61,18 @@
   Supersedes the first version, which the person approved on 2026-10-06
   (https://github.com/synnaxlabs/foundation/pull/647#issuecomment-6007546638). #1105
   builds the `removed` answer and the held rule, #1106 the key binding, and #1107 the
-  configuration that a chain proves. Until #1107, a request proves no newer
-  configuration. A node answers `removed` only to a `PreVote` or a `Vote` whose
-  `last.index` is at or below its own commit index, from a sender that `Start.voters` or
-  a committed `Voters` entry held, when the last committed configuration lacks it. A
-  sender that holds entries past the commit of the receiver can hold a newer committed
-  configuration that adds it back, and a heartbeat or an append names only entries
-  that the receiver can lack, so each other request of a sender that is not a voter gets
-  `NotVoter` (decided by the architect, 2026-10-08T06:51:45Z:
+  configuration that a chain proves. Until #1107, a request shows a newer configuration
+  only with its last index. A node answers `removed` only to a `PreVote` or a `Vote`
+  whose `last.index` is at or below its own commit index, from a sender that
+  `Start.voters` or a committed `Voters` entry held, when the last committed
+  configuration lacks it: a sender that holds a newer committed configuration names a
+  later index. A heartbeat and an append get `NotVoter`, because they can name only
+  entries that the receiver holds. The gap: a voter that a committed configuration
+  added back still gets `removed` to a vote that it sent while its log lacked that
+  entry, from a voter whose commit is also below the entry. The majority stop below
+  bounds it. This supersedes
+  "a request proves no newer configuration" of the interim rule below (decided by the
+  architect, 2026-10-08T06:51:45Z:
   https://github.com/synnaxlabs/foundation/issues/1822#issuecomment-6054242092). A
   sender that only an uncommitted entry held gets `NotVoter`: the entry can still be
   truncated, and a node whose commit lags would stop a voter that no committed
@@ -93,18 +97,21 @@
   drops the stream, as any refusal does (decided by `laptop.architect`,
   2026-10-08T02:59:07Z:
   https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164). The node
-  stops its `raft` group for that region (`Stopped::Removed`) only when the voters that
-  answered `removed` are a majority of the incoming half of the newest configuration in
-  its log, itself not counted. The set of answers clears when that configuration
-  changes. A committed add of the node is on a majority of the incoming half, so while
-  the node lacks it, a majority of the other voters admits it, and one voter that holds
-  only the removal cannot stop it. A removed node that missed its release gets
-  `removed` from each voter that learns the commit, so it still stops. The bound: when
-  most voters of its stale configuration left the group after it and missed their
-  release, they can still stop it. The set clears when the configuration differs in
-  value, so a configuration that changes and changes back between two answers keeps
-  the first answer. Decided by `laptop.architect`, 2026-10-19T12:57:24Z:
-  https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373. Lost: a
+  stops its `raft` group for that region (`Stopped::Removed`) only when
+  `Raft::removed_by` gives the voters: those that answered `removed` are a majority of
+  the incoming half of the newest configuration in its log, itself not counted. An
+  answer counts for `2 × election_ticks` ticks, so an answer given before a committed
+  add drops. A committed add of the node is on a majority of the incoming half, so
+  while the node lacks it, a majority of the other voters admits it, and one voter that
+  holds only the removal cannot stop it after that window. A removed node that missed
+  its release gets `removed` from each voter that learns the commit, so it still stops.
+  The bound: when most voters of its stale configuration left the group after it and
+  missed their release, they can still stop it. Answers given just before a committed
+  add count for one window after it. Decided by `laptop.architect`,
+  2026-10-19T12:57:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373; the
+  place in `raft` and the window 2026-10-19T18:47:21Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274691760. Lost: a
   removed node that stops only on its own committed leave, which never stops the case
   of #1105. `raft`
   sends such a node no entries, only answers. A voter with a lease drops its campaign or

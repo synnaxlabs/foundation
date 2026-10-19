@@ -203,8 +203,7 @@
   stops when a write of the log fails, when a committed change has 0 bytes or a kind
   that this build does not know, or when each `Mesh` drops: this build cannot judge such
   an entry, and a newer build can. A group also stops (`Stopped::Removed`, with the
-  voters that answered) when a majority of the other incoming voters of the newest
-  configuration in its log answered `removed` under that configuration (RAFT VOTERS).
+  voters that answered) when `Raft::removed_by` gives the voters (RAFT VOTERS).
   An entry with no change (the first entry of a leader)
   is not a change of 0 bytes. A committed entry of a known kind whose body does not
   decode is `Refused::Body` on every node, and the group goes on, so one voter that
