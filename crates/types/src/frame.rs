@@ -472,6 +472,17 @@ impl Draft {
         split(body, descriptor_ends(descriptors))
     }
 
+    /// The entry and the series bytes of the present series at position `n` in entry
+    /// order, as [`Draft::iter`] gives them, or `None` when `n` is not below the count
+    /// of present series. Time is constant.
+    #[must_use]
+    pub fn nth(&self, n: usize) -> Option<(usize, &[u8])> {
+        let (_, descriptors, body) = parts(&self.0);
+        let entry = to_usize(lead(descriptors.get(n)?));
+        let (start, end) = bounds(descriptors, n);
+        Some((entry, &body[start..end]))
+    }
+
     /// The key set the draft's entries number into.
     #[must_use]
     pub fn key_set(&self) -> key_set::Key {
@@ -1879,6 +1890,9 @@ mod tests {
             drafted.push((entry, bytes.to_vec()));
         }
         prop_assert_eq!(&drafted, &written);
+        for n in 0..=series.len() {
+            prop_assert_eq!(draft.nth(n), draft.iter().nth(n));
+        }
         let present: Vec<(u32, Range)> = draft.ranges().collect();
         let frame = draft.freeze(case.path);
 
