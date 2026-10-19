@@ -1031,16 +1031,16 @@
   before its end, and the constructor of the group gives that status (ruling A). PEM is
   read by the loop of `PEM_bytes_read_bio` of aws-lc on a BIO of the full length,
   which takes `CERTIFICATE`, `X509 CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks and
-  skips the text outside them, then `d2i_X509` on the bytes of each block, the one step
-  of the DER path (#3288 item 4, OK of `laptop.architect-2`,
-  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077), not by
+  skips the text outside them, then `d2i_X509` on the bytes of each block, not by
   the leaf loader of the copy, which drops a block
   that does not start with the exact line `-----BEGIN CERTIFICATE-----` (round 2 of
-  review of #3271). This supersedes item 1 of
+  review of #3271). `d2i_X509` is the one step of the DER path (#3288 item 4, OK of
+  `laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077). This supersedes item 1 of
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593. A DER
   entry with a byte after its last certificate, and DER then PEM in one entry, make
   the constructor of the group give `BadInternalError`; the client gives the refusals
-  of the PR 2b paragraph below. What aws-lc reads as text is dropped: a block with a
+  of the PR 2b paragraph below. What aws-lc skips is dropped: a block with a
   damaged `BEGIN` line, DER bytes after PEM, a damaged first DER certificate before a
   PEM block, and a block of another label. A damaged or empty block of any label
   fails the load. So the connect fails closed with an untrusted certificate
@@ -1085,6 +1085,10 @@
   that does not parse as data, and PR 2d names the source before the run, with the
   test that pins that text
   (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6255781688).
+  `laptop.monitor` accepted that move (2026-10-19 14:46 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607), on the
+  condition that 2d is the next PR of #2934 that a user can reach, and carries that
+  test; 2b and 2c ship dark.
   `Client::connect` keeps its `Option`, on the condition that PR 2b makes `kind.rs`
   pass the value of the config, or splits `connect` or gives it an enum
   (`laptop.director`, 2026-10-18 21:48 UTC,
@@ -1099,12 +1103,15 @@
   cause through `UA_CertificateUtils_checkTrust` and `UA_CertificateUtils_checkTime`,
   and `shim_client_secure` is the one place that turns a cause into a kind. It checks
   the policies, the key pair, the window, the trust, then the URI: the config takes
-  the URI that its check allocates, so no later refusal frees it. A check refuses
+  the URI that its check allocates, so no refusal comes after that allocation. A check refuses
   only on its own status, and any other status, such as `BadOutOfMemory` of the trust
   load, gives `client::Error::Failed`, as the other allocations of the shim do. Where
   the release gives one status for out of memory and the cause (`BadInvalidArgument`
   of the policies when `i2d_X509` fails, and the key pair check), the refusal names
-  the cause. The own
+  the cause (`laptop.monitor`, 2026-10-19 14:46 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607, item 2;
+  `laptop.architect-2`, 2026-10-19 14:49 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270087670). The own
   certificate is valid from `notBefore` up to, not at, `notAfter`, to the second, at
   the wall time of the loop of the client, the rule of the verify of the group. Lost: a
   check apart from the connect, `Credentials::check`, since the shim still refuses the
