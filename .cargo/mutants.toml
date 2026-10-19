@@ -57,6 +57,17 @@ exclude_re = [
   # `sends_from_one_run_on_one_connection_ask_for_one_move` and
   # `a_send_from_a_run_with_no_value_moves_on_only_its_connection` kill the mutant.
   'crates/connector-opcua/src/connection\.rs:.*replace \+ with \* in State::move_on$',
+  # On Linux a `[::]:0` bind gets a port that no IPv4 socket holds with or without the
+  # probe, so the `!=` of the address and the `Ok(0)` show only on macOS, where
+  # `port_0_on_any_v6_skips_the_held_ipv4_ports` kills them. The `!=` of the port
+  # shares the pattern, and `a_held_any_v6_address_is_in_use` kills it.
+  'crates/os/src/net/udp\.rs:.*replace == with != in bind_free$',
+  'crates/os/src/net/udp\.rs:.*replace free_v4_port -> Result<u16, Error> with Ok\(0\)$',
+  # Only a race between the probe and the bind reaches the retry, and no caller can
+  # force one. Only the private calls of `a_held_free_port_tries_the_next` and
+  # `gives_up_after_the_last_try` kill the mutants.
+  'crates/os/src/net/udp\.rs:.*match guard tries < TRIES with .* in bind_free$',
+  'crates/os/src/net/udp\.rs:.*replace (<|\+=) with .* in bind_free$',
   # The fields of a UUIDv7 share no bit, so `^` gives the same bits as `|`.
   'crates/types/src/uuid\.rs:.*replace \| with \^ in v7$',
   # Class 4 is 320 bytes on either side of the branch: `ALIGN * 5` and

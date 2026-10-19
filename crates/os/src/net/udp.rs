@@ -525,6 +525,14 @@ mod tests {
             assert_eq!(held.map(drop), Err(Error::AddressInUse { local }));
         }
 
+        #[test]
+        fn a_held_any_v6_address_is_in_use() {
+            let first = Udp::bind(&config(SocketAddr::new(any_v6().ip(), 0))).unwrap();
+            let local = first.0.bound.local;
+            let held = Udp::bind(&config(local));
+            assert_eq!(held.map(drop), Err(Error::AddressInUse { local }));
+        }
+
         /// macOS gives a `[::]` bind on port 0 the port of an IPv4 bind, so a
         /// datagram to that IPv4 address reaches the other socket (#3422). Each bind
         /// has about a 1 in 160 chance to hit one of 100 held ports on macOS.
