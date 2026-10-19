@@ -389,18 +389,21 @@
   is key choice (f), sent to `laptop.monitor` with the plan.
   PR 1b: a write frame is `Head { time, form, series }`, the run of its ends, a run of
   counts, and its body. The run of counts holds one `u32` of at least 1 for each group
-  whose index entry is among the ends, in group order, in messages of whole counts. A
-  head of `Time::Node` has no run of counts, and each of its groups holds one sample. So
-  the wire holds no count of counts and no node count, and neither can be wrong. A
-  series of a group whose index the ends do not hold gets the layout error
+  whose index entry is among the ends, in group order. After the head, each message
+  holds whole ends, then whole counts, so the run of counts starts in the message of
+  the last end when that message has room. `Frames` keeps the counts that come before
+  the draft, at most 4 bytes for each place, and sets them into the draft when it
+  comes. A head of `Time::Node` has no run of counts, and each of its groups holds one
+  sample. So the wire holds no count of counts and no node count, and neither can be
+  wrong. A series of a group whose index the ends do not hold gets the layout error
   `IndexAbsent`. Each outcome holds `group` (`u32`) after `frame`, and the outcomes of a
   frame come in group order: `Replies::sent` takes the groups of each frame, and an
   outcome of that frame for another group gives `Error::Group { frame, group, next }`,
   also for a group that the frame does not hold. `Outcome::Ended(End)` (kind 5,
   `End::Removed` or `End::Failed`) answers a group whose writer ended. The node makes
-  the draft due at the last end, and sets each count of the run into the draft, so the
-  ends of a write stream stay 16 bytes for each place (MEMORY BOUNDS). Decided by
-  `laptop.architect` at 2026-10-19T13:14:46Z
+  the draft due at the last end, and sets each count of the run into the draft, so a
+  write stream holds 20 bytes for each place: 16 of ends and 4 of counts (MEMORY
+  BOUNDS). Decided by `laptop.architect` at 2026-10-19T13:14:46Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268096380), on the
   revision https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917.
   `Error::Group` with `next`, a unit `Error::Stamp`, and PR 1c, where `Reply::Stored {
@@ -417,3 +420,8 @@
   a `bytes_max`. The run of counts is private to it. Approved by `laptop.architect` at
   2026-10-19T17:45:52Z
   (https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6273514088).
+  Lost: counts in messages of their own (6268096380), because each message costs the
+  node about 270 ns of a frame of 2 samples (`relay` `live 1x2`, box1). Lost: counts in
+  the first message of the body, because that message then comes from two blocks.
+  Decided by `laptop.architect`, 2026-10-19T19:14:38Z
+  (https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6275215145).
