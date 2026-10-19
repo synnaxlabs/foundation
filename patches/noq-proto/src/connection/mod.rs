@@ -1545,7 +1545,8 @@ impl Connection {
                     self.path_congestion_check(space_id, path_id, transmit, &can_send, now);
                 // A due ACK leaves in a packet of its own when congestion blocks the
                 // other frames: an ACK-only packet is not congestion controlled
-                // (RFC 9002 section 7).
+                // (RFC 9002 section 7). `populate_packet` writes ACKs only when
+                // `may_send_data`, and the ACK loop below has no such check.
                 ack_only = path_blocked == PathBlocked::Congestion
                     && can_send.acks
                     && scheduling_info.may_send_data;

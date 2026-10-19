@@ -5129,3 +5129,91 @@ fn a_close_before_the_first_answer_leaves_with_no_pacing() {
     assert!(close.is_some(), "the pacer held the close of a client");
     assert!(conn.poll_transmit(now, NonZeroUsize::MIN, &mut buf).is_none());
 }
+
+/// A controller whose window the test sets at any time, for each path that it builds.
+#[derive(Debug, Clone)]
+struct SetWindowController {
+    window: Arc<AtomicU64>,
+}
+
+impl Controller for SetWindowController {
+    fn on_congestion_event(
+        &mut self,
+        _now: Instant,
+        _sent: Instant,
+        _is_persistent_congestion: bool,
+        _is_ecn: bool,
+        _lost_bytes: u64,
+        _largest_lost: u64,
+    ) {
+    }
+
+    fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+    fn window(&self) -> u64 {
+        self.window.load(Ordering::Relaxed)
+    }
+
+    fn metrics(&self) -> ControllerMetrics {
+        ControllerMetrics {
+            congestion_window: self.window(),
+            ssthresh: None,
+            pacing_rate: None,
+            send_quantum: None,
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn Controller> {
+        Box::new(self.clone())
+    }
+
+    fn initial_window(&self) -> u64 {
+        self.window()
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+impl ControllerFactory for SetWindowController {
+    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+        Box::new((*self).clone())
+    }
+}
+
+/// A packet with only ACK frames passes a full congestion window, but only on a path that
+/// may send data: `populate_packet` writes no ACK on an unvalidated path, and neither does
+/// the ACK-only packet.
+///
+/// No crate of the workspace fills the window of an unvalidated path: `transport` runs one
+/// path, and after a migration that path starts with no bytes in flight and sends only
+/// path challenges and probes until it is validated.
+#[test]
+fn no_ack_only_packet_on_an_unvalidated_path_with_a_full_window() {
+    let _guard = subscribe();
+    let window = Arc::new(AtomicU64::new(u64::MAX / 2));
+    let mut transport = TransportConfig::default();
+    transport.congestion_controller_factory(Arc::new(SetWindowController {
+        window: window.clone(),
+    }));
+    let mut server_cfg = server_config();
+    server_cfg.transport = Arc::new(transport);
+    let mut pair = Pair::new(Default::default(), server_cfg);
+    let (client_ch, server_ch) = pair.connect();
+    pair.drive();
+
+    let s = pair.server_streams(server_ch).open(Dir::Uni).unwrap();
+    window.store(0, Ordering::Relaxed);
+    pair.server_send(server_ch, s).write(&[42; 1024]).unwrap();
+    pair.routes.as_basic_mut().passive_migration(Client);
+    let acks = pair.server_conn_mut(server_ch).stats().frame_tx.acks;
+    pair.client_conn_mut(client_ch).ping();
+    pair.drive_client();
+    for _ in 0..10 {
+        pair.time += Duration::from_millis(10);
+        pair.drive_server();
+    }
+
+    assert_eq!(pair.server_conn_mut(server_ch).stats().frame_tx.acks, acks);
+}
