@@ -6,6 +6,7 @@
 import gc
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -98,6 +99,43 @@ def planted(node: Node) -> foundation.Client:
             if error.code != "unknown" or time.monotonic() > deadline:
                 raise
             time.sleep(0.01)
+
+
+def backstop(test: unittest.TestCase, node: Node) -> subprocess.Popen:
+    """Continues the paused `node` after 10 s, for a call that keeps the GIL and so
+    stops each thread, unless `test` ends first. The shell leads a session of its own,
+    and a cleanup of `test` ends each of its processes: a process that outlives its
+    parent in the group of this process can end the last tie of the group to a parent
+    outside it, and the OS then hangs up each process of the group while a node is
+    paused. Gives the shell."""
+    shell = subprocess.Popen(
+        ["sh", "-c", f"sleep 10; kill -CONT {node.process.pid}"],
+        start_new_session=True,
+    )
+    test.addCleanup(shell.wait)
+    test.addCleanup(end_group, shell.pid)
+    return shell
+
+
+def end_group(group: int) -> None:
+    """Kills each process of the process group `group`, if it has one."""
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def strays() -> set:
+    """The processes of the group of this process whose parent is not this process."""
+    listed = subprocess.run(
+        ["ps", "-A", "-o", "pid=,ppid=,pgid="], capture_output=True, check=True
+    )
+    fields = (map(int, line.split()) for line in listed.stdout.splitlines())
+    return {
+        pid
+        for pid, ppid, pgid in fields
+        if pgid == os.getpgrp() and ppid != os.getpid()
+    }
 
 
 class Selfish(np.ndarray):
@@ -498,12 +536,7 @@ class WriterTest(unittest.TestCase):
         0.2 s and then continues the node ran while `call` waited. Gives what `call`
         gives."""
         self.node.pause()
-        # Continues the node when a call that keeps the GIL stops each thread.
-        backstop = subprocess.Popen(
-            ["sh", "-c", f"sleep 10; kill -CONT {self.node.process.pid}"]
-        )
-        self.addCleanup(backstop.wait)
-        self.addCleanup(backstop.kill)
+        backstop(self, self.node)
         counts = []
 
         def counter() -> None:
@@ -521,6 +554,18 @@ class WriterTest(unittest.TestCase):
         thread.join(PATIENCE)
         self.assertGreater(counts[0], 20)
         return given
+
+    def test_a_backstop_leaves_no_process_in_the_group_of_this_process(self) -> None:
+        before = strays()
+        self.node.pause()
+        shell = backstop(self, self.node)
+        deadline = time.monotonic() + PATIENCE
+        while subprocess.run(["pgrep", "-P", str(shell.pid)]).returncode != 0:
+            self.assertLess(time.monotonic(), deadline)
+            time.sleep(0.01)
+        self.node.resume()
+        self.doCleanups()
+        self.assertEqual(strays() - before, set())
 
     def test_other_threads_run_while_a_write_waits(self) -> None:
         with self.client.open_writer("plant.a") as writer:
@@ -814,12 +859,7 @@ class WriterTest(unittest.TestCase):
                 raised.append(str(error))
 
         self.node.pause()
-        # Continues the node when a call that keeps the GIL stops each thread.
-        backstop = subprocess.Popen(
-            ["sh", "-c", f"sleep 10; kill -CONT {self.node.process.pid}"]
-        )
-        self.addCleanup(backstop.wait)
-        self.addCleanup(backstop.kill)
+        backstop(self, self.node)
         threads = [
             threading.Thread(target=writer.write, args=(1.0,), daemon=True),
             threading.Thread(target=second, daemon=True),
