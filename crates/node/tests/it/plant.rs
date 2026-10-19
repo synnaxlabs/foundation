@@ -23,12 +23,16 @@ pub(crate) fn admin(rig: &Rig) -> (Node, Subject) {
 }
 
 /// The channels of the tests of writers: the index `plant.time`, and `plant.a` and
-/// `plant.b` of `i64` on it, homed at the node `edge`.
+/// `plant.b` of `i64` on it, and the index `other.time` with `other.a` of `i64`, all
+/// homed at the node `edge`.
 const CHANNELS: &str = concat!(
     "channel \"plant.time\" { kind = \"index\" }\n",
     "channel \"plant.a\" {\n  data_type = \"i64\"\n  index = \"plant.time\"\n}\n",
     "channel \"plant.b\" {\n  data_type = \"i64\"\n  index = \"plant.time\"\n}\n",
+    "channel \"other.time\" { kind = \"index\" }\n",
+    "channel \"other.a\" {\n  data_type = \"i64\"\n  index = \"other.time\"\n}\n",
     "placement \"plant.home\" {\n  select = \"plant.*\"\n  home = \"edge\"\n}\n",
+    "placement \"other.home\" {\n  select = \"other.*\"\n  home = \"edge\"\n}\n",
 );
 
 /// A rig whose node runs with [`CHANNELS`] applied, its node, and its admin. Waits

@@ -474,8 +474,15 @@ async fn served(session: program::Session, bytes_max: usize, open: Open) {
             return;
         }
     };
+    // The writer stamps only the group of `index`, so it writes one group.
+    let index = writer.index();
+    if writer.places().iter().any(|place| place.index != index) {
+        let malformed = program::Error::Refused(program::Refusal::Malformed);
+        drop(opened.try_send(Err(failed(malformed))));
+        return;
+    }
     let places = writer.places().to_vec();
-    drop(opened.try_send(Ok((places, writer.index(), bytes_max))));
+    drop(opened.try_send(Ok((places, index, bytes_max))));
     while let Some(call) = calls.recv().await {
         match call {
             Call::Write { frame, time } => {
