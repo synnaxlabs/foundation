@@ -817,6 +817,7 @@ mod tests {
             key: channel::Key::from_u128(1),
             data_type: Type::Scalar(scalar),
             name: "plant.a".parse().unwrap(),
+            index: 0,
         }
     }
 
