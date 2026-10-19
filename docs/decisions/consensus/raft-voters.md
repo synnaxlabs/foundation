@@ -62,18 +62,16 @@
   (https://github.com/synnaxlabs/foundation/pull/647#issuecomment-6007546638). #1105
   builds the `removed` answer and the held rule, #1106 the key binding, and #1107 the
   configuration that a chain proves. Until #1107, a request shows a newer configuration
-  only with its last index. A node answers `removed` only to a `PreVote` or a `Vote`
+  only with its last position. A node answers `removed` only to a `PreVote` or a `Vote`
   whose `last.index` is at or below its own commit index, or whose `last.term` is below
   the term of the entry at that index, from a sender that `Start.voters` or a committed
-  `Voters` entry held, when the last committed configuration lacks it: a sender that
-  holds a newer committed configuration names a later index, at a term at or above the
-  term at that commit. A heartbeat and an append get `NotVoter`, because they can name
-  only entries that the receiver holds. The gap: a voter that a committed configuration
-  added back still gets `removed` to a vote that it sent while its log lacked that
-  entry, from a voter whose commit is also below the entry. The majority stop below
-  bounds it. This supersedes
-  "a request proves no newer configuration" of the interim rule below (decided by the
-  architect, 2026-10-08T06:51:45Z:
+  `Voters` entry held, when the last committed configuration lacks it. A sender that
+  holds entries past the commit of the receiver, at a term at or above the term at that
+  commit, can hold a newer committed configuration that adds it back, and a heartbeat or
+  an append names only entries that the receiver can lack, so each other request of a
+  sender that is not a voter gets `NotVoter`. This supersedes "a request proves no newer
+  configuration" of the interim rule below (decided by the architect,
+  2026-10-08T06:51:45Z:
   https://github.com/synnaxlabs/foundation/issues/1822#issuecomment-6054242092). A
   sender that only an uncommitted entry held gets `NotVoter`: the entry can still be
   truncated, and a node whose commit lags would stop a voter that no committed
@@ -102,17 +100,17 @@
   `Raft::removed_by` gives the voters: those that answered `removed` are a majority of
   the incoming half of the newest configuration in its log, itself not counted. An
   answer counts for `2 × election_ticks` ticks, so an answer given before a committed
-  add drops. The rule is not conclusive. A node that missed its removal and a later add
-  of itself stops when a majority of the other voters of the incoming half of the
-  newest configuration in its log answer `removed` while they also lack the add. That
-  half can be smaller than the configuration that adds the node back: when it holds
-  one other voter, that voter alone stops the node. The node then needs a join again.
-  The leave design (#3355) decides a conclusive rule. A removed node with entries past
-  the commit of a voter, at a term at or above the term at that commit, gets
-  `NotVoter` from it until the voter commits past its last index. The voter cannot
-  tell such a tail from a committed add of the node. The cost is a `PreVote` to each
-  voter at each election timeout. Answers given just before a committed add count for
-  one window after it. Decided by `laptop.architect`, 2026-10-19T12:57:24Z:
+  add drops. Answers given just before a committed add count for one window after it.
+  The rule is not conclusive. A node that missed its removal and a later add of itself
+  stops when a majority of the other voters of the incoming half of the newest
+  configuration in its log answer `removed` while they also lack the add. That half can
+  be smaller than the configuration that adds the node back: when it holds one other
+  voter, that voter alone stops the node. The node then needs a join again. The leave
+  design (#3355) decides a conclusive rule. A removed node with entries past the commit
+  of a voter, at a term at or above the term at that commit, gets `NotVoter` from it
+  until the voter commits past its last index. The voter cannot tell such a tail from a
+  committed add of the node. The cost is a `PreVote` to each voter at each election
+  timeout. Decided by `laptop.architect`, 2026-10-19T12:57:24Z:
   https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373; the
   place in `raft` and the window 2026-10-19T18:47:21Z:
   https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274691760; the

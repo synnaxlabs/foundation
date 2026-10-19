@@ -7,14 +7,15 @@
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
   (`Raft::admission`: `Error::Removed` for a `PreVote` or a `Vote` at or below the
-  commit, or below the term at it, of a sender that a committed configuration removed,
-  else `Error::NotVoter`), and each claim holds (`Error::Claim`), the claims being what
-  `Raft::claims` gives, so a link that the node does not read is not checked. So a
-  node with a configuration refuses a leader that is not a voter of that
-  configuration, when a change that the node does not hold made that leader a voter.
-  The node does not get the log from that leader (a known defect, #1096, that #1107
-  fixes). A leader that stays a voter through the change passes the check, and its
-  chain proves the change (RAFT SURFACE). A node with no
+  commit, or below the term at it (`laptop.architect`, 2026-10-19T18:56:00Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859), of a
+  sender that a committed configuration removed, else `Error::NotVoter`), and each claim
+  holds (`Error::Claim`), the claims being what `Raft::claims` gives, so a link that the
+  node does not read is not checked. So a node with a configuration refuses a leader
+  that is not a voter of that configuration, when a change that the node does not hold
+  made that leader a voter. The node does not get the log from that leader (a known
+  defect, #1096, that #1107 fixes). A leader that stays a voter through the change
+  passes the check, and its chain proves the change (RAFT SURFACE). A node with no
   configuration takes no request. Only a voter that an operator wiped is such a node
   (#881), because a node that joins opens with the founding voters from its join answer
   (decided by the architect, #242, 2026-10-07T04:20:40Z:
