@@ -65,7 +65,7 @@
   (`laptop.architect-2`, 2026-10-17T18:44:19Z,
   https://github.com/synnaxlabs/foundation/issues/2923#issuecomment-6238826510).
   `Memory`, the refusal of the memory of the pool of the frames of the readers, raises
-  `MemoryError` (`laptop.architect-2`,
+  `MemoryError` (`laptop.architect-2`, 2026-10-19T14:39:03Z,
   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289).
   No Python test reaches `Bind`, so the Rust table test of the map, with a real `Bind`,
   is its only test (`laptop.architect-2`, 2026-10-18T15:00:03Z,

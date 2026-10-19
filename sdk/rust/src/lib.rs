@@ -208,8 +208,10 @@ impl Client {
     ///
     /// [`Error::Thread`] when the client's thread or its runtime cannot start,
     /// [`Error::Bind`] when the local UDP socket cannot bind, [`Error::Session`]
-    /// when the dial, the handshake, or the hello fails, and [`Error::Panicked`]. A
-    /// `node` with no address is unreachable with no attempt.
+    /// when the dial, the handshake, or the hello fails, [`Error::Memory`] when the OS
+    /// refuses the address space or the first page of the pool of the frames of the
+    /// readers, and [`Error::Panicked`]. A `node` with no address is unreachable
+    /// with no attempt.
     pub fn connect(node: &Node, subject: Subject) -> Result<Self, Error> {
         let node = node.clone();
         Self::start(move |tasks, outcome, ended, requests| {
@@ -629,7 +631,8 @@ async fn connect(
 }
 
 /// The pool of the frames of the readers of a session. It gives back the pages of the
-/// sizes that it no longer uses, so it keeps at most [`READS`] in memory.
+/// sizes that it no longer uses when another size needs them, so it keeps at most
+/// [`READS`] in memory.
 fn reads() -> Result<block::Pool, os::memory::Error> {
     let memory = os::memory::Memory::new(READS.reservation())?;
     Ok(block::Pool::new(READS, memory))
