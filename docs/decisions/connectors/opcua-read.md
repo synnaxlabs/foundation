@@ -164,3 +164,16 @@
   (`READS * (CHUNKS - 1)`), so the two cannot drift. Then pick READS by memory: 9 keeps
   the cap at 63 chunks (about 4 MiB a channel), as you want for the Pi. Keep 16 (112
   chunks, 7 MiB) only if the read bench of the connector shows 9 is slower."
+  The Publish requests of a subscription count in this bound. open62541 keeps
+  `PUBLISHES` (2) of them in flight, so once a client subscribes, its reads and services
+  stop at `READS - PUBLISHES` (7) in flight for the life of the client, and the answers
+  in flight stay at `READS`. A client that does not subscribe keeps 9. Each Publish
+  answer fits one message: the client asks for at most as many notifications as fit,
+  each sized with both timestamps and both picoseconds fields, after an empty answer
+  with room for the acknowledgement results and the available sequence numbers. At the
+  end of the subscription, the client sets its Publish count to 0, as open62541 else
+  sends a Publish again at each `BadNoSubscription` answer (`laptop.architect-2`,
+  2026-10-19T20:16:27Z,
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6276383918). Lost: a
+  queue cap of `(READS + PUBLISHES) * (CHUNKS - 1)` (77 chunks, about 5 MiB a channel,
+  past the memory picked for the Pi).

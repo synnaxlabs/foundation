@@ -256,8 +256,8 @@ pub(crate) struct Client {
     /// C holds a pointer to it until `raw` is deleted, which calls the callback of each
     /// request in flight and of the subscription.
     calls: Rc<Calls>,
-    /// The most of its own requests in flight: [`READS`], less [`PUBLISHES`] once it
-    /// subscribes.
+    /// The most of its own requests in flight: [`READS`], less [`PUBLISHES`] from its
+    /// subscribe on.
     budget: u16,
     /// The values of the last read, which [`Client::read`] gives. It swaps them with
     /// [`Reads::values`], so neither grows past the most nodes of a read.
