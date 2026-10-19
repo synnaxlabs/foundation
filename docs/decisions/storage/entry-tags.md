@@ -76,6 +76,7 @@
   its bytes and needs a P1 judgment. The `via` node of a handoff that names a holder
   adds 16 B to its copy, up to 64 B for a subject of 240 to 255 B: 1.6 MB at 100,000
   logs (`laptop.architect`, #3379,
+  2026-10-19T15:17:14Z,
   https://github.com/synnaxlabs/foundation/pull/3379#issuecomment-6270682141).
   Decided by `laptop.architect` (#3056,
   2026-10-17T18:45:34Z,
