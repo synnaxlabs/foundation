@@ -536,6 +536,30 @@ mod tests {
         }
     }
 
+    // An entry that holds a change with no added voter: the leave of `change`, and a
+    // joint that removes node 2.
+    fn unkeyed() -> [Entry; 2] {
+        let leave = raft::Change {
+            voters: Voters {
+                incoming: [key(1), key(2)].into(),
+                outgoing: BTreeSet::new(),
+            },
+            public_keys: BTreeMap::new(),
+            ..change()
+        };
+        let removes = raft::Change {
+            voters: Voters {
+                incoming: [key(1)].into(),
+                outgoing: [key(1), key(2)].into(),
+            },
+            ..leave.clone()
+        };
+        [leave, removes].map(|change| Entry {
+            at: at(3, 7),
+            data: Data::Voters(change),
+        })
+    }
+
     /// An entry of each data kind: empty, bytes, and voters.
     fn entries() -> [Entry; 3] {
         [
@@ -582,6 +606,13 @@ mod tests {
         [&bytes[..at], &bytes[at.strict_add(32)..]].concat()
     }
 
+    // `bytes` with the key at `at` replaced by the identity, a key of small order.
+    fn identity_at(bytes: &[u8], at: usize) -> Vec<u8> {
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        [&bytes[..at], &identity, &bytes[at.strict_add(32)..]].concat()
+    }
+
     // Each cut input of `mesh_entries` is `voters_keys`, or `voters`, cut inside the
     // field that its name says.
     fn check_cuts(inputs: &BTreeMap<&str, &[u8]>, keyed: &[u8], voters: &[u8]) {
@@ -603,6 +634,17 @@ mod tests {
                 assert_eq!(cut, &whole[..cut.len()], "{name}");
                 assert_eq!(round_trip_entries(cut), None, "{name}");
             }
+        }
+    }
+
+    #[test]
+    fn each_entries_input_of_a_change_that_adds_no_voter_round_trips() {
+        let inputs = inputs!("mesh_entries": "voters_leave", "voters_removes");
+        let [leave, removes] = unkeyed();
+        for (name, want) in [("voters_leave", leave), ("voters_removes", removes)] {
+            assert_eq!(entry::decode(inputs[name]), Some(vec![want]), "{name}");
+            let round_trip = round_trip_entries(inputs[name]);
+            assert_eq!(round_trip.as_deref(), Some(inputs[name]), "{name}");
         }
     }
 
@@ -639,6 +681,8 @@ mod tests {
             "voters_keys_cut_in_second_vote",
             "voters_keys_cut_in_signature",
             "voters_keys_added_key_small_order",
+            "voters_leave",
+            "voters_removes",
         );
         assert_eq!(count_files("mesh_entries"), inputs.len());
         let [empty, bytes, voters] = entries();
@@ -670,10 +714,7 @@ mod tests {
         let mut falling = voters;
         falling[25..41].copy_from_slice(&key(3).as_u128().to_le_bytes());
         refused.push(("voters_incoming_falling", falling));
-        let mut identity = [0; 32];
-        identity[0] = 1;
-        let mut small = keyed.to_vec();
-        small[BOUND..BOUND + 32].copy_from_slice(&identity);
+        let small = identity_at(keyed, BOUND);
         refused.push(("voters_keys_added_key_small_order", small));
         for (name, want) in refused {
             assert_eq!(inputs[name], want, "{name}");
