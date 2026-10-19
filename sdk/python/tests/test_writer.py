@@ -401,6 +401,12 @@ class WriterTest(unittest.TestCase):
             ),
             (
                 "plant.a",
+                {"lease": "5"},
+                TypeError,
+                "must be real number, not str",
+            ),
+            (
+                "plant.a",
                 {"on_loss": "drop"},
                 ValueError,
                 'on_loss is "drop", not "warn", "raise", or "ignore"',
