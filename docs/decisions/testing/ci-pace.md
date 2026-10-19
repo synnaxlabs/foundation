@@ -52,8 +52,11 @@
   `laptop.monitor`:
   https://github.com/synnaxlabs/foundation/pull/3151#issuecomment-6251116435. The person
   approved `ci.yaml` on GitHub at `1697708a8`.
-  Amended (#3418; the person, 2026-10-19, through `laptop.monitor`: "Let's do it
-  ASAP"; the third part and ARM, `laptop.monitor`,
+  Amended (the person, through `laptop.monitor`, recorded in #3418 at
+  2026-10-19T19:46:19Z: "Let's do it ASAP"; the serial targets and the plain test
+  paths, the plan,
+  https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6275974482; the
+  third part and ARM, `laptop.monitor`,
   https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6276305229): the
   job `check` runs three parts on each OS at the same time: `lint` (Format, Clippy,
   Layers, Globals, Skips, Oracles), `test` (`cargo xtask test nextest`, Root tests),
@@ -69,4 +72,5 @@
   skipped test of the lists of LINUX CI is a full test path that nextest leaves out
   with `test(=<path>)`: nextest 0.9.146 skips no test with `--exact --skip`. In queue
   run 39308250221, `check` took 32 min, `macos` 35 min, `windows` 28 min, and the
-  `test` of ARM 22 min, and `cargo test` ran the 132 test binaries one after another.
+  `test` of ARM 22 min, and on Linux `cargo test` ran 173 test binaries and 40
+  doc-test sets one after another.

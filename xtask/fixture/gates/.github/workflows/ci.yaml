@@ -18,7 +18,7 @@ jobs:
               - crates/g/src/lib.rs stale # #1
               - crates/g/src/lib.rs second # #1
             tests:
-              - --skip a # #1
+              - a # #1
     steps:
       - run: |
           [ "$A" = b ] && echo "a#b"

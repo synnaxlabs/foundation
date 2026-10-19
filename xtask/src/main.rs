@@ -77,7 +77,7 @@ fn main() -> ExitCode {
                 "usage: cargo xtask <layers|globals|oracles|skips>\n       \
                  cargo xtask <loom|shuttle|sanitizers>\n       \
                  cargo xtask miri [<index>/<count>]\n       \
-                 cargo xtask test <nextest|serial> [cargo flag...] [-- skipped test...]\n       \
+                 cargo xtask test <nextest|serial> [flag...] [-- test...]\n       \
                  cargo xtask fuzz [seconds]\n       \
                  cargo xtask open62541 [tag]\n       \
                  cargo xtask review <pr> <head sha>\n       \
@@ -778,15 +778,28 @@ mod tests {
         );
         // The checks of `os` hold the required names, and pass only when each part of
         // `check` passed.
-        let os = os_job("os");
-        for line in [
-            "    needs: check",
-            "    if: \"!cancelled()\"",
-            "        name: [check, macos, windows]",
-            "          RESULT: ${{ needs.check.result }}",
-        ] {
-            assert!(os.iter().any(|found| found == line), "`os` lacks `{line}`");
-        }
+        assert_eq!(
+            os_job("os"),
+            [
+                "    needs: check",
+                "    if: \"!cancelled()\"",
+                "    name: ${{ matrix.name }}",
+                "    strategy:",
+                "      matrix:",
+                "        name: [check, macos, windows]",
+                "    runs-on: ubuntu-24.04",
+                "    steps:",
+                "      - name: The result of the parts",
+                "        env:",
+                "          RESULT: ${{ needs.check.result }}",
+                "        run: |",
+                "          [ \"$RESULT\" = success ] ||",
+                concat!(
+                    "            { echo \"::error::A part of check ended",
+                    " in $RESULT.\"; exit 1; }",
+                ),
+            ]
+        );
         let features = os_job("features");
         assert_eq!(
             ifs_and_names(&features, &["Each feature alone"]),
@@ -797,6 +810,70 @@ mod tests {
                 ],
                 vec!["features", "features-macos", "features-windows"]
             )
+        );
+    }
+
+    /// The lines of the step `name` of `job`, from its name to the next step.
+    fn step<'a>(job: &'a [String], name: &str) -> Vec<&'a str> {
+        let head = format!("      - name: {name}");
+        (job.iter().map(String::as_str))
+            .skip_while(|line| *line != head)
+            .enumerate()
+            .take_while(|(i, line)| *i == 0 || !line.starts_with("      - "))
+            .map(|(_, line)| line)
+            .collect()
+    }
+
+    #[test]
+    fn each_os_runs_both_parts_of_the_tests_and_fails_when_one_fails() {
+        let check = check_job();
+        assert!(
+            check
+                .iter()
+                .any(|line| line == "        part: [lint, test, serial]")
+        );
+        assert_eq!(
+            step(&check, "Test"),
+            [
+                "      - name: Test",
+                concat!(
+                    "        if: \"!cancelled() && env.RUST != 'false'",
+                    " && matrix.part == 'test'\"",
+                ),
+                "        run: >-",
+                "          cargo xtask test nextest ${{ join(matrix.crates, ' ') }}",
+                "          ${{ join(matrix.untested, ' ') }} --all-features",
+                "          -- ${{ join(matrix.tests, ' ') }}",
+            ]
+        );
+        assert_eq!(
+            step(&check, "Serial tests"),
+            [
+                "      - name: Serial tests",
+                concat!(
+                    "        if: \"!cancelled() && env.RUST != 'false'",
+                    " && matrix.part == 'serial'\"",
+                ),
+                "        run: >-",
+                "          cargo xtask test serial ${{ join(matrix.crates, ' ') }}",
+                "          ${{ join(matrix.untested, ' ') }} --all-features",
+            ]
+        );
+        let arm =
+            std::fs::read_to_string(fixture().join("../../.github/workflows/arm.yaml"))
+                .unwrap();
+        let arm: Vec<String> =
+            yaml_lines(&arm).into_iter().map(str::to_owned).collect();
+        assert_eq!(
+            step(&arm, "Test"),
+            [
+                "      - name: Test",
+                "        run: |",
+                "          failed=0",
+                "          cargo xtask test nextest || failed=1",
+                "          cargo xtask test serial || failed=1",
+                "          exit \"$failed\"",
+            ]
         );
     }
 
