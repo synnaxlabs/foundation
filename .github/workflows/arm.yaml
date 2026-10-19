@@ -74,6 +74,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
       # As in `check` of `ci.yaml`.
       - uses: actions/setup-python@v5
         with:
@@ -83,4 +86,8 @@ jobs:
           echo "PYO3_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
           echo "FOUNDATION_NODE=$PWD/target/debug/foundation" >> "$GITHUB_ENV"
       - name: Test
-        run: cargo test --workspace
+        run: |
+          failed=0
+          scripts/test.sh nextest || failed=1
+          scripts/test.sh serial || failed=1
+          exit "$failed"

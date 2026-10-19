@@ -1,4 +1,4 @@
-# The profile of the Test step of the job `check` in `.github/workflows/ci.yaml`.
+# The profile of `scripts/test.sh nextest`, which CI runs.
 [profile.ci]
 retries = 0
 fail-fast = false

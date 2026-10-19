@@ -53,13 +53,18 @@
   https://github.com/synnaxlabs/foundation/pull/3151#issuecomment-6251116435. The person
   approved `ci.yaml` on GitHub at `1697708a8`.
   Amended (#3418; the person, 2026-10-19, through `laptop.monitor`: "Let's do it
-  ASAP"): the job `check` runs two parts on each OS at the same time, `lint` (Format,
-  Clippy, Layers, Globals, Skips, Oracles) and `test` (Test, Root tests). The job `os`
-  gives the required checks `check`, `macos`, and `windows`, each of which passes when
-  each part of `check` passed. The Test step runs `cargo nextest run` with the profile
-  `ci` of `.config/nextest.toml` (no retry, no fail-fast), `cargo test --doc`, and
-  `cargo test --test <name>` for each test target with no harness, which nextest runs to
-  list its tests and from which it gets none. Each skipped test of the lists of LINUX
-  CI is a `test(=<path>)` filter: nextest 0.9.146 skips no test with `--exact --skip`.
-  In queue run 39308250221, `check` took 32 min, `macos` 35 min, and `windows` 28 min,
-  and `cargo test` ran the 132 test binaries one after another.
+  ASAP"): the job `check` runs three parts on each OS at the same time: `lint` (Format,
+  Clippy, Layers, Globals, Skips, Oracles), `test` (`scripts/test.sh nextest`, Root
+  tests), and `serial` (`scripts/test.sh serial`). The job `os` gives the required
+  checks `check`, `macos`, and `windows`, each of which passes when each part of
+  `check` passed. `scripts/test.sh nextest` runs `cargo nextest run` with the profile
+  `ci` of `.config/nextest.toml` (no retry, no fail-fast). `scripts/test.sh serial` runs
+  `cargo test --doc` and `cargo test --test <name>` for each test target with no
+  harness, which nextest runs to list its tests and from which it gets none. These
+  took 260 s on Linux, 302 s on macOS, and 183 s on Windows in queue run 39308250221,
+  over the 3 min that `laptop.monitor` gave for a third part. The job `test` of
+  `arm.yaml` runs both parts, one after the other. Each skipped test of the lists of
+  LINUX CI is a `test(=<path>)` filter: nextest 0.9.146 skips no test with `--exact
+  --skip`. In queue run 39308250221, `check` took 32 min, `macos` 35 min, `windows` 28
+  min, and the `test` of ARM 22 min, and `cargo test` ran the 132 test binaries one
+  after another.

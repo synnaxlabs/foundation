@@ -860,7 +860,7 @@ mod tests {
     }
 
     #[test]
-    fn the_test_step_runs_each_target_with_no_harness_with_cargo_test() {
+    fn the_serial_tests_run_each_target_with_no_harness() {
         // nextest runs such a target to list its tests, and it lists none.
         let metadata = metadata(&fixture().join("../..")).unwrap();
         let mut alone = BTreeSet::new();
@@ -877,10 +877,12 @@ mod tests {
                 }
             }
         }
-        let check = check_job();
-        let listed = (check.iter())
-            .find_map(|line| line.strip_prefix("          ALONE: "))
-            .expect("the Test step of `check` has no `ALONE`");
+        let script = std::fs::read_to_string(fixture().join("../../scripts/test.sh"));
+        let script = script.unwrap();
+        let listed = (script.lines())
+            .find_map(|line| line.strip_prefix("ALONE=\""))
+            .and_then(|line| line.strip_suffix('"'))
+            .expect("`scripts/test.sh` has no `ALONE`");
         assert_eq!(listed.split(' ').collect::<BTreeSet<_>>(), alone);
     }
 

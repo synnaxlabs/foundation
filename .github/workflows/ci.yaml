@@ -104,9 +104,10 @@ jobs:
               - '.claude/skills/build/wait_test.sh'
               - '.github/workflows/**'
 
-  # The lint and the tests of each OS of LINUX CI, at the same time. A matrix job that
-  # skips reports one check named by the unexpanded expression, so this job always
-  # runs, and each step skips when the filter found no change.
+  # The lint and the two parts of the tests (`scripts/test.sh`) of each OS of LINUX CI,
+  # at the same time. A matrix job that skips reports one check named by the
+  # unexpanded expression, so this job always runs, and each step skips when the
+  # filter found no change.
   check:
     needs: changes
     if: "!cancelled()"
@@ -115,7 +116,7 @@ jobs:
       fail-fast: false
       matrix:
         name: [check, macos, windows]
-        part: [lint, test]
+        part: [lint, test, serial]
         # Each OS lists the flags that leave out what fails on it, each with the open
         # issue that removes it: `crates` do not build with all their targets, the tests
         # of `untested` fail, and so do `tests`, each a full test path that nextest
@@ -409,25 +410,18 @@ jobs:
           !cancelled() && env.RUST != 'false' && matrix.part == 'lint'
           && runner.os == 'Linux'
         run: cargo xtask oracles
-      # nextest runs a test binary with no harness to list its tests, and the binary
-      # lists none, so `cargo test` runs each target of `ALONE`.
       - name: Test
         if: "!cancelled() && env.RUST != 'false' && matrix.part == 'test'"
         env:
-          ALONE: alloc browse bytes erase global interrupt local memory peak roots
-          FLAGS: ${{ join(matrix.crates, ' ') }} ${{ join(matrix.untested, ' ') }}
           SKIPPED: ${{ join(matrix.tests, ' ') }}
-        run: |
-          filter=""
-          for target in $ALONE; do filter+=" | (kind(test) & binary(=$target))"; done
-          for test in $SKIPPED; do filter+=" | test(=$test)"; done
-          failed=0
-          cargo nextest run --workspace $FLAGS --all-features --profile ci \
-            -E "not (${filter# | })" || failed=1
-          cargo test --workspace $FLAGS --all-features --no-fail-fast --doc || failed=1
-          cargo test --workspace $FLAGS --all-features --no-fail-fast \
-            $(printf -- '--test %s ' $ALONE) || failed=1
-          exit "$failed"
+        run: >-
+          scripts/test.sh nextest ${{ join(matrix.crates, ' ') }}
+          ${{ join(matrix.untested, ' ') }} --all-features
+      - name: Serial tests
+        if: "!cancelled() && env.RUST != 'false' && matrix.part == 'serial'"
+        run: >-
+          scripts/test.sh serial ${{ join(matrix.crates, ' ') }}
+          ${{ join(matrix.untested, ' ') }} --all-features
       # Root tests mount a filesystem. Only this runner, which is discarded after the
       # job, runs them.
       - name: Root tests
@@ -439,7 +433,8 @@ jobs:
           cargo test -p os --all-features --test root
 
   # The required checks `check`, `macos`, and `windows`. Each passes when each part of
-  # `check` passed: the result of a matrix job covers all its entries.
+  # `check` passed: the result of a matrix job covers all its entries. `check` always
+  # runs, so with no change of code each part passes, and so does `os`.
   os:
     needs: check
     if: "!cancelled()"
