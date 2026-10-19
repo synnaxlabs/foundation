@@ -680,6 +680,13 @@ fn refuses_each_run_of_counts_that_the_program_cannot_encode_and_keeps_it() {
                 remain: 2,
             },
         ),
+        (
+            vec![0; 12],
+            Error::Run {
+                items: 3,
+                remain: 2,
+            },
+        ),
         ([encode_counts(&[1]), vec![0; 4]].concat(), Error::Samples),
     ];
     for (message, error) in cases {
