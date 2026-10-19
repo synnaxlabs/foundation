@@ -19,6 +19,7 @@
 //!   channels, so the home refuses each frame as `Waiting`.
 //! - `live 2x(1x2)`: frames of two groups, each as `live 1x2`, so the serve copies the
 //!   series of each group into a draft of its own writer.
+//! - `live 8x(1x2)`: as `live 2x(1x2)`, with eight groups.
 //!
 //! Compare two builds on one pinned core whose SMT sibling is idle.
 
@@ -89,7 +90,7 @@ struct Case {
     waiting: bool,
 }
 
-const CASES: [Case; 6] = [
+const CASES: [Case; 7] = [
     Case {
         name: "live 1x2",
         node: false,
@@ -138,6 +139,14 @@ const CASES: [Case; 6] = [
         series: 2,
         waiting: false,
     },
+    Case {
+        name: "live 8x(1x2)",
+        node: false,
+        count: 1,
+        groups: 8,
+        series: 2,
+        waiting: false,
+    },
 ];
 
 /// The index key of case `at`: its data keys follow it.
@@ -147,7 +156,7 @@ fn base(at: usize) -> u128 {
 
 /// The index key of group `group` of case `at`: its data keys follow it.
 fn group(at: usize, group: u32) -> u128 {
-    base(at) + u128::from(group) * LINE / 2
+    base(at) + u128::from(group) * LINE / 8
 }
 
 /// What the program and the home tell each other.
@@ -204,7 +213,10 @@ async fn bench(
 ) -> (Line, Vec<Line>, usize, usize) {
     let transport = net::transport(&node, &tasks, &net::own_pool(), net::HOME, 1 << 16);
     let indexes = (0..=CASES.len())
-        .flat_map(|at| [group(at, 0), group(at, 1)])
+        .flat_map(|at| {
+            let groups = CASES.get(at).map_or(1, |case| case.groups);
+            (0..groups).map(move |g| group(at, g))
+        })
         .map(|index| (index, index + 1..=index + 63));
     let (hub, now) = create_hub(&node, tasks.clone(), indexes).await;
     hub.set_rules(sessions::rules());
