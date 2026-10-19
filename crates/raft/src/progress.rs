@@ -59,7 +59,7 @@ impl Progress {
             State::Probe { waiting } => *waiting = true,
             State::Replicate { inflight } => {
                 inflight.push_back(last);
-                self.next = self.next.max(last + 1);
+                self.next = last + 1;
             }
         }
     }
@@ -218,7 +218,7 @@ mod tests {
             progress.sent(0);
         }
         assert!(progress.paused());
-        assert_eq!(progress.next, 1);
+        assert_eq!(progress.next(), 1);
         progress.accepted(0);
         assert!(!progress.paused());
     }
