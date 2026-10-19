@@ -535,6 +535,27 @@ class WriterTest(unittest.TestCase):
                         self.assertEqual(str(raised.exception), text)
             called(self, writer.write, {"plant.a": 1.5, "plant.b": 2})
 
+    def test_a_type_error_of_a_conversion_is_the_cause_of_the_error_of_the_place(
+        self,
+    ) -> None:
+        class Buggy:
+            def __float__(self) -> float:
+                raise TypeError("the sensor read a str")
+
+            def __index__(self) -> int:
+                raise TypeError("the sensor read a str")
+
+        with self.client.open_writer(["plant.a", "plant.b"]) as writer:
+            for name, kind in [("plant.a", "f64"), ("plant.b", "i64")]:
+                with self.subTest(name=name):
+                    with self.assertRaises(TypeError) as raised:
+                        called(self, writer.write, {name: Buggy()})
+                    text = f"{name} holds {kind}, not Buggy"
+                    self.assertEqual(str(raised.exception), text)
+                    cause = raised.exception.__cause__
+                    self.assertIs(type(cause), TypeError)
+                    self.assertEqual(str(cause), "the sensor read a str")
+
     def test_open_writer_raises_stopped_with_the_code_of_the_node(self) -> None:
         with self.assertRaises(foundation.Stopped) as raised:
             self.client.open_writer(["plant.a", "plant.z"])

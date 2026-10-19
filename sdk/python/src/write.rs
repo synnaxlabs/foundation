@@ -330,13 +330,14 @@ impl Writer {
     /// with no key for a writer of more places; `OverflowError` for a number outside
     /// its type; `KeyError` for a name of no place; `ValueError` for no value, a place
     /// past the places, or two values of one channel; and each error other than
-    /// `TypeError` that the `__float__` or `__index__` of a value raised. With each of
-    /// these, nothing was sent and the writer goes on. Raises `Rejected` when the node
-    /// refused the frame, and `DataLost` for a lost frame with `on_loss="raise"`; the
-    /// writer goes on after both. Raises `Stopped` when the node stopped the stream,
-    /// and `ConnectionError` when the session failed, after which each call raises it
-    /// again; `RuntimeError` after a close or in a forked process; and `PanicException`
-    /// when the client's thread panicked.
+    /// `TypeError` that the `__float__` or `__index__` of a value raised. Each
+    /// `TypeError` of the conversion of a value is the `__cause__` of the `TypeError`
+    /// that names its place. With each of these, nothing was sent and the writer goes
+    /// on. Raises `Rejected` when the node refused the frame, and `DataLost` for a lost
+    /// frame with `on_loss="raise"`; the writer goes on after both. Raises `Stopped`
+    /// when the node stopped the stream, and `ConnectionError` when the session failed,
+    /// after which each call raises it again; `RuntimeError` after a close or in a
+    /// forked process; and `PanicException` when the client's thread panicked.
     fn write(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<()> {
         #[cfg(feature = "sim")]
         let began = crate::sim::Part::start();
@@ -594,10 +595,13 @@ where
 }
 
 /// The error of `object`, whose conversion for `place` raised `e`: the `TypeError` of a
-/// value of another type when `e` is a `TypeError`, or else `e`.
+/// value of another type, with `e` as its cause, when `e` is a `TypeError`, or else `e`.
 fn failed(place: &Place, object: &Bound<'_, PyAny>, e: PyErr) -> PyResult<PyErr> {
-    if e.is_instance_of::<PyTypeError>(object.py()) {
-        return wrong(place, object);
+    let py = object.py();
+    if e.is_instance_of::<PyTypeError>(py) {
+        let error = wrong(place, object)?;
+        error.set_cause(py, Some(e));
+        return Ok(error);
     }
     Ok(e)
 }
