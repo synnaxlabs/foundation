@@ -69,9 +69,9 @@ enum Seat {
         key: Key,
         expiry: Option<Expiry>,
     },
-    /// The holder from the index log after a restart, not yet reopened.
+    /// The holder from the index log after a restart, not yet reopened. It is the
+    /// `Closed` record of the gate.
     Recovered {
-        writer: Box<Writer>,
         until: Monotonic,
     },
 }
@@ -97,7 +97,6 @@ impl Gate {
     pub fn recover(last: Writer, now: Monotonic, grace: Lease) -> Self {
         Self {
             seat: Seat::Recovered {
-                writer: Box::new(last.clone()),
                 until: deadline(now, grace),
             },
             record: Some(Record::Closed(Box::new(last))),
@@ -118,10 +117,8 @@ impl Gate {
         let key = Key(self.next);
         self.next += 1;
         let authority = writer.authority;
-        let reopened = matches!(
-            &self.seat,
-            Seat::Recovered { writer: last, .. } if last.subject == writer.subject
-        );
+        let reopened = matches!(self.seat, Seat::Recovered { .. })
+            && self.recovered().subject == writer.subject;
         let outranks = self.holder().is_none_or(|h| authority > h.authority);
         self.claims.push(Claim {
             key,
@@ -248,7 +245,7 @@ impl Gate {
                 expiry: Some(expiry),
                 ..
             } => Some(expiry.at),
-            Seat::Recovered { until, .. } => Some(*until),
+            Seat::Recovered { until } => Some(*until),
         }
     }
 
@@ -258,12 +255,12 @@ impl Gate {
         match &self.seat {
             Seat::Empty => None,
             Seat::Held { key, .. } => Some(&self.claim(*key).writer),
-            Seat::Recovered { writer, .. } => Some(writer.as_ref()),
+            Seat::Recovered { .. } => Some(self.recovered()),
         }
     }
 
-    /// The holder, when its subject, authority, or `via` differs from the holder
-    /// recorded last by [`Gate::recorded`] or [`Gate::recover`]. A new gate starts
+    /// The holder, when it is not equal to the holder recorded last by
+    /// [`Gate::recorded`] or [`Gate::recover`]. A new gate starts
     /// with no holder recorded. For n open writers, takes O(1) time when it returns
     /// `None` and O(log n) when it returns `Some`. Does not allocate.
     #[must_use]
@@ -307,6 +304,14 @@ impl Gate {
         self.seat = seat;
         self.checked = None;
         self.unrecorded = self.holder() != self.last();
+    }
+
+    /// The holder of a recovered seat.
+    fn recovered(&self) -> &Writer {
+        match &self.record {
+            Some(Record::Closed(writer)) => writer,
+            _ => unreachable!("invariant: a recovered seat keeps its closed record"),
+        }
     }
 
     /// The holder named by the newest handoff record.
