@@ -29,6 +29,8 @@ const LEVEL: Span = Span::from_nanos(250_000_000);
 const SUBSCRIBE_RESPONSE: [u8; 4] = [0x01, 0x00, 0x16, 0x03];
 /// The binary encoding of a `CreateMonitoredItems` response, a `NodeId` of 4 bytes.
 const MONITOR_RESPONSE: [u8; 4] = [0x01, 0x00, 0xF2, 0x02];
+/// The binary encoding of a Publish response, a `NodeId` of 4 bytes.
+const PUBLISH_RESPONSE: [u8; 4] = [0x01, 0x00, 0x3D, 0x03];
 /// `GoodCallAgain`, a service result that is not Good and not Bad.
 const GOOD_CALL_AGAIN: Status = Status(0x00A9_0000);
 
@@ -222,6 +224,45 @@ fn a_create_answer_that_is_not_good_fails() {
     let monitor = called_again(MONITOR_RESPONSE).map(|revised| revised.items);
     let items = vec![Err(GOOD_CALL_AGAIN); 2];
     assert_eq!((subscribe, monitor), (Err(GOOD_CALL_AGAIN), Ok(items)));
+}
+
+/// A Publish answer of `BadSessionClosed` makes open62541 delete the subscription
+/// with no status change, so `changes` gives `BadNoSubscription`, also at a later
+/// call.
+#[test]
+fn a_deleted_subscription_ends_with_bad_no_subscription() {
+    let ends = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            add_level(&peer);
+            let url = format!("opc.tcp://{}:{RELAY}", node.addresses()[0]);
+            let armed = Cell::new(false);
+            let rewrite = |message: &mut Vec<u8>| {
+                if armed.get() && is(message, PUBLISH_RESPONSE) {
+                    let status = Status::BAD_SESSION_CLOSED.0.to_le_bytes();
+                    message[40..44].copy_from_slice(&status);
+                }
+            };
+            relayed(&node, &Relay::default(), rewrite, async {
+                let mut client = peer.connect(&url).await.expect("the client connects");
+                let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+                assert!(revised.is_ok(), "{revised:?}");
+                let first = client.changes(future::pending()).await.map(untimed);
+                assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
+                armed.set(true);
+                let mut ends = Vec::new();
+                for _ in 0..2 {
+                    ends.push(client.changes(future::pending()).await.map(untimed));
+                }
+                client.close().await;
+                ends
+            })
+            .await
+        })
+        .await
+    })
+    .0;
+    let end = Err(Status::BAD_NO_SUBSCRIPTION);
+    assert_eq!(ends, [end.clone(), end]);
 }
 
 /// A call that the server refuses gives its status to each item of it.
