@@ -159,16 +159,16 @@
   that a peer joined), so the caller authenticates the sender and decides which nodes
   may send. `step` drops a reply with no check when its sender is neither in
   `voters()` nor a learner (`Raft::set_learners`), unless the configuration in force
-  removed the sender and the node still sends to it: only `raft` knows whom it asked
-  (#352). A learner's reply moves only its own progress. A node that may send can stop
-  a group for good with one message in term `u64::MAX`: each node writes that term,
-  and none can campaign. `raft` takes the term as it is. It trusts its voters: one
-  that lies can already break safety, because a false `AppendReply` counts as held, so
-  a bound on the term would guard nothing. No bound on a term jump spares an honest
-  node that was down, either. Later: a sender proves a term jump by a signed term,
-  which needs `mesh` (#750). The person decided on 2026-10-05 ("(a) is fine", #352
-  item 2). When the term of the last entry is above `hard.term`, `Raft::new` starts at
-  that term with no vote.
+  removed the sender or a later call to `set_learners` left it out, and the node still
+  sends to it: only `raft` knows whom it asked (#352). A learner's reply moves only its
+  own progress. A node that may send can stop a group for good with one message in term
+  `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
+  as it is. It trusts its voters: one that lies can already break safety, because a
+  false `AppendReply` counts as held, so a bound on the term would guard nothing. No
+  bound on a term jump spares an honest node that was down, either. Later: a sender
+  proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
+  2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
+  `hard.term`, `Raft::new` starts at that term with no vote.
   The node sends nothing before its write, so no peer counted a vote or an answer that a
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no atomic
   write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that each
