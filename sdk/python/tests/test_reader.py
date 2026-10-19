@@ -7,6 +7,7 @@ import _thread
 import collections.abc
 import gc
 import os
+import sys
 import threading
 import time
 import unittest
@@ -490,6 +491,20 @@ class ReaderTest(unittest.TestCase):
         with self.writes.open_writer("plant.a") as writer:
             writer.write(1.5)
         self.assertEqual(next(reader)["plant.a"].tolist(), [1.5])
+
+    def test_a_child_that_drops_an_open_reader_touches_no_descriptor(self) -> None:
+        readers = [self.client.open_reader("plant.a")]
+
+        def drop() -> object:
+            raised = []
+            sys.unraisablehook = raised.append
+            os.closerange(3, 65536)
+            readers.clear()
+            gc.collect()
+            return raised or None
+
+        self.assertEqual(fork(drop), 0)
+        self.assertIsNone(readers[0].close())
 
     def test_a_close_from_the_garbage_collector_during_next_does_not_hang(
         self,
