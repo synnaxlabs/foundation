@@ -72,27 +72,25 @@ pub mod places {
     /// The bytes of a place.
     pub const LEN: usize = 4;
 
-    /// Writes `places` to `out`, one message of the run.
+    /// Writes the first `out.len() / LEN` places of `places` into `out`, one message of
+    /// the run. It takes no more, so a caller that passes `by_ref()` writes the rest into
+    /// the next message.
     ///
     /// # Panics
     ///
-    /// When `out` is empty, or is not 4 bytes for each place.
+    /// When `out` is empty or not a whole count of places, or when `places` gives fewer
+    /// places than `out` holds.
     pub fn encode(places: impl IntoIterator<Item = u32>, out: &mut [u8]) {
         let slots = slots::<LEN>(out);
         let count = slots.len();
-        let mut places = places.into_iter();
         let written = slots
             .iter_mut()
-            .zip(places.by_ref())
+            .zip(places)
             .map(|(slot, place)| *slot = place.to_le_bytes())
             .count();
         assert!(
             written == count,
-            "out holds {count} places, and places gives {written}"
-        );
-        assert!(
-            places.next().is_none(),
-            "out holds {count} places, and places gives more"
+            "places gave {written} of the {count} places that out holds"
         );
     }
 
@@ -288,15 +286,18 @@ mod tests {
         }
 
         #[test]
-        #[should_panic(expected = "out holds 2 places, and places gives 1")]
+        #[should_panic(expected = "places gave 1 of the 2 places that out holds")]
         fn panics_when_places_gives_fewer_than_out_holds() {
             places::encode([0], &mut [0; 8]);
         }
 
         #[test]
-        #[should_panic(expected = "out holds 1 places, and places gives more")]
-        fn panics_when_places_gives_more_than_out_holds() {
-            places::encode([0, 1], &mut [0; 4]);
+        fn takes_no_more_places_than_out_holds() {
+            let mut places = [0, 1, 2].into_iter();
+            let mut out = [0xaa; 8];
+            places::encode(places.by_ref(), &mut out);
+            assert_eq!(out, [0, 0, 0, 0, 1, 0, 0, 0]);
+            assert_eq!(places.next(), Some(2));
         }
 
         #[test]
