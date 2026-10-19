@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import typing
 import unittest
 import uuid
 import warnings
@@ -28,7 +29,9 @@ ADMIN = "@admin"
 # The encoding of the base point of Ed25519: a public key that is not of small order.
 BASE = bytes([0x58]) + bytes([0x66] * 31)
 WRONG = bytes(31) + b"\x01"
-FORKED = "a connect in a forked child traps on macOS (#3370): connect in this process"
+FORKED = (
+    "a connect in a forked child traps on macOS (#3370): connect in the test process"
+)
 
 
 def crc32c(data: bytes) -> int:
@@ -47,7 +50,7 @@ def budget(pool: int, disk: int) -> bytes:
     return body + crc32c(body).to_bytes(4, "little")
 
 
-def forked(*_, **__) -> foundation.Client:
+def forked(*_, **__) -> typing.NoReturn:
     """Takes the place of `connect` in the child of `spawn`, and raises
     `AssertionError`."""
     raise AssertionError(FORKED)
@@ -61,8 +64,8 @@ def fork(call) -> int:
 
 def spawn(call) -> int:
     """Calls `call` in a forked child, and gives the pid of the child. The child exits
-    with 0 when `call` gives `None`, else with 1. In the child, a connect raises
-    `AssertionError` on each OS."""
+    with 0 when `call` gives `None`, else with 1. In the child, `foundation.connect` and
+    `foundation._native.connect` raise `AssertionError` on each OS."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         pid = os.fork()

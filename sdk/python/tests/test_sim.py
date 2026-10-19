@@ -63,7 +63,8 @@ class WriterSimTest(unittest.TestCase):
         client = planted(node)
         self.addCleanup(client.close)
         count = 2**31
-        # A copy of the 16 GiB of `plant.a` ends the process, which fails the run.
+        # A copy of the 16 GiB of `plant.a` fails the last assertion, or ends the
+        # process when the host cannot hold it.
         series = {
             "plant.a": np.broadcast_to(np.zeros(1), count),
             "plant.time": np.broadcast_to(np.zeros(1, np.int64), count),
