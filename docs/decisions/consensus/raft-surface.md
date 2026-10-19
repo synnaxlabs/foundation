@@ -223,9 +223,8 @@
   the deferral of #2471.
   `Raft::set_learners` sets the nodes that get the log and have no vote. `raft` keeps
   the set apart from the configuration: a key that the configuration in force holds as
-  a voter is a voter. A leader sends each learner heartbeats and appends as it does a
-  voter, and never counts its answer toward a commit, an election, or the quorum
-  check. A learner stays until a later call leaves it out: neither the quorum check
+  a voter is a voter. A leader sends each learner the log and the commit index, and
+  never counts its answer toward a commit, an election, or the quorum check. A learner stays until a later call leaves it out: neither the quorum check
   nor a change of the configuration releases it. A node that a call leaves out and
   that no configuration in force holds is released as a removed node is. A node never
   sends a learner of its set a PreVote or a Vote. Each node keeps the set, so a new
@@ -236,3 +235,13 @@
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124), and
   the surface, 2026-10-19T14:40:23Z
   (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).
+  A leader keeps at most one append in flight to a learner (8 to a voter), so its
+  queues hold at most one append for each learner. It sends a learner a heartbeat at
+  each quorum check, once each `election_ticks`, not each `heartbeat_ticks`, and at the
+  next tick after the commit index that the learner can take moves, so a learner
+  applies at most one tick late. A learner never votes or campaigns, so it needs no
+  heartbeat at the rate of an election. A leader sends a learner that a call adds an
+  append at once, so its catch-up does not wait for a quorum check. Decided by
+  `laptop.architect`, 2026-10-19T19:01:39Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274961164), for
+  the cost of 127 learners.

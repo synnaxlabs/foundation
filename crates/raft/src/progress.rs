@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 
-// `Append` messages a leader keeps in flight to one follower before it waits.
-const INFLIGHT: usize = 8;
+// `Append` messages a leader keeps in flight to one voter, and to one learner,
+// before it waits. One bounds what a leader queues for many learners.
+pub(crate) const INFLIGHT: usize = 8;
+pub(crate) const LEARNER_INFLIGHT: usize = 1;
 
 // What a leader knows about one follower's log.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,11 +45,12 @@ impl Progress {
         self.next <= last
     }
 
-    // Whether the leader waits for a reply before it sends more.
-    pub(crate) fn paused(&self) -> bool {
+    // Whether the leader waits for a reply before it sends more, with `window`
+    // appends in flight at most.
+    pub(crate) fn paused(&self, window: usize) -> bool {
         match &self.state {
             State::Probe { waiting } => *waiting,
-            State::Replicate { inflight } => inflight.len() >= INFLIGHT,
+            State::Replicate { inflight } => inflight.len() >= window,
         }
     }
 
@@ -100,12 +103,13 @@ impl Progress {
     }
 
     // Lets the leader send again after a heartbeat reply: a probe answers, and a
-    // full window frees one slot so that lost messages do not stop replication.
-    pub(crate) fn heard(&mut self) {
+    // full window of `window` appends frees one slot so that lost messages do not
+    // stop replication.
+    pub(crate) fn heard(&mut self, window: usize) {
         match &mut self.state {
             State::Probe { waiting } => *waiting = false,
             State::Replicate { inflight } => {
-                if inflight.len() >= INFLIGHT {
+                if inflight.len() >= window {
                     inflight.pop_front();
                 }
             }
@@ -121,16 +125,16 @@ mod tests {
     fn starts_as_a_probe_after_the_leaders_last_entry() {
         let progress = Progress::new(5);
         assert_eq!((progress.next, progress.matched), (6, 0));
-        assert!(!progress.paused());
+        assert!(!progress.paused(INFLIGHT));
     }
 
     #[test]
     fn a_probe_waits_for_its_reply() {
         let mut progress = Progress::new(5);
         progress.sent(5);
-        assert!(progress.paused());
-        progress.heard();
-        assert!(!progress.paused());
+        assert!(progress.paused(INFLIGHT));
+        progress.heard(INFLIGHT);
+        assert!(!progress.paused(INFLIGHT));
     }
 
     #[test]
@@ -139,7 +143,7 @@ mod tests {
         progress.sent(5);
         assert!(progress.accepted(3));
         assert_eq!((progress.next, progress.matched), (4, 3));
-        assert!(!progress.paused());
+        assert!(!progress.paused(INFLIGHT));
         assert!(!progress.accepted(3));
     }
 
@@ -149,7 +153,7 @@ mod tests {
         progress.sent(10);
         progress.rejected(4);
         assert_eq!(progress.next, 5);
-        assert!(!progress.paused());
+        assert!(!progress.paused(INFLIGHT));
         progress.rejected(9);
         assert_eq!(progress.next, 4);
         progress.rejected(0);
@@ -166,7 +170,7 @@ mod tests {
         progress.sent(5);
         progress.rejected(2);
         assert_eq!((progress.next, progress.matched), (6, 3));
-        assert!(!progress.paused());
+        assert!(!progress.paused(INFLIGHT));
     }
 
     #[test]
@@ -175,13 +179,13 @@ mod tests {
         progress.sent(0);
         progress.accepted(0);
         for last in 1..=INFLIGHT as u64 {
-            assert!(!progress.paused());
+            assert!(!progress.paused(INFLIGHT));
             progress.sent(last);
             assert_eq!(progress.next, last + 1);
         }
-        assert!(progress.paused());
+        assert!(progress.paused(INFLIGHT));
         progress.accepted(2);
-        assert!(!progress.paused());
+        assert!(!progress.paused(INFLIGHT));
         assert_eq!((progress.next, progress.matched), (INFLIGHT as u64 + 1, 2));
     }
 
@@ -193,10 +197,10 @@ mod tests {
         for last in 1..=INFLIGHT as u64 {
             progress.sent(last);
         }
-        progress.heard();
-        assert!(!progress.paused());
+        progress.heard(INFLIGHT);
+        assert!(!progress.paused(INFLIGHT));
         progress.sent(INFLIGHT as u64 + 1);
-        assert!(progress.paused());
+        assert!(progress.paused(INFLIGHT));
     }
 
     #[test]
@@ -216,6 +220,6 @@ mod tests {
         progress.accepted(0);
         progress.sent(0);
         assert_eq!(progress.next, 1);
-        assert!(!progress.paused());
+        assert!(!progress.paused(INFLIGHT));
     }
 }
