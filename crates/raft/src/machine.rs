@@ -283,8 +283,7 @@ impl Raft {
     #[must_use]
     pub fn admission(&self, message: &Message) -> Admission {
         // A sender that holds a committed entry past the commit names a later last
-        // index and a last term at or above the term at the commit. A leader's
-        // message names only entries that this node holds.
+        // index and a last term at or above the term at the commit.
         let last = match &message.body {
             Body::PreVote { last } | Body::Vote { last } => Some(*last),
             Body::Heartbeat { .. } | Body::Append { .. } => None,
@@ -299,8 +298,11 @@ impl Raft {
         }
         let commit = self.log.committed();
         let behind = |last: Position| {
-            last.index <= commit
-                || self.log.at(commit).is_some_and(|at| last.term < at.term)
+            let at = self
+                .log
+                .at(commit)
+                .expect("invariant: the log holds the commit");
+            last.index <= commit || last.term < at.term
         };
         match last {
             Some(last) if behind(last) && self.log.removed(message.from) => {

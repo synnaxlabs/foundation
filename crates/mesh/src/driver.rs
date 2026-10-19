@@ -923,11 +923,6 @@ impl Group {
         }
     }
 
-    // Whether `key` votes in one half of the configuration, at least.
-    fn voter(&self, key: node::Key) -> bool {
-        self.raft.voters().contains(key)
-    }
-
     // Gives `raft` an input, and wakes each call when the leader or the term changes.
     fn input<T>(&mut self, input: impl FnOnce(&mut Raft) -> T) -> T {
         let lead = (self.raft.leader(), self.raft.term());
@@ -7366,7 +7361,9 @@ mod tests {
             run.start(added, false);
             run.run(seconds(10));
             let refused = run.refused(2, 5);
+            let removed = Error::Removed { from: key(5) };
             assert!(!refused.is_empty(), "node 2 refused nothing");
+            assert!(refused.iter().all(|error| *error == removed), "{refused:?}");
             let stopped = Stopped::Removed {
                 by: [key(2)].into(),
             };
@@ -7413,16 +7410,16 @@ mod tests {
             }
             run.start(removed, false);
             run.run(seconds(60));
-            let refused = run.refused(2, 4);
-            assert!(!refused.is_empty(), "node 2 refused nothing");
             let stopped = Stopped::Removed {
                 by: [key(2), key(3)].into(),
             };
-            assert_eq!(
-                run.record().stopped,
-                [(4, stopped)].into(),
-                "node 2 refused {refused:?}"
-            );
+            assert_eq!(run.record().stopped, [(4, stopped)].into());
+            let removed = Error::Removed { from: key(4) };
+            for on in [2, 3] {
+                let refused = run.refused(on, 4);
+                assert!(!refused.is_empty(), "node {on} refused nothing");
+                assert!(refused.iter().all(|error| *error == removed), "{refused:?}");
+            }
         }
 
         // Node 4 holds the joint and the leave that remove it, not committed.
