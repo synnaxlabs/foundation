@@ -1040,14 +1040,14 @@
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593. A DER
   entry with a byte after its last certificate, and DER then PEM in one entry, make the
   constructor of the group give `BadInternalError`; the client gives the refusals of the
-  PR 2b paragraph below. What aws-lc skips is dropped: a line that does not start with
-  `-----BEGIN ` and end with `-----`, which starts no block, DER bytes after PEM, a
-  damaged first DER certificate before a PEM block, and a block of another label. A
-  damaged or empty block of any label fails the load, also one whose `END` line names
-  another label. So the
-  connect fails closed with an untrusted certificate (`laptop.architect-2`, 2026-10-18
-  22:30 UTC, https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255959458;
-  for the second, 2026-10-18 22:50 UTC,
+  PR 2b paragraph below. What aws-lc skips is dropped: text, as the comment of
+  `openSSLLoadEachCertificate` states, DER bytes after PEM, a damaged first DER
+  certificate before a PEM block, and a block of another label. A block of any label
+  that aws-lc cannot read fails the load, such as an empty one or one whose `END` line
+  names another label. So the connect fails closed with an untrusted certificate
+  (`laptop.architect-2`, 2026-10-18 22:30 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255959458; for the
+  second, 2026-10-18 22:50 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256155598; and for
   the last, with the DER test, 2026-10-18 22:58 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256221476). A block
@@ -1102,12 +1102,14 @@
   policies, the key pair, the window, the trust, then the URI: the config takes the URI
   that its check allocates, so no refusal comes after that allocation. A check refuses
   only on its own status, and any other status, such as `BadOutOfMemory` of the trust
-  load, gives `client::Error::Failed`, as the realloc of the policies in
-  `shim_add_policies` does. Where the release gives one status for out of memory and
-  the cause (`BadInvalidArgument` of the policies when `i2d_X509` fails, the key pair
-  check, and the URI check when `X509_get_ext_d2i` gives NULL), the refusal names the
-  cause, and the time check gives `Failed(BadCertificateInvalid)` when its load of the
-  certificate fails (`laptop.monitor`, 2026-10-19 14:46 UTC,
+  load when a push, the BIO, or the stack fails, gives `client::Error::Failed`, as the
+  realloc of the policies in `shim_add_policies` does. Where the release gives one
+  status for out of memory and the cause (`BadInvalidArgument` of the policies when
+  `i2d_X509` fails, the key pair check, the URI check when `X509_get_ext_d2i` gives
+  NULL, and the trust load when `d2i_X509` or `PEM_bytes_read_bio` fails, which gives
+  `Invalid`, or `Empty` at the first DER certificate), the refusal names the cause, and
+  the time check gives `Failed(BadCertificateInvalid)` when its load of the certificate
+  fails (`laptop.monitor`, 2026-10-19 14:46 UTC,
   https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607, item 2;
   `laptop.architect-2`, 2026-10-19 14:49 UTC,
   https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270087670). This
