@@ -807,27 +807,38 @@ fn the_error_of_an_answer_other_than_204_names_the_address() {
     }
 }
 
-/// The error of an address with no port, or with an empty one, names its host alone.
+/// The error of an address with no port, or with an empty one, names its host alone,
+/// also when the token is the cause.
 #[test]
 fn the_error_of_an_answer_at_an_address_with_no_port_names_its_host() {
+    let token = format!(". Check the token file({TOKEN_FILE:?})");
     for address in ["http://server", "http://server:"] {
-        let errors = run_at_server(move |node, tasks| async move {
-            let plant = Plant::on_port(node, tasks, 80).await;
-            (plant.answers.borrow_mut())
-                .push_back((StatusCode::SERVICE_UNAVAILABLE, "starting"));
-            let (_, errors, end) = send_one(&plant, config(string(address))).await;
-            assert!(end.is_none(), "the run goes on");
-            errors
-        });
-        assert_eq!(
-            errors,
-            [
-                "",
-                "InfluxDB at server answered 503 Service Unavailable: starting",
-                ""
-            ],
-            "{address}"
-        );
+        for (status, cause) in [
+            (StatusCode::SERVICE_UNAVAILABLE, ""),
+            (StatusCode::UNAUTHORIZED, token.as_str()),
+        ] {
+            let errors = run_at_server(move |node, tasks| async move {
+                let plant = Plant::on_port(node.clone(), tasks, 80).await;
+                node.paths()
+                    .write(std::path::Path::new(TOKEN_FILE), b"old")
+                    .expect("writes");
+                plant.answers.borrow_mut().push_back((status, "no"));
+                let token = [(60, "token", call("file", TOKEN_FILE))];
+                let config = plus(config(string(address)), &token);
+                let (_, errors, end) = send_one(&plant, config).await;
+                assert!(end.is_none(), "the run goes on");
+                errors
+            });
+            assert_eq!(
+                errors,
+                [
+                    "",
+                    &format!("InfluxDB at server answered {status}{cause}: no"),
+                    ""
+                ],
+                "{address} {status}"
+            );
+        }
     }
 }
 
