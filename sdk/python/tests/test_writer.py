@@ -427,9 +427,7 @@ class WriterTest(unittest.TestCase):
         self.assertEqual(
             str(raised.exception), f"{UNKNOWN}: the open names plant.a, plant.z"
         )
-        with self.assertRaises(foundation.Stopped) as raised:
-            self.client.open_writer(["plant.a", "other.a"])
-        self.assertEqual(raised.exception.code, "malformed")
+        self.assertIsNone(self.client.open_writer(["plant.a", "other.a"]).close())
         self.assertIsNone(self.client.open_writer("plant.a").close())
 
     def test_a_writer_of_a_closed_client_raises(self) -> None:

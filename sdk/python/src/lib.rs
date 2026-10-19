@@ -41,10 +41,10 @@ pyo3::create_exception!(
     "The node stopped a write, with a code. At the open, no writer opened, and the \
      session goes on. A writer that raises it has ended, and each later call raises it \
      again. `code` is its name in lower case. At the open: `unknown` for a name of no \
-     channel, `not_home` when the node is not the home of the index, `malformed` for \
-     channels of more than one index or a lease that the home refuses, `failed` when \
-     the home cannot open the write, `refused` when the access check of the node \
-     refuses the write, and `busy` when the node has no room for the open. Later: \
+     channel, `not_home` when the node is not the home of the index, `malformed` for a \
+     lease that the home refuses, `failed` when the home cannot open the write, \
+     `refused` when the access check of the node refuses the write, and `busy` when \
+     the node has no room for the open. Later: \
      `unknown` when a channel was removed, `failed` when the home failed, `busy` when \
      the home has no room for the outcome of a frame, and `malformed` for a frame that \
      breaks a rule of the wire."
