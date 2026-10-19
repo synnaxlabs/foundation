@@ -183,24 +183,17 @@ fn a_sampling_past_100_ms_is_the_publishing_interval() {
     );
 }
 
-/// Gives the subscribe of 2 nodes through a relay that gives each answer of the type
-/// `kind` the service result [`GOOD_CALL_AGAIN`], and a `CreateMonitoredItems` answer
-/// no results.
-fn called_again(kind: [u8; 4]) -> Result<Revised, Status> {
+/// Gives the subscribe of 2 nodes at [`SAMPLING`] through a relay that changes each
+/// message from the server with `rewrite`.
+fn rewritten(
+    rewrite: impl Fn(&mut Vec<u8>) + Send + 'static,
+) -> Result<Revised, Status> {
     run(0, async move |node| {
         serve(&node, 4, async |mut peer| {
             for index in 0..2 {
                 peer.server.add_scalar(&numbered(index), Value::U32(index));
             }
             let url = format!("opc.tcp://{}:{RELAY}", node.addresses()[0]);
-            let rewrite = |message: &mut Vec<u8>| {
-                if is(message, kind) {
-                    message[40..44].copy_from_slice(&GOOD_CALL_AGAIN.0.to_le_bytes());
-                    if kind == MONITOR_RESPONSE {
-                        recount_of(message, 0);
-                    }
-                }
-            };
             relayed(&node, &Relay::default(), rewrite, async {
                 let mut client = peer.connect(&url).await.expect("the client connects");
                 let nodes = [numbered(0), numbered(1)];
@@ -213,6 +206,19 @@ fn called_again(kind: [u8; 4]) -> Result<Revised, Status> {
         .await
     })
     .0
+}
+
+/// Gives [`rewritten`] with the service result [`GOOD_CALL_AGAIN`] in each answer of
+/// the type `kind`, and no results in a `CreateMonitoredItems` answer.
+fn called_again(kind: [u8; 4]) -> Result<Revised, Status> {
+    rewritten(move |message| {
+        if is(message, kind) {
+            message[40..44].copy_from_slice(&GOOD_CALL_AGAIN.0.to_le_bytes());
+            if kind == MONITOR_RESPONSE {
+                recount_of(message, 0);
+            }
+        }
+    })
 }
 
 /// A create answer whose service result is not Good fails, as open62541 then makes
@@ -263,6 +269,149 @@ fn a_deleted_subscription_ends_with_bad_no_subscription() {
     .0;
     let end = Err(Status::BAD_NO_SUBSCRIPTION);
     assert_eq!(ends, [end.clone(), end]);
+}
+
+/// Gives the publishing interval of a subscribe at a sampling of 1 s on a server that
+/// grants a keep-alive count of at least `least`, and the Publish requests that the
+/// server takes from the subscribe to 5 s after it.
+fn kept_alive(least: u32) -> (Result<Span, Status>, usize) {
+    run(0, async move |node| {
+        serve(&node, 4, async |mut peer| {
+            add_level(&peer);
+            peer.server.set_keep_alives(least);
+            let mut client = peer.connected().await;
+            let counts = peer.server.count();
+            let revised = client.subscribe(&[numbered(0)], Span::SECOND).await;
+            let idle = client.idle(peer.clock.sleep(ms(5000))).await;
+            assert_eq!(idle, Ok(()));
+            client.close().await;
+            (revised.map(|revised| revised.interval), counts.publishes())
+        })
+        .await
+    })
+    .0
+}
+
+/// A subscribe fails with `BadOutOfRange`, and sends no Publish request, when the
+/// server gives a publishing interval times a keep-alive count over 5 min, half of
+/// the timeout of a Publish request in open62541. At 5 min, the server takes the
+/// [`PUBLISHES`] requests and the one after the answer of the first change.
+#[test]
+fn a_keep_alive_past_5_min_fails_with_no_publish_request() {
+    let (at, past) = (kept_alive(300), kept_alive(301));
+    let publishes = usize::from(PUBLISHES) + 1;
+    assert_eq!(
+        (at, past),
+        (
+            (Ok(Span::SECOND), publishes),
+            (Err(Status::BAD_OUT_OF_RANGE), 0)
+        )
+    );
+}
+
+/// A publishing interval that is not a number fails as one past the bound.
+#[test]
+fn a_publishing_interval_of_nan_fails() {
+    let revised = rewritten(|message| {
+        if is(message, SUBSCRIBE_RESPONSE) {
+            message[56..64].copy_from_slice(&f64::NAN.to_le_bytes());
+        }
+    });
+    assert_eq!(revised, Err(Status::BAD_OUT_OF_RANGE));
+}
+
+/// At a sampling of 2 min, the publishing interval is 1 min, so the server holds each
+/// Publish request for at most 1 min, and never more than [`PUBLISHES`] of them, also
+/// past the 10 min timeout of a Publish request in open62541.
+#[test]
+fn the_server_holds_at_most_publishes_at_a_long_sampling() {
+    let (interval, held) = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            add_level(&peer);
+            let mut client = peer.connected().await;
+            let sampling = Span::from_nanos(2 * Span::MINUTE.nanos());
+            let revised = client.subscribe(&[numbered(0)], sampling).await;
+            let first = client.changes(future::pending()).await.map(untimed);
+            assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
+            let mut held = Vec::new();
+            for _ in 0..(30 * 60) {
+                let got = client.changes(peer.clock.sleep(Span::SECOND)).await;
+                assert_eq!(got.map(<[_]>::len), Ok(0));
+                held.push(peer.server.held());
+            }
+            client.close().await;
+            (
+                revised.map(|revised| revised.interval),
+                held.into_iter().max(),
+            )
+        })
+        .await
+    })
+    .0;
+    let most = Some(u32::from(PUBLISHES));
+    assert_eq!((interval, held), (Ok(Span::MINUTE), most));
+}
+
+/// The client sends its [`PUBLISHES`] Publish requests once the server makes the
+/// subscription, before its items, and asks for a keep-alive count of the publishing
+/// intervals in 1 min, so an idle subscription of an interval of 1 s gets one Publish
+/// answer a minute.
+#[test]
+fn an_idle_subscription_gets_one_publish_answer_a_minute() {
+    let (at_subscribe, idle) = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            add_level(&peer);
+            let mut client = peer.connected().await;
+            let counts = peer.server.count();
+            let revised = client.subscribe(&[numbered(0)], Span::SECOND).await;
+            assert!(revised.is_ok(), "{revised:?}");
+            let at_subscribe = counts.publishes();
+            let first = client.changes(future::pending()).await.map(untimed);
+            assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
+            let counts = peer.server.count();
+            let got = client.changes(peer.clock.sleep(ms(10 * 60_000))).await;
+            assert_eq!(got.map(<[_]>::len), Ok(0));
+            let idle = counts.publishes();
+            client.close().await;
+            (at_subscribe, idle)
+        })
+        .await
+    })
+    .0;
+    assert_eq!((at_subscribe, idle), (usize::from(PUBLISHES), 10));
+}
+
+/// The server answers both Publish requests while the client is not driven, then
+/// ends the subscription, and deletes it with no Publish request queued, so with no
+/// status change. The next Publish answer of `BadNoSubscription` ends the changes,
+/// and the client sends no Publish request after it.
+#[test]
+fn an_end_with_no_publish_request_queued_ends_the_changes() {
+    let (got, publishes) = on_level(4, async |peer, client, level| {
+        level.set(1.0);
+        peer.clock.sleep(ms(1200)).await;
+        level.set(2.0);
+        peer.clock.sleep(ms(1200)).await;
+        peer.server.end_subscriptions(Status::BAD_TIMEOUT);
+        peer.clock.sleep(ms(1200)).await;
+        let mut got = Vec::new();
+        let mut wait = pin!(peer.clock.sleep(ms(5000)));
+        loop {
+            let changes = client.changes(wait.as_mut()).await.map(untimed);
+            let done = !matches!(&changes, Ok(changes) if !changes.is_empty());
+            got.push(changes);
+            if done {
+                break;
+            }
+        }
+        let after = peer.server.count();
+        let idle = client.idle(peer.clock.sleep(ms(10_000))).await;
+        assert_eq!(idle, Ok(()));
+        (got, after.publishes())
+    });
+    let changed = vec![changed_to(1.0, false), changed_to(2.0, false)];
+    let end = Err(Status::BAD_NO_SUBSCRIPTION);
+    assert_eq!((got, publishes), (vec![Ok(changed), end], 0));
 }
 
 /// A call that the server refuses gives its status to each item of it.
@@ -360,8 +509,9 @@ fn a_full_queue_drops_the_oldest_change_and_marks_the_next() {
 }
 
 /// The end of the subscription comes after the changes that came before it, also in
-/// one drive, and again at each later call. The client then sends no Publish
-/// request, and the server takes only the one that the client sent before the end.
+/// one drive, and again at each later call. The server takes only the one Publish
+/// request that the client sent before the end, and one after it, whose answer of
+/// `BadNoSubscription` removes the subscription in the client.
 #[test]
 fn the_end_comes_after_the_changes_and_stops_the_publish_requests() {
     let (ends, publishes) = on_level(100, async |peer, client, level| {
@@ -380,7 +530,7 @@ fn the_end_comes_after_the_changes_and_stops_the_publish_requests() {
     });
     let end = Err(Status::BAD_TIMEOUT);
     let changed = Ok(vec![changed_to(1.0, false)]);
-    assert_eq!((ends, publishes), (vec![changed, end.clone(), end], 1));
+    assert_eq!((ends, publishes), (vec![changed, end.clone(), end], 2));
 }
 
 /// A `changes` whose `until` ends first gives no changes, and a change that a read

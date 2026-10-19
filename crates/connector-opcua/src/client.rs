@@ -85,7 +85,8 @@ const _: () = assert!(
 
 /// Gives a client of open62541 on the loop `el` with no connection. It takes at most
 /// [`CHUNKS`] chunks in a message and queues at most [`QUEUED`] intermediate chunks.
-/// Its subscription calls the callbacks of [`WATCH`].
+/// Its subscription calls the callbacks of [`WATCH`], and gets no Publish request until
+/// [`Client::subscribe`] sets their count.
 ///
 /// # Safety
 ///
@@ -100,7 +101,7 @@ pub(crate) unsafe fn unconnected(el: *mut ffi::EventLoop) -> NonNull<ffi::Client
     let client = unsafe { ffi::shim_client_new(el, CHUNKS, QUEUED, &raw const WATCH) };
     let client = NonNull::new(client).unwrap_or_else(|| alloc::exhausted());
     // SAFETY: the client lives.
-    unsafe { ffi::shim_client_publishes(client.as_ptr(), PUBLISHES) };
+    unsafe { ffi::shim_client_publishes(client.as_ptr(), 0) };
     client
 }
 

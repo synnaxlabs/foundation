@@ -1658,13 +1658,19 @@ __Client_Subscriptions_processPublishResponse(UA_Client *client, UA_PublishReque
                      "PublishResponse: Received BadShutdown status");
         return;
 
-    case UA_STATUSCODE_BADNOSUBSCRIPTION:
+    case UA_STATUSCODE_BADNOSUBSCRIPTION: {
         /* There is no Subscription configured, the server expects no
          * PublishRequests. We demote this to debug-logging, as it can occur
          * during regular shutdown when the Subscriptions are removed. */
         UA_LOG_DEBUG(client->config.logging, UA_LOGCATEGORY_CLIENT,
                      "PublishResponse: Received BadNoSubscription status");
+        /* The session holds no Subscription, so remove each local one, and no
+         * PublishRequest goes out again. */
+        UA_Client_Subscription *sub, *next;
+        LIST_FOREACH_SAFE(sub, &client->subscriptions, listEntry, next)
+            __Client_Subscription_deleteInternal(client, sub);
         return;
+    }
 
     default:
         break;

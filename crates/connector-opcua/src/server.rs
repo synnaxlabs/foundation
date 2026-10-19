@@ -479,6 +479,20 @@ impl Server {
         unsafe { ffi::test::shim_server_publishing(self.raw(), ms) };
     }
 
+    /// Sets the smallest keep-alive count of a subscription that the server grants.
+    #[cfg(test)]
+    pub(crate) fn set_keep_alives(&self, least: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_keep_alives(self.raw(), least) };
+    }
+
+    /// Gives the most Publish requests that one session of the server holds now.
+    #[cfg(test)]
+    pub(crate) fn held(&self) -> u32 {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_held(self.raw()) }
+    }
+
     /// Sets the largest queue of a monitored item that the server grants.
     #[cfg(test)]
     pub(crate) fn set_queues(&self, most: u32) {

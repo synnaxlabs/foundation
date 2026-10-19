@@ -162,6 +162,22 @@ void shim_server_publishing(UA_Server *server, UA_Double ms) {
     UA_Server_getConfig(server)->publishingIntervalLimits.min = ms;
 }
 
+/* Sets the smallest keep-alive count of a subscription that `server` grants. */
+void shim_server_keep_alives(UA_Server *server, UA_UInt32 least) {
+    UA_Server_getConfig(server)->keepAliveCountLimits.min = least;
+}
+
+/* Gives the most Publish requests that one session of `server` holds now. */
+UA_UInt32 shim_server_held(UA_Server *server) {
+    size_t most = 0;
+    session_list_entry *entry;
+    LIST_FOREACH(entry, &server->sessions, pointers) {
+        if(entry->session.responseQueueSize > most)
+            most = entry->session.responseQueueSize;
+    }
+    return (UA_UInt32)most;
+}
+
 /* Sets the largest queue of a monitored item that `server` grants. */
 void shim_server_queues(UA_Server *server, UA_UInt32 most) {
     UA_Server_getConfig(server)->queueSizeLimits.max = most;

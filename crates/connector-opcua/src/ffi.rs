@@ -898,7 +898,11 @@ unsafe extern "C" {
         count: usize,
     ) -> *mut c_void;
     pub(crate) fn shim_value_node(value: *const DataValue, out: *mut Node<'_>) -> u32;
-    pub(crate) fn shim_subscribe_new(interval: f64, most: u32) -> *mut c_void;
+    pub(crate) fn shim_subscribe_new(
+        interval: f64,
+        keep_alive: u32,
+        most: u32,
+    ) -> *mut c_void;
     pub(crate) fn shim_monitor_new(
         subscription: u32,
         nodes: *const Node<'_>,
@@ -907,7 +911,11 @@ unsafe extern "C" {
         sampling: f64,
         queue: u32,
     ) -> *mut c_void;
-    pub(crate) fn shim_subscription(answer: *const c_void, interval: *mut f64) -> u32;
+    pub(crate) fn shim_subscription(
+        answer: *const c_void,
+        interval: *mut f64,
+        keep_alive: *mut u32,
+    ) -> u32;
     pub(crate) fn shim_monitor_result(
         answer: *const c_void,
         index: usize,

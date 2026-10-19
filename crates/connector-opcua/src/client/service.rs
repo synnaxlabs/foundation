@@ -119,15 +119,16 @@ impl Request {
         Self::new(raw.cast(), Service::READ)
     }
 
-    /// A `CreateSubscription` request at the publishing interval `interval` ms, with at
-    /// most `most` notifications in a Publish answer.
+    /// A `CreateSubscription` request at the publishing interval `interval` ms and the
+    /// keep-alive count `keep_alive`, with at most `most` notifications in a Publish
+    /// answer.
     ///
     /// # Aborts
     ///
     /// As [`Request::browse`].
-    pub(super) fn subscribe(interval: f64, most: u32) -> Self {
+    pub(super) fn subscribe(interval: f64, keep_alive: u32, most: u32) -> Self {
         // SAFETY: it reads nothing.
-        let raw = unsafe { ffi::shim_subscribe_new(interval, most) };
+        let raw = unsafe { ffi::shim_subscribe_new(interval, keep_alive, most) };
         Self::new(raw, Service::SUBSCRIBE)
     }
 
@@ -352,14 +353,15 @@ impl Answer {
     /// subscription or item.
     pub(super) fn result(&self) -> Result<(), Status> {
         let raw = self.raw.as_ptr();
-        // SAFETY: the answer lives.
-        let status = Status(unsafe {
+        let status = Status(
             if matches!(self.service, Service::SUBSCRIBE | Service::MONITOR) {
-                ffi::shim_response_status(raw)
+                // SAFETY: the answer lives.
+                unsafe { ffi::shim_response_status(raw) }
             } else {
-                ffi::shim_response_result(raw)
-            }
-        });
+                // SAFETY: the answer lives.
+                unsafe { ffi::shim_response_result(raw) }
+            },
+        );
         if status == Status::GOOD {
             Ok(())
         } else {
@@ -423,23 +425,29 @@ impl Answer {
         unsafe { ffi::shim_read_result(self.raw.as_ptr().cast(), index) }
     }
 
-    /// Gives the id of the subscription of a Good `CreateSubscription` answer, and its
-    /// publishing interval in ms.
+    /// Gives the id of the subscription of a Good `CreateSubscription` answer, its
+    /// publishing interval in ms, and its keep-alive count.
     ///
     /// # Panics
     ///
     /// If the answer is not of a `CreateSubscription`.
-    pub(super) fn subscription(&self) -> (u32, f64) {
+    pub(super) fn subscription(&self) -> (u32, f64, u32) {
         assert_eq!(
             self.service,
             Service::SUBSCRIBE,
             "invariant: a reader of a subscription reads no other answer"
         );
-        let mut interval = 0.0;
-        // SAFETY: the answer lives, and `interval` is a place to write.
-        let id =
-            unsafe { ffi::shim_subscription(self.raw.as_ptr(), &raw mut interval) };
-        (id, interval)
+        let (mut interval, mut keep_alive) = (0.0, 0);
+        // SAFETY: the answer lives, and `interval` and `keep_alive` are places to
+        // write.
+        let id = unsafe {
+            ffi::shim_subscription(
+                self.raw.as_ptr(),
+                &raw mut interval,
+                &raw mut keep_alive,
+            )
+        };
+        (id, interval, keep_alive)
     }
 
     /// Gives the sampling interval in ms and the queue size of result `index` of a

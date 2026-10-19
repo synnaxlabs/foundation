@@ -14,6 +14,7 @@
 #include <open62541/plugin/securitypolicy_default.h>
 #include <open62541/types.h>
 #include <open62541/util.h>
+#include "client/ua_client_internal.h"
 #include "mp_printf.h"
 #include "timer.h"
 #pragma GCC diagnostic pop
@@ -786,9 +787,10 @@ UA_Client *shim_client_new(UA_EventLoop *el, UA_UInt32 chunks, UA_UInt32 queued,
 }
 
 /* Sets the count of Publish requests that `client` keeps in flight while it has a
- * subscription. With 0, it sends no more. */
+ * subscription, and sends the ones that it lacks. With 0, it sends no more. */
 void shim_client_publishes(UA_Client *client, UA_UInt16 count) {
     UA_Client_getConfig(client)->outStandingPublishRequests = count;
+    __Client_Subscriptions_backgroundPublish(client);
 }
 
 typedef UA_StatusCode (*policy_of)(UA_SecurityPolicy *policy,
@@ -1452,14 +1454,17 @@ size_t shim_publish_bytes(void) {
            UA_calcSizeBinary(&answer, type, NULL);
 }
 
-/* Gives a CreateSubscription request at the publishing interval `interval` ms, with at
- * most `most` notifications in a Publish answer, or NULL when an allocation fails. */
-UA_CreateSubscriptionRequest *shim_subscribe_new(UA_Double interval, UA_UInt32 most) {
+/* Gives a CreateSubscription request at the publishing interval `interval` ms and the
+ * keep-alive count `keep_alive`, with at most `most` notifications in a Publish
+ * answer, or NULL when an allocation fails. */
+UA_CreateSubscriptionRequest *shim_subscribe_new(UA_Double interval,
+                                                 UA_UInt32 keep_alive, UA_UInt32 most) {
     UA_CreateSubscriptionRequest *request = UA_CreateSubscriptionRequest_new();
     if(!request)
         return NULL;
     *request = UA_CreateSubscriptionRequest_default();
     request->requestedPublishingInterval = interval;
+    request->requestedMaxKeepAliveCount = keep_alive;
     request->maxNotificationsPerPublish = most;
     return request;
 }
@@ -1503,10 +1508,12 @@ UA_CreateMonitoredItemsRequest *shim_monitor_new(UA_UInt32 subscription,
 }
 
 /* Gives the id of the subscription of `answer`, a Good CreateSubscription answer, and
- * writes its publishing interval in ms to `interval`. */
+ * writes its publishing interval in ms to `interval` and its keep-alive count to
+ * `keep_alive`. */
 UA_UInt32 shim_subscription(const UA_CreateSubscriptionResponse *answer,
-                            UA_Double *interval) {
+                            UA_Double *interval, UA_UInt32 *keep_alive) {
     *interval = answer->revisedPublishingInterval;
+    *keep_alive = answer->revisedMaxKeepAliveCount;
     return answer->subscriptionId;
 }
 

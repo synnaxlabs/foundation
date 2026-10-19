@@ -317,6 +317,8 @@ unsafe extern "C" {
     pub(crate) fn shim_server_end(server: *mut Server, status: u32);
     pub(crate) fn shim_server_publishes(server: *mut Server, most: u32);
     pub(crate) fn shim_server_per_publish(server: *mut Server) -> u32;
+    pub(crate) fn shim_server_keep_alives(server: *mut Server, least: u32);
+    pub(crate) fn shim_server_held(server: *mut Server) -> u32;
     pub(crate) fn shim_server_publishing(server: *mut Server, ms: f64);
     pub(crate) fn shim_server_queues(server: *mut Server, most: u32);
     pub(crate) fn shim_server_count(server: *mut Server) -> *const Counts;

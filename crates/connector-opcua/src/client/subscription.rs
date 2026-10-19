@@ -53,6 +53,14 @@ pub(crate) struct Sampled {
 /// The shortest publishing interval of a subscription.
 const PUBLISHING: Span = Span::from_nanos(100_000_000);
 
+/// The longest publishing interval of a subscription, and the time that the client asks
+/// the server to hold a Publish request with no change at most.
+const KEEP_ALIVE: Span = Span::MINUTE;
+
+/// The longest time that the server may hold a Publish request with no change: half of
+/// the 10 min timeout of a Publish request in open62541.
+const SILENCE: Span = Span::from_nanos(5 * Span::MINUTE.nanos());
+
 /// The changes of a subscription that the callbacks gave, which [`Client::changes`]
 /// takes.
 #[derive(Default)]
@@ -72,17 +80,19 @@ pub(super) static WATCH: ffi::Watch = ffi::Watch {
 
 impl Client {
     /// Creates a subscription, and a monitored item for each node of `nodes` that
-    /// samples at `sampling`. It asks for a publishing interval of the longer of
-    /// `sampling` and 100 ms, and each item queues the values that it samples in two
+    /// samples at `sampling`. It asks for a publishing interval of `sampling`, at
+    /// least 100 ms and at most 1 min, and a keep-alive count of the publishing
+    /// intervals in 1 min. Each item queues the values that it samples in two
     /// publishing intervals that the server gives, the oldest dropped first. Each item
     /// asks for both timestamps and a change of the status or the value. It reads the
     /// `MaxMonitoredItemsPerCall` of the server, and sends the items in
     /// `CreateMonitoredItems` calls of at most that many. Each answer of a Publish fits
-    /// the receive limit of the client, for items of a scalar of at most 8 bytes. From
-    /// the call, the client keeps [`PUBLISHES`] Publish requests in flight, and
-    /// [`Client::read`] and the services send fewer to keep the sum. Each change that
-    /// comes, also while the client reads or serves, stays in the client until
-    /// [`Client::changes`] gives it, with no bound and no drop.
+    /// the receive limit of the client, for items of a scalar of at most 8 bytes. Once
+    /// the server makes the subscription, the client keeps [`PUBLISHES`] Publish
+    /// requests in flight, and [`Client::read`] and the services send fewer to keep the
+    /// sum from the call. Each change that comes, also while the client reads or
+    /// serves, stays in the client until [`Client::changes`] gives it, with no bound
+    /// and no drop.
     ///
     /// # Errors
     ///
@@ -92,7 +102,9 @@ impl Client {
     /// result of a `CreateMonitoredItems` call goes to each item of that call, also the
     /// `BadInternalError` that open62541 gives when the answer has more or fewer
     /// results than the call. `BadRequestTooLarge` goes to a node that does not fit
-    /// one call.
+    /// one call. `BadOutOfRange` when the publishing interval times the keep-alive
+    /// count that the server gives is over 5 min, half of the timeout of a Publish
+    /// request in open62541, with no Publish request sent.
     ///
     /// # Panics
     ///
@@ -116,8 +128,17 @@ impl Client {
         let per_call = self.read_limit(ffi::MAX_MONITORED_ITEMS_PER_CALL).await?;
         let room = self.takes.saturating_sub(ffi::shim_publish_bytes());
         let most = (room / Item::Change.bytes()).max(1);
-        let request = Request::subscribe(ms(sampling.max(PUBLISHING)), saturate(most));
-        let (id, interval) = self.serve(&request).await?.subscription();
+        let interval = sampling.clamp(PUBLISHING, KEEP_ALIVE);
+        let keep_alive = u32::try_from(KEEP_ALIVE.nanos() / interval.nanos())
+            .expect("invariant: at most 600 intervals of 100 ms fill 1 min");
+        let request = Request::subscribe(ms(interval), keep_alive, saturate(most));
+        let (id, interval, keep_alive) = self.serve(&request).await?.subscription();
+        let silence = interval * f64::from(keep_alive);
+        if silence > ms(SILENCE) || silence.is_nan() {
+            return Err(Status::BAD_OUT_OF_RANGE);
+        }
+        // SAFETY: the client lives.
+        unsafe { ffi::shim_client_publishes(self.raw.as_ptr(), PUBLISHES) };
         let sampling = ms(sampling);
         let queue = queue(interval, sampling);
         let build =
@@ -253,14 +274,13 @@ unsafe extern "C" fn changed(
 }
 
 /// Keeps the status of `change` in the [`Changes`] of the [`Calls`] at `context`,
-/// unless they hold one, and stops the Publish requests of `client`, as the server
-/// deletes the subscription.
+/// unless they hold one.
 ///
 /// # Safety
 ///
-/// `client` is live, `context` points at its [`Calls`], and `change` at the change.
+/// `context` points at live [`Calls`], and `change` at the change.
 unsafe extern "C" fn ended(
-    client: *mut ffi::Client,
+    _: *mut ffi::Client,
     _: u32,
     context: *mut c_void,
     change: *mut ffi::StatusChange,
@@ -269,10 +289,6 @@ unsafe extern "C" fn ended(
     let calls = unsafe { &*context.cast_const().cast::<Calls>() };
     // SAFETY: the change lives.
     let status = Status(unsafe { ffi::shim_status_change(change) });
-    // open62541 keeps its subscription, and sends a Publish again at each answer of
-    // `BadNoSubscription`.
-    // SAFETY: the client lives.
-    unsafe { ffi::shim_client_publishes(client, 0) };
     let ended = &calls.changes.ended;
     ended.set(Some(ended.get().unwrap_or(status)));
 }
