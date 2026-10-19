@@ -7324,6 +7324,107 @@ mod tests {
             assert_eq!(run.record().stopped, BTreeMap::new());
         }
 
+        // A gap of the rule (#3355). Of voters {1, 2, 5}, node 5 holds only e1 =
+        // (in {2}, out {1, 2, 5}). Node 2 holds e1 to e4, which remove 5 and grow
+        // the group to {2, 3, 4}, committed. A later add of 1 and 5 is committed
+        // without node 2. Node 2 lags it, and one answer of node 2 is a majority of
+        // the incoming half {2} that node 5 holds, so node 5 stops.
+        #[test]
+        fn one_lagging_voter_of_a_small_stale_half_stops_a_voter_added_back() {
+            let mut run = Run::new();
+            let base = vec![1, 2, 5];
+            let sets: [(u8, u64, &[u8], &[u8]); 4] = [
+                (1, 4, &[2], &[1, 2, 5]),
+                (1, 4, &[2], &[]),
+                (2, 5, &[2, 3, 4], &[2]),
+                (2, 5, &[2, 3, 4], &[]),
+            ];
+            let keys = |ids: &[u8]| ids.iter().map(|&id| key(id)).collect();
+            let entries: Vec<Entry> = (1..)
+                .zip(sets)
+                .map(|(index, (leader, term, incoming, outgoing))| {
+                    let voters = Voters {
+                        incoming: keys(incoming),
+                        outgoing: keys(outgoing),
+                    };
+                    common::voters_entry(leader, common::at(term, index), voters)
+                })
+                .collect();
+            let lagging = Opening {
+                id: 2,
+                voters: base.clone(),
+                entries: entries.clone(),
+                commit: 4,
+            };
+            run.start(lagging, false);
+            let added = Opening {
+                id: 5,
+                voters: base,
+                entries: entries[..1].to_vec(),
+                commit: 0,
+            };
+            run.start(added, false);
+            run.run(seconds(10));
+            let refused = run.refused(2, 5);
+            assert!(!refused.is_empty(), "node 2 refused nothing");
+            let stopped = Stopped::Removed {
+                by: [key(2)].into(),
+            };
+            assert_eq!(run.record().stopped, [(5, stopped)].into());
+        }
+
+        // Voters {1, 2, 3, 4}. Leader 1 (term 4) writes the joint e1 that
+        // removes node 4, committed on {1, 2, 4}, and three empty entries that only
+        // node 4 takes. Leader 2 (term 5) writes the final {1, 2, 3} at index 2,
+        // committed on {2, 3}. Node 4 missed its release, and its last index 4 is
+        // past the commit of nodes 2 and 3, at a term below the term at that commit.
+        #[test]
+        fn a_removed_node_with_a_tail_past_the_commit_stops_at_its_campaign() {
+            let mut run = Run::new();
+            let keys = |ids: &[u8]| ids.iter().map(|&id| key(id)).collect();
+            let joint = Voters {
+                incoming: keys(&[1, 2, 3]),
+                outgoing: keys(&[1, 2, 3, 4]),
+            };
+            let last = Voters {
+                incoming: keys(&[1, 2, 3]),
+                outgoing: BTreeSet::new(),
+            };
+            let e1 = common::voters_entry(1, common::at(4, 1), joint);
+            let tail = (2..=4).map(|index| Entry {
+                at: common::at(4, index),
+                data: Data::Empty,
+            });
+            let removed = Opening {
+                id: 4,
+                voters: vec![1, 2, 3, 4],
+                entries: [e1.clone()].into_iter().chain(tail).collect(),
+                commit: 1,
+            };
+            let release = common::voters_entry(2, common::at(5, 2), last);
+            for id in [2, 3] {
+                let voter = Opening {
+                    id,
+                    voters: vec![1, 2, 3, 4],
+                    entries: vec![e1.clone(), release.clone()],
+                    commit: 2,
+                };
+                run.start(voter, false);
+            }
+            run.start(removed, false);
+            run.run(seconds(60));
+            let refused = run.refused(2, 4);
+            assert!(!refused.is_empty(), "node 2 refused nothing");
+            let stopped = Stopped::Removed {
+                by: [key(2), key(3)].into(),
+            };
+            assert_eq!(
+                run.record().stopped,
+                [(4, stopped)].into(),
+                "node 2 refused {refused:?}"
+            );
+        }
+
         // Node 4 holds the joint and the leave that remove it, not committed.
         // Nodes 2 and 3 hold both committed, so its campaign is at their commit.
         #[test]

@@ -30,17 +30,16 @@ pub enum Error {
         /// The sender that the message names.
         from: node::Key,
     },
-    /// A request from a member that is not a voter of this node's configuration, other
-    /// than one that gives `Removed`.
+    /// A request from a member that is not a voter of this node's configuration,
+    /// other than one that gets `Removed`.
     NotVoter {
         /// The sender.
         from: node::Key,
     },
-    /// A `PreVote` or a `Vote` from `from`, which a committed configuration removed,
-    /// whose last index is at or below this node's commit: an earlier committed
-    /// configuration held `from`, and the last one lacks it. The stream stops with the
-    /// `removed` code. `from` stops its group once a majority of the other incoming
-    /// voters of its newest configuration answered so.
+    /// A `PreVote` or a `Vote` from `from`, which a committed configuration removed
+    /// (`raft::Admission::Removed`). The stream stops with the `removed` code. `from`
+    /// stops its group when a majority of the other voters of its configuration give
+    /// this answer inside the window of `Raft::removed_by`.
     Removed {
         /// The sender.
         from: node::Key,

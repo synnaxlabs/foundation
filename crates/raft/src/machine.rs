@@ -34,7 +34,7 @@ pub enum Admission {
     /// A `PreVote` or a `Vote` from a node that a committed configuration removed:
     /// the configuration before the entries or a committed `Voters` entry held it,
     /// the last committed configuration lacks it, and its last index is at or below
-    /// the commit.
+    /// the commit, or its last term is below the term at the commit.
     Removed,
     /// Each other request from a node that is not a voter.
     NotVoter,
@@ -282,10 +282,11 @@ impl Raft {
     /// the commit is `Start.applied` until a leader gives a higher one.
     #[must_use]
     pub fn admission(&self, message: &Message) -> Admission {
-        // A sender that holds a newer committed configuration names a later last
-        // index. A leader's message names only entries that this node holds.
+        // A sender that holds a committed entry past the commit names a later last
+        // index and a last term at or above the term at the commit. A leader's
+        // message names only entries that this node holds.
         let last = match &message.body {
-            Body::PreVote { last } | Body::Vote { last } => Some(last.index),
+            Body::PreVote { last } | Body::Vote { last } => Some(*last),
             Body::Heartbeat { .. } | Body::Append { .. } => None,
             Body::PreVoteReply { .. }
             | Body::VoteReply { .. }
@@ -296,10 +297,13 @@ impl Raft {
         if self.voters.contains(message.from) {
             return Admission::Admitted;
         }
+        let commit = self.log.committed();
+        let behind = |last: Position| {
+            last.index <= commit
+                || self.log.at(commit).is_some_and(|at| last.term < at.term)
+        };
         match last {
-            Some(index)
-                if index <= self.log.committed() && self.log.removed(message.from) =>
-            {
+            Some(last) if behind(last) && self.log.removed(message.from) => {
                 Admission::Removed
             }
             Some(_) | None => Admission::NotVoter,
@@ -5176,6 +5180,11 @@ mod tests {
         // Node 1 holds the change that removes node 3 from {1, 2, 3}, and an empty
         // entry after it, all committed.
         fn removed_3() -> Raft {
+            removed_3_at(1)
+        }
+
+        // As `removed_3`, with the empty entry at `term`.
+        fn removed_3_at(term: u64) -> Raft {
             let joint = voters(&[1, 2], &[1, 2, 3]);
             let entries = vec![
                 Entry {
@@ -5187,7 +5196,7 @@ mod tests {
                     data: change(1, voters(&[1, 2], &[])),
                 },
                 Entry {
-                    at: position(1, 3),
+                    at: position(term, 3),
                     data: Data::Empty,
                 },
             ];
@@ -5226,6 +5235,21 @@ mod tests {
             let admission = |body| raft.admission(&message(3, 2, body));
             assert_eq!(admission(pre_vote(4)), Admission::NotVoter);
             assert_eq!(admission(vote(4)), Admission::NotVoter);
+        }
+
+        // The commit is at term 2. A vote past it at term 1 holds no committed entry
+        // past it; one at term 2 can.
+        #[test]
+        fn a_vote_past_the_commit_below_the_term_at_the_commit_is_removed() {
+            let raft = removed_3_at(2);
+            let admission = |term, index| {
+                let last = position(term, index);
+                let pre_vote = raft.admission(&message(3, 2, Body::PreVote { last }));
+                let vote = raft.admission(&message(3, 2, Body::Vote { last }));
+                [pre_vote, vote]
+            };
+            assert_eq!(admission(1, 5), [Admission::Removed; 2]);
+            assert_eq!(admission(2, 4), [Admission::NotVoter; 2]);
         }
 
         #[test]
