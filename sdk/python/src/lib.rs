@@ -416,12 +416,13 @@ impl Client {
     /// before the node sent it, and loses nothing. `on_loss` is what the reader does
     /// with a frame after a loss: `"warn"` logs a warning on the `foundation` logger,
     /// `"raise"` raises `DataLost` and closes the reader, and `"ignore"` does nothing.
-    /// `Frame.lost` holds the loss in each case. Other Python threads run while it
-    /// waits.
+    /// `Frame.lost` holds the loss in each case. A channel of `uuid` reads as an
+    /// `object` array, which costs one `uuid.UUID` for each sample. Other Python
+    /// threads run while it waits.
     ///
-    /// Raises `TypeError` for an argument of a wrong type, or for a channel of `uuid`
-    /// or of a type that is not a scalar; `ValueError` for no channel, a name that does
-    /// not parse, or another `mode` or `on_loss`, with no reader opened; `Stopped` when
+    /// Raises `TypeError` for an argument of a wrong type, or for a channel of a type
+    /// that is not a scalar; `ValueError` for no channel, a name that does not parse,
+    /// or another `mode` or `on_loss`, with no reader opened; `Stopped` when
     /// the node refused the open, with a text that names each channel of the open for
     /// `unknown`; `ConnectionError` when the session failed; `RuntimeError` when the
     /// client closed or in a process that the program forked; and `PanicException`

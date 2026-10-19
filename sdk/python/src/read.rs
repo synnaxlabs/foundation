@@ -72,7 +72,7 @@ struct Copied {
 
 impl Reader {
     /// The Python reader of `reader`, opened in `process`. Raises `TypeError`, and
-    /// drops `reader`, for a place of `uuid` or of a type that is not a scalar.
+    /// drops `reader`, for a place of a type that is not a scalar.
     pub(crate) fn new(
         py: Python<'_>,
         reader: sdk::read::Reader,
@@ -88,13 +88,10 @@ impl Reader {
             },
         ) in places.iter().enumerate()
         {
-            let scalar = match *data_type {
-                Type::Scalar(scalar) if scalar != Scalar::Uuid => scalar,
-                _ => {
-                    return Err(PyTypeError::new_err(format!(
-                        "{name} holds {data_type}, which the reader gives no series of"
-                    )));
-                }
+            let Type::Scalar(scalar) = *data_type else {
+                return Err(PyTypeError::new_err(format!(
+                    "{name} holds {data_type}, which the reader gives no series of"
+                )));
             };
             let first = places[..place].iter().all(|other| other.name != *name);
             firsts.push(first.then_some(scalar));
@@ -179,7 +176,7 @@ impl Reader {
     fn frame(&self, py: Python<'_>, copied: Copied) -> PyResult<Py<Frame>> {
         let series = PyDict::new(py);
         for (place, samples) in copied.series {
-            series.set_item(self.names[place].bind(py), samples.array(py))?;
+            series.set_item(self.names[place].bind(py), samples.array(py)?)?;
         }
         let lost: Vec<_> = copied
             .lost
@@ -314,8 +311,9 @@ pub(crate) fn raised(py: Python<'_>, error: &sdk::Error) -> PyErr {
 /// count of its channels. A channel that did not move in the frame is not a key, and a
 /// name given twice is one key. Each series is a new one-dimensional `numpy.ndarray`
 /// that the program owns, in native byte order: `bool`, `int8` to `uint64`, `float32`,
-/// `float64`, `datetime64[ns]` for `timestamp`, and `timedelta64[ns]` for `duration`. A
-/// later frame does not change it.
+/// `float64`, `datetime64[ns]` for `timestamp`, `timedelta64[ns]` for `duration`, and
+/// `object` for `uuid`, with one `uuid.UUID` for each sample. A later frame does not
+/// change it.
 #[pyclass(frozen, mapping, module = "foundation")]
 pub(crate) struct Frame {
     count: u32,
@@ -415,6 +413,8 @@ enum Samples {
     F64(Vec<f64>),
     Stamp(Vec<Datetime<Nanoseconds>>),
     Span(Vec<Timedelta<Nanoseconds>>),
+    /// The `int` of each `uuid.UUID`.
+    Uuid(Vec<u128>),
 }
 
 impl Samples {
@@ -438,13 +438,14 @@ impl Samples {
             Scalar::Span => Self::Span(decoded(bytes, |raw| {
                 Timedelta::from(i64::from_le_bytes(raw))
             })),
-            Scalar::Uuid => unreachable!("a reader of uuid does not open"),
+            Scalar::Uuid => Self::Uuid(decoded(bytes, u128::from_be_bytes)),
         }
     }
 
-    /// The array of the samples, which takes them with no copy.
-    fn array(self, py: Python<'_>) -> Bound<'_, PyAny> {
-        match self {
+    /// The array of the samples, which takes them with no copy, or makes a `uuid.UUID`
+    /// of each `uuid`.
+    fn array(self, py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
+        Ok(match self {
             Self::Bool(samples) => PyArray1::from_vec(py, samples).into_any(),
             Self::I8(samples) => PyArray1::from_vec(py, samples).into_any(),
             Self::I16(samples) => PyArray1::from_vec(py, samples).into_any(),
@@ -458,7 +459,19 @@ impl Samples {
             Self::F64(samples) => PyArray1::from_vec(py, samples).into_any(),
             Self::Stamp(samples) => PyArray1::from_vec(py, samples).into_any(),
             Self::Span(samples) => PyArray1::from_vec(py, samples).into_any(),
-        }
+            Self::Uuid(samples) => {
+                let class = py.import("uuid")?.getattr("UUID")?;
+                let int = PyDict::new(py);
+                let keys = samples
+                    .into_iter()
+                    .map(|sample| {
+                        int.set_item("int", sample)?;
+                        Ok(class.call((), Some(&int))?.unbind())
+                    })
+                    .collect::<PyResult<Vec<_>>>()?;
+                PyArray1::from_vec(py, keys).into_any()
+            }
+        })
     }
 }
 

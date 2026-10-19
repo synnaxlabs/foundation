@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import unittest
+import uuid
 
 import numpy as np
 
@@ -217,6 +218,21 @@ class ReaderTest(unittest.TestCase):
             "datetime64[ns]"
         ))
 
+    def test_a_reader_gives_each_uuid_of_write_as_a_uuid(self) -> None:
+        keys = [uuid.UUID(int=0), uuid.UUID(int=(1 << 128) - 1), uuid.uuid4()]
+        reader = self.client.open_reader(["plant.e", "plant.a"])
+        self.addCleanup(reader.close)
+        with self.writes.open_writer(["plant.e", "plant.a"]) as writer:
+            for n, key in enumerate(keys):
+                writer.write({"plant.e": key, "plant.a": n + 0.5})
+        frames = self.read(reader, len(keys))
+        for n, (frame, key) in enumerate(zip(frames, keys)):
+            self.assertEqual(frame["plant.e"].dtype, np.dtype(object))
+            self.assertEqual(frame["plant.e"].shape, (1,))
+            self.assertIs(type(frame["plant.e"][0]), uuid.UUID)
+            self.assertEqual(frame["plant.e"][0], key)
+            self.assertEqual(frame["plant.a"].tolist(), [n + 0.5])
+
     def test_an_array_of_a_frame_keeps_its_values_after_the_next_frame(self) -> None:
         reader = self.client.open_reader("plant.a")
         self.addCleanup(reader.close)
@@ -345,8 +361,6 @@ class ReaderTest(unittest.TestCase):
              "'int' object is not iterable"),
             (lambda: self.client.open_reader([7]), TypeError,
              "a channel name is a str, not int"),
-            (lambda: self.client.open_reader("plant.e"), TypeError,
-             "plant.e holds uuid, which the reader gives no series of"),
             (lambda: self.client.open_reader("plant.string"), TypeError,
              "plant.string holds string, which the reader gives no series of"),
         ]
