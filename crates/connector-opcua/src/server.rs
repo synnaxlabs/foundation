@@ -2,6 +2,8 @@
 
 #![expect(unsafe_code, reason = "open62541 is a C library")]
 
+#[cfg(feature = "sim")]
+use std::cell::RefCell;
 use std::ffi::{CStr, c_int};
 use std::future::poll_fn;
 use std::mem::ManuallyDrop;
@@ -31,7 +33,7 @@ pub(crate) struct Server {
     events: *mut ffi::EventLoop,
     /// The context of each variable of [`Server::add_source`], until the delete.
     #[cfg(feature = "sim")]
-    sources: Vec<NonNull<Source>>,
+    sources: RefCell<Vec<NonNull<Source>>>,
 }
 
 /// The node context of a variable of [`Server::add_source`]: `shim_source` of
@@ -39,7 +41,13 @@ pub(crate) struct Server {
 #[cfg(feature = "sim")]
 #[repr(C)]
 struct Source {
-    read: unsafe extern "C" fn(*mut Source, *mut ffi::Scalar, *mut u16, *mut u32, *mut i64),
+    read: unsafe extern "C" fn(
+        *mut Source,
+        *mut ffi::Scalar,
+        *mut u16,
+        *mut u32,
+        *mut i64,
+    ),
     answer: Box<dyn FnMut() -> Answer>,
     /// False while the add reads the variable to check its type.
     added: bool,
@@ -175,7 +183,7 @@ impl Server {
             raw,
             events,
             #[cfg(feature = "sim")]
-            sources: Vec::new(),
+            sources: RefCell::default(),
         }
     }
 
@@ -248,7 +256,7 @@ impl Server {
     /// If open62541 refuses the node, or the key of `node` is the number 0.
     #[cfg(feature = "sim")]
     pub(crate) fn add_source(
-        &mut self,
+        &self,
         node: &Node,
         answer: impl FnMut() -> Answer + 'static,
     ) {
@@ -283,7 +291,7 @@ impl Server {
     /// If open62541 has no variable `node`, or its key is the number 0.
     #[cfg(test)]
     pub(crate) fn set_source(
-        &mut self,
+        &self,
         node: &Node,
         mut answer: impl FnMut() -> (Value, types::quality::Quality) + 'static,
     ) {
@@ -306,7 +314,7 @@ impl Server {
     /// Makes a [`Source`] of `answer` that the close frees.
     #[cfg(feature = "sim")]
     fn source(
-        &mut self,
+        &self,
         answer: Box<dyn FnMut() -> Answer>,
         added: bool,
     ) -> NonNull<Source> {
@@ -315,7 +323,7 @@ impl Server {
             answer,
             added,
         })));
-        self.sources.push(source);
+        self.sources.borrow_mut().push(source);
         source
     }
 
@@ -426,8 +434,39 @@ impl Server {
         }
     }
 
-    /// Counts each Browse request that the server processes from now, and the most
-    /// continuation points that one session holds.
+    /// Refuses each `CreateMonitoredItems` of more than `most` items, 0 for none, with
+    /// `BadTooManyOperations`. It adds no variable `ns=0;i=11714`, so a client does
+    /// not know the limit.
+    #[cfg(test)]
+    pub(crate) fn refuse_monitors_past(&self, most: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_monitors(self.raw(), most) };
+    }
+
+    /// Sets the `MaxMonitoredItemsPerCall` of the server to `most`, 0 for none, and
+    /// adds the variable `ns=0;i=11714` that gives it, which the build of open62541
+    /// lacks.
+    ///
+    /// # Panics
+    ///
+    /// On a second call, as open62541 refuses the second add of the variable.
+    #[cfg(test)]
+    pub(crate) fn set_per_monitor(&self, most: u32) {
+        self.refuse_monitors_past(most);
+        let node = Node::ns0(ffi::MAX_MONITORED_ITEMS_PER_CALL);
+        self.add_scalar(&node, Value::U32(most));
+    }
+
+    /// Ends each subscription of the server with `status`, which the server sends in
+    /// a status change notification at the next publishing interval of each.
+    #[cfg(test)]
+    pub(crate) fn end_subscriptions(&self, status: Status) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_end(self.raw(), status.0) };
+    }
+
+    /// Counts each Browse, `CreateMonitoredItems`, and Publish request that the server
+    /// processes from now, and the most continuation points that one session holds.
     ///
     /// # Panics
     ///
@@ -734,7 +773,7 @@ impl Server {
         let status = Status(unsafe { ffi::test::UA_Server_delete(self.raw()) });
         assert_eq!(status, Status::GOOD, "open62541 refused the server delete");
         #[cfg(feature = "sim")]
-        for source in self.sources {
+        for source in self.sources.into_inner() {
             // SAFETY: the server that read it is deleted, and nothing else holds it.
             drop(unsafe { Box::from_raw(source.as_ptr()) });
         }
@@ -804,8 +843,9 @@ pub(crate) struct Limits {
     pub(crate) chunks: u32,
 }
 
-/// The count of the Browse requests of a [`Server`], and the most continuation points
-/// that one of its sessions held, from [`Server::count`].
+/// The count of the Browse, `CreateMonitoredItems`, and Publish requests of a
+/// [`Server`], and the most continuation points that one of its sessions held, from
+/// [`Server::count`].
 #[cfg(test)]
 pub(crate) struct Counts<'s> {
     /// Lives until the delete of the server.
@@ -826,6 +866,18 @@ impl Counts<'_> {
     pub(crate) fn points(&self) -> usize {
         // SAFETY: as `browses`.
         unsafe { self.counts.as_ref().points }
+    }
+
+    /// Gives the count of the `CreateMonitoredItems` requests.
+    pub(crate) fn monitors(&self) -> usize {
+        // SAFETY: as `browses`.
+        unsafe { self.counts.as_ref().monitors }
+    }
+
+    /// Gives the count of the Publish requests.
+    pub(crate) fn publishes(&self) -> usize {
+        // SAFETY: as `browses`.
+        unsafe { self.counts.as_ref().publishes }
     }
 }
 

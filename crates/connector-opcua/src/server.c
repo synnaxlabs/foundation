@@ -139,16 +139,40 @@ void shim_server_browses(UA_Server *server, UA_UInt32 browse, UA_UInt32 translat
     config->maxNodesPerTranslateBrowsePathsToNodeIds = translate;
 }
 
+/* Sets the MaxMonitoredItemsPerCall of `server`, 0 for none. */
+void shim_server_monitors(UA_Server *server, UA_UInt32 most) {
+    UA_Server_getConfig(server)->maxMonitoredItemsPerCall = most;
+}
+
+/* Ends each subscription of `server` with `status`, which the server sends in a status
+ * change notification at the next publishing interval of each. */
+void shim_server_end(UA_Server *server, UA_StatusCode status) {
+    UA_Subscription *sub;
+    LIST_FOREACH(sub, &server->subscriptions, serverListEntry)
+        sub->statusChange = status;
+}
+
 /* The counts of a `shim_counter`. */
 typedef struct {
     /* The Browse requests. */
     size_t browses;
     /* The most continuation points that one session held at a message. */
     size_t points;
+    /* The CreateMonitoredItems requests. */
+    size_t monitors;
+    /* The Publish requests. */
+    size_t publishes;
 } shim_counts;
 
-/* A logger that counts the Browse requests of its server and the continuation points
- * of its sessions, and passes each message to the logger before it. */
+/* Gives whether `msg`, of `length` bytes, ends with `end`. */
+static UA_Boolean ends_with(const char *msg, size_t length, const char *end) {
+    size_t bytes = strlen(end);
+    return length >= bytes && strcmp(msg + length - bytes, end) == 0;
+}
+
+/* A logger that counts the Browse, CreateMonitoredItems, and Publish requests of its
+ * server and the continuation points of its sessions, and passes each message to the
+ * logger before it. */
 typedef struct {
     UA_Logger logger;
     const UA_Logger *next;
@@ -159,13 +183,15 @@ typedef struct {
 static void count_message(void *context, UA_LogLevel level, UA_LogCategory category,
                           const char *msg, va_list args) {
     shim_counter *counter = (shim_counter *)context;
-    /* The end of the format of the debug message of open62541 for each Browse
-     * request, from UA_LOG_SESSION_INTERNAL. */
-    static const char browse[] = "| Processing BrowseRequest%.0s";
+    /* The ends of the formats of the debug messages of open62541 for each request,
+     * from UA_LOG_SESSION_INTERNAL. */
     size_t length = strlen(msg);
-    if(length >= sizeof(browse) - 1 &&
-       strcmp(msg + length - (sizeof(browse) - 1), browse) == 0)
+    if(ends_with(msg, length, "| Processing BrowseRequest%.0s"))
         counter->counts.browses++;
+    else if(ends_with(msg, length, "| Processing CreateMonitoredItemsRequest%.0s"))
+        counter->counts.monitors++;
+    else if(ends_with(msg, length, "| Processing PublishRequest with RequestId %u%.0s"))
+        counter->counts.publishes++;
     session_list_entry *entry;
     LIST_FOREACH(entry, &counter->server->sessions, pointers) {
         size_t held = entry->session.continuationPointsSize;
@@ -177,9 +203,10 @@ static void count_message(void *context, UA_LogLevel level, UA_LogCategory categ
 
 static void count_clear(UA_Logger *logger) { UA_free(logger->context); }
 
-/* Counts each Browse request that `server` processes from now, and the most
- * continuation points that one of its sessions holds, and gives the counts, which live
- * until the delete of `server`, or NULL when out of memory. */
+/* Counts each Browse, CreateMonitoredItems, and Publish request that `server`
+ * processes from now, and the most continuation points that one of its sessions holds,
+ * and gives the counts, which live until the delete of `server`, or NULL when out of
+ * memory. */
 const shim_counts *shim_server_count(UA_Server *server) {
     shim_counter *counter = (shim_counter *)UA_calloc(1, sizeof(*counter));
     if(!counter)
