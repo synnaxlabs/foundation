@@ -26,24 +26,22 @@
   before a milestone applies a change that lists more than `CHUNKS_MAX` chunks, a `Spec`
   change can list them. The holders are the voters whose durable put of the listed
   chunks the proposer counted: the proposer when it is a voter, and each voter whose
-  put of them from the proposer ended `Ok` while a half that holds it lacked a
-  majority (SPEC APPLY). A record lists at most `HOLDERS_MAX` = 128 holders, and
-  decode refuses a larger count, so a record at
-  the bounds of chunks and holders is 34 893 bytes. `HOLDERS_MAX` is 128, the sum of the
-  majorities of two halves of 127 voters each (MESH WIRE), so the holders that SPEC
-  APPLY counts always fit. Decided by `laptop.architect`, 2026-10-19T17:21:45Z
+  put of them from the proposer ended `Ok` while a half that holds it lacked a majority
+  (SPEC APPLY). A record lists at most `HOLDERS_MAX` = 128 holders, and decode refuses a
+  larger count, so a record at the bounds of chunks and holders is 34 893 bytes.
+  `HOLDERS_MAX` is 128, the sum of the majorities of two halves of 127 voters each (MESH
+  WIRE), so the holders that SPEC APPLY counts always fit. Decided by
+  `laptop.architect`, 2026-10-19T17:21:45Z
   (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273042572), which
   supersedes the voter bound and its check by a change of voters of 6060034191,
-  `HOLDERS_MAX` = 64 of 6059278643, and the sum of 33 869 bytes of 6060184527.
-  The holders and decode
-  decided by
-  `laptop.architect`, 2026-10-08T12:38:01Z
+  `HOLDERS_MAX` = 64 of 6059278643, and the sum of 33 869 bytes of 6060184527. The
+  holders and decode decided by `laptop.architect`, 2026-10-08T12:38:01Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6060034191).
   Supersedes the voter bound and the sum of 33 873 bytes of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643, and the
   voter bound of
-  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059660161. The sum
-  of 33 869 bytes: `laptop.architect`, 2026-10-08T12:46:52Z
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059660161. The sum of
+  33 869 bytes: `laptop.architect`, 2026-10-08T12:46:52Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6060184527). The rule
   of a majority of each half is `raft::Voters::quorum` (#1875), which counts a majority
   as the commit of `raft` does (`Voters::committed`). So an empty half needs no holder
