@@ -81,6 +81,16 @@ impl Voters {
         self.incoming.union(&self.outgoing).copied()
     }
 
+    /// Each node of `incoming` that `outgoing` lacks, in key order: the voters that a
+    /// joint configuration adds. None outside a joint phase.
+    pub fn added(&self) -> impl Iterator<Item = node::Key> + '_ {
+        let joint = self.joint();
+        self.incoming
+            .iter()
+            .filter(move |&key| joint && !self.outgoing.contains(key))
+            .copied()
+    }
+
     // The highest index that a majority of each set holds, where `matched` is the
     // index a voter holds. `u64::MAX` with no voter at all.
     pub(crate) fn committed(&self, matched: impl Fn(node::Key) -> u64) -> u64 {
@@ -203,6 +213,23 @@ mod tests {
         };
         let nodes: Vec<node::Key> = voters.nodes().collect();
         assert_eq!(nodes, [key(1), key(2)]);
+    }
+
+    #[test]
+    fn added_names_each_incoming_voter_that_outgoing_lacks_in_a_joint_phase() {
+        let joint = Voters {
+            incoming: BTreeSet::from([key(1), key(2), key(4), key(5)]),
+            outgoing: BTreeSet::from([key(1), key(3), key(4)]),
+        };
+        let added: Vec<node::Key> = joint.added().collect();
+        assert_eq!(added, [key(2), key(5)]);
+        let same = Voters {
+            incoming: BTreeSet::from([key(1), key(2)]),
+            outgoing: BTreeSet::from([key(1), key(2)]),
+        };
+        assert_eq!(same.added().count(), 0);
+        let left = joint.leave();
+        assert_eq!(left.added().count(), 0);
     }
 
     #[test]

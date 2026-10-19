@@ -369,7 +369,8 @@ pub struct Config {
     pub window_bytes: usize,
     /// The most two-way streams, and apart from them the most one-way streams, a peer
     /// may have open to this node at once, per session. Size it near the rate of new
-    /// streams times the time each takes to deliver.
+    /// streams times the time each takes to deliver. A peer may have one more open,
+    /// which only a [`Class::Command`] stream takes.
     pub streams_max: NonZeroU32,
     /// A session whose peer is silent this long, or 3 PTO when that is longer, ends
     /// with [`Error::TimedOut`]. The count starts again at each packet from the peer,
