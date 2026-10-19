@@ -19,7 +19,8 @@ const READ: u8 = 9;
 pub struct Forward {
     /// What the program opened.
     pub kind: Kind,
-    /// The count of places of the group. At least 1.
+    /// The count of places of the group, at least 1: the places of the run that follows
+    /// the open body of a write.
     pub places: u32,
 }
 

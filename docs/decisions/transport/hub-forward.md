@@ -15,7 +15,8 @@
   Plan: https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6268770318,
   approved with changes by `laptop.architect` at 2026-10-19T14:00:04Z
   (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946, change
-  1). For a read, #3356 states what follows the open body. Lost: the keys of the group
+  1). For a read, #3356 states what follows the open body and what the count of places
+  means. Lost: the keys of the group
   in place of positions, which the home would check against the names that it
   verified; and a new `serve::Error` variant (`serve::Error::Places` exists, for the
   places of a read selector).
