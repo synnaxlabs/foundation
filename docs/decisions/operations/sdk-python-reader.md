@@ -41,3 +41,40 @@
   alignment of an `f64` array; a timer in the task of the client for the bound, which
   wakes the client's thread each 100 ms for each waiting reader; and `mode` as a class,
   where a `str` matches `on_loss`.
+  The numbers below come from `sdk/python/bench/read.py` at 9cea9ca19, with the
+  `wheel` profile and the feature `sim` (the reader code of 8bb532882), and a release
+  node, on box1 (Xeon Platinum 8488C, 32 CPUs, load 13 to 34 by `/proc/loadavg`), in
+  µs. The reader times the part of `__next__` after `next_within` gives the frame
+  (`Reader._part`): the copy of each series, the arrays, the `dict`, and the `Frame`.
+  Each case runs on a new node, with 64 MiB of disk per core, and times 3000 frames
+  after 50 to warm up, or the frames that fit in 48 MiB of series (in brackets). Each
+  cell gives the range over 5 passes. Places are of `f64` and do not count the index,
+  whose stamps each frame also holds. "As it comes" reads each frame after its write;
+  "queued" reads the frames after all their writes, with no wait.
+
+  | Case                      | As it comes, p50 | p99       | Queued, p50 | p99       |
+  | ------------------------- | ---------------- | --------- | ----------- | --------- |
+  | 1 place, 100 samples      | 1.95-15.9        | 9.49-36.1 | 0.90-1.02   | 1.27-3.07 |
+  | 1 place, 1000 samples     | 4.85-8.49        | 16.3-24.1 | 2.16-2.36   | 2.98-7.60 |
+  | 1 place, 3000 (998)       | 5.49-15.5        | 21.6-30.3 | 5.01-10.3   | 13.5-24.3 |
+  | 16 places, 100 samples    | 7.38-21.2        | 21.9-43.1 | 4.24-6.20   | 8.24-16.0 |
+  | 64 places, 100 (917)      | 23.5-54.9        | 55.2-84.8 | 14.0-28.3   | 30.3-50.4 |
+
+  One place of `bool`, as it comes, p50 then p99: 1.90-8.67, 8.19-22.3 at 100
+  samples; 2.78-12.5, 12.8-25.3 at 1000; and 4.25-16.2, 16.1-34.0 at 3000 (1814). The
+  other cases are frames over the largest block (57344 bytes), which the node never
+  sends. The round trip of a `write_series` of one place to the `__next__` of its
+  frame, p50 of 400 frames: 6.6 to 10.1 ms in 4 passes, and 22.9 to 35.0 ms in the
+  pass whose load rose to 34. A complete reader gets a frame only after it is on disk
+  (B1), so the group commit and its sync set the round trip. A latest reader, in one run
+  of 200 frames of 100 samples, got each frame in 69 µs at p50.
+
+  P1 judgment. The part costs about 0.3 to 0.4 µs for each array (the `Vec`, the
+  `numpy` array, and its item in the `dict`), from the queued cases of 1, 16, and 64
+  places, and about 0.7 ns for each sample that it copies. A frame as it comes costs 1
+  to 15 µs more at p50 than a queued one: the thread of the program wakes after it
+  slept through the commit of about 7 ms, with cold caches. It runs once for each frame
+  that a Python program reads, on the CPU of the program, not of the node, and adds 0
+  bytes per sample. A cut of the part per sample needs arrays that view the buffers of
+  the `sdk` frame, which this item rejects above. A cut of the part per array needs no
+  `numpy` array for each series, which the Python surface cannot give.
