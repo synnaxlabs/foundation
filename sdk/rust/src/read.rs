@@ -322,10 +322,13 @@ fn decoded(
     let (count, samples) = count(encoded);
     frame.count = count;
     frame.index = targets.index;
-    frame
-        .series
-        .resize_with(targets.firsts.len(), Series::default);
-    frame.firsts.clone_from(&targets.firsts);
+    // A frame serves one reader, so its layout is set at its first frame only.
+    if frame.firsts.len() != targets.firsts.len() {
+        frame
+            .series
+            .resize_with(targets.firsts.len(), Series::default);
+        frame.firsts.clone_from(&targets.firsts);
+    }
     for series in &mut frame.series {
         series.held = false;
     }
