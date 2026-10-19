@@ -487,7 +487,8 @@ fn replies(bytes: &[u8]) {
             replies.sent(frame.iter().copied());
             groups.push(frame);
         } else {
-            let next = usize::try_from(answered).expect("a usize holds the frames sent");
+            let next =
+                usize::try_from(answered).expect("a usize holds the frames sent");
             let due = groups.get(next).map_or(0, |groups| groups[at]);
             let want = match Reply::decode(message) {
                 Ok(Reply::Outcome { frame, .. }) if frame == 0 || frame > sent => {
