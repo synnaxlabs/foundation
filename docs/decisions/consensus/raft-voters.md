@@ -33,28 +33,29 @@
   alone leaves the node open until it holds that entry). A `Voters` entry with an empty
   `incoming` set, in `Start.entries` or in an `Append`, is `Error::NoVoters`: a group
   with no voter can never commit or elect. A leader changes the voters with
-  `Raft::propose_voters(set)`: it writes the joint configuration (`incoming` the new
-  set, `outgoing` the current one) and, when that entry commits, the leave (`incoming`
-  alone). One change at a time: while the last configuration entry is not committed, a
-  proposal is `Error::ChangePending`. A node the change removed stays a peer of the
-  leader, and gets appends up to the leave, or up to the leader's first entry when that
-  is later, until it holds them and the leave is committed: then the leader sends it the
-  commit in a heartbeat and releases it, so the node learns it is out and never
-  campaigns. The leader's first entry replaces each entry that an older leader left past
-  the leave on the node, such as a configuration that makes it a voter again. A removed
-  node that answered nothing over a whole quorum check period is released at that check
-  instead, and the next configuration releases any that is still a peer. A follower
-  releases the removed nodes when the leave commits. A removed node that missed its
-  release learns it from `mesh`, not `raft`: `mesh` admits a `raft` request only from a
-  voter of the newest configuration that the node knows: the newest in its log, or a
-  newer one that a link of the request's chain proves. A link proves a configuration
-  when the votes it carries elected its leader under a configuration the node already
-  knows, and the leader's signature holds (#881). A configuration entry binds the public
-  key of each voter it adds, under the signature of the leader that writes it. A node
-  answers `removed` only to a sender that a configuration in its own log held, when its
-  committed configuration lacks the sender and the request proves no newer configuration
-  that holds it. Each other sender that is not a voter gets `Error::NotVoter`, and does
-  not stop. The person chose A, 2026-10-07T04:49:33Z
+  `Raft::propose_voters(set)`, with the public key of each voter of the set: it writes
+  the joint configuration (`incoming` the new set, `outgoing` the current one, and the
+  key of each voter that it adds; RAFT SURFACE) and, when that entry commits, the
+  leave (`incoming` alone). One change at a time: while the last configuration entry
+  is not committed, a proposal is `Error::ChangePending`. A node the change removed
+  stays a peer of the leader, and gets appends up to the leave, or up to the leader's
+  first entry when that is later, until it holds them and the leave is committed: then
+  the leader sends it the commit in a heartbeat and releases it, so the node learns it
+  is out and never campaigns. The leader's first entry replaces each entry that an older
+  leader left past the leave on the node, such as a configuration that makes it a voter
+  again. A removed node that answered nothing over a whole quorum check period is
+  released at that check instead, and the next configuration releases any that is still
+  a peer. A follower releases the removed nodes when the leave commits. A removed node
+  that missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft`
+  request only from a voter of the newest configuration that the node knows: the newest
+  in its log, or a newer one that a link of the request's chain proves. A link proves a
+  configuration when the votes it carries elected its leader under a configuration the
+  node already knows, and the leader's signature holds (#881). A configuration entry
+  binds the public key of each voter it adds, under the signature of the leader that
+  writes it. A node answers `removed` only to a sender that a configuration in its own
+  log held, when its committed configuration lacks the sender and the request proves no
+  newer configuration that holds it. Each other sender that is not a voter gets
+  `Error::NotVoter`, and does not stop. The person chose A, 2026-10-07T04:49:33Z
   (https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031153921; the
   text, https://github.com/synnaxlabs/foundation/issues/1096#issuecomment-6031072285).
   Supersedes the first version, which the person approved on 2026-10-06

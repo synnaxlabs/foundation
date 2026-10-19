@@ -13,7 +13,8 @@
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Class {
-    /// The highest priority, for small messages that must arrive soon.
+    /// The highest priority, for small messages that must arrive soon. Only it takes
+    /// the last stream of each kind that the peer allows.
     Command,
     /// Second, with a small send buffer, so a message that a newer one replaces does
     /// not wait behind much.
