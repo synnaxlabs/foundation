@@ -13,6 +13,7 @@ use super::send::stop;
 use super::*;
 use crate::change::HOMES_MAX;
 use crate::common::name;
+use crate::error::{Miss, Missed};
 
 impl Cluster {
     /// Node `node` proposes the spec change of `definitions` on `base` at its next
@@ -666,21 +667,40 @@ fn a_change_on_a_base_whose_tree_the_store_cannot_give_lists_each_chunk() {
     assert_eq!(specs(&entries).len(), 2);
 }
 
+// No node runs at the addresses of voters 2 and 3, so each dial fails.
 #[test]
 fn apply_in_a_region_of_three_voters_with_no_peer_gives_quorum_and_proposes_nothing() {
     let entries = solo_stored(|node, tasks| async move {
         let (mesh, store) = open_kept(&node, &tasks, &IDS).await;
         let definitions = create_subjects(&["plant.a"], 1);
         let root = spec::region::tree(&mut Chunks::default(), &definitions).root;
-        let quorum = Error::Quorum { held: 1, voters: 3 };
+        let missed = |id| Missed {
+            node: key(id),
+            name: Some(name(&format!("plant.node{id}"))),
+            cause: Miss::Dial(transport::Error::Unreachable {
+                peer: public(id),
+                attempts: Vec::new(),
+            }),
+        };
+        let quorum = Error::Quorum {
+            held: 1,
+            voters: 3,
+            missed: vec![missed(2), missed(3)],
+        };
         assert_eq!(
             mesh.apply(base(), definitions, BTreeMap::new()).await,
             Err(quorum.clone())
         );
         assert!(store.get(root).await.unwrap().is_some());
+        let unreachable = |id| format!("no address reached peer {}", public(id));
         assert_eq!(
             quorum.to_string(),
-            "1 of 3 voters hold the chunks of the spec change, not a majority"
+            format!(
+                "1 of 3 voters hold the chunks of the spec change, not a majority; \
+                 plant.node2: its dial failed: {}; plant.node3: its dial failed: {}",
+                unreachable(2),
+                unreachable(3)
+            )
         );
         assert_eq!(mesh.pointer(), base());
     });
@@ -704,7 +724,16 @@ fn each_member_refuses_a_change_whose_holders_lack_a_majority_of_its_voters() {
     cluster.script(|_| home_to(9));
     cluster.run(seconds(5));
     let board = cluster.board();
-    let quorum = Error::Quorum { held: 1, voters: 2 };
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 2,
+        missed: Vec::new(),
+    };
+    assert_eq!(
+        quorum.to_string(),
+        "1 of 2 voters hold the chunks of the spec change, not a majority, at the \
+         apply of the change"
+    );
     assert_eq!(board.applied, [(1, base(), Err(quorum))]);
     // Node 3 is in no configuration, so it gets no entry.
     for id in [1, 2] {
@@ -772,8 +801,49 @@ fn an_apply_whose_one_live_peer_never_answers_gives_quorum_at_the_deadline() {
     cluster.run(peer::DEADLINE);
     assert_eq!(cluster.board.lock().unwrap().applied, []);
     cluster.run(seconds(1));
-    let quorum = Error::Quorum { held: 1, voters: 3 };
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 3,
+        missed: vec![late(2), late(3)],
+    };
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
+}
+
+// Each chunk takes about 1 s over links of 300 ms, so the first call of 16 chunks on
+// each voter passes the deadline.
+#[test]
+fn an_apply_over_links_of_300_ms_names_each_voter_whose_call_passed_the_deadline() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(300 * Span::MILLISECOND.nanos()));
+    cluster.start();
+    cluster.run(seconds(10));
+    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let definitions = create_subjects(&labels, 512);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(60));
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 3,
+        missed: vec![late(2), late(3)],
+    };
+    assert_eq!(
+        quorum.to_string(),
+        "1 of 3 voters hold the chunks of the spec change, not a majority; \
+         plant.node2: a call of its put of at most 16 chunks passed the deadline of 10 \
+         s; plant.node3: a call of its put of at most 16 chunks passed the deadline of \
+         10 s"
+    );
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
+}
+
+// Voter `id`, whose call of its put passed the deadline.
+fn late(id: u8) -> Missed {
+    Missed {
+        node: key(id),
+        name: Some(name(&format!("plant.node{id}"))),
+        cause: Miss::Deadline,
+    }
 }
 
 // The follower `p` sends no `raft` message to the follower `q`, which restarts, and
@@ -831,14 +901,26 @@ fn an_apply_whose_one_peer_fails_its_put_gives_quorum() {
         .fail_file(Path::new(BLOB), Operation::SyncDir);
     cluster.change(1, base(), &create_subjects(&["plant.a"], 1));
     cluster.run(seconds(1));
-    let quorum = Error::Quorum { held: 1, voters: 2 };
+    let reset = transport::Error::Reset {
+        code: transport::Code(0),
+    };
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 2,
+        missed: vec![Missed {
+            node: key(2),
+            name: Some(name("plant.node2")),
+            cause: Miss::Put(blob::peer::Error::Stream(reset)),
+        }],
+    };
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
-// The put on the peers reads the chunk files of the proposer, which fail.
+// The put on voter 2 reads the chunk file of the proposer, which fails.
 #[test]
-fn an_apply_whose_store_fails_a_read_for_a_peer_gives_the_error_of_the_store() {
+fn an_apply_whose_store_fails_a_read_for_a_peer_names_the_error_of_the_store() {
     let mut cluster = Cluster::new(0);
+    cluster.board.lock().unwrap().learners = [3].into();
     cluster.start();
     cluster.run(seconds(5));
     let definitions = create_subjects(&["plant.a"], 1);
@@ -852,8 +934,16 @@ fn an_apply_whose_store_fails_a_read_for_a_peer_gives_the_error_of_the_store() {
         operation: Operation::ReadAt,
         code: 5,
     };
-    let failed = Error::Blob(blob::Error::Files(cause));
-    assert_eq!(cluster.board().applied, [(1, base(), Err(failed))]);
+    let quorum = Error::Quorum {
+        held: 1,
+        voters: 2,
+        missed: vec![Missed {
+            node: key(2),
+            name: Some(name("plant.node2")),
+            cause: Miss::Put(blob::peer::Error::Store(blob::Error::Files(cause))),
+        }],
+    };
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
 // Voter 1 leaves 127 voters for voter 128. With no chunk to put, each put ends `Ok`
@@ -892,6 +982,36 @@ fn spread_on_a_node_that_is_not_a_voter_counts_only_the_voters() {
             outgoing: BTreeSet::new(),
         };
         assert_eq!(mesh.spread(&voters, &[]).await, Ok([2, 3].map(key).into()));
+    });
+}
+
+#[test]
+fn spread_names_a_voter_that_this_node_has_no_record_of() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2], &[1]).await.unwrap();
+        let voters = Voters {
+            incoming: [1, 9].map(key).into(),
+            outgoing: BTreeSet::new(),
+        };
+        let quorum = Error::Quorum {
+            held: 1,
+            voters: 2,
+            missed: vec![Missed {
+                node: key(9),
+                name: None,
+                cause: Miss::Unknown,
+            }],
+        };
+        let spread = mesh.spread(&voters, &[Digest([1; 32])]).await;
+        assert_eq!(spread, Err(quorum.clone()));
+        assert_eq!(
+            quorum.to_string(),
+            format!(
+                "1 of 2 voters hold the chunks of the spec change, not a majority; {}: \
+                 this node has no record of it",
+                key(9)
+            )
+        );
     });
 }
 

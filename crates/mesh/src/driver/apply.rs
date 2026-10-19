@@ -28,17 +28,19 @@ impl Mesh {
     /// voters, all at once, in calls of at most 16 chunks, each of which fails after 10
     /// seconds with no result, and proposes once the holders are a majority of each
     /// half. A holder is this node when it is a voter, or a voter whose calls each
-    /// ended `Ok` while a half that holds it lacked a majority. A follower forwards the change to the leader. Returns the pointer once its entry has
-    /// committed and this node applied it: `base` when the tree of `definitions` is the
-    /// tree of `base` and each index of `homes` has a home in this node's state, as
-    /// such a change leaves the pointer, and else a new pointer. It tries again when a
-    /// new leader replaces the entry, and after each tick while no leader takes it, as
-    /// [`Mesh::set_home`] does. On `Ok`, the pointer is the one this call makes, and
-    /// each index of `homes` has a home in this node's state when the call settles, the
-    /// listed one or another. A call whose entry finds that pointer, after a lost
-    /// answer or an equal change of another call, returns it when each index of `homes`
-    /// has a home then, and else gives `Stale`. A retry that finds a later pointer
-    /// gives `Stale`, even when an entry of this call applied before it.
+    /// ended `Ok` while a half that holds it lacked a majority. A voter whose put fails
+    /// is no holder. A follower forwards the change to the leader. Returns the pointer
+    /// once its entry has committed and this node applied it: `base` when the tree of
+    /// `definitions` is the tree of `base` and each index of `homes` has a home in this
+    /// node's state, as such a change leaves the pointer, and else a new pointer. It
+    /// tries again when a new leader replaces the entry, and after each tick while no
+    /// leader takes it, as [`Mesh::set_home`] does. On `Ok`, the pointer is the one
+    /// this call makes, and each index of `homes` has a home in this node's state when
+    /// the call settles, the listed one or another. A call whose entry finds that
+    /// pointer, after a lost answer or an equal change of another call, returns it when
+    /// each index of `homes` has a home then, and else gives `Stale`. A retry that
+    /// finds a later pointer gives `Stale`, even when an entry of this call applied
+    /// before it.
     ///
     /// # Errors
     ///
@@ -58,7 +60,8 @@ impl Mesh {
     /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
     ///   when a call of the store fails.
     /// - [`Error::Quorum`] when the holders are not a majority of each half of the
-    ///   voters once each put on a voter ended, or at the apply.
+    ///   voters once each put on a voter ended, with each voter whose put failed and
+    ///   why, or at the apply, with none.
     /// - [`Error::Stale`] when the pointer at the apply of its entry is not `base`, and
     ///   either it is not the pointer this call makes, or an index of `homes` has no
     ///   home in this node's state when the call settles.
@@ -213,7 +216,11 @@ fn unhomed<'a>(
 pub(super) fn refused(cause: Refused) -> Error {
     match cause {
         Refused::Stale { base, pointer } => Error::Stale { base, pointer },
-        Refused::Quorum { held, voters } => Error::Quorum { held, voters },
+        Refused::Quorum { held, voters } => Error::Quorum {
+            held,
+            voters,
+            missed: Vec::new(),
+        },
         cause => panic!(
             "invariant: a spec change is refused only as stale or for its quorum: \
              {cause}"

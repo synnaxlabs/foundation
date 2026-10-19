@@ -13,6 +13,7 @@ use types::name::Name;
 use types::node;
 
 use crate::change::Unknown;
+use crate::driver::CHUNKS;
 use crate::member::Member;
 use crate::region::{self, Unfit};
 use crate::{claim, file, log};
@@ -107,12 +108,17 @@ pub enum Error {
     /// one half of the voters, so the pointer did not move. A holder is the proposer
     /// when it is a voter, or a voter whose put of those chunks from the proposer
     /// ended `Ok` while a half that holds it lacked a majority. This half comes first
-    /// of the halves that lack a majority, incoming before outgoing.
+    /// of the halves that lack a majority, incoming before outgoing. `missed` gives
+    /// each voter whose put of those chunks failed, in key order. It is empty for a
+    /// refusal at the apply: the configuration in force then is not the one that this
+    /// node put the chunks on.
     Quorum {
         /// The voters of the half that hold the chunks.
         held: usize,
         /// The voters of the half.
         voters: usize,
+        /// Each voter whose put failed, and why.
+        missed: Vec<Missed>,
     },
     /// A call of this node's chunk store failed.
     Blob(blob::Error),
@@ -244,11 +250,21 @@ impl fmt::Display for Error {
                  change can list"
             ),
             Self::Problems(problems) => write_problems(f, problems),
-            Self::Quorum { held, voters } => write!(
-                f,
-                "{held} of {voters} voters hold the chunks of the spec change, not a \
-                 majority"
-            ),
+            Self::Quorum {
+                held,
+                voters,
+                missed,
+            } => {
+                write!(
+                    f,
+                    "{held} of {voters} voters hold the chunks of the spec change, not \
+                     a majority"
+                )?;
+                if missed.is_empty() {
+                    return f.write_str(", at the apply of the change");
+                }
+                missed.iter().try_for_each(|missed| write!(f, "; {missed}"))
+            }
             Self::Blob(error) => write!(f, "the chunk store failed: {error}"),
             Self::Files(error) => error.fmt(f),
             Self::Stray { path } => write!(
@@ -306,6 +322,54 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+/// A voter whose put of the listed chunks of a spec change failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Missed {
+    /// The voter.
+    pub node: node::Key,
+    /// Its name, or `None` when this node has no record of it.
+    pub name: Option<Name>,
+    /// Why the put failed.
+    pub cause: Miss,
+}
+
+impl fmt::Display for Missed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.name {
+            Some(name) => write!(f, "{name}: {}", self.cause),
+            None => write!(f, "{}: {}", self.node, self.cause),
+        }
+    }
+}
+
+/// Why a put of the listed chunks of a spec change on a voter failed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Miss {
+    /// A call of the put did not end within the deadline of 10 s.
+    Deadline,
+    /// This node has no record of the voter, so no address to dial.
+    Unknown,
+    /// The dial of the voter failed.
+    Dial(transport::Error),
+    /// The put failed: the stream, the voter, or this node's store.
+    Put(blob::peer::Error),
+}
+
+impl fmt::Display for Miss {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Deadline => write!(
+                f,
+                "a call of its put of at most {CHUNKS} chunks passed the deadline of \
+                 10 s"
+            ),
+            Self::Unknown => f.write_str("this node has no record of it"),
+            Self::Dial(error) => write!(f, "its dial failed: {error}"),
+            Self::Put(error) => write!(f, "its put failed: {error}"),
+        }
+    }
+}
 
 /// Writes the text of a stop: `the group stopped: `, then `stopped`.
 pub(crate) fn write_stopped(

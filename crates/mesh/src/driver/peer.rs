@@ -1,6 +1,6 @@
 //! The calls of `blob::peer` on the members of a group.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::poll_fn;
 use std::pin::{Pin, pin};
 use std::task::Poll;
@@ -12,17 +12,15 @@ use types::digest::Digest;
 use types::node;
 use types::time::Span;
 
-use super::apply::refused;
 use super::{Call, Mesh};
-use crate::error::Error;
-use crate::region::Refused;
+use crate::error::{Error, Miss, Missed};
 
 /// How long one get or put of chunks on a peer may take, its dial included.
 pub(super) const DEADLINE: Span = Span::from_nanos(10 * Span::SECOND.nanos());
 
 /// The most chunks that one put on a peer carries, so that a call of the largest
 /// chunks ends within [`DEADLINE`] over links of 100 ms.
-pub(super) const CHUNKS: usize = 16;
+pub(crate) const CHUNKS: usize = 16;
 
 impl Mesh {
     /// Puts each chunk of `digests` of the store on each voter of `voters` but this
@@ -32,9 +30,8 @@ impl Mesh {
     /// voter counts only while a half that holds it lacks a majority, so the holders
     /// are at most the sum of the majorities of the halves.
     ///
-    /// `Stopped` as soon as the group stops, `Blob` as soon as a read of this node's
-    /// store for a put fails, and `Quorum` for the first half that lacks a majority
-    /// once each put ended.
+    /// `Stopped` as soon as the group stops, and `Quorum` for the first half that
+    /// lacks a majority once each put ended, with each voter whose put failed.
     pub(super) async fn spread(
         &self,
         voters: &Voters,
@@ -50,28 +47,25 @@ impl Mesh {
             .filter(|&key| key != own)
             .map(|key| (key, Box::pin(self.put_on(key, digests))))
             .collect();
+        let mut missed = BTreeMap::new();
         let call = Call::new(&self.group);
-        poll_fn(|cx| {
+        poll_fn(|cx| -> Poll<Result<(), Error>> {
             self.group.borrow().running()?;
-            let mut failed = None;
             puts.retain_mut(|(key, put)| {
                 let Poll::Ready(stored) = put.as_mut().poll(cx) else {
                     return true;
                 };
                 match stored {
-                    Ok(true) if short(voters, &holders, *key) => {
+                    Ok(()) if short(voters, &holders, *key) => {
                         holders.insert(*key);
                     }
-                    Ok(_) => {}
-                    Err(error) => {
-                        failed.get_or_insert(error);
+                    Ok(()) => {}
+                    Err(miss) => {
+                        missed.insert(*key, miss);
                     }
                 }
                 false
             });
-            if let Some(error) = failed {
-                return Poll::Ready(Err(error));
-            }
             if puts.is_empty() || quorate(voters, &holders) {
                 return Poll::Ready(Ok(()));
             }
@@ -80,46 +74,56 @@ impl Mesh {
             Poll::Pending
         })
         .await?;
-        let quorum = voters.quorum(|key| holders.contains(&key));
-        quorum.map_err(|short| refused(Refused::from(short)))?;
+        if let Err(short) = voters.quorum(|key| holders.contains(&key)) {
+            let group = self.group.borrow();
+            let missed = missed.into_iter().map(|(node, cause)| Missed {
+                node,
+                name: group
+                    .state
+                    .member(node)
+                    .map(|member| member.card.card().name.clone()),
+                cause,
+            });
+            return Err(Error::Quorum {
+                held: short.counted,
+                voters: short.voters,
+                missed: missed.collect(),
+            });
+        }
         Ok(holders)
     }
 
     // Puts `digests` on `to` in calls of at most `CHUNKS` chunks, in order, and gives
-    // whether each call ended `Ok` within `DEADLINE`, its dials included. A call whose
-    // session ended dials once more: a session to a process of `to` that restarted
-    // ends only at its first use. Any other failure of the dial, the stream, or the
-    // peer leaves `to` no holder. A failed read of this node's store gives its error.
-    async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<bool, Error> {
+    // why the first call that did not end `Ok` within `DEADLINE`, its dials included,
+    // failed. A call whose session ended dials once more: a session to a process of
+    // `to` that restarted ends only at its first use.
+    async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<(), Miss> {
         for call in digests.chunks(CHUNKS) {
             let put = async {
-                let Some(session) = self.dial(to).await else {
-                    return Ok(false);
-                };
+                let session = self.dial(to).await?;
                 let first = blob::peer::put(&self.store, &session, call).await;
                 let broken = matches!(first, Err(blob::peer::Error::Stream(_)));
                 if !broken || session.ended().is_none() {
-                    return held(first);
+                    return first.map_err(Miss::Put);
                 }
-                let Some(session) = self.dial(to).await else {
-                    return Ok(false);
-                };
-                held(blob::peer::put(&self.store, &session, call).await)
+                let session = self.dial(to).await?;
+                let put = blob::peer::put(&self.store, &session, call).await;
+                put.map_err(Miss::Put)
             };
-            match within(&self.clock, DEADLINE, put).await {
-                Some(Ok(true)) => {}
-                Some(Ok(false)) | None => return Ok(false),
-                Some(Err(error)) => return Err(error),
-            }
+            within(&self.clock, DEADLINE, put)
+                .await
+                .unwrap_or(Err(Miss::Deadline))?;
         }
-        Ok(true)
+        Ok(())
     }
 
     // The session of the transport to member `to`, which it dials at the addresses
     // of the card of `to` when it has none open.
-    async fn dial(&self, to: node::Key) -> Option<Session> {
-        let (public_key, addresses) = self.group.borrow().contact(to)?;
-        self.transport.dial(public_key, &addresses).await.ok()
+    async fn dial(&self, to: node::Key) -> Result<Session, Miss> {
+        let contact = self.group.borrow().contact(to);
+        let (public_key, addresses) = contact.ok_or(Miss::Unknown)?;
+        let dialed = self.transport.dial(public_key, &addresses).await;
+        dialed.map_err(Miss::Dial)
     }
 }
 
@@ -137,17 +141,6 @@ pub(super) async fn within<F: Future>(
         Pin::new(&mut sleep).poll(cx).map(|()| None)
     })
     .await
-}
-
-// Whether a put stored its chunks on the peer, or the error of this node's store.
-// `Absent` needs a chunk file that something outside the node removed after the put
-// of the apply, so the chunk is not on the peer either.
-fn held(put: Result<(), blob::peer::Error>) -> Result<bool, Error> {
-    match put {
-        Ok(()) => Ok(true),
-        Err(blob::peer::Error::Store(error)) => Err(Error::Blob(error)),
-        Err(_) => Ok(false),
-    }
 }
 
 fn quorate(voters: &Voters, holders: &BTreeSet<node::Key>) -> bool {

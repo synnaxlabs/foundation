@@ -52,6 +52,8 @@ mod peer;
 mod propose;
 mod send;
 mod stream;
+
+pub(crate) use peer::CHUNKS;
 pub(crate) mod used;
 mod version;
 
