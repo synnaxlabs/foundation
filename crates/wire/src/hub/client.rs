@@ -278,7 +278,7 @@ pub enum Error {
         index: u32,
     },
     /// A place of a read names an index other than that of place 0: a read has one
-    /// index.
+    /// index until the node merges the reads of many indexes (#3356).
     ManyIndexes {
         /// The place.
         place: u32,
