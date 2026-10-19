@@ -219,6 +219,8 @@ struct Writes {
     groups: Vec<Group>,
     /// Each group of the frame whose head came, with the block of its outcome.
     pending: Vec<(u32, Unique)>,
+    /// The places of the stream's set, from [`group::places`].
+    places: Box<[(u32, usize)]>,
 }
 
 impl Writes {
@@ -227,12 +229,13 @@ impl Writes {
     fn new(set: &KeySet, writers: Vec<Writer>) -> Self {
         let groups = (0..)
             .zip(writers)
-            .map(|(number, writer)| Group::new(number, writer, set))
+            .map(|(number, writer)| Group::new(number, writer))
             .collect();
         Self {
             heads: 0,
             groups,
             pending: Vec::new(),
+            places: group::places(set),
         }
     }
 
@@ -244,7 +247,6 @@ impl Writes {
         layout: &Layout<'_>,
     ) -> Result<(), Error> {
         self.heads += 1;
-        self.pending.clear();
         for group in layout.groups() {
             self.pending.push((group, alloc(state, Outcome::LEN_MAX)?));
         }
@@ -277,15 +279,19 @@ impl Writes {
         draft: Draft,
         time: Time,
     ) -> Result<(), Error> {
-        let (mut whole, part) = match self.groups.len() {
+        let (mut whole, mut part) = match self.groups.len() {
             1 => (Some(draft), None),
             _ => (None, Some(draft)),
         };
         let mut pending = mem::take(&mut self.pending);
+        if let Some(part) = &part {
+            let present = pending.iter().map(|&(group, _)| group);
+            group::split(&mut self.groups, &self.places, part, present);
+        }
         for (group, block) in pending.drain(..) {
             let frame = match whole.take() {
                 Some(draft) => Frame::Whole(draft),
-                None => Frame::Part(part.as_ref().expect("invariant: a part is kept")),
+                None => Frame::Part(part.as_mut().expect("invariant: a part is kept")),
             };
             let at = to_usize(group);
             let (ended, outcome) =

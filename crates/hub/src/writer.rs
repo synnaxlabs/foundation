@@ -1,6 +1,7 @@
 //! Writer sessions: what one opens with, why one does not open, and the session.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -158,7 +159,8 @@ pub struct Writer {
     /// Why the hub ended the writer.
     ending: Ending,
     set: Arc<KeySet>,
-    /// The entry in `set` of each channel of the config, in its order.
+    /// The entry in `set` of each channel of the config, in its order, or none for a
+    /// writer of [`Homed::split`].
     entries: Box<[usize]>,
     /// The outcomes of the last write.
     outcomes: Vec<::home::Outcome>,
@@ -226,7 +228,7 @@ impl Homed {
         let groups = self.carry(borrowed);
         let indexes = groups.iter().map(|group| group.index);
         let keys = self.keys.iter().copied().chain(indexes).collect();
-        let writer = self.writer(borrowed, &groups, keys)?;
+        let writer = self.writer(borrowed, &groups, keys, &self.keys)?;
         drop(groups);
         Ok((writer, self.channels))
     }
@@ -247,15 +249,17 @@ impl Homed {
         let borrowed = &mut *borrowed;
         let groups = self.carry(borrowed);
         let set = borrowed.interner.intern(&groups);
+        let of: BTreeMap<channel::Key, &Group<'_>> =
+            groups.iter().map(|group| (group.index, group)).collect();
         for &index in set.groups() {
             let index = set.entries()[index].key;
-            let group = groups
-                .iter()
-                .find(|group| group.index == index)
+            let group = of
+                .get(&index)
                 .expect("invariant: each group of the set is a group of the writer");
             let keys = group.data.iter().map(|&(key, _)| key);
             let keys = keys.chain([index]).collect();
-            writers.push(self.writer(borrowed, std::slice::from_ref(group), keys)?);
+            let groups = std::slice::from_ref(*group);
+            writers.push(self.writer(borrowed, groups, keys, &[])?);
         }
         let entries = entries(&set, &self.keys);
         drop(groups);
@@ -282,21 +286,17 @@ impl Homed {
     }
 
     /// Opens a writer of `groups` at the home, which ends once a channel of `keys` is
-    /// removed. `keys` holds each channel of `groups`.
+    /// removed, with the entry of each of `named`. `keys` holds each channel of
+    /// `groups`, and `named` some of them.
     fn writer(
         &self,
         state: &mut State,
         groups: &[Group<'_>],
         keys: Vec<channel::Key>,
+        named: &[channel::Key],
     ) -> Result<Writer, Error> {
         let set = state.interner.intern(groups);
-        let held: Vec<_> = self
-            .keys
-            .iter()
-            .copied()
-            .filter(|&key| keys.contains(&key))
-            .collect();
-        let entries = entries(&set, &held);
+        let entries = entries(&set, named);
         let writer = ::home::writer::Writer {
             subject: self.subject.clone(),
             authority: self.authority,

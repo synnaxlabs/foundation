@@ -1670,7 +1670,14 @@ fn opens_a_write_whose_channel_moves_to_a_second_index_during_its_home_wait() {
                     place(2, I64, "value", 1),
                 ]
             );
-            assert_eq!(end(&mut stream).await, []);
+            let (ends, body) = frame(&[(0, &[1]), (1, &[5]), (2, &[50])]);
+            stream.frame(live(3), &[1, 1], &ends, &body).await;
+            assert_eq!(stream.reply().await, taken_in(1, 0, 0, 1));
+            assert_eq!(stream.reply().await, taken_in(1, 1, 0, 1));
+            let mut replies = end(&mut stream).await;
+            replies.sort_by_key(|reply| format!("{reply:?}"));
+            let stored = |group| Reply::Stored { group, frames: 1 };
+            assert_eq!(replies, [stored(0), stored(1)]);
             finish(&mut agent).await;
         })
     });
@@ -1707,4 +1714,100 @@ fn holds_the_ends_of_each_place_of_a_write_on_two_indexes() {
         "served: {:?}",
         home.served
     );
+}
+
+/// A frame of a group that ended, which finds no block for its draft, gets the end of
+/// the group, not `Full`.
+#[test]
+fn refuses_a_frame_of_an_ended_group_with_its_end() {
+    let ready = async |test: &Test| {
+        let (clock, hub) = (test.clock.clone(), test.hub.clone());
+        test.tasks.spawn(async move {
+            clock.sleep(Span::from_nanos(START.nanos() / 2)).await;
+            hub.set_definitions(&without(&["value"]));
+        });
+        let sizes = vec![Outcome::LEN_MAX, Outcome::LEN_MAX, 64];
+        spare_for_a_while(sizes)(test).await;
+    };
+    let stamps: Vec<i64> = (1..=32).collect();
+    let home = read_session(491, ready, move |mut agent| async move {
+        agent.admit().await;
+        let mut stream = write(&agent).await;
+        agent.sleep(Span::from_nanos(START.nanos() * 5 / 4)).await;
+        send(&mut stream, &[1], &[10]).await;
+        assert_eq!(stream.reply().await, ended(0, End::Removed));
+        assert_eq!(stream.reply().await, ended_at(1, 0, End::Removed));
+        send(&mut stream, &stamps, &stamps).await;
+        assert_eq!(stream.reply().await, ended_at(2, 0, End::Removed));
+        assert_eq!(end(&mut stream).await, []);
+        finish(&mut agent).await;
+    });
+    assert_eq!(home.served, [Ok(Got::Ended), Ok(Got::Ended)]);
+}
+
+/// The `Stored` of a commit that is due when its group ends never comes.
+#[test]
+fn drops_the_stored_of_a_commit_due_when_the_group_ends() {
+    let ready = async |test: &Test| {
+        let config = super::unnamed(&["value"], hub::reader::Mode::Latest);
+        let mut reader = test.hub.reader(config).await.expect("opens");
+        let hub = test.hub.clone();
+        test.tasks.spawn(async move {
+            let _frame = reader.next().await.expect("a frame");
+            hub.set_definitions(&without(&["value"]));
+        });
+    };
+    let home = read_session(492, ready, |mut agent| async move {
+        agent.admit().await;
+        let mut stream = write(&agent).await;
+        send(&mut stream, &[1], &[10]).await;
+        assert_eq!(stream.reply().await, taken(1, 0, 1));
+        send(&mut stream, &[2], &[20]).await;
+        let replies = end(&mut stream).await;
+        assert_eq!(
+            replies,
+            [ended(0, End::Removed), ended_at(2, 0, End::Removed)]
+        );
+        finish(&mut agent).await;
+    });
+    assert_eq!(home.served, [Ok(Got::Ended), Ok(Got::Ended)]);
+}
+
+/// The writers of a write open in group order, the order of the index slots, not the
+/// order of the channels of the open.
+#[test]
+fn opens_the_writer_of_each_group_in_group_order() {
+    let home = read_session(
+        493,
+        async |_| {},
+        |mut agent| async move {
+            agent.admit().await;
+            let (mut reading, mut reader) = read(&agent).await;
+            let mut stream = agent.write(&["value-b", "value"]).await;
+            let start = stream.started().await;
+            assert_eq!(
+                start.places,
+                [
+                    place(1, STAMP, "time", 0),
+                    place(2, I64, "value", 0),
+                    place(3, STAMP, "time-b", 2),
+                    place(4, I64, "value-b", 2),
+                ]
+            );
+            let (ends, body) =
+                frame(&[(0, &[1]), (1, &[10]), (2, &[5, 6]), (3, &[50, 60])]);
+            stream.frame(live(4), &[1, 2], &ends, &body).await;
+            assert_eq!(stream.reply().await, taken_in(1, 0, 0, 1));
+            assert_eq!(stream.reply().await, taken_in(1, 1, 0, 2));
+            assert_eq!(next(&mut reading, &mut reader).await, (10, 1));
+            let mut replies = end(&mut stream).await;
+            replies.sort_by_key(|reply| format!("{reply:?}"));
+            let stored = |group| Reply::Stored { group, frames: 1 };
+            assert_eq!(replies, [stored(0), stored(1)]);
+            reading.sender.finish().expect("finishes");
+            assert_eq!(reading.recv().await, Ok(None));
+            finish(&mut agent).await;
+        },
+    );
+    assert_eq!(home.served[0], Ok(Got::Ended));
 }
