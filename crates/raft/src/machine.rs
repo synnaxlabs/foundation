@@ -4952,7 +4952,8 @@ mod tests {
         }
 
         // Node 9 leaves the set and comes back while a change is pending, so its peer
-        // stays.
+        // stays. It answers the append with no entry that it gets while out of the
+        // set, so no append to it is in flight.
         #[test]
         fn a_learner_that_a_call_adds_again_gets_an_append_at_once() {
             let mut raft = raft(&[1, 2, 3], Hard::default());
@@ -4967,6 +4968,8 @@ mod tests {
             raft.set_learners([]);
             raft.propose(b"y".to_vec()).unwrap();
             sent(&mut raft);
+            accepted(&mut raft, 9, 2);
+            assert!(sent(&mut raft).is_empty());
             raft.set_learners([key(9)]);
             assert_eq!(carrying(&sent(&mut raft), 9).len(), 1);
         }

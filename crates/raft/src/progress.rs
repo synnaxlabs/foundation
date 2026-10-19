@@ -313,13 +313,13 @@ mod tests {
         progress.sent(0);
         progress.accepted(0);
         for _ in 0..INFLIGHT {
-            assert!(!progress.paused());
+            assert!(!progress.paused(INFLIGHT));
             progress.sent(0);
         }
-        assert!(progress.paused());
+        assert!(progress.paused(INFLIGHT));
         assert_eq!(progress.next(), 1);
         progress.accepted(0);
-        assert!(!progress.paused());
+        assert!(!progress.paused(INFLIGHT));
     }
 
     #[test]
