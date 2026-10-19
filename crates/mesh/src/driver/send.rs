@@ -10,10 +10,10 @@ use std::task::Poll;
 use block::{Block, Pool};
 use env::tasks;
 use transport::stream::Sender;
-use transport::{Class, Session, Transport};
+use transport::{Class, Transport};
 use types::node;
 
-use super::{Group, REMOVED, header};
+use super::{Group, REMOVED, header, peer};
 use crate::error::Stopped;
 use crate::message::Message;
 
@@ -193,33 +193,11 @@ impl Senders {
         let sender = if let Some(sender) = stream {
             sender
         } else {
-            let held = self.group().borrow().sessions.get(&to).cloned();
-            let session = match held {
-                Some(session) => session,
-                None => self.dial(to).await?,
-            };
+            let session = peer::session(&self.group, &self.transport, to).await?;
             let mut sender = session.open_sender(Class::Command).await?;
             sender.send(header(&self.pool)?).await?;
             stream.insert(sender)
         };
         Ok(sender.send(copy(&self.pool, message)?).await?)
-    }
-
-    // Dials `to` at the addresses of its card, as the group holds it now, and gives
-    // the session to the group.
-    async fn dial(&self, to: node::Key) -> Result<Session, Failure> {
-        let (public_key, addresses) = {
-            let group = self.group();
-            let group = group.borrow();
-            let member = group.state.member(to).ok_or(Failure::Unknown)?;
-            let addresses = member.card.card().addresses.as_slice().to_vec();
-            (member.public_key(), addresses)
-        };
-        let session = self.transport.dial(public_key, &addresses).await?;
-        self.group()
-            .borrow_mut()
-            .sessions
-            .insert(to, session.clone());
-        Ok(session)
     }
 }

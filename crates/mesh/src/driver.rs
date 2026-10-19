@@ -48,6 +48,7 @@ mod bound;
 mod founding;
 mod home;
 mod join;
+mod peer;
 mod propose;
 mod send;
 mod stream;
