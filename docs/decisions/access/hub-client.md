@@ -406,9 +406,13 @@
   group, frames }` and `Reply::Ended { group, end }` come and which merges before PR 2,
   are by `laptop.architect` at 2026-10-19T13:54:38Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268910604). Until
-  PR 1c, `hub` never gives `Outcome::Ended`. Key choice (f) went to `laptop.monitor`
-  with the revised plan
-  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917).
+  PR 1c, `hub` never gives `Outcome::Ended`. Key choice (f), the revised plan
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917), went
+  to `laptop.monitor` in a factory message, which has no link.
   Supersedes the head `{ time, form, count, series }` and the one `Outcome` for each
   frame of Amended (#2718). Lost: a count of each group in the head, which no message
-  of a small `message_bytes_max` holds for many groups.
+  of a small `message_bytes_max` holds for many groups. `wire::hub::write::Lead`
+  encodes the head, the ends, and the counts of one frame, and gives its messages for
+  a `bytes_max`. The run of counts is private to it. Approved by `laptop.architect` at
+  2026-10-19T17:45:52Z
+  (https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6273514088).
