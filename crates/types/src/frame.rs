@@ -355,7 +355,8 @@ impl<'a> Layout<'a> {
         self.body
     }
 
-    /// The group of each index that the frame holds, in increasing order.
+    /// Each present group, in group order: the group of each index that the frame
+    /// holds. Time is linear in the number of series.
     pub fn groups(&self) -> impl Iterator<Item = u32> + '_ {
         let set = self.set;
         self.series
@@ -1913,6 +1914,16 @@ mod tests {
             let block = draft.0.len();
             let body = draft.freeze(case.path).body().len();
             prop_assert_eq!(sized, Ok((block, body)));
+        }
+
+        #[test]
+        fn gives_the_groups_of_the_ranges_of_its_draft(case in cases()) {
+            let (set, series) = shape(&case);
+            let layout = Layout::new(&set, &series).unwrap();
+            let groups: Vec<u32> = layout.groups().collect();
+            let draft = layout.draft(&pool(1 << 20), case.form).unwrap();
+            let ranges: Vec<u32> = draft.ranges().map(|(group, _)| group).collect();
+            prop_assert_eq!(groups, ranges);
         }
 
         /// Key n has slot n, so shuffled keys give any slot order, and more groups
