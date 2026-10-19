@@ -848,7 +848,7 @@ mod tests {
 
         #[test]
         fn acks_within_the_max_ack_delay_with_a_full_congestion_window() {
-            let (ping, ack, len) = testing::run(1, |shard| {
+            let (ping, ack, len, acked) = testing::run(1, |shard| {
                 let idle = Span::from_nanos(10 * Span::SECOND.nanos());
                 let mut pair = Pair::new(shard, idle, DELAY);
                 pair.dial(pair::SERVER_KEY.public());
@@ -861,15 +861,19 @@ mod tests {
                 pair.run(Duration::from_millis(500));
                 pair.client.drops = 0;
                 let (ping, before) = (pair.now(), pair.client.sent.len());
+                let acks = pair.server.connection().stats().frame_rx.acks;
                 pair.server.connection().ping();
+                pair.run(2 * DELAY + MAX_ACK_DELAY + Duration::from_millis(1));
+                let acked = pair.server.connection().stats().frame_rx.acks - acks;
                 pair.run(Duration::from_secs(1));
                 let (ack, _, bytes) = pair.client.sent.get(before).expect("a datagram");
-                (Duration::from_nanos(ping.0), *ack, bytes.len())
+                (Duration::from_nanos(ping.0), *ack, bytes.len(), acked)
             });
             let late = ack.checked_sub(ping + DELAY).expect("after it arrives");
             assert!(late <= MAX_ACK_DELAY, "{late:?}");
             // A stream frame would fill the datagram to the MTU.
             assert!(len < 100, "{len}");
+            assert_eq!(acked, 1);
         }
 
         /// A GSO batch takes the size of its first datagram, so a batch that went on
