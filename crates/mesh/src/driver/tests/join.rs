@@ -181,8 +181,7 @@ fn the_apply_refuses_the_second_of_two_joins_that_fill_a_region() {
         let full = Refusal::Refused(region::Refused::Unfit(Unfit::Full));
         assert_eq!(second.await, Ok(Err(full)));
         assert_eq!(mesh.member(key(201)), None);
-        let members = mesh.group.borrow().state.keys().count();
-        assert_eq!(members, region::MEMBERS_MAX);
+        assert_eq!(mesh.names().len(), region::MEMBERS_MAX);
     });
 }
 

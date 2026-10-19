@@ -3345,7 +3345,7 @@ mod tests {
         }
 
         #[test]
-        fn takes_a_reply_from_a_member_that_is_not_a_voter() {
+        fn a_reply_of_a_later_term_from_a_learner_is_unproven() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &IDS).await.unwrap();
                 // Node 4 is a learner, so `raft` reads its reply of a later term.
