@@ -210,11 +210,13 @@ state on `main`.
   `removed` once the leave commits, and the node stops (#1105). A voter whose log lacks
   the leave entry admits the request until #1107, so in `raft` alone such a node can win
   an election once no voter has a lease, and lead until it commits the leave.
-- `raft` drops a reply from a node that is not a voter, unless a change removed the node
-  and `raft` still sends to it (#352). It takes a higher term only with a proof that a
-  quorum of its configuration granted the sender, in every message but a `PreVote` and a
-  granted `PreVoteReply` (RAFT SURFACE, #750). A refusal of a lower term carries the
-  proof of the refuser's term, so a node that is behind catches up.
+- `raft` drops a reply from a node that is neither a voter nor a learner
+  (`Raft::set_learners`), unless a change removed the node or a later call to
+  `set_learners` left it out, and `raft` has not released it yet (#352). It takes a
+  higher term only with a proof that a quorum of its configuration granted the sender,
+  in every message but a `PreVote` and a granted `PreVoteReply` (RAFT SURFACE, #750). A
+  refusal of a lower term carries the proof of the refuser's term, so a node that is
+  behind catches up.
 - A node that may send to a group and lies could stop the group for good with one
   message in term `u64::MAX`. Now that message needs a quorum of grants of a
   configuration the node holds, or of one that a chain of signed configuration
@@ -228,12 +230,14 @@ state on `main`.
   `crates/raft/tests/it/hostile.rs` pins the gap (architect,
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
-  VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
+  VOTERS, #654), and `raft` drops a reply from any node that is not its peer: a voter, a
+  learner, or a node that it has not released yet (RAFT SURFACE). `Mesh::receive`
   refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
-  code 17) only to a sender that a committed configuration removed, so a stranger
-  cannot learn from the answer which nodes the log held, and a sender stops its group
-  only on that answer from a voter of its own configuration (#1105). `node` serves
-  mesh streams when it has a region (NODE MESH).
+  code 17) only to a sender that a committed configuration removed, so a stranger cannot
+  learn from the answer which nodes the log held, and a sender stops its group only on
+  that answer from a
+  voter of its own configuration (#1105). `node` serves mesh streams when it has a
+  region (NODE MESH).
   A voter that lies can still break safety, because a false `AppendReply` counts as
   held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a
   voter that lies writes gives its node the key it names (MESH DRIVER). A signed
