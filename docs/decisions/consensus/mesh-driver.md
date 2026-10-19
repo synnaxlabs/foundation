@@ -434,12 +434,12 @@
   https://github.com/synnaxlabs/foundation/pull/2755#issuecomment-6203047812.
   Amended (2026-10-18, #2283): `Mesh::set_addresses` proposes a `Change::Card` of the
   member of this node through `attempt` and `settle`, as `set_home` does. A member that
-  is not a voter gets `Error::NoVote`, as `set_home` gives, because a leader sends
-  entries only to the nodes of its configurations, so such a member applies no entry
-  after its join (`laptop.architect`, 2026-10-18T05:35:52Z:
-  https://github.com/synnaxlabs/foundation/issues/2283#issuecomment-6246157119). The
-  forward rule waits for B2 of #2283 (#3116, which waits on #3140): a member that is
-  not a voter forwards its card, the node that takes a forwarded change takes a
+  is not a voter gets `Error::NoVote`, as `set_home` gives (`laptop.architect`,
+  2026-10-18T05:35:52Z:
+  https://github.com/synnaxlabs/foundation/issues/2283#issuecomment-6246157119). Such
+  a member applies each entry as a learner (#3140), but it forwards no change until
+  B2. The forward rule waits for B2 of #2283 (#3116, which waits on #3140): a member
+  that is not a voter forwards its card, the node that takes a forwarded change takes a
   `Change::Card` from a peer that is not a voter when the card's member has the public
   key that the transport proves for that peer, and each other change from such a peer
   stays `Error::PeerNotVoter`. A member that knows no leader forwards to a voter of its
