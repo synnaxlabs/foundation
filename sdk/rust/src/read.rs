@@ -1,10 +1,13 @@
 //! The reads of a client: one read stream of the channels of one index.
 
+use std::future::poll_fn;
 use std::mem;
 use std::ops::Range;
+use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::task::Poll;
 use std::time::Duration;
 
 pub use program::Mode;
@@ -258,7 +261,7 @@ pub(crate) struct Open {
 type Answer = (Result<(), Error>, Frame);
 
 /// Opens the reader of `open` on `session`, and serves the calls of its [`Reader`]
-/// until the reader ends or drops.
+/// until the reader ends or drops, also while a call is out.
 pub(crate) async fn served(session: program::Session, open: Open) {
     let Open {
         config,
@@ -275,7 +278,23 @@ pub(crate) async fn served(session: program::Session, open: Open) {
     };
     drop(opened.try_send(Ok(layout.places)));
     while let Some(mut frame) = calls.recv().await {
-        let next = match reader.next().await {
+        let read = {
+            let mut next = pin!(reader.next());
+            poll_fn(|cx| match calls.poll_recv(cx) {
+                Poll::Ready(None) => Poll::Ready(None),
+                Poll::Ready(Some(_)) => {
+                    unreachable!(
+                        "invariant: each call takes its answer before the next"
+                    )
+                }
+                Poll::Pending => next.as_mut().poll(cx).map(Some),
+            })
+            .await
+        };
+        let Some(read) = read else {
+            return;
+        };
+        let next = match read {
             Ok(encoded) => {
                 let lost = |entry| reader.lost(entry);
                 decoded(reader.places(), &layout.targets, lost, &encoded, &mut frame)
