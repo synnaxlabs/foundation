@@ -279,12 +279,13 @@ impl Variables {
     }
 
     /// Answers a read of variable `index` at `time`, and records it when its value is
-    /// a Double. The first read after a change sets the source timestamp to `wall`.
+    /// a Double. The first read after a change sets the source timestamp to the server
+    /// time of `wall`.
     fn read(&self, index: usize, time: Monotonic, wall: Stamp) -> Answer {
         let mut state = self.state();
-        let quality = state.quality;
+        let (quality, ahead) = (state.quality, state.ahead);
         let variable = &mut state.variables[index];
-        let source = *variable.source.get_or_insert(wall);
+        let source = *variable.source.get_or_insert_with(|| shift(wall, ahead));
         #[cfg(test)]
         let quality = variable.hooks.quality.unwrap_or(quality);
         if let Value::F64(value) = variable.value {
@@ -301,6 +302,11 @@ impl Variables {
     fn state(&self) -> MutexGuard<'_, State> {
         self.0.lock().expect("no holder of the variables panics")
     }
+}
+
+/// Gives the server time at the wall time `wall`, when the server clock is `ahead`.
+fn shift(wall: Stamp, ahead: Span) -> Stamp {
+    Stamp::from_nanos(wall.nanos().saturating_add(ahead.nanos()))
 }
 
 /// A read that a server answered.
@@ -356,16 +362,12 @@ pub async fn serve(
     variables: &Variables,
     until: Token,
 ) -> Result<(), net::Error> {
-    let shifted = Variables::clone(variables);
-    let wall = Rc::new(move || {
-        let nanos = wall().nanos().saturating_add(shifted.state().ahead.nanos());
-        Stamp::from_nanos(nanos)
-    });
+    let wall = Rc::new(wall);
     let time = event::Time {
         clock: Clock::clone(&clock),
         wall: Box::new({
-            let wall = Rc::clone(&wall);
-            move || wall()
+            let (wall, variables) = (Rc::clone(&wall), Variables::clone(variables));
+            move || shift(wall(), variables.state().ahead)
         }),
     };
     let manager = Manager::accepting(time, net, listener, rng);

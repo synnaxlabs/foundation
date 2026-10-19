@@ -881,31 +881,42 @@ async fn subscribe_spike(client: &mut Client) -> Vec<Change> {
 }
 
 /// A change gives the source timestamp of `change_at`, or the server clock at the
-/// first read of a value with none, and the server timestamp on that clock.
+/// first read of a value with none, also after a `change_at`, and the server
+/// timestamp on that clock.
 #[test]
 fn a_change_gives_the_source_timestamp_of_change_at_and_the_server_clock() {
     let wall = Stamp::from_nanos(1_767_225_600 * Span::SECOND.nanos());
     let ahead = Span::from_nanos(5 * Span::MINUTE.nanos());
-    let earlier = wall - Span::HOUR;
+    let (earlier, later) = (wall - Span::HOUR, wall + Span::MINUTE);
     let changes = on_spike(Some(wall), ahead, async move |node, url, variables| {
         let mut rng = node.entropy().rng();
         let mut client = connect(node, &mut rng, url).await.expect("connect");
-        let first = subscribe_spike(&mut client).await;
+        let mut changes = vec![Ok(subscribe_spike(&mut client).await)];
         variables.change_at(Quality::GOOD, earlier);
-        let next = client.changes(future::pending()).await.map(<[_]>::to_vec);
+        changes.push(client.changes(future::pending()).await.map(<[_]>::to_vec));
+        variables.set_clock(later - wall);
+        variables.change(Quality::GOOD);
+        changes.push(client.changes(future::pending()).await.map(<[_]>::to_vec));
         client.close().await;
-        (first, next)
+        changes
     });
-    let at = |value, source| Change {
-        index: 0,
-        value: Ok(Value::F64(value)),
-        source: Some(source),
-        server: Some(wall + ahead),
-        overflow: false,
+    let at = |value, source, server| {
+        Ok(vec![Change {
+            index: 0,
+            value: Ok(Value::F64(value)),
+            source: Some(source),
+            server: Some(server),
+            overflow: false,
+        }])
     };
+    let now = wall + ahead;
     assert_eq!(
         changes,
-        (vec![at(0.0, wall + ahead)], Ok(vec![at(1.0, earlier)]))
+        [
+            at(0.0, now, now),
+            at(1.0, earlier, now),
+            at(2.0, later, later)
+        ]
     );
 }
 
