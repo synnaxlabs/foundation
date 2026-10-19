@@ -207,9 +207,10 @@ state on `main`.
   the index a heartbeat or an append answer names, the order of an append's entries, and
   that no entry is above the append's term. A node that a change removed and that missed
   its release campaigns; a voter whose log holds the leave refuses the request, with
-  `removed` once the leave commits, and the node stops (#1105). A voter whose log lacks
-  the leave entry admits the request until #1107, so in `raft` alone such a node can win
-  an election once no voter has a lease, and lead until it commits the leave.
+  `removed` once the leave commits, and the node stops once a majority of its voters
+  answer so (#1105). A voter whose log lacks the leave entry admits the request until
+  #1107, so in `raft` alone such a node can win an election once no voter has a lease,
+  and lead until it commits the leave.
 - `raft` drops a reply from a node that is neither a voter nor a learner
   (`Raft::set_learners`), unless a change removed the node or a later call to
   `set_learners` left it out, and `raft` has not released it yet (#352). It takes a
@@ -241,12 +242,11 @@ state on `main`.
   majority of the other voters of its own configuration give that answer inside two
   election timeouts. That configuration can be smaller than the one in force, so a
   minority of the voters in force that lags or lies can still stop a node that missed
-  its removal and a later add of itself (#1105, #1822, #3355). `node` serves
-  mesh streams when it has a region (NODE MESH).
-  A voter that lies can still break safety, because a false `AppendReply` counts as
-  held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a
-  voter that lies writes gives its node the key it names (MESH DRIVER). A signed
-  `AppendReply` is #882.
+  its removal and a later add of itself (#1105, #1822, #3355). `node` serves mesh
+  streams when it has a region (NODE MESH). A voter that lies can still break safety,
+  because a false `AppendReply` counts as held, so `raft` trusts its voters (RAFT
+  SURFACE, #352 item 2). A join that a voter that lies writes gives its node the key it
+  names (MESH DRIVER). A signed `AppendReply` is #882.
 - A voter that does not lead cannot make a node follow it: a heartbeat or an
   `Append` of a higher term, or of a term whose leader the node does not know yet,
   needs a quorum of votes for the sender, else `Error::Unproven` and nothing changes.

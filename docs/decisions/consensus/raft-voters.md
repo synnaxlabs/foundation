@@ -75,11 +75,13 @@
   sender that is not a voter gets `NotVoter`. This supersedes "a request proves no newer
   configuration" of the interim rule below (decided by the architect,
   2026-10-08T06:51:45Z:
-  https://github.com/synnaxlabs/foundation/issues/1822#issuecomment-6054242092). A
-  sender that only an uncommitted entry held gets `NotVoter`: the entry can still be
-  truncated, and a node whose commit lags would stop a voter that no committed
-  configuration removed, the failure of #1054 (decided by the architect,
-  2026-10-08T02:21:15Z:
+  https://github.com/synnaxlabs/foundation/issues/1822#issuecomment-6054242092). The
+  term clause supersedes the last-index rule of that comment (`laptop.architect`,
+  2026-10-19T18:56:00Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859). A sender
+  that only an uncommitted entry held gets `NotVoter`: the entry can still be truncated,
+  and a node whose commit lags would stop a voter that no committed configuration
+  removed, the failure of #1054 (decided by the architect, 2026-10-08T02:21:15Z:
   https://github.com/synnaxlabs/foundation/issues/1105#issuecomment-6050855747). `mesh`
   asks `Raft::admission`, so the log that holds the configurations answers it (decided
   by `laptop.architect`, 2026-10-08T03:04:33Z:
@@ -90,13 +92,12 @@
   `Raft::removed(&Message) -> bool`, which left "request" and "voter" in `mesh`.
   `Raft::admission` counts a configuration entry only once the commit index covers it,
   so a node that opened again answers `NotVoter` until a leader gives it the commit
-  index.
-  A request is a PreVote, a Vote, a heartbeat, or an append. The rule covers requests
-  only, and `raft` decides which replies count (RAFT SURFACE). The coordinator gives the
-  person's words on the first version in its comment on #647, linked above. The removed
-  node takes that answer only from a voter of its own region. A voter of its region is
-  a voter of the newest configuration in its log, and an answer from any other node
-  drops the stream, as any refusal does (decided by `laptop.architect`,
+  index. A request is a PreVote, a Vote, a heartbeat, or an append. The rule covers
+  requests only, and `raft` decides which replies count (RAFT SURFACE). The coordinator
+  gives the person's words on the first version in its comment on #647, linked above.
+  The removed node takes that answer only from a voter of its own region. A voter of its
+  region is a voter of the newest configuration in its log, and an answer from any other
+  node drops the stream, as any refusal does (decided by `laptop.architect`,
   2026-10-08T02:59:07Z:
   https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051260164). The node
   stops its `raft` group for that region (`Stopped::Removed`) only when
@@ -116,39 +117,40 @@
   timeout. Decided by `laptop.architect`, 2026-10-19T12:57:24Z:
   https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373; the
   place in `raft` and the window 2026-10-19T18:47:21Z:
-  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274691760; the
-  term at the commit, the bound, and the deferral to #3355 2026-10-19T18:56:00Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274691760, which
+  supersedes the stop in `mesh` and its clear on a change of the configuration of
+  https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373; the term
+  at the commit, the bound, and the deferral to #3355 2026-10-19T18:56:00Z:
   https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859. Lost: a
   removed node that stops only on its own committed leave, which never stops the case
-  of #1105. `raft`
-  sends such a node no entries, only answers. A voter with a lease drops its campaign or
-  refuses it with a `PreVoteReply` of `Answer::Refused` at the voter's term. In `raft`
-  alone, the node campaigns. While a voter has a lease, this has no effect. Once no
-  voter has a lease, as after the leader fails, the voters can elect the node: it
-  commits an entry of its term, which commits the leave, and steps down, and the voters
-  follow it until their election timeout. That gap stays in `raft`, pinned by
-  `it::change::the_voters_elect_a_removed_node_once_the_leader_fails`. In `mesh`, the
-  admission check and the `removed` answer close it for each voter whose log holds the
-  leave; a voter whose log lacks the leave entry admits the request until #1107. #483
-  keeps the stop on applying a committed configuration without itself. Keeping readmit
-  until then lost. The person decided on 2026-10-05 ("(a)"), #482. Readmit in `raft`
-  (#414) lost: it sent the log to a sender that `raft` cannot check. The person decided
-  on 2026-10-05 ("Ok B is fine", #193). A leader outside the committed final set sends
-  the commit and steps down. A node may campaign when it is a voter, incoming or
-  outgoing, of the configuration in force, or, while that configuration is not
-  committed, of the configuration before it. No other node campaigns. The rule is exact:
-  a leader appends a configuration entry only after the last one commits, so by Log
-  Matching only the last configuration entry in a log can be truncated, and the one
-  before it is committed. The fallback keeps two cases: a truncation gives the
-  configuration before back, and a removed leader that lost its lead before the leave
-  reached a peer is the only node that can win the election that commits it. A follower
-  whose commit index lags lets the configuration before campaign for longer, which costs
-  liveness, never safety. The `mesh` admission check stays beside this rule:
-  `promotable` decides whether an honest node campaigns, and `mesh` checks a sender that
-  may lie, because `raft` never checks senders (RAFT SURFACE). Neither is a second guard
-  for the other. Decided by the coordinator and the advisor on 2026-10-06 (#659). After
-  compaction a snapshot carries the configuration in force at its index, so the
-  configuration before the last entry stays known (#253).
-  `mesh` keeps the founding voters with the rest of `Config::founding` at each open
-  whose log holds no record, and refuses another set at an open whose log holds a
-  record (MESH DRIVER, #1209).
+  of #1105. `raft` sends such a node no entries, only answers. A voter with a lease
+  drops its campaign or refuses it with a `PreVoteReply` of `Answer::Refused` at the
+  voter's term. In `raft` alone, the node campaigns. While a voter has a lease, this has
+  no effect. Once no voter has a lease, as after the leader fails, the voters can elect
+  the node: it commits an entry of its term, which commits the leave, and steps down,
+  and the voters follow it until their election timeout. That gap stays in `raft`,
+  pinned by `it::change::the_voters_elect_a_removed_node_once_the_leader_fails`. In
+  `mesh`, the admission check and the `removed` answer close it for each voter whose log
+  holds the leave; a voter whose log lacks the leave entry admits the request until
+  #1107. #483 keeps the stop on applying a committed configuration without itself.
+  Keeping readmit until then lost. The person decided on 2026-10-05 ("(a)"), #482.
+  Readmit in `raft` (#414) lost: it sent the log to a sender that `raft` cannot check.
+  The person decided on 2026-10-05 ("Ok B is fine", #193). A leader outside the
+  committed final set sends the commit and steps down. A node may campaign when it is a
+  voter, incoming or outgoing, of the configuration in force, or, while that
+  configuration is not committed, of the configuration before it. No other node
+  campaigns. The rule is exact: a leader appends a configuration entry only after the
+  last one commits, so by Log Matching only the last configuration entry in a log can be
+  truncated, and the one before it is committed. The fallback keeps two cases: a
+  truncation gives the configuration before back, and a removed leader that lost its
+  lead before the leave reached a peer is the only node that can win the election that
+  commits it. A follower whose commit index lags lets the configuration before campaign
+  for longer, which costs liveness, never safety. The `mesh` admission check stays
+  beside this rule: `promotable` decides whether an honest node campaigns, and `mesh`
+  checks a sender that may lie, because `raft` never checks senders (RAFT SURFACE).
+  Neither is a second guard for the other. Decided by the coordinator and the advisor on
+  2026-10-06 (#659). After compaction a snapshot carries the configuration in force at
+  its index, so the configuration before the last entry stays known (#253). `mesh` keeps
+  the founding voters with the rest of `Config::founding` at each open whose log holds
+  no record, and refuses another set at an open whose log holds a record (MESH DRIVER,
+  #1209).
