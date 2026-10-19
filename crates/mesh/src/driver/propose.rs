@@ -21,7 +21,7 @@ impl Mesh {
     pub(super) fn check_proposer(&self) -> Result<(), Error> {
         let group = self.group.borrow();
         group.running()?;
-        if !group.voter(group.raft.key()) {
+        if !group.raft.voters().contains(group.raft.key()) {
             return Err(Error::NoVote);
         }
         Ok(())
