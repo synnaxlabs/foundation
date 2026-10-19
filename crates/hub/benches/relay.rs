@@ -17,6 +17,8 @@
 //! - `live 1x64`: as `live 1x2`, with an index and 63 data channels.
 //! - `waiting 1x2`: as `live 1x2`, while a writer of the home holds control of the
 //!   channels, so the home refuses each frame as `Waiting`.
+//! - `live 2x(1x2)`: frames of two groups, each as `live 1x2`, so the serve copies the
+//!   series of each group into a draft of its own writer.
 //!
 //! Compare two builds on one pinned core whose SMT sibling is idle.
 
@@ -79,17 +81,20 @@ struct Case {
     node: bool,
     /// Samples per series.
     count: u32,
-    /// Series per frame: the index and its data channels.
+    /// Groups per frame, each on an index of its own.
+    groups: u32,
+    /// Series per group: the index and its data channels.
     series: u32,
     /// A writer of the home holds control, so each frame is refused as `Waiting`.
     waiting: bool,
 }
 
-const CASES: [Case; 5] = [
+const CASES: [Case; 6] = [
     Case {
         name: "live 1x2",
         node: false,
         count: 1,
+        groups: 1,
         series: 2,
         waiting: false,
     },
@@ -97,6 +102,7 @@ const CASES: [Case; 5] = [
         name: "node 1x2",
         node: true,
         count: 1,
+        groups: 1,
         series: 2,
         waiting: false,
     },
@@ -104,6 +110,7 @@ const CASES: [Case; 5] = [
         name: "live 100x2",
         node: false,
         count: 100,
+        groups: 1,
         series: 2,
         waiting: false,
     },
@@ -111,6 +118,7 @@ const CASES: [Case; 5] = [
         name: "live 1x64",
         node: false,
         count: 1,
+        groups: 1,
         series: 64,
         waiting: false,
     },
@@ -118,14 +126,28 @@ const CASES: [Case; 5] = [
         name: "waiting 1x2",
         node: false,
         count: 1,
+        groups: 1,
         series: 2,
         waiting: true,
+    },
+    Case {
+        name: "live 2x(1x2)",
+        node: false,
+        count: 1,
+        groups: 2,
+        series: 2,
+        waiting: false,
     },
 ];
 
 /// The index key of case `at`: its data keys follow it.
 fn base(at: usize) -> u128 {
     u128::try_from(at + 1).expect("few") * LINE
+}
+
+/// The index key of group `group` of case `at`: its data keys follow it.
+fn group(at: usize, group: u32) -> u128 {
+    base(at) + u128::from(group) * LINE / 2
 }
 
 /// What the program and the home tell each other.
@@ -181,7 +203,9 @@ async fn bench(
     progress: Arc<Progress>,
 ) -> (Line, Vec<Line>, usize, usize) {
     let transport = net::transport(&node, &tasks, &net::own_pool(), net::HOME, 1 << 16);
-    let indexes = (0..=CASES.len()).map(|at| (base(at), base(at) + 1..=base(at) + 63));
+    let indexes = (0..=CASES.len())
+        .flat_map(|at| [group(at, 0), group(at, 1)])
+        .map(|index| (index, index + 1..=index + 63));
     let (hub, now) = create_hub(&node, tasks.clone(), indexes).await;
     hub.set_rules(sessions::rules());
     let mut timer = Line::new("timer", FRAMES);
@@ -296,13 +320,16 @@ async fn program(
     let mut stamp = progress.stamp.load(Ordering::Relaxed);
     let mut round = 0;
     for (at, case) in CASES.iter().enumerate() {
-        let names: Vec<String> = (1..case.series)
-            .map(|data| channel_name(base(at) + u128::from(data)).to_string())
+        let names: Vec<String> = (0..case.groups)
+            .flat_map(|g| {
+                (1..case.series).map(move |data| group(at, g) + u128::from(data))
+            })
+            .map(|key| channel_name(key).to_string())
             .collect();
         let select: Vec<&str> = names.iter().map(String::as_str).collect();
         let mut stream = agent.write(&select).await;
         let start = stream.started().await;
-        let series = usize::try_from(case.series).expect("few");
+        let series = usize::try_from(case.series * case.groups).expect("few");
         assert_eq!(start.places.len(), series, "the places of {}", case.name);
         progress.opened.fetch_add(1, Ordering::Relaxed);
         for _ in 0..WARMUP + ROUNDS {
@@ -317,7 +344,7 @@ async fn program(
             }
             progress.sent.fetch_add(FRAMES, Ordering::Relaxed);
             let mut outcomes = 0;
-            while outcomes < FRAMES {
+            while outcomes < FRAMES * usize::try_from(case.groups).expect("few") {
                 match stream.reply().await {
                     Reply::Outcome {
                         outcome: Outcome::Taken { .. },
@@ -362,7 +389,7 @@ fn head(case: &Case) -> Head {
             Time::Frame(Path::Live)
         },
         form: Form::Raw,
-        series: case.series,
+        series: case.series * case.groups,
     }
 }
 
@@ -371,7 +398,7 @@ fn counts(case: &Case) -> Vec<u32> {
     if case.node {
         Vec::new()
     } else {
-        vec![case.count]
+        vec![case.count; usize::try_from(case.groups).expect("few")]
     }
 }
 
