@@ -157,10 +157,10 @@ pub(crate) enum Refusal {
     /// The PEM block of the certificate `number`, from 1, of `trust` holds bytes after
     /// it, such as trust settings or a second certificate.
     Trailing { number: usize },
-    /// Line `number`, from 1, of `credential` in PEM, counted by `\n`, is in a PEM block, and
+    /// Line `number`, from 1, of `credential`, counted by `\n`, is in a PEM block, and
     /// a piece of it that aws-lc reads (at most 253 bytes, through its `\n`) holds a
-    /// byte of 0x80 to 0xFF after its last byte of 0x21 to 0x7F, or anywhere when it has
-    /// none, which aws-lc reads in two ways by the CPU target.
+    /// byte of 0x80 to 0xFF after its last byte of 0x21 to 0x7F, or anywhere when it
+    /// has none, which aws-lc reads in two ways by the CPU target.
     Line {
         credential: Credential,
         number: usize,
@@ -227,8 +227,8 @@ impl fmt::Display for Refusal {
             ),
             Self::Line { credential, number } => write!(
                 f,
-                "line {number} of {credential}, in a PEM block, holds a byte of 0x80 to 0xFF, \
-                 which PEM does not allow"
+                "line {number} of {credential}, in a PEM block, holds a byte of 0x80 \
+                 to 0xFF, which PEM does not allow"
             ),
             Self::Uri => f.write_str(
                 "the certificate holds no URI in its subject alternative name",

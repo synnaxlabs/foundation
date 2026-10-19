@@ -648,8 +648,8 @@ fn a_refusal_names_the_part_that_fails() {
                 credential: Credential::Key,
                 number: 3,
             },
-            "line 3 of the key, in a PEM block, holds a byte of 0x80 to 0xFF, which PEM \
-             does not allow",
+            "line 3 of the key, in a PEM block, holds a byte of 0x80 to 0xFF, which \
+             PEM does not allow",
         ),
         (
             Refusal::Uri,

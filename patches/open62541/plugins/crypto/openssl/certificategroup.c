@@ -1032,23 +1032,29 @@ static EVP_PKEY *
 openSSLLoadPublicKey(const UA_ByteString *data) {
     size_t line;
     const UA_Byte *at = data->data;
+    X509 *cert = NULL;
     BIO *bio = UA_OpenSSL_PemBio(data, &line);
-    X509 *cert = bio ? PEM_read_bio_X509(bio, NULL, UA_OpenSSL_refusePassword, NULL) : NULL;
+    if(bio)
+        cert = PEM_read_bio_X509(bio, NULL, UA_OpenSSL_refusePassword, NULL);
     BIO_free(bio);
     if(!cert)
         cert = d2i_X509(NULL, &at, (long)data->length);
     X509_REQ *csr = NULL;
     if(!cert) {
         bio = UA_OpenSSL_PemBio(data, &line);
-        csr = bio ? PEM_read_bio_X509_REQ(bio, NULL, UA_OpenSSL_refusePassword, NULL)
-                  : NULL;
+        if(bio)
+            csr = PEM_read_bio_X509_REQ(bio, NULL, UA_OpenSSL_refusePassword, NULL);
         BIO_free(bio);
     }
     if(!cert && !csr) {
         at = data->data;
         csr = d2i_X509_REQ(NULL, &at, (long)data->length);
     }
-    EVP_PKEY *key = cert ? X509_get_pubkey(cert) : csr ? X509_REQ_get_pubkey(csr) : NULL;
+    EVP_PKEY *key = NULL;
+    if(cert)
+        key = X509_get_pubkey(cert);
+    else if(csr)
+        key = X509_REQ_get_pubkey(csr);
     X509_free(cert);
     X509_REQ_free(csr);
     return key;

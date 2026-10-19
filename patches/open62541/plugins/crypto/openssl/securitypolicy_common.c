@@ -1543,7 +1543,8 @@ UA_OpenSSL_LoadPemCrl(const UA_ByteString *crl) {
     BIO *bio = UA_OpenSSL_PemBio(crl, &line);
     if(!bio)
         return NULL;
-    X509_CRL *result = PEM_read_bio_X509_CRL(bio, NULL, UA_OpenSSL_refusePassword, NULL);
+    X509_CRL *result =
+        PEM_read_bio_X509_CRL(bio, NULL, UA_OpenSSL_refusePassword, NULL);
     BIO_free(bio);
     return result;
 }
