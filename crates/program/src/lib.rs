@@ -225,8 +225,8 @@ impl Session {
     }
 
     /// Opens a writer on `config.channels` as the session's subject, and waits until
-    /// the node opened it. The node must be the home of their index. A write takes no
-    /// turn: it runs beside the requests and the reads.
+    /// the node opened it. The node must be the home of each of their indexes. A write
+    /// takes no turn: it runs beside the requests and the reads.
     ///
     /// # Errors
     ///
@@ -234,14 +234,14 @@ impl Session {
     /// open is over `OPEN_BYTES_MAX`, each with nothing sent. The error that ended the
     /// renewal, when it ended before or during the open. Else [`Error::Refused`] when
     /// the node stopped the write (`UNKNOWN` for a name of no channel, `FAILED` when
-    /// the home cannot open the write, `MALFORMED` for channels of more than one index
-    /// or a lease that the home refuses, `NOT_HOME` when the node is not the home of
-    /// the index, `REFUSED` for a signature that the node refuses, `BUSY` when the node
-    /// has no room for the open), [`Error::Transport`], [`Error::Message`] for places
-    /// that `wire` refuses or a stream that ends before the last place,
-    /// [`Error::Unplaced`] for places that hold no place of a channel of the open, and
-    /// [`Error::Pool`] when no block of [`Config::pool`] holds the open, or the head
-    /// and an end of each place of a frame, which stops the stream.
+    /// the home cannot open the write, `MALFORMED` for a lease that the home refuses,
+    /// `NOT_HOME` when the node is not the home of an index, `REFUSED` for a signature
+    /// that the node refuses, `BUSY` when the node has no room for the open),
+    /// [`Error::Transport`], [`Error::Message`] for places that `wire` refuses or a
+    /// stream that ends before the last place, [`Error::Unplaced`] for places that hold
+    /// no place of a channel of the open, and [`Error::Pool`] when no block of
+    /// [`Config::pool`] holds the open, or the head and an end of each place of a
+    /// frame, which stops the stream.
     pub async fn writer(&self, config: write::Config) -> Result<Writer, Error> {
         let shared = &self.0.0;
         let write::Config {
