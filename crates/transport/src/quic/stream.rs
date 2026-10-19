@@ -2559,6 +2559,43 @@ mod tests {
         });
     }
 
+    #[test]
+    fn a_late_copy_of_a_reset_keeps_the_connection() {
+        testing::run(1, |shard| {
+            let mut pair = narrow(shard);
+            let mut reset = open_sender(&mut pair, Class::Complete);
+            let now = pair.now();
+            write(&mut pair.client, now, &mut reset, &[shard.block(b"a")]);
+            pair.run(RUN);
+            // Not accepted, so noq-proto keeps the stream after the reset.
+            fill(&mut pair, shard, &mut reset);
+            pair.client.endpoint.reset(now, &mut reset, Code(9));
+            let dropped = pair.client.sent.len();
+            pair.client.drops = 1;
+            pair.run(RUN);
+            let mut other = open_sender(&mut pair, Class::Complete);
+            let message = vec![1; MESSAGE_MAX];
+            let now = pair.now();
+            write(&mut pair.client, now, &mut other, &[shard.block(&message)]);
+            pair.run(RUN);
+            let (_, _, late) = pair.client.sent[dropped].clone();
+            let meta = pair::meta(pair::CLIENT, &late);
+            pair.server.endpoint.receive(pair.now(), &meta, &late);
+            pair.run(RUN);
+            let closed = events(&pair.server)
+                .into_iter()
+                .find(|event| matches!(event, Event::Closed { .. }));
+            assert_eq!(closed, None);
+            let now = pair.now();
+            let mut incoming = accept(&mut pair.server);
+            let read = next(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, Err(Error::Reset { code: Code(9) }));
+            let mut incoming = accept(&mut pair.server);
+            let read = drain(&mut pair.server, now, &mut incoming.receiver);
+            assert_eq!(read, (vec![message], false));
+        });
+    }
+
     /// A window of two of the largest messages, so the receive budget holds three.
     const NARROW: usize = 2 * MESSAGE_MAX;
 

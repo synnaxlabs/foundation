@@ -1167,6 +1167,49 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_reset_near_the_window() {
+        let mut server = make(Side::Server);
+        let window = server.local_max_data;
+        let a = StreamId::new(Side::Client, Dir::Uni, 0);
+        let b = StreamId::new(Side::Client, Dir::Uni, 1);
+        let data = Bytes::from(vec![0; usize::try_from(window - 1).unwrap()]);
+        let len = data.len();
+        server
+            .received(
+                frame::Stream {
+                    id: a,
+                    offset: 0,
+                    fin: false,
+                    data,
+                },
+                len,
+            )
+            .unwrap();
+        let reset = frame::ResetStream {
+            id: b,
+            error_code: 0u32.into(),
+            final_offset: 1u32.into(),
+        };
+        server.received_reset(reset).unwrap();
+        let data = Bytes::from_static(&[0]);
+        server
+            .received(
+                frame::Stream {
+                    id: a,
+                    offset: window - 1,
+                    fin: false,
+                    data,
+                },
+                1,
+            )
+            .unwrap();
+        assert_eq!(
+            server.received_reset(reset).map_err(|e| e.code),
+            Ok(ShouldTransmit(false))
+        );
+    }
+
+    #[test]
     fn recv_stopped() {
         let mut client = make(Side::Client);
         let id = StreamId::new(Side::Server, Dir::Uni, 0);
