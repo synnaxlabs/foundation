@@ -1789,6 +1789,16 @@ impl Connection {
                 );
             }
 
+            if ack_only {
+                // A GSO batch takes the size of its first datagram, so a batch that went
+                // on after this small packet would hold packets of padding alone.
+                let last_pn = builder.packet_number;
+                builder.finish_and_track(now, self, path_id, pad_datagram);
+                return PollPathSpaceStatus::Send {
+                    last_packet_number: last_pn,
+                };
+            }
+
             // Now we need to finish the packet.  Before we do so we need to know if we will
             // be coalescing the next packet into this one, or will be ending the datagram
             // as well.  Because if this is the last packet in the datagram more padding

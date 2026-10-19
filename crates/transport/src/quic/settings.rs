@@ -872,6 +872,35 @@ mod tests {
             assert!(len < 100, "{len}");
         }
 
+        /// A GSO batch takes the size of its first datagram, so a batch that went on
+        /// after a small ACK-only datagram would hold datagrams of padding alone.
+        #[test]
+        fn an_ack_with_a_full_congestion_window_leaves_alone_in_its_batch() {
+            let sent = testing::run(1, |shard| {
+                let idle = Span::from_nanos(10 * Span::SECOND.nanos());
+                let mut pair = Pair::new(shard, idle, ROUND_TRIP);
+                let config = shard.config(pair::CLIENT_KEY, idle);
+                let setup = testing::setup(&config);
+                pair.client.endpoint = Endpoint::new(&setup, CLIENT_SHARD, BATCH_MAX);
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_secs(2));
+                let mut streams = pair.client.connection().streams();
+                let stream = streams.open(Dir::Uni).expect("a stream");
+                let mut send = pair.client.connection().send_stream(stream);
+                send.write(&vec![0; 100_000]).expect("written");
+                pair.server.connection().ping();
+                let before = pair.client.sent.len();
+                pair.run(ROUND_TRIP + MAX_ACK_DELAY);
+                pair.client.sent[before..]
+                    .iter()
+                    .map(|(at, _, bytes)| (*at, bytes.len()))
+                    .collect::<Vec<_>>()
+            });
+            let &(ack, len) = sent.iter().find(|(_, len)| *len < 100).expect("an ACK");
+            let batch: Vec<_> = sent.iter().filter(|(at, _)| *at == ack).collect();
+            assert_eq!(batch, [&(ack, len)]);
+        }
+
         const ROUND_TRIP: Duration = Duration::from_millis(125);
 
         /// The max ACK delay of noq-proto, which `transport` keeps.
