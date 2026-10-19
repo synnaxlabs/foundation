@@ -1,14 +1,14 @@
 # The configuration of `cargo nextest` in CI, which the Test step of `check` gives with
 # `--config-file`.
 
-# On Windows, a heap commits its whole length at its allocation. Each test of
-# `program::it` makes pools of up to about 500 MB, so several at once can pass the
-# commit limit of the runner, and a heap allocation fails. One at a time, they take
-# about 21 s in all.
+# On Windows, a heap commits its whole length at its allocation. A test of `program`
+# that connects makes two pools of 504 MiB, so several at once can pass the commit
+# limit of the runner, and a heap allocation fails. One at a time, the tests of
+# `program::it` and `program::lost` take about 17 s in all.
 [test-groups]
-program-it = { max-threads = 1 }
+program = { max-threads = 1 }
 
 [[profile.default.overrides]]
 platform = "cfg(windows)"
-filter = "binary_id(program::it)"
-test-group = "program-it"
+filter = "package(program) & kind(test)"
+test-group = "program"
