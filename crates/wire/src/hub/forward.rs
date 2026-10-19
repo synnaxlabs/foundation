@@ -8,7 +8,7 @@
 //! - [`Forward`]: kind 8, then the count of places (`u32`).
 //! - [`places`]: each place (`u32`).
 
-use super::{Error, Fields};
+use super::{Error, Fields, Writer};
 
 const KIND: u8 = 8;
 
@@ -29,11 +29,12 @@ impl Forward {
     ///
     /// # Panics
     ///
-    /// When `places` is 0.
-    pub fn encode(&self, out: &mut [u8; Self::LEN]) {
+    /// When `places` is 0, or `out` is not [`Forward::LEN`] bytes.
+    pub fn encode(&self, out: &mut [u8]) {
         assert!(self.places > 0, "a forward names at least one place");
-        let [p0, p1, p2, p3] = self.places.to_le_bytes();
-        *out = [KIND, p0, p1, p2, p3];
+        let mut out = Writer::new(out, Self::LEN);
+        out.put(&[KIND]);
+        out.put(&self.places.to_le_bytes());
     }
 
     /// The forward in `message`.
@@ -205,6 +206,18 @@ mod tests {
         fn panics_on_a_forward_of_no_place() {
             let forward = Forward { places: 0 };
             forward.encode(&mut [0; Forward::LEN]);
+        }
+
+        #[test]
+        #[should_panic(expected = "out has 4 bytes, and the message has 5")]
+        fn panics_when_out_is_short() {
+            Forward { places: 1 }.encode(&mut [0; 4]);
+        }
+
+        #[test]
+        #[should_panic(expected = "out has 6 bytes, and the message has 5")]
+        fn panics_when_out_is_long() {
+            Forward { places: 1 }.encode(&mut [0; 6]);
         }
 
         proptest! {
