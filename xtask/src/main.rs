@@ -55,7 +55,7 @@ fn main() -> ExitCode {
                     Some(end) => (&rest[..end], &rest[end + 1..]),
                     None => (rest, &[][..]),
                 };
-                test::run(root, part, flags, skipped)
+                test::run(root, cargo().get_program(), part, flags, skipped)
             }),
         ["fuzz"] => fuzz::run(root, fuzz::SECONDS),
         ["fuzz", seconds] => fuzz::seconds(seconds)
@@ -822,6 +822,57 @@ mod tests {
             .take_while(|(i, line)| *i == 0 || !line.starts_with("      - "))
             .map(|(_, line)| line)
             .collect()
+    }
+
+    #[test]
+    fn each_step_of_check_runs_in_its_part() {
+        // A step whose `if` names no value of `part` skips on each OS, and passes.
+        let check = check_job();
+        let mut steps: Vec<(&str, Option<&str>)> = Vec::new();
+        for line in check
+            .iter()
+            .skip_while(|line| *line != "    steps:")
+            .skip(1)
+        {
+            let line = line.as_str();
+            if line.starts_with("      - ") {
+                steps.push(("run", None));
+            }
+            let Some((name, part)) = steps.last_mut() else {
+                continue;
+            };
+            let key = line.trim_start_matches([' ', '-']);
+            if *name == "run" {
+                if let Some(found) = key.strip_prefix("name: ") {
+                    *name = found;
+                } else if let Some(found) = key.strip_prefix("uses: ") {
+                    *name = found;
+                }
+            }
+            if let Some((_, rest)) = line.split_once("matrix.part == '") {
+                *part = rest.split_once('\'').map(|(found, _)| found);
+            }
+        }
+        let (lint, test, serial) = (Some("lint"), Some("test"), Some("serial"));
+        assert_eq!(
+            steps,
+            [
+                ("actions/checkout@v4", None),
+                ("Swatinem/rust-cache@v2", None),
+                ("taiki-e/install-action@v2", test),
+                ("actions/setup-python@v5", None),
+                ("run", None),
+                ("Format", lint),
+                ("Clippy", lint),
+                ("Layers", lint),
+                ("Globals", lint),
+                ("Skips", lint),
+                ("Oracles", lint),
+                ("Test", test),
+                ("Serial tests", serial),
+                ("Root tests", test),
+            ]
+        );
     }
 
     #[test]

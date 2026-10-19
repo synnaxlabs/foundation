@@ -185,7 +185,7 @@ fn problems(root: &Path) -> Result<Vec<String>, String> {
                 continue;
             }
         };
-        let tests = if module.entry && file.items.iter().any(main) {
+        let tests = if alone(module.entry, &file) {
             Tests::Each
         } else {
             module.tests
@@ -229,9 +229,11 @@ fn roots(root: &Path) -> Result<Vec<Module>, String> {
                 .parent()
                 .ok_or_else(|| format!("{} has no directory", file.display()))?
                 .to_path_buf();
-            let kinds = field::list(value, "kind")?;
-            let tested = field::flag(value, "test")?;
-            let tests = if tested { Tests::Marked } else { Tests::None };
+            let tests = if field::flag(value, "test")? {
+                Tests::Marked
+            } else {
+                Tests::None
+            };
             modules.push(Module {
                 file,
                 above: Vec::new(),
@@ -241,16 +243,30 @@ fn roots(root: &Path) -> Result<Vec<Module>, String> {
                 path: Vec::new(),
                 gates: Vec::new(),
                 tests,
-                entry: tested && kinds.iter().any(|k| k == "test" || k == "bench"),
+                entry: entry(value)?,
             });
         }
     }
     Ok(modules)
 }
 
+/// Reports whether `cargo test` runs `target`, a target of cargo metadata, as a test or
+/// bench target.
+pub(crate) fn entry(target: &serde_json::Value) -> Result<bool, String> {
+    let kinds = field::list(target, "kind")?;
+    Ok(field::flag(target, "test")?
+        && kinds.iter().any(|k| k == "test" || k == "bench"))
+}
+
+/// Reports whether a target that `cargo test` runs as a test or bench target when
+/// `entry` holds, with the root file `file`, is a program with no test harness.
+pub(crate) fn alone(entry: bool, file: &syn::File) -> bool {
+    entry && file.items.iter().any(main)
+}
+
 /// Reports whether `item`, an item of the root file of a target, makes the target a
 /// program with no test harness.
-pub(crate) fn main(item: &Item) -> bool {
+fn main(item: &Item) -> bool {
     match item {
         Item::Fn(function) => function.sig.ident == "main",
         Item::Macro(call) => call
