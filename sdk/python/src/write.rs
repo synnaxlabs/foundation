@@ -11,6 +11,7 @@ use numpy::{
     Element, PyArray1, PyArrayDescrMethods, PyArrayMethods, PyUntypedArray,
     PyUntypedArrayMethods,
 };
+use program::write::End;
 use pyo3::exceptions::{
     PyKeyError, PyOverflowError, PyRuntimeError, PyTypeError, PyValueError,
 };
@@ -233,6 +234,7 @@ impl Writer {
                 Err(rejected)
             }
             Outcome::Lost { range } => self.lost(py, range, places),
+            Outcome::Ended(end) => Err(error(py, &ended(end))),
         }
     }
 
@@ -510,6 +512,16 @@ fn rejection(refusal: Refusal) -> (&'static str, &'static str) {
         ),
         Refusal::Large => ("large", "the frame is too large for one write: split it"),
     }
+}
+
+/// The error of a writer whose one group ended with `end`: the error of a stream
+/// that the node stopped for the same cause.
+fn ended(end: End) -> sdk::Error {
+    let refusal = match end {
+        End::Removed => program::Refusal::Unknown,
+        End::Failed => program::Refusal::Failed,
+    };
+    sdk::Error::Stream(program::Error::Refused(refusal))
 }
 
 /// The value of `object` for `place`.
@@ -805,6 +817,7 @@ fn fill<'a, T: Copy>(
 mod tests {
     use std::ffi::CStr;
 
+    use program::write::End;
     use pyo3::prelude::*;
     use pyo3::types::PyDict;
     use sdk::write::Place;
@@ -855,6 +868,22 @@ np.array = guard(np.array, array)
 
     // The `// SAFETY:` comment of `raw` relies on this bound, and a read past the
     // array changes no byte that a test on CPython sees.
+    /// The end of the one group of a writer raises `Stopped` with the code of a stream
+    /// that the node stopped for the same cause.
+    #[test]
+    fn ended_raises_stopped_with_the_code_of_each_end() {
+        Python::initialize();
+        Python::attach(|py| {
+            for (end, code) in [(End::Removed, "unknown"), (End::Failed, "failed")] {
+                let error = crate::error(py, &super::ended(end));
+                assert_eq!(error.get_type(py).name().unwrap().to_string(), "Stopped");
+                let given: String =
+                    error.value(py).getattr("code").unwrap().extract().unwrap();
+                assert_eq!(given, code, "{end:?}");
+            }
+        });
+    }
+
     #[test]
     fn fill_pulls_no_sample_after_the_last_chunk() {
         let mut bytes = [0_u8; 3 * 8];
