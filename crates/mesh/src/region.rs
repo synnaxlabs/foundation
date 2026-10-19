@@ -1403,13 +1403,14 @@ mod tests {
         assert_eq!(state.keys().count(), MEMBERS_MAX);
     }
 
-    // So a repeat of an applied join stays safe in a full region.
     #[test]
-    fn a_join_for_a_member_of_a_full_region_is_a_duplicate() {
-        let mut state = holding_members(MEMBERS_MAX);
+    fn a_repeat_of_the_join_that_fills_a_region_is_a_duplicate() {
+        let mut state = holding_members(MEMBERS_MAX - 1);
+        let filled = join(7, 200, "plant.edge.a");
+        assert_eq!(apply_join(&mut state, filled.clone()), Ok(false));
         assert_eq!(
-            apply_join(&mut state, join(7, 1, "plant.edge.a")),
-            Err(Unfit::Duplicate { key: node(1) }.into())
+            apply_join(&mut state, filled),
+            Err(Unfit::Duplicate { key: node(200) }.into())
         );
     }
 

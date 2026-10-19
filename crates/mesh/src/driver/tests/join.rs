@@ -157,6 +157,42 @@ fn a_join_whose_entry_the_region_refuses_gives_the_refusal() {
     });
 }
 
+#[test]
+fn a_voter_stamps_no_join_to_a_full_region() {
+    solo(|node, tasks| async move {
+        let mesh = holding(&node, &tasks, region::MEMBERS_MAX).await;
+        let stamped = mesh.stamp(request(200, 8, &[])).err();
+        let full = Refusal::Refused(region::Refused::Unfit(Unfit::Full));
+        assert_eq!(stamped, Some(full));
+    });
+}
+
+// Both joins stamp at 127 members, so only the apply refuses the second.
+#[test]
+fn the_apply_refuses_the_second_of_two_joins_that_fill_a_region() {
+    solo(|node, tasks| async move {
+        let mesh = holding(&node, &tasks, region::MEMBERS_MAX - 1).await;
+        let mut calls =
+            [200, 201].map(|id| Box::pin(mesh.admit(public(id), request(id, 8, &[]))));
+        let polls = poll_each(&mut calls).await;
+        assert!(polls.iter().all(Poll::is_pending));
+        let [first, second] = calls;
+        assert_eq!(first.await, Ok(Ok(())));
+        let full = Refusal::Refused(region::Refused::Unfit(Unfit::Full));
+        assert_eq!(second.await, Ok(Err(full)));
+        assert_eq!(mesh.member(key(201)), None);
+        let members = mesh.group.borrow().state.keys().count();
+        assert_eq!(members, region::MEMBERS_MAX);
+    });
+}
+
+// A mesh of `count` founding members, led by member 1, with reusable ticket 8.
+async fn holding(node: &sim::node::Node, tasks: &Tasks, count: usize) -> Mesh {
+    let ids: Vec<u8> = (1..=u8::try_from(count).unwrap()).collect();
+    let config = config(node, tasks, 1, &ids, &[1]).await;
+    recorded_with(node, config, &[ticket_of(8, "plant", true, LAST)]).await
+}
+
 // A member of the same card key and public key that another ticket admitted is no
 // earlier answer to this request.
 #[test]

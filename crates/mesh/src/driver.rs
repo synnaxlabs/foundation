@@ -6091,6 +6091,22 @@ mod tests {
         }
 
         #[test]
+        fn refuses_a_founding_of_more_than_members_max_members() {
+            solo(|node, tasks| async move {
+                let ids: Vec<u8> = (1..=129).collect();
+                let config = config(&node, &tasks, 1, &ids, &[1]).await;
+                let opened = Mesh::start(config).await.err();
+                assert_eq!(opened, Some(Error::Member(Unfit::Full)));
+                assert_eq!(
+                    node.files().list(Path::new("")).await,
+                    Ok(vec![BLOB.into()])
+                );
+            });
+            let text = "the region holds 128 members, the most that it can hold";
+            assert_eq!(Error::Member(Unfit::Full).to_string(), text);
+        }
+
+        #[test]
         fn refuses_a_private_key_that_is_not_the_key_of_the_member() {
             solo(|node, tasks| async move {
                 let config = Config {
