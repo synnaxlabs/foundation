@@ -752,11 +752,20 @@ void shim_establish(UA_ConnectionManager *cm, uintptr_t id, void *application,
              message);
 }
 
+/* The callbacks of a subscription and of each of its monitored items. */
+typedef struct {
+    UA_Client_DataChangeNotificationCallback changed;
+    UA_Client_StatusChangeNotificationCallback ended;
+    UA_Client_DeleteSubscriptionCallback deleted;
+} shim_watch;
+
 /* Gives a client on `el` that sends and takes at most `chunks` chunks in a message
  * and queues at most `queued` intermediate chunks of all messages, or NULL when out
- * of memory. A failed copy of the application URI or of the URI of namespace 0 gives
- * a client with that URI empty (#2566). */
-UA_Client *shim_client_new(UA_EventLoop *el, UA_UInt32 chunks, UA_UInt32 queued) {
+ * of memory. Its subscription and monitored items call the callbacks of `watch`. A
+ * failed copy of the application URI or of the URI of namespace 0 gives a client with
+ * that URI empty (#2566). */
+UA_Client *shim_client_new(UA_EventLoop *el, UA_UInt32 chunks, UA_UInt32 queued,
+                           const shim_watch *watch) {
     UA_ClientConfig config;
     memset(&config, 0, sizeof(config));
     config.logging = &loop_of(el)->logger;
@@ -770,6 +779,7 @@ UA_Client *shim_client_new(UA_EventLoop *el, UA_UInt32 chunks, UA_UInt32 queued)
      * against this count, not against the count of the peer. */
     config.localConnectionConfig.localMaxChunkCount = chunks;
     config.localConnectionConfig.localMaxQueuedChunks = queued;
+    config.clientContext = (void *)(uintptr_t)watch;
     /* No custom types: `value::mistyped` finds the type of each decoded value in
      * `UA_TYPES`. */
     return UA_Client_newWithConfig(&config);
@@ -1130,13 +1140,6 @@ static const UA_DataType *answer_type(size_t service) {
     return &UA_TYPES[SERVICES[service].answer];
 }
 
-/* The callbacks of a subscription and of each of its monitored items. */
-typedef struct {
-    UA_Client_DataChangeNotificationCallback changed;
-    UA_Client_StatusChangeNotificationCallback ended;
-    UA_Client_DeleteSubscriptionCallback deleted;
-} shim_watch;
-
 /* Sends `request`, a CreateMonitoredItems request, on `client`. Each item calls
  * `changed` with its client handle in `request` as its context, as open62541 gives the
  * items handles of its own. */
@@ -1167,16 +1170,17 @@ static UA_StatusCode monitor(UA_Client *client,
 
 /* Sends `request`, a request of `service`, on `client`, and has `callback` called with
  * `data` and the answer. A CreateSubscription gives `data` to the subscription and
- * `watch` its callbacks, and a CreateMonitoredItems `watch->changed` to each item.
+ * the callbacks of the client, and a CreateMonitoredItems `changed` to each item.
  * Writes the id of the request to `id`. The request times out only after 2^32 - 1 ms
  * (49.7 days), so in practice it ends at its answer or at the close of the channel. */
 static UA_StatusCode send(UA_Client *client, void *request, size_t service,
                           UA_ClientAsyncServiceCallback callback, void *data,
-                          const shim_watch *watch, UA_UInt32 *id) {
+                          UA_UInt32 *id) {
     /* open62541 takes the timeout hint of a request from the config, and makes 0
      * 2^32 - 1 ms (`src/client/ua_client.c`, lines 460 and 915). The server gets the
      * hint 0. A send keeps the handle that it gives a request with handle 0. */
     UA_ClientConfig *config = UA_Client_getConfig(client);
+    const shim_watch *watch = (const shim_watch *)config->clientContext;
     UA_UInt32 timeout = config->timeout;
     config->timeout = 0;
     ((UA_RequestHeader *)request)->requestHandle = 0;
@@ -1206,15 +1210,15 @@ UA_StatusCode shim_client_read(UA_Client *client, UA_ReadRequest *request,
                                UA_ClientAsyncReadCallback callback, void *data,
                                UA_UInt32 *id) {
     return send(client, request, SERVICE_READ, (UA_ClientAsyncServiceCallback)callback,
-                data, NULL, id);
+                data, id);
 }
 
 /* Sends `request`, a request of `service`, on `client` as `send` does, with `callback`
- * for the answer and `watch` for a subscription. */
+ * for the answer. */
 UA_StatusCode shim_client_service(UA_Client *client, void *request, size_t service,
                                   UA_ClientAsyncServiceCallback callback, void *data,
-                                  const shim_watch *watch, UA_UInt32 *id) {
-    return send(client, request, service, callback, data, watch, id);
+                                  UA_UInt32 *id) {
+    return send(client, request, service, callback, data, id);
 }
 
 /* Gives the request type of `service` when not `answer`, else its answer type, for the

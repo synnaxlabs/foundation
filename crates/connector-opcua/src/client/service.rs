@@ -8,7 +8,6 @@ use std::ptr::{self, NonNull};
 use std::task::Poll;
 
 use super::browse::{Cause, Foreign};
-use super::subscription;
 use super::{Calls, Client, id_bytes};
 use crate::alloc;
 use crate::ffi::{self, Service, Status};
@@ -622,7 +621,6 @@ impl Client {
                 request.service,
                 served,
                 ptr::from_ref::<Calls>(calls).cast_mut().cast(),
-                &raw const subscription::WATCH,
                 &raw mut key,
             )
         });

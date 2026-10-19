@@ -35,7 +35,7 @@ pub(crate) mod subscription;
 pub(crate) mod tests;
 
 use service::{Bytes, Item, Request, Sizes};
-use subscription::Change;
+use subscription::{Change, WATCH};
 
 /// The most requests of a client in flight, its Publish requests included. A request
 /// past it waits until one ends.
@@ -85,6 +85,7 @@ const _: () = assert!(
 
 /// Gives a client of open62541 on the loop `el` with no connection. It takes at most
 /// [`CHUNKS`] chunks in a message and queues at most [`QUEUED`] intermediate chunks.
+/// Its subscription calls the callbacks of [`WATCH`].
 ///
 /// # Safety
 ///
@@ -96,7 +97,7 @@ const _: () = assert!(
 /// does when it has no memory.
 pub(crate) unsafe fn unconnected(el: *mut ffi::EventLoop) -> NonNull<ffi::Client> {
     // SAFETY: as the caller ensures.
-    let client = unsafe { ffi::shim_client_new(el, CHUNKS, QUEUED) };
+    let client = unsafe { ffi::shim_client_new(el, CHUNKS, QUEUED, &raw const WATCH) };
     let client = NonNull::new(client).unwrap_or_else(|| alloc::exhausted());
     // SAFETY: the client lives.
     unsafe { ffi::shim_client_publishes(client.as_ptr(), PUBLISHES) };

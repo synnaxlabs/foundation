@@ -768,6 +768,7 @@ unsafe extern "C" {
         el: *mut EventLoop,
         chunks: u32,
         queued: u32,
+        watch: *const Watch,
     ) -> *mut Client;
     pub(crate) fn UA_Client_run_iterate(client: *mut Client, timeout_ms: u32) -> u32;
     pub(crate) fn UA_Client_delete(client: *mut Client);
@@ -826,7 +827,6 @@ unsafe extern "C" {
         service: Service,
         callback: Served,
         data: *mut c_void,
-        watch: *const Watch,
         id: *mut u32,
     ) -> u32;
     pub(crate) fn shim_answer_move(
