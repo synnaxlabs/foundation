@@ -47,16 +47,17 @@ enum Timed {
 pub(crate) fn run() {
     let (rounds, calls) = (5, 1_000);
     let legs = legs(rounds, calls);
-    let (program, sdk) = lines(rounds, calls, Timed::Write);
-    let (program_read, sdk_read) = lines(rounds, calls, Timed::Read);
-    let alone = |calls, timed| {
-        let (mut rig, node, subject) = crate::plant::planted();
-        let spans = spans(&node, subject, rounds, calls, timed);
-        rig.stop();
-        spans
+    let program_line =
+        |read| alone(|node, subject| program(node, &subject, rounds, calls, read));
+    let sdk_line = |calls, timed| {
+        alone(|node, subject| spans(node, subject, rounds, calls, timed))
     };
-    let twice = alone(calls, Timed::Twice);
-    let held = alone(calls / 2, Timed::Held);
+    let program = program_line(false);
+    let sdk = sdk_line(calls, Timed::Write);
+    let program_read = program_line(true);
+    let sdk_read = sdk_line(calls, Timed::Read);
+    let twice = sdk_line(calls, Timed::Twice);
+    let held = sdk_line(calls / 2, Timed::Held);
     println!(
         "{:<14} {:>6} {:>9} {:>9}",
         "line", "round", "p50 µs", "p99 µs"
@@ -79,19 +80,12 @@ pub(crate) fn run() {
     }
 }
 
-/// The spans of the `program` and the `sdk` line of `rounds` rounds of `calls` writes,
-/// each timed as `timed`, [`Timed::Write`] or [`Timed::Read`], against a node of their
-/// own.
-fn lines(
-    rounds: usize,
-    calls: usize,
-    timed: Timed,
-) -> (Vec<Vec<Duration>>, Vec<Vec<Duration>>) {
+/// The spans of `line` against a node of its own.
+fn alone<T>(line: impl FnOnce(&sdk::Node, sdk::Subject) -> T) -> T {
     let (mut rig, node, subject) = crate::plant::planted();
-    let program = program(&node, &subject, rounds, calls, timed == Timed::Read);
-    let sdk = spans(&node, subject, rounds, calls, timed);
+    let spans = line(&node, subject);
     rig.stop();
-    (program, sdk)
+    spans
 }
 
 /// The spans of each of `rounds` rounds of `calls` writes of 2 values through an
