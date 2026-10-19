@@ -7554,8 +7554,10 @@ mod tests {
             assert_eq!(run.record().stopped, BTreeMap::new());
         }
 
-        // As above, and nodes 1 and 3 elect node 4. Node 2 refuses its votes, its
-        // appends, and its heartbeats as from a node that is not a voter.
+        // As above, and nodes 1 and 3 elect node 4. Nodes 1, 3, and 4 hold the add,
+        // so it is committed, and only node 4 holds a later entry, so only it can
+        // win. Node 2 starts after that, and refuses the appends and heartbeats of
+        // node 4 as from a node that is not a voter.
         #[test]
         fn a_leader_that_was_added_back_keeps_its_group_at_a_lagging_voter() {
             let mut run = Run::new();
@@ -7567,23 +7569,30 @@ mod tests {
                 (&all[..], &[]),
             ];
             let entries = changes(1, &sets);
+            for id in [1, 3] {
+                let holder = Opening {
+                    voters: all.to_vec(),
+                    ..opening(id, &entries, 4, 4)
+                };
+                run.start(holder, false);
+            }
+            let later = Entry {
+                at: at(5),
+                data: Data::Empty,
+            };
+            let added = Opening {
+                id: 4,
+                voters: all.to_vec(),
+                entries: entries.iter().cloned().chain([later]).collect(),
+                commit: 4,
+            };
+            run.start(added, true);
+            run.run(seconds(5));
             let lagging = Opening {
                 voters: all.to_vec(),
                 ..opening(2, &entries, 2, 2)
             };
             run.start(lagging, false);
-            let fresh = Opening {
-                voters: all.to_vec(),
-                ..opening(1, &entries, 0, 0)
-            };
-            run.start(fresh, false);
-            for id in [3, 4] {
-                let added = Opening {
-                    voters: all.to_vec(),
-                    ..opening(id, &entries, 4, 4)
-                };
-                run.start(added, id == 4);
-            }
             run.run(seconds(20));
             let record = run.record();
             assert_eq!(record.stopped, BTreeMap::new());

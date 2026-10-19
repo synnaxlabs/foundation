@@ -401,23 +401,20 @@ impl Raft {
     /// once they are a majority of the other voters of the incoming half of the
     /// newest configuration in the log. An answer counts for `2 × election_ticks`
     /// ticks, and the answers clear when the configuration in force changes. An
-    /// answer from a node that is not a voter of that configuration changes nothing.
+    /// answer from any other node changes nothing.
     #[must_use]
     pub fn removed_by(&mut self, by: node::Key) -> Option<BTreeSet<node::Key>> {
-        if !self.voters.contains(by) {
+        if by == self.key || !self.voters.incoming.contains(&by) {
             return None;
         }
         let now = self.ticks;
         let window = 2 * self.election_ticks;
         self.removals.insert(by, now);
         self.removals.retain(|_, at| now - *at < window);
-        let others = self.voters.incoming.iter().filter(|&&key| key != self.key);
-        let answered: BTreeSet<node::Key> = others
-            .clone()
-            .filter(|key| self.removals.contains_key(key))
-            .copied()
-            .collect();
-        (answered.len() > others.count() / 2).then_some(answered)
+        let others = self.voters.incoming.len()
+            - usize::from(self.voters.incoming.contains(&self.key));
+        let answered: BTreeSet<node::Key> = self.removals.keys().copied().collect();
+        (answered.len() > others / 2).then_some(answered)
     }
 
     /// The state that must be on disk before a message of this term leaves.
