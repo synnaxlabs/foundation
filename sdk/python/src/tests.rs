@@ -284,28 +284,47 @@ fn raises<const N: usize>(cases: [(sdk::Error, &str, &str); N]) {
 }
 
 /// Maps an error of the pool of a reader to `ConnectionError`, as the frames of a
-/// reader come from the node, and each other error as `error` does.
+/// reader come from the node, and each other error, a refusal of the stream included,
+/// as `error` does.
 #[test]
 fn raised_raises_connection_error_for_an_error_of_the_pool_of_a_reader() {
     let pool = sdk::Error::Stream(program::Error::Pool(block::Error::TooLarge {
         requested: 9,
         largest: 8,
     }));
+    let unknown =
+        sdk::Error::Stream(program::Error::Refused(program::Refusal::Unknown));
     let cases = [
         (
             pool,
             "ConnectionError",
             "no block of the pool holds a message or a frame: block of 9 bytes is \
              above the largest block of 8 bytes",
+            None,
         ),
-        (sdk::Error::Closed, "RuntimeError", "the client is closed"),
+        (
+            unknown,
+            "Stopped",
+            "the selector matches no channel, or a channel of the read or write is \
+             unknown or was removed",
+            Some("unknown"),
+        ),
+        (
+            sdk::Error::Closed,
+            "RuntimeError",
+            "the client is closed",
+            None,
+        ),
     ];
     Python::initialize();
     Python::attach(|py| {
-        for (variant, class, text) in cases {
+        for (variant, class, text, code) in cases {
             let error = super::read::raised(py, &variant);
             assert_eq!(error.get_type(py).name().unwrap().to_string(), class);
-            assert_eq!(error.value(py).to_string(), text);
+            let value = error.value(py);
+            assert_eq!(value.to_string(), text);
+            let given = value.getattr("code").ok().map(|code| code.to_string());
+            assert_eq!(given.as_deref(), code);
         }
     });
 }

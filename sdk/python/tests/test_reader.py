@@ -77,7 +77,8 @@ class ReaderTest(unittest.TestCase):
         os.chdir(self.node.dir.name)
         with foundation.connect(self.node.address) as client:
             reader = client.open_reader("plant.a")
-            with self.writes.open_writer("plant.a") as writer:
+            with (foundation.connect(self.node.address) as writes,
+                  writes.open_writer("plant.a") as writer):
                 for value in (1.5, 2.5, 3.5):
                     writer.write(value)
             frames = self.read(reader, 3)
