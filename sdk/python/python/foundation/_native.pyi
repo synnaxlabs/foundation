@@ -189,14 +189,14 @@ class Writer:
         type that is not a scalar, a key that is not a name or a place, or one value
         with no key for a writer of more places; `OverflowError` for a number outside
         its type; `KeyError` for a name of no place; `ValueError` for no value, a place
-        past the places, or two values of one channel; and the error that the
-        `__float__` or `__index__` of a value raised. With each of these, nothing was
-        sent and the writer goes on. Raises `Rejected` when the node refused the frame,
-        and `DataLost` for a lost frame with `on_loss="raise"`; the writer goes on after
-        both. Raises `Stopped` when the node stopped the stream, and `ConnectionError`
-        when the session failed, after which each call raises it again; `RuntimeError`
-        after a close or in a forked process; and `PanicException` when the client's
-        thread panicked.
+        past the places, or two values of one channel; and each error other than
+        `TypeError` that the `__float__` or `__index__` of a value raised. With each of
+        these, nothing was sent and the writer goes on. Raises `Rejected` when the node
+        refused the frame, and `DataLost` for a lost frame with `on_loss="raise"`; the
+        writer goes on after both. Raises `Stopped` when the node stopped the stream,
+        and `ConnectionError` when the session failed, after which each call raises it
+        again; `RuntimeError` after a close or in a forked process; and `PanicException`
+        when the client's thread panicked.
         """
 
     def write_series(self, series: dict[Any, NDArray[Any]]) -> None:

@@ -189,6 +189,17 @@ class WriterTest(unittest.TestCase):
             ({"plant.b": np.True_}, TypeError, f"plant.b holds i64, not {flag}"),
             ({"plant.c": np.False_}, TypeError, f"plant.c holds u8, not {flag}"),
             (
+                {"plant.a": np.array([1.0, 2.0])},
+                TypeError,
+                "plant.a holds f64, not ndarray",
+            ),
+            (
+                {"plant.b": np.array([1, 2])},
+                TypeError,
+                "plant.b holds i64, not ndarray",
+            ),
+            ({"plant.a": np.str_("x")}, TypeError, "plant.a holds f64, not str_"),
+            (
                 {"plant.time": np.True_},
                 TypeError,
                 f"plant.time holds timestamp, not {flag}",
