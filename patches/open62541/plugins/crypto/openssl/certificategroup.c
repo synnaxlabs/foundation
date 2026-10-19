@@ -274,8 +274,9 @@ MemoryCertStore_clear(UA_CertificateGroup *certGroup) {
     }
 }
 
-static UA_Boolean
-openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack);
+static UA_TrustLoad
+openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
+                           size_t *number);
 
 static UA_StatusCode
 reloadCertificates(UA_CertificateGroup *certGroup) {
@@ -292,8 +293,13 @@ reloadCertificates(UA_CertificateGroup *certGroup) {
         return UA_STATUSCODE_BADOUTOFMEMORY;
     }
     for(size_t i = 0; i < context->trustList.trustedCertificatesSize; i++) {
-        if(!openSSLLoadEachCertificate(context->trustList.trustedCertificates[i],
-                                       context->trustedCertificates))
+        size_t number;
+        UA_TrustLoad load = openSSLLoadEachCertificate(
+            context->trustList.trustedCertificates[i], context->trustedCertificates,
+            &number);
+        if(load == UA_TRUSTLOAD_NOMEMORY)
+            return UA_STATUSCODE_BADOUTOFMEMORY;
+        if(load != UA_TRUSTLOAD_GOOD)
             return UA_STATUSCODE_BADINTERNALERROR;
     }
 
@@ -429,40 +435,90 @@ openSSLLoadCertificateStack(const UA_ByteString cert) {
     return result;
 }
 
-/* Pushes each certificate of the bytestring onto the stack. A bytestring that starts
- * with a DER certificate is DER certificates back to back, and fails on any byte
- * after the last one. Else it is PEM: each block that aws-lc reads as a certificate,
- * also a `TRUSTED CERTIFICATE`, and aws-lc skips all else as text. A block with any
- * byte after its certificate fails, also trust settings, which the verify of the
- * group does not apply. Gives false when no certificate loads, and for any error but
- * the end of PEM. */
-static UA_Boolean
-openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack) {
+/* Pushes the certificate at `*at` onto the stack and moves `*at` past it. */
+static UA_TrustLoad
+openSSLPushCertificate(const UA_Byte **at, const UA_Byte *end, STACK_OF(X509) *stack) {
+    X509 *x509 = d2i_X509(NULL, at, (long)(end - *at));
+    if(!x509)
+        return UA_TRUSTLOAD_INVALID;
+    if(!sk_X509_push(stack, x509)) {
+        X509_free(x509);
+        return UA_TRUSTLOAD_NOMEMORY;
+    }
+    return UA_TRUSTLOAD_GOOD;
+}
+
+/* Pushes each certificate of the bytestring onto the stack, and gives why it does
+ * not load, with the number from 1 of the certificate that fails in `number`. A
+ * bytestring that starts with a DER certificate is DER certificates back to back,
+ * and bytes after the last one are one more. Else it is PEM: each block of
+ * `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED CERTIFICATE`. aws-lc reads a line
+ * in pieces of at most 253 bytes, drops the bytes of 0x20 or less as a `char` at the
+ * end of each, so also 0x80 to 0xFF where `char` is signed, and starts a block at a
+ * piece from `-----BEGIN ` to `-----`. It skips other text and a block of another
+ * label, but fails on a block of any label that it cannot read, such as an empty one,
+ * damaged base64, or an `END` line that does not name its label, which counts as one
+ * more. A block with any byte after its certificate fails, also trust settings,
+ * which the verify of the group does not apply. Clears the error queue of the thread.
+ */
+static UA_TrustLoad
+openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
+                           size_t *number) {
     const UA_Byte *at = cert.data;
     const UA_Byte *end = cert.data + cert.length;
-    X509 *x509 = d2i_X509(NULL, &at, (long)cert.length);
-    if(x509) {
-        do
-            sk_X509_push(stack, x509);
-        while(at < end && (x509 = d2i_X509(NULL, &at, (long)(end - at))));
-        return at == end;
+    *number = 1;
+    UA_TrustLoad load = openSSLPushCertificate(&at, end, stack);
+    if(load != UA_TRUSTLOAD_INVALID) {
+        while(load == UA_TRUSTLOAD_GOOD && at < end) {
+            (*number)++;
+            load = openSSLPushCertificate(&at, end, stack);
+        }
+        ERR_clear_error();
+        return load;
     }
     BIO *bio = BIO_new_mem_buf((void *)cert.data, (ossl_ssize_t)cert.length);
-    if(!bio)
-        return false;
-    int pushed = sk_X509_num(stack);
-    while((x509 = PEM_read_bio_X509_AUX(bio, NULL, UA_OpenSSL_refusePassword,
-                                        NULL))) {
-        sk_X509_push(stack, x509);
-        /* The reader keeps the bytes after the certificate as its aux. */
-        if(i2d_X509_AUX(x509, NULL) != i2d_X509(x509, NULL))
-            break;
+    if(!bio) {
+        ERR_clear_error();
+        return UA_TRUSTLOAD_NOMEMORY;
+    }
+    *number = 0;
+    load = UA_TRUSTLOAD_GOOD;
+    unsigned char *der;
+    long length;
+    char *name;
+    while(load == UA_TRUSTLOAD_GOOD &&
+          PEM_bytes_read_bio(&der, &length, &name, PEM_STRING_X509_TRUSTED, bio,
+                             UA_OpenSSL_refusePassword, NULL)) {
+        (*number)++;
+        at = der;
+        load = openSSLPushCertificate(&at, der + length, stack);
+        if(load == UA_TRUSTLOAD_GOOD && at != der + length)
+            load = UA_TRUSTLOAD_TRAILING;
+        OPENSSL_free(der);
+        OPENSSL_free(name);
     }
     BIO_free(bio);
     uint32_t error = ERR_peek_last_error();
     ERR_clear_error();
-    return !x509 && sk_X509_num(stack) > pushed && ERR_GET_LIB(error) == ERR_LIB_PEM &&
-           ERR_GET_REASON(error) == PEM_R_NO_START_LINE;
+    if(load != UA_TRUSTLOAD_GOOD)
+        return load;
+    if(ERR_GET_LIB(error) != ERR_LIB_PEM ||
+       ERR_GET_REASON(error) != PEM_R_NO_START_LINE) {
+        (*number)++;
+        return UA_TRUSTLOAD_INVALID;
+    }
+    return *number > 0 ? UA_TRUSTLOAD_GOOD : UA_TRUSTLOAD_EMPTY;
+}
+
+/* Is `now` from `notBefore` up to, not at, `notAfter` of the certificate, to the
+ * second? */
+static UA_Boolean
+openSSLInsideWindow(X509 *cert, UA_DateTime now) {
+    UA_DateTime since = now - UA_DATETIME_UNIX_EPOCH;
+    /* The second that holds the time, also before the epoch */
+    int64_t second = since / UA_DATETIME_SEC - (since % UA_DATETIME_SEC < 0);
+    return X509_cmp_time_posix(X509_get_notBefore(cert), second) == -1 &&
+           X509_cmp_time_posix(X509_get_notAfter(cert), second) == 1;
 }
 
 /* Return the first matching issuer candidate AFTER prev */
@@ -635,14 +691,8 @@ openSSL_verifyChain(UA_CertificateGroup *cg, MemoryCertStore *ctx, STACK_OF(X509
 
     if (ret == UA_STATUSCODE_GOOD) {
         /* Verification Step: Validity Period */
-        ASN1_TIME *notBefore = X509_get_notBefore(cert);
-        ASN1_TIME *notAfter = X509_get_notAfter(cert);
         UA_EventLoop *el = ctx->eventLoop;
-        UA_DateTime since = el->dateTime_now(el) - UA_DATETIME_UNIX_EPOCH;
-        /* The second that holds the time, also before the epoch */
-        int64_t now = since / UA_DATETIME_SEC - (since % UA_DATETIME_SEC < 0);
-        if(X509_cmp_time_posix(notBefore, now) != -1 ||
-           X509_cmp_time_posix(notAfter, now) != 1)
+        if(!openSSLInsideWindow(cert, el->dateTime_now(el)))
             return (depth == 0) ? UA_STATUSCODE_BADCERTIFICATETIMEINVALID :
                 UA_STATUSCODE_BADCERTIFICATEISSUERTIMEINVALID;
     }
@@ -821,6 +871,26 @@ UA_CertificateUtils_getApplicationUri(const UA_ByteString *certificate,
     X509_free(certificateX509);
     sk_GENERAL_NAME_pop_free(pNames, GENERAL_NAME_free);
     return ret;
+}
+
+UA_TrustLoad
+UA_CertificateUtils_checkTrust(const UA_ByteString *trust, size_t *number) {
+    STACK_OF(X509) *stack = sk_X509_new_null();
+    if(!stack)
+        return UA_TRUSTLOAD_NOMEMORY;
+    UA_TrustLoad load = openSSLLoadEachCertificate(*trust, stack, number);
+    sk_X509_pop_free(stack, X509_free);
+    return load;
+}
+
+UA_StatusCode
+UA_CertificateUtils_checkTime(const UA_ByteString *certificate, UA_DateTime now) {
+    X509 *cert = UA_OpenSSL_LoadCertificate(certificate, EVP_PKEY_NONE);
+    if(!cert)
+        return UA_STATUSCODE_BADCERTIFICATEINVALID;
+    UA_Boolean inside = openSSLInsideWindow(cert, now);
+    X509_free(cert);
+    return inside ? UA_STATUSCODE_GOOD : UA_STATUSCODE_BADCERTIFICATETIMEINVALID;
 }
 
 UA_StatusCode
