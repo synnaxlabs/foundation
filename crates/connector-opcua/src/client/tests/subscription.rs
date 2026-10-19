@@ -12,7 +12,7 @@ use super::common::is;
 use super::{
     Peer, READS, RELAY, Relay, drop_reads, numbered, recount_of, relayed, run, serve,
 };
-use crate::client::service::Item;
+use crate::client::service::{Item, Request};
 use crate::client::subscription::{Change, Revised, Sampled};
 use crate::client::{Client, PUBLISHES};
 use crate::ffi::{self, Status};
@@ -398,13 +398,18 @@ fn an_idle_subscription_gets_one_publish_answer_a_minute() {
     assert_eq!((at_subscribe, idle), (usize::from(PUBLISHES), 10));
 }
 
-/// The server answers both Publish requests while the client is not driven, then
-/// ends the subscription, and deletes it with no Publish request queued, so with no
-/// status change. The next Publish answer of `BadNoSubscription` ends the changes,
-/// and the client sends no Publish request after it.
-#[test]
-fn an_end_with_no_publish_request_queued_ends_the_changes() {
-    let (got, publishes) = on_level(4, async |peer, client, level| {
+/// Gives the changes and the Publish requests after their end when the server answers
+/// both Publish requests while the client is not driven, then ends each subscription,
+/// and deletes it with no Publish request queued, so with no status change. Before it,
+/// the client makes `more` subscriptions with no items through the service path.
+fn ended_with_no_publish_queued(
+    more: usize,
+) -> (Vec<Result<Vec<Change>, Status>>, usize) {
+    on_level(4, async move |peer, client, level| {
+        for _ in 0..more {
+            let made = client.serve(&Request::subscribe(1000.0, 60, 100)).await;
+            assert_eq!(made.map(|_| ()), Ok(()));
+        }
         level.set(1.0);
         peer.clock.sleep(ms(1200)).await;
         level.set(2.0);
@@ -425,10 +430,25 @@ fn an_end_with_no_publish_request_queued_ends_the_changes() {
         let idle = client.idle(peer.clock.sleep(ms(10_000))).await;
         assert_eq!(idle, Ok(()));
         (got, after.publishes())
-    });
+    })
+}
+
+/// When the server ends the subscription with no Publish request queued, the next
+/// Publish answer of `BadNoSubscription` ends the changes, and the client sends no
+/// Publish request after it, also when the client holds a second subscription. Its
+/// first keep-alive takes a Publish request that the change of 2.0 then lacks.
+#[test]
+fn an_end_with_no_publish_request_queued_ends_the_changes() {
     let changed = vec![changed_to(1.0, false), changed_to(2.0, false)];
     let end = Err(Status::BAD_NO_SUBSCRIPTION);
-    assert_eq!((got, publishes), (vec![Ok(changed), end], 0));
+    let (one, (two, publishes)) = (
+        ended_with_no_publish_queued(0),
+        ended_with_no_publish_queued(1),
+    );
+    assert_eq!(
+        (one, two.last(), publishes),
+        ((vec![Ok(changed), end.clone()], 0), Some(&end), 0)
+    );
 }
 
 /// A call that the server refuses gives its status to each item of it.
