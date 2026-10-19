@@ -114,6 +114,9 @@ class StubTest(unittest.TestCase):
             s.name: s for s in self.tree.body if isinstance(s, ast.ClassDef)
         }
 
+    def test_the_package_is_typed(self) -> None:
+        self.assertTrue(STUB.with_name("py.typed").is_file())
+
     def test_the_stub_defines_each_item_of_the_module(self) -> None:
         self.assertEqual(defined(self.tree.body), sorted(built(vars(_native))))
 
