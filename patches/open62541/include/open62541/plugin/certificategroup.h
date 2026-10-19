@@ -86,12 +86,14 @@ typedef enum {
     UA_TRUSTLOAD_EMPTY,    /* No certificate in DER or PEM. */
     UA_TRUSTLOAD_INVALID,  /* The certificate, or a damaged PEM block, fails. */
     UA_TRUSTLOAD_TRAILING, /* Bytes after the certificate in its PEM block. */
+    UA_TRUSTLOAD_LINE,     /* A line of a PEM block ends in a byte of 0x80 to 0xFF. */
     UA_TRUSTLOAD_NOMEMORY
 } UA_TrustLoad;
 
 /* Loads each certificate of the entry as the memory group loads a trust entry, and
  * gives why it does not load, with the number from 1 of the certificate that fails
- * in `number`. In DER, bytes after the last certificate are one more. */
+ * in `number`, or of the line for `UA_TRUSTLOAD_LINE`. In DER, bytes after the last
+ * certificate are one more. */
 UA_EXPORT UA_TrustLoad
 UA_CertificateUtils_checkTrust(const UA_ByteString *trust, size_t *number);
 

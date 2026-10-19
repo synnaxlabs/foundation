@@ -323,6 +323,78 @@ fn a_trust_whose_end_line_names_another_label_ends_the_connect() {
     }
 }
 
+/// The refusal of a trust whose line `number` is in a PEM block and ends in a byte of
+/// 0x80 to 0xFF.
+fn line(number: usize) -> Error {
+    Error::Refused(Refusal::Line { number })
+}
+
+/// [`TRUST`] with `tail` before the `\n` of line `at`, from 0, of its second block, and
+/// the number from 1 of that line in the trust.
+fn with_tail(at: usize, tail: &[u8]) -> (Vec<u8>, usize) {
+    let (other, server) = blocks();
+    let mut trust = other.into_bytes();
+    let number = trust.iter().filter(|&&byte| byte == b'\n').count() + at + 1;
+    for (index, line) in server.split_inclusive('\n').enumerate() {
+        let line = line.as_bytes();
+        if index == at {
+            trust.extend_from_slice(&line[..line.len() - 1]);
+            trust.extend_from_slice(tail);
+            trust.push(b'\n');
+        } else {
+            trust.extend_from_slice(line);
+        }
+    }
+    (trust, number)
+}
+
+#[test]
+fn a_line_of_a_block_that_ends_in_a_high_byte_ends_the_connect() {
+    let last = blocks().1.lines().count() - 1;
+    for at in [0, 1, last] {
+        for tail in [b"\xA0".as_slice(), b" \xFF\r", b"\x80 "] {
+            let (trust, number) = with_tail(at, tail);
+            assert_eq!(trusting(trust), Err(line(number)), "{at} {tail:?}");
+        }
+    }
+}
+
+#[test]
+fn a_trust_whose_last_byte_is_high_ends_the_connect() {
+    let (mut trust, number) = with_tail(blocks().1.lines().count() - 1, b"\xA0");
+    assert_eq!(trust.pop(), Some(b'\n'));
+    assert_eq!(trusting(trust), Err(line(number)));
+}
+
+#[test]
+fn a_begin_line_with_a_high_byte_at_a_piece_of_a_long_line_ends_the_connect() {
+    let (trust, number) = with_tail(0, b"\xA0");
+    let at = blocks().0.len();
+    let text = "x".repeat(253);
+    let trust = [&trust[..at], text.as_bytes(), &trust[at..]].concat();
+    assert_eq!(trusting(trust), Err(line(number)));
+}
+
+#[test]
+fn a_client_that_trusts_a_pem_with_utf_8_text_outside_its_blocks_reads() {
+    let (other, server) = blocks();
+    let long = "é".repeat(200);
+    for trust in [
+        format!("{other}Certigna é\n{server}"),
+        format!("{long}\n{other}{long}\n{server}{long}"),
+    ] {
+        let read = trusting(trust).expect("the client connects");
+        assert_eq!(read.answer, Ok(read.value));
+    }
+}
+
+#[test]
+fn a_begin_line_with_a_nul_before_its_dashes_is_text() {
+    let trust = [b"-----BEGIN X\0-----\xA0\n", TRUST].concat();
+    let read = trusting(trust).expect("the client connects");
+    assert_eq!(read.answer, Ok(read.value));
+}
+
 #[test]
 fn a_trust_that_does_not_parse_ends_the_connect() {
     assert_eq!(
@@ -404,6 +476,7 @@ fn a_group_whose_trust_does_not_load_is_refused() {
         b"no certificate",
         BROKEN_TRUST,
         ONE_BLOCK_TRUST,
+        &with_tail(0, b"\xA0").0,
     ];
     for trust in trusts {
         let status = crate::validity::verify(SERVER.certificate, Some(trust), START);
@@ -482,6 +555,10 @@ fn a_refusal_names_the_part_that_fails() {
         (
             Refusal::Trailing { number: 3 },
             "the PEM block of certificate 3 of the trust holds bytes after it",
+        ),
+        (
+            Refusal::Line { number: 4 },
+            "line 4 of the trust, in a PEM block, ends in a byte of 0x80 to 0xFF",
         ),
         (
             Refusal::Uri,
