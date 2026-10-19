@@ -124,6 +124,7 @@ struct SignedChange {
     leader: node::Key,
     at: Position,
     voters: Voters,
+    public_keys: BTreeMap<node::Key, PublicKey>,
     signature: Signature,
 }
 
@@ -157,10 +158,16 @@ impl Signed {
                 self.grants.push((claim, signature));
                 signature
             }
-            Claim::Change { leader, at, voters } => {
+            Claim::Change {
+                leader,
+                at,
+                voters,
+                public_keys,
+            } => {
                 let same = |signed: &&SignedChange| {
                     (signed.leader, signed.at) == (leader, at)
                         && signed.voters == *voters
+                        && signed.public_keys == *public_keys
                 };
                 if let Some(signed) = self.changes.iter().find(same) {
                     return signed.signature;
@@ -170,6 +177,7 @@ impl Signed {
                     leader,
                     at,
                     voters: voters.clone(),
+                    public_keys: public_keys.clone(),
                     signature,
                 });
                 signature
@@ -5233,14 +5241,14 @@ mod tests {
         fn a_learner_that_a_change_adds_and_removes_stays_a_learner() {
             let mut raft = leader();
             raft.set_learners([key(4)]);
-            raft.propose_voters(set(&[1, 2, 3, 4])).unwrap();
+            raft.propose_voters(keyed(&[1, 2, 3, 4])).unwrap();
             accept(&mut raft, &[2, 3], 2);
             accept(&mut raft, &[2, 3], 3);
             assert_eq!(raft.voters(), &voters(&[1, 2, 3, 4], &[]));
             raft.propose(b"x".to_vec()).unwrap();
             accept(&mut raft, &[2, 4], 4);
             assert_eq!(raft.ready().committed.last().unwrap().at.index, 4);
-            raft.propose_voters(set(&[1, 2, 3])).unwrap();
+            raft.propose_voters(keyed(&[1, 2, 3])).unwrap();
             accept(&mut raft, &[2, 3], 5);
             accept(&mut raft, &[2, 3, 4], 6);
             assert_eq!(raft.ready().committed.last().unwrap().at.index, 6);
@@ -5270,7 +5278,7 @@ mod tests {
         fn a_change_keeps_a_learner_in_no_configuration() {
             let mut raft = leader();
             raft.set_learners([key(9)]);
-            raft.propose_voters(set(&[1, 2, 4])).unwrap();
+            raft.propose_voters(keyed(&[1, 2, 4])).unwrap();
             sent(&mut raft);
             raft.tick(0);
             assert_eq!(to(&sent(&mut raft)), [key(2), key(3), key(4), key(9)]);
@@ -5280,14 +5288,14 @@ mod tests {
         fn a_removed_voter_keeps_its_progress_through_a_later_change() {
             let mut raft = leader();
             raft.set_learners([key(4)]);
-            raft.propose_voters(set(&[1, 2, 3, 4])).unwrap();
+            raft.propose_voters(keyed(&[1, 2, 3, 4])).unwrap();
             accept(&mut raft, &[2, 3], 2);
             accept(&mut raft, &[2, 3, 4], 3);
-            raft.propose_voters(set(&[1, 2, 3])).unwrap();
+            raft.propose_voters(keyed(&[1, 2, 3])).unwrap();
             accept(&mut raft, &[2, 3], 4);
             accept(&mut raft, &[2, 3], 5);
             assert_eq!(raft.voters(), &voters(&[1, 2, 3], &[]));
-            raft.propose_voters(set(&[1, 2, 3, 5])).unwrap();
+            raft.propose_voters(keyed(&[1, 2, 3, 5])).unwrap();
             sent(&mut raft);
             raft.tick(0);
             let to_4 = sent(&mut raft).into_iter().find(|m| m.to == key(4));
@@ -5308,7 +5316,7 @@ mod tests {
         #[test]
         fn signs_each_claim_of_a_change_once() {
             let mut raft = leader();
-            raft.propose_voters(set(&[1, 2, 4])).unwrap();
+            raft.propose_voters(keyed(&[1, 2, 4])).unwrap();
             let mut ready = raft.ready();
             let mut claims = Vec::new();
             ready.sign(|claim| {
@@ -5316,6 +5324,7 @@ mod tests {
                 Signature([u8::try_from(claims.len()).unwrap(); 64])
             });
             let joint = voters(&[1, 2, 4], &[1, 2, 3]);
+            let added = keyed(&[4]);
             let vote = Claim::Grant {
                 voter: key(1),
                 grant: Grant::Vote,
@@ -5326,6 +5335,7 @@ mod tests {
                 leader: key(1),
                 at: position(1, 2),
                 voters: &joint,
+                public_keys: &added,
             };
             assert_eq!(claims, [format!("{vote:?}"), format!("{change:?}")]);
             assert_eq!(to(&ready.messages), [key(2), key(3), key(4)]);
@@ -5336,6 +5346,31 @@ mod tests {
             assert_eq!(to_3.body.entries(), ready.entries);
             let votes = &to_4.proof.as_ref().unwrap().voters;
             assert_eq!(votes[&key(1)], Some(Signature([1; 64])));
+        }
+
+        #[test]
+        fn signs_a_change_again_for_other_public_keys() {
+            let joint = voters(&[1, 2, 4], &[1, 2, 3]);
+            let (added, none) = (keyed(&[4]), BTreeMap::new());
+            let change = |public_keys| Claim::Change {
+                leader: key(1),
+                at: position(1, 2),
+                voters: &joint,
+                public_keys,
+            };
+            let mut signed = Signed::default();
+            let mut count = 0;
+            let mut sign = |_: &Claim<'_>| {
+                count += 1;
+                Signature([count; 64])
+            };
+            let signatures = [
+                signed.of(&change(&added), &mut sign),
+                signed.of(&change(&none), &mut sign),
+                signed.of(&change(&added), &mut sign),
+            ];
+            let [one, two] = [1, 2].map(|n| Signature([n; 64]));
+            assert_eq!(signatures, [one, two, one]);
         }
 
         // Node 5's vote arrives after the change that removes it is in force. Node 5
