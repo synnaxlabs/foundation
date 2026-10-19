@@ -208,13 +208,8 @@ impl Senders {
     // Dials `to` at the addresses of its card, as the group holds it now, and gives
     // the session to the group.
     async fn dial(&self, to: node::Key) -> Result<Session, Failure> {
-        let (public_key, addresses) = {
-            let group = self.group();
-            let group = group.borrow();
-            let member = group.state.member(to).ok_or(Failure::Unknown)?;
-            let addresses = member.card.card().addresses.as_slice().to_vec();
-            (member.public_key(), addresses)
-        };
+        let contact = self.group().borrow().contact(to);
+        let (public_key, addresses) = contact.ok_or(Failure::Unknown)?;
         let session = self.transport.dial(public_key, &addresses).await?;
         self.group()
             .borrow_mut()

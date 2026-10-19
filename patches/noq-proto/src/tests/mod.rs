@@ -5129,3 +5129,138 @@ fn a_close_before_the_first_answer_leaves_with_no_pacing() {
     assert!(close.is_some(), "the pacer held the close of a client");
     assert!(conn.poll_transmit(now, NonZeroUsize::MIN, &mut buf).is_none());
 }
+
+/// A controller whose window the test sets at any time, for each path that it builds.
+#[derive(Debug, Clone)]
+struct SetWindowController {
+    window: Arc<AtomicU64>,
+}
+
+impl Controller for SetWindowController {
+    fn on_congestion_event(
+        &mut self,
+        _now: Instant,
+        _sent: Instant,
+        _is_persistent_congestion: bool,
+        _is_ecn: bool,
+        _lost_bytes: u64,
+        _largest_lost: u64,
+    ) {
+    }
+
+    fn on_mtu_update(&mut self, _new_mtu: u16) {}
+
+    fn window(&self) -> u64 {
+        self.window.load(Ordering::Relaxed)
+    }
+
+    fn metrics(&self) -> ControllerMetrics {
+        ControllerMetrics {
+            congestion_window: self.window(),
+            ssthresh: None,
+            pacing_rate: None,
+            send_quantum: None,
+        }
+    }
+
+    fn clone_box(&self) -> Box<dyn Controller> {
+        Box::new(self.clone())
+    }
+
+    fn initial_window(&self) -> u64 {
+        self.window()
+    }
+
+    fn into_any(self: Box<Self>) -> Box<dyn Any> {
+        self
+    }
+}
+
+impl ControllerFactory for SetWindowController {
+    fn build(self: Arc<Self>, _now: Instant, _current_mtu: u16) -> Box<dyn Controller> {
+        Box::new((*self).clone())
+    }
+}
+
+/// The ACK-only packet carries the ACK of each path whose ACK is due, and of no other path.
+///
+/// No crate of the workspace has a second path: `transport` does not negotiate multipath.
+#[test]
+fn ack_only_packet_acks_only_the_paths_with_a_due_ack() -> TestResult {
+    let _guard = subscribe();
+    let window = Arc::new(AtomicU64::new(u64::MAX / 2));
+    let mut builder = ConnPair::builder().enable_multipath();
+    builder
+        .server_transport_cfg
+        .congestion_controller_factory(Arc::new(SetWindowController {
+            window: window.clone(),
+        }));
+    let mut pair = builder.connect();
+    let mut client_two = pair.routes.as_basic().client_addr;
+    let mut server_two = pair.routes.as_basic().server_addr;
+    client_two.set_port(client_two.port() + 1);
+    server_two.set_port(server_two.port() + 1);
+    pair.routes = util::ManyToManyRouting::simple_symmetric(
+        [pair.routes.as_basic().client_addr, client_two],
+        [pair.routes.as_basic().server_addr, server_two],
+    )
+    .into();
+    let network_path = FourTuple {
+        local_ip: Some(client_two.ip()),
+        remote: server_two,
+    };
+    let path_id = pair.open_path(Client, network_path, PathStatus::Available)?;
+    pair.drive();
+
+    let s = pair.streams(Server).open(Dir::Uni).unwrap();
+    window.store(0, Ordering::Relaxed);
+    pair.send_stream(Server, s).write(&[42; 1024])?;
+    let path_acks = pair.stats(Server).frame_tx.path_acks;
+    pair.ping_path(Client, path_id)?;
+    pair.drive_client();
+    for _ in 0..10 {
+        pair.time += Duration::from_millis(10);
+        pair.drive_server();
+    }
+
+    assert_eq!(pair.stats(Server).frame_tx.path_acks, path_acks + 1);
+    Ok(())
+}
+
+/// A server that anti-amplification blocks sends no ACK-only packet, also with an ACK due.
+///
+/// A `transport` server reaches this state when its peer sends a short Initial after its
+/// first datagram. The `transport` test that replaces this copy test is #3410.
+#[test]
+fn no_ack_only_packet_when_anti_amplification_blocks() {
+    let _guard = subscribe();
+    const MTU: u16 = 8000;
+    let mut endpoint = EndpointConfig::default();
+    endpoint.max_udp_payload_size(MTU).unwrap();
+    let (cert, key) = big_cert_and_key();
+    let mut server = server_config_with_cert(cert.clone(), key);
+    let mut transport = TransportConfig::default();
+    transport.initial_mtu(MTU);
+    server.transport_config(Arc::new(transport));
+    let mut pair = Pair::new(Arc::new(endpoint), server);
+    pair.mtu = MTU.into();
+
+    pair.begin_connect(client_config_with_certs(vec![cert]));
+    pair.drive_client();
+    // The first datagram of the server goes past its budget of 3 times the client's
+    // Initial by more than the 3 times of a second Initial.
+    pair.drive_server();
+    pair.client.inbound.clear();
+    pair.time += Duration::from_secs(2);
+    pair.drive_client();
+    assert!(
+        !pair.server.inbound.is_empty(),
+        "the client sends its Initial again"
+    );
+
+    pair.server.drive(pair.time);
+    assert!(
+        pair.server.outbound.is_empty(),
+        "the server sends a datagram"
+    );
+}

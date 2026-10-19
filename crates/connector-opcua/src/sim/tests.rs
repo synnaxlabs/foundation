@@ -1,5 +1,4 @@
 use std::ffi::{CStr, CString};
-use std::future;
 use std::future::poll_fn;
 use std::net::SocketAddr;
 use std::num::{NonZeroU32, NonZeroUsize};
@@ -12,10 +11,10 @@ use types::quality::Quality;
 use types::time::{Span, Stamp};
 
 use super::{Served, Variables, during, serve, tree};
-use crate::client::Client;
 use crate::client::browse::{
     Base, Cause, Class, Description, Foreign, Page, Reference, Unit,
 };
+use crate::client::{self, Client};
 use crate::connection::OPTIONS;
 use crate::event;
 use crate::ffi::Status;
@@ -722,16 +721,7 @@ async fn connect(
     url: &CStr,
 ) -> Result<Client, Status> {
     let time = event::Time::monotonic(node.clock());
-    let connect = Client::connect(
-        time,
-        tracing::Span::none(),
-        node.net(),
-        rng,
-        url,
-        None,
-        future::pending(),
-    );
-    Ok(connect.await?.expect("a pending wait never ends"))
+    client::tests::open(time, node.net(), rng, url).await
 }
 
 /// What a peer of a [`serve`] saw: the output of the serve, the first read of a stream

@@ -519,10 +519,10 @@ fn assert_ends<M: Future<Output = ()> + 'static>(
 }
 
 /// Asserts that each task that sends ended, also the task of node 3, which waits in
-/// a dial: only the test holds `transport`.
-async fn assert_ended(clock: &Clock, transport: Rc<Transport>) {
+/// a dial: `transport` has `held` holders, the test included.
+async fn assert_ended(clock: &Clock, transport: Rc<Transport>, held: usize) {
     clock.sleep(Span::MILLISECOND).await;
-    assert_eq!(Rc::strong_count(&transport), 1, "a task that sends runs");
+    assert_eq!(Rc::strong_count(&transport), held, "a task that sends runs");
     pending::<()>().await;
 }
 
@@ -543,7 +543,7 @@ fn each_task_that_sends_ends_when_the_mesh_drops() {
         let mesh = Mesh::open(config).await.unwrap();
         node.clock().sleep(seconds(3)).await;
         drop(mesh);
-        assert_ended(&node.clock(), transport).await;
+        assert_ended(&node.clock(), transport, 1).await;
     });
 }
 
@@ -555,7 +555,8 @@ fn each_task_that_sends_ends_when_the_group_stops() {
         let mesh = Mesh::open(config).await.unwrap();
         node.clock().sleep(seconds(3)).await;
         stop(&node, &mesh);
-        assert_ended(&node.clock(), transport).await;
+        // The mesh holds the transport for its calls of blob.
+        assert_ended(&node.clock(), transport, 2).await;
     });
 }
 
@@ -584,7 +585,7 @@ fn each_task_that_sends_ends_when_a_committed_entry_stops_the_group() {
         let cause = Unknown::Kind { kind: 9 };
         assert_eq!(watch.next().await, Err(Stopped::Change { at, cause }));
         drop(watch);
-        assert_ended(&node.clock(), transport).await;
+        assert_ended(&node.clock(), transport, 2).await;
     });
 }
 

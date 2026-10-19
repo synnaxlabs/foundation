@@ -35,11 +35,19 @@
   its claim, in the hard proof, in each message, and in each change this node wrote
   (in `entries`, in `committed`, and in each append), before the write and the
   sends. `raft` keeps each claim that it makes unsigned, and a claim that it reads at
-  start keeps its signature. So `Ready::sign` signs each copy of an unsigned claim that
-  a `Ready` holds, and a resend again. Ed25519 gives each copy the same bytes. A data
+  start keeps its signature. So `Ready::sign` signs each distinct unsigned claim of a
+  `Ready` once, also when many messages carry it, and a resend in a later `Ready`
+  again; Ed25519 gives each copy the same bytes (`laptop.architect`,
+  2026-10-19T13:53:13Z,
+  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124, and
+  2026-10-19T14:40:23Z,
+  https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).
+  Supersedes the signature of each copy of
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6041049761. A data
   entry carries no claim, so the cost does not grow with the data rate. The most
-  frequent case is a leader with a voter that does not answer: each heartbeat to it
-  carries the votes, so the leader signs once for each tick (100 ms). A node that
+  frequent case is a leader with a peer that does not answer: each heartbeat to it
+  carries the votes and the chain, so the leader signs each unsigned claim of them once
+  for each tick (100 ms), for all such peers together. A node that
   campaigned for its term signs each refusal of a lower term in the same way, because
   the refusal carries its own pre-votes. Lost: `raft` keeps the signed copy, which puts
   the signer in `raft` and changes the conformance oracle (architect, #1187,
@@ -160,16 +168,19 @@
   campaign (RAFT VOTERS) still votes and follows.
   `step` does not check that a sender is a voter (a voter can learn late
   that a peer joined), so the caller authenticates the sender and decides which nodes
-  may send. `step` drops a reply with no check when its sender is not in `voters()`,
-  unless the configuration in force removed the sender and the node still sends to it:
-  only `raft` knows whom it asked (#352). A node that may send can stop a group for good
-  with one message in term `u64::MAX`: each node writes that term, and none can
-  campaign. `raft` takes the term as it is. It trusts its voters: one that lies can
-  already break safety, because a false `AppendReply` counts as held, so a bound on the
-  term would guard nothing. No bound on a term jump spares an honest node that was down,
-  either. Later: a sender proves a term jump by a signed term, which needs `mesh`
-  (#750). The person decided on 2026-10-05 ("(a) is fine", #352 item 2). When the term
-  of the last entry is above `hard.term`, `Raft::new` starts at that term with no vote.
+  may send. `step` drops a reply with no check when its sender is neither in
+  `voters()` nor a learner (`Raft::set_learners`), unless the configuration in force
+  removed the sender or a later call to `set_learners` left it out, and the node has
+  not released it yet: only `raft` knows whom it asked (#352). A learner's reply moves
+  only its own progress. A node that may send can stop a group for good with one message
+  in term `u64::MAX`: each node writes that term, and none can campaign. `raft` takes
+  the term as it is. It trusts its voters: one that lies can already break safety,
+  because a
+  false `AppendReply` counts as held, so a bound on the term would guard nothing. No
+  bound on a term jump spares an honest node that was down, either. Later: a sender
+  proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
+  2026-10-05 ("(a) is fine", #352 item 2). When the term of the last entry is above
+  `hard.term`, `Raft::new` starts at that term with no vote.
   The node sends nothing before its write, so no peer counted a vote or an answer that a
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no atomic
   write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that each
@@ -210,6 +221,53 @@
   2026-10-12T18:29:52Z
   (https://github.com/synnaxlabs/foundation/issues/1361#issuecomment-6130215772), with
   the deferral of #2471.
+  `Raft::set_learners` sets the nodes that get the log and have no vote. `raft` keeps
+  the set apart from the configuration: a key that the configuration in force holds as
+  a voter is a voter. A leader sends each learner the log and the commit index, and
+  never counts its answer toward a commit, an election, or the quorum check. A
+  learner stays until a later call leaves it out: neither the quorum check nor a
+  change of the configuration releases it. A node that a call leaves out and
+  that no configuration in force holds is released as a removed node is. A node never
+  sends a learner of its set a PreVote or a Vote. Each node keeps the set, so a new
+  leader has it. `mesh` is to set it from the members of its applied state, PR 2 of
+  #3140. Lost: learners in the configuration, which puts them in each signed change;
+  `Config::learners` at `Raft::new` with no setter, because `mesh` learns of a member
+  only at an apply. Decided by `laptop.architect`, the plan, 2026-10-19T13:53:13Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124), and
+  the surface, 2026-10-19T14:40:23Z
+  (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).
+  A leader keeps at most one append in flight to a learner (8 to a voter). A heartbeat
+  reply frees no slot of a learner. When a learner answers this leader during a whole
+  quorum check, but answers no append, the leader sends to it again from its accepted
+  index, or sends its probe again, so a lost append goes again within two quorum checks,
+  also when no new entry comes. A learner that answers nothing keeps its window and gets
+  no resend. A learner whose append takes longer than a quorum check can get the same
+  entries again about each second check. A leader sends each learner a message at least
+  once each `election_ticks` of its own ticks: a heartbeat at each quorum check, not
+  each `heartbeat_ticks`. A learner never votes or campaigns, so it needs no heartbeat
+  at the rate of an election. A leader sends a learner the commit index at the next tick
+  after the commit index that it can take moves: in its next append with entries, or
+  else in a heartbeat. A leader sends a learner that a call adds an append at once,
+  unless an append to it is in flight or the learner holds the whole log, so its
+  catch-up does not wait for a quorum check. Decided by `laptop.architect`,
+  2026-10-19T19:01:39Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274961164), for
+  the cost of 127 learners; the resend and the append at once to a learner that a call
+  adds, 2026-10-19T19:48:34Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275865221) and
+  2026-10-19T19:51:09Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275912627); the
+  exceptions of an append in flight and of a learner that holds the whole log,
+  2026-10-19T21:41:27Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6278021695); the
+  resend of an expired probe at its `next`, 2026-10-19T20:07:40Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6276219408); the
+  message each `election_ticks` and the commit, 2026-10-19T19:46:05Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275819044). A bound
+  that does not grow with the learners (entries that the queues share, not copy) is
+  deferred. Trigger: before `MEMBERS_MAX` grows past 128. Supersedes the pace of a
+  learner "as it does a voter" of the surface, 2026-10-19T14:40:23Z
+  (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).
   `Message::replaces(&self, older)` tells the caller that `older`, a message that has
   not gone yet, can drop when this one goes after it. Both have the same sender and the
   same receiver, and one of these holds: `older` has a lower term, and this one is not a

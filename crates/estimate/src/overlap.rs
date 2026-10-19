@@ -53,14 +53,15 @@ impl Overlap {
     }
 
     /// Narrows the overlap with one reading: at local time `at`, the offset is at
-    /// least `low` and at most `high`. On an error, the overlap does not change.
+    /// least `low` and at most `high`. A reading older than the newest one narrows the
+    /// overlap from the newest local time on, widened by drift to that time; an edge
+    /// that drift widens past the range of a span is left out. On an error, the overlap
+    /// does not change.
     ///
     /// # Errors
     ///
-    /// - [`Error::Backwards`] when `at` is older than the newest reading: the clock
-    ///   restarted.
-    /// - [`Error::Disjoint`] when the reading shares no offset with the overlap, or
-    ///   `low` is above `high`: the clock jumped, or it drifts faster than `drift`.
+    /// [`Error::Disjoint`] when the reading shares no offset with the overlap, or `low`
+    /// is above `high`: the clock jumped, or it drifts faster than `drift`.
     pub fn push(&mut self, at: Monotonic, low: Span, high: Span) -> Result<(), Error> {
         self.narrow(Reading {
             at,
@@ -70,7 +71,8 @@ impl Overlap {
     }
 
     /// Narrows the overlap with a reading open above: at local time `at`, the offset
-    /// is at least `low`. A stamp before a start command gives one.
+    /// is at least `low`. A stamp before a start command gives one. A reading older
+    /// than the newest one counts as in [`Overlap::push`].
     ///
     /// # Errors
     ///
@@ -85,7 +87,7 @@ impl Overlap {
 
     /// Narrows the overlap with a reading open below: at local time `at`, the offset
     /// is at most `high`. A read return gives one for the newest sample the host
-    /// knows.
+    /// knows. A reading older than the newest one counts as in [`Overlap::push`].
     ///
     /// # Errors
     ///
@@ -99,10 +101,12 @@ impl Overlap {
     }
 
     /// The overlap at `now`, earlier or later than the readings. From the newest
-    /// reading on, it is the overlap of all of them. Earlier, it can be wider.
+    /// reading on, it is the overlap of all of them when they came in local time
+    /// order, and holds it in any order. Earlier, it can be wider.
     ///
-    /// `None` when the readings do not bound the offset to 36500 days: no reading gave
-    /// a low edge, none gave a high edge, or the edges allow more before drift.
+    /// `None` when the readings do not bound the offset to 36500 days: no low edge is
+    /// kept, no high edge is kept, or the edges allow more before drift. An edge
+    /// widened past the range of a span is not kept ([`Overlap::push`]).
     #[must_use]
     pub fn at(&self, now: Monotonic) -> Option<Measurement> {
         let (low, high) = self.edges(|r| r.at)?;
@@ -128,13 +132,12 @@ impl Overlap {
     }
 
     fn narrow(&mut self, reading: Reading) -> Result<(), Error> {
-        let at = reading.at;
-        if at < self.newest {
-            return Err(Error::Backwards {
-                at,
-                newest: self.newest,
-            });
+        // Before widening, which can uncross the edges.
+        if reading.low.zip(reading.high).is_some_and(|(l, h)| l > h) {
+            return Err(Error::Disjoint);
         }
+        let reading = reading.widened_to(self.newest, self.drift);
+        let at = reading.at;
         // From `at` on, every edge moves at `drift`, so this order holds. Of equal
         // edges, the older one stays. A missing edge is `None`, which never wins.
         let low_at = |r: Option<Reading>| r?.edges_at(at, self.drift).0;
@@ -162,6 +165,21 @@ struct Reading {
 }
 
 impl Reading {
+    /// The reading at `newest` when it is older, widened by drift and rounded outward.
+    /// An edge that widens past the range of a span is left out.
+    fn widened_to(self, newest: Monotonic, drift: Drift) -> Self {
+        if self.at >= newest {
+            return self;
+        }
+        let (low, high) = self.edges_at(newest, drift);
+        let span = |nanos: i128| i64::try_from(nanos).ok().map(Span::from_nanos);
+        Self {
+            at: newest,
+            low: low.and_then(|low| span(low.div_euclid(PER_NANO))),
+            high: high.and_then(|high| span(-(-high).div_euclid(PER_NANO))),
+        }
+    }
+
     /// The edges at `now`, widened by drift, in billionths of a nanosecond.
     fn edges_at(self, now: Monotonic, drift: Drift) -> (Option<i128>, Option<i128>) {
         let growth = drift.over_exact(now.0.abs_diff(self.at.0));
@@ -176,13 +194,6 @@ impl Reading {
 /// Why an [`Overlap`] refused a reading.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
-    /// The reading is older than the newest one in the overlap.
-    Backwards {
-        /// The local time of the reading.
-        at: Monotonic,
-        /// The local time of the newest reading in the overlap.
-        newest: Monotonic,
-    },
     /// The reading shares no offset with the overlap.
     Disjoint,
 }
@@ -190,11 +201,6 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Backwards { at, newest } => write!(
-                f,
-                "reading at {}ns is older than the newest at {}ns",
-                at.0, newest.0
-            ),
             Self::Disjoint => f.write_str("reading shares no offset with the overlap"),
         }
     }
@@ -508,50 +514,52 @@ mod tests {
         }
     }
 
-    mod when_backwards {
+    mod when_older {
         use super::*;
 
-        fn backwards(at: u64, newest: u64) -> Error {
-            Error::Backwards {
-                at: Monotonic(at),
-                newest: Monotonic(newest),
-            }
+        #[test]
+        fn refuses_one_with_its_low_edge_above_its_high_edge() {
+            let mut overlap = overlap(200_000, &[m(SECOND_NS, 0, 0)]).expect("valid");
+            let crossed = Push::Both(0, 5, 4);
+            assert_eq!(crossed.push(&mut overlap), Err(Error::Disjoint));
         }
 
         #[test]
-        fn fails_and_keeps_the_overlap() {
-            let mut overlap = overlap(0, &[m(10, 0, 5)]).expect("valid");
-            assert_eq!(m(9, 0, 5).push(&mut overlap), Err(backwards(9, 10)));
-            assert_eq!(overlap.at(Monotonic(10)).map(pair), Some((0, 5)));
-            assert_eq!(
-                backwards(9, 10).to_string(),
-                "reading at 9ns is older than the newest at 10ns"
-            );
+        fn narrows_from_the_newest_time_on() {
+            let pushes = [m(10, 0, 5), m(9, 2, 1)];
+            assert_eq!(check(0, &pushes, 10), Ok(Some((2, 1))));
         }
 
         #[test]
-        fn fails_on_a_one_sided_reading() {
-            let mut overlap = overlap(0, &[Push::Low(10, 0)]).expect("valid");
-            let late = Push::High(9, 5);
-            assert_eq!(late.push(&mut overlap), Err(backwards(9, 10)));
-            assert_eq!(overlap.at(Monotonic(10)), None);
+        fn widens_by_drift_to_the_newest_time() {
+            let pushes = [m(SECOND_NS, 0, 5_000), m(0, 4_500, 1)];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(Some((4_249, 751))));
         }
 
         #[test]
-        fn counts_a_reading_that_narrows_nothing() {
+        fn rounds_its_edges_outward() {
+            let pushes = [m(3, 0, 1), m(0, 0, 0)];
+            assert_eq!(check(1, &pushes, 3), Ok(Some((0, 1))));
+        }
+
+        #[test]
+        fn joins_a_one_sided_reading() {
+            let pushes = [Push::Low(10, 0), Push::High(9, 5)];
+            assert_eq!(check(0, &pushes, 10), Ok(Some((2, 3))));
+        }
+
+        #[test]
+        fn keeps_a_reading_that_narrows_nothing() {
             let pushes = [m(0, 0, 5), m(10, 0, 100), m(5, 0, 5)];
-            assert_eq!(check(0, &pushes, 5), Err(backwards(5, 10)));
+            assert_eq!(check(0, &pushes, 5), Ok(Some((0, 5))));
         }
 
         #[test]
-        fn catches_a_contradiction_pushed_late() {
-            let (a, b, c) =
-                (m(0, 10_000, 0), m(0, 0, 0), m(100 * SECOND_NS, 0, 50_000));
-            assert_eq!(check(1_000, &[a, b, c], 0), Err(Error::Disjoint));
-            assert_eq!(
-                check(1_000, &[c, a, b], 0),
-                Err(backwards(0, 100 * SECOND_NS))
-            );
+        fn refuses_one_that_misses_the_overlap_after_drift() {
+            let pushes = [m(SECOND_NS, 0, 0), m(0, 10_000, 8_999)];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Err(Error::Disjoint));
+            let pushes = [m(SECOND_NS, 0, 0), m(0, 10_000, 9_000)];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(Some((0, 0))));
         }
 
         #[test]
@@ -561,10 +569,46 @@ mod tests {
             let pushes = [
                 m(4_000_000, 1_900_000, 1_000_000),
                 m(5_000_000, 100_000, 1_000_000),
-                m(1_000_000, 3_550_000, 2_500_000),
+                m(1_000_000, 6_000_000, 500_000),
             ];
             let err = check(200_000, &pushes, 1_000_000);
-            assert_eq!(err, Err(backwards(1_000_000, 5_000_000)));
+            assert_eq!(err, Err(Error::Disjoint));
+        }
+
+        #[test]
+        fn misses_a_restart_that_the_width_of_a_reading_covers() {
+            // As above, with a third read wide enough to hold both offsets after drift.
+            let pushes = [
+                m(4_000_000, 1_900_000, 1_000_000),
+                m(5_000_000, 100_000, 1_000_000),
+                m(1_000_000, 3_550_000, 2_500_000),
+            ];
+            assert_eq!(
+                check(200_000, &pushes, 1_000_000),
+                Ok(Some((1_074_600, 26_200)))
+            );
+        }
+
+        #[test]
+        fn leaves_out_an_edge_widened_past_the_lowest_span() {
+            let pushes = [Push::High(SECOND_NS, i64::MIN), Push::Low(0, i64::MIN)];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(None));
+            let pushes = [
+                Push::High(SECOND_NS, i64::MIN),
+                Push::Low(0, i64::MIN + 1_000),
+            ];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(Some((i64::MIN, 0))));
+        }
+
+        #[test]
+        fn leaves_out_an_edge_widened_past_the_highest_span() {
+            let pushes = [Push::Low(SECOND_NS, i64::MAX), Push::High(0, i64::MAX)];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(None));
+            let pushes = [
+                Push::Low(SECOND_NS, i64::MAX),
+                Push::High(0, i64::MAX - 1_000),
+            ];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(Some((i64::MAX, 0))));
         }
     }
 
@@ -581,15 +625,17 @@ mod tests {
                 let sides = vec(0..3_u8, measurements.len());
                 (
                     Just(w),
-                    sides.prop_map(move |s| readings(&measurements, &s)),
+                    sides
+                        .prop_map(move |s| readings(&measurements, &s))
+                        .prop_shuffle(),
                 )
             })
         }
 
-        /// `measurements` as readings in time order, open above for a side of 0, open
-        /// below for 1, and closed for 2.
+        /// `measurements` as readings, open above for a side of 0, open below for 1,
+        /// and closed for 2.
         fn readings(measurements: &[Measurement], sides: &[u8]) -> Vec<Push> {
-            let mut readings: Vec<_> = measurements
+            measurements
                 .iter()
                 .zip(sides)
                 .map(|(measurement, side)| {
@@ -604,9 +650,7 @@ mod tests {
                         _ => m(at, offset, error),
                     }
                 })
-                .collect();
-            readings.sort_by_key(|r| r.at());
-            readings
+                .collect()
         }
 
         fn closed(readings: &[Push]) -> bool {
@@ -659,6 +703,8 @@ mod tests {
                 (w, readings) in agreeing_readings(),
                 later in 0..TIME_NS,
             ) {
+                let mut readings = readings;
+                readings.sort_by_key(|r| r.at());
                 let newest = readings.last().expect("one or more").at();
                 let now = newest + later;
                 let (mut low, mut high) = (None, None);
@@ -688,16 +734,11 @@ mod tests {
                 now in any::<u64>(),
                 ppb in 0..=100_000_000_u32,
             ) {
-                let mut readings = readings;
-                readings.sort_by_key(|r| r.at());
                 let drift = Drift::from_ppb(ppb).expect("valid");
                 let mut overlap = Overlap::new(drift);
                 for reading in readings {
                     match reading.push(&mut overlap) {
                         Ok(()) | Err(Error::Disjoint) => {}
-                        Err(e @ Error::Backwards { .. }) => {
-                            prop_assert!(false, "unexpected {e}");
-                        }
                     }
                 }
                 if let Some(m) = overlap.at(Monotonic(now)) {

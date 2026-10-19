@@ -349,6 +349,7 @@ fn gives_each_series_at_the_entry_of_its_place() {
                     .expect("opens");
                 assert_eq!(reader.places(), around());
                 assert_eq!(keys(&reader), [key(10), key(1), key(11)]);
+                assert_eq!(reader.index(), 1);
                 let frame = reader.next().await.expect("a frame");
                 assert_eq!(frame.range(0), Some(Range { seq: 5, count: 1 }));
                 assert_eq!(frame.form(), Form::Encoded);
@@ -392,7 +393,7 @@ fn takes_the_index_at_the_place_that_the_node_names() {
                     .await
                     .expect("opens");
                 assert_eq!(reader.places(), places);
-                assert_eq!(reader.set().groups(), [0]);
+                assert_eq!((reader.index(), reader.set().groups()), (0, &[0][..]));
                 let frame = reader.next().await.expect("a frame");
                 assert_eq!(frame.iter().collect::<Vec<_>>(), [(0, &body[..])]);
             })
