@@ -189,9 +189,13 @@
   type of one channel that its selector matches. It holds none while it waits for the
   home of its index. For its life it holds the key and the slot of each of those
   channels. So one read holds at most the defined channels of one index, and a link
-  holds at most `streams_max` reads. No cap bounds the reads of one subject or of one
-  node (#2418). Lost: the places under `BODIES_BYTES_MAX` and the share, which refuses a
-  read wider than the share at each retry (`laptop.architect`, 2026-10-11T15:17:29Z,
+  holds at most `streams_max` + 1 reads: a client may open one more stream than
+  `streams_max`, which `program` and `sdk` keep for a `Class::Command` stream (#2019;
+  `laptop.architect`, 2026-10-19T14:03:39Z,
+  https://github.com/synnaxlabs/foundation/issues/2019#issuecomment-6269095622). No cap
+  bounds the reads of one subject or of one node (#2418). Lost: the places under
+  `BODIES_BYTES_MAX` and the share, which refuses a read wider than the share at each
+  retry (`laptop.architect`, 2026-10-11T15:17:29Z,
   https://github.com/synnaxlabs/foundation/issues/1749#issuecomment-6110496809, item 4).
   Amended (#2725, with #2723 and #2553): no case gives `Behind` now. A complete session
   that misses a frame reads it from disk, and a seq lost for no room comes as the gap of

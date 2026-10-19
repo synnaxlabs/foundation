@@ -15,6 +15,7 @@ struct Inputs(Arc<Mutex<Option<(String, i64)>>>);
 
 impl Kind for Inputs {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())

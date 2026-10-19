@@ -139,6 +139,7 @@ struct Watch(Arc<Mutex<Vec<Vec<u8>>>>);
 
 impl Kind for Watch {
     type Config = ();
+    const SCHEMA: document::schema::Body = crate::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())

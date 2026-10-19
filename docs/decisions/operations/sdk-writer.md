@@ -87,3 +87,15 @@
   (https://github.com/synnaxlabs/foundation/pull/3275#issuecomment-6256253289), and
   confirmed on this text on 2026-10-19T00:27:25Z
   (https://github.com/synnaxlabs/foundation/pull/3275#issuecomment-6257075310).
+  `Writer::bytes_max` gives the most bytes of one frame of the writer, its head
+  included: the largest block of the session's pool of frames, which the client's
+  thread sends with the places at the open. `write_series` refuses series whose bytes
+  go over it before its first copy into the kept frame, with
+  `Stream(Pool(TooLarge))`, `requested` the bytes of the series and `largest` the
+  value of `bytes_max`. So the kept frame never grows past it. The draft still checks
+  the exact frame. Decided by `laptop.architect-2` on 2026-10-19T12:51:02Z
+  (https://github.com/synnaxlabs/foundation/pull/3325#issuecomment-6267629281), for the
+  round 3 defect of PR 3325: before, `write_series` copied series of any size into the
+  kept frame before the draft refused them. Lost: a fill closure on `write_series`
+  that copies from the caller straight into the kept frame, as the binding then needs
+  a fill and a send as two steps.

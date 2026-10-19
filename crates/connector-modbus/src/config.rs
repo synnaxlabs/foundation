@@ -41,7 +41,7 @@ const TABLES: [(&str, Table); 4] = [
 const ORDERS: [(&str, Order); 2] = [("big", Order::Big), ("little", Order::Little)];
 
 /// The body of the config.
-const BODY: Body = Body {
+pub(crate) const BODY: Body = Body {
     summary: "Polls the registers and coils of a Modbus TCP device at a rate.",
     attributes: &[
         Attribute {
@@ -74,8 +74,21 @@ const BODY: Body = Body {
         label: Some("the channel"),
         forms: &[READ],
     }],
-    examples: &[],
+    examples: &[EXAMPLE],
 };
+
+/// A connector to one device.
+const EXAMPLE: &str = "\
+address = \"plc:502\"
+rate    = \"10Hz\"
+unit    = 1
+order   = \"big\"
+
+read \"plant.pressure\" {
+  table   = \"holding\"
+  address = 0
+}
+";
 
 /// The body of a `read` block.
 const READ: Body = Body {

@@ -1,8 +1,8 @@
 //! open62541 decodes any input as each of its built-in types with no memory fault or
 //! leak, and the encoding of each value that it decodes decodes to a value with the
 //! same encoding. A `DataValue` gives the same read of its value, or the same fault,
-//! from both decodes. Until #435 is fixed, the encoding decodes with as many zeros
-//! after it as its length.
+//! and the same time, or the same status, from both decodes. Until #435 is fixed, the
+//! encoding decodes with as many zeros after it as its length.
 //!
 //! Input: two bytes that pick the type, then the encoded value
 //! (`connector_opcua::fuzz::decode`). A new open62541 copy can change the type of an

@@ -6,7 +6,7 @@ use std::pin::pin;
 use std::rc::Rc;
 use std::task::Poll;
 
-use access::proof::{self, Admitted};
+use access::proof;
 use transport::Code;
 use transport::stream::{Incoming, Receiver, Sender};
 use types::hash;
@@ -17,6 +17,7 @@ use wire::hub::client::{
     place,
 };
 
+use super::admission::Admission;
 use super::{BODIES_BYTES_MAX, Error, alloc, halves, stop};
 use crate::State;
 use crate::link::{Served, Session};
@@ -76,16 +77,24 @@ impl Reply {
 
 /// Which streams a client session may give next: the hello stream first, then, once a
 /// hello is admitted, requests one at a time and reads.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Gate {
     hello_taken: Cell<bool>,
-    /// The hello that the link admitted last, and its signature.
-    admitted: RefCell<Option<(Admitted, [u8; 64])>>,
+    admission: Admission,
     /// A request is open: read, and its reply not yet sent or dropped.
     open: Cell<bool>,
 }
 
 impl Gate {
+    /// The gate of a new client session of `node`.
+    pub(crate) fn new(node: types::node::Key) -> Self {
+        Self {
+            hello_taken: Cell::default(),
+            admission: Admission::new(node),
+            open: Cell::default(),
+        }
+    }
+
     /// Gives `true` for the first stream of the session only: the hello stream.
     pub(crate) fn first(&self) -> bool {
         !self.hello_taken.replace(true)
@@ -255,10 +264,9 @@ async fn renew(
     if !take(session, receiver, sender).await? {
         return Ok(Served::Ended);
     }
+    let mut expiry = pin!(session.client.admission.expiry(&session.state));
     loop {
-        // A fresh wait for each renewal, since a renewal can move the end earlier.
         let mut renewal = pin!(take(session, receiver, sender));
-        let mut expiry = pin!(expiry(session));
         let renewed = poll_fn(|cx| match renewal.as_mut().poll(cx) {
             Poll::Ready(renewed) => Poll::Ready(renewed),
             Poll::Pending => expiry.as_mut().poll(cx).map(Err),
@@ -281,19 +289,11 @@ async fn take(
     let Some(message) = receiver.recv().await? else {
         return Ok(false);
     };
-    let Signed { hello, signature } = Signed::decode(&message)?;
-    if hello.nonce != nonce {
+    let signed = Signed::decode(&message)?;
+    if signed.hello.nonce != nonce {
         return Err(Error::Stale);
     }
-    let state = session.state.borrow();
-    let now = state.time.now().mesh;
-    let mut admitted = session.client.admitted.borrow_mut();
-    let next = match admitted.as_ref() {
-        None => state.rules.admit(now, state.node, hello, &signature),
-        Some((first, _)) => state.rules.renew(first, now, hello, &signature),
-    }
-    .map_err(Error::Access)?;
-    *admitted = Some((next, signature));
+    session.client.admission.admit(&session.state, signed)?;
     Ok(true)
 }
 
@@ -314,33 +314,6 @@ async fn challenge(session: &Session, sender: &mut Sender) -> Result<[u8; 16], E
     };
     sender.send(message).await?;
     Ok(nonce)
-}
-
-/// Waits until the hello that the link holds ends, and gives the refusal.
-async fn expiry(session: &Session) -> Error {
-    loop {
-        let wait = {
-            let state = session.state.borrow();
-            let admitted = session.client.admitted.borrow();
-            let (admitted, _) = admitted
-                .as_ref()
-                .expect("invariant: the hello stream admitted a hello first");
-            let ends = admitted.ends();
-            let now = state
-                .time
-                .now()
-                .mesh
-                .expect("invariant: mesh time stays once the clock has synced");
-            if now.latest >= ends {
-                return Error::Access(proof::Error::Expired {
-                    expires: ends,
-                    now: now.latest,
-                });
-            }
-            state.time.reach(ends)
-        };
-        wait.await;
-    }
 }
 
 /// Serves a later stream of `session`, a request, a read, or a write, by the kind of
@@ -397,14 +370,7 @@ async fn first(
     session: &Session,
     receiver: &mut Receiver,
 ) -> Result<Option<(Name, First)>, Error> {
-    // A renewal never changes the subject, so the one of the first hello holds.
-    let Some(subject) = session
-        .client
-        .admitted
-        .borrow()
-        .as_ref()
-        .map(|(admitted, _)| admitted.hello().subject.clone())
-    else {
+    let Some(subject) = session.client.admission.subject() else {
         return Err(Error::Unadmitted);
     };
     let Some(message) = receiver.recv().await? else {
@@ -422,7 +388,12 @@ async fn request(
 ) -> Result<(Signed, Vec<u8>, Open), Error> {
     let open = Open::new(session, subject, request.length)?;
     let body = body(receiver, request.body()).await?;
-    let admitted = verify(session, proof::Kind::Request, &body, &request.signature)?;
+    let admitted = session.client.admission.verify(
+        &session.state,
+        proof::Kind::Request,
+        &body,
+        &request.signature,
+    )?;
     Ok((admitted, body, open))
 }
 
@@ -459,31 +430,6 @@ async fn places(
         sender.send(block.freeze()).await?;
     }
     Ok(())
-}
-
-/// Verifies `signature`, of `kind`, over `bytes` with the hello that the link
-/// admitted, and gives that hello and its signature.
-fn verify(
-    session: &Session,
-    kind: proof::Kind,
-    bytes: &[u8],
-    signature: &[u8; 64],
-) -> Result<Signed, Error> {
-    let (admitted, hello) = session
-        .client
-        .admitted
-        .borrow()
-        .clone()
-        .expect("invariant: a link keeps the hello that it admitted");
-    let state = session.state.borrow();
-    state
-        .rules
-        .verify(&admitted, state.time.now().mesh, kind, bytes, signature)
-        .map_err(Error::Access)?;
-    Ok(Signed {
-        hello: admitted.hello().clone(),
-        signature: hello,
-    })
 }
 
 /// Sends the response and its body, then finishes the stream.

@@ -77,6 +77,7 @@ pub(crate) const INFLUX: Reader = Reader {
 
 impl kind::Kind for Reader {
     type Config = Vec<Name>;
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
         let reads = config
@@ -297,6 +298,7 @@ where
     let (mut output, mut errors) = (Vec::new(), Vec::new());
     let input = async || crate::line(&mut std::io::empty());
     let front_ends = front_ends();
+    let kinds = create_kinds();
     let run = crate::cli(
         args,
         input,
@@ -304,6 +306,7 @@ where
         &mut errors,
         paths,
         &front_ends,
+        &kinds,
         reach,
     );
     let run = run.await;

@@ -8,14 +8,18 @@
 //! `founding`, and syncs the directory, before raft writes a record. So a crash before
 //! the first record leaves a first open, and a reopen with the same founding keeps it.
 
-use std::path::Path;
-use std::rc::Rc;
+use std::cell::{Cell, RefCell};
+use std::future::poll_fn;
+use std::path::{Path, PathBuf};
+use std::rc::{Rc, Weak};
+use std::task::{Poll, Waker};
 
 use block::Pool;
 use env::files::{self, Files, Mode};
 
 use crate::error::Error;
 use crate::file::{self, Blocks};
+use crate::message::FOUNDING_BYTES_MAX;
 use crate::region::Founding;
 
 /// The name of the founding file in a mesh directory.
@@ -42,7 +46,7 @@ pub async fn founding(
     let Some(body) = read(files, dir, &blocks, Mode::Read).await? else {
         return Ok(None);
     };
-    let founding = Founding::decode(&body).ok_or_else(|| unfounded(dir))?;
+    let founding = Founding::decode(body.body()).ok_or_else(|| unfounded(dir))?;
     Ok(Some(founding))
 }
 
@@ -53,6 +57,8 @@ pub async fn founding(
 ///
 /// # Errors
 ///
+/// - [`Error::Unjoinable`] when the log holds no record and the byte form of `given`
+///   is over [`FOUNDING_BYTES_MAX`] bytes.
 /// - [`Error::Founding`] when `dir` holds another founding.
 /// - [`Error::Unfounded`] when the log holds a record and `dir` holds no founding, or
 ///   a founding that does not read back whole.
@@ -66,24 +72,32 @@ pub(super) async fn keep(
     logged: bool,
 ) -> Result<(), Error> {
     let encoded = given.encode();
+    // A later open does not check it, so a node with a stored founding always opens.
+    if !logged && encoded.len() > FOUNDING_BYTES_MAX {
+        return Err(Error::Unjoinable {
+            bytes: encoded.len(),
+            most: FOUNDING_BYTES_MAX,
+        });
+    }
     let body = match read(files, dir, blocks, Mode::Write).await {
         // A first open writes over it, and an open with a record refuses it below.
         Err(Error::Unfounded { .. }) => None,
         body => body?,
     };
+    let body = body.as_ref().map(Stored::body);
     if !logged {
-        if body.as_ref() != Some(&encoded) {
+        if body != Some(&encoded[..]) {
             write(files, dir, blocks, &encoded).await?;
         }
         // Also for the same founding: a crash after the rename of an earlier open can
         // leave its name not durable.
         return files.sync_dir(dir).await.map_err(Error::Files);
     }
-    if body.as_ref() == Some(&encoded) {
+    if body == Some(&encoded[..]) {
         return Ok(());
     }
     let body = body.ok_or_else(|| unfounded(dir))?;
-    let stored = Founding::decode(&body).ok_or_else(|| unfounded(dir))?;
+    let stored = Founding::decode(body).ok_or_else(|| unfounded(dir))?;
     let mut given = given.clone();
     given.members.sort_by_key(|member| member.card.key());
     Err(Error::Founding {
@@ -92,7 +106,23 @@ pub(super) async fn keep(
     })
 }
 
-// The body of the founding file in `dir`, after its check and version, or `None` when
+/// The bytes of the founding file: the check and the version, then the body.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Stored {
+    framed: Vec<u8>,
+    start: usize,
+}
+
+impl Stored {
+    /// The byte form of the founding.
+    pub(super) fn body(&self) -> &[u8] {
+        self.framed
+            .get(self.start..)
+            .expect("invariant: the body starts inside the file")
+    }
+}
+
+// The founding file in `dir`, after a check of its check and version, or `None` when
 // `dir` or the file is not there. A `mode` of `Mode::Write` first waits for each call
 // on the file that a dropped `keep` left to run, such as its remove; a read open does
 // not.
@@ -101,7 +131,7 @@ async fn read(
     dir: &Path,
     blocks: &Blocks,
     mode: Mode,
-) -> Result<Option<Vec<u8>>, Error> {
+) -> Result<Option<Stored>, Error> {
     let opened = match files.open(&dir.join(FILE), mode).await {
         Ok(opened) => opened,
         Err(files::Error::NotFound { .. }) => return Ok(None),
@@ -110,10 +140,15 @@ async fn read(
     let stored = blocks.read(&opened).await;
     opened.close().await;
     let stored = stored?;
-    match file::unframe(&stored) {
-        Some((VERSION, body)) => Ok(Some(body.to_vec())),
-        _ => Err(unfounded(dir)),
-    }
+    let start = match file::unframe(&stored) {
+        Some((VERSION, body)) => (stored.len().checked_sub(body.len()))
+            .expect("invariant: the body is a tail of the file"),
+        _ => return Err(unfounded(dir)),
+    };
+    Ok(Some(Stored {
+        framed: stored,
+        start,
+    }))
 }
 
 fn unfounded(dir: &Path) -> Error {
@@ -143,4 +178,90 @@ async fn write(
     opened.rename(&path).await.map_err(Error::Files)?;
     opened.close().await;
     Ok(())
+}
+
+/// The founding file that join answers send. An idle voter holds no copy: each answer
+/// holds one, and answers at one time share it.
+pub(super) struct Shared {
+    files: Files,
+    dir: PathBuf,
+    blocks: Blocks,
+    turn: RefCell<Turn>,
+}
+
+#[derive(Default)]
+struct Turn {
+    copy: Weak<Stored>,
+    reading: bool,
+    // Each call that waits, with the slot that a read that ends fills with its copy.
+    // The read can end in the poll that also drops its last copy, before a woken call
+    // runs.
+    waiting: Vec<(Waker, Rc<Slot>)>,
+}
+
+type Slot = Cell<Option<Rc<Stored>>>;
+
+impl Shared {
+    /// The founding file of `dir`, which an open of the mesh checked, read with
+    /// `blocks`.
+    pub(super) fn new(files: Files, dir: PathBuf, blocks: Blocks) -> Self {
+        Self {
+            files,
+            dir,
+            blocks,
+            turn: RefCell::default(),
+        }
+    }
+
+    /// Gives the copy that another answer holds, or reads the file. While one call
+    /// reads, each other call waits for its copy.
+    pub(super) async fn get(&self) -> Result<Rc<Stored>, Error> {
+        let slot = Rc::new(Slot::default());
+        poll_fn(|cx| {
+            let mut turn = self.turn.borrow_mut();
+            if !turn.reading {
+                return Poll::Ready(());
+            }
+            turn.waiting.push((cx.waker().clone(), Rc::clone(&slot)));
+            Poll::Pending
+        })
+        .await;
+        if let Some(copy) = slot.take().or_else(|| self.turn.borrow().copy.upgrade()) {
+            return Ok(copy);
+        }
+        let reading = Reading::new(&self.turn);
+        let read = read(&self.files, &self.dir, &self.blocks, Mode::Read);
+        let stored = read.await?.ok_or_else(|| unfounded(&self.dir))?;
+        let copy = Rc::new(stored);
+        reading.give(&copy);
+        Ok(copy)
+    }
+}
+
+// The turn of the call that reads. It ends when the call ends or drops, and wakes each
+// call that waits.
+struct Reading<'a>(&'a RefCell<Turn>);
+
+impl<'a> Reading<'a> {
+    fn new(turn: &'a RefCell<Turn>) -> Self {
+        turn.borrow_mut().reading = true;
+        Self(turn)
+    }
+
+    // Ends the turn with `copy`, which each call that waits gets.
+    fn give(self, copy: &Rc<Stored>) {
+        let mut turn = self.0.borrow_mut();
+        turn.copy = Rc::downgrade(copy);
+        for (_, slot) in &turn.waiting {
+            slot.set(Some(Rc::clone(copy)));
+        }
+    }
+}
+
+impl Drop for Reading<'_> {
+    fn drop(&mut self) {
+        let mut turn = self.0.borrow_mut();
+        turn.reading = false;
+        turn.waiting.drain(..).for_each(|(waker, _)| waker.wake());
+    }
 }
