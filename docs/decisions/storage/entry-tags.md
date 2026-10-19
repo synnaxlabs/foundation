@@ -73,7 +73,11 @@
   memory with no file read and no new failure, and `newest` and `Shard::open` are
   sync with no error. It supersedes the 48 B bound of `HANDOFF` above, and the 84 B,
   the 19.4 to 38.9 B, and the 2.2 MB above. A change that adds to the 53.7 B states
-  its bytes and needs a P1 judgment. Decided by `laptop.architect` (#3056,
+  its bytes and needs a P1 judgment. The `via` node of a handoff that names a holder
+  adds 16 B to its copy, up to 64 B for a subject of 240 to 255 B: 1.6 MB at 100,000
+  logs (`laptop.architect`, #3379,
+  https://github.com/synnaxlabs/foundation/pull/3379#issuecomment-6270682141).
+  Decided by `laptop.architect` (#3056,
   2026-10-17T18:45:34Z,
   https://github.com/synnaxlabs/foundation/pull/3056#issuecomment-6238846993). The
   person accepted the cost: "Yeah that's fine. I mean 100,000 tags is an insane
