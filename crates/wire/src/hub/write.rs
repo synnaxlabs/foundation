@@ -13,8 +13,8 @@
 //!   (`u64`), and the count (`u32`); refused 3, then the frame, the group, and the code
 //!   (`u8`, waiting 1, reserved 2, expired 3, order 4, codec 5, full 6, large 7); ended
 //!   5, then the frame, the group, and the code (`u8`, removed 1, failed 2); stored 4,
-//!   then the group and the count of frames that it covers (`u64`); end 6, then the
-//!   group and the code of the end.
+//!   then the group and the count of frames that it covers (`u64`); group ended 6, then
+//!   the group and the code of the end.
 
 use std::collections::VecDeque;
 use std::iter;
@@ -42,8 +42,8 @@ const TAKEN: u8 = 1;
 const LOST: u8 = 2;
 const REFUSED: u8 = 3;
 const STORED: u8 = 4;
-const ENDED: u8 = 5;
-const END: u8 = 6;
+const OUTCOME_ENDED: u8 = 5;
+const GROUP_ENDED: u8 = 6;
 
 /// The head of one frame that a program writes, after the places. The run of its
 /// [`ends`](super::ends) follows, then its run of counts, then its body.
@@ -459,7 +459,7 @@ impl Reply {
                 return;
             }
             Self::Ended { group, end } => {
-                out.put(&[END]);
+                out.put(&[GROUP_ENDED]);
                 out.put(&group.to_le_bytes());
                 out.put(&[end.code()]);
                 return;
@@ -469,7 +469,7 @@ impl Reply {
             Outcome::Taken { .. } => TAKEN,
             Outcome::Lost { .. } => LOST,
             Outcome::Refused(_) => REFUSED,
-            Outcome::Ended(_) => ENDED,
+            Outcome::Ended(_) => OUTCOME_ENDED,
         };
         out.put(&[kind]);
         out.put(&frame.to_le_bytes());
@@ -501,14 +501,14 @@ impl Reply {
             fields.end()?;
             return Ok(Self::Stored { group, frames });
         }
-        if kind == END {
+        if kind == GROUP_ENDED {
             let group = u32::from_le_bytes(*fields.take()?);
             let [code] = *fields.take()?;
             fields.end()?;
             let end = End::of(code)?;
             return Ok(Self::Ended { group, end });
         }
-        if !matches!(kind, TAKEN | LOST | REFUSED | ENDED) {
+        if !matches!(kind, TAKEN | LOST | REFUSED | OUTCOME_ENDED) {
             return Err(Error::Kind { kind });
         }
         let frame = u64::from_le_bytes(*fields.take()?);
@@ -555,6 +555,8 @@ pub struct Replies {
     /// The count of frames whose groups each got an outcome.
     answered: u64,
     groups: Box<[Group]>,
+    /// The count of groups that are not [`Group::settled`].
+    unsettled: usize,
 }
 
 /// The replies of one group.
@@ -567,6 +569,14 @@ struct Group {
     ended: Option<End>,
 }
 
+impl Group {
+    /// Whether the group ended, or its last [`Reply::Stored`] covers its last taken
+    /// frame.
+    fn settled(&self) -> bool {
+        self.ended.is_some() || self.stored >= self.taken
+    }
+}
+
 impl Replies {
     /// The replies of a write of `groups` groups that sent no frame. It allocates here
     /// and in [`Replies::sent`] while the outcomes due grow, and nowhere else.
@@ -577,6 +587,7 @@ impl Replies {
             due: VecDeque::new(),
             answered: 0,
             groups: vec![Group::default(); groups].into_boxed_slice(),
+            unsettled: 0,
         }
     }
 
@@ -650,9 +661,12 @@ impl Replies {
                         bound,
                     });
                 }
-                state.stored = frames;
+                self.settle(group, |state| state.stored = frames);
             }
-            Reply::Ended { group, end } => self.open(group)?.ended = Some(end),
+            Reply::Ended { group, end } => {
+                self.open(group)?;
+                self.settle(group, |state| state.ended = Some(end));
+            }
         }
         Ok(reply)
     }
@@ -679,12 +693,19 @@ impl Replies {
                 next: due,
             });
         }
-        let state = self.group(group)?;
+        let Some(state) = usize::try_from(group)
+            .ok()
+            .and_then(|at| self.groups.get(at))
+        else {
+            unreachable!("invariant: `sent` checks each group of a frame")
+        };
         match (state.ended, outcome) {
             (Some(end), Outcome::Ended(given)) if given == end => {}
             (Some(_), _) => return Err(Error::Ended { group }),
             (None, Outcome::Ended(_)) => return Err(Error::Unended { frame, group }),
-            (None, Outcome::Taken { .. }) => state.taken = frame,
+            (None, Outcome::Taken { .. }) => {
+                self.settle(group, |state| state.taken = frame);
+            }
             (None, Outcome::Lost { .. } | Outcome::Refused(_)) => {}
         }
         self.due.pop_front();
@@ -694,21 +715,34 @@ impl Replies {
         Ok(())
     }
 
-    /// The replies of `group`.
-    fn group(&mut self, group: u32) -> Result<&mut Group, Error> {
-        let count = self.groups.len();
-        usize::try_from(group)
-            .ok()
-            .and_then(|index| self.groups.get_mut(index))
-            .ok_or(Error::Groups { group, count })
-    }
-
     /// The replies of `group`, while it has not ended.
     fn open(&mut self, group: u32) -> Result<&mut Group, Error> {
-        let state = self.group(group)?;
+        let count = self.groups.len();
+        let state = usize::try_from(group)
+            .ok()
+            .and_then(|index| self.groups.get_mut(index))
+            .ok_or(Error::Groups { group, count })?;
         state
             .ended
             .map_or(Ok(state), |_| Err(Error::Ended { group }))
+    }
+
+    /// Applies `change` to `group`, a group of the write, and counts it again among
+    /// the groups that are not settled.
+    fn settle(&mut self, group: u32, change: impl FnOnce(&mut Group)) {
+        let Some(state) = usize::try_from(group)
+            .ok()
+            .and_then(|at| self.groups.get_mut(at))
+        else {
+            unreachable!("invariant: group {group} of a reply is a group of the write")
+        };
+        let settled = state.settled();
+        change(state);
+        match (settled, state.settled()) {
+            (true, false) => self.unsettled = self.unsettled.strict_add(1),
+            (false, true) => self.unsettled = self.unsettled.strict_sub(1),
+            _ => {}
+        }
     }
 
     /// Whether each group of each frame sent got its outcome.
@@ -721,11 +755,7 @@ impl Replies {
     /// last [`Reply::Stored`] covers its last taken frame, or the group ended.
     #[must_use]
     pub fn stored(&self) -> bool {
-        self.answered()
-            && self
-                .groups
-                .iter()
-                .all(|group| group.ended.is_some() || group.stored >= group.taken)
+        self.answered() && self.unsettled == 0
     }
 
     /// Each group that ended with a taken frame past its last [`Reply::Stored`], and
