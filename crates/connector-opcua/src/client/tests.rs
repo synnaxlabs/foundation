@@ -8,12 +8,15 @@ use std::num::NonZeroUsize;
 use std::pin::pin;
 use std::ptr::NonNull;
 use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use env::clock::Clock;
 use env::net::{Net, Tcp, tcp};
 use env::rng::Rng;
-use sim::{Sim, node};
+use env::shards;
+use sim::{Crash, Sim, node};
 use types::quality::Quality;
 use types::time::{Span, Stamp};
 
@@ -982,6 +985,33 @@ fn a_close_frees_the_session_on_the_server_and_a_drop_does_not() {
         .await
     });
     assert_eq!(connects, Some(Status::BAD_TOO_MANY_SESSIONS));
+}
+
+/// A crash of the node drops a connected client off the threads of the sim, as a
+/// failed scenario does, and the drop does not abort the process.
+#[test]
+fn a_crash_drops_a_connected_client_off_the_threads_of_the_sim() {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(node::Config::default());
+    let (own, connected) = (node.clone(), Arc::new(AtomicBool::new(false)));
+    let on = Arc::clone(&connected);
+    let config = shards::Config {
+        name: "client".into(),
+        core: None,
+    };
+    let start = node.shards().start(config, move |_| async move {
+        serve(&own, 4, async |mut peer| {
+            let _client = peer.connected().await;
+            on.store(true, Ordering::Relaxed);
+            future::pending::<()>().await;
+        })
+        .await;
+    });
+    drop(start.expect("a shard with no core gets no fault"));
+    sim.run_for(Span::from_nanos(10_000_000_000))
+        .expect("the run goes on");
+    assert!(connected.load(Ordering::Relaxed));
+    sim.crash(&node, Crash::Process);
 }
 
 /// Connects to a listener on `node` that gives `accepted` each stream it accepts, and
