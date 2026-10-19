@@ -252,7 +252,7 @@ exclude_re = [
   'crates/buffer/src/log\.rs:.*replace \| with \^ in Holder::copy$',
   # A read's assembly (`SKIP` false) never reaches `Skipped`: its `skip` fails to
   # build. So the arm under a true guard is never taken.
-  'crates/wire/src/hub/part\.rs:.*replace match guard SKIP with true in Assembly<SKIP>::(body|take)$',
+  'crates/wire/src/hub/part\.rs:.*replace match guard SKIP with true in Assembly<SKIP>::(body|count|take)$',
   # The lead of a frame is 11 bytes and 8 for each place, so it is odd, and each block
   # payload is even: the lead never equals the largest block.
   'crates/program/src/write\.rs:.*replace > with >= in Writer::open$',
