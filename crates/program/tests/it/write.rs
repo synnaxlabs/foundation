@@ -24,7 +24,7 @@ use types::time::Span;
 use wire::header::MALFORMED;
 use wire::hub::client::write::Write;
 use wire::hub::client::{Mode, OPEN_BYTES_MAX, Place, Refusal};
-use wire::hub::write::{Reply, counts};
+use wire::hub::write::Reply;
 
 use crate::agent::{AGENT, name};
 use crate::connect::{ample, connect, connect_receiving, connect_with};
@@ -756,7 +756,8 @@ async fn take_frame(write: &mut Incoming) {
         message.expect("a message of the frame");
     }
     let message = write.receiver.recv().await.expect("receives");
-    if message.expect("a message of the frame").len() == counts::LEN {
+    // A count is 4 bytes, and the body of 2 series of one sample is 16.
+    if message.expect("a message of the frame").len() == 4 {
         let message = write.receiver.recv().await.expect("receives");
         message.expect("the body");
     }

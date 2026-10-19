@@ -12,9 +12,8 @@ use types::name::Name;
 use types::time::Span;
 use wire::hub::client::Place;
 use wire::hub::client::write::{Open, Opening, Start, Write};
-use wire::hub::ends;
-use wire::hub::write::{Head, Replies, Reply, counts};
 pub use wire::hub::write::{End, Outcome, Refusal, Time};
+use wire::hub::write::{Lead, Replies, Reply};
 
 use crate::{Error, Handle, end};
 
@@ -67,8 +66,7 @@ impl Writer {
                     return Err(error);
                 }
             };
-        let lead =
-            Head::LEN + places.len() * ends::LEN + set.groups().len() * counts::LEN;
+        let lead = Lead::most(&set);
         let largest = session.0.pool.largest();
         if lead > largest {
             return Err(Error::Pool(block::Error::TooLarge {
@@ -271,46 +269,19 @@ impl Writer {
         let (sender, _) = stream
             .as_mut()
             .expect("invariant: a writer holds its stream until it ends");
-        let head = Head {
-            time,
-            form: frame.form(),
-            series: to_u32(frame.iter().count()),
-        };
         let frame = frame.freeze(match time {
             Time::Frame(path) => path,
             Time::Node => Path::Live,
         });
-        let ended = Head::LEN + to_usize(head.series) * ends::LEN;
-        let groups = match time {
-            Time::Frame(_) => frame.ranges().count(),
-            Time::Node => 0,
-        };
+        let lead = Lead::new(time, &frame);
         // The open checked that a block of the pool holds the lead.
-        let mut lead = shared.alloc(ended + groups * counts::LEN).await?;
-        let (bytes, rest) = lead.split_at_mut(Head::LEN);
-        head.encode(bytes);
-        let (run, rest) = rest.split_at_mut(ended - Head::LEN);
-        ends::encode(
-            frame
-                .ends()
-                .map(|(entry, end)| (to_u32(entry), to_u32(end))),
-            run,
-        );
-        if groups > 0 {
-            counts::encode(frame.ranges().map(|(_, range)| range.count), rest);
-        }
-        let lead = lead.freeze();
+        let mut bytes = shared.alloc(lead.bytes()).await?;
+        lead.encode(&mut bytes);
+        let bytes = bytes.freeze();
         let most = sender.bytes_max();
         *cut = true;
-        send_range(sender, &lead, 0..Head::LEN).await?;
-        for (run, len) in [
-            (Head::LEN..ended, ends::LEN),
-            (ended..lead.len(), counts::LEN),
-        ] {
-            let run_most = most / len * len;
-            for at in run.clone().step_by(run_most) {
-                send_range(sender, &lead, at..run.end.min(at + run_most)).await?;
-            }
+        for range in lead.messages(most) {
+            send_range(sender, &bytes, range).await?;
         }
         let body = frame.body();
         for at in (0..body.len()).step_by(most) {
@@ -397,8 +368,4 @@ async fn start(
 
 fn to_u32(value: usize) -> u32 {
     u32::try_from(value).expect("invariant: a frame of a writer fits the wire")
-}
-
-fn to_usize(value: u32) -> usize {
-    usize::try_from(value).expect("invariant: a u32 fits a usize")
 }
