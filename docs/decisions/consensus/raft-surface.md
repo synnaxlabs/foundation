@@ -284,4 +284,7 @@
   the lower term and the requests of a vote, 2026-10-19T19:53:12Z
   (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6275950285), and for
   the replies to a heartbeat and a pre-vote, 2026-10-19T20:33:44Z
-  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276712034).
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276712034), and for
+  its cost, 2026-10-19T19:56:42Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276015270, finding
+  3).
