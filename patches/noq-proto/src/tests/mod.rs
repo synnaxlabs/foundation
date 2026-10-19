@@ -5229,11 +5229,8 @@ fn ack_only_packet_acks_only_the_paths_with_a_due_ack() -> TestResult {
 
 /// A server that anti-amplification blocks sends no ACK-only packet, also with an ACK due.
 ///
-/// No crate of the workspace reaches this state. The patch sends an ACK-only packet on an
-/// unvalidated path only in the handshake (`may_send_data`). There a `transport` client
-/// sends no 0-RTT, so each datagram that makes an ACK due holds an Initial of at least 1200
-/// bytes. It gives the server 3600 bytes of budget, more than the server sends past its
-/// budget at the `transport` initial MTU of 1200.
+/// A `transport` server reaches this state when its peer sends a short Initial after its
+/// first datagram. The `transport` test that replaces this copy test is #3410.
 #[test]
 fn no_ack_only_packet_when_anti_amplification_blocks() {
     let _guard = subscribe();
