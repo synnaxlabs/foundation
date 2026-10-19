@@ -638,6 +638,9 @@ fn sends_ends_over_one_message_as_whole_ends() {
     );
 }
 
+/// The ends, the counts, the body bytes, and the groups of a frame that the node takes.
+type Taken<'f> = (&'f [(u32, u32)], &'f [u32], usize, &'f [u32]);
+
 /// A writer of two groups sets the count of each group that its draft holds: group 1
 /// alone, then both.
 #[test]
@@ -652,7 +655,7 @@ fn sends_the_count_of_each_group_of_a_draft() {
         727,
         move |session, node| async move {
             let mut write = opened_with(&session, &places).await;
-            let frames: [(&[(u32, u32)], &[u32], usize, &[u32]); 2] = [
+            let frames: [Taken<'_>; 2] = [
                 (&[(2, 8), (3, 16)], &[1], 16, &[1]),
                 (&[(0, 16), (1, 32), (2, 48), (3, 64)], &[2, 2], 64, &[0, 1]),
             ];
