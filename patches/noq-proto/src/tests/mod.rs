@@ -5217,3 +5217,48 @@ fn no_ack_only_packet_on_an_unvalidated_path_with_a_full_window() {
 
     assert_eq!(pair.server_conn_mut(server_ch).stats().frame_tx.acks, acks);
 }
+
+/// The ACK-only packet carries the ACK of each path whose ACK is due, and of no other path.
+///
+/// No crate of the workspace has a second path: `transport` does not negotiate multipath.
+#[test]
+fn ack_only_packet_acks_only_the_paths_with_a_due_ack() -> TestResult {
+    let _guard = subscribe();
+    let window = Arc::new(AtomicU64::new(u64::MAX / 2));
+    let mut builder = ConnPair::builder().enable_multipath();
+    builder
+        .server_transport_cfg
+        .congestion_controller_factory(Arc::new(SetWindowController {
+            window: window.clone(),
+        }));
+    let mut pair = builder.connect();
+    let mut client_two = pair.routes.as_basic().client_addr;
+    let mut server_two = pair.routes.as_basic().server_addr;
+    client_two.set_port(client_two.port() + 1);
+    server_two.set_port(server_two.port() + 1);
+    pair.routes = util::ManyToManyRouting::simple_symmetric(
+        [pair.routes.as_basic().client_addr, client_two],
+        [pair.routes.as_basic().server_addr, server_two],
+    )
+    .into();
+    let network_path = FourTuple {
+        local_ip: Some(client_two.ip()),
+        remote: server_two,
+    };
+    let path_id = pair.open_path(Client, network_path, PathStatus::Available)?;
+    pair.drive();
+
+    let s = pair.streams(Server).open(Dir::Uni).unwrap();
+    window.store(0, Ordering::Relaxed);
+    pair.send_stream(Server, s).write(&[42; 1024])?;
+    let path_acks = pair.stats(Server).frame_tx.path_acks;
+    pair.ping_path(Client, path_id)?;
+    pair.drive_client();
+    for _ in 0..10 {
+        pair.time += Duration::from_millis(10);
+        pair.drive_server();
+    }
+
+    assert_eq!(pair.stats(Server).frame_tx.path_acks, path_acks + 1);
+    Ok(())
+}
