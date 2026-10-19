@@ -3036,6 +3036,39 @@ mod tests {
         assert_eq!(window_after(Ending::StopBefore), window_after(Ending::Read));
     }
 
+    /// The stop goes out while a message is lost, so the reset's final size is past
+    /// the bytes that arrived.
+    #[test]
+    fn a_stop_before_a_reset_past_the_bytes_that_arrived_gives_the_peer_its_window() {
+        let window = testing::run(1, |shard| {
+            let mut pair = connected(shard);
+            for _ in 0..8 {
+                let mut sender = open_sender(&mut pair, Class::Complete);
+                let now = pair.now();
+                write(
+                    &mut pair.client,
+                    now,
+                    &mut sender,
+                    &[shard.block(&[1; 100])],
+                );
+                pair.run(RUN);
+                let incoming = accept(&mut pair.server);
+                pair.client.drops = usize::MAX;
+                let now = pair.now();
+                let message = shard.block(&vec![2; MESSAGE_MAX]);
+                write(&mut pair.client, now, &mut sender, &[message]);
+                pair.server.endpoint.stop(now, incoming.receiver, Code(9));
+                pair.run(DELAY + STEP);
+                pair.client.drops = 0;
+                let now = pair.now();
+                pair.client.endpoint.reset(now, &mut sender, Code(9));
+                pair.run(RUN);
+            }
+            unread(&mut pair)
+        });
+        assert_eq!(window, window_after(Ending::Read));
+    }
+
     #[test]
     fn streams_that_wait_for_budget_let_the_streams_with_a_block_finish() {
         testing::run(1, |shard| {
