@@ -23,7 +23,7 @@ fn config(term: u64, index: u64, voters: Voters, keys: &[u8], elected: &[u8]) ->
         at: position(term, index),
         data: Data::Voters(Change {
             voters,
-            keys: keyed(keys),
+            public_keys: keyed(keys),
             votes: proof(Grant::Vote, 1, elected),
             signature: None,
         }),

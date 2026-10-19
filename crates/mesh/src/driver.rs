@@ -3855,7 +3855,7 @@ mod tests {
                 outgoing: keys(outgoing),
             };
             Data::Voters(raft::Change {
-                keys: common::bound(&change),
+                public_keys: common::bound(&change),
                 voters: change,
                 votes: proof.expect("a proven message holds a proof"),
                 signature: None,
@@ -6572,7 +6572,7 @@ mod tests {
                 assert_eq!(mesh.propose_voters(voters).await, Ok(after(at, 1)));
             });
             let joint = entries.iter().find_map(|entry| match &entry.data {
-                Data::Voters(change) => Some(&change.keys),
+                Data::Voters(change) => Some(&change.public_keys),
                 Data::Empty | Data::Bytes(_) => None,
             });
             let cards = [(key(2), public(2)), (key(3), public(3))].into();
@@ -7489,7 +7489,7 @@ mod tests {
         #[test]
         fn a_link_whose_bound_key_a_relay_changed_refuses_the_message() {
             let mut forged = heartbeat(links(2, &ALL));
-            forged.chain[0].change.keys.insert(key(4), public(5));
+            forged.chain[0].change.public_keys.insert(key(4), public(5));
             let claim = Error::Claim(claim::Error::Forged { signer: key(2) });
             takes(&FOUNDERS, forged, Err(claim));
         }

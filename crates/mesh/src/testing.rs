@@ -530,7 +530,7 @@ mod tests {
                 incoming: [key(1), key(2)].into(),
                 outgoing: [key(1)].into(),
             },
-            keys: [(key(2), public(2))].into(),
+            public_keys: [(key(2), public(2))].into(),
             votes: proof(),
             signature: Some(Signature([9; 64])),
         }
@@ -994,7 +994,7 @@ mod tests {
         put_position(link.at, &mut bytes);
         put_change(&link.change, &mut bytes);
         assert_eq!(chain.len(), links + bytes.len() + 9);
-        let bound = link.change.keys.values().next().unwrap();
+        let bound = link.change.public_keys.values().next().unwrap();
         assert_eq!(bytes[16 + 64..16 + 96], bound.to_bytes());
         refused.push(("raft_chain", unbound(chain, links + 16 + 64)));
         let append = inputs["raft_append_keys"];

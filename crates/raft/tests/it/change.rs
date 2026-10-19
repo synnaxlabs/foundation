@@ -810,7 +810,7 @@ fn link(index: u64, voters: Voters) -> Link {
         },
         change: Change {
             voters,
-            keys: BTreeMap::new(),
+            public_keys: BTreeMap::new(),
             votes: votes(1, &[1, 2, 3, 4]),
             signature: None,
         },

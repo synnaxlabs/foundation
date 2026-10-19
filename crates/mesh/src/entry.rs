@@ -116,7 +116,7 @@ mod tests {
             at: at(3, 4),
             data: Data::Voters(Change {
                 voters,
-                keys,
+                public_keys: keys,
                 votes: proof,
                 signature,
             }),

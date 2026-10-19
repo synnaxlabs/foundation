@@ -363,7 +363,7 @@ impl Raft {
         let proof = self.votes.clone();
         Change {
             voters,
-            keys,
+            public_keys: keys,
             votes: proof.expect("invariant: only a leader writes a configuration"),
             signature: None,
         }
@@ -1455,7 +1455,7 @@ mod tests {
     fn change(leader: u8, voters: Voters) -> Data {
         Data::Voters(Change {
             voters,
-            keys: BTreeMap::new(),
+            public_keys: BTreeMap::new(),
             votes: Proof {
                 grant: Grant::Vote,
                 candidate: key(leader),
@@ -1487,7 +1487,7 @@ mod tests {
             at: position(term, index),
             data: Data::Voters(Change {
                 voters,
-                keys: keyed(keys),
+                public_keys: keyed(keys),
                 votes: proof,
                 signature: None,
             }),
@@ -2985,7 +2985,7 @@ mod tests {
                 at,
                 change: Change {
                     voters,
-                    keys: BTreeMap::new(),
+                    public_keys: BTreeMap::new(),
                     votes: proof(Grant::Vote, leader, elected),
                     signature: Some(signature(Grant::Vote, leader)),
                 },
@@ -4489,7 +4489,7 @@ mod tests {
             else {
                 panic!("the last entry is no change");
             };
-            change.keys
+            change.public_keys
         }
 
         #[test]

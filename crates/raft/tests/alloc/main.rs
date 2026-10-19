@@ -90,7 +90,7 @@ fn heartbeat(links: u64) -> Message {
                     } else {
                         voters(&[1, 2, 3])
                     },
-                    keys: BTreeMap::new(),
+                    public_keys: BTreeMap::new(),
                     votes: proof(1, &[1, 2]),
                     signature: None,
                 },

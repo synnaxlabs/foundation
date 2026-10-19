@@ -451,7 +451,7 @@ pub(crate) fn voters_entry_voted(
     let entry = Entry {
         at,
         data: Data::Voters(raft::Change {
-            keys: bound(&voters),
+            public_keys: bound(&voters),
             voters,
             votes: votes(at.term, leader, voted),
             signature: None,

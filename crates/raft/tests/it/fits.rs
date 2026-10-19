@@ -222,7 +222,7 @@ fn a_link_of_three_voters_in_each_set_is_457_bytes() {
                 incoming: set(&[1, 2, 3]),
                 outgoing: set(&[1, 2, 3]),
             },
-            keys: BTreeMap::new(),
+            public_keys: BTreeMap::new(),
             votes: Proof {
                 grant: Grant::Vote,
                 candidate: key(1),

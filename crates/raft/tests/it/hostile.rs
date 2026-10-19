@@ -199,13 +199,13 @@ fn a_voter_that_led_a_term_can_forge_a_link_to_itself_and_prove_any_term() {
         leader: from,
         at,
         voters: &alone,
-        keys: &BTreeMap::new(),
+        public_keys: &BTreeMap::new(),
     });
     let link = Link {
         at,
         change: Change {
             voters: alone,
-            keys: BTreeMap::new(),
+            public_keys: BTreeMap::new(),
             votes,
             signature: Some(signature),
         },

@@ -452,7 +452,7 @@ mod tests {
                 };
                 raft::Change {
                     voters,
-                    keys,
+                    public_keys: keys,
                     votes,
                     signature: Some(signature),
                 }
@@ -598,7 +598,7 @@ mod tests {
                         incoming: keys.map(key).into(),
                         outgoing: BTreeSet::new(),
                     },
-                    keys: BTreeMap::new(),
+                    public_keys: BTreeMap::new(),
                     votes: Proof {
                         grant: Grant::Vote,
                         candidate: key(1),
@@ -643,7 +643,7 @@ mod tests {
                 incoming: [key(1), key(2)].into(),
                 outgoing: [key(2)].into(),
             },
-            keys: [(key(1), PublicKey::new([0xc1; 32]).unwrap())].into(),
+            public_keys: [(key(1), PublicKey::new([0xc1; 32]).unwrap())].into(),
             votes: Proof {
                 grant: Grant::Vote,
                 candidate: key(1),
@@ -823,7 +823,7 @@ mod tests {
                             incoming: [1, 2, 3].map(key).into(),
                             outgoing: [1, 2, 4].map(key).into(),
                         },
-                        keys: [(key(3), public(3))].into(),
+                        public_keys: [(key(3), public(3))].into(),
                         votes: Proof {
                             grant: Grant::Vote,
                             candidate: key(1),
@@ -1099,7 +1099,7 @@ mod tests {
                     incoming: (1..=voters).map(node::Key::from_u128).collect(),
                     outgoing: BTreeSet::new(),
                 },
-                keys: BTreeMap::new(),
+                public_keys: BTreeMap::new(),
                 votes: Proof {
                     grant: Grant::Vote,
                     candidate: key(1),
@@ -1159,7 +1159,7 @@ mod tests {
                 incoming: keys_of(0, most),
                 outgoing: keys_of(most, 2 * most),
             },
-            keys: keys_of(0, most)
+            public_keys: keys_of(0, most)
                 .into_iter()
                 .map(|key| (key, PublicKey::new([0xc1; 32]).unwrap()))
                 .collect(),

@@ -78,7 +78,8 @@ pub enum Claim<'a> {
         /// The node it grants it to.
         candidate: node::Key,
     },
-    /// `leader` wrote the configuration entry `voters` at `at`, which binds `keys`.
+    /// `leader` wrote the configuration entry `voters` at `at`, which binds
+    /// `public_keys`.
     Change {
         /// The leader that signs.
         leader: node::Key,
@@ -87,7 +88,7 @@ pub enum Claim<'a> {
         /// The configuration.
         voters: &'a Voters,
         /// The keys that the change binds.
-        keys: &'a BTreeMap<node::Key, PublicKey>,
+        public_keys: &'a BTreeMap<node::Key, PublicKey>,
     },
 }
 

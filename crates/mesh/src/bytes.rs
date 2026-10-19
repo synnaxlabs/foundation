@@ -287,7 +287,7 @@ pub(crate) fn put_proof(proof: &Proof, out: &mut Vec<u8>) {
 pub(crate) fn put_change(change: &Change, out: &mut Vec<u8>) {
     put_keys(&change.voters.incoming, out);
     put_keys(&change.voters.outgoing, out);
-    put_bound(&change.keys, out);
+    put_bound(&change.public_keys, out);
     put_proof(&change.votes, out);
     put_signature(change.signature, out);
 }
@@ -307,7 +307,7 @@ pub(crate) fn change_len(change: &Change) -> usize {
     let lengths = [
         keys(&voters.incoming),
         keys(&voters.outgoing),
-        change.keys.len().saturating_mul(32),
+        change.public_keys.len().saturating_mul(32),
     ];
     let proof = proof_len(&change.votes).saturating_add(8 + 8 + 64);
     lengths.into_iter().fold(proof, usize::saturating_add)
@@ -325,7 +325,7 @@ pub(crate) fn take_change(bytes: &mut &[u8]) -> Option<Change> {
     let signature = Some(take_signature(bytes)?);
     Some(Change {
         voters,
-        keys,
+        public_keys: keys,
         votes: proof,
         signature,
     })

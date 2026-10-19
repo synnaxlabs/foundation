@@ -157,7 +157,7 @@ impl Disk {
 pub(crate) fn change(leader: node::Key, voters: Voters) -> Data {
     Data::Voters(Change {
         voters,
-        keys: BTreeMap::new(),
+        public_keys: BTreeMap::new(),
         votes: Proof {
             grant: Grant::Vote,
             candidate: leader,

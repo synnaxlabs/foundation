@@ -219,7 +219,7 @@ fn statement(claim: &Claim<'_>) -> Vec<u8> {
             leader,
             at,
             voters,
-            keys,
+            public_keys: keys,
         } => {
             let mut bytes = CHANGE.to_vec();
             put_key(leader, &mut bytes);
@@ -539,7 +539,7 @@ mod tests {
             leader: key(3),
             at: common::at(7, 5),
             voters: &voters,
-            keys: &keys,
+            public_keys: &keys,
         };
         assert_eq!(statement(&claim), expected);
     }
@@ -579,7 +579,7 @@ mod tests {
             leader: key(1),
             at: written(),
             voters: &joint,
-            keys: &keys,
+            public_keys: &keys,
         };
         let signature = change.signature;
         assert_eq!(verify(&claim, signature, members(&[1, 2, 3])), Ok(()));
@@ -594,7 +594,7 @@ mod tests {
             leader: key(1),
             at: written(),
             voters: &joint,
-            keys: &keys,
+            public_keys: &keys,
         };
         let panic = std::panic::catch_unwind(|| {
             verify(&claim, change.signature, members(&[2, 3])).unwrap();
@@ -638,7 +638,7 @@ mod tests {
                 leader,
                 at,
                 voters,
-                keys,
+                public_keys: keys,
             };
             let forged = Err(Error::Forged { signer: leader });
             assert_eq!(verify(&claim, signature, &members), forged, "{claim:?}");
