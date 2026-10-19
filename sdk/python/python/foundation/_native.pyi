@@ -133,12 +133,12 @@ class Client:
         threads run while it waits.
 
         Raises `TypeError` for an argument of a wrong type; `ValueError` for no channel,
-        a name that does not parse, an `authority` outside 0 to 255, a `lease` that
-        rounds to a number of nanoseconds outside 1 to 2^63 - 1, or another `on_loss`,
-        with no writer opened; `Stopped` when the node refused the open, with a text
-        that names each channel of the open for `unknown`; `ConnectionError` when the
-        session failed; `RuntimeError` when the client closed or in a process that the
-        program forked; and `PanicException` when the client's thread panicked.
+        a name that does not parse, an `authority` outside 0 to 255, a `lease` that,
+        taken as a `float`, does not round to 1 to 2^63 - 1 nanoseconds, or another
+        `on_loss`, with no writer opened; `Stopped` when the node refused the open, with
+        a text that names each channel of the open for `unknown`; `ConnectionError` when
+        the session failed; `RuntimeError` when the client closed or in a process that
+        the program forked; and `PanicException` when the client's thread panicked.
         """
 
     def __enter__(self) -> Self: ...

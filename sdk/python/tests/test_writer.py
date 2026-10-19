@@ -383,32 +383,33 @@ class WriterTest(unittest.TestCase):
                 "plant.a",
                 {"lease": 0.0},
                 ValueError,
-                "lease is 0.0 s, outside 1 to 2^63 - 1 whole ns",
+                "lease is 0.0 s, which does not round to 1 to 2^63 - 1 ns",
             ),
             (
                 "plant.a",
                 {"lease": 1e-12},
                 ValueError,
-                "lease is 1e-12 s, outside 1 to 2^63 - 1 whole ns",
+                "lease is 1e-12 s, which does not round to 1 to 2^63 - 1 ns",
             ),
             (
                 "plant.a",
                 # Its nanoseconds round to 2^63, one past the largest i64.
                 {"lease": 2**63 / 1e9},
                 ValueError,
-                "lease is 9223372036.854776 s, outside 1 to 2^63 - 1 whole ns",
+                "lease is 9223372036.854776 s, which does not round to 1 to 2^63 - 1 "
+                "ns",
             ),
             (
                 "plant.a",
                 {"lease": float("inf")},
                 ValueError,
-                "lease is inf s, outside 1 to 2^63 - 1 whole ns",
+                "lease is inf s, which does not round to 1 to 2^63 - 1 ns",
             ),
             (
                 "plant.a",
                 {"lease": float("nan")},
                 ValueError,
-                "lease is NaN s, outside 1 to 2^63 - 1 whole ns",
+                "lease is NaN s, which does not round to 1 to 2^63 - 1 ns",
             ),
             (
                 "plant.a",
@@ -458,8 +459,30 @@ class WriterTest(unittest.TestCase):
                 self.assertIs(type(raised.exception), ValueError)
                 self.assertEqual(
                     str(raised.exception),
-                    f"lease is {lease!r} s, outside 1 to 2^63 - 1 whole ns",
+                    f"lease is {lease!r} s, which does not round to 1 to 2^63 - 1 ns",
                 )
+        # Its repr raises: it has more digits than Python converts to a str. So does
+        # the message of `called`.
+        with self.assertRaises(ValueError) as raised:
+            self.client.open_writer("plant.a", lease=10**5000)
+        self.assertEqual(
+            str(raised.exception),
+            "lease is past the range of a float, which does not round to 1 to 2^63 - 1 "
+            "ns",
+        )
+
+    def test_a_lease_is_taken_as_a_float_before_it_rounds(self) -> None:
+        # 0.49999... ns, which is 0.5 ns as a float, and rounds to 1 ns.
+        lease = decimal.Decimal("4.9999999999999999999E-10")
+        called(self, self.client.open_writer, "plant.a", lease=lease).close()
+        # 2^63 - 1 ns, which is 2^63 ns as a float.
+        with self.assertRaises(ValueError) as raised:
+            lease = decimal.Decimal("9223372036.854775807")
+            called(self, self.client.open_writer, "plant.a", lease=lease)
+        self.assertEqual(
+            str(raised.exception),
+            "lease is 9223372036.854776 s, which does not round to 1 to 2^63 - 1 ns",
+        )
 
     def test_the_stub_types_each_value_and_lease_that_the_module_takes(self) -> None:
         class Float:

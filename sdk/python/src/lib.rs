@@ -364,12 +364,12 @@ impl Client {
     /// threads run while it waits.
     ///
     /// Raises `TypeError` for an argument of a wrong type; `ValueError` for no channel,
-    /// a name that does not parse, an `authority` outside 0 to 255, a `lease` that
-    /// rounds to a number of nanoseconds outside 1 to 2^63 - 1, or another `on_loss`,
-    /// with no writer opened; `Stopped` when the node refused the open, with a text
-    /// that names each channel of the open for `unknown`; `ConnectionError` when the
-    /// session failed; `RuntimeError` when the client closed or in a process that the
-    /// program forked; and `PanicException` when the client's thread panicked.
+    /// a name that does not parse, an `authority` outside 0 to 255, a `lease` that,
+    /// taken as a `float`, does not round to 1 to 2^63 - 1 nanoseconds, or another
+    /// `on_loss`, with no writer opened; `Stopped` when the node refused the open, with
+    /// a text that names each channel of the open for `unknown`; `ConnectionError` when
+    /// the session failed; `RuntimeError` when the client closed or in a process that
+    /// the program forked; and `PanicException` when the client's thread panicked.
     #[pyo3(
         signature = (
             channels, *, authority=Level(Authority(0)), lease=None, on_loss="warn"
@@ -501,8 +501,8 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Level {
     }
 }
 
-/// The argument `lease` of `open_writer`: seconds that round to 1 to 2^63 - 1 whole
-/// nanoseconds.
+/// The argument `lease` of `open_writer`: seconds that, taken as an `f64`, round to 1
+/// to 2^63 - 1 nanoseconds.
 struct Lease(Span);
 
 impl<'a, 'py> FromPyObject<'a, 'py> for Lease {
@@ -511,13 +511,17 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Lease {
     fn extract(object: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
         let refused = |lease: &str| {
             PyValueError::new_err(format!(
-                "lease is {lease} s, outside 1 to 2^63 - 1 whole ns"
+                "lease is {lease}, which does not round to 1 to 2^63 - 1 ns"
             ))
         };
         let lease = match object.extract::<f64>() {
             Ok(lease) => lease,
             Err(e) if e.is_instance_of::<PyOverflowError>(object.py()) => {
-                return Err(refused(&object.repr()?.to_cow()?));
+                let lease = object.repr().map_or_else(
+                    |_| "past the range of a float".to_owned(),
+                    |repr| format!("{repr} s"),
+                );
+                return Err(refused(&lease));
             }
             Err(e) => return Err(e),
         };
@@ -525,7 +529,7 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Lease {
         // The bound is the first f64 past `i64::MAX`, and a NaN fails both tests.
         #[expect(clippy::cast_precision_loss, reason = "2^63 is exact in an f64")]
         if !(nanos >= 1.0 && nanos < i64::MAX as f64) {
-            return Err(refused(&format!("{lease:?}")));
+            return Err(refused(&format!("{lease:?} s")));
         }
         #[expect(
             clippy::cast_possible_truncation,
