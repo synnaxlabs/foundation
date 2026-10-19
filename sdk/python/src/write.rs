@@ -866,10 +866,9 @@ np.array = guard(np.array, array)
         })
     }
 
-    // The `// SAFETY:` comment of `raw` relies on this bound, and a read past the
-    // array changes no byte that a test on CPython sees.
     /// The end of the one group of a writer raises `Stopped` with the code of a stream
-    /// that the node stopped for the same cause.
+    /// that the node stopped for the same cause. It calls the map, not `write`: no
+    /// node gives `Outcome::Ended` until #3372, which adds the test through `write`.
     #[test]
     fn ended_raises_stopped_with_the_code_of_each_end() {
         Python::initialize();
@@ -884,6 +883,8 @@ np.array = guard(np.array, array)
         });
     }
 
+    // The `// SAFETY:` comment of `raw` relies on this bound, and a read past the
+    // array changes no byte that a test on CPython sees.
     #[test]
     fn fill_pulls_no_sample_after_the_last_chunk() {
         let mut bytes = [0_u8; 3 * 8];
