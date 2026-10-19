@@ -219,18 +219,17 @@ impl Homed {
         })
     }
 
-    /// Opens the writer at the home, and gives it with the channels of its config.
-    /// Call it with no wait after [`Homed::new`], so that the channels and their homes
-    /// are as it found them.
-    pub(crate) fn open(self) -> Result<(Writer, Vec<Name>), Error> {
+    /// Opens the writer at the home. Call it with no wait after [`Homed::new`], so
+    /// that the channels and their homes are as it found them.
+    pub(crate) fn open(self) -> Result<Writer, Error> {
         let mut borrowed = self.state.borrow_mut();
         let borrowed = &mut *borrowed;
         let groups = self.carry(borrowed);
         let indexes = groups.iter().map(|group| group.index);
         let keys = self.keys.iter().copied().chain(indexes).collect();
-        let writer = self.writer(borrowed, &groups, keys, &self.keys)?;
-        drop(groups);
-        Ok((writer, self.channels))
+        let mut writer = self.writer(borrowed, &groups, keys)?;
+        writer.entries = entries(&writer.set, &self.keys);
+        Ok(writer)
     }
 
     /// The places of the set of all groups: each index and each of its data
@@ -259,7 +258,7 @@ impl Homed {
             let keys = group.data.iter().map(|&(key, _)| key);
             let keys = keys.chain([index]).collect();
             let groups = std::slice::from_ref(*group);
-            writers.push(self.writer(borrowed, groups, keys, &[])?);
+            writers.push(self.writer(borrowed, groups, keys)?);
         }
         let entries = entries(&set, &self.keys);
         drop(groups);
@@ -285,18 +284,15 @@ impl Homed {
             .collect()
     }
 
-    /// Opens a writer of `groups` at the home, which ends once a channel of `keys` is
-    /// removed, with the entry of each of `named`. `keys` holds each channel of
-    /// `groups`, and `named` some of them.
+    /// Opens a writer of `groups` at the home, with no entries, which ends once a
+    /// channel of `keys`, each channel of `groups`, is removed.
     fn writer(
         &self,
         state: &mut State,
         groups: &[Group<'_>],
         keys: Vec<channel::Key>,
-        named: &[channel::Key],
     ) -> Result<Writer, Error> {
         let set = state.interner.intern(groups);
-        let entries = entries(&set, named);
         let writer = ::home::writer::Writer {
             subject: self.subject.clone(),
             authority: self.authority,
@@ -311,7 +307,7 @@ impl Homed {
             key,
             ending,
             set,
-            entries,
+            entries: Box::default(),
             outcomes: Vec::new(),
         })
     }

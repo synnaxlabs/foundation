@@ -260,7 +260,7 @@ impl Hub {
         &self,
         config: writer::Config,
     ) -> Result<Writer, writer::Error> {
-        let (writer, _) = writer::Homed::new(&self.0, config).await?.open()?;
+        let writer = writer::Homed::new(&self.0, config).await?.open()?;
         Ok(writer)
     }
 
