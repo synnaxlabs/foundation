@@ -20,7 +20,7 @@ import uuid
 import warnings
 
 import foundation
-from test_stubs import assert_stated
+from test_stubs import assert_stated, assert_takes
 
 PATIENCE = 90.0
 # The node sends its close before it exits. No call of the client shows that the client
@@ -316,12 +316,15 @@ class ClientTest(unittest.TestCase):
         with foundation.connect() as client:
             assert_stated(self, client, "connect")
             self.assertEqual(client.address, self.node.address)
+        assert_takes(self, "connect", self.node.address)
         with foundation.connect(self.node.address) as client:
             self.assertEqual(client.address, self.node.address)
 
     def test_the_subject_keywords_win_over_the_data_directory(self) -> None:
         with self.assertRaises(ConnectionError) as raised:
             self.node.connect(subject=ADMIN, private_key=bytes(32))
+        assert_stated(self, raised.exception)
+        self.assertEqual(raised.exception.code, "refused")
         self.assertEqual(
             str(raised.exception),
             "the spec has no such subject, does not list the key for it, or the "
@@ -625,8 +628,8 @@ class ArgumentTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), "subject: a name or pattern is empty")
 
     def test_a_data_directory_with_a_nul_byte_is_refused(self) -> None:
-        for connect in (foundation.connect, self.connect):
-            with self.subTest(connect=connect.__name__):
+        for given, connect in (("data", foundation.connect), ("each", self.connect)):
+            with self.subTest(given=given):
                 with self.assertRaises(ValueError) as raised:
                     connect(data="a\0b")
                 self.assertEqual(

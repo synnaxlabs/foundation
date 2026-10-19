@@ -3,6 +3,8 @@
 `FOUNDATION_NODE` is the path of the `foundation` binary that each test starts.
 """
 
+import decimal
+import fractions
 import gc
 import logging
 import os
@@ -17,7 +19,7 @@ import numpy as np
 
 import foundation
 from test_client import PATIENCE, Node, fork
-from test_stubs import assert_stated
+from test_stubs import assert_stated, assert_takes
 
 CHANNELS = """
 channel "plant.time" { kind = "index" }
@@ -421,6 +423,33 @@ class WriterTest(unittest.TestCase):
                 self.assertEqual(str(raised.exception), text)
         writer = self.client.open_writer(("plant.a",), authority=255, lease=5.0)
         self.assertIsNone(writer.close())
+
+    def test_the_stub_types_each_value_and_lease_that_the_module_takes(self) -> None:
+        class Float:
+            def __float__(self) -> float:
+                return 1.5
+
+        class Index:
+            def __index__(self) -> int:
+                return 2
+
+        values = [
+            1.5,
+            3,
+            np.float32(2.5),
+            np.int64(3),
+            fractions.Fraction(1, 2),
+            decimal.Decimal("1.5"),
+            Float(),
+            Index(),
+        ]
+        for value in values:
+            with self.subTest(value=value):
+                kwargs = {"authority": 255, "lease": value, "on_loss": "raise"}
+                assert_takes(self, "Client.open_writer", "plant.a", **kwargs)
+                with self.client.open_writer("plant.a", **kwargs) as writer:
+                    assert_takes(self, "Writer.write", value)
+                    self.assertIsNone(writer.write(value))
 
     def test_open_writer_raises_stopped_with_the_code_of_the_node(self) -> None:
         with self.assertRaises(foundation.Stopped) as raised:

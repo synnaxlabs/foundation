@@ -24,7 +24,7 @@ def stub() -> types.ModuleType:
 
 
 def conforms(value: object, hint: typing.Any) -> bool:
-    """Whether `value` is of the type `hint`, with each item of a `dict` or a `tuple`."""
+    """Whether `value` is of the type `hint`, with each item of a `dict` or `tuple`."""
     origin, args = typing.get_origin(hint), typing.get_args(hint)
     if hint is typing.Any:
         return True
@@ -47,24 +47,50 @@ def conforms(value: object, hint: typing.Any) -> bool:
     return isinstance(value, origin or hint)
 
 
+def stated() -> tuple[types.ModuleType, dict[str, typing.Any]]:
+    """The module of the stub, and the namespace in which its annotations name the
+    classes of the module, not of the stub."""
+    module = stub()
+    names = vars(module) | {n: c for n, c in vars(_native).items() if type(c) is type}
+    return module, names
+
+
+def named(module: types.ModuleType, by: str) -> typing.Any:
+    """The item `by` of `module`, such as `connect` or `Client.open_writer`."""
+    *owner, name = by.split(".")
+    return getattr(getattr(module, owner[0]) if owner else module, name)
+
+
+def assert_takes(
+    test: unittest.TestCase, by: str, *args: object, **kwargs: object
+) -> None:
+    """Asserts that the function `by` of the stub takes `args` and `kwargs`: each value
+    is of the type of the parameter that it binds to."""
+    module, names = stated()
+    function = named(module, by)
+    method = "." in by
+    receiver = [None] if method else []
+    bound = inspect.signature(function).bind(*receiver, *args, **kwargs)
+    hints = typing.get_type_hints(function, names)
+    for name, value in list(bound.arguments.items())[method:]:
+        hint = hints[name]
+        test.assertTrue(conforms(value, hint), f"{by} takes {value!r}, not {hint}")
+
+
 def assert_stated(test: unittest.TestCase, value: object, by: str = "") -> None:
     """Asserts that `value` is of each type that the stub states for it: the return of
     the function `by` (such as `Client.open_writer`), and each attribute and property
     of its class."""
-    module = stub()
-    # A class that an annotation names is the class of the module, not of the stub.
-    names = vars(module) | {n: c for n, c in vars(_native).items() if type(c) is type}
+    module, names = stated()
     if by:
-        *owner, name = by.split(".")
-        function = getattr(getattr(module, owner[0]) if owner else module, name)
-        hint = typing.get_type_hints(function, names)["return"]
+        hint = typing.get_type_hints(named(module, by), names)["return"]
         test.assertTrue(conforms(value, hint), f"{by} gave {value!r}, not {hint}")
     kind = getattr(module, type(value).__name__)
     hints = typing.get_type_hints(kind, names)
     test.assertEqual(sorted(getattr(value, "__dict__", {})), sorted(hints))
-    for name, item in vars(kind).items():
-        if isinstance(item, property):
-            hints[name] = typing.get_type_hints(item.fget, names)["return"]
+    for name, member in vars(kind).items():
+        if isinstance(member, property):
+            hints[name] = typing.get_type_hints(member.fget, names)["return"]
     test.assertTrue(hints, f"the stub states no attribute of {type(value).__name__}")
     for name, hint in hints.items():
         found = getattr(value, name)
