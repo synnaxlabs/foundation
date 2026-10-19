@@ -604,12 +604,15 @@ fn stops_a_read_whose_places_are_not_valid() {
     ];
     let repeated =
         |n| Error::Message(wire::hub::client::Error::Repeated { key: key(n) });
+    // The node opens the read of two indexes, so only the reader's check keeps it from
+    // the frames.
     let cases = [
-        (414, twice, repeated(1)),
-        (418, apart, repeated(10)),
+        (414, twice, false, repeated(1)),
+        (418, apart, false, repeated(10)),
         (
             424,
             two,
+            true,
             Error::Message(wire::hub::client::Error::ManyIndexes {
                 place: 2,
                 index: 3,
@@ -618,18 +621,23 @@ fn stops_a_read_whose_places_are_not_valid() {
         (
             419,
             unstamped,
+            false,
             Error::Message(wire::hub::client::Error::Unstamped {
                 place: 1,
                 sample: I64,
             }),
         ),
     ];
-    for (seed, places, error) in cases {
+    for (seed, places, open, error) in cases {
         by_hand(
             seed,
             move |session, node| async move {
                 let mut read = accept_read(&session).await;
                 start(&mut read, &places, places.len()).await;
+                if open {
+                    let sender = read.sender.as_mut().expect("two-way");
+                    reply(sender, Reply::Opened { live: 0 }).await;
+                }
                 assert_eq!(stopped(&mut read).await, Code(MALFORMED));
                 node.clock().sleep(QUIET).await;
             },
