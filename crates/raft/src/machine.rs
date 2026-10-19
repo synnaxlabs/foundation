@@ -865,9 +865,9 @@ impl Raft {
         self.sync_voters();
     }
 
-    // Puts the log's configuration in force. The peers become its other voters and
-    // the nodes it removed: the other voters of the configuration before it. A new peer
-    // starts at the end of the log.
+    // Puts the log's configuration in force. The peers become its other voters, the
+    // nodes it removed (the other voters of the configuration before it), and the
+    // learners. A new peer starts at the end of the log.
     fn sync_voters(&mut self) {
         let (at, voters) = self.log.voters();
         // Equal voters at another position still change who was removed.
