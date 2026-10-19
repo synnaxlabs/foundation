@@ -236,13 +236,27 @@
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124), and
   the surface, 2026-10-19T14:40:23Z
   (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).
-  A leader keeps at most one append in flight to a learner (8 to a voter), so its
-  queues hold at most one append for each learner. It sends a learner a heartbeat at
-  each quorum check, once each `election_ticks`, not each `heartbeat_ticks`, and at the
-  next tick after the commit index that the learner can take moves, so a learner
-  applies at most one tick late. A learner never votes or campaigns, so it needs no
-  heartbeat at the rate of an election. A leader sends a learner that a call adds an
-  append at once, so its catch-up does not wait for a quorum check. Decided by
-  `laptop.architect`, 2026-10-19T19:01:39Z
+  A leader keeps at most one append in flight to a learner (8 to a voter). A heartbeat
+  reply frees no slot of a learner. When a learner answers this leader during a whole
+  quorum check, but answers no append, the leader sends to it again from its accepted
+  index, so a lost append goes again within two quorum checks, also when no new entry
+  comes. A learner that answers nothing keeps its window and gets no resend. A learner
+  whose append takes longer than a quorum check gets the same entries again about each
+  second check. A leader sends each learner a message at least once each
+  `election_ticks` of its own ticks: a heartbeat at each quorum check, not each
+  `heartbeat_ticks`. A learner never votes or campaigns, so it needs no heartbeat at the
+  rate of an election. A leader sends a learner a new commit index at the next tick: in
+  its next append with entries, or else in a heartbeat. A leader sends a learner that a
+  call adds an append at once, so its catch-up does not wait for a quorum check. Decided
+  by `laptop.architect`, 2026-10-19T19:01:39Z
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274961164), for
-  the cost of 127 learners.
+  the cost of 127 learners; the resend, 2026-10-19T19:48:34Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275865221) and
+  2026-10-19T19:51:09Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275912627); the
+  message each `election_ticks` and the commit, 2026-10-19T19:46:05Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275819044). A bound
+  that does not grow with the learners (entries that the queues share, not copy) is
+  deferred. Trigger: before `MEMBERS_MAX` grows past 128. Supersedes the pace of a
+  learner "as it does a voter" of the surface, 2026-10-19T14:40:23Z
+  (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).

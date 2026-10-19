@@ -1,16 +1,13 @@
 use std::collections::VecDeque;
 
-// `Append` messages a leader keeps in flight to one voter, and to one learner,
-// before it waits. One bounds what a leader queues for many learners.
-pub(crate) const INFLIGHT: usize = 8;
-pub(crate) const LEARNER_INFLIGHT: usize = 1;
-
 // What a leader knows about one follower's log.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Progress {
     next: u64,
     matched: u64,
     state: State,
+    // Whether the window was full at the last quorum check, with no append since.
+    aged: bool,
 }
 
 // A leader probes a follower whose log it does not know with one `Append` at a
@@ -27,6 +24,7 @@ impl Progress {
             next: last + 1,
             matched: 0,
             state: State::Probe { waiting: false },
+            aged: false,
         }
     }
 
@@ -58,14 +56,41 @@ impl Progress {
     // the index before `next`.
     pub(crate) fn sent(&mut self, last: u64) {
         match &mut self.state {
-            State::Probe { waiting } => *waiting = true,
+            State::Probe { waiting } => {
+                *waiting = true;
+                self.aged = false;
+            }
             State::Replicate { inflight } => {
                 if last >= self.next {
                     inflight.push_back(last);
                     self.next = last + 1;
+                    self.aged = false;
                 }
             }
         }
+    }
+
+    // Records a quorum check, with `window` appends in flight at most, and whether
+    // the follower answered since the check before. A window that was full at the
+    // check before, with no append sent since, holds appends that the follower did not
+    // answer through a whole check period in which it answered something else: they
+    // count as lost. A probe then waits no more, and replication probes again from
+    // the match. Returns whether the window freed.
+    pub(crate) fn checked(&mut self, window: usize, heard: bool) -> bool {
+        let paused = self.paused(window);
+        let aged = std::mem::replace(&mut self.aged, paused);
+        if !(aged && paused && heard) {
+            return false;
+        }
+        self.aged = false;
+        match &mut self.state {
+            State::Probe { waiting } => *waiting = false,
+            State::Replicate { .. } => {
+                self.next = self.matched + 1;
+                self.state = State::Probe { waiting: false };
+            }
+        }
+        true
     }
 
     // Records that the follower holds every entry up to `index`, which is at most the
@@ -102,9 +127,15 @@ impl Progress {
         self.state = State::Probe { waiting: false };
     }
 
+    // Whether the leader probes for the follower's match, with at most one append
+    // in flight.
+    pub(crate) fn probing(&self) -> bool {
+        matches!(self.state, State::Probe { .. })
+    }
+
     // Lets the leader send again after a heartbeat reply: a probe answers, and a
-    // full window of `window` appends frees one slot so that lost messages do not
-    // stop replication.
+    // window of `window` that is full frees one slot so that lost messages do not stop
+    // replication.
     pub(crate) fn heard(&mut self, window: usize) {
         match &mut self.state {
             State::Probe { waiting } => *waiting = false,
@@ -120,6 +151,8 @@ impl Progress {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const INFLIGHT: usize = 8;
 
     #[test]
     fn starts_as_a_probe_after_the_leaders_last_entry() {
@@ -201,6 +234,68 @@ mod tests {
         assert!(!progress.paused(INFLIGHT));
         progress.sent(INFLIGHT as u64 + 1);
         assert!(progress.paused(INFLIGHT));
+    }
+
+    #[test]
+    fn a_window_full_through_a_check_period_frees_at_the_check() {
+        let mut progress = Progress::new(0);
+        progress.sent(0);
+        progress.accepted(0);
+        for last in 1..=INFLIGHT as u64 {
+            progress.sent(last);
+        }
+        assert!(!progress.checked(1, true));
+        assert!(progress.paused(1));
+        assert!(progress.checked(1, true));
+        assert!(!progress.paused(1));
+        assert!(progress.probing());
+        assert_eq!((progress.next, progress.matched), (1, 0));
+    }
+
+    #[test]
+    fn an_append_after_a_check_starts_its_period_again() {
+        let mut progress = Progress::new(0);
+        progress.sent(0);
+        progress.accepted(0);
+        progress.sent(1);
+        assert!(!progress.checked(1, true));
+        progress.accepted(1);
+        progress.sent(2);
+        assert!(!progress.checked(1, true));
+        assert!(progress.paused(1));
+    }
+
+    #[test]
+    fn a_probe_waiting_through_a_check_period_frees_at_the_check() {
+        let mut progress = Progress::new(5);
+        progress.sent(5);
+        assert!(!progress.checked(1, true));
+        assert!(progress.checked(1, true));
+        assert!(!progress.paused(1));
+    }
+
+    #[test]
+    fn a_window_of_a_silent_follower_stays_full() {
+        let mut progress = Progress::new(0);
+        progress.sent(0);
+        progress.accepted(0);
+        progress.sent(1);
+        assert!(!progress.checked(1, true));
+        assert!(!progress.checked(1, false));
+        assert!(!progress.checked(1, false));
+        assert!(progress.paused(1));
+        assert!(progress.checked(1, true));
+    }
+
+    #[test]
+    fn a_window_with_room_at_the_check_frees_nothing() {
+        let mut progress = Progress::new(0);
+        progress.sent(0);
+        progress.accepted(0);
+        progress.sent(1);
+        assert!(!progress.checked(INFLIGHT, true));
+        assert!(!progress.checked(INFLIGHT, true));
+        assert!(progress.paused(1));
     }
 
     #[test]
