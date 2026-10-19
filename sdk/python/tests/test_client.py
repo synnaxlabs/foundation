@@ -19,6 +19,7 @@ import uuid
 import warnings
 
 import foundation
+from test_stubs import assert_stated
 
 PATIENCE = 90.0
 # The node sends its close before it exits. No call of the client shows that the client
@@ -301,6 +302,7 @@ class ClientTest(unittest.TestCase):
         self.addCleanup(os.chdir, cwd)
         os.chdir(self.node.dir.name)
         with foundation.connect() as client:
+            assert_stated(self, client, "connect")
             self.assertEqual(client.address, self.node.address)
         with foundation.connect(self.node.address) as client:
             self.assertEqual(client.address, self.node.address)

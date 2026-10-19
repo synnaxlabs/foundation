@@ -16,6 +16,61 @@ STUB = pathlib.Path(foundation.__file__).with_name("_native.pyi")
 BASETYPE = 1 << 10
 
 
+def stub() -> types.ModuleType:
+    """The module that the stub defines."""
+    module = types.ModuleType("_native_stub")
+    exec(compile(STUB.read_text(), str(STUB), "exec"), vars(module))
+    return module
+
+
+def conforms(value: object, hint: typing.Any) -> bool:
+    """Whether `value` is of the type `hint`, with each item of a `dict` or a `tuple`."""
+    origin, args = typing.get_origin(hint), typing.get_args(hint)
+    if hint is typing.Any:
+        return True
+    if hint is None or hint is types.NoneType:
+        return value is None
+    if origin in (typing.Union, types.UnionType):
+        return any(conforms(value, arg) for arg in args)
+    if origin is typing.Literal:
+        return value in args
+    if origin is dict:
+        return isinstance(value, dict) and all(
+            conforms(k, args[0]) and conforms(v, args[1]) for k, v in value.items()
+        )
+    if origin is tuple:
+        if not isinstance(value, tuple):
+            return False
+        if args[-1] is Ellipsis:
+            return all(conforms(item, args[0]) for item in value)
+        return len(value) == len(args) and all(map(conforms, value, args))
+    return isinstance(value, origin or hint)
+
+
+def assert_stated(test: unittest.TestCase, value: object, by: str = "") -> None:
+    """Asserts that `value` is of each type that the stub states for it: the return of
+    the function `by` (such as `Client.open_writer`), and each attribute and property
+    of its class."""
+    module = stub()
+    # A class that an annotation names is the class of the module, not of the stub.
+    names = vars(module) | {n: c for n, c in vars(_native).items() if type(c) is type}
+    if by:
+        *owner, name = by.split(".")
+        function = getattr(getattr(module, owner[0]) if owner else module, name)
+        hint = typing.get_type_hints(function, names)["return"]
+        test.assertTrue(conforms(value, hint), f"{by} gave {value!r}, not {hint}")
+    kind = getattr(module, type(value).__name__)
+    hints = typing.get_type_hints(kind, names)
+    test.assertEqual(sorted(getattr(value, "__dict__", {})), sorted(hints))
+    for name, item in vars(kind).items():
+        if isinstance(item, property):
+            hints[name] = typing.get_type_hints(item.fget, names)["return"]
+    test.assertTrue(hints, f"the stub states no attribute of {type(value).__name__}")
+    for name, hint in hints.items():
+        found = getattr(value, name)
+        test.assertTrue(conforms(found, hint), f"{name} is {found!r}, not {hint}")
+
+
 def public(name: str) -> bool:
     """Whether a program calls the item `name`: a name with no `_` first, or a special
     method."""
@@ -54,8 +109,7 @@ def parameters(function: typing.Any, method: bool) -> list[tuple[str, object, ob
 class StubTest(unittest.TestCase):
     def setUp(self) -> None:
         self.tree = ast.parse(STUB.read_text(), str(STUB))
-        self.stub = types.ModuleType("_native_stub")
-        exec(compile(self.tree, str(STUB), "exec"), vars(self.stub))
+        self.stub = stub()
         self.classes = {
             s.name: s for s in self.tree.body if isinstance(s, ast.ClassDef)
         }

@@ -17,6 +17,7 @@ import numpy as np
 
 import foundation
 from test_client import PATIENCE, Node, fork
+from test_stubs import assert_stated
 
 CHANNELS = """
 channel "plant.time" { kind = "index" }
@@ -119,6 +120,7 @@ class WriterTest(unittest.TestCase):
 
     def test_a_writer_gives_its_places_in_the_order_of_its_channels(self) -> None:
         with self.client.open_writer(["plant.b", "plant.a"]) as writer:
+            assert_stated(self, writer, "Client.open_writer")
             self.assertEqual(
                 writer.places,
                 (
@@ -138,6 +140,7 @@ class WriterTest(unittest.TestCase):
             self.assertIsNone(writer.write({"plant.a": 2.5, 1: 3, 2: stamp}))
             with self.assertRaises(foundation.Rejected) as raised:
                 writer.write({"plant.a": 3.5, "plant.time": stamp})
+            assert_stated(self, raised.exception)
             self.assertEqual(raised.exception.code, "order")
             self.assertEqual(str(raised.exception), ORDER)
             self.assertIsNone(writer.write({"plant.a": 3.5, "plant.time": stamp + 1}))
@@ -422,6 +425,7 @@ class WriterTest(unittest.TestCase):
     def test_open_writer_raises_stopped_with_the_code_of_the_node(self) -> None:
         with self.assertRaises(foundation.Stopped) as raised:
             self.client.open_writer(["plant.a", "plant.z"])
+        assert_stated(self, raised.exception)
         self.assertNotIsInstance(raised.exception, ConnectionError)
         self.assertEqual(raised.exception.code, "unknown")
         self.assertEqual(
@@ -673,6 +677,7 @@ class WriterTest(unittest.TestCase):
             with self.assertRaises(foundation.DataLost) as raised:
                 while time.monotonic() < deadline:
                     writer.write(1.5)
+        assert_stated(self, raised.exception)
         self.assertEqual(
             str(raised.exception), "samples were lost: plant.a (1), plant.time (1)"
         )
