@@ -1,0 +1,114 @@
+"""The stub `foundation/_native.pyi` states the surface of the module."""
+
+import ast
+import inspect
+import pathlib
+import types
+import typing
+import unittest
+
+import foundation
+from foundation import _native
+
+STUB = pathlib.Path(foundation.__file__).with_name("_native.pyi")
+
+# Set on each class that a Python class can subclass.
+BASETYPE = 1 << 10
+
+
+def public(name: str) -> bool:
+    """Whether a program calls the item `name`: a name with no `_` first, or a special
+    method."""
+    return not name.startswith("_") or (name.startswith("__") and name.endswith("__"))
+
+
+def defined(body: list[ast.stmt]) -> list[str]:
+    """The names of the public functions and classes that `body` defines."""
+    kinds = (ast.FunctionDef, ast.ClassDef)
+    return sorted(s.name for s in body if isinstance(s, kinds) and public(s.name))
+
+
+def built(namespace: typing.Mapping[str, object]) -> dict[str, object]:
+    """The public items of `namespace` of the module, with each special method that it
+    defines and no other special attribute."""
+    return {
+        name: item
+        for name, item in namespace.items()
+        if public(name) and (not name.startswith("_") or callable(item))
+    }
+
+
+def doc(item: object) -> str | None:
+    """The doc of `item` with each run of white space as one space."""
+    text = inspect.getdoc(item)
+    return None if text is None else " ".join(text.split())
+
+
+def parameters(function: typing.Any, method: bool) -> list[tuple[str, object, object]]:
+    """The name, kind, and default of each parameter of `function`, with no `self` for a
+    method."""
+    found = list(inspect.signature(function).parameters.values())
+    return [(p.name, p.kind, p.default) for p in found[1 if method else 0 :]]
+
+
+class StubTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tree = ast.parse(STUB.read_text(), str(STUB))
+        self.stub = types.ModuleType("_native_stub")
+        exec(compile(self.tree, str(STUB), "exec"), vars(self.stub))
+        self.classes = {
+            s.name: s for s in self.tree.body if isinstance(s, ast.ClassDef)
+        }
+
+    def test_the_stub_defines_each_item_of_the_module(self) -> None:
+        self.assertEqual(defined(self.tree.body), sorted(built(vars(_native))))
+
+    def test_each_function_has_the_signature_and_doc_of_the_module(self) -> None:
+        for name, item in built(vars(_native)).items():
+            if not isinstance(item, type):
+                with self.subTest(name):
+                    self.check(getattr(self.stub, name), item, method=False)
+
+    def test_each_class_has_the_bases_doc_and_members_of_the_module(self) -> None:
+        for name, item in built(vars(_native)).items():
+            if isinstance(item, type):
+                with self.subTest(name):
+                    self.check_class(name, item)
+
+    def test_each_annotation_of_the_stub_names_a_type(self) -> None:
+        for name in defined(self.tree.body):
+            item = getattr(self.stub, name)
+            members = [item]
+            if isinstance(item, type):
+                members += [vars(item)[n] for n in defined(self.classes[name].body)]
+            for member in members:
+                with self.subTest(name, member=getattr(member, "__name__", None)):
+                    hinted = getattr(member, "fget", member)
+                    typing.get_type_hints(hinted, vars(self.stub))
+
+    def check_class(self, name: str, module: type) -> None:
+        stub = getattr(self.stub, name)
+        bases = [base.__name__ for base in module.__bases__]
+        self.assertEqual([base.__name__ for base in stub.__bases__], bases)
+        final = not module.__flags__ & BASETYPE
+        self.assertEqual(getattr(stub, "__final__", False), final)
+        self.assertEqual(doc(stub), doc(module))
+        members = built(vars(module))
+        self.assertEqual(defined(self.classes[name].body), sorted(members))
+        for member, item in members.items():
+            with self.subTest(member=member):
+                stated = vars(stub)[member]
+                if inspect.isgetsetdescriptor(item):
+                    self.assertIsInstance(stated, property)
+                    self.assertEqual(doc(stated), doc(item))
+                else:
+                    self.check(stated, item, method=True)
+        # An attribute that the module sets on each exception that it raises, which
+        # the doc of the class names.
+        for attribute in stub.__annotations__:
+            with self.subTest(attribute=attribute):
+                self.assertIn(f"`{attribute}`", module.__doc__ or "")
+
+    def check(self, stub: typing.Any, module: typing.Any, method: bool) -> None:
+        self.assertEqual(parameters(stub, method), parameters(module, method))
+        self.assertEqual(doc(stub), doc(module))

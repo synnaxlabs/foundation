@@ -93,6 +93,11 @@
   surface is a step: the demo needs `foundation.connect("address")` alone, so the
   defaults of #2177 land before it
   (https://github.com/synnaxlabs/foundation/issues/2923#issuecomment-6238857409). The
+  wheel gives the stub `foundation/_native.pyi`, with the doc of each item, and
+  `py.typed`. `tests/test_stubs.py` asserts that the stub defines each public item of
+  the module, with its parameters, defaults, bases, `final`, and doc, and that each
+  annotation names a type (#3212 PR 1c,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6272502641). The
   feature `sim` adds test-only functions, so a test asserts that a panic on the caller's
   thread gives `PanicException`, not an abort (`laptop.architect-2`,
   2026-10-17T18:39:00Z,
