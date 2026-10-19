@@ -104,7 +104,7 @@ jobs:
               - '.claude/skills/build/wait_test.sh'
               - '.github/workflows/**'
 
-  # The lint and the two parts of the tests (`scripts/test.sh`) of each OS of LINUX CI,
+  # The lint and the two parts of the tests (`cargo xtask test`) of each OS of LINUX CI,
   # at the same time. A matrix job that skips reports one check named by the
   # unexpanded expression, so this job always runs, and each step skips when the
   # filter found no change.
@@ -412,15 +412,14 @@ jobs:
         run: cargo xtask oracles
       - name: Test
         if: "!cancelled() && env.RUST != 'false' && matrix.part == 'test'"
-        env:
-          SKIPPED: ${{ join(matrix.tests, ' ') }}
         run: >-
-          scripts/test.sh nextest ${{ join(matrix.crates, ' ') }}
+          cargo xtask test nextest ${{ join(matrix.crates, ' ') }}
           ${{ join(matrix.untested, ' ') }} --all-features
+          -- ${{ join(matrix.tests, ' ') }}
       - name: Serial tests
         if: "!cancelled() && env.RUST != 'false' && matrix.part == 'serial'"
         run: >-
-          scripts/test.sh serial ${{ join(matrix.crates, ' ') }}
+          cargo xtask test serial ${{ join(matrix.crates, ' ') }}
           ${{ join(matrix.untested, ' ') }} --all-features
       # Root tests mount a filesystem. Only this runner, which is discarded after the
       # job, runs them.
@@ -433,8 +432,9 @@ jobs:
           cargo test -p os --all-features --test root
 
   # The required checks `check`, `macos`, and `windows`. Each passes when each part of
-  # `check` passed: the result of a matrix job covers all its entries. `check` always
-  # runs, so with no change of code each part passes, and so does `os`.
+  # `check` on each OS passed: the result of a matrix job covers all its entries, so
+  # each of the three gives the result of all three OSes. `check` always runs, so with
+  # no change of code each part passes, and so does `os`.
   os:
     needs: check
     if: "!cancelled()"
@@ -449,7 +449,7 @@ jobs:
           RESULT: ${{ needs.check.result }}
         run: |
           [ "$RESULT" = success ] ||
-            { echo "::error::The lint and test parts ended in $RESULT."; exit 1; }
+            { echo "::error::A part of check ended in $RESULT."; exit 1; }
 
   # The required checks `features`, `features-macos`, and `features-windows`. It runs
   # as `check` does, and each OS leaves out the `crates` of its entry of `check`.

@@ -1,4 +1,0 @@
-# The profile of `scripts/test.sh nextest`, which CI runs.
-[profile.ci]
-retries = 0
-fail-fast = false

@@ -21,6 +21,7 @@ mod sanitizers;
 mod select;
 mod sim;
 mod skips;
+mod test;
 mod workflow;
 
 use std::collections::BTreeSet;
@@ -47,6 +48,15 @@ fn main() -> ExitCode {
             .map_err(|e| vec![e])
             .and_then(|shard| miri::run(root, shard)),
         ["sanitizers"] => sanitizers::run(root),
+        ["test", part, ref rest @ ..] => test::Part::parse(part)
+            .map_err(|e| vec![e])
+            .and_then(|part| {
+                let (flags, skipped) = match rest.iter().position(|arg| *arg == "--") {
+                    Some(end) => (&rest[..end], &rest[end + 1..]),
+                    None => (rest, &[][..]),
+                };
+                test::run(root, part, flags, skipped)
+            }),
         ["fuzz"] => fuzz::run(root, fuzz::SECONDS),
         ["fuzz", seconds] => fuzz::seconds(seconds)
             .map_err(|e| vec![e])
@@ -67,6 +77,7 @@ fn main() -> ExitCode {
                 "usage: cargo xtask <layers|globals|oracles|skips>\n       \
                  cargo xtask <loom|shuttle|sanitizers>\n       \
                  cargo xtask miri [<index>/<count>]\n       \
+                 cargo xtask test <nextest|serial> [cargo flag...] [-- skipped test...]\n       \
                  cargo xtask fuzz [seconds]\n       \
                  cargo xtask open62541 [tag]\n       \
                  cargo xtask review <pr> <head sha>\n       \
@@ -857,33 +868,6 @@ mod tests {
                 "the exception `{item}` of ci.yaml names no issue as `# #<n>`"
             );
         }
-    }
-
-    #[test]
-    fn the_serial_tests_run_each_target_with_no_harness() {
-        // nextest runs such a target to list its tests, and it lists none.
-        let metadata = metadata(&fixture().join("../..")).unwrap();
-        let mut alone = BTreeSet::new();
-        for package in metadata["packages"].as_array().unwrap() {
-            for target in package["targets"].as_array().unwrap() {
-                let kinds = target["kind"].as_array().unwrap();
-                if !kinds.iter().any(|kind| kind == "test") {
-                    continue;
-                }
-                let root = target["src_path"].as_str().unwrap();
-                let file = syn::parse_file(&std::fs::read_to_string(root).unwrap());
-                if file.unwrap().items.iter().any(skips::main) {
-                    alone.insert(target["name"].as_str().unwrap());
-                }
-            }
-        }
-        let script = std::fs::read_to_string(fixture().join("../../scripts/test.sh"));
-        let script = script.unwrap();
-        let listed = (script.lines())
-            .find_map(|line| line.strip_prefix("ALONE=\""))
-            .and_then(|line| line.strip_suffix('"'))
-            .expect("`scripts/test.sh` has no `ALONE`");
-        assert_eq!(listed.split(' ').collect::<BTreeSet<_>>(), alone);
     }
 
     #[test]
