@@ -276,8 +276,9 @@ fn raises<const N: usize>(cases: [(sdk::Error, &str, &str); N]) {
     });
 }
 
-/// Maps a write that ended with a frame not on disk to `Stopped`, with the code of a
-/// stream that the node stopped for the cause of its group's end, and its text.
+/// Maps a write that ended with a frame that may not be on disk to `Stopped`, with the
+/// code of a stream that the node stopped for the cause of its group's end, and its
+/// text.
 #[test]
 fn error_raises_stopped_with_the_code_of_the_end_of_an_unstored_write() {
     let ends = [

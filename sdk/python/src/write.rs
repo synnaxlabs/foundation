@@ -432,15 +432,16 @@ impl Writer {
         })
     }
 
-    /// Finishes the stream, and blocks until each frame that the node took is on disk
-    /// and the node finished the stream. Control ends then. A close waits for a call
-    /// that sends, with other Python threads running. A call that a close ends before
-    /// its send raises `RuntimeError`. A close after a close gives `None`, and in a
-    /// forked process it gives `None` and ends nothing.
+    /// Finishes the stream, and blocks until each frame that the node took is on disk,
+    /// or its group ended, and the node finished the stream. Control ends then. A close
+    /// waits for a call that sends, with other Python threads running. A call that a
+    /// close ends before its send raises `RuntimeError`. A close after a close gives
+    /// `None`, and in a forked process it gives `None` and ends nothing.
     ///
-    /// Raises `Stopped` when the node stopped the stream, `ConnectionError` when the
-    /// session failed, `RuntimeError` when the client closed, and `PanicException`
-    /// when the client's thread panicked.
+    /// Raises `Stopped` when the node stopped the stream, or when a group ended with a
+    /// taken frame that may not be on disk, `ConnectionError` when the session failed,
+    /// `RuntimeError` when the client closed, and `PanicException` when the client's
+    /// thread panicked.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         if process::id() != self.process {
             return Ok(());

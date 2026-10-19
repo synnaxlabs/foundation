@@ -731,7 +731,7 @@ impl Replies {
             .ok()
             .and_then(|at| self.groups.get_mut(at))
         else {
-            unreachable!("invariant: `sent` checks each group of a frame")
+            unreachable!("invariant: `sent` checks group {group} of frame {frame}")
         };
         match (state.ended, outcome) {
             (Some(end), Outcome::Ended(given)) if given == end => {}

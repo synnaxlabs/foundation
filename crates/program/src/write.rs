@@ -212,8 +212,9 @@ impl Writer {
     ///
     /// The error that ended the writer, as [`Writer::write`] gives it,
     /// [`Error::Reply`] with [`wire::hub::Error::Finished`] when the node finishes the
-    /// stream before each outcome or the `Stored` of each taken frame, and then
-    /// [`Error::Unstored`] as [`Writer::stored`] gives it.
+    /// stream before each outcome, or before the `Stored` of each taken frame of a
+    /// group that did not end, and then [`Error::Unstored`] as [`Writer::stored`] gives
+    /// it.
     pub async fn finish(mut self) -> Result<(), Error> {
         self.draft = None;
         self.check()?;
