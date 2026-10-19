@@ -54,9 +54,10 @@
   approved `ci.yaml` on GitHub at `1697708a8`.
   Amended (the person, through `laptop.monitor`, recorded in #3418 at
   2026-10-19T19:46:19Z: "Let's do it ASAP"; the plain test paths and the test targets
-  with no harness, the plan,
+  with no harness, the plan, 2026-10-19T19:54:31Z,
   https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6275974482; the
-  job `os`, the third part, and ARM, `laptop.monitor`,
+  job `os`, the third part, and ARM, `laptop.monitor`, recorded at
+  2026-10-19T20:12:18Z,
   https://github.com/synnaxlabs/foundation/issues/3418#issuecomment-6276305229): the
   job `check` runs three parts on each OS at the same time: `lint` (Format, Clippy,
   Layers, Globals, Skips, Oracles), `test` (`cargo xtask test nextest`, Root tests),

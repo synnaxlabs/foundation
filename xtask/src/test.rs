@@ -37,12 +37,13 @@ pub(crate) struct Alone {
     pub(crate) benches: BTreeSet<String>,
 }
 
-/// Runs `part` of the tests of the workspace at `root` with the program `cargo`, with
-/// `flags` on each cargo command. nextest leaves out each test whose full path is in
-/// `skipped`, which `Part::Serial` refuses. Each command runs to its end, and the run
-/// fails when one fails. Each target that shares the name of a target of `Alone` also
-/// runs in `Part::Serial`, as a cargo target flag selects by name. It refuses a
-/// pattern after `--exclude`.
+/// Runs `part` of the tests of the workspace at `root`: each command runs the program
+/// `cargo` with `flags`, and the targets come from the metadata of the cargo of the
+/// environment. nextest leaves out each test whose full path is in `skipped`, which
+/// `Part::Serial` refuses. Each command runs to its end, and the run fails when one
+/// fails. Each target that shares the name of a target of `Alone` also runs in
+/// `Part::Serial`, as a cargo target flag selects by name. It refuses a pattern after
+/// `--exclude`.
 pub(crate) fn run(
     root: &Path,
     cargo: &OsStr,
