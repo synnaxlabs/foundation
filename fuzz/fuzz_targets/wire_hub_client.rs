@@ -525,12 +525,15 @@ fn replies(bytes: &[u8]) {
                         next: due,
                     })
                 }
-                Ok(reply @ Reply::Outcome {
-                    frame,
-                    group,
-                    outcome,
-                }) => {
-                    let state = &mut each[state(group).expect("a byte names the group")];
+                Ok(
+                    reply @ Reply::Outcome {
+                        frame,
+                        group,
+                        outcome,
+                    },
+                ) => {
+                    let slot = state(group).expect("a byte names the group");
+                    let state = &mut each[slot];
                     let refused = match (state.ended, outcome) {
                         (Some(end), Outcome::Ended(given)) if given == end => None,
                         (Some(_), _) => Some(hub::Error::Ended { group }),
@@ -568,7 +571,8 @@ fn replies(bytes: &[u8]) {
                     Err(hub::Error::Ended { group })
                 }
                 Ok(reply @ Reply::Stored { group, frames }) => {
-                    let state = &mut each[state(group).expect("an arm above checks it")];
+                    let slot = state(group).expect("an arm above checks it");
+                    let state = &mut each[slot];
                     if frames < state.stored {
                         Err(hub::Error::Stored {
                             group,
@@ -587,7 +591,8 @@ fn replies(bytes: &[u8]) {
                     }
                 }
                 Ok(reply @ Reply::Ended { group, end }) => {
-                    each[state(group).expect("an arm above checks it")].ended = Some(end);
+                    let slot = state(group).expect("an arm above checks it");
+                    each[slot].ended = Some(end);
                     Ok(reply)
                 }
                 Err(error) => Err(error),
@@ -601,13 +606,17 @@ fn replies(bytes: &[u8]) {
                 .iter()
                 .all(|group| group.ended.is_some() || group.stored >= group.taken);
         assert_eq!(replies.stored(), all, "the stored frames differ");
-        let unstored = each.iter().zip(0..).filter_map(|(group, key)| {
-            match group.ended {
-                Some(end) if group.taken > group.stored => Some((key, end)),
-                _ => None,
-            }
-        });
-        assert!(replies.unstored().eq(unstored), "the unstored groups differ");
+        let unstored =
+            each.iter()
+                .zip(0..)
+                .filter_map(|(group, key)| match group.ended {
+                    Some(end) if group.taken > group.stored => Some((key, end)),
+                    _ => None,
+                });
+        assert!(
+            replies.unstored().eq(unstored),
+            "the unstored groups differ"
+        );
     }
 }
 
