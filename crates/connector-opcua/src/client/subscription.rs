@@ -50,6 +50,9 @@ pub(crate) struct Sampled {
     pub(crate) queue: u32,
 }
 
+/// The shortest publishing interval of a subscription.
+const PUBLISHING: Span = Span::from_nanos(100_000_000);
+
 /// The changes of a subscription that the callbacks gave, which [`Client::changes`]
 /// takes.
 #[derive(Default)]
@@ -68,15 +71,16 @@ pub(super) static WATCH: ffi::Watch = ffi::Watch {
 };
 
 impl Client {
-    /// Creates a subscription at the publishing interval `interval`, and a monitored
-    /// item for each node of `nodes` that samples at `sampling` and queues `queue`
-    /// values, the oldest dropped first. Each item asks for both timestamps and a
-    /// change of the status or the value. It reads the `MaxMonitoredItemsPerCall` of the
-    /// server, and sends the items in `CreateMonitoredItems` calls of at most that
-    /// many. Each answer of
-    /// a Publish fits the receive limit of the client, for items of a scalar of at
-    /// most 8 bytes. From the call, the client keeps [`PUBLISHES`] Publish requests in
-    /// flight, and [`Client::read`] and the services send fewer to keep the sum.
+    /// Creates a subscription, and a monitored item for each node of `nodes` that
+    /// samples at `sampling`. It asks for a publishing interval of the longer of
+    /// `sampling` and 100 ms, and each item queues the values that it samples in two
+    /// publishing intervals that the server gives, the oldest dropped first. Each item asks for both timestamps and a
+    /// change of the status or the value. It reads the `MaxMonitoredItemsPerCall` of
+    /// the server, and sends the items in `CreateMonitoredItems` calls of at most that
+    /// many. Each answer of a Publish fits the receive limit of the client, for items
+    /// of a scalar of at most 8 bytes. From the call, the client keeps [`PUBLISHES`]
+    /// Publish requests in flight, and [`Client::read`] and the services send fewer to
+    /// keep the sum.
     ///
     /// # Errors
     ///
@@ -90,16 +94,18 @@ impl Client {
     ///
     /// # Panics
     ///
-    /// On a second call, also after an error, as a `CreateSubscription` that failed in
-    /// the client can still make a subscription.
+    /// When `sampling` is not positive. On a second call, also after an error, as a
+    /// `CreateSubscription` that failed in the client can still make a subscription.
     #[cfg_attr(not(test), expect(dead_code, reason = "PR 5 of #2622 calls it"))]
     pub(crate) async fn subscribe(
         &mut self,
-        interval: Span,
         nodes: &[Node],
         sampling: Span,
-        queue: u32,
     ) -> Result<Revised, Status> {
+        assert!(
+            sampling > Span::ZERO,
+            "invariant: a sampling interval is positive"
+        );
         assert_eq!(
             self.budget, READS,
             "invariant: a client holds one subscription"
@@ -108,9 +114,10 @@ impl Client {
         let per_call = self.read_limit(ffi::MAX_MONITORED_ITEMS_PER_CALL).await?;
         let room = self.takes.saturating_sub(ffi::shim_publish_bytes());
         let most = (room / Item::Change.bytes()).max(1);
-        let request = Request::subscribe(ms(interval), saturate(most));
+        let request = Request::subscribe(ms(sampling.max(PUBLISHING)), saturate(most));
         let (id, interval) = self.serve(&request).await?.subscription();
         let sampling = ms(sampling);
+        let queue = queue(interval, sampling);
         let build =
             |nodes: &[ffi::Node<'_>]| Request::monitor(id, nodes, 0, sampling, queue);
         let sizes = self.sizes(build, Item::Created.bytes());
@@ -194,6 +201,17 @@ fn ms(span: Span) -> f64 {
 )]
 fn span(ms: f64) -> Span {
     Span::from_nanos((ms * 1e6) as i64)
+}
+
+/// Gives the size of a queue that holds the values sampled every `sampling` ms in two
+/// publishing intervals of `interval` ms: 0 for NaN, and `u32::MAX` when it is past.
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the cast saturates, as the doc says"
+)]
+fn queue(interval: f64, sampling: f64) -> u32 {
+    (2.0 * (interval / sampling).ceil()) as u32
 }
 
 /// Gives `count`, or `u32::MAX` when it is past.

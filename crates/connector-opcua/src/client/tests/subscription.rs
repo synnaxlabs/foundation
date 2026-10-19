@@ -17,10 +17,10 @@ use crate::node::Node;
 use crate::unwind::caught;
 use crate::value::{Fault, Value};
 
-/// The publishing interval of each subscription.
-const INTERVAL: Span = Span::SECOND;
-/// The sampling interval of each item.
-const SAMPLING: Span = Span::from_nanos(100_000_000);
+/// A sampling interval under the shortest publishing interval of a client.
+const SAMPLING: Span = Span::from_nanos(50_000_000);
+/// The sampling interval of the item of [`on_level`].
+const LEVEL: Span = Span::from_nanos(250_000_000);
 
 /// Gives the span of `ms` ms.
 const fn ms(ms: i64) -> Span {
@@ -67,11 +67,17 @@ type Subscribed = (
     Vec<(usize, Result<Value, Fault>)>,
 );
 
-/// Subscribes a client to `count` nodes of [`numbered`], each with a queue of 4, on a
-/// server that `limit` sets.
-fn monitored(count: u32, limit: impl FnOnce(&Peer<'_>) + Send + 'static) -> Subscribed {
+/// Subscribes a client to `count` nodes of [`numbered`], each sampled at `sampling`,
+/// on a server that grants a publishing interval of 10 ms or more and that `limit`
+/// sets.
+fn monitored(
+    count: u32,
+    sampling: Span,
+    limit: impl FnOnce(&Peer<'_>) + Send + 'static,
+) -> Subscribed {
     run(0, async move |node| {
         serve(&node, 4, async |mut peer| {
+            peer.server.set_publishing(10.0);
             limit(&peer);
             for index in 0..count {
                 peer.server.add_scalar(&numbered(index), Value::U32(index));
@@ -79,7 +85,7 @@ fn monitored(count: u32, limit: impl FnOnce(&Peer<'_>) + Send + 'static) -> Subs
             let nodes: Vec<Node> = (0..count).map(numbered).collect();
             let counts = peer.server.count();
             let mut client = peer.connected().await;
-            let revised = client.subscribe(INTERVAL, &nodes, SAMPLING, 4).await;
+            let revised = client.subscribe(&nodes, sampling).await;
             let calls = counts.monitors();
             let mut changes = Vec::new();
             let mut wait = pin!(peer.clock.sleep(ms(3000)));
@@ -105,14 +111,15 @@ fn numbers(count: u32) -> Vec<(usize, Result<Value, Fault>)> {
         .collect()
 }
 
-/// Each item that the server made, at the interval of [`INTERVAL`].
+/// `count` items sampled at [`SAMPLING`], at the interval of 100 ms, each with a
+/// queue of the 4 values of two intervals.
 fn made(count: usize) -> Revised {
     let item = Sampled {
         sampling: SAMPLING,
         queue: 4,
     };
     Revised {
-        interval: INTERVAL,
+        interval: ms(100),
         items: vec![Ok(item); count],
     }
 }
@@ -121,17 +128,36 @@ fn made(count: usize) -> Revised {
 /// a limit of 0 is no limit. The change of each item gives the index of its node.
 #[test]
 fn the_items_take_calls_of_at_most_the_max_monitored_items_per_call() {
-    let tens = monitored(25, |peer| peer.server.set_per_monitor(10));
+    let tens = monitored(25, SAMPLING, |peer| peer.server.set_per_monitor(10));
     assert_eq!(tens, (Ok(made(25)), 3, numbers(25)));
-    let none = monitored(25, |peer| peer.server.set_per_monitor(0));
+    let none = monitored(25, SAMPLING, |peer| peer.server.set_per_monitor(0));
     assert_eq!(none, (Ok(made(25)), 1, numbers(25)));
+}
+
+/// A sampling interval past 100 ms is the publishing interval, and the queue holds
+/// the 2 values of two intervals.
+#[test]
+fn a_sampling_past_100_ms_is_the_publishing_interval() {
+    let (revised, ..) = monitored(1, LEVEL, |_| {});
+    let item = Sampled {
+        sampling: LEVEL,
+        queue: 2,
+    };
+    let interval = LEVEL;
+    assert_eq!(
+        revised,
+        Ok(Revised {
+            interval,
+            items: vec![Ok(item)]
+        })
+    );
 }
 
 /// A call that the server refuses gives its status to each item of it.
 #[test]
 fn a_refused_call_gives_its_status_to_each_item() {
     let (revised, calls, changes) =
-        monitored(3, |peer| peer.server.refuse_monitors_past(2));
+        monitored(3, SAMPLING, |peer| peer.server.refuse_monitors_past(2));
     let refused = Err(Status::BAD_TOO_MANY_OPERATIONS);
     let revised = revised.expect("the subscription");
     assert_eq!(
@@ -140,27 +166,35 @@ fn a_refused_call_gives_its_status_to_each_item() {
     );
 }
 
-/// Runs `body` on a client subscribed to the Double of [`add_level`] with a queue of
-/// `queue`, after its first change, and gives its output. The server grants each
-/// count of notifications of a Publish answer that the client asks for.
+/// Runs `body` on a client subscribed to the Double of [`add_level`] at [`LEVEL`],
+/// after its first change, and gives its output. The server gives a publishing
+/// interval of 1 s, so the item asks for a queue of 8, and grants queues of at most
+/// `queues` and each count of notifications of a Publish answer that the client asks
+/// for.
 fn on_level<T: Send + 'static>(
-    queue: u32,
+    queues: u32,
     body: impl AsyncFnOnce(&mut Peer<'_>, &mut Client, &Cell<f64>) -> T + Send + 'static,
 ) -> T {
     run(0, async move |node| {
         serve(&node, 4, async |mut peer| {
             let level = add_level(&peer);
+            peer.server.set_publishing(1000.0);
+            peer.server.set_queues(queues);
             peer.server.set_per_publish(u32::MAX);
             let mut client = peer.connected().await;
             let nodes = [numbered(0)];
-            let revised = client.subscribe(INTERVAL, &nodes, SAMPLING, queue).await;
+            let revised = client.subscribe(&nodes, LEVEL).await;
             let revised = revised.expect("the subscription");
+            let item = Sampled {
+                sampling: LEVEL,
+                queue: queues.min(8),
+            };
             assert_eq!(
-                revised.items,
-                [Ok(Sampled {
-                    sampling: SAMPLING,
-                    queue
-                })]
+                revised,
+                Revised {
+                    interval: Span::SECOND,
+                    items: vec![Ok(item)]
+                }
             );
             let first = client.changes(future::pending()).await.map(untimed);
             assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
@@ -176,7 +210,7 @@ fn on_level<T: Send + 'static>(
 /// A Publish answer holds the most changes that fit the receive limit of the client.
 #[test]
 fn a_publish_answer_holds_the_most_changes_that_fit_the_client() {
-    let (most, fits) = on_level(4, async |peer, client, _| {
+    let (most, fits) = on_level(100, async |peer, client, _| {
         let most = usize::try_from(peer.server.per_publish()).expect("fits");
         let bytes =
             |count: usize| ffi::shim_publish_bytes() + count * Item::Change.bytes();
@@ -193,7 +227,7 @@ fn a_full_queue_drops_the_oldest_change_and_marks_the_next() {
     let changes = on_level(2, async |peer, client, level| {
         for value in [1.0, 2.0, 3.0] {
             level.set(value);
-            peer.clock.sleep(ms(200)).await;
+            peer.clock.sleep(ms(300)).await;
         }
         client.changes(future::pending()).await.map(untimed)
     });
@@ -208,7 +242,7 @@ fn a_full_queue_drops_the_oldest_change_and_marks_the_next() {
 /// request, and the server takes only the one that the client sent before the end.
 #[test]
 fn the_end_comes_after_the_changes_and_stops_the_publish_requests() {
-    let (ends, publishes) = on_level(4, async |peer, client, level| {
+    let (ends, publishes) = on_level(100, async |peer, client, level| {
         level.set(1.0);
         peer.clock.sleep(ms(1200)).await;
         peer.server.end_subscriptions(Status::BAD_TIMEOUT);
@@ -231,7 +265,7 @@ fn the_end_comes_after_the_changes_and_stops_the_publish_requests() {
 /// takes in comes at the next `changes`.
 #[test]
 fn a_change_that_a_read_takes_in_comes_at_the_next_changes() {
-    let changes = on_level(4, async |peer, client, level| {
+    let changes = on_level(100, async |peer, client, level| {
         let none = client
             .changes(peer.clock.sleep(ms(2500)))
             .await
@@ -254,7 +288,7 @@ fn a_change_that_a_read_takes_in_comes_at_the_next_changes() {
 #[test]
 fn a_subscribed_client_keeps_reads_for_the_publish_requests() {
     let held = |dropped: u16| {
-        on_level(4, async move |peer, client, _| {
+        on_level(100, async move |peer, client, _| {
             peer.gate.close();
             drop_reads(client, dropped).await;
             let start = peer.clock.now();
@@ -281,13 +315,31 @@ fn a_subscribed_client_keeps_reads_for_the_publish_requests() {
 /// A second subscribe panics, as a client holds one subscription.
 #[test]
 fn a_second_subscribe_panics() {
-    let panic = on_level(4, async |_, client, _| {
+    let panic = on_level(100, async |_, client, _| {
         let nodes = [numbered(0)];
-        let second = caught(client.subscribe(INTERVAL, &nodes, SAMPLING, 4)).await;
+        let second = caught(client.subscribe(&nodes, SAMPLING)).await;
         let panic = second.expect_err("the subscribe panics");
         panic.downcast_ref::<String>().cloned()
     });
     let text = "assertion `left == right` failed: invariant: a client holds one \
                 subscription\n  left: 7\n right: 9";
     assert_eq!(panic.as_deref(), Some(text));
+}
+
+/// A sampling interval that is not positive panics.
+#[test]
+fn a_sampling_of_zero_panics() {
+    let panic = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            let mut client = peer.connected().await;
+            let nodes = [numbered(0)];
+            let zero = caught(client.subscribe(&nodes, Span::ZERO)).await;
+            client.close().await;
+            let panic = zero.expect_err("the subscribe panics");
+            panic.downcast_ref::<&str>().copied()
+        })
+        .await
+    })
+    .0;
+    assert_eq!(panic, Some("invariant: a sampling interval is positive"));
 }

@@ -157,6 +157,16 @@ void shim_server_publishes(UA_Server *server, UA_UInt32 most) {
     UA_Server_getConfig(server)->maxNotificationsPerPublish = most;
 }
 
+/* Sets the shortest publishing interval that `server` grants, in ms. */
+void shim_server_publishing(UA_Server *server, UA_Double ms) {
+    UA_Server_getConfig(server)->publishingIntervalLimits.min = ms;
+}
+
+/* Sets the largest queue of a monitored item that `server` grants. */
+void shim_server_queues(UA_Server *server, UA_UInt32 most) {
+    UA_Server_getConfig(server)->queueSizeLimits.max = most;
+}
+
 /* Gives the most notifications of a Publish answer of the first subscription of
  * `server`, 0 for none. */
 UA_UInt32 shim_server_per_publish(UA_Server *server) {

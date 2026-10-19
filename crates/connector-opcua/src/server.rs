@@ -472,6 +472,20 @@ impl Server {
         unsafe { ffi::test::shim_server_publishes(self.raw(), most) };
     }
 
+    /// Sets the shortest publishing interval that the server grants, in ms.
+    #[cfg(test)]
+    pub(crate) fn set_publishing(&self, ms: f64) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_publishing(self.raw(), ms) };
+    }
+
+    /// Sets the largest queue of a monitored item that the server grants.
+    #[cfg(test)]
+    pub(crate) fn set_queues(&self, most: u32) {
+        // SAFETY: the server lives.
+        unsafe { ffi::test::shim_server_queues(self.raw(), most) };
+    }
+
     /// Gives the most notifications of a Publish answer of the first subscription of
     /// the server, 0 for none.
     #[cfg(test)]

@@ -871,9 +871,7 @@ fn on_spike<T: Send + 'static>(
 /// Subscribes `client` to [`SPIKE`], and gives its first changes.
 async fn subscribe_spike(client: &mut Client) -> Vec<Change> {
     let spike = SPIKE.parse::<Node>().expect("a node");
-    let revised = client
-        .subscribe(Span::SECOND, &[spike], Span::SECOND, 4)
-        .await;
+    let revised = client.subscribe(&[spike], Span::SECOND).await;
     assert!(revised.is_ok(), "{revised:?}");
     client
         .changes(future::pending())
