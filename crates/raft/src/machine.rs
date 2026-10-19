@@ -5348,6 +5348,9 @@ mod tests {
             assert_eq!(votes[&key(1)], Some(Signature([1; 64])));
         }
 
+        // Through `Signed::of`, as no call of `Ready::sign` can show the compare of
+        // `public_keys`: only a change that this node writes is unsigned, and a leader
+        // writes one change at a position.
         #[test]
         fn signs_a_change_again_for_other_public_keys() {
             let joint = voters(&[1, 2, 4], &[1, 2, 3]);
