@@ -279,7 +279,7 @@ pub enum Error {
     },
     /// A place of a read names an index other than that of place 0: a read has one
     /// index.
-    Indexes {
+    ManyIndexes {
         /// The place.
         place: u32,
         /// The index that it names.
@@ -374,7 +374,7 @@ impl fmt::Display for Error {
                 f,
                 "place {place} names place {index} as its index, which is not an index"
             ),
-            Self::Indexes { place, index } => write!(
+            Self::ManyIndexes { place, index } => write!(
                 f,
                 "place {place} names place {index} as its index, and a read has the one \
                  index of place 0"

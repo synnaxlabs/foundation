@@ -698,7 +698,7 @@ fn names_each_error() {
             "place 2 names place 3 as its index, which is not an index",
         ),
         (
-            Error::Indexes { place: 2, index: 3 },
+            Error::ManyIndexes { place: 2, index: 3 },
             "place 2 names place 3 as its index, and a read has the one index of place 0",
         ),
         (
