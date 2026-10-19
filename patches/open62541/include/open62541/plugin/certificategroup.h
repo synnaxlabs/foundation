@@ -80,6 +80,27 @@ UA_EXPORT UA_StatusCode
 UA_CertificateUtils_getApplicationUri(const UA_ByteString *certificate,
                                       UA_String *applicationUri);
 
+/* Why an entry of a trust list does not load. */
+typedef enum {
+    UA_TRUSTLOAD_GOOD,
+    UA_TRUSTLOAD_EMPTY,    /* No certificate in DER or PEM. */
+    UA_TRUSTLOAD_INVALID,  /* The certificate, or a damaged PEM block, fails. */
+    UA_TRUSTLOAD_TRAILING, /* Bytes after the certificate in its PEM block. */
+    UA_TRUSTLOAD_NOMEMORY
+} UA_TrustLoad;
+
+/* Loads each certificate of the entry as the memory group loads a trust entry, and
+ * gives why it does not load, with the number from 1 of the certificate that fails
+ * in `number`. In DER, bytes after the last certificate are one more. */
+UA_EXPORT UA_TrustLoad
+UA_CertificateUtils_checkTrust(const UA_ByteString *trust, size_t *number);
+
+/* BadCertificateTimeInvalid when `now` is outside the validity window of the
+ * certificate, as the verify of the memory group tests a leaf, and
+ * BadCertificateInvalid when it does not parse. */
+UA_EXPORT UA_StatusCode
+UA_CertificateUtils_checkTime(const UA_ByteString *certificate, UA_DateTime now);
+
 /* Verify that the certificate has the applicationURI in the subject name. */
 UA_EXPORT UA_StatusCode
 UA_CertificateUtils_verifyApplicationUri(const UA_ByteString *certificate,

@@ -2,8 +2,8 @@
 //!
 //! The fixtures in `secure/` are self-signed RSA 2048 certificates with SHA-256 and
 //! their PKCS #1 keys, in DER from Python `cryptography` 41.0.7, each valid from
-//! [`START`] to [`END`], PEM copies of them, and one P-256 certificate and its key.
-//! They are test keys only.
+//! [`START`] to [`END`] other than [`LASTING`], PEM copies of them, and one P-256
+//! certificate and its key. They are test keys only.
 
 use std::ffi::CStr;
 
@@ -48,6 +48,13 @@ pub(crate) const EMPTY_URI: Identity = Identity {
 /// A client on the key of [`CLIENT`] with the URI of [`CLIENT`], then another.
 pub(crate) const TWO_URIS: Identity = Identity {
     certificate: include_bytes!("secure/two-uris.der"),
+    key: CLIENT.key,
+};
+
+/// [`CLIENT`] valid from 2000-01-01 to 2003-01-01, a year before [`START`] and after
+/// [`END`].
+pub(crate) const LASTING: Identity = Identity {
+    certificate: include_bytes!("secure/lasting.der"),
     key: CLIENT.key,
 };
 

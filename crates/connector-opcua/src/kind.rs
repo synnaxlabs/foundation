@@ -18,7 +18,7 @@ use types::time::Span;
 use types::time::Stamp;
 
 use crate::browse::Server;
-use crate::client::{Client, Large};
+use crate::client::{self, Client, Large};
 use crate::config::{self, Config, Read};
 use crate::event;
 use crate::ffi::Status;
@@ -259,8 +259,12 @@ async fn session<T>(
     work: impl AsyncFnOnce(&mut Client) -> T,
 ) -> Result<Option<T>, Error> {
     let connected = Client::connect(time, span, net, rng, address, None, until).await;
-    let connected =
-        connected.map_err(|status| failed(address, Call::Connect, status))?;
+    let connected = connected.map_err(|error| match error {
+        client::Error::Failed(status) => failed(address, Call::Connect, status),
+        client::Error::Refused(refusal) => {
+            panic!("invariant: a client with no credentials refuses none: {refusal}")
+        }
+    })?;
     let Some(mut client) = connected else {
         return Ok(None);
     };

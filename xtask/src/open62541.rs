@@ -225,8 +225,8 @@ const AWS_LC_KEYS: [(&str, &str, &str, Access); 19] = [
         "ASN1_TIME_to_tm",
         Access::Call,
     ),
-    // The error queue of aws-lc for the thread. The load reads only the last error,
-    // which its own last PEM read pushed, then clears the queue.
+    // The error queue of aws-lc for the thread. The load clears it on each return,
+    // and reads only the last error, which its own last PEM read pushed.
     (
         "plugins/crypto/openssl/certificategroup.c",
         "openSSLLoadEachCertificate",
@@ -460,7 +460,7 @@ const SYMBOLS: [&str; 30] = [
 /// an algorithm and not its result. A PEM reader reads no console only with a callback
 /// of [`PASSWORDS`], which [`passwords`] checks.
 #[rustfmt::skip]
-const AWS_LC: [&str; 151] = [
+const AWS_LC: [&str; 150] = [
     "ASN1_INTEGER_cmp", "BIO_free", "BIO_new_mem_buf", "BIO_reset", "BN_bin2bn",
     "BN_bn2binpad", "BN_free", "BN_new", "BN_set_word", "ECDSA_SIG_free",
     "ECDSA_SIG_get0", "ECDSA_SIG_new", "ECDSA_SIG_set0", "ECDSA_size",
@@ -489,7 +489,7 @@ const AWS_LC: [&str; 151] = [
     "EVP_sha256", "EVP_sha384", "GENERAL_NAME_free", "HMAC", "OBJ_txt2nid",
     "OPENSSL_cleanse", "OPENSSL_free", "OPENSSL_sk_free", "OPENSSL_sk_new_null",
     "OPENSSL_sk_num", "OPENSSL_sk_pop_free_ex", "OPENSSL_sk_push", "OPENSSL_sk_value",
-    "PEM_read_bio_PrivateKey", "PEM_read_bio_X509", "PEM_read_bio_X509_AUX",
+    "PEM_bytes_read_bio", "PEM_read_bio_PrivateKey", "PEM_read_bio_X509",
     "PEM_read_bio_X509_CRL", "PEM_read_bio_X509_REQ", "RSA_free", "RSA_new", "RSA_size",
     "X509V3_EXT_conf_nid", "X509_CRL_digest", "X509_CRL_free", "X509_CRL_get_REVOKED",
     "X509_CRL_get_issuer", "X509_EXTENSION_free", "X509_NAME_add_entry_by_txt",
@@ -505,7 +505,7 @@ const AWS_LC: [&str; 151] = [
     "X509_get_subject_name", "X509_verify", "d2i_AutoPrivateKey", "d2i_ECDSA_SIG",
     "d2i_PrivateKey_bio", "d2i_X509", "d2i_X509_CRL", "d2i_X509_CRL_bio",
     "d2i_X509_REQ_bio", "d2i_X509_bio", "i2d_ECDSA_SIG", "i2d_PrivateKey", "i2d_X509",
-    "i2d_X509_AUX", "i2d_X509_REQ",
+    "i2d_X509_REQ",
 ];
 
 /// The header of the symbol prefix, which the build script of `connector-opcua` also
