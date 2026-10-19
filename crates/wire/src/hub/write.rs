@@ -169,7 +169,8 @@ impl<'f> Lead<'f> {
             );
             assert!(
                 frame.ranges().all(|(_, range)| range.count == 1),
-                "a frame that the node stamps holds other than one sample of each series"
+                "a frame that the node stamps holds other than one sample of each \
+                 series"
             );
         }
         Self { time, frame }

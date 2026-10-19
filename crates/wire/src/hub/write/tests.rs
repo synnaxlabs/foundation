@@ -929,7 +929,8 @@ mod replies {
                 };
                 let before = replies.clone();
                 let got = replies.decode(&encode_reply(reply));
-                let (next, next_group) = due.get(at).copied().unwrap_or((sent.strict_add(1), 0));
+                let (next, next_group) =
+                    due.get(at).copied().unwrap_or((sent.strict_add(1), 0));
                 let want = match reply {
                     Reply::Outcome { frame, .. } if frame == 0 || frame > sent => {
                         Err(Error::Unasked { frame, sent })
