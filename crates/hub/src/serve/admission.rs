@@ -13,7 +13,6 @@ use wire::hub::client::Signed;
 
 use super::Error;
 use crate::State;
-use crate::task::Waiter;
 
 /// The hello that a session admitted last, and its signature. The first
 /// [`Admission::admit`] admits a hello, and each later one renews it.
@@ -22,8 +21,6 @@ pub(crate) struct Admission {
     /// The node that carried each hello of the session.
     peer: node::Key,
     admitted: RefCell<Option<(Admitted, [u8; 64])>>,
-    /// The wait of [`Admission::expiry`], woken at each renewal.
-    expiry: RefCell<Waiter>,
 }
 
 impl Admission {
@@ -33,7 +30,6 @@ impl Admission {
         Self {
             peer,
             admitted: RefCell::default(),
-            expiry: RefCell::default(),
         }
     }
 
@@ -59,7 +55,6 @@ impl Admission {
         }
         .map_err(Error::Access)?;
         *admitted = Some((next, signature));
-        self.expiry.borrow().wake();
         Ok(())
     }
 
@@ -104,8 +99,9 @@ impl Admission {
         })
     }
 
-    /// Waits until the admitted hello ends, and gives the refusal. Each renewal moves
-    /// the end of the wait.
+    /// Waits until the admitted hello ends, and gives the refusal. A renewal moves the
+    /// end of the wait at its next poll, so poll it in the task that admits each
+    /// renewal.
     ///
     /// # Panics
     ///
@@ -133,7 +129,6 @@ impl Admission {
                 if self.ends() != ends {
                     return Poll::Ready(());
                 }
-                self.expiry.borrow_mut().polled(cx);
                 reach.as_mut().poll(cx)
             })
             .await;
