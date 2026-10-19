@@ -956,7 +956,8 @@ fn an_apply_whose_store_fails_a_read_for_a_peer_names_the_error_of_the_store() {
 }
 
 // Voter 1 leaves 127 voters for voter 128. With no chunk to put, each put ends `Ok`
-// at once, in the order of the keys. A change holds the 65 holders.
+// at once, in the order of the keys. A change holds the 65 holders. It calls `spread`,
+// as `apply` cannot reach a joint configuration until #336.
 #[test]
 fn spread_in_a_joint_configuration_counts_a_majority_of_each_half() {
     solo(|node, tasks| async move {
@@ -982,6 +983,8 @@ fn spread_in_a_joint_configuration_counts_a_majority_of_each_half() {
     });
 }
 
+// It calls `spread`, as `check_proposer` gives `NoVote` to a node that is not a voter,
+// so `apply` cannot reach this case.
 #[test]
 fn spread_on_a_node_that_is_not_a_voter_counts_only_the_voters() {
     solo(|node, tasks| async move {
