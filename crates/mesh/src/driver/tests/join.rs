@@ -30,6 +30,19 @@ fn a_voter_admits_a_join_and_admits_it_again_after_it_applied() {
     });
 }
 
+#[test]
+fn a_leader_sends_a_member_that_joins_the_log() {
+    solo(|node, tasks| async move {
+        let mesh = recorded(&node, &tasks, &[ticket_of(8, "plant", false, LAST)]).await;
+        let admitted = mesh.admit(public(4), request(4, 8, &[])).await;
+        assert_eq!(admitted, Ok(Ok(())));
+        let clock = node.clock();
+        let sent = within(&clock, seconds(10), pin!(mesh.outgoing(key(4)))).await;
+        let to = sent.map(|message| message.map(|message| message.to));
+        assert_eq!(to, Some(Ok(key(4))));
+    });
+}
+
 // Only the holder of the card's private key proves its public key, so no other
 // peer asks for a join in its name.
 #[test]

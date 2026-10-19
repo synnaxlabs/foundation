@@ -766,12 +766,14 @@ struct Group {
 }
 
 impl Group {
+    // Gives `raft` the members of `state` as learners.
     fn new(
-        raft: Raft,
+        mut raft: Raft,
         state: region::State,
         unapplied: BTreeMap<u64, Written>,
         used: Used,
     ) -> Self {
+        raft.set_learners(state.keys());
         Self {
             raft,
             state,
@@ -1021,18 +1023,22 @@ impl Group {
         Ok(())
     }
 
-    // Applies `change`, and gives the task of the spec in use each pointer that moves.
+    // Applies `change`, gives the task of the spec in use each pointer that moves, and
+    // gives `raft` the members after a join.
     fn apply_change(&mut self, change: Change) -> Result<bool, Refused> {
-        let listed = match &change {
-            Change::Spec { chunks, .. } => Some(chunks.clone()),
-            Change::Home { .. }
-            | Change::Join(_)
-            | Change::Ticket { .. }
-            | Change::Card(_) => None,
+        let (listed, joined) = match &change {
+            Change::Spec { chunks, .. } => (Some(chunks.clone()), false),
+            Change::Join(_) => (None, true),
+            Change::Home { .. } | Change::Ticket { .. } | Change::Card(_) => {
+                (None, false)
+            }
         };
         let applied = self.state.apply(change)?;
         if let Some(listed) = listed {
             self.used.committed(self.state.pointer(), listed);
+        }
+        if joined {
+            self.raft.set_learners(self.state.keys());
         }
         Ok(applied)
     }
@@ -3341,9 +3347,14 @@ mod tests {
         fn takes_a_reply_from_a_member_that_is_not_a_voter() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &IDS).await.unwrap();
+                // Node 4 is a learner, so `raft` reads its reply of a later term.
+                let unproven = raft::Error::Unproven {
+                    term: common::TERM,
+                    from: key(4),
+                };
                 for body in replies() {
                     let received = mesh.receive(public(4), message(4, 1, body));
-                    assert_eq!(received, Ok(()));
+                    assert_eq!(received, Err(unproven.into()));
                 }
             });
         }

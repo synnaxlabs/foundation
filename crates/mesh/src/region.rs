@@ -190,6 +190,11 @@ impl State {
         self.members.get(&key)
     }
 
+    /// The key of each member, in key order.
+    pub(crate) fn keys(&self) -> impl Iterator<Item = node::Key> + '_ {
+        self.members.keys().copied()
+    }
+
     /// The name of each member.
     pub(crate) fn names(&self) -> BTreeSet<Name> {
         self.members

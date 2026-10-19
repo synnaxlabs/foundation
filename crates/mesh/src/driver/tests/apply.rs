@@ -682,8 +682,8 @@ fn each_member_refuses_a_change_whose_holders_lack_a_majority_of_its_voters() {
     let board = cluster.board();
     let quorum = Error::Quorum { held: 1, voters: 2 };
     assert_eq!(board.applied, [(1, base(), Err(quorum))]);
-    // Node 3 is in no configuration, so it gets no entry.
-    for id in [1, 2] {
+    // Node 3 is in no configuration, so it gets each entry as a learner.
+    for id in IDS {
         assert_eq!(board.homes[&id].last(), Some(&Some(key(9))), "node {id}");
         assert_eq!(board.pointers[&id], base(), "node {id}");
     }
