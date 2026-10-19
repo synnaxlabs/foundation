@@ -24,11 +24,11 @@
   its claim, in the hard proof, in each message, and in each change this node wrote
   (in `entries`, in `committed`, and in each append), before the write and the
   sends. `raft` keeps each claim that it makes unsigned, and a claim that it reads at
-  start keeps its signature. So `Ready::sign` signs each copy of an unsigned claim that
-  a `Ready` holds, and a resend again. Ed25519 gives each copy the same bytes. A data
-  entry carries no claim, so the cost does not grow with the data rate. The most
-  frequent case is a leader with a voter that does not answer: each heartbeat to it
-  carries the votes, so the leader signs once for each tick (100 ms). A node that
+  start keeps its signature. So `Ready::sign` signs each distinct unsigned claim of a
+  `Ready` once, also when many messages carry it, and a resend in a later `Ready` again
+  (#3140). A data entry carries no claim, so the cost does not grow with the data rate.
+  The most frequent case is a leader with a voter that does not answer: each heartbeat
+  to it carries the votes, so the leader signs once for each tick (100 ms). A node that
   campaigned for its term signs each refusal of a lower term in the same way, because
   the refusal carries its own pre-votes. Lost: `raft` keeps the signed copy, which puts
   the signer in `raft` and changes the conformance oracle (architect, #1187,
@@ -199,3 +199,17 @@
   2026-10-12T18:29:52Z
   (https://github.com/synnaxlabs/foundation/issues/1361#issuecomment-6130215772), with
   the deferral of #2471.
+  `Raft::set_learners` sets the nodes that get the log and have no vote. `raft` keeps
+  the set apart from the configuration: a key that the configuration in force holds as
+  a voter is a voter. A leader sends each learner heartbeats and appends as it does a
+  voter, and never counts its answer toward a commit, an election, or the quorum
+  check. A learner stays until a later call leaves it out: neither the quorum check
+  nor a change of the configuration releases it. No node sends a learner a PreVote or
+  a Vote. Each node keeps the set, so a new leader has it. `mesh` sets it from the
+  members of its applied state (#3140). Lost: learners in the configuration, which
+  puts them in each signed change; `Config::learners` at `Raft::new` with no setter,
+  because `mesh` learns of a member only at an apply. Decided by `laptop.architect`,
+  the plan
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124) and
+  the surface
+  (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).
