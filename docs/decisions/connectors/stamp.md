@@ -46,10 +46,11 @@
   holds one `estimate::overlap::Overlap` of 200 ppm, over offsets of mesh time minus
   device time, each from `c`, the offset of the first reading of the fit. `mesh` adds
   `c` back. Each sum is in `i128`. `between` gives both edges and `before` gives a high
-  edge, in any order of device time. A reading with an edge more than 2^62 ns from `c`
-  starts a new fit from it, and a `between` wider than 2^62 ns gives only its high edge,
-  so each edge stays within 2^62 ns plus drift of `c` and no input panics
-  (`laptop.architect-2`, ruling owed:
+  edge, in any order of device time. A high edge more than 2^62 ns over `c` adds
+  nothing, as the fit already holds a high edge under it; any other edge more than 2^62
+  ns from `c` starts a new fit from its reading, and a `between` wider than 2^62 ns
+  gives only its high edge, so each edge stays within 2^62 ns plus drift of `c` and no
+  input panics (`laptop.architect-2`, ruling owed:
   https://github.com/synnaxlabs/foundation/pull/3386#issuecomment-6272521433). A mesh
   bound past the range of a `Stamp` on the side that claims less becomes `i64::MIN` or
   `i64::MAX` ns, and `mesh` gives `None` past it on the side that claims more

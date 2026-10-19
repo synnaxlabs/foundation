@@ -229,10 +229,6 @@ fn a_reading_past_the_reach_of_the_fit_restarts_it() {
     let mut fit = Fit::default();
     assert_eq!(fit.before(Monotonic(0), at(0)), Fitted::Kept);
     assert_eq!(fit.before(Monotonic(0), at(-REACH - 1)), Fitted::Restarted);
-    assert_eq!(
-        fit.between(Monotonic(0), at(-REACH - 2), at(0)),
-        Fitted::Restarted
-    );
     assert_eq!(fit.mesh(Monotonic(0)), None);
     let mut fit = Fit::default();
     assert_eq!(fit.before(Monotonic(0), at(0)), Fitted::Kept);
@@ -242,6 +238,25 @@ fn a_reading_past_the_reach_of_the_fit_restarts_it() {
         Fitted::Restarted
     );
     assert_eq!(fit.mesh(Monotonic(0)), Some(within(far, far)));
+}
+
+#[test]
+fn a_high_edge_far_over_the_fit_is_kept() {
+    let mut fit = Fit::default();
+    assert_eq!(fit.between(Monotonic(0), at(0), at(10)), Fitted::Kept);
+    assert_eq!(fit.before(Monotonic(0), at(REACH + 100)), Fitted::Kept);
+    assert_eq!(fit.mesh(Monotonic(0)), Some(within(0, 10)));
+}
+
+#[test]
+fn a_low_edge_far_under_the_fit_restarts_it_from_the_reading() {
+    let mut fit = Fit::default();
+    assert_eq!(fit.between(Monotonic(0), at(-10), at(0)), Fitted::Kept);
+    assert_eq!(
+        fit.between(Monotonic(0), at(-REACH - 2), at(-2)),
+        Fitted::Restarted
+    );
+    assert_eq!(fit.mesh(Monotonic(0)), Some(within(-REACH - 2, -2)));
 }
 
 #[test]

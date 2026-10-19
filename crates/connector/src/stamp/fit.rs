@@ -12,11 +12,11 @@ mod tests;
 /// for a clock that drifts from mesh time by at most 200 ppm. Readings come in any
 /// order. A reading that disagrees with the readings before it, as after a restart or
 /// a jump of the clock, starts a new fit from that reading. A clock that goes back by
-/// less than the width of a reading is not caught until a reading disagrees. A reading
-/// whose offset `mesh - device` is more than 2^62 ns (146 years) from that of the
-/// first reading also starts a new fit, and a `between` reading wider than 2^62 ns
-/// bounds the clock only from above. Mesh times are taken as exact: the error of the
-/// fit covers only the device clock.
+/// less than the width of a reading is not caught until a reading disagrees. A high
+/// edge more than 2^62 ns (146 years) over the offset `mesh - device` of the first
+/// reading adds nothing, and any other edge more than 2^62 ns from it starts a new fit.
+/// A `between` reading wider than 2^62 ns bounds the clock only from above. Mesh times
+/// are taken as exact: the error of the fit covers only the device clock.
 #[derive(Clone, Debug)]
 pub struct Fit {
     overlap: Overlap,
@@ -80,13 +80,10 @@ impl Fit {
         let low = low.filter(|&low| high - low <= REACH);
         let base = *self.base.get_or_insert(high);
         let near = |edge: i128| edge.abs_diff(base) <= REACH.unsigned_abs();
-        if near(high) && low.is_none_or(near) {
-            match push(
-                &mut self.overlap,
-                device,
-                low.map(|l| l - base),
-                high - base,
-            ) {
+        if high >= base - REACH && low.is_none_or(near) {
+            // The fit already holds a high edge under the reach.
+            let high = high.min(base + REACH) - base;
+            match push(&mut self.overlap, device, low.map(|l| l - base), high) {
                 Ok(()) => return Fitted::Kept,
                 Err(Error::Disjoint) => {}
             }
