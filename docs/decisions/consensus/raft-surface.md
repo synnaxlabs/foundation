@@ -159,11 +159,12 @@
   that a peer joined), so the caller authenticates the sender and decides which nodes
   may send. `step` drops a reply with no check when its sender is neither in
   `voters()` nor a learner (`Raft::set_learners`), unless the configuration in force
-  removed the sender or a later call to `set_learners` left it out, and the node still
-  sends to it: only `raft` knows whom it asked (#352). A learner's reply moves only its
-  own progress. A node that may send can stop a group for good with one message in term
-  `u64::MAX`: each node writes that term, and none can campaign. `raft` takes the term
-  as it is. It trusts its voters: one that lies can already break safety, because a
+  removed the sender or a later call to `set_learners` left it out, and the node has
+  not released it yet: only `raft` knows whom it asked (#352). A learner's reply moves
+  only its own progress. A node that may send can stop a group for good with one message
+  in term `u64::MAX`: each node writes that term, and none can campaign. `raft` takes
+  the term as it is. It trusts its voters: one that lies can already break safety,
+  because a
   false `AppendReply` counts as held, so a bound on the term would guard nothing. No
   bound on a term jump spares an honest node that was down, either. Later: a sender
   proves a term jump by a signed term, which needs `mesh` (#750). The person decided on
@@ -220,8 +221,7 @@
   leader has it. `mesh` is to set it from the members of its applied state, PR 2 of
   #3140. Lost: learners in the configuration, which puts them in each signed change;
   `Config::learners` at `Raft::new` with no setter, because `mesh` learns of a member
-  only at an apply. Decided by `laptop.architect`,
-  the plan, 2026-10-19T13:53:13Z
+  only at an apply. Decided by `laptop.architect`, the plan, 2026-10-19T13:53:13Z
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124), and
   the surface, 2026-10-19T14:40:23Z
   (https://github.com/synnaxlabs/foundation/issues/3375#issuecomment-6269894725).

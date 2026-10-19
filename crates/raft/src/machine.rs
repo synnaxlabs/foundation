@@ -507,8 +507,8 @@ impl Raft {
     /// A reply is dropped with no check when its sender is neither in
     /// [`Raft::voters`] nor a learner ([`set_learners`](Self::set_learners)), unless
     /// the configuration in force removed the sender or a later call to
-    /// [`set_learners`](Self::set_learners) left it out, and this node still sends to
-    /// it. A learner's reply moves only its own progress. The node's state does not
+    /// [`set_learners`](Self::set_learners) left it out, and this node has not released
+    /// it yet. A learner's reply moves only its own progress. The node's state does not
     /// change on an error.
     pub fn step(&mut self, message: Message) -> Result<(), Error> {
         if !self.reads(&message)? {
