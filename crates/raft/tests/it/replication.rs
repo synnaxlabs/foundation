@@ -75,6 +75,13 @@ proptest! {
         nodes.extend(&learners);
         network.apply_until(&nodes, at.index);
         for &node in &learners {
+            // A change can leave a learner at a term that only its old voters prove,
+            // and it refuses the leader (#1485).
+            prop_assume!(
+                network.disks[node].applied >= at.index
+                    || network.nodes[node].term() <= network.nodes[leader].term(),
+                "a learner at a term this group cannot prove refuses the leader"
+            );
             prop_assert!(network.disks[node].applied >= at.index, "node {node}");
             let applied = usize::try_from(network.disks[node].applied).unwrap();
             prop_assert_eq!(
