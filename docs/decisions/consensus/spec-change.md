@@ -117,7 +117,7 @@
   holders, the refusal at apply, the quorum rule, and the trigger for `CHUNKS_MAX`,
   2026-10-08T11:03:36Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
-  The move of `HOLDERS_MAX` to `raft`, 2026-10-08T11:53:51Z
+  The move of the quorum rule to `raft` (`Voters::quorum`), 2026-10-08T11:53:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643). The
   panics of the hub and the check before them, agreed with `laptop.architect-2`,
   2026-10-08T20:08:50Z

@@ -167,8 +167,7 @@ mod tests {
         ids.iter().copied().map(key).collect()
     }
 
-    // It calls `short`, as `apply` cannot reach a joint configuration until #336, and
-    // the sim never ends two puts in one poll.
+    // It calls `short`, as `apply` cannot reach a joint configuration until #336.
     #[test]
     fn a_voter_counts_only_while_a_half_that_holds_it_lacks_a_majority() {
         let voters = Voters {
