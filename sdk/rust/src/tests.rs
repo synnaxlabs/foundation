@@ -1,7 +1,6 @@
 use std::cell::Cell;
 use std::fs::Permissions;
 use std::net::{Ipv4Addr, Ipv6Addr};
-use std::ops::Range;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicUsize;
@@ -41,7 +40,7 @@ fn the_reads_pool_holds_a_frame_of_7_mib_in_504_mib_of_address_space() {
 /// The whole pages of the bytes at `range` that are in memory, from
 /// `/proc/self/pagemap`.
 #[cfg(target_os = "linux")]
-fn present(range: Range<*const u8>) -> usize {
+fn present(range: std::ops::Range<*const u8>) -> usize {
     use std::os::unix::fs::FileExt;
     const PAGE: usize = 4096;
     #[expect(
