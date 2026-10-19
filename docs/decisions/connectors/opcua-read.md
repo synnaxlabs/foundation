@@ -99,8 +99,8 @@
   is Good or Uncertain, such as `GoodCallAgain`, gives its results, each with its own
   status, as the OPC Foundation reference client does. Only a Bad service result of such
   an answer is an error (`laptop.architect-2`, 2026-10-19T00:31:17Z,
-  https://github.com/synnaxlabs/foundation/pull/3268#issuecomment-6257117078).
-  A `CreateSubscription` or `CreateMonitoredItems` answer whose service result is not
+  https://github.com/synnaxlabs/foundation/pull/3268#issuecomment-6257117078). A
+  `CreateSubscription` or `CreateMonitoredItems` answer whose service result is not
   Good, such as Uncertain or `GoodCallAgain`, gives that status: `subscribe` fails at a
   `CreateSubscription` answer, and each item of a `CreateMonitoredItems` call gets it,
   as open62541 then makes no subscription or item (`laptop.architect-2`,
@@ -108,11 +108,11 @@
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278478978). A
   CreateSession, ActivateSession, or GetEndpoints answer of the connect that open62541
   makes still ends the connect, with `BadDecodingError`, at a code that is neither Good
-  nor Bad, and a FindServers answer of such a code keeps the given URL (#3317). A close by the client, also at the timeout
-  of the connect, gives the reads in flight `BadConnectionClosed`. A close or reset of
-  the stream by the server
-  still gives them `BadSecureChannelClosed`, and the connect `BadConnectionClosed`
-  (`laptop.architect-2`, 2026-10-18T20:52:27Z,
+  nor Bad, and a FindServers answer of such a code keeps the given URL (#3317). A close
+  by the client, also at the timeout of the connect, gives the reads in flight
+  `BadConnectionClosed`. A close or reset of the stream by the server still gives them
+  `BadSecureChannelClosed`, and the connect `BadConnectionClosed` (`laptop.architect-2`,
+  2026-10-18T20:52:27Z,
   https://github.com/synnaxlabs/foundation/issues/2592#issuecomment-6255008245, and
   2026-10-18T21:11:02Z,
   https://github.com/synnaxlabs/foundation/issues/2592#issuecomment-6255192139).
