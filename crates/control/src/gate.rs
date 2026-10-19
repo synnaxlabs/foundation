@@ -709,6 +709,8 @@ mod tests {
             assert_eq!(write(&mut gate, a, at(6)), Ok(()));
         }
 
+        /// Through a private field: only the memory that the gate holds shows that the
+        /// closed record frees its box, and no test of `control` counts that memory.
         #[test]
         fn frees_the_record_when_its_holder_reopens() {
             let mut gate = recovered();
