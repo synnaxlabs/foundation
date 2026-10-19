@@ -8,8 +8,8 @@ use std::process;
 use std::sync::{Mutex, PoisonError};
 
 use pyo3::exceptions::{
-    PyConnectionError, PyException, PyOSError, PyRuntimeError, PyTypeError,
-    PyValueError,
+    PyConnectionError, PyException, PyMemoryError, PyOSError, PyRuntimeError,
+    PyTypeError, PyValueError,
 };
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
@@ -97,9 +97,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
 /// Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
 /// that does not parse or a pair given in half, `RuntimeError` when a thread of the
 /// client or of the read of `data` cannot start, `OSError` when the local UDP socket
-/// cannot bind, `ConnectionError` when no source gives a value, the data directory
-/// cannot be read, the client cannot reach the node, or the node refuses the subject,
-/// and `PanicException` when a thread of the client or of the read of `data` panicked.
+/// cannot bind, `MemoryError` when the OS refuses the memory of the pool of the frames
+/// of the client's readers, `ConnectionError` when no source gives a value, the data
+/// directory cannot be read, the client cannot reach the node, or the node refuses the
+/// subject, and `PanicException` when a thread of the client or of the read of `data`
+/// panicked.
 #[pyfunction]
 #[pyo3(signature = (
     address=None, *, node=None, public_key=None, subject=None, private_key=None,
@@ -580,8 +582,10 @@ fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
         ) => PyValueError::new_err(text),
         sdk::Error::Thread { .. } | sdk::Error::Closed => PyRuntimeError::new_err(text),
         sdk::Error::Bind(_) => PyOSError::new_err(text),
+        sdk::Error::Memory(_) => PyMemoryError::new_err(text),
         sdk::Error::Session(_)
         | sdk::Error::Local(_)
+        | sdk::Error::Decode { .. }
         | sdk::Error::Stream(
             program::Error::Transport(_)
             | program::Error::Message(_)

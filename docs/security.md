@@ -210,11 +210,13 @@ state on `main`.
   `removed` once the leave commits, and the node stops (#1105). A voter whose log lacks
   the leave entry admits the request until #1107, so in `raft` alone such a node can win
   an election once no voter has a lease, and lead until it commits the leave.
-- `raft` drops a reply from a node that is not a voter, unless a change removed the node
-  and `raft` still sends to it (#352). It takes a higher term only with a proof that a
-  quorum of its configuration granted the sender, in every message but a `PreVote` and a
-  granted `PreVoteReply` (RAFT SURFACE, #750). A refusal of a lower term carries the
-  proof of the refuser's term, so a node that is behind catches up.
+- `raft` drops a reply from a node that is neither a voter nor a learner
+  (`Raft::set_learners`), unless a change removed the node or a later call to
+  `set_learners` left it out, and `raft` has not released it yet (#352). It takes a
+  higher term only with a proof that a quorum of its configuration granted the sender,
+  in every message but a `PreVote` and a granted `PreVoteReply` (RAFT SURFACE, #750). A
+  refusal of a lower term carries the proof of the refuser's term, so a node that is
+  behind catches up.
 - A node that may send to a group and lies could stop the group for good with one
   message in term `u64::MAX`. Now that message needs a quorum of grants of a
   configuration the node holds, or of one that a chain of signed configuration
@@ -228,12 +230,14 @@ state on `main`.
   `crates/raft/tests/it/hostile.rs` pins the gap (architect,
   https://github.com/synnaxlabs/foundation/pull/1488#issuecomment-6043096423). `mesh`
   also admits a `raft` request only from a voter of the newest configuration (RAFT
-  VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
+  VOTERS, #654), and `raft` drops a reply from any node that is not its peer: a voter, a
+  learner, or a node that it has not released yet (RAFT SURFACE). `Mesh::receive`
   refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
-  code 17) only to a sender that a committed configuration removed, so a stranger
-  cannot learn from the answer which nodes the log held, and a sender stops its group
-  only on that answer from a voter of its own configuration (#1105). `node` serves
-  mesh streams when it has a region (NODE MESH).
+  code 17) only to a sender that a committed configuration removed, so a stranger cannot
+  learn from the answer which nodes the log held, and a sender stops its group only on
+  that answer from a
+  voter of its own configuration (#1105). `node` serves mesh streams when it has a
+  region (NODE MESH).
   A voter that lies can still break safety, because a false `AppendReply` counts as
   held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a
   voter that lies writes gives its node the key it names (MESH DRIVER). A signed
@@ -556,7 +560,7 @@ seconds on each PR, and `fuzz.yaml` runs each target for 600 seconds each night.
 | `connector_modbus_rtu` | `connector_modbus::rtu::decode_request`, `decode_reply`, `pdu::Request::decode`, `Request::decode_reply` | A request reads back unchanged; a reply has the asked count |
 | `connector_modbus_tcp` | `connector_modbus::tcp::decode`, `pdu::Request::decode`, `decode_reply`, `read::groups`, `read::Group::values` | A request reads back unchanged; a reply has the asked count; reads of each register type that tile a read request group into that request, and give the values of its reply in address order, in each register order |
 | `connector_opcua_decode` | `connector_opcua::fuzz::decode`: `UA_decodeBinary` of open62541, as each type of `UA_TYPES` | No memory fault or leak; a decoded value encodes to its `UA_calcSizeBinary` length, and that encoding decodes, reads exactly its length, and encodes to the same bytes. A decoded `DataValue` gives the same read of its value (`Value::of` of the kind), or the same fault, and the same time (`value::time`), or the same status, from both decodes. Until #435 is fixed, the encoding decodes with as many zeros after it as its length. |
-| `connector_opcua_certificate` | `connector_opcua::fuzz::certificate`: the certificate that a server sends, DER or PEM, as the client of the copy reads it: `verifyCertificate` of a memory group that trusts nothing, `newChannelContext` of each of the three policies, `compareCertificate` with the certificate of a channel; and `UA_CertificateUtils_getApplicationUri`, which the client reads only from its own certificate (feature `sim`) | No memory fault or leak, and no read of the console; the check never gives `Good`. Not reached: a certificate that a trust list holds, which a fuzzed input cannot be |
+| `connector_opcua_certificate` | `connector_opcua::fuzz::certificate`: the certificate that a server sends, DER or PEM, as the client of the copy reads it: `verifyCertificate` of a memory group that trusts nothing, `newChannelContext` of each of the three policies, `compareCertificate` with the certificate of a channel; and `UA_CertificateUtils_getApplicationUri`, which the client reads only from its own certificate (feature `sim`) | No memory fault or leak, and no read of the console; the check never gives `Good`. Not reached: the trust load, under "No target yet" (#3289) |
 | `ops_mcp` | `foundation mcp`, through `ops::cli` | No error, and at most one reply for each line |
 | `types_name` | `Name` | Prints as the text it was read from |
 | `types_selector` | `Pattern`, `Selector` | Agree with a second matcher |
@@ -594,4 +598,6 @@ reply of its node (`ops::serve`, #2563), the newest handoff record of each index
 ring (`home::handoff::read`, #2278), the newest named reader entry of each index in
 the ring (`home::named::read`, #2278), the buffer entry that a complete reader reads from
 disk (`home::stored::Decoder::frame`, #2738), the chunk processing of open62541
-(`ua_securechannel.c`, #1990).
+(`ua_securechannel.c`, #1990), the trust load of the open62541 copy
+(`openSSLLoadEachCertificate` through `UA_CertificateUtils_checkTrust`), which no config
+reaches until PR 2d of #2934 (#3289).
