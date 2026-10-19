@@ -1,5 +1,5 @@
-//! Tests of `Mesh::apply` on one node, and of its spec change on a cluster of three
-//! voters, where each voter holds the chunks.
+//! Tests of `Mesh::apply` on one node and on a cluster of three voters, and of its
+//! spec change on a cluster.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -44,6 +44,30 @@ impl Cluster {
             homes,
         };
         self.board.lock().unwrap().applies.insert(node, spec);
+    }
+
+    /// Node `node` calls `Mesh::apply` of `definitions` on `base` at its next tick.
+    fn change(
+        &self,
+        node: u8,
+        base: Pointer,
+        definitions: &BTreeMap<Name, Definition>,
+    ) {
+        let change = (base, definitions.clone());
+        self.board.lock().unwrap().changes.insert(node, change);
+    }
+
+    /// Sets a one-way delay of `delay` on each link between two voters.
+    fn delay(&mut self, delay: Span) {
+        let config = link::Config {
+            delay,
+            ..link::Config::default()
+        };
+        for (a, b) in [(1, 2), (1, 3), (2, 3)] {
+            let (a, b) = (self.node(a).clone(), self.node(b).clone());
+            self.sim.link(&a, &b, config);
+            self.sim.link(&b, &a, config);
+        }
     }
 
     /// Node `node` proposes `voters` at its next tick.
@@ -643,7 +667,7 @@ fn a_change_on_a_base_whose_tree_the_store_cannot_give_lists_each_chunk() {
 }
 
 #[test]
-fn apply_in_a_region_of_three_voters_gives_quorum_and_puts_and_proposes_nothing() {
+fn apply_in_a_region_of_three_voters_with_no_peer_gives_quorum_and_proposes_nothing() {
     let entries = solo_stored(|node, tasks| async move {
         let (mesh, store) = open_kept(&node, &tasks, &IDS).await;
         let definitions = create_subjects(&["plant.a"], 1);
@@ -653,7 +677,7 @@ fn apply_in_a_region_of_three_voters_gives_quorum_and_puts_and_proposes_nothing(
             mesh.apply(base(), definitions, BTreeMap::new()).await,
             Err(quorum.clone())
         );
-        assert!(store.get(root).await.unwrap().is_none());
+        assert!(store.get(root).await.unwrap().is_some());
         assert_eq!(
             quorum.to_string(),
             "1 of 3 voters hold the chunks of the spec change, not a majority"
@@ -687,6 +711,86 @@ fn each_member_refuses_a_change_whose_holders_lack_a_majority_of_its_voters() {
         assert_eq!(board.homes[&id].last(), Some(&Some(key(9))), "node {id}");
         assert_eq!(board.pointers[&id], base(), "node {id}");
     }
+}
+
+/// Asserts that each of `ids` uses the spec of `definitions` at `pointer`.
+fn assert_used(
+    board: &Board,
+    ids: &[u8],
+    pointer: Pointer,
+    definitions: &BTreeMap<Name, Definition>,
+) {
+    for id in ids {
+        let seen = &board.specs[id];
+        assert_eq!(seen.pointer, Some(pointer), "node {id}");
+        assert_eq!(&seen.definitions, definitions, "node {id}");
+    }
+}
+
+// Voter 3 is down, so the holders are 1 and 2, and voter 2 uses the spec from the
+// chunks that voter 1 put on it.
+#[test]
+fn an_apply_with_one_voter_down_commits_and_the_other_voter_uses_the_spec() {
+    let mut cluster = Cluster::new(0);
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(5));
+    let definitions = create_subjects(&["plant.a"], 1);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(5));
+    let board = cluster.board();
+    let moved = pointer(1, &definitions);
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_used(&board, &[1, 2], moved, &definitions);
+}
+
+#[test]
+fn an_apply_in_a_region_of_two_voters_commits_and_each_uses_the_spec() {
+    let mut cluster = Cluster::new(0);
+    cluster.board.lock().unwrap().learners = [3].into();
+    cluster.start();
+    cluster.run(seconds(5));
+    let definitions = create_subjects(&["plant.a"], 1);
+    cluster.change(2, base(), &definitions);
+    cluster.run(seconds(5));
+    let board = cluster.board();
+    let moved = pointer(1, &definitions);
+    assert_eq!(board.applied, [(2, moved, Ok(moved))]);
+    assert_used(&board, &[1, 2], moved, &definitions);
+}
+
+// Voter 2 takes the put and never answers, and voter 3 is down, so the apply ends at
+// the deadline of its call on voter 2.
+#[test]
+fn an_apply_whose_one_live_peer_never_answers_gives_quorum_at_the_deadline() {
+    let mut cluster = Cluster::new(0);
+    cluster.board.lock().unwrap().silent = Some(2);
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(5));
+    cluster.change(1, base(), &create_subjects(&["plant.a"], 1));
+    cluster.run(peer::DEADLINE);
+    assert_eq!(cluster.board.lock().unwrap().applied, []);
+    cluster.run(seconds(1));
+    let quorum = Error::Quorum { held: 1, voters: 3 };
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
+}
+
+// Each chunk takes a round trip of 200 ms, so one call of all 1024 chunks would miss
+// the deadline.
+#[test]
+fn an_apply_of_the_most_chunks_commits_over_links_of_100_ms() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(100 * Span::MILLISECOND.nanos()));
+    cluster.start();
+    cluster.run(seconds(10));
+    let definitions = create_large(1950);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(300));
+    let board = cluster.board();
+    let moved = pointer(1, &definitions);
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_used(&board, &IDS, moved, &definitions);
 }
 
 #[test]

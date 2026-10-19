@@ -134,6 +134,7 @@ pub struct Mesh {
     tasks: tasks::Group,
     pool: Rc<Pool>,
     store: Rc<blob::Store>,
+    transport: Rc<Transport>,
     clock: Clock,
     cards: Rc<version::Cards>,
     entropy: Entropy,
@@ -215,11 +216,10 @@ impl Mesh {
                 bytes_min: message::BYTES_MIN,
             });
         }
-        let transport = Rc::clone(&config.transport);
         let mesh = Self::start(config).await?;
         let senders = Senders {
             group: Rc::downgrade(&mesh.group),
-            transport,
+            transport: Rc::clone(&mesh.transport),
             pool: Rc::clone(&mesh.pool),
             tasks: mesh.tasks.clone(),
         };
@@ -244,7 +244,6 @@ impl Mesh {
                 .map_err(Error::Member)?;
         check_members(&state, config.key, &config.private_key, &voters)?;
         put(&config.store, &config.pool, &chunks, &tree.chunks).await?;
-        let signer = Signer::new(config.key, &config.private_key);
         let pool = Rc::clone(&config.pool);
         let files = &config.files;
         let (log, stored) = open_log(files, &config.dir, Rc::clone(&pool)).await?;
@@ -283,7 +282,7 @@ impl Mesh {
         tasks.tasks().spawn(run(
             weak,
             log,
-            signer,
+            Signer::new(config.key, &config.private_key),
             config.clock.clone(),
             config.entropy.clone(),
         ));
@@ -292,6 +291,7 @@ impl Mesh {
             tasks,
             pool,
             store: config.store,
+            transport: config.transport,
             clock: config.clock,
             cards: Rc::new(cards),
             entropy: config.entropy,
@@ -1497,6 +1497,10 @@ mod tests {
         configurations: BTreeMap<u8, BTreeSet<u8>>,
         /// The spec change that each node proposes next.
         applies: BTreeMap<u8, Proposal>,
+        /// The base and the definitions that each node gives `Mesh::apply` next.
+        changes: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
+        /// The node that answers no blob stream.
+        silent: Option<u8>,
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
@@ -1749,7 +1753,8 @@ mod tests {
     }
 
     /// Serves each stream of each session that a peer opens to `transport`, as `node`
-    /// does. The group refuses no message of a cluster.
+    /// does, and holds each blob stream with no answer when node `id` is silent. The
+    /// group refuses no message of a cluster.
     async fn accept(
         mesh: Mesh,
         transport: Rc<Transport>,
@@ -1771,8 +1776,16 @@ mod tests {
                         let Ok(Some(header)) = incoming.receiver.recv().await else {
                             return;
                         };
-                        let protocol = wire::header::decode(&header).unwrap();
-                        assert_eq!(protocol, (Protocol::Mesh, &[][..]));
+                        let (protocol, _) = wire::header::decode(&header).unwrap();
+                        if protocol == Protocol::Blob {
+                            let silent = board.lock().unwrap().silent == Some(id);
+                            if silent {
+                                std::future::pending::<()>().await;
+                            }
+                            drop(blob::peer::serve(&mesh.store, incoming).await);
+                            return;
+                        }
+                        assert_eq!(protocol, Protocol::Mesh);
                         match mesh.serve(peer, incoming).await {
                             Ok(()) | Err(Error::Stream(_) | Error::Soon) => {}
                             Err(error @ Error::Contested { .. }) => {
@@ -1908,21 +1921,31 @@ mod tests {
     }
 
     /// Proposes the spec change that the board gives node `id`, as `Mesh::apply`
-    /// does after its count of the holders, and puts the result on the board.
+    /// does after its count of the holders, or calls `Mesh::apply` on the base and the
+    /// definitions that it gives, and puts the result on the board.
     async fn apply(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
         loop {
             clock.sleep(TICK).await;
-            let Some(spec) = board.lock().unwrap().applies.remove(&id) else {
-                continue;
+            let (spec, change) = {
+                let mut board = board.lock().unwrap();
+                (board.applies.remove(&id), board.changes.remove(&id))
             };
-            let Proposal {
-                base,
-                root,
-                chunks,
-                holders,
-                homes,
-            } = spec;
-            let result = mesh.settle_spec(base, root, chunks, holders, homes).await;
+            let result = match (spec, change) {
+                (Some(spec), _) => {
+                    let Proposal {
+                        base,
+                        root,
+                        chunks,
+                        holders,
+                        homes,
+                    } = spec;
+                    mesh.settle_spec(base, root, chunks, holders, homes).await
+                }
+                (None, Some((base, definitions))) => {
+                    mesh.apply(base, definitions, BTreeMap::new()).await
+                }
+                (None, None) => continue,
+            };
             let pointer = mesh.pointer();
             board.lock().unwrap().applied.push((id, pointer, result));
         }

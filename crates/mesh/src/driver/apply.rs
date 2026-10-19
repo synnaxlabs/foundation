@@ -24,7 +24,11 @@ impl Mesh {
     /// put of each chunk of the new tree in [`Config::store`](super::Config::store) has
     /// returned. The change lists each chunk of the new tree that the tree of `base`
     /// lacks, or each chunk of the new tree when the store cannot give the tree of
-    /// `base`. A follower forwards the change to the leader. Returns the pointer once
+    /// `base`. It then puts the listed chunks on each other voter of both halves of
+    /// the voters, all at once, in calls of at most 32 chunks that each end after 10
+    /// seconds, and proposes once the holders are a majority of each half. A holder is
+    /// this node when it is a voter, or a voter whose calls each ended `Ok`. A follower
+    /// forwards the change to the leader. Returns the pointer once
     /// its entry has committed and this node applied it: `base` when the tree of
     /// `definitions` is the tree of `base` and each index of `homes` has a home in this
     /// node's state, as such a change leaves the pointer, and else a new pointer. It
@@ -40,8 +44,8 @@ impl Mesh {
     /// # Errors
     ///
     /// `Problems` comes first, then `NotIndex`, `Homes`, a `Blob` from the read of the
-    /// tree of `base`, `Large`, `Stopped`, `NoVote`, `UnknownNode`, and a `Quorum`
-    /// before the first put. None of these, `Pool`, and `Blob` propose anything.
+    /// tree of `base`, `Large`, `Stopped`, `NoVote`, and `UnknownNode`. None of these,
+    /// `Pool`, `Blob`, and a `Quorum` before the proposal propose anything.
     ///
     /// - [`Error::Problems`] when the spec has problems.
     /// - [`Error::NotIndex`] when `definitions` does not hold an index of `homes` as
@@ -54,8 +58,8 @@ impl Mesh {
     ///   of an index of `homes` that has no home. It reads what this node applied.
     /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
     ///   when a call of the store fails.
-    /// - [`Error::Quorum`] when the voters that hold the chunks are not a majority of
-    ///   each half of the voters, before the proposal or at the apply.
+    /// - [`Error::Quorum`] when the holders are not a majority of each half of the
+    ///   voters: before the proposal, once each put on a voter ended, or at the apply.
     /// - [`Error::Stale`] when the pointer at the apply of its entry is not `base`, and
     ///   either it is not the pointer this call makes, or an index of `homes` has no
     ///   home in this node's state when the call settles.
@@ -106,17 +110,13 @@ impl Mesh {
         // A try opens only after the puts, since its floor keeps `Applied` from a trim.
         self.check_proposer()?;
         let homes = self.keyed(&indexes)?;
-        let holders = BTreeSet::from([self.group.borrow().raft.key()]);
-        let quorum = self
-            .group
-            .borrow()
-            .raft
-            .voters()
-            .quorum(|key| holders.contains(&key));
-        quorum.map_err(|short| refused(short.into()))?;
         // Each chunk, not only the listed ones: the store can lack a chunk that the
         // base shares with the new tree, and `diff` never reads a shared chunk.
         put(&self.store, &self.pool, &chunks, &update.chunks).await?;
+        let voters = self.group.borrow().raft.voters().clone();
+        let holders = self.spread(&voters, &listed).await;
+        let quorum = voters.quorum(|key| holders.contains(&key));
+        quorum.map_err(|short| refused(short.into()))?;
         let listed = listed.into_iter().collect();
         self.settle_spec(base, root, listed, holders, homes).await
     }

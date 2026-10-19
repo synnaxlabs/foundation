@@ -103,9 +103,11 @@ pub enum Error {
     /// A spec has problems, in the order that [`spec::region::check`] gives them. Fix
     /// each problem as [`spec::region::Problem::fix`] says.
     Problems(Vec<spec::region::Problem>),
-    /// The voters that hold the chunks of a spec change are not a majority of one
-    /// half of the voters, so the pointer did not move. This half comes first of the
-    /// halves that lack a majority, incoming before outgoing.
+    /// The voters that hold the listed chunks of a spec change are not a majority of
+    /// one half of the voters, so the pointer did not move. A holder is the proposer
+    /// when it is a voter, or a voter whose put of those chunks from the proposer
+    /// ended `Ok`. This half comes first of the halves that lack a majority, incoming
+    /// before outgoing.
     Quorum {
         /// The voters of the half that hold the chunks.
         held: usize,
