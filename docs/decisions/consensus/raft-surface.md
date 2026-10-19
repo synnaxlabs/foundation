@@ -27,7 +27,7 @@
   2026-10-19T12:43:33Z:
   https://github.com/synnaxlabs/foundation/issues/1106#issuecomment-6267490155).
   `Voters::added` gives the voters that a change adds, the one rule for `raft` and for
-  the byte form, and the field is `public_keys`, since a bound is a limit in this repo
+  the byte form, and the field is `public_keys`, because a bound is a limit in this repo
   (architect, #3380,
   https://github.com/synnaxlabs/foundation/pull/3380#issuecomment-6270310245).
   `raft` gives this node's own entries, grants, and changes with no signature
