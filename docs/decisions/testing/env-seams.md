@@ -128,8 +128,13 @@
   the local address, and don't-fragment. `os` binds with `rustix`, with `IPV6_V6ONLY`
   off on an IPv6 socket, and routes as `sim` does: a socket on `::` sends IPv4 as
   `::ffff:a.b.c.d`, and any other socket that gets a destination of the other family
-  gives `Unreachable`. A `Transmit` goes out in one `sendmsg`, with GSO, or one per
-  datagram after the kernel refuses GSO; there is no `sendmmsg`. A `Transmit` holds at
+  gives `Unreachable`. A UDP bind to `[::]:0` first tries the port of a closed IPv4
+  probe on `0.0.0.0:0`, up to 8 times, and then lets the kernel pick: on macOS the
+  kernel can give it the port of a held `127.0.0.1` socket, which then gets each
+  datagram to that port (#3422,
+  https://github.com/synnaxlabs/foundation/issues/3422#issuecomment-6276973048). A
+  `Transmit` goes out in one `sendmsg`, with GSO, or one per datagram after the kernel
+  refuses GSO; there is no `sendmmsg`. A `Transmit` holds at
   most `TRANSMIT_BYTES_MAX`, so a GSO batch gets `EMSGSIZE` only when its segment is
   over the path MTU. Then each full segment is lost, and `os` sends the short last
   datagram alone (`laptop.architect-2`, 2026-10-09 22:36 UTC,
