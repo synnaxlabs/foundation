@@ -952,7 +952,14 @@ fn an_apply_whose_store_fails_a_read_for_a_peer_names_the_error_of_the_store() {
             cause: Miss::Put(blob::peer::Error::Store(blob::Error::Files(cause))),
         }],
     };
-    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum.clone()))]);
+    assert_eq!(
+        quorum.to_string(),
+        format!(
+            "1 of 2 voters hold the chunks of the spec change, not a majority; \
+             plant.node2: its put failed: read_at of {BLOB}/{root} failed with OS error 5"
+        )
+    );
 }
 
 // Voter 1 leaves 127 voters for voter 128. With no chunk to put, each put ends `Ok`
