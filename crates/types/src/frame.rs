@@ -510,6 +510,16 @@ impl Draft {
         );
     }
 
+    /// Sets how many samples each series of a group holds, for each present group
+    /// from the `first` on, in group order, to the next of `counts`, until either
+    /// ends. Time is linear in the number of groups that it sets.
+    pub fn set_counts(&mut self, first: usize, counts: impl IntoIterator<Item = u32>) {
+        let (ranges, ..) = parts_mut(&mut self.0);
+        for (record, count) in ranges.iter_mut().skip(first).zip(counts) {
+            put(record, at::range::COUNT, &count.to_le_bytes());
+        }
+    }
+
     /// Sets the seq of the first sample of group `group`, on the path the frame
     /// freezes on.
     ///
@@ -1649,6 +1659,25 @@ mod tests {
         );
         let frame = draft.freeze(Path::Live);
         assert_eq!(frame.ranges().collect::<Vec<_>>(), ranges);
+    }
+
+    #[test]
+    fn sets_the_counts_of_the_present_groups_from_the_first_on() {
+        let pool = pool(1 << 16);
+        let series = [(0, 8), (1, 8), (2, 8), (3, 8)];
+        let mut draft = Draft::new(&pool, &two_groups(), Form::Raw, &series).unwrap();
+        let counts = |draft: &Draft| -> Vec<_> {
+            draft
+                .ranges()
+                .map(|(group, range)| (group, range.count))
+                .collect()
+        };
+        draft.set_counts(1, [7, 9]);
+        assert_eq!(counts(&draft), [(0, 0), (1, 7)]);
+        draft.set_counts(0, [3]);
+        assert_eq!(counts(&draft), [(0, 3), (1, 7)]);
+        draft.set_counts(2, [5]);
+        assert_eq!(counts(&draft), [(0, 3), (1, 7)]);
     }
 
     #[test]
