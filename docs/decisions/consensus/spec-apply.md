@@ -46,17 +46,16 @@
   at its first use. A holder is the node when it is a voter, or a voter whose calls each
   ended `Ok` while a half that holds it lacked a majority; another failed dial or call,
   also a failed read of the node's store for a call, leaves a voter no holder. So the
-  holders are at most the sum of the majorities of the
-  halves, at most 128, which `HOLDERS_MAX` holds (SPEC CHANGE). `Error::Stopped` comes
-  as for `Mesh::set_home`, also while the puts wait. Once the holders are a
-  majority of each half, the node drops the puts still open and proposes. When the
-  holders are not a majority of each half once each put ended, or at the apply, the
-  call gives `Error::Quorum { held, voters, missed }` for the first half that lacks
-  one, the incoming half first, and proposes nothing before the apply. `missed` gives
-  each voter whose put failed, in key order, with its name and why: `Miss::Deadline`,
-  `Unknown` (no record of the voter), `Dial`, or `Put`. It is empty for a refusal at
-  the apply. Decided by
-  `laptop.architect`, 2026-10-19T17:02:16Z
+  holders are at most the sum of the majorities of the halves, at most 128, which
+  `HOLDERS_MAX` holds (SPEC CHANGE). `Error::Stopped` comes as for `Mesh::set_home`,
+  also while the puts wait. Once the holders are a majority of each half, the node drops
+  the puts still open and proposes. When the holders are not a majority of each half
+  once each put ended, or at the apply, the call gives `Error::Quorum { held, voters,
+  missed }` for the first half that lacks one, the incoming half first, and proposes
+  nothing before the apply. `missed` gives each voter whose put failed, in key order,
+  with its name and why: `Miss::Deadline`, `Unknown` (no record of the voter), `Dial`,
+  or `Put`. It is empty for a refusal at the apply. Decided by `laptop.architect`,
+  2026-10-19T17:02:16Z
   (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202), which
   supersedes the count before the put of item 2 of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643 and the one
@@ -71,7 +70,8 @@
   `laptop.architect`, 2026-10-19T17:48:57Z
   (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273571109), on the
   condition of `laptop.monitor` that a failed apply names its cause until #3405 lands.
-  The redial: approval owed on #3399.
+  The redial: `laptop.architect`, 2026-10-19T18:11:29Z
+  (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6274006583).
   `Mesh::open` puts each chunk of the
   founding tree in the store. A change that the state refuses as stale gives
   `Error::Stale { base, pointer }`. A call learns the refusal of its own entry from
