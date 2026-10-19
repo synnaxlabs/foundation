@@ -372,8 +372,12 @@
   its places names it. `Opening` builds the key set with `KeySet::ordered`, and at the
   last place gives, for the first place in place order that breaks a rule,
   `Error::Index` when its index is not a place whose index is itself, or
-  `Error::Unstamped` when it is an index that is not `Stamp`, or, on a read,
-  `Error::Indexes` when its index is not that of place 0, then `Error::Repeated`.
+  `Error::Unstamped` when it is an index that is not `Stamp`, then `Error::Repeated`.
+  `KeySet::ordered` checks these rules and gives `key_set::Error`, which `Opening`
+  maps to them. After the start, `client::Reader` gives `Error::ManyIndexes` for the
+  first place whose index is not that of place 0, and is then done. Ruled by
+  `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6270542720).
   `Place::index` is a `usize`, as the other places of the crate are, not the `u32` of
   the plan; the wire holds a `u32`. This replaces the lost flag of #3266 above: the
   index is now a fact of each group, not of the stream. Lost: a `Places` with a run of

@@ -610,7 +610,10 @@ fn stops_a_read_whose_places_are_not_valid() {
         (
             424,
             two,
-            Error::Message(wire::hub::client::Error::Indexes { place: 2, index: 3 }),
+            Error::Message(wire::hub::client::Error::ManyIndexes {
+                place: 2,
+                index: 3,
+            }),
         ),
         (
             419,

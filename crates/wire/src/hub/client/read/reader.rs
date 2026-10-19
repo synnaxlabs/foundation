@@ -34,7 +34,7 @@ impl Reader {
     pub fn new(mode: Mode) -> Self {
         Self {
             latest: mode == Mode::Latest,
-            opening: Opening::read(),
+            opening: Opening::default(),
         }
     }
 
@@ -45,16 +45,27 @@ impl Reader {
     /// # Errors
     ///
     /// Those of [`write::Opening::decode`](crate::hub::client::write::Opening::decode),
-    /// for the places of the read, where a place also breaks a rule when its index is
-    /// not that of place 0: [`Error::Indexes`].
+    /// for the places of the read. Then [`Error::ManyIndexes`] for the first place
+    /// whose index is not that of place 0. The reader is then done: it does not stay
+    /// as it was.
     ///
     /// # Panics
     ///
-    /// When it gave the start before.
+    /// When it gave the start or [`Error::ManyIndexes`] before.
     pub fn decode(&mut self, message: Option<&[u8]>) -> Result<Option<Start>, Error> {
         let Some(stream::Start { places, set }) = self.opening.decode(message)? else {
             return Ok(None);
         };
+        let lead = places.first().map(|place| place.index);
+        let mut places_of = places.iter().enumerate();
+        if let Some((at, place)) =
+            places_of.find(|(_, place)| Some(place.index) != lead)
+        {
+            return Err(Error::ManyIndexes {
+                place: to_u32(at),
+                index: to_u32(place.index),
+            });
+        }
         Ok(Some(Start {
             home: hub::Reader::of(count(&places), self.latest),
             places,
@@ -64,5 +75,9 @@ impl Reader {
 }
 
 fn count(places: &[Place]) -> u32 {
-    u32::try_from(places.len()).expect("invariant: the places are at most PLACES_MAX")
+    to_u32(places.len())
+}
+
+fn to_u32(n: usize) -> u32 {
+    u32::try_from(n).expect("invariant: the places are at most PLACES_MAX")
 }
