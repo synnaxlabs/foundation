@@ -135,6 +135,7 @@ fn run_of(
     fixed: bool,
 ) -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
     nodes.prop_flat_map(move |nodes| {
+        assert!(nodes <= NODES_MAX, "a run of {nodes} nodes");
         (
             prop::collection::vec(position(), nodes),
             prop::collection::vec(action(nodes, fixed), 0..400),

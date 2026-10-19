@@ -307,7 +307,7 @@ fn no_change_of_a_run_has_a_larger_append_than_largest() {
 }
 
 #[test]
-fn fits_largest_refuses_a_message_one_byte_past_largest() {
+fn fits_largest_holds_largest_and_refuses_one_byte_more() {
     let past = Message {
         body: Body::Append {
             prev: Position::default(),
@@ -322,6 +322,7 @@ fn fits_largest_refuses_a_message_one_byte_past_largest() {
         },
         ..largest()
     };
+    assert!(fits_largest(&largest()));
     assert_eq!(bytes(&past), bytes(&largest()) + 1);
     assert!(!fits_largest(&past));
 }
