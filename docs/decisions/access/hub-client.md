@@ -460,26 +460,31 @@
   which needs a walk of the queue of outcomes at each `Stored`.
   PR 2: the node opens one home writer for each group of a write, in group order, once
   the home of each index is this node, and the write no longer stops with `MALFORMED`
-  for many indexes. This supersedes that stop in the amendment of #2718 PR 2 above.
-  The stream holds the ends and counts of each place of its writers, each index and
-  each channel of its groups, from the home of each index, in place of each channel
-  of the open and one index from the decode of the open (MEMORY BOUNDS). A
-  group whose home is another node stops the open with `NOT_HOME`, with no control
-  taken, until #3104. A frame of a stream of one group goes to its writer as it is. A
-  frame of many groups is copied into one draft for each group that it holds, and a
-  group whose copy finds no block gets `Refused(Full)` or `Refused(Large)` while the
-  other groups go on. Each group of a frame of `Time::Node` gets its own stamp. A frame
-  of `k` groups takes `k` outcome blocks before its drafts, and a pool with fewer free
-  blocks stops the stream with `BUSY`. Each group takes the block of its next `Stored`
-  on its own, so a stream holds at most two such blocks for each group, and none while
-  it idles. A channel of a group removed after its writer opens sends `Ended { group,
-  Removed }`, and a `Disk` error or a failed commit of a group sends `Ended { group,
-  Failed }`, in the block of its next or due `Stored`, also for a write of one group, in
-  place of the reset with `UNKNOWN` or `FAILED`: the failure of one group ends only that
-  group (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267198734).
-  The `Ended` comes before the outcome of its frame, each later outcome of the group is
-  `Outcome::Ended`, and no `Stored` of the group follows. The other groups and the
-  stream go on. A stream error, a bad frame, or `BUSY` still stops every group. Plan
+  for many indexes. Supersedes that stop in the amendment of #2718 PR 2 above
+  (https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6247275705). The
+  stream holds the ends and counts of each place of its writers, each index and each
+  channel of its groups, from the home of each index, in place of each channel of the
+  open and one index from the decode of the open (MEMORY BOUNDS). A group whose home is
+  another node stops the open with `NOT_HOME`, with no control taken, until #3104. A
+  frame of a stream of one group goes to its writer as it is. A frame of many groups is
+  copied into one draft for each group that it holds, and a group whose copy finds no
+  block gets `Refused(Full)` or `Refused(Large)` while the other groups go on. Each
+  group of a frame of `Time::Node` gets its own stamp. A frame of `k` groups takes `k`
+  outcome blocks before its drafts, and a pool with fewer free blocks stops the stream
+  with `BUSY`. Each group takes the block of its next `Stored` on its own, so a stream
+  holds at most two such blocks for each group, and none while it idles. A channel of a
+  group removed after its writer opens sends `Ended { group, Removed }`, and a `Disk`
+  error or a failed commit of a group sends `Ended { group, Failed }`, in the block of
+  its next or due `Stored`, also for a write of one group, in place of the reset with
+  `UNKNOWN` or `FAILED`: the failure of one group ends only that group (the person,
+  2026-10-19T12:27:44Z,
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267198734).
+  Supersedes `UNKNOWN` for a removed channel and `FAILED` for the buffer of HUB LINK for
+  a write stream
+  (https://github.com/synnaxlabs/foundation/issues/1749#issuecomment-6103306402, plan
+  item 6). The `Ended` comes before the outcome of its frame, each later outcome of the
+  group is `Outcome::Ended`, and no `Stored` of the group follows. The other groups and
+  the stream go on. A stream error, a bad frame, or `BUSY` still stops every group. Plan
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269723864 and
   https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269769681),
   approved by `laptop.architect` at 2026-10-19T14:40:13Z
