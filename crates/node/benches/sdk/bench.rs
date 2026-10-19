@@ -1,5 +1,6 @@
 //! The rounds and the table of the bench.
 
+use std::hint::black_box;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -35,6 +36,8 @@ enum Timed {
     Write,
     /// A write, then the read of its frame.
     Read,
+    /// A write, then the read of its frame by a reader that names a channel twice.
+    Twice,
     /// The read of the frame of a write, after [`HELD`], when the client's thread holds
     /// the frame.
     Held,
@@ -46,12 +49,14 @@ pub(crate) fn run() {
     let legs = legs(rounds, calls);
     let (program, sdk) = lines(rounds, calls, Timed::Write);
     let (program_read, sdk_read) = lines(rounds, calls, Timed::Read);
-    let held = {
+    let alone = |calls, timed| {
         let (mut rig, node, subject) = crate::plant::planted();
-        let spans = spans(&node, subject, rounds, calls / 2, Timed::Held);
+        let spans = spans(&node, subject, rounds, calls, timed);
         rig.stop();
         spans
     };
+    let twice = alone(calls, Timed::Twice);
+    let held = alone(calls / 2, Timed::Held);
     println!(
         "{:<14} {:>6} {:>9} {:>9}",
         "line", "round", "p50 µs", "p99 µs"
@@ -63,6 +68,7 @@ pub(crate) fn run() {
         ("program", program),
         ("sdk read", sdk_read),
         ("program read", program_read),
+        ("sdk read twice", twice),
         ("sdk next held", held),
     ] {
         for (round, mut spans) in spans.into_iter().enumerate() {
@@ -102,12 +108,17 @@ fn spans(
     let config = sdk::write::Config::new(names());
     let mut writer = client.open_writer(config).expect("the writer opens");
     let mut reader = (timed != Timed::Write).then(|| {
+        let mut channels = names();
+        if timed == Timed::Twice {
+            channels.push(channels[0].clone());
+        }
         let config = sdk::read::Config {
-            channels: names(),
+            channels,
             mode: MODE,
         };
         client.open_reader(config).expect("the reader opens")
     });
+    let places = reader.as_ref().map_or(0, |reader| reader.places().len());
     let values = [(0, Value::I64(1)), (1, Value::I64(2))];
     let sdk = rounded(rounds, calls, || {
         spin(GAP);
@@ -125,6 +136,10 @@ fn spans(
         if let Some(reader) = &mut reader {
             let frame = reader.next().expect("the reader reads");
             assert_eq!(frame.count(), 1, "the frame of the write");
+            for place in 0..places {
+                black_box(frame.series(place));
+                black_box(frame.lost(place));
+            }
         }
         start.elapsed()
     });

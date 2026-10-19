@@ -14,9 +14,11 @@
 //! - `program`: `program::Writer::draft` and `write` of the same frame, on an `os`
 //!   shard of its own, as `served` writes it.
 //! - `sdk read`: an `sdk` write, then `sdk::Reader::next` of its frame, with a latest
-//!   reader of the same client.
+//!   reader of the same client, and `series` and `lost` of each place.
 //! - `program read`: a `program` write, then `program::Reader::next` of its frame, as
 //!   the task of `sdk/rust/src/read.rs` reads it.
+//! - `sdk read twice`: `sdk read` with a reader that names `plant.a` twice, against a
+//!   node of its own.
 //! - `sdk next held`: `sdk::Reader::next` alone, after an `sdk` write and a spin of
 //!   1 ms, when the client's thread holds the frame: the two legs and the work of the
 //!   task, with no wait for the node. Its rounds are of 500 calls.
