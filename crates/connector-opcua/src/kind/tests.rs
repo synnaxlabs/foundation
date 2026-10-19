@@ -1253,6 +1253,7 @@ struct Count(fn(usize) -> usize);
 
 impl kind::Kind for Count {
     type Config = Config;
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, config: &Document) -> Result<Config, Vec<Diagnostic>> {
         Kind::default().parse(config)
@@ -1263,7 +1264,9 @@ impl kind::Kind for Count {
     }
 
     async fn run(&self, ctx: Context<Config>) -> Result<(), Error> {
-        let mut frames = Frames::open(&ctx).await?;
+        let Some(mut frames) = Frames::open(&ctx).await? else {
+            return Ok(());
+        };
         let one = |&scalar| Ok(crate::value::Value::one(scalar));
         let good: Vec<_> = frames.types.iter().map(one).collect();
         let ((), stamp) = frames.writer.request(future::ready(())).await;

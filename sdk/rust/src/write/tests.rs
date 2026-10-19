@@ -11,6 +11,9 @@ use super::*;
 
 const WAITING: Outcome = Outcome::Refused(Refusal::Waiting);
 
+/// The [`Writer::bytes_max`] of each writer of these tests.
+const BYTES_MAX: usize = 32;
+
 /// Runs `serve` on a thread of its own, in place of the client's thread.
 #[expect(
     clippy::disallowed_methods,
@@ -60,7 +63,7 @@ fn writer_of(channels: &[&str], outcome: Outcome) -> (Writer, JoinHandle<Sent>) 
             written,
             ..
         } = opened.blocking_recv().unwrap();
-        answer.send(Ok((places(), 0))).unwrap();
+        answer.send(Ok((places(), 0, BYTES_MAX))).unwrap();
         let mut sent = Vec::new();
         while let Some(call) = calls.blocking_recv() {
             match call {
@@ -94,7 +97,7 @@ fn opened(channels: &[&str]) -> Writer {
     let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
     let served = spawn(move || {
         let open = opened.blocking_recv().unwrap();
-        open.opened.send(Ok((places(), 0))).unwrap();
+        open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
         open
     });
     let channels = channels.iter().map(|name| name.parse().unwrap()).collect();
@@ -129,7 +132,7 @@ fn an_open_sends_its_config_and_gives_its_channels_in_its_order_then_the_index()
     let lease = Span::from_nanos(5);
     let served = spawn(move || {
         let open = opened.blocking_recv().unwrap();
-        open.opened.send(Ok((places(), 0))).unwrap();
+        open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
         open.config
     });
     let config = Config {
@@ -139,8 +142,11 @@ fn an_open_sends_its_config_and_gives_its_channels_in_its_order_then_the_index()
     };
     let writer = Writer::open(&opens, &Arc::default(), config.clone()).unwrap();
     let node = places();
-    let ordered = [node[2].clone(), node[1].clone(), node[0].clone()];
-    assert_eq!(writer.places(), ordered);
+    let at = |n: usize| Place {
+        index: 2,
+        ..node[n].clone()
+    };
+    assert_eq!(writer.places(), [at(2), at(1), at(0)]);
     assert_eq!(writer.index(), 2);
     let sent = served.join().unwrap();
     assert_eq!(
@@ -156,7 +162,11 @@ fn an_open_sends_its_config_and_gives_its_channels_in_its_order_then_the_index()
 #[test]
 fn a_writer_that_names_the_index_gives_it_at_its_place() {
     let writer = opened(&["count", "time"]);
-    assert_eq!(writer.places(), [places()[1].clone(), places()[0].clone()]);
+    let at = |n: usize| Place {
+        index: 1,
+        ..places()[n].clone()
+    };
+    assert_eq!(writer.places(), [at(1), at(0)]);
     assert_eq!(writer.index(), 1);
 }
 
@@ -164,6 +174,7 @@ fn a_writer_that_names_the_index_gives_it_at_its_place() {
 fn a_writer_that_names_a_channel_twice_gives_it_at_each_place() {
     let writer = opened(&["time", "count", "time", "count"]);
     let [time, count, _] = places().try_into().unwrap();
+    let (time, count) = (Place { index: 0, ..time }, Place { index: 0, ..count });
     assert_eq!(writer.places(), [time.clone(), count.clone(), time, count]);
     assert_eq!(writer.index(), 0);
 }
@@ -365,11 +376,30 @@ fn a_write_of_series_sends_each_series_in_place_order_with_its_stamps() {
 }
 
 #[test]
+fn a_write_of_series_over_bytes_max_gives_too_large_and_copies_nothing() {
+    let (mut writer, served) = writer(WAITING);
+    assert_eq!(writer.bytes_max(), BYTES_MAX);
+    let room = writer.frame.bytes.capacity();
+    let (stamps, counts) = ([0; 16], [0; 17]);
+    let large = block::Error::TooLarge {
+        requested: 33,
+        largest: BYTES_MAX,
+    };
+    assert_eq!(
+        writer.write_series(2, &[(2, &stamps), (0, &counts)]),
+        Err(Error::Stream(program::Error::Pool(large)))
+    );
+    assert_eq!(writer.frame.bytes.capacity(), room);
+    assert_eq!(writer.close(), Ok(()));
+    assert_eq!(served.join().unwrap().len(), 0);
+}
+
+#[test]
 fn a_write_gives_the_error_of_the_node() {
     let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
     let served = spawn(move || {
         let open = opened.blocking_recv().unwrap();
-        open.opened.send(Ok((places(), 0))).unwrap();
+        open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
         let mut calls = open.calls;
         let Some(Call::Write { frame, .. }) = calls.blocking_recv() else {
             panic!("a call other than a write");
@@ -395,7 +425,7 @@ fn each_call_whose_task_ended_gives_closed_after_a_close_else_panicked() {
         let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
         let served = spawn(move || {
             let open = opened.blocking_recv().unwrap();
-            open.opened.send(Ok((places(), 0))).unwrap();
+            open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
             let mut calls = open.calls;
             drop(calls.blocking_recv());
             drop(open.written);
@@ -419,7 +449,7 @@ fn a_close_whose_task_ended_before_its_answer_gives_closed_after_a_close() {
         let (opens, mut opened) = mpsc::unbounded_channel::<Open>();
         let served = spawn(move || {
             let open = opened.blocking_recv().unwrap();
-            open.opened.send(Ok((places(), 0))).unwrap();
+            open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
             let mut calls = open.calls;
             drop(calls.blocking_recv());
         });
@@ -437,7 +467,7 @@ fn client(after: impl FnOnce(mpsc::Receiver<Call>) + Send + 'static) -> crate::C
     let started = crate::Client::start(|_, outcome, ended, mut opens| async move {
         outcome.send(Ok(())).unwrap();
         let open = opens.recv().await.unwrap();
-        open.opened.send(Ok((places(), 0))).unwrap();
+        open.opened.send(Ok((places(), 0, BYTES_MAX))).unwrap();
         after(open.calls);
         drop(ended.await);
     });

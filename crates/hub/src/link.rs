@@ -55,11 +55,14 @@ impl Link {
     ) -> Self {
         Self(match transport.peer() {
             transport::Peer::Node(_) => Peer::Node(state),
-            transport::Peer::Client => Peer::Client(Rc::new(Session {
-                state,
-                transport,
-                client: client::Gate::default(),
-            })),
+            transport::Peer::Client => {
+                let client = client::Gate::new(state.borrow().node);
+                Peer::Client(Rc::new(Session {
+                    state,
+                    transport,
+                    client,
+                }))
+            }
         })
     }
 

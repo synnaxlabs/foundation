@@ -179,6 +179,222 @@ mod encode_counts {
     }
 }
 
+mod lead {
+    use std::sync::Arc;
+
+    use types::frame::{Frame, Layout};
+    use types::sample::{Scalar, Type};
+
+    use super::*;
+    use crate::hub::tests::key;
+
+    const LIVE: Time = Time::Frame(Path::Live);
+
+    /// The index of group 0 (place 0), an `I64` of it (place 1), and the index of
+    /// group 1 (place 2).
+    fn create_set() -> Arc<KeySet> {
+        let stamp = Type::Scalar(Scalar::Stamp);
+        let channels = [
+            (key(1), stamp, 0),
+            (key(2), Type::Scalar(Scalar::I64), 0),
+            (key(3), stamp, 2),
+        ];
+        Arc::new(KeySet::ordered(channels).expect("no key repeats"))
+    }
+
+    fn create_pool() -> block::Pool {
+        let config = block::Config::new(1 << 16).expect("the budget fits");
+        let memory = block::Heap::new(config.reservation());
+        block::Pool::new(config, memory)
+    }
+
+    /// A raw frame on `path` of `first` samples of each series of group 0, and of
+    /// `second` samples of group 1, which is absent at 0.
+    fn create_frame(path: Path, first: u32, second: u32) -> Frame {
+        let set = create_set();
+        let bytes =
+            |count: u32| usize::try_from(count).expect("a u32 fits").strict_mul(8);
+        let mut series = vec![(0, bytes(first)), (1, bytes(first))];
+        if second > 0 {
+            series.push((2, bytes(second)));
+        }
+        let layout = Layout::new(&set, &series).expect("a valid layout");
+        let mut draft = layout.draft(&create_pool(), Form::Raw).expect("a block");
+        draft.set_count(0, first);
+        if second > 0 {
+            draft.set_count(1, second);
+        }
+        draft.freeze(path)
+    }
+
+    fn encode(lead: Lead<'_>) -> Vec<u8> {
+        let mut out = vec![0xaa; lead.bytes()];
+        lead.encode(&mut out);
+        out
+    }
+
+    fn words(values: &[u32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn holds_the_most_bytes_of_a_lead_of_the_set() {
+        assert_eq!(Lead::most(&create_set()), 39);
+        let frame = create_frame(Path::Live, 2, 1);
+        assert_eq!(Lead::new(LIVE, &frame).bytes(), 39);
+    }
+
+    #[test]
+    fn encodes_the_head_the_ends_and_the_counts_of_a_frame() {
+        let frame = create_frame(Path::Backfill, 2, 1);
+        let lead = Lead::new(Time::Frame(Path::Backfill), &frame);
+        let want = [
+            vec![7, 1, 0, 3, 0, 0, 0],
+            words(&[0, 16, 1, 32, 2, 40]),
+            words(&[2, 1]),
+        ];
+        assert_eq!(encode(lead), want.concat());
+    }
+
+    #[test]
+    fn encodes_no_counts_for_a_frame_that_the_node_stamps() {
+        let frame = create_frame(Path::Live, 1, 1);
+        let lead = Lead::new(Time::Node, &frame);
+        let want = [vec![7, 2, 0, 3, 0, 0, 0], words(&[0, 8, 1, 16, 2, 24])];
+        assert_eq!(encode(lead), want.concat());
+        assert_eq!(lead.messages(16).last(), Some(23..31));
+    }
+
+    #[test]
+    fn encodes_the_count_of_group_0_alone_when_group_1_is_absent() {
+        let frame = create_frame(Path::Live, 3, 0);
+        let want = [
+            vec![7, 0, 0, 2, 0, 0, 0],
+            words(&[0, 24, 1, 48]),
+            words(&[3]),
+        ];
+        assert_eq!(encode(Lead::new(LIVE, &frame)), want.concat());
+    }
+
+    #[test]
+    fn gives_whole_ends_and_whole_counts_in_each_message() {
+        let frame = create_frame(Path::Live, 2, 1);
+        let lead = Lead::new(LIVE, &frame);
+        let messages = |bytes_max| lead.messages(bytes_max).collect::<Vec<_>>();
+        assert_eq!(messages(8), [0..7, 7..15, 15..23, 23..31, 31..39]);
+        assert_eq!(messages(19), [0..7, 7..23, 23..31, 31..39]);
+        assert_eq!(messages(1024), [0..7, 7..31, 31..39]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a message of 7 bytes holds no head or no end")]
+    fn panics_on_messages_that_hold_no_end() {
+        let frame = create_frame(Path::Live, 1, 1);
+        drop(Lead::new(LIVE, &frame).messages(7));
+    }
+
+    #[test]
+    #[should_panic(expected = "the frame is not on the path of its time")]
+    fn panics_on_a_frame_on_another_path_than_its_time() {
+        let frame = create_frame(Path::Backfill, 1, 1);
+        let _lead = Lead::new(LIVE, &frame);
+    }
+
+    #[test]
+    #[should_panic(expected = "the frame is not on the path of its time")]
+    fn panics_on_a_frame_that_the_node_stamps_on_the_backfill_path() {
+        let frame = create_frame(Path::Backfill, 1, 1);
+        let _lead = Lead::new(Time::Node, &frame);
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "a frame that the node stamps holds other than one sample of each \
+                    series"
+    )]
+    fn panics_on_a_frame_that_the_node_stamps_of_two_samples() {
+        let frame = create_frame(Path::Live, 1, 2);
+        let _lead = Lead::new(Time::Node, &frame);
+    }
+
+    #[test]
+    #[should_panic(expected = "a frame that the node stamps is in the encoded form")]
+    fn panics_on_an_encoded_frame_that_the_node_stamps() {
+        let set = create_set();
+        let layout = Layout::new(&set, &[(0, 8), (1, 8)]).expect("a valid layout");
+        let mut draft = layout
+            .draft(&create_pool(), Form::Encoded)
+            .expect("a block");
+        draft.set_count(0, 1);
+        let _lead = Lead::new(Time::Node, &draft.freeze(Path::Live));
+    }
+
+    #[test]
+    #[should_panic(expected = "out is not the bytes of the lead")]
+    fn panics_on_an_encode_into_another_length() {
+        let frame = create_frame(Path::Live, 1, 1);
+        Lead::new(LIVE, &frame).encode(&mut [0; 38]);
+    }
+
+    #[test]
+    #[should_panic(expected = "a group of a frame holds no sample")]
+    fn panics_on_an_encode_of_a_group_of_no_sample() {
+        let set = create_set();
+        let layout = Layout::new(&set, &[(0, 0), (1, 0)]).expect("a valid layout");
+        let draft = layout.draft(&create_pool(), Form::Raw).expect("a block");
+        let frame = draft.freeze(Path::Live);
+        encode(Lead::new(LIVE, &frame));
+    }
+
+    proptest! {
+        #[test]
+        fn frames_take_each_lead_as_its_frame(
+            first in 1..4_u32,
+            second in 0..4_u32,
+            node in any::<bool>(),
+            backfill in any::<bool>(),
+            bytes_max in 8..48_usize,
+        ) {
+            let (time, first, second) = match (node, backfill) {
+                (true, _) => (Time::Node, 1, second.min(1)),
+                (false, false) => (LIVE, first, second),
+                (false, true) => (Time::Frame(Path::Backfill), first, second),
+            };
+            let path = match time {
+                Time::Frame(path) => path,
+                Time::Node => Path::Live,
+            };
+            let sent = create_frame(path, first, second);
+            let lead = Lead::new(time, &sent);
+            let bytes = encode(lead);
+            let pool = create_pool();
+            let mut frames = Frames::new(create_set());
+            for range in lead.messages(bytes_max) {
+                prop_assert!(range.len() <= bytes_max);
+                let step = frames.decode(&bytes[range]).expect("a message of the lead");
+                prop_assert!(matches!(step, Step::Head(_) | Step::More));
+                if let Ok(Due::Draft { layout, form }) = frames.due() {
+                    let draft = layout.draft(&pool, form).expect("a block");
+                    prop_assert!(matches!(frames.draft(draft), Step::More));
+                }
+            }
+            let body = sent.body();
+            let Ok(Step::Frame { draft, time: got }) = frames.decode(&body[..]) else {
+                panic!("the body gives no frame");
+            };
+            prop_assert_eq!(got, time);
+            let frame = draft.freeze(path);
+            let ranges = |frame: &Frame| frame.ranges().collect::<Vec<_>>();
+            let ends = |frame: &Frame| frame.ends().collect::<Vec<_>>();
+            prop_assert_eq!(ranges(&frame), ranges(&sent));
+            prop_assert_eq!(ends(&frame), ends(&sent));
+        }
+    }
+}
+
 mod reply {
     use super::*;
 

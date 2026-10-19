@@ -1,6 +1,7 @@
 //! The streams that a [`Link`](crate::Link) serves: remote reader sessions, and the
 //! hello, request, and read streams of a client, and why one ends.
 
+mod admission;
 pub(crate) mod client;
 
 use std::cell::RefCell;

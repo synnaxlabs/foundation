@@ -94,8 +94,33 @@ const BODY: Body = Body {
         },
     ],
     blocks: &[reader::BLOCK],
-    examples: &[],
+    examples: &[DATABASE, BUCKET],
 };
+
+/// A connector to InfluxDB 1.
+const DATABASE: &str = "\
+address     = \"http://influx:8086\"
+database    = \"edge\"
+measurement = \"telemetry\"
+select      = \"edge.*\"
+";
+
+/// A connector to InfluxDB 2 or 3, with a token, a CA, and a reader block.
+const BUCKET: &str = "\
+address     = \"https://influx:8086\"
+bucket      = \"edge\"
+org         = \"plant\"
+measurement = \"telemetry\"
+token       = env(\"INFLUX_TOKEN\")
+ca          = file(\"/etc/foundation/influx.pem\")
+select      = \"edge.**\"
+
+reader {
+  mode = \"complete\"
+  hold = \"2h\"
+}
+";
+
 /// The count of the samples of the frames that the run acks, which InfluxDB confirmed
 /// with a 204, across the runs of one supervisor call. A run that ends before it acks
 /// a frame counts none of its samples, also those that landed.
@@ -166,6 +191,7 @@ impl Target {
 
 impl kind::Kind for Kind {
     type Config = Config;
+    const SCHEMA: Body = BODY;
 
     /// Reads `address`, `database` or `bucket` and `org`, `measurement`, an optional
     /// `token` and an optional `ca` that [`secret::Source::read`] takes, the settings

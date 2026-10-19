@@ -5,9 +5,11 @@
 //! `Places` of 0 or over `PLACES_MAX` gives `Error::Places`, each body ends at its
 //! length and nowhere else, each refusal of a body is the one that its rest gives, a
 //! read stream gives with its last place the places of its run, their key set, and the
-//! decoder of a session of their count and the mode, a refused message of a read
-//! stream leaves its decoder as it was, an `Opening` gives what a `Reader` gives, and
-//! each valid message made from the input reads back. A `Reader` holds an `Opening`,
+//! decoder of a session of their count and the mode, a read of more than one index
+//! gives `Error::ManyIndexes` after `Error::Repeated` and ends its decoder, each other
+//! refused message of a read stream leaves its decoder as it was, an `Opening` gives
+//! what a `Reader` gives other than `Error::ManyIndexes`, and each valid message made
+//! from the input reads back. A `Reader` holds an `Opening`,
 //! so the checks of the read stream are the checks of the run of both.
 //! `write::Replies` takes or refuses each reply as the order of the replies gives, a
 //! refused reply changes no count, and `unstored` gives each group that ended with a
@@ -169,7 +171,8 @@ fn unkinded(message: &[u8]) {
 }
 
 /// Drives an `Opening` and a `Reader` on `bytes`: each message gives what it gives
-/// the reader, and the start gives the reader's places and key set.
+/// the reader, and the start gives the reader's places and key set. Only the reader
+/// refuses places of more than one index, after the start.
 fn open(bytes: &[u8]) {
     let mut opening = Opening::default();
     let mut reader = Reader::new(Mode::Latest);
@@ -187,6 +190,11 @@ fn open(bytes: &[u8]) {
                 );
                 return;
             }
+            (Ok(Some(opened)), Err(read @ Error::ManyIndexes { .. })) => {
+                assert!(opened.set.groups().len() > 1, "{read:?} of one index");
+                assert_eq!(many(&opened.places), Some(read), "{message:?}");
+                return;
+            }
             (Err(opened), Err(read)) => assert_eq!(opened, read, "{message:?}"),
             (opened, read) => {
                 panic!("{opened:?} is not what the reader gave: {read:?}")
@@ -197,7 +205,8 @@ fn open(bytes: &[u8]) {
 }
 
 /// Drives a reader of `mode` on `bytes` until it gives the last place, then ends the
-/// stream. A refused message leaves the reader as it was, and a refused first message
+/// stream. `Error::ManyIndexes` ends the reader, each other refused message leaves it
+/// as it was, and a refused first message
 /// gives the error of its places. Each message that it takes decodes alone as places or
 /// as a run that encodes to it, a run holds no more places than remain, and only the
 /// message with the last place gives the start: the places of the run, their key set in
@@ -210,6 +219,7 @@ fn drive(bytes: &[u8], mode: Mode) {
         let start = match reader.decode(Some(message)) {
             Ok(start) => start,
             Err(error) => {
+                let done = matches!(error, Error::ManyIndexes { .. });
                 if run.is_none() {
                     let places = Places::decode(message).err();
                     assert_eq!(
@@ -220,6 +230,9 @@ fn drive(bytes: &[u8], mode: Mode) {
                 }
                 if let Some(expected) = refusal(run.as_ref(), message) {
                     assert_eq!(Some(error), expected, "a valid message refused");
+                }
+                if done {
+                    return;
                 }
                 continue;
             }
@@ -242,6 +255,7 @@ fn drive(bytes: &[u8], mode: Mode) {
             continue;
         };
         assert_eq!(*remain, 0, "a start before the last place");
+        assert_eq!(many(all), None, "a start of a read of more than one index");
         assert_eq!(start.places, *all, "the places differ");
         let keys = start.set.entries().iter().map(|entry| entry.key);
         assert!(
@@ -303,9 +317,22 @@ fn unindexed(places: &[Place]) -> Option<Error> {
     })
 }
 
+/// `Error::ManyIndexes` for the first of `places` whose index is not that of place 0,
+/// as a read has one index.
+fn many(places: &[Place]) -> Option<Error> {
+    let fit = "the places fit a u32";
+    let lead = places.first()?.index;
+    let (at, place) =
+        (places.iter().enumerate()).find(|(_, place)| place.index != lead)?;
+    Some(Error::ManyIndexes {
+        place: u32::try_from(at).expect(fit),
+        index: u32::try_from(place.index).expect(fit),
+    })
+}
+
 /// `None` when `message` is not a valid message of `run`. Else, when it holds the last
-/// place, `Some` of the error of the indexes of its places and those before them, or of
-/// the least key that they name twice, and else `Some(None)`.
+/// place, `Some` of the error of the indexes of its places and those before them, of
+/// the least key that they name twice, or of a second index, and else `Some(None)`.
 fn refusal(
     run: Option<&(Places, u32, Vec<Place>)>,
     message: &[u8],
@@ -325,8 +352,10 @@ fn refusal(
     }
     let mut keys: Vec<_> = all.iter().map(|place| place.key).collect();
     keys.sort_unstable();
-    let repeated = keys.windows(2).find(|pair| pair[0] == pair[1]);
-    Some(repeated.map(|pair| Error::Repeated { key: pair[0] }))
+    if let Some(pair) = keys.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Some(Some(Error::Repeated { key: pair[0] }));
+    }
+    Some(many(&all))
 }
 
 /// Checks each decoder on `message`, and gives its body when it is a request, a
@@ -473,7 +502,8 @@ fn replies(bytes: &[u8]) {
             replies.sent(frame.iter().copied());
             groups.push(frame);
         } else {
-            let next = usize::try_from(answered).expect("a usize holds the frames sent");
+            let next =
+                usize::try_from(answered).expect("a usize holds the frames sent");
             let due = groups.get(next).map_or(0, |groups| groups[at]);
             let state = |group: u32| {
                 usize::try_from(group).ok().filter(|&group| group < GROUPS)

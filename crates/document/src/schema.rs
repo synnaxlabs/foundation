@@ -6,7 +6,8 @@ use crate::Map;
 /// What the body of one kind of block takes. Its check refuses each attribute and
 /// block that it does not state, other than those that it gives to another check,
 /// such as the kind of a `connector`. `foundation docs` states each form of each block
-/// that a config file can hold, with the body of each block inside it.
+/// that a config file can hold and the body of each connector kind, each with the body
+/// of each block inside it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Body {
     /// One sentence on what the body defines, with the `kind` that picks it when its

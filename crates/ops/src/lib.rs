@@ -5,6 +5,7 @@ use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::Path;
 
+use connector::kind::Table;
 use env::paths::Paths;
 
 use serde::Serialize;
@@ -81,6 +82,8 @@ pub enum Run {
 /// call after a [`Failure`] of what `reach` gave. `start` and the other operations call
 /// neither.
 ///
+/// `docs` states the body of each kind of `kinds`.
+///
 /// The tools of `foundation mcp` read and write only under each `--files` folder,
 /// else under the working directory, and never in the data directory. With no
 /// `--files` and a working directory of `/` or the home folder, it serves nothing,
@@ -89,6 +92,10 @@ pub enum Run {
 ///
 /// Blocks its thread at each read or write of a path, and each write of `output` or
 /// `errors`, and makes none while a request to the node or a line of `input` waits.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the parts of the binary, which only `node` builds"
+)]
 pub async fn cli<C>(
     args: impl IntoIterator<Item = OsString>,
     input: impl AsyncFnMut() -> io::Result<Line>,
@@ -96,6 +103,7 @@ pub async fn cli<C>(
     errors: impl Write,
     paths: &Paths,
     front_ends: &FrontEnds,
+    kinds: &Table,
     mut reach: impl AsyncFnMut(&Path) -> Result<C, Failure>,
 ) -> Run
 where
@@ -109,7 +117,7 @@ where
         Ok(Parsed::Run { request, data }) => {
             let mut link = Link::new(async || reach(&data).await);
             match request
-                .run(&Scope::free(paths, front_ends), &mut link)
+                .run(&Scope::free(paths, front_ends), kinds, &mut link)
                 .await
             {
                 Ok(response) => write(
@@ -127,7 +135,7 @@ where
             match Scope::mcp(paths, front_ends, &files, &data) {
                 Ok(scope) => {
                     let mut link = Link::new(async || reach(&data).await);
-                    mcp::serve(input, &mut output, &scope, &mut link).await
+                    mcp::serve(input, &mut output, &scope, kinds, &mut link).await
                 }
                 Err(error) => Err(Stop::Failed(error)),
             }

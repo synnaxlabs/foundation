@@ -42,10 +42,10 @@
 //! - [`Read`]: kind 6, the open's length (`u64`), and the signature (64).
 //! - [`Open`]: the mode (`u8`, latest 1, complete 2), then each pattern of the selector
 //!   as written, an exclusion with its leading `!`: its length (`u16`) and its text.
-//! - [`Places`]: kind 6, the count of places (`u32`), and the place of the index
-//!   (`u32`).
-//! - [`place`]: each place's key (`u128`), its sample type as text (length `u8`, then
-//!   the text), and its name (length `u8`, then the name).
+//! - [`Places`]: kind 6 and the count of places (`u32`).
+//! - [`place`]: each place's key (`u128`), the place of the index of its channel's
+//!   group (`u32`), its sample type as text (length `u8`, then the text), and its name
+//!   (length `u8`, then the name).
 //! - [`write::Write`]: kind 7, the open's length (`u64`), and the signature (64).
 //! - [`write::Open`]: the authority (`u8`), the lease (`u8`, none 0, a lease 1, then
 //!   the lease as `i64` nanoseconds), then each channel's name: its length (`u8`) and
@@ -277,6 +277,14 @@ pub enum Error {
         /// The index that it names.
         index: u32,
     },
+    /// A place of a read names an index other than that of place 0: a read has one
+    /// index.
+    ManyIndexes {
+        /// The place.
+        place: u32,
+        /// The index that it names.
+        index: u32,
+    },
     /// The sample type of a place does not read.
     Sample(text::Error<sample::Error>),
     /// The name of a place does not read.
@@ -365,6 +373,11 @@ impl fmt::Display for Error {
             Self::Index { place, index } => write!(
                 f,
                 "place {place} names place {index} as its index, which is not an index"
+            ),
+            Self::ManyIndexes { place, index } => write!(
+                f,
+                "place {place} names place {index} as its index, and a read has the one \
+                 index of place 0"
             ),
             Self::Sample(cause) => {
                 write!(f, "the sample type of a place does not read: {cause}")

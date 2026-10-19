@@ -21,7 +21,7 @@ use wire::hub::client::write::{Open, Write};
 use wire::hub::write::{Due, Frames, Outcome, Reply, Step, Time};
 
 use self::group::{Frame, Group};
-use super::{Reserved, body, verify};
+use super::{Reserved, body};
 use crate::State;
 use crate::link::Session;
 use crate::serve::{Error, alloc, unless};
@@ -69,7 +69,12 @@ async fn open(
 ) -> Result<Open, Error> {
     let _reserved = Reserved::new(&session.state, subject, write.length)?;
     let bytes = body(receiver, write.body()).await?;
-    verify(session, proof::Kind::Write, &bytes, &write.signature)?;
+    session.client.admission.verify(
+        &session.state,
+        proof::Kind::Write,
+        &bytes,
+        &write.signature,
+    )?;
     Ok(Open::decode(&bytes)?)
 }
 

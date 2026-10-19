@@ -214,16 +214,33 @@ impl<const SKIP: bool> Assembly<SKIP> {
         }
     }
 
-    /// The entry of each end that came, in order.
-    pub(super) fn entries(&self) -> impl Iterator<Item = usize> {
-        self.ends.iter().map(|&(entry, _)| entry)
+    /// The group of each index among the ends, in order, which is group order: one for
+    /// each range of the draft. Call it once the layout is valid.
+    pub(super) fn groups(&self) -> impl Iterator<Item = u32> {
+        groups(&self.set, &self.ends)
     }
 
-    /// Makes the draft due, when the parts of the frame before its body came after
-    /// its ends.
-    pub(super) fn whole(&mut self) {
-        assert!(matches!(self.stage, Stage::Run), "a frame is whole twice");
-        self.stage = Stage::Drafting;
+    /// Sets the counts of the ranges of the draft in order, from range `first` on. A
+    /// skipped frame drops them.
+    ///
+    /// # Panics
+    ///
+    /// When neither a draft nor a skip came.
+    pub(super) fn count(
+        &mut self,
+        first: usize,
+        counts: impl IntoIterator<Item = u32>,
+    ) {
+        let draft = match &mut self.stage {
+            Stage::Body(draft) => draft,
+            Stage::Skipped if SKIP => return,
+            stage => {
+                unreachable!("invariant: counts come after a draft, not {stage:?}")
+            }
+        };
+        for (group, count) in groups(&self.set, &self.ends).skip(first).zip(counts) {
+            draft.set_count(group, count);
+        }
     }
 
     /// Copies body bytes that start at `start` into the draft. A skipped frame drops
@@ -303,6 +320,18 @@ impl<const SKIP: bool> Assembly<SKIP> {
 #[inline(never)]
 fn due_draft(what: &str) -> ! {
     panic!("a draft is due before {what}")
+}
+
+/// The group of each index among `ends`, in order.
+fn groups<'a>(
+    set: &'a KeySet,
+    ends: &'a [(usize, usize)],
+) -> impl Iterator<Item = u32> + 'a {
+    let entries = set.entries();
+    ends.iter().filter_map(move |&(entry, _)| {
+        let place = entries.get(entry)?;
+        (set.index(entry) == entry).then_some(place.group)
+    })
 }
 
 /// The body of `draft` from `start` on.

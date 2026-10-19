@@ -92,6 +92,7 @@ fn run_on_cfg(args: &[&str], line: Option<Vec<u8>>) -> (String, String) {
     };
     let reach = async |_: &Path| Ok(request);
     let front_ends = hcl();
+    let kinds = connector::kind::Table::new();
     let mut output = Vec::new();
     let mut errors = Vec::new();
     let before = ALLOCATOR.held();
@@ -106,6 +107,7 @@ fn run_on_cfg(args: &[&str], line: Option<Vec<u8>>) -> (String, String) {
             &mut errors,
             &paths,
             &front_ends,
+            &kinds,
             reach,
         );
         let Poll::Ready(_) = pin!(cli).poll(&mut Context::from_waker(Waker::noop()))

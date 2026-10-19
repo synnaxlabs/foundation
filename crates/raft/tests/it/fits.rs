@@ -11,7 +11,7 @@ use raft::{
 };
 use types::node;
 
-use crate::network::{Network, run, run_of_many};
+use crate::network::{Network, keyed, run, run_of_many};
 
 const ELECTION: u32 = 10;
 
@@ -35,7 +35,12 @@ fn proof(proof: &Proof) -> usize {
 fn change(change: &Change) -> usize {
     let keys = |keys: &BTreeSet<node::Key>| 8 + keys.len() * 16;
     let voters = &change.voters;
-    keys(&voters.incoming) + keys(&voters.outgoing) + proof(&change.votes) + 64
+    let public_keys = change.public_keys.len() * 32;
+    keys(&voters.incoming)
+        + keys(&voters.outgoing)
+        + public_keys
+        + proof(&change.votes)
+        + 64
 }
 
 fn body(body: &Body) -> usize {
@@ -204,8 +209,8 @@ fn others(id: u8) -> Vec<u8> {
 }
 
 #[test]
-fn a_link_of_three_voters_in_each_set_is_457_bytes() {
-    let link = Link {
+fn a_link_of_three_voters_in_each_set_is_457_bytes_and_489_when_it_adds_one() {
+    let mut link = Link {
         at: Position {
             term: Term(1),
             index: 1,
@@ -215,6 +220,7 @@ fn a_link_of_three_voters_in_each_set_is_457_bytes() {
                 incoming: set(&[1, 2, 3]),
                 outgoing: set(&[1, 2, 3]),
             },
+            public_keys: BTreeMap::new(),
             votes: Proof {
                 grant: Grant::Vote,
                 candidate: key(1),
@@ -224,6 +230,9 @@ fn a_link_of_three_voters_in_each_set_is_457_bytes() {
         },
     };
     assert_eq!(self::link(&link), 457);
+    link.change.voters.outgoing = set(&[1, 2, 4]);
+    link.change.public_keys = keyed(&[3]);
+    assert_eq!(self::link(&link), 489);
 }
 
 #[test]
@@ -236,7 +245,7 @@ fn three_voters_elect_a_leader_after_a_change_in_each_of_3_terms() {
     let mut leader = 1;
     for _ in 0..3 {
         let raft = nodes.get_mut(&key(leader)).unwrap();
-        raft.propose_voters(set(&[1, 2, 3])).unwrap();
+        raft.propose_voters(keyed(&[1, 2, 3])).unwrap();
         run_among(&mut nodes, &[1, 2, 3], ran);
         leader = elect(&mut nodes, &others(leader), ran);
         run_among(&mut nodes, &[1, 2, 3], ran);
@@ -355,7 +364,7 @@ fn a_message_with_a_proof_drops_its_entries_and_keeps_its_chain() {
         |message: &Message| message.proof.is_none() || entries(message).is_empty();
     let (mut nodes, mut ran) = led(proven);
     let leader = nodes.get_mut(&key(1)).unwrap();
-    leader.propose_voters(set(&[1, 2, 3])).unwrap();
+    leader.propose_voters(keyed(&[1, 2, 3])).unwrap();
     run_among(&mut nodes, &[1, 2, 3], &mut ran);
     let ran = &mut Ran::default();
     let elected = elect(&mut nodes, &[2, 3], ran);

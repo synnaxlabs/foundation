@@ -1,5 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
+use types::ed25519::PublicKey;
 use types::node;
 
 use crate::{Claim, Error, Link, Position, Proof, Signature, Term, Voters};
@@ -53,10 +54,13 @@ pub enum Data {
 pub struct Change {
     /// The configuration.
     pub voters: Voters,
+    /// The public key of each node of [`Voters::added`]: none in a leave entry. A
+    /// `Raft` keeps them with the entry and never reads them.
+    pub public_keys: BTreeMap<node::Key, PublicKey>,
     /// The votes that elected the leader that wrote the entry, in the entry's term.
     pub votes: Proof,
-    /// The leader's signature of its [`Claim::Change`]. A `Raft` gives its own with
-    /// `None`, for the caller to sign.
+    /// The leader's signature of its [`Claim::Change`], which covers `public_keys`. A
+    /// `Raft` gives its own with `None`, for the caller to sign.
     pub signature: Option<Signature>,
 }
 
@@ -70,6 +74,7 @@ impl Change {
             leader: self.votes.candidate,
             at,
             voters: &self.voters,
+            public_keys: &self.public_keys,
         };
         self.votes
             .claims(at.term)
@@ -89,6 +94,7 @@ impl Change {
                 leader: self.votes.candidate,
                 at,
                 voters: &self.voters,
+                public_keys: &self.public_keys,
             }));
         }
     }
@@ -568,6 +574,7 @@ mod tests {
     fn change(voters: Voters) -> Data {
         Data::Voters(Change {
             voters,
+            public_keys: BTreeMap::new(),
             votes: Proof {
                 grant: crate::Grant::Vote,
                 candidate: node::Key::from_u128(1),
@@ -601,6 +608,7 @@ mod tests {
             leader: node::Key::from_u128(1),
             at: position(3, 2),
             voters: &change.voters,
+            public_keys: &change.public_keys,
         };
         let mut signed = entry.clone();
         signed.sign(&mut |_| signature);

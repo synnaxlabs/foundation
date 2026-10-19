@@ -759,6 +759,64 @@ mod reader {
         );
     }
 
+    /// A read has one index. The places give `ManyIndexes` for the first place, in
+    /// place order, whose index is not that of place 0, after each other error of the
+    /// places. Places that all name a later index give the start.
+    #[test]
+    fn refuses_places_of_two_indexes_at_the_last_message() {
+        let at = |index, place| Place { index, ..place };
+        let unstamped = Error::Unstamped {
+            place: 0,
+            sample: "u8".parse().unwrap(),
+        };
+        let repeated = Error::Repeated {
+            key: channel::Key::from_u128(1),
+        };
+        let cases = [
+            (
+                vec![stamp(1), at(1, stamp(2))],
+                Error::ManyIndexes { place: 1, index: 1 },
+            ),
+            (
+                vec![stamp(1), byte(2), at(2, stamp(3)), at(2, byte(4))],
+                Error::ManyIndexes { place: 2, index: 2 },
+            ),
+            (vec![stamp(1), at(1, stamp(1))], repeated),
+            (vec![byte(1), at(1, stamp(2))], unstamped),
+        ];
+        for (run, error) in cases {
+            let places = Places {
+                count: u32::try_from(run.len()).unwrap(),
+            };
+            let mut reader = in_run(Mode::Complete, places);
+            assert_eq!(
+                reader.decode(Some(&encode_run(&run))).err(),
+                Some(error),
+                "{run:?}"
+            );
+        }
+        let run = [at(1, byte(1)), at(1, stamp(2))];
+        let mut reader = in_run(Mode::Complete, Places { count: 2 });
+        assert_eq!(
+            event(&mut reader, &encode_run(&run)),
+            Ok(Event::Start(run.to_vec()))
+        );
+    }
+
+    /// `ManyIndexes` ends the reader.
+    #[test]
+    #[should_panic(expected = "a stream is decoded after the decoder gave its start")]
+    fn panics_on_a_decode_after_many_indexes() {
+        let at = |index, place| Place { index, ..place };
+        let mut reader = in_run(Mode::Complete, Places { count: 2 });
+        let run = encode_run(&[stamp(1), at(1, stamp(2))]);
+        assert_eq!(
+            reader.decode(Some(&run)).err(),
+            Some(Error::ManyIndexes { place: 1, index: 1 })
+        );
+        drop(reader.decode(None));
+    }
+
     /// The messages of a fuzz input, as `fuzz::messages` cuts them: each a length byte
     /// and then that many bytes.
     fn input(mut bytes: &[u8]) -> Vec<&[u8]> {
@@ -917,10 +975,18 @@ mod reader {
     /// messages, the last a refusal.
     #[test]
     fn refuses_each_other_run_input_of_the_fuzz_target() {
-        let cases: [(&[u8], Error); 9] = [
+        let cases: [(&[u8], Error); 11] = [
             (
                 corpus!("reader_index_indexed"),
                 Error::Index { place: 0, index: 1 },
+            ),
+            (
+                corpus!("reader_index_past_indexed"),
+                Error::Index { place: 0, index: 5 },
+            ),
+            (
+                corpus!("reader_groups_indexed"),
+                Error::ManyIndexes { place: 2, index: 2 },
             ),
             (
                 corpus!("reader_place_cut_indexed"),

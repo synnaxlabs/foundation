@@ -441,6 +441,7 @@ struct Refuser;
 
 impl kind::Kind for Refuser {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())

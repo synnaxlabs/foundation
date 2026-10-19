@@ -18,14 +18,14 @@ use std::task::Poll;
 use env::clock::Clock;
 use env::net::Net;
 use env::rng::Rng;
-use types::time::{Monotonic, Span};
+use types::time::{Monotonic, Span, Stamp};
 
 use crate::alloc;
 use crate::connection::{CHUNKS, Manager, SENDS};
 use crate::event::Time;
 use crate::ffi::{self, Status};
 use crate::node::{Key, Node};
-use crate::value::{Fault, Value};
+use crate::value::{self, Fault, Value};
 
 pub(crate) mod browse;
 mod service;
@@ -630,6 +630,23 @@ impl Client {
             *sent += 1;
         }
         Ok(())
+    }
+
+    /// Reads the current time of the server (`ns=0;i=2258`), in ns from the Unix
+    /// epoch.
+    ///
+    /// # Errors
+    ///
+    /// The error of a service request, as [`Client::read`] gives it, or of a value
+    /// that is not Good: `BadNoData` for none, `BadTypeMismatch` when it holds no
+    /// scalar `DateTime`, and `BadOutOfRange` when a [`Stamp`] cannot hold it.
+    #[cfg_attr(not(test), expect(dead_code, reason = "PR 5 of #2622 calls it"))]
+    pub(crate) async fn time(&mut self) -> Result<Stamp, Status> {
+        let node = Node::ns0(ffi::TIME);
+        let answer = self.serve(&Request::values(&[(&node).into()])).await?;
+        answer.has(1)?;
+        // SAFETY: the value lives with `answer`.
+        unsafe { value::time(answer.value(0)) }
     }
 
     /// Drives the client until `until` ends, and gives its value, so the client keeps
