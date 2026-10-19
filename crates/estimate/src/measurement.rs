@@ -163,7 +163,7 @@ fn capped(nanos: i128) -> Span {
 }
 
 /// `nanos` as a span, or the nearest span when it is past a span's range.
-fn saturated(nanos: i128) -> Span {
+pub(crate) fn saturated(nanos: i128) -> Span {
     Span::from_nanos(clamped(nanos))
 }
 
