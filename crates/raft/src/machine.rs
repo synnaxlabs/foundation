@@ -575,15 +575,14 @@ impl Raft {
     /// removed is. This node never sends a learner a PreVote or a Vote. Each node keeps
     /// the set, so a node that becomes leader has it.
     pub fn set_learners(&mut self, keys: impl IntoIterator<Item = node::Key>) {
-        self.learners = keys.into_iter().collect();
-        self.learners.remove(&self.key);
+        let mut learners: BTreeSet<node::Key> = keys.into_iter().collect();
+        learners.remove(&self.key);
+        let added: Vec<node::Key> =
+            learners.difference(&self.learners).copied().collect();
+        self.learners = learners;
         let last = self.log.last().index;
-        let mut added = Vec::new();
         for &key in &self.learners {
-            if let btree_map::Entry::Vacant(vacant) = self.peers.entry(key) {
-                vacant.insert(Peer::new(last));
-                added.push(key);
-            }
+            self.peers.entry(key).or_insert_with(|| Peer::new(last));
         }
         self.release_removed();
         if self.role == Role::Leader {
@@ -4896,6 +4895,26 @@ mod tests {
             accepted(&mut raft, 9, 2);
             assert_eq!(sent(&mut raft), []);
             assert_eq!(checked_to(&mut raft, 9), [Body::Heartbeat { commit: 0 }]);
+        }
+
+        // Node 9 leaves the set and comes back while a change is pending, so its peer
+        // stays.
+        #[test]
+        fn a_learner_that_a_call_adds_again_gets_an_append_at_once() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            accepted(&mut raft, 9, 1);
+            raft.propose_voters(keyed(&[1, 2, 3, 4])).unwrap();
+            accepted(&mut raft, 2, 2);
+            accepted(&mut raft, 9, 2);
+            sent(&mut raft);
+            raft.set_learners([]);
+            raft.propose(b"y".to_vec()).unwrap();
+            sent(&mut raft);
+            raft.set_learners([key(9)]);
+            assert_eq!(carrying(&sent(&mut raft), 9).len(), 1);
         }
 
         // A network that loses nothing and keeps the order of each link, with a delay
