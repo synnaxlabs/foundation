@@ -74,7 +74,7 @@ fn draft(frames: &mut Frames, pool: &block::Pool) -> Step {
     frames.draft(draft)
 }
 
-/// Takes a live head, the ends of the index and place 1, and a count of 2.
+/// Takes a live head and the ends of the index and place 1.
 fn ends(frames: &mut Frames) {
     let step = frames.decode(&encode_head(LIVE, Form::Raw, 2));
     assert!(matches!(step, Ok(Step::Head(head)) if head.series == 2));
@@ -87,11 +87,22 @@ fn ends(frames: &mut Frames) {
         frames.decode(&encode_ends(&[(1, 32)])),
         Ok(Step::More)
     ));
+}
+
+/// Takes a count of 2, the run of counts of [`ends`].
+fn count(frames: &mut Frames) {
     assert!(matches!(frames.due(), Ok(Due::Message)));
     assert!(matches!(
         frames.decode(&encode_counts(&[2])),
         Ok(Step::More)
     ));
+}
+
+/// Takes the messages of [`ends`], a draft from `pool`, and [`count`].
+fn lead(frames: &mut Frames, pool: &block::Pool) {
+    ends(frames);
+    assert!(matches!(draft(frames, pool), Step::More));
+    count(frames);
 }
 
 /// The 32 bytes of a body: 2 stamps, then 2 samples of place 1.
@@ -114,11 +125,10 @@ fn check(frame: &types::frame::Frame, body: &[u8]) {
     assert_eq!(frame.series(2), None);
 }
 
-/// The bytes of the end and count of each place: an entry and an end, each a
-/// `usize`, and a group and a count, each a `u32`.
+/// The bytes of the ends of each place: an entry and an end, each a `usize`.
 #[test]
-fn holds_two_usizes_and_two_u32s_for_each_place() {
-    let place = 2 * size_of::<usize>() + 8;
+fn holds_two_usizes_for_each_place() {
+    let place = 2 * size_of::<usize>();
     let bytes = [0, 1, 3].map(Frames::bytes);
     assert_eq!(bytes, [0, place, 3 * place]);
 }
@@ -127,8 +137,7 @@ fn holds_two_usizes_and_two_u32s_for_each_place() {
 fn builds_a_frame_from_a_whole_body_message() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
-    ends(&mut frames);
-    assert!(matches!(draft(&mut frames, &pool), Step::More));
+    lead(&mut frames, &pool);
     let (frame, time) = frame(frames.decode(&body()).expect("the body"));
     assert_eq!(time, LIVE);
     check(&frame, &body());
@@ -140,8 +149,7 @@ fn finishes_between_frames() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
     assert_eq!(frames.finish(), Ok(()));
-    ends(&mut frames);
-    draft(&mut frames, &pool);
+    lead(&mut frames, &pool);
     frames.decode(&body()).expect("the body");
     assert_eq!(frames.finish(), Ok(()));
 }
@@ -158,9 +166,9 @@ fn gives_the_bytes_of_a_frame_that_the_stream_cuts() {
     frames.decode(&encode_ends(&[(0, 16)])).expect("the end");
     assert_eq!(frames.finish(), cut(15, None));
     frames.decode(&encode_ends(&[(1, 32)])).expect("the end");
+    draft(&mut frames, &pool);
     assert_eq!(frames.finish(), cut(23, NonZeroUsize::new(59)));
     frames.decode(&encode_counts(&[2])).expect("the count");
-    draft(&mut frames, &pool);
     assert_eq!(frames.finish(), cut(27, NonZeroUsize::new(59)));
     frames.decode(&body()[..20]).expect("the part");
     assert_eq!(frames.finish(), cut(47, NonZeroUsize::new(59)));
@@ -218,7 +226,7 @@ fn panics_on_a_draft_when_no_draft_is_due() {
         panic!("a draft is due");
     };
     let twice = layout.draft(&pool, form).expect("a block");
-    draft(&mut frames, &pool);
+    assert!(matches!(draft(&mut frames, &pool), Step::More));
     let _step = frames.draft(twice);
 }
 
@@ -226,8 +234,7 @@ fn panics_on_a_draft_when_no_draft_is_due() {
 fn builds_a_frame_from_a_body_received_in_place() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
-    ends(&mut frames);
-    draft(&mut frames, &pool);
+    lead(&mut frames, &pool);
     let body = body();
     for part in body.chunks(10) {
         let Ok(Due::Body(rest)) = frames.due() else {
@@ -245,13 +252,14 @@ fn builds_a_frame_from_a_body_received_in_place() {
 }
 
 #[test]
-fn gives_a_frame_of_no_body_at_its_draft() {
+fn gives_a_frame_of_no_body_at_its_last_count() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
     frames
         .decode(&encode_head(LIVE, Form::Raw, 1))
         .expect("the head");
     frames.decode(&encode_ends(&[(0, 0)])).expect("the ends");
+    assert!(matches!(draft(&mut frames, &pool), Step::More));
     assert_eq!(
         frames.finish(),
         Err(Error::Cut {
@@ -259,10 +267,25 @@ fn gives_a_frame_of_no_body_at_its_draft() {
             len: NonZeroUsize::new(19)
         })
     );
-    frames.decode(&encode_counts(&[1])).expect("the count");
-    let (frame, _) = frame(draft(&mut frames, &pool));
+    let step = frames.decode(&encode_counts(&[1])).expect("the count");
+    let (frame, _) = frame(step);
     assert_eq!(frame.series(0), Some(&[][..]));
+    assert_eq!(frame.range(0), Some(Range { seq: 0, count: 1 }));
     assert!(matches!(frames.due(), Ok(Due::Message)));
+}
+
+#[test]
+fn gives_a_frame_of_no_body_that_the_node_stamps_at_its_draft() {
+    let pool = create_pool();
+    let mut frames = Frames::new(create_set());
+    frames
+        .decode(&encode_head(Time::Node, Form::Raw, 1))
+        .expect("the head");
+    frames.decode(&encode_ends(&[(0, 0)])).expect("the ends");
+    let (frame, time) = frame(draft(&mut frames, &pool));
+    assert_eq!(time, Time::Node);
+    assert_eq!(frame.range(0), Some(Range { seq: 0, count: 1 }));
+    assert_eq!(frames.finish(), Ok(()));
 }
 
 #[test]
@@ -279,14 +302,14 @@ fn gives_the_time_and_form_of_each_head() {
             .decode(&encode_head(time, form, 1))
             .expect("the head");
         frames.decode(&encode_ends(&[(0, 8)])).expect("the ends");
-        if time != Time::Node {
-            frames.decode(&encode_counts(&[count])).expect("the count");
-        }
         let Ok(Due::Draft { form: due, .. }) = frames.due() else {
             panic!("a draft is due");
         };
         assert_eq!(due, form);
         draft(&mut frames, &pool);
+        if time != Time::Node {
+            frames.decode(&encode_counts(&[count])).expect("the count");
+        }
         let step = frames.decode(&[0; 8]).expect("the body");
         let Step::Frame { draft, time: given } = step else {
             panic!("a frame, not {step:?}");
@@ -380,8 +403,7 @@ fn refuses_a_run_message_of_more_ends_than_remain_and_keeps_the_run() {
 fn refuses_an_empty_or_long_body_message_and_keeps_the_body() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
-    ends(&mut frames);
-    draft(&mut frames, &pool);
+    lead(&mut frames, &pool);
     assert_eq!(frames.decode(&[]).map(|_| ()), Err(Error::Empty));
     assert_eq!(frames.received(0).map(|_| ()), Err(Error::Empty));
     assert_eq!(
@@ -404,7 +426,6 @@ fn gives_the_layout_error_of_ends_out_of_order() {
     frames
         .decode(&encode_ends(&[(0, 16), (1, 8)]))
         .expect("the ends");
-    frames.decode(&encode_counts(&[1])).expect("the count");
     assert!(matches!(
         frames.due(),
         Err(types::frame::Error::End(BadEnd::Before { .. }))
@@ -412,7 +433,7 @@ fn gives_the_layout_error_of_ends_out_of_order() {
 }
 
 #[test]
-fn asks_one_count_of_a_group_whose_index_repeats() {
+fn gives_the_layout_error_of_a_repeated_index() {
     let mut frames = Frames::new(create_set());
     frames
         .decode(&encode_head(LIVE, Form::Raw, 2))
@@ -420,7 +441,6 @@ fn asks_one_count_of_a_group_whose_index_repeats() {
     frames
         .decode(&encode_ends(&[(0, 8), (0, 16)]))
         .expect("the ends");
-    frames.decode(&encode_counts(&[1])).expect("the count");
     assert!(matches!(
         frames.due(),
         Err(types::frame::Error::Unordered { entry: 0, last: 0 })
@@ -450,16 +470,19 @@ fn takes_the_next_frame_after_a_frame_of_no_body_finds_the_pool_full() {
         .decode(&encode_head(LIVE, Form::Raw, 1))
         .expect("the head");
     frames.decode(&encode_ends(&[(0, 0)])).expect("the ends");
-    frames.decode(&encode_counts(&[1])).expect("the count");
     let (held, error) = create_full(&mut frames, &pool);
     assert!(matches!(error, block::Error::Exhausted { .. }), "{error:?}");
     frames.skip();
+    assert!(matches!(frames.due(), Ok(Due::Message)));
+    assert!(matches!(
+        frames.decode(&encode_counts(&[1])),
+        Ok(Step::More)
+    ));
     assert!(frames.head.is_none(), "the skipped frame ended");
     drop(held);
     assert!(matches!(frames.due(), Ok(Due::Message)));
     assert_eq!(frames.finish(), Ok(()));
-    ends(&mut frames);
-    draft(&mut frames, &pool);
+    lead(&mut frames, &pool);
     let (frame, _) = frame(frames.decode(&body()).expect("the body"));
     check(&frame, &body());
 }
@@ -472,6 +495,7 @@ fn drops_the_body_of_a_skipped_frame_and_takes_the_next_frame() {
     let (held, _) = create_full(&mut frames, &pool);
     frames.skip();
     drop(held);
+    count(&mut frames);
     let body = body();
     assert!(matches!(frames.due(), Ok(Due::Message)));
     assert!(matches!(frames.decode(&body[..20]), Ok(Step::More)));
@@ -485,8 +509,7 @@ fn drops_the_body_of_a_skipped_frame_and_takes_the_next_frame() {
     assert!(matches!(frames.decode(&body[20..]), Ok(Step::More)));
     assert!(matches!(frames.due(), Ok(Due::Message)));
     assert_eq!(frames.finish(), Ok(()));
-    ends(&mut frames);
-    draft(&mut frames, &pool);
+    lead(&mut frames, &pool);
     let (frame, _) = frame(frames.decode(&body).expect("the body"));
     check(&frame, &body);
 }
@@ -496,6 +519,8 @@ fn refuses_an_empty_or_long_body_message_of_a_skipped_frame() {
     let mut frames = Frames::new(create_set());
     ends(&mut frames);
     frames.skip();
+    assert_eq!(frames.decode(&[0; 4]).map(|_| ()), Err(Error::Samples));
+    count(&mut frames);
     assert_eq!(frames.decode(&[]).map(|_| ()), Err(Error::Empty));
     assert_eq!(
         frames.decode(&[0; 33]).map(|_| ()),
@@ -523,7 +548,6 @@ fn create_refused() -> Frames {
     frames
         .decode(&encode_ends(&[(0, 16), (1, 8)]))
         .expect("the ends");
-    frames.decode(&encode_counts(&[1])).expect("the count");
     assert!(frames.due().is_err(), "the layout is not valid");
     frames
 }
@@ -553,6 +577,7 @@ fn panics_on_a_body_received_in_place_for_a_skipped_frame() {
     let mut frames = Frames::new(create_set());
     ends(&mut frames);
     frames.skip();
+    count(&mut frames);
     let _received = frames.received(1);
 }
 
@@ -566,9 +591,8 @@ fn two_ends(frames: &mut Frames, time: Time) {
     frames.decode(&ends).expect("the ends");
 }
 
-/// The frame of `frames` after its draft and a body of 32 bytes.
-fn two_frame(frames: &mut Frames, pool: &block::Pool) -> types::frame::Frame {
-    assert!(matches!(draft(frames, pool), Step::More));
+/// The frame of `frames` after a body of 32 bytes.
+fn two_frame(frames: &mut Frames) -> types::frame::Frame {
     frame(frames.decode(&[0; 32]).expect("the body")).0
 }
 
@@ -577,6 +601,7 @@ fn sets_the_count_of_each_group_from_the_run_of_counts() {
     let pool = create_pool();
     let mut frames = Frames::new(create_two());
     two_ends(&mut frames, LIVE);
+    assert!(matches!(draft(&mut frames, &pool), Step::More));
     assert!(matches!(frames.due(), Ok(Due::Message)));
     frames
         .decode(&encode_counts(&[1]))
@@ -592,7 +617,7 @@ fn sets_the_count_of_each_group_from_the_run_of_counts() {
     frames
         .decode(&encode_counts(&[3]))
         .expect("the second count");
-    let frame = two_frame(&mut frames, &pool);
+    let frame = two_frame(&mut frames);
     assert_eq!(frame.range(0), Some(Range { seq: 0, count: 1 }));
     assert_eq!(frame.range(1), Some(Range { seq: 0, count: 3 }));
 }
@@ -607,6 +632,7 @@ fn counts_only_the_groups_whose_index_the_ends_hold() {
     frames
         .decode(&encode_ends(&[(2, 8), (3, 16)]))
         .expect("the ends");
+    assert!(matches!(draft(&mut frames, &pool), Step::More));
     assert_eq!(
         frames.decode(&encode_counts(&[1, 1])).map(|_| ()),
         Err(Error::Run {
@@ -615,7 +641,6 @@ fn counts_only_the_groups_whose_index_the_ends_hold() {
         })
     );
     frames.decode(&encode_counts(&[2])).expect("the count");
-    assert!(matches!(draft(&mut frames, &pool), Step::More));
     let (frame, _) = frame(frames.decode(&[0; 16]).expect("the body"));
     assert_eq!(frame.range(0), None);
     assert_eq!(frame.range(1), Some(Range { seq: 0, count: 2 }));
@@ -644,6 +669,7 @@ fn refuses_each_run_of_counts_that_the_program_cannot_encode_and_keeps_it() {
     let pool = create_pool();
     let mut frames = Frames::new(create_two());
     two_ends(&mut frames, LIVE);
+    assert!(matches!(draft(&mut frames, &pool), Step::More));
     let cases = [
         (vec![], Error::Empty),
         (vec![1, 0, 0], Error::Length { len: 3 }),
@@ -665,7 +691,7 @@ fn refuses_each_run_of_counts_that_the_program_cannot_encode_and_keeps_it() {
         "the frame holds a group of no sample"
     );
     frames.decode(&encode_counts(&[2, 4])).expect("the counts");
-    let frame = two_frame(&mut frames, &pool);
+    let frame = two_frame(&mut frames);
     assert_eq!(frame.range(0), Some(Range { seq: 0, count: 2 }));
     assert_eq!(frame.range(1), Some(Range { seq: 0, count: 4 }));
 }
@@ -679,7 +705,6 @@ fn refuses_a_series_of_a_group_whose_index_the_ends_do_not_hold() {
     frames
         .decode(&encode_ends(&[(0, 8), (3, 16)]))
         .expect("the ends");
-    frames.decode(&encode_counts(&[1])).expect("the count");
     assert!(matches!(
         frames.due(),
         Err(types::frame::Error::IndexAbsent { entry: 3, index: 2 })
@@ -778,9 +803,8 @@ proptest! {
                 let step = frames.decode(&encode_ends(run));
                 prop_assert!(matches!(step, Ok(Step::More)));
             }
-            let step = frames.decode(&encode_counts(&[case.count]));
-            prop_assert!(matches!(step, Ok(Step::More)));
-            let mut step = draft(&mut frames, &pool);
+            prop_assert!(matches!(draft(&mut frames, &pool), Step::More));
+            let mut step = frames.decode(&encode_counts(&[case.count])).expect("the count");
             let fit = "the bytes of a frame fit a usize";
             let run = ends::LEN.checked_mul(ends.len()).and_then(|n| n.checked_add(counts::LEN));
             let run = run.expect(fit);
