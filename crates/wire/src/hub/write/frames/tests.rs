@@ -891,15 +891,20 @@ mod corpus {
             } else {
                 Scalar::I64
             };
-            let n = u128::try_from(entry).expect("at most 8 places") + 1;
+            let n = u128::try_from(entry)
+                .expect("at most 8 places")
+                .strict_add(1);
             (key(n), Type::Scalar(data), index)
         });
         Arc::new(KeySet::ordered(channels).expect("a valid set"))
     }
 
-    /// The ranges of each frame that the fuzz input `bytes` gives, `None` for a frame
-    /// skipped on a full pool, and how its stream ends.
-    fn drive(bytes: &[u8]) -> (Vec<Option<Vec<(u32, Range)>>>, End) {
+    /// The ranges of each frame of a stream, `None` for a frame skipped on a full pool.
+    type Given = Vec<Option<Vec<(u32, Range)>>>;
+
+    /// The ranges of each frame that the fuzz input `bytes` gives, and how its stream
+    /// ends.
+    fn drive(bytes: &[u8]) -> (Given, End) {
         let (&first, mut bytes) = bytes.split_first().expect("the input has a byte");
         let pool = create_pool();
         let mut frames = Frames::new(create_input_set(first));
@@ -907,14 +912,14 @@ mod corpus {
         loop {
             let step = match frames.due() {
                 Err(error) => return (seen, End::Layout(error)),
-                Ok(Due::Draft { layout, form }) => match layout.draft(&pool, form) {
-                    Ok(draft) => frames.draft(draft),
-                    Err(_) => {
+                Ok(Due::Draft { layout, form }) => {
+                    let Ok(draft) = layout.draft(&pool, form) else {
                         frames.skip();
                         seen.push(None);
                         continue;
-                    }
-                },
+                    };
+                    frames.draft(draft)
+                }
                 Ok(Due::Body(_) | Due::Message) => {
                     let Some((&len, rest)) = bytes.split_first() else {
                         return (seen, End::Finished(frames.finish()));
@@ -935,11 +940,11 @@ mod corpus {
     }
 
     /// The ranges of a frame: each group, and its count from seq 0.
-    fn ranges(groups: &[(u32, u32)]) -> Option<Vec<(u32, Range)>> {
+    fn ranges(groups: &[(u32, u32)]) -> Vec<(u32, Range)> {
         let ranges = groups
             .iter()
             .map(|&(group, count)| (group, Range { seq: 0, count }));
-        Some(ranges.collect())
+        ranges.collect()
     }
 
     fn cut(received: usize, len: Option<usize>) -> End {
@@ -950,11 +955,12 @@ mod corpus {
     }
 
     #[test]
+    #[expect(clippy::too_many_lines, reason = "one case for each input")]
     fn gives_the_frames_and_end_of_each_input_of_a_run_of_counts() {
         let run = |items, remain| End::Message(Error::Run { items, remain });
         let done = || End::Finished(Ok(()));
-        let one = |count| ranges(&[(0, count)]);
-        let both = ranges(&[(0, 1), (1, 1)]);
+        let one = |count| Some(ranges(&[(0, count)]));
+        let both = Some(ranges(&[(0, 1), (1, 1)]));
         let cases = [
             (corpus!("body_cut_grouped"), vec![], cut(54, Some(59))),
             (
@@ -1109,7 +1115,7 @@ mod corpus {
             (corpus!("two_groups_node"), vec![both.clone()], done()),
             (
                 corpus!("two_groups_second"),
-                vec![ranges(&[(1, 1)])],
+                vec![Some(ranges(&[(1, 1)]))],
                 done(),
             ),
             (
