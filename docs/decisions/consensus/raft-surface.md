@@ -257,6 +257,9 @@
   (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275865221) and
   2026-10-19T19:51:09Z
   (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6275912627); the
+  exceptions of an append in flight and of a learner that holds the whole log,
+  2026-10-19T21:41:27Z
+  (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6278021695); the
   resend of an expired probe at its `next`, 2026-10-19T20:07:40Z
   (https://github.com/synnaxlabs/foundation/pull/3415#issuecomment-6276219408); the
   message each `election_ticks` and the commit, 2026-10-19T19:46:05Z
