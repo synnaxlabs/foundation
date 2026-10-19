@@ -262,10 +262,10 @@ impl Gate {
         }
     }
 
-    /// The holder, when its subject or authority differs from the holder recorded
-    /// last by [`Gate::recorded`] or [`Gate::recover`]. A new gate starts with no
-    /// holder recorded. For n open writers, takes O(1) time when it returns `None`
-    /// and O(log n) when it returns `Some`. Does not allocate.
+    /// The holder, when its subject, authority, or `via` differs from the holder
+    /// recorded last by [`Gate::recorded`] or [`Gate::recover`]. A new gate starts
+    /// with no holder recorded. For n open writers, takes O(1) time when it returns
+    /// `None` and O(log n) when it returns `Some`. Does not allocate.
     #[must_use]
     pub fn handoff(&self) -> Option<Handoff<'_>> {
         self.unrecorded.then(|| Handoff { to: self.holder() })
