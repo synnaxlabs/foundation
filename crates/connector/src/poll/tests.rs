@@ -18,7 +18,7 @@ use types::frame::{Draft, Form, Label, Path, key_set};
 use types::name::{Name, Selector};
 use types::sample::Value::{F64, U16};
 use types::sample::{Scalar, Type, Value};
-use types::time::{Span, Stamp};
+use types::time::{Interval, Span, Stamp};
 
 use super::Writer;
 use crate::common::{env, run_on};
@@ -65,12 +65,19 @@ fn definitions() -> Vec<(Name, Definition)> {
     ]
 }
 
+/// The ends of the time and the `held` of a frame of samples, each in ns after the
+/// stamp of the last request.
+type Sample = [i64; 3];
+
 /// A kind that opens a [`Writer`] of `channels`, keeps its types, and writes each of
-/// `writes` one [`TICK`] after the last, until the cancel.
+/// `writes` one [`TICK`] after the last. Then it writes the last of `writes` again at
+/// the stamp of each of `samples`, and keeps each stamp with its error in `stamped`.
 struct Polls {
     channels: [&'static str; 3],
     writes: Vec<Vec<Option<Value>>>,
+    samples: Vec<Sample>,
     types: Arc<Mutex<Vec<Type>>>,
+    stamped: Arc<Mutex<Vec<(Stamp, Span)>>>,
 }
 
 impl Kind for Polls {
@@ -95,12 +102,26 @@ impl Kind for Polls {
             return Ok(());
         };
         *self.types.lock().expect("no panic") = writer.types().collect();
+        let mut last = None;
         for values in &self.writes {
             if ctx.cancel().race(ctx.clock().sleep(TICK)).await.is_none() {
                 return Ok(());
             }
             let ((), stamp) = writer.request(std::future::ready(())).await;
             writer.write(values.iter().copied(), stamp)?;
+            last = Some((values, stamp));
+        }
+        if let Some((values, at)) = last {
+            let after = |nanos| at + Span::from_nanos(nanos);
+            for &[earliest, latest, held] in &self.samples {
+                let time = Interval {
+                    earliest: after(earliest),
+                    latest: after(latest),
+                };
+                let (stamp, error) = writer.sample(time, after(held));
+                writer.write(values.iter().copied(), stamp)?;
+                self.stamped.lock().expect("no panic").push((stamp, error));
+            }
         }
         ctx.cancel().wait().await;
         Ok(())
@@ -120,6 +141,8 @@ struct Record {
     /// The frames of `plant.clock` and `plant.c`.
     clock: Vec<Frame>,
     types: Vec<Type>,
+    /// Each stamp of a sample with its error.
+    stamped: Vec<(Stamp, Span)>,
     /// The counts `in` and `lost` at the end.
     counts: (u64, u64),
 }
@@ -143,11 +166,25 @@ fn run_of<F: Future<Output = ()> + 'static>(
     counts: (u64, u64),
     script: impl FnOnce(Hub, Clock, Tasks) -> F + Send + 'static,
 ) -> Record {
+    run_sampled(channels, writes, Vec::new(), counts, script)
+}
+
+/// As [`run_of`], with the frames of `samples` after `writes`.
+fn run_sampled<F: Future<Output = ()> + 'static>(
+    channels: [&'static str; 3],
+    writes: Vec<Vec<Option<Value>>>,
+    samples: Vec<Sample>,
+    counts: (u64, u64),
+    script: impl FnOnce(Hub, Clock, Tasks) -> F + Send + 'static,
+) -> Record {
     let types = Arc::new(Mutex::new(Vec::new()));
+    let stamped = Arc::new(Mutex::new(Vec::new()));
     let kind = Polls {
         channels,
         writes,
+        samples,
         types: Arc::clone(&types),
+        stamped: Arc::clone(&stamped),
     };
     let mut record = run_on(move |node, tasks| async move {
         let kinds = Table::new().with("writes", kind);
@@ -171,10 +208,12 @@ fn run_of<F: Future<Output = ()> + 'static>(
             time: time.take(),
             clock: clock.take(),
             types: Vec::new(),
+            stamped: Vec::new(),
             counts,
         }
     });
     record.types = types.lock().expect("no panic").clone();
+    record.stamped = stamped.lock().expect("no panic").clone();
     record
 }
 
@@ -281,6 +320,40 @@ fn writes_each_value_and_the_stamp_of_the_request_in_each_index() {
         assert_eq!(Some(&record.clock[at]), clock.as_ref());
     }
     assert_eq!(record.counts, (6, 0));
+}
+
+/// The first two samples are before the request, so each takes 1 ns after the last
+/// stamp: the first holds past it, and the second does not, so its error grows by 2 ns.
+/// The third has its ends in reverse order. The fourth has the midpoint of the third, so
+/// it takes 1 ns after it, and that 1 ns is its error.
+#[test]
+fn stamps_each_sample_at_its_midpoint_or_after_the_last_stamp_with_its_error() {
+    let writes = [values(1.5, 7, -3, [true; 3])];
+    let ms = 1_000_000;
+    let samples = vec![
+        [-2 * ms, -ms, 5 * ms],
+        [-2 * ms, -ms, 0],
+        [12 * ms, 10 * ms, 0],
+        [11 * ms, 11 * ms, 0],
+    ];
+    let all = writes.iter().copied().map(Vec::from).collect();
+    let record = run_sampled(CHANNELS, all, samples, (15, 0), |_, _, _| async {});
+    assert_eq!(record.result.as_ref().map_err(ToString::to_string), Ok(&()));
+    let first = stamp(&record.time[0], 1);
+    let stamps = [1, 2, 11 * ms, 11 * ms + 1].map(|nanos| first + nanos);
+    let errors = [ms / 2, ms / 2 + 2, ms, 1].map(Span::from_nanos);
+    let want: Vec<_> = (stamps.map(Stamp::from_nanos).into_iter())
+        .zip(errors)
+        .collect();
+    assert_eq!(record.stamped, want);
+    let mut time = vec![record.time[0].clone()];
+    time.extend(
+        stamps
+            .iter()
+            .filter_map(|&stamp| frames(writes[0], stamp).0),
+    );
+    assert_eq!(record.time, time);
+    assert_eq!(record.counts, (15, 0));
 }
 
 #[test]
