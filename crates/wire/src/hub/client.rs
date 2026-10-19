@@ -42,10 +42,10 @@
 //! - [`Read`]: kind 6, the open's length (`u64`), and the signature (64).
 //! - [`Open`]: the mode (`u8`, latest 1, complete 2), then each pattern of the selector
 //!   as written, an exclusion with its leading `!`: its length (`u16`) and its text.
-//! - [`Places`]: kind 6, the count of places (`u32`), and the place of the index
-//!   (`u32`).
-//! - [`place`]: each place's key (`u128`), its sample type as text (length `u8`, then
-//!   the text), and its name (length `u8`, then the name).
+//! - [`Places`]: kind 6 and the count of places (`u32`).
+//! - [`place`]: each place's key (`u128`), the place of the index of its channel's
+//!   group (`u32`), its sample type as text (length `u8`, then the text), and its name
+//!   (length `u8`, then the name).
 //! - [`write::Write`]: kind 7, the open's length (`u64`), and the signature (64).
 //! - [`write::Open`]: the authority (`u8`), the lease (`u8`, none 0, a lease 1, then
 //!   the lease as `i64` nanoseconds), then each channel's name: its length (`u8`) and
