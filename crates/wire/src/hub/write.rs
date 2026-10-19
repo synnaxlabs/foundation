@@ -590,7 +590,12 @@ impl Group {
     /// Whether the group ended, or its last [`Reply::Stored`] covers its last taken
     /// frame.
     fn settled(&self) -> bool {
-        self.ended.is_some() || self.stored >= self.taken
+        self.ended.is_some() || !self.unstored()
+    }
+
+    /// Whether the group took a frame past its last [`Reply::Stored`].
+    fn unstored(&self) -> bool {
+        self.taken > self.stored
     }
 
     /// Applies `change`, and counts the group again in `unsettled`, the count of groups
@@ -696,7 +701,7 @@ impl Replies {
             }
             Reply::Ended { group, end } => {
                 let state = open(&mut self.groups, group)?;
-                if state.taken > state.stored {
+                if state.unstored() {
                     self.unstored = self.unstored.strict_add(1);
                 }
                 state.settle(&mut self.unsettled, |state| state.ended = Some(end));
@@ -773,7 +778,7 @@ impl Replies {
         groups.iter().zip(0..).filter_map(|(group, key)| {
             group
                 .ended
-                .filter(|_| group.taken > group.stored)
+                .filter(|_| group.unstored())
                 .map(|end| (key, end))
         })
     }
