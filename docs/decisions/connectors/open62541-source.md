@@ -1103,15 +1103,46 @@
   (https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278296455;
   `laptop.architect-2`,
   https://github.com/synnaxlabs/foundation/pull/3423#issuecomment-6278381176). Text
-  outside the blocks keeps any bytes. The check is in C, at the start of the PEM branch
-  of `openSSLLoadEachCertificate`, so both loads of a trust pass it. The client gives
-  `client::Refusal::Line { number }`, the line from 1 counted by `\n`, since the check
-  runs before aws-lc counts certificates. PR 2d of #2934, the caller that reads the
-  trust file, puts its path before that text (`laptop.architect-2`, 2026-10-19 18:24
-  UTC, https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216).
-  Lost: a check in Rust in `Client::connect`, which copies the DER rule; a check in the
-  kind, which other callers skip; and aws-lc patched to compare as unsigned, which gives
-  no refusal and no line.
+  outside the blocks keeps any bytes. A further case that each target reads alike
+  needs no message to `laptop.monitor`: this text records it, with a test
+  (`laptop.monitor`, message c4c6936d,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6278296455). The
+  rule holds for each PEM read of the copy, so for a PEM key and certificate too
+  (#3428). The check is in C, in `UA_OpenSSL_PemBio` of `securitypolicy_common.c`, the
+  one PEM entry of the copy: it makes the BIO of each PEM read, and first refuses such
+  a piece (`laptop.architect-2`, 2026-10-19 20:55 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6277130219). A site
+  that tries DER first does it before the entry, on the bytes: `d2i_X509`,
+  `d2i_X509_REQ`, `d2i_X509_CRL`, and `d2i_AutoPrivateKey` in place of their `_bio`
+  forms. So a DER key over 100 KiB, which `d2i_PrivateKey_bio` refused, loads
+  (`laptop.architect-2`, 2026-10-19 23:26 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6279597410, item
+  3). `cargo xtask open62541` admits `BIO_new_mem_buf` only in the entry, and no `_bio`
+  DER read or `BIO_reset`. The test
+  `a_begin_line_at_a_piece_of_253_bytes_of_a_long_line_starts_a_block` pins the piece
+  size of aws-lc. `UA_CertificateUtils_certificateLine` and
+  `UA_CertificateUtils_keyLine` of `certificategroup.h` run the loaders of the policies
+  and give the line at which the entry refuses the own certificate or key, and
+  `shim_client_secure` checks the certificate, then the key, before the policies. The
+  client gives `client::Refusal::Line { credential, number }`, with the field of
+  `Credentials` that holds the line (`client::Credential`) and the line from 1 counted
+  by `\n`, since the check runs before aws-lc counts certificates (`laptop.architect-2`,
+  items 1 and 2 of
+  https://github.com/synnaxlabs/foundation/issues/3428#issuecomment-6279597410; the
+  name `Credential` in place of `Part`, which `client.rs` holds, sent to
+  `laptop.architect-2` in message 8qdvt0fu). A site that the client does not reach
+  keeps its own failure for a refused line: a CRL fails as a damaged one,
+  `UA_CertificateUtils_comparePublicKeys` skips the PEM read, and
+  `UA_CertificateUtils_decryptPrivateKey` gives `BadSecurityChecksFailed`. A
+  certificate of the server from the wire that the entry refuses does not load, as a
+  damaged one. PR 2d of #2934, the caller that reads the files, puts the path of the
+  file of that field before that text (`laptop.architect-2`, 2026-10-19 18:24 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216). Lost:
+  a check in Rust in `Client::connect`, which copies the DER rule; a check in the kind,
+  which other callers skip; aws-lc patched to compare as unsigned, which gives no
+  refusal and no line; a filter BIO, whose refusal comes out of aws-lc as a read error;
+  and a check of the raw bytes in the shim, which refuses a DER certificate that the
+  load reads.
   The validity check of the own certificate and the map of each refusal in `kind.rs`
   move to PR 2b (`laptop.architect-2`, 2026-10-18 21:37 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255457069, items 1

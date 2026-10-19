@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use types::time::{Span, Stamp};
 
 use super::{Client, PORT, VALUE, fits, fitting, long, run, serve_on};
-use crate::client::{Credentials, Error, Large, Mode, Refusal};
+use crate::client::{Credential, Credentials, Error, Large, Mode, Refusal};
 use crate::event;
 use crate::ffi::{self, Status};
 use crate::secure::{
@@ -342,7 +342,10 @@ fn a_trust_whose_end_line_names_another_label_ends_the_connect() {
 
 /// The `Line` refusal of line `number` of the trust.
 fn line(number: usize) -> Error {
-    Error::Refused(Refusal::Line { number })
+    Error::Refused(Refusal::Line {
+        credential: Credential::Trust,
+        number,
+    })
 }
 
 /// [`TRUST`] with `tail` before the `\n` of line `at`, from 0, of its second block, and
@@ -398,6 +401,20 @@ fn a_begin_line_with_a_high_byte_at_a_piece_of_a_long_line_ends_the_connect() {
 }
 
 #[test]
+fn a_begin_line_whose_label_holds_a_high_byte_starts_a_block() {
+    let (other, server) = blocks();
+    let begin = "-----BEGIN CERTIFICATE-----\u{A0}-----";
+    let server = server.replacen("-----BEGIN CERTIFICATE-----", begin, 1);
+    assert_eq!(trusting(format!("{other}{server}")), Err(invalid(2)));
+    let end = "-----END CERTIFICATE-----\u{A0}-----";
+    let server = server.replacen("-----END CERTIFICATE-----", end, 1);
+    assert_eq!(
+        trusting(format!("{other}{server}")).map(|_| ()),
+        Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED))
+    );
+}
+
+#[test]
 fn a_client_that_trusts_a_pem_with_utf_8_text_outside_its_blocks_reads() {
     let (other, server) = blocks();
     let long = "é".repeat(200);
@@ -426,7 +443,11 @@ fn a_begin_line_with_no_label_and_a_high_byte_ends_the_connect() {
 
 #[test]
 fn a_begin_line_with_no_space_or_four_dashes_starts_no_block() {
-    for begin in [b"-----BEGINX-----".as_slice(), b"-----BEGIN X----"] {
+    for begin in [
+        b"-----BEGINX-----".as_slice(),
+        b"-----BEGIN X----",
+        b"-----BEGIN X----Y",
+    ] {
         let trust = [begin, b"\nnote \xA0\n", TRUST].concat();
         let read = trusting(trust).expect("the client connects");
         assert_eq!(read.answer, Ok(read.value), "{begin:?}");
@@ -607,9 +628,28 @@ fn a_refusal_names_the_part_that_fails() {
             "the PEM block of certificate 3 of the trust holds bytes after it",
         ),
         (
-            Refusal::Line { number: 4 },
+            Refusal::Line {
+                credential: Credential::Trust,
+                number: 4,
+            },
             "line 4 of the trust, in a PEM block, holds a byte of 0x80 to 0xFF, which \
              PEM does not allow",
+        ),
+        (
+            Refusal::Line {
+                credential: Credential::Certificate,
+                number: 2,
+            },
+            "line 2 of the certificate, in a PEM block, holds a byte of 0x80 to 0xFF, \
+             which PEM does not allow",
+        ),
+        (
+            Refusal::Line {
+                credential: Credential::Key,
+                number: 3,
+            },
+            "line 3 of the key, in a PEM block, holds a byte of 0x80 to 0xFF, which PEM \
+             does not allow",
         ),
         (
             Refusal::Uri,
@@ -627,6 +667,41 @@ fn a_certificate_that_does_not_parse_ends_the_connect_before_the_dial() {
         ..CLIENT
     };
     assert_eq!(refused(own), Err(Error::Refused(Refusal::Certificate)));
+}
+
+/// `pem` with a byte of 0xA0 before the `\n` of its second line, which lives to the
+/// end of the test.
+fn with_high_byte(pem: &[u8]) -> &'static [u8] {
+    let mut lines = pem.split_inclusive(|&byte| byte == b'\n');
+    let first = lines.next().expect("the PEM has a first line").len();
+    let end = first + lines.next().expect("the PEM has a second line").len() - 1;
+    [&pem[..end], b"\xA0", &pem[end..]].concat().leak()
+}
+
+/// The `Line` refusal of line 2 of `credential`.
+fn second_line(credential: Credential) -> Result<(), Error> {
+    Err(Error::Refused(Refusal::Line {
+        credential,
+        number: 2,
+    }))
+}
+
+#[test]
+fn a_pem_certificate_with_a_high_byte_ends_the_connect_before_the_dial() {
+    let own = Identity {
+        certificate: with_high_byte(CLIENT_PEM.certificate),
+        ..CLIENT_PEM
+    };
+    assert_eq!(refused(own), second_line(Credential::Certificate));
+}
+
+#[test]
+fn a_pem_key_with_a_high_byte_ends_the_connect_before_the_dial() {
+    let own = Identity {
+        key: with_high_byte(CLIENT_PEM.key),
+        ..CLIENT_PEM
+    };
+    assert_eq!(refused(own), second_line(Credential::Key));
 }
 
 #[test]
@@ -1007,6 +1082,24 @@ fn a_received_chunk_holds_the_smaller_of_two_payloads() {
         });
         assert_eq!(limits, (Status::GOOD, payloads), "{mode:?} {buffer}");
     }
+}
+
+#[test]
+fn the_certificate_line_is_checked_before_the_key_line() {
+    let own = Identity {
+        certificate: with_high_byte(CLIENT_PEM.certificate),
+        key: with_high_byte(CLIENT_PEM.key),
+    };
+    assert_eq!(refused(own), second_line(Credential::Certificate));
+}
+
+#[test]
+fn the_key_line_is_checked_before_the_certificate() {
+    let own = Identity {
+        certificate: b"no certificate",
+        key: with_high_byte(CLIENT_PEM.key),
+    };
+    assert_eq!(refused(own), second_line(Credential::Key));
 }
 
 #[test]

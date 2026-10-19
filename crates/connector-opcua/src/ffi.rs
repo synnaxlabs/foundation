@@ -537,7 +537,7 @@ pub(crate) struct Security<'a> {
 }
 
 /// `shim_refusal` of `shim.c`: the kind of a refusal of the credentials and the number
-/// of the certificate or line of the trust that it names.
+/// of the certificate of the trust or the line that it names.
 #[repr(C)]
 pub(crate) struct Refusal {
     pub(crate) kind: c_int,
@@ -554,7 +554,9 @@ impl Refusal {
     pub(crate) const EMPTY: c_int = 6;
     pub(crate) const INVALID: c_int = 7;
     pub(crate) const TRAILING: c_int = 8;
-    pub(crate) const LINE: c_int = 9;
+    pub(crate) const TRUST_LINE: c_int = 9;
+    pub(crate) const CERTIFICATE_LINE: c_int = 10;
+    pub(crate) const KEY_LINE: c_int = 11;
 }
 
 /// `UA_MessageSecurityMode`, the modes of a channel that signs.
