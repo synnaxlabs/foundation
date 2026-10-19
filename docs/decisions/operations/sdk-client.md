@@ -94,11 +94,15 @@
   drafts of its writers, so `write_series` keeps its bound. The pool reserves about
   504 MiB of address space of the OS, with no commit charge, and gives back the pages
   of a size that it no longer uses when another size needs them, so it holds at most
-  8 MiB. When the OS refuses the reservation, `connect` gives `Memory`. A frame whose
-  memory the OS refuses later waits in `next`, which tries again until the OS gives
-  the memory or the session closes (`laptop.architect-2`, 2026-10-19T14:39:03Z,
-  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289, and
-  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270455282). A frame
+  8 MiB, and up to two partial pages more of each of its sizes. When the OS refuses
+  the reservation, `connect` gives `Memory`. A frame whose memory the OS refuses later
+  waits in `next`, which tries again until the OS gives the memory or the session
+  closes (`laptop.architect-2`, 2026-10-19T14:39:03Z,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270455282, and
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270555497;
+  `laptop.architect` for what it states of `program`,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270603246). A frame
   of more than 7,340,032 bytes, encoded, ends the reader with
   `Stream(Pool(TooLarge { .. }))`
   (`laptop.architect-2`, 2026-10-19T13:10:47Z,

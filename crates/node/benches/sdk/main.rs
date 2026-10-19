@@ -19,9 +19,10 @@
 //!   the task of `sdk/rust/src/read.rs` reads it.
 //! - `sdk read twice`: `sdk read` with a reader that names `plant.a` twice, against a
 //!   node of its own.
-//! - `sdk next held`: `sdk::Reader::next` alone, after an `sdk` write and a spin of
-//!   1 ms, when the client's thread holds the frame: the two legs and the work of the
-//!   task, with no wait for the node. Its rounds are of 500 calls.
+//! - `sdk next held`: `sdk::Reader::next`, and `series` and `lost` of each place,
+//!   after an `sdk` write and a spin of 1 ms, when the client's thread holds the
+//!   frame: the two legs and the work of the task, with no wait for the node. Its
+//!   rounds are of 500 calls.
 //!
 //! The channels are those of `Writer::open`, and each shard is one of `Client::start`
 //! in `sdk/rust/src/lib.rs`: `os`, with the caller's log. Before each call of the legs

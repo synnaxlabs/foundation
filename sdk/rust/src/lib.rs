@@ -632,7 +632,7 @@ async fn connect(
 
 /// The pool of the frames of the readers of a session. It gives back the pages of the
 /// sizes that it no longer uses when another size needs them, so it keeps at most
-/// [`READS`] in memory.
+/// [`READS`] in memory, and up to two partial pages more of each size.
 fn reads() -> Result<block::Pool, os::memory::Error> {
     let memory = os::memory::Memory::new(READS.reservation())?;
     Ok(block::Pool::new(READS, memory))
