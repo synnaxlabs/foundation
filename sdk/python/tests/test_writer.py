@@ -569,8 +569,8 @@ class WriterTest(unittest.TestCase):
         pids = {shell.pid, *children(self, shell.pid)}
         self.node.resume()
         self.doCleanups()
-        # A process of this group whose parent is not this process, as a runner that
-        # shares its group with the test can start at any time.
+        # Its sleep is a process of this group whose parent is not this process, as a
+        # runner that shares its group with the test can start at any time.
         other = subprocess.Popen(["sh", "-c", "sleep 30; :"])
         self.addCleanup(other.wait)
         self.addCleanup(other.kill)
