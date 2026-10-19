@@ -91,9 +91,10 @@ impl Reader {
         })
     }
 
-    /// The channels of the reader: the key, sample type, and name of each place.
-    /// Place `n` is `Config::channels[n]`, so a channel named twice is at each of its
-    /// places. Then the index, when `Config::channels` does not name it.
+    /// The channels of the reader: the key, sample type, name, and place of the index
+    /// of each place. Place `n` is `Config::channels[n]`, so a channel named twice is
+    /// at each of its places. Then the index, when `Config::channels` does not name it.
+    /// Each place names the first place of the index as its index.
     #[must_use]
     pub fn places(&self) -> &[Place] {
         &self.places

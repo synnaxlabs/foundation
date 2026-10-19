@@ -410,18 +410,15 @@ async fn body(receiver: &mut Receiver, mut rest: Body) -> Result<Vec<u8>, Error>
     Ok(body)
 }
 
-/// Sends the head and the run of `places` of a read or a write, whose index is place
-/// `index`.
+/// Sends the head and the run of `places` of a read or a write.
 async fn places(
     state: &RefCell<State>,
     sender: &mut Sender,
-    index: usize,
     places: &[Place],
 ) -> Result<(), Error> {
     let fit = "invariant: a read or a write holds fewer than u32::MAX places";
     let head = Places {
         count: u32::try_from(places.len()).expect(fit),
-        index: u32::try_from(index).expect(fit),
     };
     let mut block = alloc(state, Places::LEN)?;
     head.encode(&mut block);

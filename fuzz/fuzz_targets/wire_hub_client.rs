@@ -2,15 +2,17 @@
 //! panic, each but the two opens, `Reader::decode`, and `Opening::decode` refuses a
 //! message of another kind with its `Kind` error, `Reader::decode` refuses a first
 //! message of another kind with it, each message that decodes encodes to its bytes, a
-//! `Places` over `PLACES_MAX` gives `Error::Places`, each body ends at its length and
-//! nowhere else, each refusal of a body is the one that its rest gives, a read stream
-//! gives with its last place the places of its run, their key set, and the decoder of
-//! a session of their count and the mode, a refused message of a read stream leaves
-//! its decoder as it was, an `Opening` gives what a `Reader` gives, and each valid
-//! message made from the input reads back. A `Reader` holds an `Opening`, so the
-//! checks of the read stream are the checks of the run of both. `write::Replies` takes
-//! or refuses each reply as the order of the replies gives, and a refused reply changes
-//! no count.
+//! `Places` of 0 or over `PLACES_MAX` gives `Error::Places`, each body ends at its
+//! length and nowhere else, each refusal of a body is the one that its rest gives, a
+//! read stream gives with its last place the places of its run, their key set, and the
+//! decoder of a session of their count and the mode, a read of more than one index
+//! gives `Error::ManyIndexes` after `Error::Repeated` and ends its decoder, each other
+//! refused message of a read stream leaves its decoder as it was, an `Opening` gives
+//! what a `Reader` gives other than `Error::ManyIndexes`, and each valid message made
+//! from the input reads back. A `Reader` holds an `Opening`,
+//! so the checks of the read stream are the checks of the run of both.
+//! `write::Replies` takes or refuses each reply as the order of the replies gives, and
+//! a refused reply changes no count.
 //!
 //! Input: the messages of one stream (`fuzz::messages`). Each decoder reads each
 //! message, an open among them; the body of the first message, when it is a request, a
@@ -166,7 +168,8 @@ fn unkinded(message: &[u8]) {
 }
 
 /// Drives an `Opening` and a `Reader` on `bytes`: each message gives what it gives
-/// the reader, and the start gives the reader's places and key set.
+/// the reader, and the start gives the reader's places and key set. Only the reader
+/// refuses places of more than one index, after the start.
 fn open(bytes: &[u8]) {
     let mut opening = Opening::default();
     let mut reader = Reader::new(Mode::Latest);
@@ -184,6 +187,11 @@ fn open(bytes: &[u8]) {
                 );
                 return;
             }
+            (Ok(Some(opened)), Err(read @ Error::ManyIndexes { .. })) => {
+                assert!(opened.set.groups().len() > 1, "{read:?} of one index");
+                assert_eq!(many(&opened.places), Some(read), "{message:?}");
+                return;
+            }
             (Err(opened), Err(read)) => assert_eq!(opened, read, "{message:?}"),
             (opened, read) => {
                 panic!("{opened:?} is not what the reader gave: {read:?}")
@@ -194,12 +202,13 @@ fn open(bytes: &[u8]) {
 }
 
 /// Drives a reader of `mode` on `bytes` until it gives the last place, then ends the
-/// stream. A refused message leaves the reader as it was, and a refused first message
+/// stream. `Error::ManyIndexes` ends the reader, each other refused message leaves it
+/// as it was, and a refused first message
 /// gives the error of its places. Each message that it takes decodes alone as places or
-/// as a run that encodes to it, a run holds no more places than remain and a stamp at
-/// the index place, and only the message with the last place gives the start: the
-/// places of the run, their key set in place order, and the decoder of a session of the
-/// count and the mode. An end before the last place gives `Error::Finished`.
+/// as a run that encodes to it, a run holds no more places than remain, and only the
+/// message with the last place gives the start: the places of the run, their key set in
+/// place order with the index of each place, and the decoder of a session of the count
+/// and the mode. An end before the last place gives `Error::Finished`.
 fn drive(bytes: &[u8], mode: Mode) {
     let mut reader = Reader::new(mode);
     let mut run: Option<(Places, u32, Vec<Place>)> = None;
@@ -207,6 +216,7 @@ fn drive(bytes: &[u8], mode: Mode) {
         let start = match reader.decode(Some(message)) {
             Ok(start) => start,
             Err(error) => {
+                let done = matches!(error, Error::ManyIndexes { .. });
                 if run.is_none() {
                     let places = Places::decode(message).err();
                     assert_eq!(
@@ -215,9 +225,11 @@ fn drive(bytes: &[u8], mode: Mode) {
                         "not the error of the places"
                     );
                 }
-                if let Some(repeated) = refusal(run.as_ref(), message) {
-                    let expected = repeated.map(|key| Error::Repeated { key });
+                if let Some(expected) = refusal(run.as_ref(), message) {
                     assert_eq!(Some(error), expected, "a valid message refused");
+                }
+                if done {
+                    return;
                 }
                 continue;
             }
@@ -233,9 +245,6 @@ fn drive(bytes: &[u8], mode: Mode) {
         };
         let places = place::decode(message).expect("the run decodes alone");
         assert_eq!(encode_run(&places), message, "the run changed");
-        if let Some(index) = index_place(*reply, *remain, &places) {
-            assert_eq!(index.data_type, Type::Scalar(Scalar::Stamp));
-        }
         *remain -= u32::try_from(places.len()).expect("the run fits a u32");
         all.extend(places);
         let Some(start) = start else {
@@ -243,14 +252,21 @@ fn drive(bytes: &[u8], mode: Mode) {
             continue;
         };
         assert_eq!(*remain, 0, "a start before the last place");
+        assert_eq!(many(all), None, "a start of a read of more than one index");
         assert_eq!(start.places, *all, "the places differ");
         let keys = start.set.entries().iter().map(|entry| entry.key);
         assert!(
             keys.eq(all.iter().map(|place| place.key)),
             "the set differs"
         );
-        let index = usize::try_from(reply.index).expect("a u32 fits a usize");
-        assert_eq!(start.set.groups(), [index], "the index differs");
+        let groups: Vec<_> = (all.iter().enumerate())
+            .filter(|(at, place)| place.index == *at)
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(start.set.groups(), groups, "the groups differ");
+        for (at, place) in all.iter().enumerate() {
+            assert_eq!(start.set.index(at), place.index, "the index differs");
+        }
         let session = hub::Reader::new(&hub::Open {
             mode: match mode {
                 Mode::Latest => hub::Mode::Latest,
@@ -270,35 +286,73 @@ fn drive(bytes: &[u8], mode: Mode) {
     assert_eq!(reader.decode(None).err(), Some(Error::Finished));
 }
 
-/// The index place in `places`, a message of the run after `remain` places remained.
-fn index_place(reply: Places, remain: u32, places: &[Place]) -> Option<&Place> {
-    let at = usize::try_from(reply.index.wrapping_sub(reply.count - remain)).ok();
-    at.and_then(|at| places.get(at))
+/// The error of the first of `places` whose index is not a place whose index is
+/// itself, or that is such an index and not a stamp.
+fn unindexed(places: &[Place]) -> Option<Error> {
+    let fit = "the places fit a u32";
+    places.iter().enumerate().find_map(|(at, place)| {
+        let index = places
+            .get(place.index)
+            .filter(|own| own.index == place.index);
+        let at_place = u32::try_from(at).expect(fit);
+        match index {
+            None => Some(Error::Index {
+                place: at_place,
+                index: u32::try_from(place.index).expect(fit),
+            }),
+            Some(own)
+                if at == place.index
+                    && own.data_type != Type::Scalar(Scalar::Stamp) =>
+            {
+                Some(Error::Unstamped {
+                    place: at_place,
+                    sample: own.data_type,
+                })
+            }
+            Some(_) => None,
+        }
+    })
 }
 
-/// `None` when `message` is not a valid message of `run`. Else `Some` of the least key
-/// that its places and those before them name twice when it holds the last place, or
-/// `Some(None)`.
+/// `Error::ManyIndexes` for the first of `places` whose index is not that of place 0,
+/// as a read has one index.
+fn many(places: &[Place]) -> Option<Error> {
+    let fit = "the places fit a u32";
+    let lead = places.first()?.index;
+    let (at, place) =
+        (places.iter().enumerate()).find(|(_, place)| place.index != lead)?;
+    Some(Error::ManyIndexes {
+        place: u32::try_from(at).expect(fit),
+        index: u32::try_from(place.index).expect(fit),
+    })
+}
+
+/// `None` when `message` is not a valid message of `run`. Else, when it holds the last
+/// place, `Some` of the error of the indexes of its places and those before them, of
+/// the least key that they name twice, or of a second index, and else `Some(None)`.
 fn refusal(
     run: Option<&(Places, u32, Vec<Place>)>,
     message: &[u8],
-) -> Option<Option<channel::Key>> {
-    let (reply, remain, all) = run?;
+) -> Option<Option<Error>> {
+    let (_, remain, all) = run?;
     let places = place::decode(message).ok()?;
-    let stamp = Type::Scalar(Scalar::Stamp);
     let remain_len = usize::try_from(*remain).ok()?;
-    if places.len() > remain_len
-        || index_place(*reply, *remain, &places).is_some_and(|at| at.data_type != stamp)
-    {
+    if places.len() > remain_len {
         return None;
     }
     if places.len() < remain_len {
         return Some(None);
     }
-    let mut keys: Vec<_> = all.iter().chain(&places).map(|place| place.key).collect();
+    let all: Vec<_> = all.iter().chain(&places).cloned().collect();
+    if let Some(error) = unindexed(&all) {
+        return Some(Some(error));
+    }
+    let mut keys: Vec<_> = all.iter().map(|place| place.key).collect();
     keys.sort_unstable();
-    let repeated = keys.windows(2).find(|pair| pair[0] == pair[1]);
-    Some(repeated.map(|pair| pair[0]))
+    if let Some(pair) = keys.windows(2).find(|pair| pair[0] == pair[1]) {
+        return Some(Some(Error::Repeated { key: pair[0] }));
+    }
+    Some(many(&all))
 }
 
 /// Checks each decoder on `message`, and gives its body when it is a request, a
@@ -331,14 +385,11 @@ fn fixed(message: &[u8]) -> Option<(Body, u64)> {
         )
     });
     decode(message, 6, Places::decode, places, |error| {
-        matches!(
-            error,
-            Error::Length { .. } | Error::Places { .. } | Error::Index { .. }
-        )
+        matches!(error, Error::Length { .. } | Error::Places { .. })
     });
-    if let [6, a, b, c, d, _, _, _, _] = *message {
+    if let [6, a, b, c, d] = *message {
         let count = u32::from_le_bytes([a, b, c, d]);
-        if count > PLACES_MAX {
+        if !(1..=PLACES_MAX).contains(&count) {
             let over = Err(Error::Places {
                 count,
                 cap: PLACES_MAX,
@@ -538,9 +589,9 @@ fn write_read(input: &mut Unstructured) -> arbitrary::Result<()> {
         "the read changed"
     );
 
-    let count = input.int_in_range(1..=PLACES_MAX)?;
-    let index = input.int_in_range(0..=count - 1)?;
-    let reply = Places { count, index };
+    let reply = Places {
+        count: input.int_in_range(1..=PLACES_MAX)?,
+    };
     let mut out = [0; Places::LEN];
     reply.encode(&mut out);
     assert_eq!(Places::decode(&out), Ok(reply), "the places changed");
@@ -565,6 +616,8 @@ fn write_read(input: &mut Unstructured) -> arbitrary::Result<()> {
             key: channel::Key::from_u128(input.arbitrary()?),
             data_type,
             name,
+            index: usize::try_from(input.arbitrary::<u32>()?)
+                .expect("a u32 fits a usize"),
         }];
         assert_eq!(
             place::decode(&encode_run(&run)),

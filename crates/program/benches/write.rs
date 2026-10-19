@@ -101,6 +101,7 @@ impl Shape {
             key: channel::Key::from_u128(key),
             data_type,
             name: format!("c{key}").parse().expect("a valid name"),
+            index: 0,
         };
         let series = u128::try_from(self.series).expect("few");
         std::iter::once(place(1, Type::Scalar(Scalar::Stamp)))
@@ -200,7 +201,7 @@ async fn answer(session: transport::Session, node: sim::node::Node) {
             Write::decode(first).expect("a write").body()
         })
         .await;
-        start(&mut write, &places, 0, places.len()).await;
+        start(&mut write, &places, places.len()).await;
         let mut seq = 0;
         for frame in 1..=(WARMUP + ROUNDS) * FRAMES {
             let mut got = 0;
