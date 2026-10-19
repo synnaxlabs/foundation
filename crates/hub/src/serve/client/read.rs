@@ -103,20 +103,21 @@ where
     F: Future<Output = Result<(), Error>>,
 {
     let refused = |error| Error::Reader(Box::new(error));
-    // `index` is set once the place of the index is known.
-    let place = |&(name, channel): &(&Name, &Channel)| Place {
-        key: channel.key(),
-        data_type: channel.sample(),
-        name: name.clone(),
-        index: 0,
+    let places = |found: &[(&Name, &Channel)], index| {
+        let place = |&(name, channel): &(&Name, &Channel)| Place {
+            key: channel.key(),
+            data_type: channel.sample(),
+            name: name.clone(),
+            index,
+        };
+        found.iter().map(place).collect()
     };
-    let places = |found: &[(&Name, &Channel)]| found.iter().map(place).collect();
     let found = unless(program, reader::find(state, || open.select(), places)).await;
     drop(open);
     let Some(found) = found? else {
         return Ok(None);
     };
-    let (mut places, home) = found.map_err(refused)?;
+    let (places, home) = found.map_err(refused)?;
     let count = places.items.len();
     if count > usize::try_from(PLACES_MAX).expect("invariant: a usize holds a u32") {
         return Err(Error::Places { count });
@@ -128,9 +129,6 @@ where
     let channels = here.carry(&mut state.borrow_mut());
     let layout = Layout::new(channels.slots.clone(), channels.index);
     let (reader, live) = Reader::here(state, channels, mode);
-    for place in &mut places.items {
-        place.index = places.index;
-    }
     Ok(Some((reader, live, places.items, layout)))
 }
 

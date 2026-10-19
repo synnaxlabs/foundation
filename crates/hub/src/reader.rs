@@ -527,7 +527,7 @@ impl Reader {
         );
         let named = name.map(|name| ::home::reader::named::Key { subject, name });
         let mut listed = None;
-        let items = |found: &[(&Name, &Channel)]| {
+        let items = |found: &[(&Name, &Channel)], _| {
             listed = Some(Names::new(found));
             let item =
                 |&(_, channel): &(&Name, &Channel)| (channel.key(), channel.sample());
@@ -841,14 +841,14 @@ pub(crate) enum Home {
 
 /// What the selector that `select` gives matches once the home of its index is known,
 /// with the items that `items` makes, one for each channel in the order of the channels
-/// it gets, and that home. It applies the spec in use before each match. A change of a
+/// it gets, from those channels and the place of their index, and that home. It applies the spec in use before each match. A change of a
 /// channel that it matched ends a wait for the home at once, and it matches again. It
 /// calls `select` before and after each wait for the home, and keeps no selector or
 /// item across a wait. It calls `items` once, after the last wait.
 pub(crate) async fn find<S: std::borrow::Borrow<Selector>, T>(
     state: &Rc<RefCell<State>>,
     mut select: impl FnMut() -> S,
-    mut items: impl FnMut(&[(&Name, &Channel)]) -> Vec<T>,
+    mut items: impl FnMut(&[(&Name, &Channel)], usize) -> Vec<T>,
 ) -> Result<(Matched<T>, Home), Error> {
     let (index, homed) = loop {
         let (index, keys) = {
@@ -911,7 +911,7 @@ fn defined<'a>(
 fn matched<T>(
     state: &State,
     select: &Selector,
-    mut items: impl FnMut(&[(&Name, &Channel)]) -> Vec<T>,
+    mut items: impl FnMut(&[(&Name, &Channel)], usize) -> Vec<T>,
 ) -> Result<(Box<[channel::Key]>, Matched<T>), Error> {
     let mut found = defined(state, select)?;
     let index = found[0].1.index();
@@ -924,7 +924,7 @@ fn matched<T>(
         found.len() - 1
     };
     let keys = found.iter().map(|(_, channel)| channel.key()).collect();
-    let items = items(&found);
+    let items = items(&found, at);
     Ok((keys, Matched { items, index: at }))
 }
 
