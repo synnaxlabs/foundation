@@ -47,9 +47,9 @@
   device time. `between` gives both edges and `before` gives a high edge. An offset is
   computed in `i128`. A low edge under the range of a `Span` is left out, and a high
   edge under it becomes `i64::MIN` ns, so a reading never claims more than it knows
-  and no input panics (read of the ruling, with the question to `laptop.architect-2`
-  open: https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6269891659,
-  item 2). A `before` older than the newest reading is checked against the earliest
+  and no input panics (`laptop.architect-2`, 2026-10-19T14:55:55Z:
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6270224530). A
+  property test over any `Monotonic` and mesh time pins it. A `before` older than the newest reading is checked against the earliest
   mesh time that the fit gives at its device time: one under it restarts the fit, and
   else it adds nothing. A refusal as `Backwards` or `Disjoint` of a `between`, or as
   `Disjoint` of a new `before`, restarts the fit from that reading. `sample` takes the

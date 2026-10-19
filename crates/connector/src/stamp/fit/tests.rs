@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use types::time::{Interval, Monotonic, Span, Stamp};
 
-use super::{Fit, Fitted};
+use super::{Fit, Fitted, high, low, offset};
 
 /// 2^63: the device time at which an offset reaches `i64::MIN` ns for mesh time zero.
 const HALF: u64 = 1 << 63;
@@ -285,6 +285,58 @@ proptest! {
                     );
                 }
             }
+        }
+    }
+
+    /// Any reading of any device time: no reading panics, each edge kept is on its
+    /// side of the true offset, a restart holds only its reading, and a fit of one true
+    /// `between` reading holds the true mesh time.
+    #[test]
+    fn any_reading_keeps_its_edges_on_their_sides(
+        device in any::<u64>(),
+        mut times in prop::array::uniform3(any::<i64>()),
+        readings in prop::collection::vec(
+            (any::<u64>(), any::<i64>(), any::<i64>(), any::<bool>()),
+            0..8,
+        ),
+    ) {
+        times.sort_unstable();
+        let [sent, truth, answered] = times.map(at);
+        let device = Monotonic(device);
+        let truth_offset = offset(device, truth);
+        if let Some(low) = low(device, sent) {
+            prop_assert!(i128::from(low.nanos()) <= truth_offset);
+        }
+        prop_assert!(i128::from(high(device, answered).nanos()) >= truth_offset);
+
+        let last = [
+            (device.0, answered.nanos(), 0, false),
+            (device.0, answered.nanos(), sent.nanos(), true),
+        ];
+        let read = |fit: &mut Fit, (device, a, b, between)| {
+            if between {
+                fit.between(Monotonic(device), at(a), at(b))
+            } else {
+                fit.before(Monotonic(device), at(a))
+            }
+        };
+        let mut fit = Fit::default();
+        for reading in readings.into_iter().chain(last) {
+            if read(&mut fit, reading) == Fitted::Restarted {
+                let mut alone = Fit::default();
+                prop_assert_eq!(read(&mut alone, reading), Fitted::Kept);
+                let device = Monotonic(reading.0);
+                prop_assert_eq!(fit.mesh(device), alone.mesh(device));
+            }
+        }
+
+        let mut fit = Fit::default();
+        prop_assert_eq!(fit.between(device, answered, sent), Fitted::Kept);
+        if let Some(mesh) = fit.mesh(device) {
+            prop_assert!(
+                mesh.earliest <= truth && truth <= mesh.latest,
+                "{mesh:?} does not hold {truth:?}"
+            );
         }
     }
 }
