@@ -58,6 +58,7 @@ impl Value {
     /// # Safety
     ///
     /// `value` is a live `UA_DataValue`.
+    #[inline]
     pub(crate) unsafe fn of(value: *const ffi::DataValue) -> Result<Self, Fault> {
         let mut scalar = ffi::Scalar { uint64: 0 };
         let mut kind = 0;
