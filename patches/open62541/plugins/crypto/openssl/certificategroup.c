@@ -475,14 +475,14 @@ openSSLAmbiguousLine(const UA_ByteString trust) {
         size_t text = 0;
         while(text < kept && at[text] != '\0')
             text++;
-        UA_Boolean begins = !inside && kept >= 16 && text == kept &&
+        UA_Boolean begins = kept >= 16 && text == kept &&
                             memcmp(at, "-----BEGIN ", 11) == 0 &&
                             memcmp(at + kept - 5, "-----", 5) == 0;
         if((inside || begins) && high)
             return line;
         if(begins)
             inside = true;
-        else if(inside && kept >= 10 && memcmp(at, "-----END ", 9) == 0)
+        else if(kept >= 10 && memcmp(at, "-----END ", 9) == 0)
             inside = false;
         line += at[length - 1] == '\n';
         at += length;
@@ -500,10 +500,11 @@ openSSLAmbiguousLine(const UA_ByteString trust) {
  * is signed, and starts a block at a piece from `-----BEGIN ` to `-----`. It skips
  * other text and a block of another label, but fails on a block of any label that it
  * cannot read, such as an empty one, damaged base64, or an `END` line that does not
- * name its label, which counts as one more. A piece of a block that ends in 0x80 to
- * 0xFF fails before aws-lc reads, so each target reads alike. A block with any byte
- * after its certificate fails, also trust settings, which the verify of the group
- * does not apply. Clears the error queue of the thread.
+ * name its label, which counts as one more. A piece of a block with a byte of 0x80 to
+ * 0xFF after its last byte of 0x21 to 0x7F fails before aws-lc reads, so each target
+ * reads alike. A block with any byte after its certificate fails, also trust
+ * settings, which the verify of the group does not apply. Clears the error queue of
+ * the thread.
  */
 static UA_TrustLoad
 openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
@@ -530,7 +531,6 @@ openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
         ERR_clear_error();
         return UA_TRUSTLOAD_NOMEMORY;
     }
-    *number = 0;
     load = UA_TRUSTLOAD_GOOD;
     unsigned char *der;
     long length;

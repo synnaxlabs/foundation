@@ -400,6 +400,12 @@ fn a_begin_line_with_a_nul_before_its_dashes_is_text() {
 }
 
 #[test]
+fn a_begin_line_with_no_label_and_a_high_byte_ends_the_connect() {
+    let trust = [b"-----BEGIN -----\xA0\n", TRUST].concat();
+    assert_eq!(trusting(trust), Err(line(1)));
+}
+
+#[test]
 fn a_trust_that_does_not_parse_ends_the_connect() {
     assert_eq!(
         trusting(b"no certificate"),
@@ -562,7 +568,8 @@ fn a_refusal_names_the_part_that_fails() {
         ),
         (
             Refusal::Line { number: 4 },
-            "line 4 of the trust, in a PEM block, ends in a byte of 0x80 to 0xFF",
+            "line 4 of the trust, in a PEM block, holds a byte of 0x80 to 0xFF \
+             after its last byte of 0x21 to 0x7F",
         ),
         (
             Refusal::Uri,

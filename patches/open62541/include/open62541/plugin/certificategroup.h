@@ -86,7 +86,8 @@ typedef enum {
     UA_TRUSTLOAD_EMPTY,    /* No certificate in DER or PEM. */
     UA_TRUSTLOAD_INVALID,  /* The certificate, or a damaged PEM block, fails. */
     UA_TRUSTLOAD_TRAILING, /* Bytes after the certificate in its PEM block. */
-    UA_TRUSTLOAD_LINE,     /* A line of a PEM block ends in a byte of 0x80 to 0xFF. */
+    UA_TRUSTLOAD_LINE,     /* A line of a PEM block holds a byte of 0x80 to 0xFF after
+                            * its last byte of 0x21 to 0x7F. */
     UA_TRUSTLOAD_NOMEMORY
 } UA_TrustLoad;
 
