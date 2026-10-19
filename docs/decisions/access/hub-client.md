@@ -473,7 +473,9 @@
   group of a frame of `Time::Node` gets its own stamp. A frame of `k` groups takes `k`
   outcome blocks before its drafts, and a pool with fewer free blocks stops the stream
   with `BUSY`. Each group takes the block of its next `Stored` on its own, so a stream
-  holds at most two such blocks for each group, and none while it idles. A channel of a
+  holds at most two such blocks for each group, and none while it idles. The stream
+  has one commit due at a time: it covers each group that took a frame since its call,
+  and its end sends the `Stored` of each, in the order the groups took. A channel of a
   group removed after its writer opens sends `Ended { group, Removed }`, and a `Disk`
   error or a failed commit of a group sends `Ended { group, Failed }`, in the block of
   its next or due `Stored`, also for a write of one group, in place of the reset with
@@ -493,5 +495,6 @@
   choices (9) and (d) went to `laptop.monitor`. The test of a later open that fails
   after an earlier one moves to #3104, whose first forward can fail after a local open
   (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269834724). Lost:
-  one home writer for all groups, which cannot end one group, and one block of `Stored`
-  for all groups, which can pass the largest block of the pool.
+  one home writer for all groups, which cannot end one group, one block of `Stored`
+  for all groups, which can pass the largest block of the pool, and one due commit for
+  each group, which polls each group at each message.
