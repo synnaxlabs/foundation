@@ -26,6 +26,20 @@ pub enum Role {
     Leader,
 }
 
+/// How `mesh` takes a message from another node. `raft` never checks a sender.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Admission {
+    /// A reply, or a request from a voter of the newest configuration in the log.
+    Admitted,
+    /// A `PreVote` or a `Vote` from a node that a committed configuration removed:
+    /// the configuration before the entries or a committed `Voters` entry held it,
+    /// the last committed configuration lacks it, and its last index is at or below
+    /// the commit.
+    Removed,
+    /// Each other request from a node that is not a voter.
+    NotVoter,
+}
+
 // Entries in one `Append`.
 const BATCH: usize = 64;
 
@@ -258,15 +272,32 @@ impl Raft {
         &self.voters
     }
 
-    /// Whether a committed configuration removed `key`: the configuration before the
-    /// entries or a committed `Voters` entry held it, and the last committed
-    /// configuration lacks it. An entry past the commit counts for neither, so it
-    /// can hold for a voter of the configuration in force, which an uncommitted
-    /// entry added back. After `Raft::new`, the commit is `Start.applied` until a
-    /// leader gives a higher one.
+    /// How `mesh` takes `message`, a message from another node. After `Raft::new`,
+    /// the commit is `Start.applied` until a leader gives a higher one.
     #[must_use]
-    pub fn removed(&self, key: node::Key) -> bool {
-        self.log.removed(key)
+    pub fn admission(&self, message: &Message) -> Admission {
+        // A sender that holds a newer committed configuration names a later last
+        // index. A leader's message names only entries that this node holds.
+        let last = match &message.body {
+            Body::PreVote { last } | Body::Vote { last } => Some(last.index),
+            Body::Heartbeat { .. } | Body::Append { .. } => None,
+            Body::PreVoteReply { .. }
+            | Body::VoteReply { .. }
+            | Body::HeartbeatReply
+            | Body::AppendReply { .. }
+            | Body::AppendReject { .. } => return Admission::Admitted,
+        };
+        if self.voters.contains(message.from) {
+            return Admission::Admitted;
+        }
+        match last {
+            Some(index)
+                if index <= self.log.committed() && self.log.removed(message.from) =>
+            {
+                Admission::Removed
+            }
+            Some(_) | None => Admission::NotVoter,
+        }
     }
 
     /// The state that must be on disk before a message of this term leaves.
@@ -5098,6 +5129,130 @@ mod tests {
             raft.step(message(3, 2, Body::HeartbeatReply)).unwrap();
             tick_times(&mut raft, 10);
             assert_eq!(raft.role(), Role::Leader);
+        }
+    }
+
+    mod admission {
+        use super::*;
+
+        fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
+            Voters {
+                incoming: incoming.iter().copied().map(key).collect(),
+                outgoing: outgoing.iter().copied().map(key).collect(),
+            }
+        }
+
+        // Node 1 holds the change that removes node 3 from {1, 2, 3}, and an empty
+        // entry after it, all committed.
+        fn removed_3() -> Raft {
+            let joint = voters(&[1, 2], &[1, 2, 3]);
+            let entries = vec![
+                Entry {
+                    at: position(1, 1),
+                    data: change(1, joint),
+                },
+                Entry {
+                    at: position(1, 2),
+                    data: change(1, voters(&[1, 2], &[])),
+                },
+                Entry {
+                    at: position(1, 3),
+                    data: Data::Empty,
+                },
+            ];
+            let start = Start {
+                entries,
+                applied: 3,
+                ..start(&[1, 2, 3], at_term(1))
+            };
+            Raft::new(CONFIG, start).unwrap()
+        }
+
+        fn pre_vote(index: u64) -> Body {
+            Body::PreVote {
+                last: position(1, index),
+            }
+        }
+
+        fn vote(index: u64) -> Body {
+            Body::Vote {
+                last: position(1, index),
+            }
+        }
+
+        #[test]
+        fn removed_answers_a_vote_of_a_removed_node_at_or_below_the_commit() {
+            let raft = removed_3();
+            let admission = |body| raft.admission(&message(3, 2, body));
+            assert_eq!(admission(pre_vote(3)), Admission::Removed);
+            assert_eq!(admission(vote(3)), Admission::Removed);
+            assert_eq!(admission(pre_vote(2)), Admission::Removed);
+        }
+
+        #[test]
+        fn a_vote_past_the_commit_is_not_a_voter() {
+            let raft = removed_3();
+            let admission = |body| raft.admission(&message(3, 2, body));
+            assert_eq!(admission(pre_vote(4)), Admission::NotVoter);
+            assert_eq!(admission(vote(4)), Admission::NotVoter);
+        }
+
+        #[test]
+        fn a_leader_message_of_a_removed_node_is_not_a_voter() {
+            let raft = removed_3();
+            let admission = |body| raft.admission(&message(3, 2, body));
+            let empty = append(position(1, 3), Vec::new(), 3);
+            assert_eq!(admission(empty), Admission::NotVoter);
+            let heartbeat = Body::Heartbeat { commit: 3 };
+            assert_eq!(admission(heartbeat), Admission::NotVoter);
+        }
+
+        #[test]
+        fn a_vote_of_a_node_that_no_configuration_held_is_not_a_voter() {
+            let raft = removed_3();
+            let stranger = raft.admission(&message(9, 2, pre_vote(3)));
+            assert_eq!(stranger, Admission::NotVoter);
+        }
+
+        #[test]
+        fn a_reply_from_a_node_that_is_not_a_voter_is_admitted() {
+            let raft = removed_3();
+            let reply = Body::VoteReply { answer: GRANTED };
+            assert_eq!(raft.admission(&message(3, 2, reply)), Admission::Admitted);
+            let reply = Body::AppendReply { last: 3 };
+            assert_eq!(raft.admission(&message(9, 2, reply)), Admission::Admitted);
+        }
+
+        // Node 3 is removed as of the commit, and entries past it add node 3 back.
+        #[test]
+        fn a_voter_that_an_uncommitted_entry_added_back_is_admitted() {
+            let sets = [
+                voters(&[1, 2], &[1, 2, 3]),
+                voters(&[1, 2], &[]),
+                voters(&[1, 2, 3], &[1, 2]),
+                voters(&[1, 2, 3], &[]),
+            ];
+            let entries = (1..).zip(sets).map(|(index, voters)| Entry {
+                at: position(1, index),
+                data: change(1, voters),
+            });
+            let start = Start {
+                entries: entries.collect(),
+                applied: 2,
+                ..start(&[1, 2, 3], at_term(1))
+            };
+            let raft = Raft::new(CONFIG, start).unwrap();
+            let vote = raft.admission(&message(3, 2, vote(2)));
+            assert_eq!(vote, Admission::Admitted);
+        }
+
+        #[test]
+        fn a_request_of_a_voter_is_admitted() {
+            let raft = removed_3();
+            let admission = |body| raft.admission(&message(2, 2, body));
+            assert_eq!(admission(pre_vote(3)), Admission::Admitted);
+            let heartbeat = Body::Heartbeat { commit: 3 };
+            assert_eq!(admission(heartbeat), Admission::Admitted);
         }
     }
 

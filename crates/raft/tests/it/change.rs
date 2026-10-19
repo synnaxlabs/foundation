@@ -5,8 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use raft::{
-    Answer, Body, Change, Config, Data, Entry, Error, Grant, Hard, Link, Message,
-    Position, Proof, Raft, Role, Start, Term, Voters,
+    Admission, Answer, Body, Change, Config, Data, Entry, Error, Grant, Hard, Link,
+    Message, Position, Proof, Raft, Role, Start, Term, Voters,
 };
 use types::node;
 
@@ -456,11 +456,36 @@ fn a_removed_leader_that_restarts_before_the_leave_commits_finishes_the_change()
     assert_eq!(b.voters(), &new);
 }
 
-// Node 2 leads {1, 2, 3} and removes node 3. Once the leave commits, each node holds
-// node 3 as removed. A node that starts again from its disk holds the leave but no
-// commit, so it holds node 3 as removed only once a leader gives it the commit index.
+// How `raft` takes a `Vote` from node `id` whose last index is `commit`, the commit
+// of `raft`: the last index that can get `removed`.
+fn admission(raft: &Raft, id: u8, commit: u64) -> Admission {
+    let vote = Message {
+        from: key(id),
+        to: raft.key(),
+        term: raft.term(),
+        body: Body::Vote {
+            last: Position {
+                term: raft.term(),
+                index: commit,
+            },
+        },
+        proof: None,
+        chain: Vec::new(),
+    };
+    raft.admission(&vote)
+}
+
+// The index of the last entry that `node` committed in `committed`.
+fn last(committed: &BTreeMap<node::Key, Vec<Entry>>, node: u8) -> u64 {
+    committed[&key(node)].last().unwrap().at.index
+}
+
+// Node 2 leads {1, 2, 3} and removes node 3. Once the leave commits, each node answers
+// node 3 `removed`. A node that starts again from its disk holds the leave but no
+// commit, so it answers `removed` only once a leader gives it the commit index.
 #[test]
-fn removed_holds_once_a_leader_gives_the_commit_of_the_leave() {
+fn removed_answers_once_a_leader_gives_the_commit_of_the_leave() {
+    use Admission::{Admitted, NotVoter, Removed};
     let mut nodes: BTreeMap<node::Key, Raft> =
         (1..=3).map(|id| (key(id), node(id, &[1, 2, 3]))).collect();
     nodes.get_mut(&key(2)).unwrap().campaign();
@@ -472,9 +497,12 @@ fn removed_holds_once_a_leader_gives_the_commit_of_the_leave() {
         .propose_voters(keyed(&[1, 2]))
         .unwrap();
     let (more, _) = run(&mut nodes);
-    let removed = |raft: &Raft| [1, 3, 9].map(|id| raft.removed(key(id)));
+    let commit = last(&more, 2);
+    let admitted =
+        |raft: &Raft, commit| [1, 3, 9].map(|id| admission(raft, id, commit));
     for id in 1..=3 {
-        assert_eq!(removed(&nodes[&key(id)]), [false, true, false], "node {id}");
+        let got = admitted(&nodes[&key(id)], commit);
+        assert_eq!(got, [Admitted, Removed, NotVoter], "node {id}");
     }
 
     let mut disk = committed.remove(&key(2)).unwrap();
@@ -499,22 +527,26 @@ fn removed_holds_once_a_leader_gives_the_commit_of_the_leave() {
         restart,
     )
     .unwrap();
-    assert_eq!(removed(&b), [false, false, false]);
+    assert_eq!(admitted(&b, 0), [Admitted, NotVoter, NotVoter]);
     nodes.insert(key(2), b);
     nodes.get_mut(&key(1)).unwrap().campaign();
-    run(&mut nodes);
+    let (more, _) = run(&mut nodes);
     assert_eq!(nodes[&key(1)].role(), Role::Leader);
-    assert_eq!(removed(&nodes[&key(2)]), [false, true, false]);
+    let commit = last(&more, 2);
+    assert_eq!(
+        admitted(&nodes[&key(2)], commit),
+        [Admitted, Removed, NotVoter]
+    );
 }
 
 // Node 2 leads {1, 2, 3}, adds node 4, removes it, then adds it back. No
-// `Start.voters` holds node 4, so only the committed join holds it. From node 2's
-// disk, a start at a commit below the join holds nothing about node 4, a start at the
-// join holds it as a voter, a start at the second leave holds it as removed while the
-// entries past the commit make it a voter in force, and a start at the last leave
-// holds it as a voter again.
+// `Start.voters` holds node 4, so only the committed join holds it. A start from
+// node 2's disk up to a commit below the join holds nothing about node 4, a start up
+// to the join or to the last leave admits it as a voter, and a start up to the second
+// leave answers it `removed`.
 #[test]
-fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
+fn removed_answers_a_node_that_only_a_committed_entry_held() {
+    use Admission::{Admitted, NotVoter, Removed};
     let mut nodes: BTreeMap<node::Key, Raft> =
         (1..=4).map(|id| (key(id), node(id, &[1, 2, 3]))).collect();
     nodes.get_mut(&key(2)).unwrap().campaign();
@@ -530,19 +562,23 @@ fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
             .get_mut(&key(2))
             .unwrap()
             .extend(more[&key(2)].iter().cloned());
+        last(&more, 2)
     };
-    propose(&mut nodes, &[1, 2, 3, 4]);
-    let removed = |raft: &Raft| [1, 4].map(|id| raft.removed(key(id)));
+    let admitted = |raft: &Raft, commit| [1, 4].map(|id| admission(raft, id, commit));
+    let commit = propose(&mut nodes, &[1, 2, 3, 4]);
     for id in 1..=4 {
-        assert_eq!(removed(&nodes[&key(id)]), [false, false], "node {id}");
+        let got = admitted(&nodes[&key(id)], commit);
+        assert_eq!(got, [Admitted, Admitted], "node {id}");
     }
-    propose(&mut nodes, &[1, 2, 3]);
+    let commit = propose(&mut nodes, &[1, 2, 3]);
     for id in 1..=4 {
-        assert_eq!(removed(&nodes[&key(id)]), [false, true], "node {id}");
+        let got = admitted(&nodes[&key(id)], commit);
+        assert_eq!(got, [Admitted, Removed], "node {id}");
     }
-    propose(&mut nodes, &[1, 2, 3, 4]);
+    let commit = propose(&mut nodes, &[1, 2, 3, 4]);
     for id in 1..=4 {
-        assert_eq!(removed(&nodes[&key(id)]), [false, false], "node {id}");
+        let got = admitted(&nodes[&key(id)], commit);
+        assert_eq!(got, [Admitted, Admitted], "node {id}");
     }
 
     let disk = committed.remove(&key(2)).unwrap();
@@ -553,20 +589,21 @@ fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
         .collect();
     assert_eq!(at.len(), 6);
     let cases = [
-        (0, false),
-        (at[0] - 1, false),
-        (at[1], false),
-        (at[3], true),
-        (at[5], false),
+        (0, NotVoter),
+        (at[0] - 1, NotVoter),
+        (at[1], Admitted),
+        (at[3], Removed),
+        (at[5], Admitted),
     ];
     for (applied, want) in cases {
+        let through = usize::try_from(applied).unwrap();
         let start = Start {
             hard: nodes[&key(2)].hard(),
             voters: Voters {
                 incoming: set(&[1, 2, 3]),
                 outgoing: BTreeSet::new(),
             },
-            entries: disk.clone(),
+            entries: disk[..through].to_vec(),
             applied,
         };
         let config = Config {
@@ -576,11 +613,10 @@ fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
             fits: |_| true,
         };
         let raft = Raft::new(config, start).unwrap();
-        assert!(raft.voters().contains(key(4)), "applied {applied}");
-        assert_eq!(removed(&raft), [false, want], "applied {applied}");
+        let got = admitted(&raft, applied);
+        assert_eq!(got, [Admitted, want], "applied {applied}");
     }
 }
-
 // Whether a message crosses between the sides {1, 4} and {2, 3}.
 fn crosses(message: &Message) -> bool {
     let side = |at: node::Key| at == key(1) || at == key(4);
