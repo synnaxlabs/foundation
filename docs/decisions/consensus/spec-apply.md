@@ -42,26 +42,26 @@
   chunks with `blob::peer::put` on each other voter of both halves of `raft.voters()`,
   all at once, in calls of at most 16 chunks in order, each of which fails after
   `peer::DEADLINE` (10 s on the `env` clock) with no result, its dials included. A call
-  whose session ended dials once more, as a session to a peer that restarted ends only
-  at its first use. A holder is the node when it is a voter, or a voter whose calls each
-  ended `Ok` while a half that holds it lacked a majority; another failed dial or call,
-  also a failed read of the node's store for a call, leaves a voter no holder. So the
-  holders are at most the sum of the majorities of the halves, at most 128, which
-  `HOLDERS_MAX` holds (SPEC CHANGE). `Error::Stopped` comes as for `Mesh::set_home`,
-  also while the puts wait. Once the holders are a majority of each half, the node drops
-  the puts still open and proposes. When the holders are not a majority of each half
-  once each put ended, or at the apply, the call gives `Error::Quorum { held, voters,
-  missed }` for the first half that lacks one, the incoming half first, and proposes
-  nothing before the apply. `missed` gives each voter whose put failed, in key order,
-  with its name and why: `Miss::Deadline`, `Unknown` (no record of the voter), `Dial`,
-  or `Put`. It is empty for a refusal at the apply. Decided by `laptop.architect`,
-  2026-10-19T17:02:16Z
+  whose session ended dials once more, inside its own deadline, as a session to a peer
+  that restarted ends only at its first use. A miss gives the cause of the last attempt.
+  A holder is the node when it is a voter, or a voter whose calls each ended `Ok` while
+  a half that holds it lacked a majority; another failed dial or call, also a failed
+  read of the node's store for a call, leaves a voter no holder. So the holders are at
+  most the sum of the majorities of the halves, at most 128, which `HOLDERS_MAX` holds
+  (SPEC CHANGE). `Error::Stopped` comes as for `Mesh::set_home`, also while the puts
+  wait. Once the holders are a majority of each half, the node drops the puts still open
+  and proposes. When the holders are not a majority of each half once each put ended, or
+  at the apply, the call gives `Error::Quorum { held, voters, missed }` for the first
+  half that lacks one, the incoming half first, and proposes nothing before the apply.
+  `missed` gives each voter whose put failed, in key order, with its name and why:
+  `Miss::Deadline`, `Unknown` (no record of the voter), `Dial`, or `Put`. It is empty
+  for a refusal at the apply. Decided by `laptop.architect`, 2026-10-19T17:02:16Z
   (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202), which
   supersedes the count before the put of item 2 of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643 and the one
   holder of
-  https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178.
-  The holder rule, the docs, and `HOLDERS_MAX` = 128: `laptop.architect`,
+  https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178. The
+  holder rule, the docs, and `HOLDERS_MAX` = 128: `laptop.architect`,
   2026-10-19T17:21:45Z
   (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273042572). The 16
   chunks of a call: `laptop.architect`, 2026-10-19T17:43:07Z
@@ -70,7 +70,9 @@
   `laptop.architect`, 2026-10-19T17:48:57Z
   (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273571109), on the
   condition of `laptop.monitor` that a failed apply names its cause until #3405 lands.
-  The redial: `laptop.architect`, 2026-10-19T18:11:29Z
+  The redial: `laptop.architect`, 2026-10-19T17:56:52Z
+  (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273716895), and its
+  approval, 2026-10-19T18:11:29Z
   (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6274006583).
   `Mesh::open` puts each chunk of the
   founding tree in the store. A change that the state refuses as stale gives
