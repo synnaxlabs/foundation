@@ -274,11 +274,14 @@ fn a_trust_with_a_damaged_or_empty_block_of_another_label_ends_the_connect() {
 #[test]
 fn a_trust_whose_begin_line_starts_no_block_drops_it() {
     let (other, server) = blocks();
-    let server = server.replacen("-----BEGIN", "----BEGIN", 1);
-    assert_eq!(
-        trusting(format!("{other}{server}")),
-        Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED))
-    );
+    for begin in ["----BEGIN CERTIFICATE-----", "-----BEGIN CERTIFICATE----"] {
+        let server = server.replacen("-----BEGIN CERTIFICATE-----", begin, 1);
+        assert_eq!(
+            trusting(format!("{other}{server}")),
+            Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED)),
+            "{begin}"
+        );
+    }
 }
 
 #[test]
