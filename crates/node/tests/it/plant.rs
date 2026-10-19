@@ -38,7 +38,11 @@ const CHANNELS: &str = concat!(
 /// A rig whose node runs with [`CHANNELS`] applied, its node, and its admin. Waits
 /// until the hub of the node knows the channels, which it learns after the apply.
 pub(crate) fn planted() -> (Rig, Node, Subject) {
-    let mut rig = Rig::new();
+    planted_on(Rig::new())
+}
+
+/// [`planted`] on `rig`, which has no node yet.
+pub(crate) fn planted_on(mut rig: Rig) -> (Rig, Node, Subject) {
     rig.config(CHANNELS);
     rig.start();
     rig.apply();

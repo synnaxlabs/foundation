@@ -28,10 +28,12 @@
 //! and of the `sdk` lines, the caller spins for [`GAP`], so that the task parks before
 //! each send, as it does between the calls of a program.
 //!
-//! Each write must give `Taken`: the ring of the home shard holds 18,000 to 20,000
-//! frames of a line on a box, and 10,795 on a CI runner, where more writes are a commit
-//! of their own. A frame past it is `Lost`. So each line writes its 5,500 frames on a
-//! node of its own, also under `cargo test`, so that a test fails when they do not fit.
+//! Each write must give `Taken`, and a frame past the ring of the home shard is
+//! `Lost`. A ring holds more writes when several share a commit, which depends on the
+//! host: a CI runner lost frame 10,795 of two lines on one node. So each line writes
+//! its 5,500 frames on a node of its own, with twice the disk budget of the node tests,
+//! where the ring holds 12,500 writes of a commit each (`sdk next held` on box1), also
+//! under `cargo test`, so that a test fails when they do not fit.
 //! Judge `sdk` against `program` from one run, and each leg against its p50: a p99 far
 //! over it is a wait for a wake.
 //!
@@ -48,9 +50,10 @@ mod bench;
 /// Only Unix: the channels of the bench, and the session of its `program` line.
 #[cfg(all(unix, not(loom)))]
 #[expect(
+    dead_code,
     clippy::unwrap_used,
     clippy::missing_assert_message,
-    reason = "a helper of the node tests fails loud"
+    reason = "a helper of the node tests fails loud, and the bench uses only some"
 )]
 #[path = "../../tests/it/plant.rs"]
 mod plant;

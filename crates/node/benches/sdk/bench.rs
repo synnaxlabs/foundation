@@ -13,6 +13,8 @@ use types::name::{Name, Selector};
 use types::sample::Value;
 use wire::hub::client::Mode;
 
+use crate::rig::{POOL, Rig};
+
 /// The mode of each reader. A complete reader gets each frame after its commit, one
 /// record of the ring for each read, and the node never trims the ring (#160).
 const MODE: Mode = Mode::Latest;
@@ -26,7 +28,7 @@ const GAP: Duration = Duration::from_micros(100);
 
 /// The spin of the caller after a write of [`Timed::Held`], which is longer than the
 /// time for its frame to reach the client's thread. Each such write is then a commit of
-/// its own, one record of the ring, so the ring holds about 4,600 of them.
+/// its own, one record of the ring.
 const HELD: Duration = Duration::from_millis(1);
 
 /// What a call of a line times.
@@ -80,9 +82,14 @@ pub(crate) fn run() {
     }
 }
 
-/// The spans of `line` against a node of its own.
+/// The spans of `line` against a node of its own, whose disk budget is twice that of
+/// [`Rig::new`], so that its ring holds the 5,500 writes of a line also when each is a
+/// commit of its own.
 fn alone<T>(line: impl FnOnce(&sdk::Node, sdk::Subject) -> T) -> T {
-    let (mut rig, node, subject) = crate::plant::planted();
+    let mut rig = Rig::new();
+    rig.disk *= 2;
+    rig.keep(POOL, rig.disk);
+    let (mut rig, node, subject) = crate::plant::planted_on(rig);
     let spans = line(&node, subject);
     rig.stop();
     spans
