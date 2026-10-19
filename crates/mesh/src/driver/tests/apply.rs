@@ -871,19 +871,28 @@ fn an_apply_of_a_follower_counts_a_follower_that_restarted() {
 }
 
 // The cards of voters 2 and 3 have addresses where no node answers, so the puts
-// wait in their dials.
+// wait in their dials. The apply runs in a task of its own, so only the stop wakes
+// it, and the stop falls between two timers of the dials, which tick each 250 ms.
 #[test]
 fn an_apply_whose_puts_wait_gives_stopped_as_soon_as_the_group_stops() {
     let entries = solo_stored(|node, tasks| async move {
         let mesh = Mesh::start(dialed_at(&node, &tasks, 1, PORT, &IDS, &IDS).await);
         let mesh = mesh.await.unwrap();
         let clock = node.clock();
-        let definitions = create_subjects(&["plant.a"], 1);
-        let mut apply = pin!(mesh.apply(base(), definitions, BTreeMap::new()));
-        assert_eq!(within(&clock, seconds(1), apply.as_mut()).await, None);
+        let given = Rc::new(RefCell::new(None));
+        let (proposer, slot) = (mesh.clone(), Rc::clone(&given));
+        tasks.spawn(async move {
+            let definitions = create_subjects(&["plant.a"], 1);
+            let applied = proposer.apply(base(), definitions, BTreeMap::new()).await;
+            *slot.borrow_mut() = Some(applied);
+        });
+        clock
+            .sleep(Span::from_nanos(1_123 * Span::MILLISECOND.nanos()))
+            .await;
+        assert_eq!(*given.borrow(), None);
         let stopped = stop(&node, &mesh);
-        let given = within(&clock, Span::MILLISECOND, apply).await;
-        assert_eq!(given, Some(Err(Error::Stopped(stopped))));
+        clock.sleep(Span::MILLISECOND).await;
+        assert_eq!(*given.borrow(), Some(Err(Error::Stopped(stopped))));
     });
     assert_eq!(specs(&entries), []);
 }
