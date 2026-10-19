@@ -104,8 +104,9 @@ impl Overlap {
     /// reading on, it is the overlap of all of them when they came in local time
     /// order, and holds it in any order. Earlier, it can be wider.
     ///
-    /// `None` when the readings do not bound the offset to 36500 days: no reading gave
-    /// a low edge, none gave a high edge, or the edges allow more before drift.
+    /// `None` when the readings do not bound the offset to 36500 days: no low edge is
+    /// kept, no high edge is kept, or the edges allow more before drift. An edge
+    /// widened past the range of a span is not kept ([`Overlap::push`]).
     #[must_use]
     pub fn at(&self, now: Monotonic) -> Option<Measurement> {
         let (low, high) = self.edges(|r| r.at)?;
