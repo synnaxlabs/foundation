@@ -45,14 +45,17 @@
   leader left past the leave on the node, such as a configuration that makes it a voter
   again. A removed node that answered nothing over a whole quorum check period is
   released at that check instead, and the next configuration releases any that is still
-  a peer. A follower releases the removed nodes when the leave commits. A removed node
-  that missed its release learns it from `mesh`, not `raft`: `mesh` admits a `raft`
-  request only from a voter of the newest configuration that the node knows: the newest
-  in its log, or a newer one that a link of the request's chain proves. A link proves a
-  configuration when the votes it carries elected its leader under a configuration the
-  node already knows, and the leader's signature holds (#881). A configuration entry
-  binds the public key of each voter it adds, under the signature of the leader that
-  writes it. A node answers `removed` only to a sender that a configuration in its own
+  a peer. A follower releases the removed nodes when the leave commits. A learner
+  (`Raft::set_learners`, RAFT SURFACE) is the exception: while it is in the set, it gets
+  each entry past the leave, and no release, quorum check, or configuration drops it. A
+  removed node that missed its release learns it from `mesh`, not `raft`: `mesh` admits
+  a `raft` request only from a voter of the newest configuration that the node knows:
+  the newest in its log, or a newer one that a link of the request's chain proves. A
+  link proves a configuration when the votes it carries elected its leader under a
+  configuration the node already knows, and the leader's signature holds (#881). A
+  configuration entry binds the public key of each voter it adds, under the signature of
+  the leader that writes it. A node answers `removed` only to a sender that a
+  configuration in its own
   log held, when its committed configuration lacks the sender and the request proves no
   newer configuration that holds it. Each other sender that is not a voter gets
   `Error::NotVoter`, and does not stop. The person chose A, 2026-10-07T04:49:33Z

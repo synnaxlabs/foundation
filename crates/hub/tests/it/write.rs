@@ -1329,8 +1329,15 @@ async fn in_region(
         region::open(&node, &tasks, Rc::clone(&transport), Vec::new(), channels())
             .await;
     let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-    let mut test =
-        Test::new(node.clone(), tasks.clone(), layout, POOL, Some(region)).await;
+    let mut test = Test::new(
+        node.clone(),
+        NODE,
+        tasks.clone(),
+        layout,
+        POOL,
+        Some(region),
+    )
+    .await;
     test.sync().await;
     test.set_home(TIME_B, NODE).await;
     test.hub.set_rules(rules());

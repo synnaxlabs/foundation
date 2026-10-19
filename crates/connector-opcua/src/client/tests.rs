@@ -22,7 +22,7 @@ use super::{
     Calls, Client, Flight, GRACE, Large, Nodes, READS, Request, SPLIT, STATE, Slots,
     UNREAD, answer, id_bytes, most,
 };
-use crate::client::{Credentials, Mode};
+use crate::client::{Credentials, Error, Mode};
 use crate::connection::CHUNKS;
 use crate::connection::Manager;
 use crate::event;
@@ -142,7 +142,7 @@ impl Peer<'_> {
         mode: Mode,
         credentials: &Credentials<'_>,
         wall: Stamp,
-    ) -> Result<Client, Status> {
+    ) -> Result<Client, Error> {
         let time = event::Time::since(Clock::clone(&self.clock), wall);
         let url = CString::new(self.url.clone()).expect("the URL holds no NUL");
         let connect = Client::connect(
@@ -186,7 +186,7 @@ impl Peer<'_> {
 }
 
 /// Connects a new client to `url`, with no wait that ends it.
-async fn open(
+pub(crate) async fn open(
     time: event::Time,
     net: Net,
     rng: &mut Rng,
@@ -201,7 +201,13 @@ async fn open(
         None,
         future::pending(),
     );
-    Ok(connect.await?.expect("a pending wait never ends"))
+    match connect.await {
+        Ok(client) => Ok(client.expect("a pending wait never ends")),
+        Err(Error::Failed(status)) => Err(status),
+        Err(Error::Refused(refusal)) => {
+            panic!("a client with no credentials: {refusal}")
+        }
+    }
 }
 
 /// Runs `test` on a node of a run of `seed`, and gives its value and the digest of

@@ -39,3 +39,38 @@
   `hub::writer::Writer` (the hub then knows that a request has two ends); the
   nanosecond after the later of the two (it puts the refused frame after a frame from
   a later read); `now` as a closure (a caller can pass a clock that is not mesh time).
+- **STAMP FIT (#2622)** `connector::stamp::Fit` fits one device clock to mesh time, and
+  `Stamps::sample` stamps a sample from the mesh time that a fit gives
+  (`laptop.architect-2`, 2026-10-14T01:37:20Z, PR 2:
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6158936229). `Fit`
+  holds one `estimate::overlap::Overlap` of 200 ppm, over offsets of mesh time minus
+  device time, each from `c`, the offset of the first reading of the fit. `mesh` adds
+  `c` back. Each sum is in `i128`. `between` gives both edges and `before` gives a high
+  edge, in any order of device time. A `between` wider than 2^62 ns gives only its high
+  edge. Then a high edge more than 2^62 ns over `c` adds nothing, as the fit already
+  holds a high edge under it, and any other edge more than 2^62 ns from `c` starts a new
+  fit from its reading, so each edge stays within 2^62 ns plus drift of `c` and no input
+  panics (`laptop.architect-2`, 2026-10-19T18:14:00Z, round 3 item 1:
+  https://github.com/synnaxlabs/foundation/pull/3386#issuecomment-6274052652). A mesh
+  bound past the range of a `Stamp` on the side that claims less becomes `i64::MIN` or
+  `i64::MAX` ns, and `mesh` gives `None` past it on the side that claims more
+  (`laptop.architect-2`, 2026-10-19T15:07:34Z, B:
+  https://github.com/synnaxlabs/foundation/pull/3386#issuecomment-6270475292, which
+  supersedes the absolute offsets of
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6270224530). A
+  property test over any `Monotonic` and mesh time pins it. A reading older than the
+  newest is widened by drift to the newest device time in `Overlap` (ESTIMATE FIT, A of
+  the same ruling). A `Disjoint` reading restarts the fit from that reading. A clock
+  that goes back by less than the width of a reading is not caught until a reading
+  disagrees (ESTIMATE FIT). `sample` takes the floor of the midpoint, as `request` does.
+  Lost: an edge past the range of a `Span` that stops at that range on the side that
+  claims less, and is left out on the other side (B of the same ruling: a first `before`
+  far above the clock then leaves each later low edge out, and a stopped high edge can
+  hide a disagreement); `c` of 0, which drops each server time past the range of an
+  offset; `Fit` inside `Stamps` (a writer with the values of two devices then needs two
+  `Stamps` for one index, so a stamp can go back); a fit that keeps each reading and
+  solves a line (it allocates, and its bound is not hard); a restart on any edge out of
+  reach (one source time 146 years old drops the bound); leaving out a far low edge (a
+  fit from `before` alone never bounds the clock); a restart only on a high edge under
+  `i64::MIN`, which keeps the table of B (an old reading widened past the range drops an
+  edge; round 3 item 1 of the ruling of 2026-10-19T18:14:00Z).

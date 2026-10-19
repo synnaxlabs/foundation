@@ -8,6 +8,7 @@ use control::lease::Lease;
 use types::authority::Authority;
 use types::frame::key_set::KeySet;
 use types::name::Name;
+use types::node;
 use types::time::Span;
 
 /// What a writer opens with.
@@ -17,6 +18,10 @@ pub struct Writer {
     pub subject: Name,
     /// The writer's authority. The home does not cap it by access yet.
     pub authority: Authority,
+    /// The node whose program opened the writer, or this node for a writer opened
+    /// here. The home records it with each handoff. The gate never compares it to
+    /// choose the holder.
+    pub via: node::Key,
     /// The control lease, or `None` for no limit. It runs on each index apart: from
     /// when the writer takes control there, and again from each group applied or
     /// lost there. When it runs out, the writer loses control of that index.

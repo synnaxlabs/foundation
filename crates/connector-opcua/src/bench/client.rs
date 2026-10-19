@@ -155,7 +155,14 @@ impl Server {
         );
         let session = match connect.await {
             Ok(session) => session.expect("a pending wait never ends"),
-            Err(status) => panic!("a connect failed: {status:?}"),
+            Err(crate::client::Error::Failed(status)) => {
+                panic!("a connect failed: {status:?}")
+            }
+            Err(crate::client::Error::Refused(refusal)) => {
+                panic!(
+                    "invariant: a client with no credentials refuses none: {refusal}"
+                )
+            }
         };
         let nodes = |node: Node| {
             let nodes: Vec<Node> = std::iter::repeat_n(node, count).collect();
