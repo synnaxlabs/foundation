@@ -2,7 +2,7 @@
 //! through Tokio.
 
 use std::io::{self, IoSliceMut};
-use std::net::{IpAddr, Ipv6Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::num::NonZeroUsize;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::Arc;
@@ -43,7 +43,7 @@ impl Udp {
         let fd =
             super::socket(local, SocketType::DGRAM, ipproto::UDP).map_err(io_error)?;
         configure(fd.as_fd(), config).map_err(io_error)?;
-        bind(fd.as_fd(), local)?;
+        bind_free(fd.as_fd(), local)?;
         let socket = UdpSocket::from(fd);
         let state = UdpSocketState::new((&socket).into()).map_err(|e| from_io(&e))?;
         // Linux and macOS each set don't-fragment, so this fails only on an OS that
@@ -66,6 +66,36 @@ impl Udp {
         };
         Ok((Self { bound }, receiver))
     }
+}
+
+/// The binds that `bind_free` tries before it gives up.
+const TRIES: usize = 8;
+
+/// Binds `fd` to `local`. Port 0 on `[::]` takes a port that no IPv4 socket holds:
+/// the macOS search for a free IPv6 port skips IPv4 binds. Another socket can take
+/// that port between the probe and the bind, so it tries [`TRIES`] times.
+fn bind_free(fd: BorrowedFd<'_>, local: SocketAddr) -> Result<(), Error> {
+    if !(local.ip() == Ipv6Addr::UNSPECIFIED && local.port() == 0) {
+        return bind(fd, local);
+    }
+    let mut tries = 1;
+    loop {
+        let mut free = local;
+        free.set_port(free_v4_port()?);
+        match bind(fd, free) {
+            Err(Error::AddressInUse { .. }) if tries < TRIES => tries += 1,
+            bound => return bound,
+        }
+    }
+}
+
+/// A port that no IPv4 socket holds, from a probe socket that it closes.
+fn free_v4_port() -> Result<u16, Error> {
+    let any = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
+    let fd = super::socket(any, SocketType::DGRAM, ipproto::UDP).map_err(io_error)?;
+    bind(fd.as_fd(), any)?;
+    let probe = UdpSocket::from(fd);
+    Ok(probe.local_addr().map_err(|e| from_io(&e))?.port())
 }
 
 /// Sets the buffer sizes of `config` on `fd`, and lets an IPv6 socket take IPv4,
@@ -408,8 +438,6 @@ fn from_codepoint(ecn: EcnCodepoint) -> Ecn {
 
 #[cfg(test)]
 mod tests {
-    use std::net::Ipv4Addr;
-
     use super::*;
 
     const V4: Ipv4Addr = Ipv4Addr::LOCALHOST;
@@ -489,6 +517,19 @@ mod tests {
             let local = first.bound.local;
             let held = Udp::bind(&config(local));
             assert_eq!(held.map(drop), Err(Error::AddressInUse { local }));
+        }
+
+        /// macOS gives a `[::]` bind on port 0 the port of an IPv4 bind, so a
+        /// datagram to that IPv4 address reaches the other socket (#3422).
+        #[test]
+        fn port_0_on_any_v6_skips_a_held_ipv4_port() {
+            let held = loopback();
+            let port = held.bound.local.port();
+            let local = SocketAddr::new(any_v6().ip(), 0);
+            for _ in 0..50_000 {
+                let udp = Udp::bind(&config(local)).unwrap().0;
+                assert_ne!(udp.bound.local.port(), port);
+            }
         }
     }
 
