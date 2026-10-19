@@ -8,8 +8,8 @@ use std::process;
 use std::sync::{Mutex, PoisonError};
 
 use pyo3::exceptions::{
-    PyConnectionError, PyException, PyOSError, PyRuntimeError, PyTypeError,
-    PyValueError,
+    PyConnectionError, PyException, PyOSError, PyOverflowError, PyRuntimeError,
+    PyTypeError, PyValueError,
 };
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
@@ -381,14 +381,14 @@ impl Client {
         py: Python<'_>,
         channels: &Bound<'_, PyAny>,
         authority: Level,
-        lease: Option<f64>,
+        lease: Option<Lease>,
         on_loss: &str,
     ) -> PyResult<write::Writer> {
         let loss = write::Loss::parse(on_loss)?;
         let names = names(channels)?;
         let mut config = sdk::write::Config::new(names.clone());
         config.authority = authority.0;
-        config.lease = lease.map(span).transpose()?;
+        config.lease = lease.map(|lease| lease.0);
         owned(self.process)?;
         // The lock is taken without the GIL, which a closing thread needs to return.
         let writer = py
@@ -501,21 +501,37 @@ impl<'a, 'py> FromPyObject<'a, 'py> for Level {
     }
 }
 
-/// The span of the lease `lease`, in seconds.
-fn span(lease: f64) -> PyResult<Span> {
-    let nanos = (lease * 1e9).round();
-    // The bound is the first f64 past `i64::MAX`, and a NaN fails both tests.
-    #[expect(clippy::cast_precision_loss, reason = "2^63 is exact in an f64")]
-    if !(nanos >= 1.0 && nanos < i64::MAX as f64) {
-        return Err(PyValueError::new_err(format!(
-            "lease is {lease:?} s, not a finite number of seconds over 0"
-        )));
+/// The argument `lease` of `open_writer`: a finite number of seconds over 0.
+struct Lease(Span);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Lease {
+    type Error = PyErr;
+
+    fn extract(object: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let refused = |lease: &str| {
+            PyValueError::new_err(format!(
+                "lease is {lease} s, not a finite number of seconds over 0"
+            ))
+        };
+        let lease = match object.extract::<f64>() {
+            Ok(lease) => lease,
+            Err(e) if e.is_instance_of::<PyOverflowError>(object.py()) => {
+                return Err(refused(&object.repr()?.to_cow()?));
+            }
+            Err(e) => return Err(e),
+        };
+        let nanos = (lease * 1e9).round();
+        // The bound is the first f64 past `i64::MAX`, and a NaN fails both tests.
+        #[expect(clippy::cast_precision_loss, reason = "2^63 is exact in an f64")]
+        if !(nanos >= 1.0 && nanos < i64::MAX as f64) {
+            return Err(refused(&format!("{lease:?}")));
+        }
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the test above keeps a whole number of nanoseconds in i64"
+        )]
+        Ok(Self(Span::from_nanos(nanos as i64)))
     }
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "the test above keeps a whole number of nanoseconds in i64"
-    )]
-    Ok(Span::from_nanos(nanos as i64))
 }
 
 impl Drop for Client {

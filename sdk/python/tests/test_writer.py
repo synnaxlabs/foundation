@@ -19,7 +19,7 @@ import numpy as np
 
 import foundation
 from test_client import PATIENCE, Node, fork
-from test_stubs import assert_stated, assert_takes
+from test_stubs import assert_stated, called
 
 CHANNELS = """
 channel "plant.time" { kind = "index" }
@@ -121,9 +121,7 @@ class WriterTest(unittest.TestCase):
         self.addCleanup(self.client.close)
 
     def test_a_writer_gives_its_places_in_the_order_of_its_channels(self) -> None:
-        assert_takes(self, "Client.open_writer", ["plant.b", "plant.a"])
-        with self.client.open_writer(["plant.b", "plant.a"]) as writer:
-            assert_stated(self, writer, "Client.open_writer")
+        with called(self, self.client.open_writer, ["plant.b", "plant.a"]) as writer:
             self.assertEqual(
                 writer.places,
                 (
@@ -133,8 +131,9 @@ class WriterTest(unittest.TestCase):
                 ),
             )
             self.assertEqual(writer.index, 2)
-        with self.client.open_writer(["plant.time", "plant.a"]) as writer:
-            self.assertEqual(writer.index, 0)
+        writer = called(self, self.client.open_writer, ["plant.time", "plant.a"])
+        self.assertEqual(writer.index, 0)
+        called(self, writer.close)
 
     def test_write_takes_frames_of_node_time_and_of_the_callers_stamps(self) -> None:
         with self.client.open_writer(["plant.a", "plant.b"]) as writer:
@@ -172,7 +171,9 @@ class WriterTest(unittest.TestCase):
                 "plant.f": 1.5,
                 "plant.g": 2**63 - 1,
             }
-            self.assertIsNone(writer.write(values))
+            called(self, writer.write, values)
+        with self.client.open_writer("plant.e") as writer:
+            called(self, writer.write, uuid.uuid4())
 
     def test_write_raises_for_each_value_that_its_place_does_not_take(self) -> None:
         channels = ["plant.a", "plant.b", "plant.c", "plant.d", "plant.e", "plant.f"]
@@ -257,7 +258,7 @@ class WriterTest(unittest.TestCase):
                 "plant.d": np.arange(count) % 2 == 0,
                 "plant.time": stamps,
             }
-            self.assertIsNone(writer.write_series(series))
+            called(self, writer.write_series, series)
             later = (stamps + count).astype("datetime64[ns]")
             series["plant.time"] = later
             self.assertIsNone(writer.write_series(series))
@@ -422,8 +423,26 @@ class WriterTest(unittest.TestCase):
                     self.client.open_writer("plant.a", authority=authority)
                 text = f"authority is an int, not {kind}"
                 self.assertEqual(str(raised.exception), text)
-        writer = self.client.open_writer(("plant.a",), authority=255, lease=5.0)
-        self.assertIsNone(writer.close())
+        writer = called(
+            self, self.client.open_writer, ("plant.a",), authority=255, lease=5.0
+        )
+        self.assertIs(called(self, writer.__enter__), writer)
+        called(self, writer.__exit__, None, None, None)
+
+    def test_a_lease_past_the_range_of_a_float_raises_value_error(self) -> None:
+        class Index:
+            def __index__(self) -> int:
+                return 10**400
+
+        for lease in [10**400, -(10**400), fractions.Fraction(10**400), Index()]:
+            with self.subTest(lease=type(lease).__name__):
+                with self.assertRaises(ValueError) as raised:
+                    called(self, self.client.open_writer, "plant.a", lease=lease)
+                self.assertIs(type(raised.exception), ValueError)
+                self.assertEqual(
+                    str(raised.exception),
+                    f"lease is {lease!r} s, not a finite number of seconds over 0",
+                )
 
     def test_the_stub_types_each_value_and_lease_that_the_module_takes(self) -> None:
         class Float:
@@ -447,10 +466,34 @@ class WriterTest(unittest.TestCase):
         for value in values:
             with self.subTest(value=value):
                 kwargs = {"authority": 255, "lease": value, "on_loss": "raise"}
-                assert_takes(self, "Client.open_writer", "plant.a", **kwargs)
-                with self.client.open_writer("plant.a", **kwargs) as writer:
-                    assert_takes(self, "Writer.write", value)
-                    self.assertIsNone(writer.write(value))
+                with called(self, self.client.open_writer, "plant.a", **kwargs) as w:
+                    called(self, w.write, value)
+
+    def test_write_raises_the_error_that_the_conversion_of_a_value_raised(
+        self,
+    ) -> None:
+        class Broken:
+            def __float__(self) -> float:
+                raise ZeroDivisionError("the sensor divided by zero")
+
+            def __index__(self) -> int:
+                raise ZeroDivisionError("the sensor divided by zero")
+
+        cases = [
+            ("plant.a", decimal.Decimal("sNaN"), ValueError),
+            ("plant.a", Broken(), ZeroDivisionError),
+            ("plant.b", Broken(), ZeroDivisionError),
+        ]
+        with self.client.open_writer(["plant.a", "plant.b"]) as writer:
+            for name, value, kind in cases:
+                with self.subTest(name=name, value=type(value).__name__):
+                    with self.assertRaises(kind) as raised:
+                        called(self, writer.write, {name: value})
+                    self.assertIs(type(raised.exception), kind)
+                    if kind is ZeroDivisionError:
+                        text = "the sensor divided by zero"
+                        self.assertEqual(str(raised.exception), text)
+            called(self, writer.write, {"plant.a": 1.5, "plant.b": 2})
 
     def test_open_writer_raises_stopped_with_the_code_of_the_node(self) -> None:
         with self.assertRaises(foundation.Stopped) as raised:
@@ -916,7 +959,7 @@ class WriterTest(unittest.TestCase):
         with self.client.open_writer("plant.d") as writer:
             for flag in np.array([False, True]):
                 self.assertIsInstance(flag, np.bool_)
-                self.assertIsNone(writer.write(flag))
+                called(self, writer.write, flag)
 
 
 if __name__ == "__main__":

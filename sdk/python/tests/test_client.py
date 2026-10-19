@@ -20,7 +20,7 @@ import uuid
 import warnings
 
 import foundation
-from test_stubs import assert_stated, assert_takes
+from test_stubs import assert_stated, called
 
 PATIENCE = 90.0
 # The node sends its close before it exits. No call of the client shows that the client
@@ -187,7 +187,7 @@ class ClientTest(unittest.TestCase):
 
     def test_a_client_connects_and_connects_again_after_its_close(self) -> None:
         client = self.node.connect()
-        self.assertIsNone(client.close())
+        called(self, client.close)
         self.assertIsNone(client.close())
         client = self.node.connect()
         del client
@@ -195,6 +195,9 @@ class ClientTest(unittest.TestCase):
     def test_a_with_block_closes_the_client(self) -> None:
         with self.node.connect() as client:
             self.assertIsInstance(client, foundation.Client)
+        client = self.node.connect()
+        self.assertIs(called(self, client.__enter__), client)
+        called(self, client.__exit__, None, None, None)
         self.node.stop()
         time.sleep(CLOSED)
         self.assertIsNone(client.close())
@@ -313,11 +316,9 @@ class ClientTest(unittest.TestCase):
         cwd = os.getcwd()
         self.addCleanup(os.chdir, cwd)
         os.chdir(self.node.dir.name)
-        with foundation.connect() as client:
-            assert_stated(self, client, "connect")
+        with called(self, foundation.connect) as client:
             self.assertEqual(client.address, self.node.address)
-        assert_takes(self, "connect", self.node.address)
-        with foundation.connect(self.node.address) as client:
+        with called(self, foundation.connect, self.node.address) as client:
             self.assertEqual(client.address, self.node.address)
 
     def test_the_subject_keywords_win_over_the_data_directory(self) -> None:
@@ -342,8 +343,13 @@ class ClientTest(unittest.TestCase):
             f"to {self.node.address}",
         )
         with self.assertRaises(ConnectionError) as raised:
-            foundation.connect(
-                at, node=uuid.UUID(int=1), public_key=WRONG, data=self.node.data
+            called(
+                self,
+                foundation.connect,
+                at,
+                node=uuid.UUID(int=1),
+                public_key=WRONG,
+                data=self.node.data,
             )
         self.assertEqual(
             str(raised.exception),
@@ -354,8 +360,7 @@ class ClientTest(unittest.TestCase):
 
     def test_the_data_directory_can_be_a_path(self) -> None:
         data = pathlib.Path(self.node.data)
-        assert_takes(self, "connect", data=data)
-        with foundation.connect(data=data) as client:
+        with called(self, foundation.connect, data=data) as client:
             self.assertEqual(client.address, self.node.address)
 
     def test_a_data_directory_with_no_admin_key_gives_no_subject(self) -> None:
@@ -372,8 +377,12 @@ class ClientTest(unittest.TestCase):
             str(raised.exception), f"{copy.name} holds no admin.key that a node wrote"
         )
         with self.assertRaises(ConnectionError) as raised:
-            foundation.connect(
-                data=copy.name, subject="plant.operator", private_key=bytes(32)
+            called(
+                self,
+                foundation.connect,
+                data=copy.name,
+                subject="plant.operator",
+                private_key=bytes(32),
             )
         self.assertEqual(
             str(raised.exception),

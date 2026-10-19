@@ -1,7 +1,9 @@
 """The stub `foundation/_native.pyi` states the surface of the module."""
 
 import ast
+import collections.abc
 import inspect
+import os
 import pathlib
 import types
 import typing
@@ -24,16 +26,20 @@ def stub() -> types.ModuleType:
 
 
 def conforms(value: object, hint: typing.Any) -> bool:
-    """Whether `value` is of the type `hint`, with each item of a `dict` or `tuple`."""
+    """Whether `value` is of the type `hint`, with each item of a `dict`, a `tuple`, and
+    a `list`, `tuple`, or `set` for an `Iterable`, the path of an `os.PathLike`, and the
+    value of an alias of a `type` statement, such as `NDArray` of numpy 2.5."""
     origin, args = typing.get_origin(hint), typing.get_args(hint)
     if hint is typing.Any:
         return True
     if hint is None or hint is types.NoneType:
         return value is None
+    if hasattr(origin, "__value__"):
+        return conforms(value, origin.__value__)
     if origin in (typing.Union, types.UnionType):
         return any(conforms(value, arg) for arg in args)
     if origin is typing.Literal:
-        return value in args
+        return any(type(value) is type(arg) and value == arg for arg in args)
     if origin is dict:
         return isinstance(value, dict) and all(
             conforms(k, args[0]) and conforms(v, args[1]) for k, v in value.items()
@@ -44,6 +50,12 @@ def conforms(value: object, hint: typing.Any) -> bool:
         if args[-1] is Ellipsis:
             return all(conforms(item, args[0]) for item in value)
         return len(value) == len(args) and all(map(conforms, value, args))
+    if origin is collections.abc.Iterable:
+        # Another iterable, such as a generator, is not read: a read consumes it.
+        items = value if isinstance(value, (list, tuple, set, frozenset)) else []
+        return isinstance(value, origin) and all(conforms(i, args[0]) for i in items)
+    if origin is os.PathLike:
+        return isinstance(value, origin) and conforms(os.fspath(value), args[0])
     return isinstance(value, origin or hint)
 
 
@@ -55,36 +67,36 @@ def stated() -> tuple[types.ModuleType, dict[str, typing.Any]]:
     return module, names
 
 
-def named(module: types.ModuleType, by: str) -> typing.Any:
-    """The item `by` of `module`, such as `connect` or `Client.open_writer`."""
-    *owner, name = by.split(".")
-    return getattr(getattr(module, owner[0]) if owner else module, name)
-
-
-def assert_takes(
-    test: unittest.TestCase, by: str, *args: object, **kwargs: object
-) -> None:
-    """Asserts that the function `by` of the stub takes `args` and `kwargs`: each value
-    is of the type of the parameter that it binds to."""
+def called(
+    test: unittest.TestCase, function: typing.Any, *args: object, **kwargs: object
+) -> typing.Any:
+    """Calls `function` of the module (such as `client.open_writer`) with `args` and
+    `kwargs`, and returns what it gives. Asserts that the function of the stub of the
+    same name takes each argument, that it states the type of the value, and, as
+    `assert_stated` does, the type of each attribute of the value."""
     module, names = stated()
-    function = named(module, by)
-    method = "." in by
-    receiver = [None] if method else []
-    bound = inspect.signature(function).bind(*receiver, *args, **kwargs)
-    hints = typing.get_type_hints(function, names)
-    for name, value in list(bound.arguments.items())[method:]:
-        hint = hints[name]
+    by = function.__qualname__
+    owner, _, name = by.rpartition(".")
+    declared = getattr(getattr(module, owner) if owner else module, name)
+    signature = inspect.signature(declared)
+    if owner:
+        signature = signature.replace(parameters=[*signature.parameters.values()][1:])
+    hints = typing.get_type_hints(declared, names)
+    for parameter, value in signature.bind(*args, **kwargs).arguments.items():
+        hint = hints[parameter]
         test.assertTrue(conforms(value, hint), f"{by} takes {value!r}, not {hint}")
+    value = function(*args, **kwargs)
+    hint = names[owner] if hints["return"] is typing.Self else hints["return"]
+    test.assertTrue(conforms(value, hint), f"{by} gave {value!r}, not {hint}")
+    if hasattr(module, type(value).__name__):
+        assert_stated(test, value)
+    return value
 
 
-def assert_stated(test: unittest.TestCase, value: object, by: str = "") -> None:
-    """Asserts that `value` is of each type that the stub states for it: the return of
-    the function `by` (such as `Client.open_writer`), and each attribute and property
-    of its class."""
+def assert_stated(test: unittest.TestCase, value: object) -> None:
+    """Asserts that `value` is of each type that the stub states for each attribute
+    and property of its class."""
     module, names = stated()
-    if by:
-        hint = typing.get_type_hints(named(module, by), names)["return"]
-        test.assertTrue(conforms(value, hint), f"{by} gave {value!r}, not {hint}")
     kind = getattr(module, type(value).__name__)
     hints = typing.get_type_hints(kind, names)
     test.assertEqual(sorted(getattr(value, "__dict__", {})), sorted(hints))

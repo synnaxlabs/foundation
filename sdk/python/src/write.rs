@@ -328,14 +328,15 @@ impl Writer {
     /// Raises `TypeError` for a value that is not of its place's type, a place of a
     /// type that is not a scalar, a key that is not a name or a place, or one value
     /// with no key for a writer of more places; `OverflowError` for a number outside
-    /// its type; `KeyError` for a name of no place; and `ValueError` for no value, a
-    /// place past the places, or two values of one channel. With each of these, nothing
-    /// was sent and the writer goes on. Raises `Rejected` when the node refused the
-    /// frame, and `DataLost` for a lost frame with `on_loss="raise"`; the writer goes
-    /// on after both. Raises `Stopped` when the node stopped the stream, and
-    /// `ConnectionError` when the session failed, after which each call raises it
-    /// again; `RuntimeError` after a close or in a forked process; and
-    /// `PanicException` when the client's thread panicked.
+    /// its type; `KeyError` for a name of no place; `ValueError` for no value, a place
+    /// past the places, or two values of one channel; and the error that the
+    /// `__float__` or `__index__` of a value raised. With each of these, nothing was
+    /// sent and the writer goes on. Raises `Rejected` when the node refused the frame,
+    /// and `DataLost` for a lost frame with `on_loss="raise"`; the writer goes on after
+    /// both. Raises `Stopped` when the node stopped the stream, and `ConnectionError`
+    /// when the session failed, after which each call raises it again; `RuntimeError`
+    /// after a close or in a forked process; and `PanicException` when the client's
+    /// thread panicked.
     fn write(&self, py: Python<'_>, values: &Bound<'_, PyAny>) -> PyResult<()> {
         #[cfg(feature = "sim")]
         let began = crate::sim::Part::start();
@@ -550,7 +551,9 @@ fn value(place: &Place, object: &Bound<'_, PyAny>) -> PyResult<Value> {
                 Err(e) if e.is_instance_of::<PyOverflowError>(object.py()) => {
                     return Err(outside(place, object, "its range"));
                 }
-                Err(_) => return Err(wrong(place, object)?),
+                Err(e) => {
+                    return Err(failed(place, object, e, &["__float__", "__index__"])?);
+                }
             };
             if scalar == Scalar::F64 {
                 Value::F64(float)
@@ -586,10 +589,28 @@ where
     let wide = match object.extract::<i128>() {
         Ok(wide) => wide,
         Err(e) if e.is_instance_of::<PyOverflowError>(object.py()) => i128::MAX,
-        Err(_) => return Err(wrong(place, object)?),
+        Err(e) => return Err(failed(place, object, e, &["__index__"])?),
     };
     T::try_from(wide)
         .map_err(|_outside| outside(place, object, &format!("{min} to {max}")))
+}
+
+/// The error of `object`, whose conversion for `place` raised `e`: `e` when the type of
+/// `object` has one of `methods`, which then raised it, or else the `TypeError` of a
+/// value of another type.
+fn failed(
+    place: &Place,
+    object: &Bound<'_, PyAny>,
+    e: PyErr,
+    methods: &[&str],
+) -> PyResult<PyErr> {
+    let kind = object.get_type();
+    for method in methods {
+        if kind.hasattr(*method)? {
+            return Ok(e);
+        }
+    }
+    wrong(place, object)
 }
 
 /// The `TypeError` of `object`, a value of another type, for `place`.

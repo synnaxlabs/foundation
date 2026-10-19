@@ -17,7 +17,8 @@ from typing import (
 import numpy
 from numpy.typing import NDArray
 
-_Value: TypeAlias = numpy.bool_ | SupportsIndex | SupportsFloat | uuid.UUID
+_Float: TypeAlias = SupportsFloat | SupportsIndex
+_Value: TypeAlias = numpy.bool_ | _Float | uuid.UUID
 
 def connect(
     address: str | None = None,
@@ -117,7 +118,7 @@ class Client:
         channels: str | Iterable[str],
         *,
         authority: int = 0,
-        lease: SupportsFloat | SupportsIndex | None = None,
+        lease: _Float | None = None,
         on_loss: Literal["warn", "raise", "ignore"] = "warn",
     ) -> Writer:
         """Opens a writer of `channels` at the home of their index, and blocks until the
@@ -187,14 +188,15 @@ class Writer:
         Raises `TypeError` for a value that is not of its place's type, a place of a
         type that is not a scalar, a key that is not a name or a place, or one value
         with no key for a writer of more places; `OverflowError` for a number outside
-        its type; `KeyError` for a name of no place; and `ValueError` for no value, a
-        place past the places, or two values of one channel. With each of these, nothing
-        was sent and the writer goes on. Raises `Rejected` when the node refused the
-        frame, and `DataLost` for a lost frame with `on_loss="raise"`; the writer goes
-        on after both. Raises `Stopped` when the node stopped the stream, and
-        `ConnectionError` when the session failed, after which each call raises it
-        again; `RuntimeError` after a close or in a forked process; and
-        `PanicException` when the client's thread panicked.
+        its type; `KeyError` for a name of no place; `ValueError` for no value, a place
+        past the places, or two values of one channel; and the error that the
+        `__float__` or `__index__` of a value raised. With each of these, nothing was
+        sent and the writer goes on. Raises `Rejected` when the node refused the frame,
+        and `DataLost` for a lost frame with `on_loss="raise"`; the writer goes on after
+        both. Raises `Stopped` when the node stopped the stream, and `ConnectionError`
+        when the session failed, after which each call raises it again; `RuntimeError`
+        after a close or in a forked process; and `PanicException` when the client's
+        thread panicked.
         """
 
     def write_series(self, series: dict[Any, NDArray[Any]]) -> None:
