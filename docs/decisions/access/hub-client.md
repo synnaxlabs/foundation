@@ -377,7 +377,9 @@
   `KeySet::ordered` checks these rules and gives `key_set::Error`, which `Opening`
   maps to them. When `Opening` gives the start, `client::Reader` gives
   `Error::ManyIndexes` in its place for the first place whose index is not that of
-  place 0, and is then done. Ruled by `laptop.architect` at 2026-10-19T15:10:51Z
+  place 0, and is then done. This is a step: #3356 makes the node merge the reads of
+  many indexes, so that no user sees `Error::ManyIndexes` (`laptop.monitor`). Ruled
+  by `laptop.architect` at 2026-10-19T15:10:51Z
   (https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6270542720).
   `Place::index` is a `usize`, as the other places of the crate are, not the `u32` of
   the plan; the wire holds a `u32`. This replaces the lost flag of #3266 above: the
