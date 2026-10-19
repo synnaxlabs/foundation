@@ -14,7 +14,7 @@ use wire::hub::client::Place;
 use wire::hub::client::write::{Open, Opening, Start, Write};
 use wire::hub::ends;
 use wire::hub::write::{Head, Replies, Reply, counts};
-pub use wire::hub::write::{Outcome, Refusal, Time};
+pub use wire::hub::write::{End, Outcome, Refusal, Time};
 
 use crate::{Error, Handle, end};
 
