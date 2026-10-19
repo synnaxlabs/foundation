@@ -86,7 +86,7 @@ so that a mutants run with `--jobs 4 --jobserver-tasks 4` fits (#803), and
 
 | Box | RAM | Group cap | Sessions counted | Share |
 | --- | --- | --- | --- | --- |
-| box1 | 61 GiB | 54 GiB | builder-1, builder-2, builder-3 | 16G |
+| box1 | 61 GiB | 54 GiB | builder-1, builder-2, builder-3, builder-4 | 12G |
 | box2 | 61 GiB | 54 GiB | builder-5, builder-6, builder-7, connector | 12G |
 
 The group cap is the `MemoryMax` of `user-1000.slice`. It is a runtime setting, so a

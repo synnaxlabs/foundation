@@ -4,6 +4,8 @@
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
+use std::collections::BTreeMap;
+
 use raft::{
     Body, Change, Config, Grant, Link, Message, Position, Proof, Raft, Start, Term,
     Voters,
@@ -88,6 +90,7 @@ fn heartbeat(links: u64) -> Message {
                     } else {
                         voters(&[1, 2, 3])
                     },
+                    public_keys: BTreeMap::new(),
                     votes: proof(1, &[1, 2]),
                     signature: None,
                 },

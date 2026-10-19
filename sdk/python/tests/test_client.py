@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+import typing
 import unittest
 import uuid
 import warnings
@@ -28,6 +29,9 @@ ADMIN = "@admin"
 # The encoding of the base point of Ed25519: a public key that is not of small order.
 BASE = bytes([0x58]) + bytes([0x66] * 31)
 WRONG = bytes(31) + b"\x01"
+FORKED = (
+    "a connect in a forked child traps on macOS (#3370): connect in the test process"
+)
 
 
 def crc32c(data: bytes) -> int:
@@ -46,6 +50,12 @@ def budget(pool: int, disk: int) -> bytes:
     return body + crc32c(body).to_bytes(4, "little")
 
 
+def forked(*_, **__) -> typing.NoReturn:
+    """Takes the place of `connect` in the child of `spawn`, and raises
+    `AssertionError`."""
+    raise AssertionError(FORKED)
+
+
 def fork(call) -> int:
     """Calls `call` in a forked child, and gives the exit code of the child: 0 when
     `call` gives `None`. Kills the child after `PATIENCE` s."""
@@ -54,13 +64,15 @@ def fork(call) -> int:
 
 def spawn(call) -> int:
     """Calls `call` in a forked child, and gives the pid of the child. The child exits
-    with 0 when `call` gives `None`, else with 1."""
+    with 0 when `call` gives `None`, else with 1. In the child, `foundation.connect` and
+    `foundation._native.connect` raise `AssertionError` on each OS."""
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", DeprecationWarning)
         pid = os.fork()
     if pid == 0:
         code = 1
         try:
+            foundation.connect = sys.modules["foundation._native"].connect = forked
             code = 0 if call() is None else 1
         finally:
             os._exit(code)
@@ -429,6 +441,20 @@ class ArgumentTest(unittest.TestCase):
                 **arguments,
             }
         )
+
+    def test_a_connect_in_a_forked_child_raises_assertion_error(self) -> None:
+        def child() -> object:
+            for connect in (self.connect, sys.modules["foundation._native"].connect):
+                try:
+                    connect()
+                except AssertionError as error:
+                    if str(error) != FORKED:
+                        return str(error)
+                else:
+                    return "connected"
+            return None
+
+        self.assertEqual(fork(child), 0)
 
     def directory(self) -> str:
         """A new data directory, with its `data`, that holds no node."""

@@ -8,6 +8,7 @@ use raft::{
     Answer, Body, Config, Data, Entry, Grant, Hard, Message, Position, Proof, Raft,
     Ready, Role, Start, Term, Voters,
 };
+use types::ed25519::PublicKey;
 use types::node;
 
 pub(crate) const ELECTION: u32 = 10;
@@ -377,4 +378,10 @@ pub(crate) fn position(term: u64, index: u64) -> Position {
 
 pub(crate) fn set(ids: &[u8]) -> BTreeSet<node::Key> {
     ids.iter().copied().map(key).collect()
+}
+
+/// Each node of `ids` with a test public key.
+pub(crate) fn keyed(ids: &[u8]) -> BTreeMap<node::Key, PublicKey> {
+    let public = |id| PublicKey::new([id; 32]).expect("not of small order");
+    ids.iter().map(|&id| (key(id), public(id))).collect()
 }

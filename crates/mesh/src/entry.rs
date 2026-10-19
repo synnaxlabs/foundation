@@ -94,15 +94,19 @@ fn wide(len: usize) -> u64 {
 #[cfg(test)]
 mod tests {
     use raft::{Change, Grant, Proof, Signature, Voters};
+    use types::ed25519::PublicKey;
 
     use super::*;
     use crate::common::{at, key};
 
+    // A change that adds nodes 2 and 3 to node 1.
     fn change(signature: Option<Signature>) -> Entry {
         let voters = Voters {
-            incoming: [key(1), key(2)].into(),
+            incoming: [key(1), key(2), key(3)].into(),
             outgoing: [key(1)].into(),
         };
+        let public = |byte| PublicKey::new([byte; 32]).unwrap();
+        let keys = [(key(2), public(0xb2)), (key(3), public(0xb3))].into();
         let proof = Proof {
             grant: Grant::Vote,
             candidate: key(1),
@@ -112,6 +116,7 @@ mod tests {
             at: at(3, 4),
             data: Data::Voters(Change {
                 voters,
+                public_keys: keys,
                 votes: proof,
                 signature,
             }),
@@ -119,13 +124,16 @@ mod tests {
     }
 
     #[test]
-    fn a_change_is_the_position_tag_voters_votes_and_signature() {
+    fn a_change_is_the_position_tag_voters_bound_keys_votes_and_signature() {
         let mut expected = vec![3, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 2];
-        expected.extend([2, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([3, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([1, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        expected.extend([0xb2; 32]);
+        expected.extend([0xb3; 32]);
         expected.push(1);
         expected.extend([1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         expected.extend([1, 0, 0, 0, 0, 0, 0, 0]);
@@ -146,6 +154,35 @@ mod tests {
         for cut in [bytes.len() - 64, bytes.len() - 1] {
             assert_eq!(decode(&bytes[..cut]), None, "{cut}");
         }
+    }
+
+    // The byte form of the signed `change`, and where its first bound key starts.
+    fn encoded_change() -> (Vec<u8>, usize) {
+        let mut bytes = Vec::new();
+        encode(&[change(Some(Signature([9; 64])))], &mut bytes);
+        (bytes, 17 + 8 + 3 * 16 + 8 + 16)
+    }
+
+    #[test]
+    fn decode_refuses_a_change_cut_inside_a_bound_key() {
+        let (bytes, first) = encoded_change();
+        for cut in [first, first + 31, first + 32, first + 63] {
+            assert_eq!(decode(&bytes[..cut]), None, "{cut}");
+        }
+    }
+
+    #[test]
+    fn decode_refuses_a_bound_key_of_small_order() {
+        let (mut bytes, first) = encoded_change();
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        for at in [first, first + 32] {
+            let mut bytes = bytes.clone();
+            bytes[at..at + 32].copy_from_slice(&identity);
+            assert_eq!(decode(&bytes), None, "{at}");
+        }
+        bytes[first..first + 32].copy_from_slice(&[0xb4; 32]);
+        assert!(decode(&bytes).is_some());
     }
 
     #[test]
