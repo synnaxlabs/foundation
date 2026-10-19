@@ -1895,15 +1895,15 @@ fn refuses_to_discover() {
     assert_eq!(diagnostics, [expected]);
 }
 
-/// Runs `script` on a scene of `setup` that subscribes at 50 Hz, as [`scene`] does.
-/// The server samples each 20 ms and publishes each 100 ms, so a change arrives up to
-/// 80 ms after its source timestamp.
+/// Runs `script` on a scene of `setup` that subscribes at 20 Hz, as [`scene`] does.
+/// The server samples each 50 ms and publishes each 100 ms, so a change arrives up to
+/// 50 ms after its source timestamp.
 fn watch<S, F>(setup: Setup, script: S) -> Record
 where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
 {
-    scene("50Hz", false, setup, script)
+    scene("20Hz", false, setup, script)
 }
 
 /// The offset of mesh time from the clock of the node of `scene`, in ns.
@@ -1919,7 +1919,7 @@ fn changed(outcome: &Record, node: &str, offset: i64) -> Vec<(f64, i64)> {
     for served in &outcome.served[node] {
         if changed
             .last()
-            .is_none_or(|&(value, _)| value != served.value)
+            .is_none_or(|&(value, _)| value.to_bits() != served.value.to_bits())
         {
             let time = i64::try_from(served.time.0).expect("small") + offset;
             changed.push((served.value, time));
@@ -2153,4 +2153,33 @@ fn leaves_out_and_counts_each_change_that_is_not_good() {
     assert_eq!(last(statuses, BAD), 2);
     assert_eq!(last(statuses, UNCERTAIN), 2);
     assert_eq!(last(statuses, IN), 4);
+}
+
+/// A queue of 2 values of each item, published each 500 ms, and a change each 50 ms:
+/// the server drops the oldest values, `missed` counts each value with the overflow
+/// bit, and each value that arrives is written.
+#[test]
+fn counts_each_overflow_of_the_queue_of_an_item_as_missed() {
+    let outcome = watch(Setup::three(), |scene| async move {
+        scene.variables.limit_queues(2, 500.0);
+        scene.stop().await;
+        scene.serve();
+        for at in (1_030..2_000).step_by(50) {
+            scene.after(ms(at), |scene| async move {
+                scene.variables.change(Quality::GOOD);
+            });
+        }
+        scene.supervise(ms(2_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    let frames = &outcome.frames;
+    assert_eq!(keys(frames), vec![vec![1, 2, 3, 4]; 5]);
+    for key in [2, 3, 4] {
+        assert_eq!(values(frames, key), [0.0, 8.0, 9.0, 18.0, 19.0], "{key}");
+    }
+    // The server sets the overflow bit on the oldest value that it keeps in each
+    // publishing interval that dropped one, so 2 for each item.
+    assert_eq!(last(&outcome.statuses, MISSED), 6);
+    assert_eq!(last(&outcome.statuses, IN), 15);
 }

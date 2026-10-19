@@ -72,6 +72,10 @@ struct State {
     /// The most session timeout of a server, set before it starts.
     #[cfg(test)]
     session: Option<Span>,
+    /// The largest queue of a monitored item and the shortest publishing interval
+    /// that a server grants, set before it starts.
+    #[cfg(test)]
+    queues: Option<(u32, f64)>,
     /// The reads of the state of the server (`ns=0;i=2259`) that a server answered.
     #[cfg(test)]
     states: u32,
@@ -149,6 +153,8 @@ impl Variables {
             most: None,
             #[cfg(test)]
             session: None,
+            #[cfg(test)]
+            queues: None,
             #[cfg(test)]
             states: 0,
             #[cfg(test)]
@@ -237,6 +243,14 @@ impl Variables {
     #[cfg(test)]
     pub(crate) fn time_out_sessions(&self, most: Span) {
         self.state().session = Some(most);
+    }
+
+    /// Makes a server that starts later grant each monitored item a queue of at most
+    /// `most` values, and each subscription a publishing interval of at least `ms`
+    /// ms.
+    #[cfg(test)]
+    pub(crate) fn limit_queues(&self, most: u32, ms: f64) {
+        self.state().queues = Some((most, ms));
     }
 
     /// Gives each later answer of the state of the server the status `quality`.
@@ -376,6 +390,8 @@ pub async fn serve(
         .collect();
     #[cfg(test)]
     let (most, session, fixed) = variables.hooks();
+    #[cfg(test)]
+    let queues = variables.state().queues;
     let add = |server: &mut Server| {
         server.cap_references(tree::REFERENCES);
         tree::add(server);
@@ -386,6 +402,11 @@ pub async fn serve(
         #[cfg(test)]
         if let Some(most) = session {
             server.set_session_timeout(most);
+        }
+        #[cfg(test)]
+        if let Some((most, ms)) = queues {
+            server.set_queues(most);
+            server.set_publishing(ms);
         }
         #[cfg(test)]
         {
