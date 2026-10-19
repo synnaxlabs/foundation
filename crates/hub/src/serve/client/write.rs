@@ -20,7 +20,7 @@ use wire::hub::client::Place;
 use wire::hub::client::write::{Open, Write};
 use wire::hub::write::{Due, Frames, Outcome, Reply, Step, Time};
 
-use self::group::{Frame, Group};
+use self::group::{Frame, Group, Parts};
 use super::{Reserved, body};
 use crate::State;
 use crate::link::Session;
@@ -212,6 +212,11 @@ async fn relay(
 }
 
 /// The writes of the groups of a stream, and the outcome blocks of its last frame.
+///
+/// A group that takes a frame waits for the next commit. One commit at a time is due:
+/// when none is, the stream calls one for the frames of each waiting group, and when
+/// it ends, sends the `Stored` or `Ended` of each group that it covers, in the order
+/// in which the groups took their first frame after the commit before.
 struct Writes {
     /// The count of frames of the stream whose head came.
     heads: u64,
@@ -219,8 +224,9 @@ struct Writes {
     groups: Vec<Group>,
     /// Each group of the frame whose head came, with the block of its outcome.
     pending: Vec<(u32, Unique)>,
-    /// The places of the stream's set, from [`group::places`].
-    places: Box<[(u32, usize)]>,
+    /// The series of each group of the last frame, or `None` for a stream of one
+    /// group, whose frames go to the group whole.
+    parts: Option<Parts>,
     /// The commit that is due, of the taken frames of each group of `covered`.
     due: Option<::home::Commit>,
     /// Each group that the commit in `due` covers.
@@ -233,6 +239,7 @@ impl Writes {
     /// The replies of a write of `set` with `writers`, one for each group, in group
     /// order.
     fn new(set: &KeySet, writers: Vec<Writer>) -> Self {
+        let parts = (writers.len() > 1).then(|| Parts::new(set));
         let groups = (0..)
             .zip(writers)
             .map(|(number, writer)| Group::new(number, writer))
@@ -241,7 +248,7 @@ impl Writes {
             heads: 0,
             groups,
             pending: Vec::new(),
-            places: group::places(set),
+            parts,
             due: None,
             covered: Vec::new(),
             waiting: Vec::new(),
@@ -258,7 +265,7 @@ impl Writes {
         self.heads += 1;
         // A head names at least one series and each series its index, so the frame
         // of a stream of one group holds it. This skips the walk of the series.
-        if self.groups.len() == 1 {
+        if self.parts.is_none() {
             self.pending.push((0, alloc(state, Outcome::LEN_MAX)?));
             return Ok(());
         }
@@ -294,28 +301,29 @@ impl Writes {
         draft: Draft,
         time: Time,
     ) -> Result<(), Error> {
-        let (mut whole, mut part) = match self.groups.len() {
-            1 => (Some(draft), None),
-            _ => (None, Some(draft)),
-        };
         let mut pending = mem::take(&mut self.pending);
-        if let Some(part) = &part {
-            let present = pending.iter().map(|&(group, _)| group);
-            group::split(&mut self.groups, &self.places, part, present);
-        }
+        let (mut whole, part) = match &mut self.parts {
+            Some(parts) => {
+                parts.split(&draft, pending.iter().map(|&(group, _)| group));
+                (None, Some((&*parts, draft)))
+            }
+            None => (Some(draft), None),
+        };
         for (group, block) in pending.drain(..) {
-            let frame = match whole.take() {
-                Some(draft) => Frame::Whole(draft),
-                None => Frame::Part(part.as_mut().expect("invariant: a part is kept")),
+            let frame = match (whole.take(), &part) {
+                (Some(draft), _) => Frame::Whole(draft),
+                (None, Some((parts, draft))) => parts.part(draft, group),
+                (None, None) => {
+                    unreachable!("invariant: a frame of one group writes one group")
+                }
             };
             let at = to_usize(group);
-            let (ended, outcome) = self.groups[at].write(
-                state,
-                frame,
-                time,
-                self.heads,
-                &mut self.waiting,
-            );
+            let waiting = self.groups[at].waiting();
+            let (ended, outcome) =
+                self.groups[at].write(state, frame, time, self.heads);
+            if !waiting && let Outcome::Taken { .. } = outcome {
+                self.waiting.push(group);
+            }
             if let Some((block, reply)) = ended {
                 send(sender, block, reply).await?;
             }

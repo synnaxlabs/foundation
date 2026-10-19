@@ -1,6 +1,7 @@
 //! The write of one group of a write stream.
 
 use std::cell::RefCell;
+use std::ops::Range;
 
 use block::Unique;
 use types::frame::key_set::KeySet;
@@ -23,9 +24,15 @@ const STORED_BYTES: usize = Reply::Stored {
 pub(super) enum Frame<'a> {
     /// A frame of the writer's set: the stream has one group.
     Whole(Draft),
-    /// A frame of the stream's set, whose series of the group, from [`split`], the
-    /// write copies.
-    Part(&'a mut Draft),
+    /// A frame of the stream's set, whose series of the group the write copies.
+    Part {
+        /// The frame.
+        frame: &'a Draft,
+        /// The entry in the writer's set and the length of each series of the group.
+        series: &'a [(usize, usize)],
+        /// The position in `frame` of each of `series`, as [`Draft::nth`] takes it.
+        sources: &'a [usize],
+    },
 }
 
 /// The write of one group of a stream at its home, and the `Stored` of the frames that
@@ -37,11 +44,6 @@ pub(super) struct Group {
     writer: Option<Writer>,
     /// Why the write of the group ended.
     ended: Option<End>,
-    /// The entry in the writer's set and the length of each series of the group in the
-    /// last frame that [`split`] split, reused across frames.
-    series: Vec<(usize, usize)>,
-    /// The entry in the stream's set of each of `series`.
-    sources: Vec<usize>,
     /// The last stamp that the home took or lost, of a frame of [`Time::Node`].
     stamped: Option<Stamp>,
     /// The count of frames of the stream through the last one taken since the last
@@ -63,8 +65,6 @@ impl Group {
             number,
             writer: Some(writer),
             ended: None,
-            series: Vec::new(),
-            sources: Vec::new(),
             stamped: None,
             taken: None,
             next: None,
@@ -72,21 +72,23 @@ impl Group {
         }
     }
 
+    /// Whether the group took a frame since the last [`cover`](Self::cover).
+    pub(super) fn waiting(&self) -> bool {
+        self.taken.is_some()
+    }
+
     /// Writes the series of the group in `frame`, frame `count` of the stream, of
     /// `time`, and gives its outcome, after the `Ended` reply and its block when the
-    /// group ends at it. Pushes the group to `waiting` when the frame is its first
-    /// taken frame since the last [`cover`](Self::cover). First takes the block of the
-    /// next `Stored` from the home's pool when the group holds none, so each taken
-    /// frame has the block of its `Stored`. A frame that finds no block for it or for
-    /// the copy of its series is refused as `Full` or `Large`, and the home does not
-    /// see it.
+    /// group ends at it. First takes the block of the next `Stored` from the home's
+    /// pool when the group holds none, so each taken frame has the block of its
+    /// `Stored`. A frame that finds no block for it or for the copy of its series is
+    /// refused as `Full` or `Large`, and the home does not see it.
     pub(super) fn write(
         &mut self,
         state: &RefCell<State>,
         frame: Frame<'_>,
         time: Time,
         count: u64,
-        waiting: &mut Vec<u32>,
     ) -> (Option<(Unique, Reply)>, Outcome) {
         if let Some(end) = self.ended {
             return (None, Outcome::Ended(end));
@@ -99,7 +101,11 @@ impl Group {
         }
         let draft = match frame {
             Frame::Whole(draft) => draft,
-            Frame::Part(draft) => match self.copy(state, draft) {
+            Frame::Part {
+                frame,
+                series,
+                sources,
+            } => match self.copy(state, frame, series, sources) {
                 Ok(draft) => draft,
                 Err(error) => return (None, self.untaken(refused(&error))),
             },
@@ -109,7 +115,7 @@ impl Group {
             .as_mut()
             .expect("invariant: a group that did not end writes until the finish");
         match write(writer, draft, time, &mut self.stamped) {
-            Ok(outcome) => (None, self.counted(count, outcome, waiting)),
+            Ok(outcome) => (None, self.counted(count, outcome)),
             Err(end) => {
                 let block = self
                     .next
@@ -163,22 +169,24 @@ impl Group {
         self.writer = None;
     }
 
-    /// A draft of the writer's set from the home's pool, with the series of the group
-    /// in `from`, a frame of the stream's set that [`split`] split.
+    /// A draft of the writer's set from the home's pool, with `series` of the group,
+    /// at `sources` in `from`, a frame of the stream's set.
     fn copy(
-        &mut self,
+        &self,
         state: &RefCell<State>,
-        from: &mut Draft,
+        from: &Draft,
+        series: &[(usize, usize)],
+        sources: &[usize],
     ) -> Result<Draft, block::Error> {
         let writer = self
             .writer
             .as_ref()
             .expect("invariant: a group that did not end writes until the finish");
-        let mut draft = layout(writer.set(), &self.series)
+        let mut draft = layout(writer.set(), series)
             .draft(state.borrow().home.pool(), from.form())?;
-        for ((_, to), &source) in draft.iter_mut().zip(&self.sources) {
-            let bytes = from
-                .series_mut(source)
+        for ((_, to), &source) in draft.iter_mut().zip(sources) {
+            let (_, bytes) = from
+                .nth(source)
                 .expect("invariant: the frame holds each series of its split");
             to.copy_from_slice(bytes);
         }
@@ -201,18 +209,10 @@ impl Group {
         (block, Reply::Ended { group, end })
     }
 
-    /// Counts a taken frame for the next commit, pushes the group to `waiting` when it
-    /// is the first since the last [`cover`](Self::cover), and gives `outcome`.
-    fn counted(
-        &mut self,
-        count: u64,
-        outcome: Outcome,
-        waiting: &mut Vec<u32>,
-    ) -> Outcome {
+    /// Counts a taken frame for the next commit, and gives `outcome`.
+    fn counted(&mut self, count: u64, outcome: Outcome) -> Outcome {
         if let Outcome::Taken { .. } = outcome {
-            if self.taken.replace(count).is_none() {
-                waiting.push(self.number);
-            }
+            self.taken = Some(count);
             return outcome;
         }
         self.untaken(outcome)
@@ -228,39 +228,81 @@ impl Group {
     }
 }
 
-/// The group of each entry of `set`, the stream's set, and its entry in the set of the
-/// writer of that group, which holds the entries of the group in the same order.
-pub(super) fn places(set: &KeySet) -> Box<[(u32, usize)]> {
-    let mut counts = vec![0; set.groups().len()];
-    set.entries()
-        .iter()
-        .map(|entry| {
-            let count = &mut counts[to_usize(entry.group)];
-            let place = (entry.group, *count);
-            *count += 1;
-            place
-        })
-        .collect()
+/// The series of each group of a frame of a stream of more than one group, in group
+/// order, in buffers reused across frames.
+pub(super) struct Parts {
+    /// The group of each entry of the stream's set, and its entry in the set of the
+    /// writer of that group, which holds the entries of the group in the same order.
+    places: Box<[(u32, usize)]>,
+    /// The span in `series` of each group of the last frame, by group.
+    spans: Vec<Range<usize>>,
+    /// The entry in the writer's set and the length of each series of the last frame.
+    series: Vec<(usize, usize)>,
+    /// The position in the frame of each of `series`.
+    sources: Vec<usize>,
 }
 
-/// Gives each of `present`, the groups of `frame`, a frame of the stream's set, its
-/// series in it, by `places` from [`places`].
-pub(super) fn split(
-    groups: &mut [Group],
-    places: &[(u32, usize)],
-    frame: &Draft,
-    present: impl IntoIterator<Item = u32>,
-) {
-    for group in present {
-        let group = &mut groups[to_usize(group)];
-        group.series.clear();
-        group.sources.clear();
+impl Parts {
+    /// The parts of the frames of `set`, the stream's set.
+    pub(super) fn new(set: &KeySet) -> Self {
+        let mut counts = vec![0; set.groups().len()];
+        let places = set
+            .entries()
+            .iter()
+            .map(|entry| {
+                let count = &mut counts[to_usize(entry.group)];
+                let place = (entry.group, *count);
+                *count += 1;
+                place
+            })
+            .collect();
+        Self {
+            places,
+            spans: vec![0..0; set.groups().len()],
+            series: Vec::new(),
+            sources: Vec::new(),
+        }
     }
-    for (source, bytes) in frame.iter() {
-        let (group, entry) = places[source];
-        let group = &mut groups[to_usize(group)];
-        group.series.push((entry, bytes.len()));
-        group.sources.push(source);
+
+    /// Splits `frame`, a frame of the stream's set whose groups are `present`, in
+    /// rising order. Time is linear in the series of `frame`.
+    pub(super) fn split(
+        &mut self,
+        frame: &Draft,
+        present: impl Iterator<Item = u32> + Clone,
+    ) {
+        for group in present.clone() {
+            self.spans[to_usize(group)] = 0..0;
+        }
+        for (source, _) in frame.iter() {
+            self.spans[to_usize(self.places[source].0)].end += 1;
+        }
+        let mut start = 0;
+        for group in present {
+            let span = &mut self.spans[to_usize(group)];
+            let count = span.end;
+            *span = start..start;
+            start += count;
+        }
+        self.series.resize(start, (0, 0));
+        self.sources.resize(start, 0);
+        for (n, (source, bytes)) in frame.iter().enumerate() {
+            let (group, entry) = self.places[source];
+            let span = &mut self.spans[to_usize(group)];
+            self.series[span.end] = (entry, bytes.len());
+            self.sources[span.end] = n;
+            span.end += 1;
+        }
+    }
+
+    /// The part of `group` of `frame`, the frame of the last [`split`](Self::split).
+    pub(super) fn part<'a>(&'a self, frame: &'a Draft, group: u32) -> Frame<'a> {
+        let span = self.spans[to_usize(group)].clone();
+        Frame::Part {
+            frame,
+            series: &self.series[span.clone()],
+            sources: &self.sources[span],
+        }
     }
 }
 
