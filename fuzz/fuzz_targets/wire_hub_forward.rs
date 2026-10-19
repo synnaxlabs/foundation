@@ -1,8 +1,8 @@
 //! `wire::hub::forward::Forward::decode` and `places::Run::decode` never panic, a
-//! forward that decodes encodes to its bytes, a refused forward has the refusal that its
-//! kind, its length, and its count give, each message of the run gives what a model of
-//! the run gives, a message that decodes encodes to its bytes, and each valid forward
-//! and run made from the input reads back in messages.
+//! forward that decodes encodes to its bytes, a refused forward has the refusal that
+//! its kind, its length, and its count give, each message of the run gives what a
+//! model of the run gives, a message that decodes encodes to its bytes, and each valid
+//! forward and run made from the input reads back in messages.
 //!
 //! Input: the channels of the open (`u32`), then the messages of one stream
 //! (`fuzz::messages`). The first is decoded as a forward, and each other as the next

@@ -75,8 +75,8 @@ pub mod places {
     pub const LEN: usize = 4;
 
     /// Writes the first `out.len() / LEN` places of `places` into `out`, one message of
-    /// the run. It takes no more, so a caller that passes `by_ref()` writes the rest into
-    /// the next message.
+    /// the run. It takes no more, so a caller that passes `by_ref()` writes the rest
+    /// into the next message.
     ///
     /// # Panics
     ///
@@ -446,7 +446,8 @@ mod tests {
                 let refused = places
                     .chunks(per)
                     .find_map(|chunk| decode(&mut run, &encode_places(chunk)).err());
-                let expected = first_bad(&places, channels).map(|place| Error::Place { place });
+                let expected =
+                    first_bad(&places, channels).map(|place| Error::Place { place });
                 prop_assert_eq!(refused, expected);
                 prop_assert_eq!(run.ended(), expected.is_none());
             }
