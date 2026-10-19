@@ -2,9 +2,11 @@ use std::env;
 use std::ffi::CStr;
 use std::path::Path;
 
+use pyo3::exceptions::PyConnectionError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 use pyo3::wrap_pymodule;
+use types::frame;
 
 const SUITE: &CStr = c"
 import io, sys, unittest
@@ -20,7 +22,11 @@ report = stream.getvalue()
 
 /// The files of `sdk/python/tests`, each with whether it runs only with the feature
 /// `sim`.
-const FILES: [(&str, bool); 2] = [("test_client.py", false), ("test_sim.py", true)];
+const FILES: [(&str, bool); 3] = [
+    ("test_client.py", false),
+    ("test_sim.py", true),
+    ("test_writer.py", false),
+];
 
 /// Runs each file of the Python suite `sdk/python/tests` on its own in this process,
 /// with this build as `foundation._native`. `FOUNDATION_NODE` is the path of the
@@ -208,13 +214,103 @@ fn error_raises_the_class_and_text_of_each_variant() {
             "place 1 holds i64, not f64",
         ),
         (sdk::Error::Closed, "RuntimeError", "the client is closed"),
+        (
+            sdk::Error::Session(program::Error::Unplaced("plant.a".parse().unwrap())),
+            "ConnectionError",
+            "the node gave no place for the channel plant.a of the open",
+        ),
     ];
+    raises(cases);
+}
+
+/// Maps each error of a stream that sent nothing and leaves a writer going to
+/// `ValueError`.
+#[test]
+fn error_raises_value_error_for_each_stream_error_that_sent_nothing() {
+    let cases = [
+        (
+            sdk::Error::Stream(program::Error::Layout(frame::Error::OutOfRange {
+                entry: 3,
+                entries: 2,
+            })),
+            "ValueError",
+            "the series of the draft are not valid: entry 3 is out of range for a key \
+             set of 2 entries",
+        ),
+        (
+            sdk::Error::Stream(program::Error::Unsent {
+                count: 0,
+                form: frame::Form::Raw,
+            }),
+            "ValueError",
+            "the frame holds no sample, so it was not sent",
+        ),
+        (
+            sdk::Error::Stream(program::Error::Body { length: 9 }),
+            "ValueError",
+            "the body has 9 bytes, over the 16777216 that a request holds",
+        ),
+        (
+            sdk::Error::Stream(program::Error::Open { length: 9 }),
+            "ValueError",
+            "the open has 9 bytes, over the 65536 that an open holds",
+        ),
+        (
+            sdk::Error::Stream(program::Error::Unnamed),
+            "ValueError",
+            "the writer names no channel",
+        ),
+    ];
+    raises(cases);
+}
+
+/// Asserts that `error` maps each variant of `cases` to its class and text.
+fn raises<const N: usize>(cases: [(sdk::Error, &str, &str); N]) {
     Python::initialize();
     Python::attach(|py| {
         for (variant, class, text) in cases {
-            let error = super::error(&variant);
+            let error = super::error(py, &variant);
             assert_eq!(error.get_type(py).name().unwrap().to_string(), class);
             assert_eq!(error.value(py).to_string(), text);
+        }
+    });
+}
+
+/// Maps a refusal of the session to `Refused`, a `ConnectionError`, and a refusal of a
+/// stream to `Stopped`, which is not one, each with the code of the refusal and its
+/// text.
+#[test]
+fn error_raises_refused_or_stopped_with_the_code_of_each_refusal() {
+    let codes = [
+        (program::Refusal::Malformed, "malformed"),
+        (program::Refusal::Unknown, "unknown"),
+        (program::Refusal::NotHome, "not_home"),
+        (program::Refusal::Failed, "failed"),
+        (program::Refusal::Busy, "busy"),
+        (program::Refusal::Refused, "refused"),
+        (program::Refusal::Unsynced, "unsynced"),
+        (program::Refusal::Stale, "stale"),
+        (program::Refusal::Via, "via"),
+        (program::Refusal::Expired, "expired"),
+        (program::Refusal::Changed, "changed"),
+    ];
+    Python::initialize();
+    Python::attach(|py| {
+        for (refusal, code) in codes {
+            let stream = sdk::Error::Stream(program::Error::Refused(refusal));
+            let session = sdk::Error::Session(program::Error::Refused(refusal));
+            for (variant, class, session) in
+                [(stream, "Stopped", false), (session, "Refused", true)]
+            {
+                let error = super::error(py, &variant);
+                assert_eq!(error.get_type(py).name().unwrap().to_string(), class);
+                let connection = error.is_instance_of::<PyConnectionError>(py);
+                assert_eq!(connection, session, "{variant}");
+                let value = error.value(py);
+                assert_eq!(value.to_string(), refusal.to_string());
+                let given: String = value.getattr("code").unwrap().extract().unwrap();
+                assert_eq!(given, code);
+            }
         }
     });
 }

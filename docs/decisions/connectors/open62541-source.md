@@ -462,8 +462,11 @@
   tests give the monotonic time from the Unix epoch (`event::Time::monotonic`).
   Approved by `laptop.architect-2`
   (https://github.com/synnaxlabs/foundation/pull/2574#issuecomment-6147681882,
-  2026-10-13 14:19 UTC). `laptop.architect-2` moved the trigger of #1992 to "exit test
-  1 of #1737 passes"
+  2026-10-13 14:19 UTC). The server clock of `sim::serve` adds the span of
+  `Variables::set_clock` (`laptop.architect-2`, 2026-10-19T12:02:54Z and 12:37:09Z:
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6266740401 and
+  https://github.com/synnaxlabs/foundation/pull/3354#issuecomment-6267372432).
+  `laptop.architect-2` moved the trigger of #1992 to "exit test 1 of #1737 passes"
   (https://github.com/synnaxlabs/foundation/issues/1992#issuecomment-6140198064,
   2026-10-13 07:03 UTC), and the person added this part to ONE NODE ("Yes thats
   fine"), relayed by `laptop.monitor`
@@ -1023,63 +1026,105 @@
   fixed in
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6255409915).
   Supersedes the policy index of the test helper and its abort in
-  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6247742342: the
-  sim server offers an ordered list of policies, and each secure test connects
-  through `Client::connect`. The client trusts one byte string: DER certificates back to
-  back, when `d2i_X509` reads its first certificate, or else PEM certificates. The copy
-  loads each certificate of each trust entry, and refuses an entry whose load stops
-  before its end, and the constructor of the group gives that status (ruling A). PEM is
-  read by the loop of `PEM_read_bio_X509_AUX` of aws-lc on a BIO of the full length,
-  which takes `CERTIFICATE`, `X509 CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks and
-  skips the text outside them, not by the leaf loader of the copy, which drops a block
-  that does not start with the exact line `-----BEGIN CERTIFICATE-----` (round 2 of
-  review of #3271). This supersedes item 1 of
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6247742342: the sim
+  server offers an ordered list of policies, and each secure test connects through
+  `Client::connect`. The client trusts one byte string: DER certificates back to back,
+  when `d2i_X509` reads its first certificate, or else PEM certificates. The copy loads
+  each certificate of each trust entry, and refuses an entry whose load stops before its
+  end, and the constructor of the group gives that status (ruling A). PEM is read by the
+  loop of `PEM_bytes_read_bio` of aws-lc on a BIO of the full length, which takes
+  `CERTIFICATE`, `X509 CERTIFICATE`, and `TRUSTED CERTIFICATE` blocks and skips the text
+  outside them, then `d2i_X509` on the bytes of each block, not by the leaf loader of
+  the copy, which drops a block that does not start with the exact line `-----BEGIN
+  CERTIFICATE-----` (round 2 of review of #3271). `d2i_X509` is the one step of the DER
+  path (#3288 item 4, OK of `laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077). This
+  supersedes item 1 of
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593. A DER
-  entry with a byte after its last certificate, and DER then PEM in one entry, give
-  `BadInternalError`. What aws-lc reads as text is dropped: a block with a damaged
-  `BEGIN` line, DER bytes after PEM, and a damaged first DER certificate before a PEM
-  block. So the connect fails closed with an untrusted certificate
+  entry with a byte after its last certificate, and DER then PEM in one entry, make the
+  constructor of the group give `BadInternalError`; the client gives the refusals of the
+  PR 2b paragraph below. What aws-lc skips is dropped: text, as the comment of
+  `openSSLLoadEachCertificate` states, DER bytes after PEM, a damaged first DER
+  certificate before a PEM block, and a block of another label. A block of any label
+  that aws-lc cannot read fails the load, such as an empty one or one whose `END` line
+  names another label. So the connect fails closed with an untrusted certificate
   (`laptop.architect-2`, 2026-10-18 22:30 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255959458; for the
   second, 2026-10-18 22:50 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256155598; and for
   the last, with the DER test, 2026-10-18 22:58 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256221476). A block
-  that holds two certificates gives `BadInternalError`, since the AUX reader of aws-lc
-  reads the bytes after the first certificate of a block of any label as trust
-  settings (`laptop.architect-2`, 2026-10-18 23:35 UTC,
-  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256562565, item 2,
-  which supersedes that part of item 1 of 6256155598). A block with any byte after its
-  certificate gives `BadInternalError`, also a `TRUSTED CERTIFICATE` with trust
-  settings, since the verify of the group applies none. A `TRUSTED CERTIFICATE` with
-  no settings reads. So the client never trusts a certificate past what its trust file
-  says (`laptop.architect-2`, 2026-10-18 23:40 UTC,
+  that holds two certificates makes the constructor give `BadInternalError`, since
+  `d2i_X509` does not take all the bytes of the block (`laptop.architect-2`, 2026-10-18
+  23:35 UTC, https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256562565,
+  item 2, which supersedes that part of item 1 of 6256155598). A block with any byte
+  after its certificate makes the constructor give `BadInternalError`, also a `TRUSTED
+  CERTIFICATE` with trust settings, since the verify of the group applies none. A
+  `TRUSTED CERTIFICATE` with no settings reads. So the client never trusts a certificate
+  past what its trust file says (`laptop.architect-2`, 2026-10-18 23:40 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256613286, which
   supersedes item 1 of 6256562565). Lost, with no form of them for now: a read of the
-  settings for the use of the group, and the verify of aws-lc in place of the chain
-  walk of the copy, which comes back only when a user needs a system trust bundle.
-  Cost: a trust file with settings, such as a system bundle in `TRUSTED CERTIFICATE`
-  form, is refused, and `openssl x509` writes it again without them. The person
-  approved this form (`laptop.monitor`, 2026-10-18 23:41:44 UTC,
+  settings for the use of the group, and the verify of aws-lc in place of the chain walk
+  of the copy, which comes back only when a user needs a system trust bundle. Cost: a
+  trust file with settings, such as a system bundle in `TRUSTED CERTIFICATE` form, is
+  refused, and `openssl x509` writes it again without them. The person approved this
+  form (`laptop.monitor`, 2026-10-18 23:41:44 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256621478): "Yeah
-  fine".
-  `laptop.monitor` accepted that the readers of aws-lc read the trust, and our own PEM
-  parser lost (message 20c8b048 to `box1.builder-3`,
-  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256452096). An
-  issuer entry keeps the load of the release (`laptop.architect-2`, 2026-10-18 22:07
-  UTC, https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593,
-  item 2).
+  fine". `laptop.monitor` accepted that the readers of aws-lc read the trust, and our
+  own PEM parser lost (message 20c8b048 to `box1.builder-3`,
+  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256452096). An issuer
+  entry keeps the load of the release (`laptop.architect-2`, 2026-10-18 22:07 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255744593, item 2).
   The validity check of the own certificate and the map of each refusal in `kind.rs`
   move to PR 2b (`laptop.architect-2`, 2026-10-18 21:37 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255457069, items 1
-  and 2). `laptop.monitor` accepted the trust as one byte string
-  (2026-10-18 22:03 UTC,
+  and 2), and the map in `kind.rs` then to PR 2d (`laptop.architect-2`, 2026-10-19 12:04
+  UTC, https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077).
+  `laptop.monitor` accepted the trust as one byte string (2026-10-18 22:03 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6256452096), on one
-  condition: the user never sees only `BadInternalError`. The check of PR 2b names the
-  source and the certificate that does not parse, before the run, and the plan of PR
-  2b names the test that pins that text
+  condition: the user never sees only `BadInternalError`. PR 2b gives the certificate
+  that does not parse as data, and PR 2d names the source before the run, with the test
+  that pins that text
   (https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6255781688).
-  `Client::connect` keeps its `Option`, on the condition that PR 2b makes `kind.rs`
-  pass the value of the config, or splits `connect` or gives it an enum
-  (`laptop.director`, 2026-10-18 21:48 UTC,
-  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255562713).
+  `laptop.monitor` accepted that move (2026-10-19 14:46 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607), on the
+  condition that 2d is the next PR of #2934 that a user can reach, and carries that
+  test; 2b and 2c ship dark. `Client::connect` keeps its `Option`, on the condition that
+  PR 2b makes `kind.rs` pass the value of the config, or splits `connect` or gives it an
+  enum (`laptop.director`, 2026-10-18 21:48 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255562713). With the
+  split of PR 2, the condition names PR 2d, the PR that gives `kind.rs` the config, and
+  2b and 2c add no other production caller that passes a literal (`laptop.director`,
+  2026-10-19 12:19 UTC,
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6267044406). PR 2b
+  of #2934 refuses the credentials before the dial with the cause as data:
+  `client::Error::Refused` with a `client::Refusal`, which names the part that fails and
+  the number from 1 of a trust certificate that does not load. The copy gives the cause
+  through `UA_CertificateUtils_checkTrust` and `UA_CertificateUtils_checkTime`, and
+  `shim_client_secure` is the one place that turns a cause into a kind. It checks the
+  policies, the key pair, the window, the trust, then the URI: the config takes the URI
+  that its check allocates, so no refusal comes after that allocation. A check refuses
+  only on its own status, and any other status, such as `BadOutOfMemory` of the trust
+  load when a push, the BIO, or the stack fails, gives `client::Error::Failed`, as the
+  realloc of the policies in `shim_add_policies` does. Where a check gives one result
+  for out of memory and the cause (`BadCertificateInvalid` of the policies when
+  `UA_OpenSSL_LoadCertificate` gives NULL, `BadInvalidArgument` of the policies when
+  `i2d_X509` fails, the key pair check, the URI check when `X509_get_ext_d2i` gives
+  NULL, and the trust load when `d2i_X509` or `PEM_bytes_read_bio` fails, which gives
+  `Invalid`, or `Empty` at the first DER certificate, as the load does not read the
+  `ERR_R_MALLOC_FAILURE` of aws-lc, #3391), the refusal names the cause, and the time
+  check gives `Failed(BadCertificateInvalid)` when its load of the certificate fails
+  (`laptop.monitor`, 2026-10-19 14:46 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607, item 2;
+  `laptop.architect-2`, 2026-10-19 14:49 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270087670; for the
+  trust load, `laptop.monitor`, 2026-10-19 16:56 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6272561677). This
+  supersedes the order of the checks and the abort on out of memory of step 3 of
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266751872. The own
+  certificate is valid from `notBefore` up to, not at, `notAfter`, to the second, at the
+  wall time of the loop of the client, the rule of the verify of the group. Lost: a
+  check apart from the connect, `Credentials::check`, since the shim still refuses the
+  same credentials at the connect, so two paths state each refusal; and a log line of
+  the cause, which no status carries (`laptop.architect-2`, 2026-10-19 12:04 UTC,
+  https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266776077).

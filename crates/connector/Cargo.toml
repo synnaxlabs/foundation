@@ -21,6 +21,7 @@ tracing.workspace = true
 block = { path = "../block" }
 codec = { path = "../codec" }
 env = { path = "../env" }
+estimate = { path = "../estimate" }
 hub = { path = "../hub" }
 secret = { path = "../secret" }
 document = { path = "../document" }

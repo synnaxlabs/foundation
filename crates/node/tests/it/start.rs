@@ -434,21 +434,22 @@ fn a_kept_pool_budget_that_gives_a_shard_too_little_fails() {
     let rig = Rig::new();
     rig.keep(1024, rig.disk);
     let output = rig.run(&["start", "--name", "edge"], b"");
-    let (status, out, errors) = ended(&output);
-    assert_eq!((status, out), (Some(1), ""));
-    // The shard and the block sizes depend on the cores of the host.
-    let (message, fix) = errors.split_once('\n').expect("two lines");
-    assert!(
-        message.starts_with(
-            "error[node.memory]: the pool budget 1KiB, which foundation-data keeps \
-             from its first start, gives shard-"
-        ),
-        "{errors}"
-    );
+    let cores = os::shards().expect("read the cores").cores().get();
+    let least = types::byte::Size::from_bytes(62_272 * u64::try_from(cores).unwrap());
     assert_eq!(
-        fix,
-        "fix: Remove the file `budget` in foundation-data, and the next start \
-         computes the budgets again from the free memory and disk\n"
+        ended(&output),
+        (
+            Some(1),
+            "",
+            format!(
+                "error[node.memory]: the pool budget 1KiB, which foundation-data keeps \
+                 from its first start, opens no buffer on each of {cores} shards; it \
+                 needs at least {least}\n\
+                 fix: Remove the file `budget` in foundation-data, and the next start \
+                 computes the budgets again from the free memory and disk\n"
+            )
+            .as_str()
+        )
     );
 }
 

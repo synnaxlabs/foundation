@@ -16,6 +16,7 @@ use crate::client::browse::Foreign;
 use crate::client::tests::common::{config, env, rig};
 use crate::client::tests::{RELAY, Relay, relayed};
 use crate::event::Time;
+use crate::ffi::UNIX_EPOCH;
 use crate::kind::Kind;
 use crate::sim::{Variables, during, serve, tree};
 
@@ -78,7 +79,7 @@ fn browse_relayed(delay: Span, query: Query) -> (Result<Found, Error>, i64, Vec<
 
 /// `stamp` in 100 ns from 1601.
 fn ticks(stamp: Stamp) -> i64 {
-    stamp.nanos() / 100 + 116_444_736_000_000_000
+    stamp.nanos() / 100 + UNIX_EPOCH
 }
 
 #[test]

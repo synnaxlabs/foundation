@@ -22,7 +22,7 @@ use super::{
     Calls, Client, Flight, GRACE, Large, Nodes, READS, Request, SPLIT, STATE, Slots,
     UNREAD, answer, id_bytes, most,
 };
-use crate::client::{Credentials, Mode};
+use crate::client::{Credentials, Error, Mode};
 use crate::connection::CHUNKS;
 use crate::connection::Manager;
 use crate::event;
@@ -62,7 +62,7 @@ const CHUNK: usize = 1 << 16;
 /// The current time of the server, a `DateTime`.
 const TIME: Node = Node {
     namespace: 0,
-    key: Key::Number(ffi::test::TIME),
+    key: Key::Number(ffi::TIME),
 };
 
 impl Client {
@@ -142,7 +142,7 @@ impl Peer<'_> {
         mode: Mode,
         credentials: &Credentials<'_>,
         wall: Stamp,
-    ) -> Result<Client, Status> {
+    ) -> Result<Client, Error> {
         let time = event::Time::since(Clock::clone(&self.clock), wall);
         let url = CString::new(self.url.clone()).expect("the URL holds no NUL");
         let connect = Client::connect(
@@ -186,7 +186,7 @@ impl Peer<'_> {
 }
 
 /// Connects a new client to `url`, with no wait that ends it.
-async fn open(
+pub(crate) async fn open(
     time: event::Time,
     net: Net,
     rng: &mut Rng,
@@ -201,7 +201,13 @@ async fn open(
         None,
         future::pending(),
     );
-    Ok(connect.await?.expect("a pending wait never ends"))
+    match connect.await {
+        Ok(client) => Ok(client.expect("a pending wait never ends")),
+        Err(Error::Failed(status)) => Err(status),
+        Err(Error::Refused(refusal)) => {
+            panic!("a client with no credentials: {refusal}")
+        }
+    }
 }
 
 /// Runs `test` on a node of a run of `seed`, and gives its value and the digest of
@@ -2978,6 +2984,32 @@ fn a_connect_whose_read_of_the_max_nodes_per_read_fails_closes_its_session() {
         .await
     });
     assert_eq!(connect, (Some(Status::BAD_UNEXPECTED_ERROR), 1));
+}
+
+/// A read of the time whose answer holds no result fails with `BadUnexpectedError`.
+#[test]
+fn a_time_whose_answer_has_no_result_fails_with_unexpected_error() {
+    let (time, _) = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            let url = format!("opc.tcp://{}:{RELAY}", node.addresses()[0]);
+            let connected = Cell::new(false);
+            let rewrite = |message: &mut Vec<u8>| {
+                if connected.get() && handle(message).is_some() {
+                    recount_of(message, 0);
+                }
+            };
+            relayed(&node, &Relay::default(), rewrite, async {
+                let mut client = peer.connect(&url).await.expect("the client connects");
+                connected.set(true);
+                let time = client.time().await;
+                client.close().await;
+                time
+            })
+            .await
+        })
+        .await
+    });
+    assert_eq!(time, Err(Status::BAD_UNEXPECTED_ERROR));
 }
 
 mod abort;

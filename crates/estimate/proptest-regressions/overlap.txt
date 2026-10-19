@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cb7e7c3b4121239c603197740cc0e6840b9c6145c7877d53bdd54dd86cc74c97 # shrinks to readings = [Low(15761189087285009905, 0), Both(6000145946416443111, 3026331194657842786, 2488862155902692225)], now = 0, ppb = 27531332
