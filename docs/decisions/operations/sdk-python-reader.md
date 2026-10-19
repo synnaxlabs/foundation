@@ -60,21 +60,25 @@
   | 16 places, 100 samples    | 7.38-21.2        | 21.9-43.1 | 4.24-6.20   | 8.24-16.0 |
   | 64 places, 100 (917)      | 23.5-54.9        | 55.2-84.8 | 14.0-28.3   | 30.3-50.4 |
 
-  One place of `bool`, as it comes, p50 then p99: 1.90-8.67, 8.19-22.3 at 100
-  samples; 2.78-12.5, 12.8-25.3 at 1000; and 4.25-16.2, 16.1-34.0 at 3000 (1814). The
-  other cases are frames over the largest block (57344 bytes), which the node never
-  sends. The round trip of a `write_series` of one place to the `__next__` of its
-  frame, p50 of 400 frames: 6.6 to 10.1 ms in 4 passes, and 22.9 to 35.0 ms in the
-  pass whose load rose to 34. A complete reader gets a frame only after it is on disk
-  (B1), so the group commit and its sync set the round trip. A latest reader, in one run
-  of 200 frames of 100 samples, got each frame in 69 µs at p50.
+  One place of `bool`, as it comes, p50 then p99: 1.90-8.67, 8.19-22.3 at 100 samples;
+  2.78-12.5, 12.8-25.3 at 1000; and 4.25-16.2, 16.1-34.0 at 3000 (1814). The other cases
+  are frames over the largest block of the pool of frames of a writer (57344 bytes),
+  which the writer of the bench cannot send. The round trip of a `write_series` of one
+  place to the `__next__` of its frame, p50 of 400 frames: 6.6 to 10.1 ms in 4 passes,
+  and 22.9 to 35.0 ms in the pass whose load rose to 34. A complete reader gets a frame
+  only after it is on disk (B1), so the group commit and its sync set the round trip. A
+  latest reader, in one run of 200 frames of 100 samples, got each frame in 69 µs at
+  p50.
 
-  P1 judgment. The part costs about 0.3 to 0.4 µs for each array (the `Vec`, the
-  `numpy` array, and its item in the `dict`), from the queued cases of 1, 16, and 64
-  places, and about 0.7 ns for each sample that it copies. A frame as it comes costs 1
-  to 15 µs more at p50 than a queued one: the thread of the program wakes after it
-  slept through the commit of about 7 ms, with cold caches. It runs once for each frame
-  that a Python program reads, on the CPU of the program, not of the node, and adds 0
-  bytes per sample. A cut of the part per sample needs arrays that view the buffers of
-  the `sdk` frame, which this item rejects above. A cut of the part per array needs no
-  `numpy` array for each series, which the Python surface cannot give.
+  P1 judgment. The part costs about 0.3 to 0.4 µs for each array (the `Vec`, the `numpy`
+  array, and its item in the `dict`), from the queued cases of 1, 16, and 64 places, and
+  about 0.7 ns for each sample that it copies. A frame as it comes costs 1 to 15 µs more
+  at p50 than a queued one: the thread of the program wakes after it slept through the
+  commit of about 7 ms, with cold caches. It runs once for each frame that a Python
+  program reads, on the CPU of the program, not of the node, and adds 0 bytes per
+  sample. It is on the path of a latest-mode read, so it counts against the latest-mode
+  p99, whose limit is 2.5 µs a hop. Its p99 is over the limit in each case but the
+  queued frame of 1 place of 100 samples, at 1.27 to 3.07 µs. A cut of the part per
+  sample needs arrays that view the buffers of the `sdk` frame, which this item rejects
+  above. A cut of the part per array needs no `numpy` array for each series, which the
+  Python surface cannot give.
