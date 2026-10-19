@@ -50,7 +50,7 @@
   https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032591908). Then
   the public keys that the change binds, as in the entry. The tag stays
   `foundation/voters/1`, because no node with the form before the keys shipped
-  (architect, #1106,
+  (architect, #1106, 2026-10-19T12:43:33Z:
   https://github.com/synnaxlabs/foundation/issues/1106#issuecomment-6267490155).
   Supersedes the form with no public keys (architect, #881, 2026-10-07T06:48:31Z:
   https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032591908).
