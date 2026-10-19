@@ -61,6 +61,28 @@ proptest! {
             );
         }
     }
+
+    #[test]
+    fn the_learners_of_a_mended_network_hold_the_leaders_log(
+        (logs, actions) in run(),
+        random in any::<u64>(),
+    ) {
+        let mut network = Network::new(&logs, random);
+        let (leader, _) = network.settle(&actions)?;
+        let at = network.propose(leader).unwrap();
+        let learners = network.learners(leader);
+        let mut nodes: Vec<usize> = network.voters(leader).collect();
+        nodes.extend(&learners);
+        network.apply_until(&nodes, at.index);
+        for &node in &learners {
+            prop_assert!(network.disks[node].applied >= at.index, "node {node}");
+            let applied = usize::try_from(network.disks[node].applied).unwrap();
+            prop_assert_eq!(
+                &network.disks[node].entries[..applied],
+                &network.disks[leader].entries[..applied]
+            );
+        }
+    }
 }
 
 const CASES: u32 = 1000;

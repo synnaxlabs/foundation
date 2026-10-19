@@ -249,7 +249,7 @@ mod tests {
         assert!(progress.checked(1, true));
         assert!(!progress.paused(1));
         assert!(progress.probing());
-        assert_eq!((progress.next, progress.matched), (1, 0));
+        assert_eq!((progress.next(), progress.matched()), (1, 0));
     }
 
     #[test]

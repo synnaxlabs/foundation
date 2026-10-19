@@ -563,10 +563,12 @@ impl Raft {
     /// counts its answer toward a commit, an election, or the quorum check. It keeps at
     /// most one append in flight to a learner (8 to a voter). When a learner answers
     /// this leader during a whole quorum check, but answers no append, the leader sends
-    /// to it again from its accepted index, so a lost append goes again within two
-    /// quorum checks. It sends each learner a message at least once each
-    /// `election_ticks` of its own ticks, and a new commit index at the next tick. It
-    /// sends a learner that a call adds an append at once. A learner stays until a
+    /// to it again from its accepted index, or sends its probe again, so a lost append
+    /// goes again within two quorum checks. A learner whose append takes longer than a
+    /// quorum check can get the same entries again about each second check. It sends
+    /// each learner a message at least once each `election_ticks` of its own ticks, and
+    /// the commit index at the next tick after the commit index that it can take moves.
+    /// It sends a learner that a call adds an append at once. A learner stays until a
     /// later call leaves it out: neither the quorum check nor a change of the
     /// configuration releases it. A node that a later call leaves out, and that the
     /// configuration in force does not hold, is released as a node that a change
@@ -709,9 +711,10 @@ impl Raft {
             Checked::HeartbeatReply => {
                 let last = self.log.last().index;
                 let learner = self.learner(from);
+                let window = window(&self.voters, &self.learners, from);
                 let behind = self.heard_from(from).is_some_and(|peer| {
                     if !learner {
-                        peer.progress.heard(INFLIGHT);
+                        peer.progress.heard(window);
                     }
                     peer.progress.matched() < last
                 });
@@ -1215,8 +1218,8 @@ impl Raft {
         self.send(from, self.term, reply, Some(proof));
     }
 
-    // A learner never campaigns, so it needs a heartbeat only for the commit index
-    // and to find a lost append.
+    // A learner never campaigns, so it gets a heartbeat only at each quorum check,
+    // which `set_learners` promises, and for a new commit index.
     fn tick_leader(&mut self) {
         self.heartbeat_elapsed += 1;
         let checked = self.election_elapsed >= self.election_ticks;
@@ -1232,14 +1235,16 @@ impl Raft {
             let (voters, learners) = (&self.voters, &self.learners);
             self.peers
                 .retain(|&key, peer| peer.active || full(voters, learners, key));
-            // A peer silent through a check may have lost the leader with its hard
-            // state, so it gets the votes again.
             for (&key, peer) in &mut self.peers {
                 if learner(voters, learners, key)
-                    && peer.progress.checked(LEARNER_INFLIGHT, peer.active)
+                    && peer
+                        .progress
+                        .checked(window(voters, learners, key), peer.active)
                 {
                     lost.push(key);
                 }
+                // A peer silent through a check may have lost the leader with its hard
+                // state, so it gets the votes again.
                 peer.answered = peer.answered && peer.active;
                 peer.active = false;
             }
@@ -4822,6 +4827,75 @@ mod tests {
             assert_eq!(carrying(&sent(&mut raft), 9), []);
             raft.step(message(9, 1, Body::HeartbeatReply)).unwrap();
             assert_eq!(carrying(&sent(&mut raft), 9), []);
+        }
+
+        fn checked_to(raft: &mut Raft, to: u8) -> Vec<Body> {
+            checked(raft)
+                .into_iter()
+                .filter(|m| m.to == key(to))
+                .map(|m| m.body)
+                .collect()
+        }
+
+        #[test]
+        fn a_heartbeat_reply_frees_no_probe_of_a_learner() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            sent(&mut raft);
+            raft.set_learners([key(9)]);
+            assert_eq!(to(&sent(&mut raft)), [key(9)]);
+            raft.step(message(9, 1, Body::HeartbeatReply)).unwrap();
+            assert_eq!(sent(&mut raft), []);
+        }
+
+        // The learner answers only heartbeats, so the probe goes again as it was,
+        // not from the learner's accepted index.
+        #[test]
+        fn an_expired_probe_of_a_learner_goes_again_at_its_next() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            raft.propose(b"x".to_vec()).unwrap();
+            raft.propose(b"y".to_vec()).unwrap();
+            accepted(&mut raft, 2, 3);
+            raft.set_learners([key(9)]);
+            sent(&mut raft);
+            checked(&mut raft);
+            raft.step(message(9, 1, Body::HeartbeatReply)).unwrap();
+            let probe = append(position(1, 3), Vec::new(), 3);
+            assert_eq!(
+                checked_to(&mut raft, 9),
+                [Body::Heartbeat { commit: 0 }, probe]
+            );
+        }
+
+        #[test]
+        fn a_probe_sent_after_a_reject_waits_a_whole_check() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            sent(&mut raft);
+            checked(&mut raft);
+            raft.step(message(9, 1, Body::AppendReject { hint: 0 }))
+                .unwrap();
+            assert_eq!(to(&sent(&mut raft)), [key(9)]);
+            assert_eq!(checked_to(&mut raft, 9), [Body::Heartbeat { commit: 0 }]);
+        }
+
+        #[test]
+        fn a_learner_that_answers_the_append_gets_no_resend_at_the_check() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 9, 1);
+            raft.propose(b"x".to_vec()).unwrap();
+            sent(&mut raft);
+            checked(&mut raft);
+            accepted(&mut raft, 9, 2);
+            assert_eq!(sent(&mut raft), []);
+            assert_eq!(checked_to(&mut raft, 9), [Body::Heartbeat { commit: 0 }]);
         }
 
         // A network that loses nothing and keeps the order of each link, with a delay
