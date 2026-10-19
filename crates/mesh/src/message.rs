@@ -399,16 +399,17 @@ fn take_answer(bytes: &mut &[u8]) -> Option<Answer> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use proptest::prelude::*;
     use raft::{Data, Entry, Grant, Proof, Signature, Voters};
     use types::channel;
+    use types::ed25519::PublicKey;
 
     /// The bytes of a link whose change has three incoming voters, three outgoing
-    /// voters, and three votes: the position, two key sets, the votes, and the
-    /// signature.
-    const LINK: usize = 16 + (8 + 3 * 16) * 2 + (1 + 16 + 8 + 3 * (16 + 64)) + 64;
+    /// voters, one of them added, and three votes: the position, two key sets, the
+    /// bound key, the votes, and the signature.
+    const LINK: usize = 16 + (8 + 3 * 16) * 2 + 32 + (1 + 16 + 8 + 3 * (16 + 64)) + 64;
 
     use super::*;
     use crate::change;
@@ -433,12 +434,23 @@ mod tests {
         ]
     }
 
+    fn a_public_key() -> impl Strategy<Value = PublicKey> {
+        prop::array::uniform32(any::<u8>())
+            .prop_filter_map("a key of small order", |bytes| PublicKey::new(bytes).ok())
+    }
+
     fn a_change() -> impl Strategy<Value = raft::Change> {
-        (keys(), keys(), a_proof(), a_signature()).prop_map(
-            |(incoming, outgoing, votes, signature)| raft::Change {
-                voters: Voters { incoming, outgoing },
-                votes,
-                signature: Some(signature),
+        let public = prop::collection::vec(a_public_key(), 4);
+        (keys(), keys(), public, a_proof(), a_signature()).prop_map(
+            |(incoming, outgoing, public, votes, signature)| {
+                let voters = Voters { incoming, outgoing };
+                let public_keys = voters.added().zip(public).collect();
+                raft::Change {
+                    voters,
+                    public_keys,
+                    votes,
+                    signature: Some(signature),
+                }
             },
         )
     }
@@ -581,6 +593,7 @@ mod tests {
                         incoming: keys.map(key).into(),
                         outgoing: BTreeSet::new(),
                     },
+                    public_keys: BTreeMap::new(),
                     votes: Proof {
                         grant: Grant::Vote,
                         candidate: key(1),
@@ -617,13 +630,15 @@ mod tests {
     const PROOF_AT: usize = HEAD - 9;
 
     /// The change of leader 1 to the incoming voters 1 and 2 from the outgoing
-    /// voter 2, with the vote of voter 1 and `signature`.
+    /// voter 2, which binds the key `[0xc1; 32]` of voter 1, with the vote of voter 1
+    /// and `signature`.
     fn change(signature: Option<Signature>) -> raft::Change {
         raft::Change {
             voters: Voters {
                 incoming: [key(1), key(2)].into(),
                 outgoing: [key(2)].into(),
             },
+            public_keys: [(key(1), PublicKey::new([0xc1; 32]).unwrap())].into(),
             votes: Proof {
                 grant: Grant::Vote,
                 candidate: key(1),
@@ -781,8 +796,9 @@ mod tests {
         let position = [le(2), le(4)].concat();
         let incoming = [&le(2)[..], &le_key(1), &le_key(2)].concat();
         let outgoing = [&le(1)[..], &le_key(2)].concat();
+        let bound = vec![0xc1; 32];
         let votes = [&[1][..], &le_key(1), &le(1), &le_key(1), &[5; 64]].concat();
-        let link = [position, incoming, outgoing, votes, vec![6; 64]].concat();
+        let link = [position, incoming, outgoing, bound, votes, vec![6; 64]].concat();
         let head = &head()[..head().len() - 8];
         let expected = [head, &le(1), &link, &[5], &le(6)].concat();
         assert_eq!(message.encode(), expected);
@@ -790,32 +806,77 @@ mod tests {
     }
 
     #[test]
-    fn a_link_of_three_voters_is_457_bytes() {
-        assert_eq!(LINK, 457);
+    fn a_link_of_three_voters_is_457_bytes_and_489_when_it_adds_one() {
+        assert_eq!(LINK, 489);
         let bare = chained(Vec::new()).encode().len();
-        for count in [2, 20] {
-            let chain = (1..=count)
-                .map(|index| Link {
-                    at: at(2, index),
-                    change: raft::Change {
-                        voters: Voters {
-                            incoming: [1, 2, 3].map(key).into(),
-                            outgoing: [1, 2, 4].map(key).into(),
+        let same = (BTreeMap::new(), [1, 2, 3], 457);
+        let adds = ([(key(3), public(3))].into(), [1, 2, 4], LINK);
+        for (public_keys, outgoing, link) in [same, adds] {
+            for count in [2, 20] {
+                let chain = (1..=count)
+                    .map(|index| Link {
+                        at: at(2, index),
+                        change: raft::Change {
+                            voters: Voters {
+                                incoming: [1, 2, 3].map(key).into(),
+                                outgoing: outgoing.map(key).into(),
+                            },
+                            public_keys: public_keys.clone(),
+                            votes: Proof {
+                                grant: Grant::Vote,
+                                candidate: key(1),
+                                voters: [1_u8, 2, 3]
+                                    .map(|id| (key(id), Some(signature(id))))
+                                    .into(),
+                            },
+                            signature: Some(signature(6)),
                         },
-                        votes: Proof {
-                            grant: Grant::Vote,
-                            candidate: key(1),
-                            voters: [1_u8, 2, 3]
-                                .map(|id| (key(id), Some(signature(id))))
-                                .into(),
-                        },
-                        signature: Some(signature(6)),
-                    },
-                })
-                .collect();
-            let encoded = chained(chain).encode().len();
-            assert_eq!(encoded - bare, LINK * usize::try_from(count).unwrap());
+                    })
+                    .collect();
+                let encoded = chained(chain).encode().len();
+                assert_eq!(encoded - bare, link * usize::try_from(count).unwrap());
+            }
         }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a change binds the keys of exactly the voters it adds"
+    )]
+    fn encode_panics_on_a_change_that_binds_a_voter_it_does_not_add() {
+        let mut link = Link {
+            at: at(2, 4),
+            change: change(Some(signature(6))),
+        };
+        link.change.public_keys.insert(key(2), public(9));
+        chained(vec![link]).encode();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a change binds the keys of exactly the voters it adds"
+    )]
+    fn encode_panics_on_a_change_that_lacks_the_key_of_a_voter_it_adds() {
+        let mut link = Link {
+            at: at(2, 4),
+            change: change(Some(signature(6))),
+        };
+        link.change.public_keys.pop_first().unwrap();
+        chained(vec![link]).encode();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a change binds the keys of exactly the voters it adds"
+    )]
+    fn encode_panics_on_a_change_that_binds_another_node_in_place_of_a_voter_it_adds() {
+        let mut link = Link {
+            at: at(2, 4),
+            change: change(Some(signature(6))),
+        };
+        let added = link.change.public_keys.remove(&key(1)).unwrap();
+        link.change.public_keys.insert(key(3), added);
+        chained(vec![link]).encode();
     }
 
     #[test]
@@ -1077,6 +1138,7 @@ mod tests {
                     incoming: (1..=voters).map(node::Key::from_u128).collect(),
                     outgoing: BTreeSet::new(),
                 },
+                public_keys: BTreeMap::new(),
                 votes: Proof {
                     grant: Grant::Vote,
                     candidate: key(1),
@@ -1136,6 +1198,10 @@ mod tests {
                 incoming: keys_of(0, most),
                 outgoing: keys_of(most, 2 * most),
             },
+            public_keys: keys_of(0, most)
+                .into_iter()
+                .map(|key| (key, PublicKey::new([0xc1; 32]).unwrap()))
+                .collect(),
             votes: votes_of_254(),
             signature: None,
         };
@@ -1156,7 +1222,7 @@ mod tests {
             },
             ..append.clone()
         };
-        assert_eq!([len(&append), len(&reply)], [24_581, 20_461]);
+        assert_eq!([len(&append), len(&reply)], [28_645, 20_461]);
         assert!(fits(&append) && fits(&reply));
     }
 

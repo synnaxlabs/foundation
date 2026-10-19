@@ -83,6 +83,12 @@ impl<'a> Streams<'a> {
         self.state
     }
 
+    /// The number of streams of a certain directionality that [`open`](Self::open)
+    /// may open now, before the peer allows more.
+    pub fn available(&self, dir: Dir) -> u64 {
+        self.state.max[dir as usize].saturating_sub(self.state.next[dir as usize])
+    }
+
     /// The number of streams that may have unacknowledged data.
     pub fn send_streams(&self) -> usize {
         self.state.send_streams
