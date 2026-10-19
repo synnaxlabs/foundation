@@ -174,10 +174,15 @@
   lost `hard` held. The caller writes `hard` and `entries` in any order, with no atomic
   write. Lost: the `Ready` doc requires `hard` before `entries`, a patch that each
   caller must keep and that shows only at a restart. The person decided on 2026-10-05
-  ("I approve long term fix on 522"), #522. `Raft::removed` says whether a committed
-  configuration removed a node: the configuration before the entries or a committed
-  `Voters` entry held it, and the last committed configuration lacks it. `mesh` is to
-  ask it at a refusal and keeps no copy of the configurations (#1105, #1762).
+  ("I approve long term fix on 522"), #522. `Raft::admission(&Message) -> Admission`
+  says how `mesh` takes a message from another node: `Admitted` for a reply or a
+  request of a voter of the newest configuration, `Removed` for a `PreVote` or a `Vote`
+  whose last index is at or below the commit, from a node that a committed
+  configuration removed (the configuration before the entries or a committed `Voters`
+  entry held it, and the last committed configuration lacks it), and `NotVoter` for
+  each other request. `mesh` keeps no copy of the configurations (#1105, #1762). It
+  replaces `Raft::removed` (decided by `laptop.architect`, 2026-10-19T12:57:24Z:
+  https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373).
   `Voters::contains` and `Voters::nodes` are public. Decided by `laptop.architect`,
   2026-10-08T03:04:33Z:
   https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777. After

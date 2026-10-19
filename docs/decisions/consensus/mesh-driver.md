@@ -6,8 +6,9 @@
   lost, so the group's time only slows. Before each `step`, `mesh` checks a message in
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
-  (`Error::Removed` for a sender that a committed configuration removed, else
-  `Error::NotVoter`), and each claim holds (`Error::Claim`), the claims being what
+  (`Raft::admission`: `Error::Removed` for a `PreVote` or a `Vote` at or below the
+  commit of a sender that a committed configuration removed, else `Error::NotVoter`),
+  and each claim holds (`Error::Claim`), the claims being what
   `Raft::claims` gives, so a link that the node does not read is not checked. So a
   node with a configuration refuses a leader that is not a voter of that
   configuration, when a change that the node does not hold made that leader a voter.
@@ -201,7 +202,10 @@
   https://github.com/synnaxlabs/foundation/pull/1057#issuecomment-6031046531). A group
   stops when a write of the log fails, when a committed change has 0 bytes or a kind
   that this build does not know, or when each `Mesh` drops: this build cannot judge such
-  an entry, and a newer build can. An entry with no change (the first entry of a leader)
+  an entry, and a newer build can. A group also stops (`Stopped::Removed`, with the
+  voters that answered) when a majority of the other incoming voters of the newest
+  configuration in its log answered `removed` under that configuration (RAFT VOTERS).
+  An entry with no change (the first entry of a leader)
   is not a change of 0 bytes. A committed entry of a known kind whose body does not
   decode is `Refused::Body` on every node, and the group goes on, so one voter that
   proposes bad bytes cannot halt the region. One `pub(crate)` type of `change` holds the
