@@ -410,5 +410,10 @@
   writer goes on. `Writer::finish` gives it after `Finished`. Until PR 2, `hub` sends
   only `Stored` of group 0 and never ends a group. Plan by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114) and
-  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269218439. Lost: a
-  `Stored` of the whole write, which a group that ends can hold back for ever.
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269218439. A frame
+  that the home took after the last `Stored` of an ended group may not be on disk: a
+  commit due at the end can still reach the disk, and its `Stored` drops.
+  `Writer::stored` gives `Error::Unstored` once each other group is stored, and again
+  at each later call. OK with these two doc changes by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269891329). Lost:
+  a `Stored` of the whole write, which a group that ends can hold back for ever.

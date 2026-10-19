@@ -553,9 +553,11 @@ pub enum Error {
         /// The form of the frame.
         form: Form,
     },
-    /// The write of each group ended with a frame that its home took and that is not
-    /// on disk: the place of the group's index, and why it ended. The other groups
-    /// go on.
+    /// The write of each group ended with a frame that its home took and that is not on
+    /// disk: the place of the group's index, and why it ended. The other groups go on.
+    /// [`Writer::stored`] gives it once each taken frame of every other group is on
+    /// disk, and again at each later call, so an `Ok` never says that a frame of an
+    /// ended group is on disk. [`Writer::finish`] gives it after `Finished`.
     Unstored(Vec<(usize, write::End)>),
 }
 

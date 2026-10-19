@@ -183,8 +183,10 @@ pub enum Reply {
         /// The count of frames that it covers.
         frames: u64,
     },
-    /// The write of `group` ended. It comes once. No `Stored` of `group` comes after
-    /// it, and each later outcome of `group` is [`Outcome::Ended`] of `end`.
+    /// The writer of `group` ended. Sent once. No `Stored` of `group` comes after it,
+    /// and each later outcome of `group` is [`Outcome::Ended`] of `end`. A frame whose
+    /// `group` its home took after the last `Stored` of `group` may not be on disk
+    /// there.
     Ended {
         /// The group that ended.
         group: u32,
