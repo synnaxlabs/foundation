@@ -3855,7 +3855,7 @@ mod tests {
                 outgoing: keys(outgoing),
             };
             Data::Voters(raft::Change {
-                public_keys: common::bound(&change),
+                public_keys: common::public_keys(&change),
                 voters: change,
                 votes: proof.expect("a proven message holds a proof"),
                 signature: None,

@@ -151,27 +151,35 @@ pub(crate) fn take_keys(bytes: &mut &[u8]) -> Option<BTreeSet<node::Key>> {
     Some(keys)
 }
 
-/// Adds each public key of `keys`, the keys that a change binds, in rising node order
-/// with no count: the voters of the change give the count.
-pub(crate) fn put_bound(keys: &BTreeMap<node::Key, PublicKey>, out: &mut Vec<u8>) {
-    for &key in keys.values() {
+/// Adds `public_keys`, the key of each voter that a change to `voters` adds
+/// ([`Voters::added`]), in rising node order with no count: `voters` gives the count.
+///
+/// # Panics
+///
+/// When the nodes of `public_keys` are not the voters that the change adds.
+pub(crate) fn put_public_keys(
+    voters: &Voters,
+    public_keys: &BTreeMap<node::Key, PublicKey>,
+    out: &mut Vec<u8>,
+) {
+    assert!(
+        public_keys.keys().copied().eq(voters.added()),
+        "invariant: a change binds the keys of exactly the voters it adds"
+    );
+    for &key in public_keys.values() {
         put_public_key(key, out);
     }
 }
 
-/// Takes what [`put_bound`] gives for a change to `voters`: a key for each node of
-/// `voters.incoming` that `voters.outgoing` lacks, and none in a leave. `None` for a
-/// key of small order.
-pub(crate) fn take_bound(
+/// Takes what [`put_public_keys`] gives for a change to `voters`. `None` for a key of
+/// small order.
+pub(crate) fn take_public_keys(
     voters: &Voters,
     bytes: &mut &[u8],
 ) -> Option<BTreeMap<node::Key, PublicKey>> {
-    if voters.outgoing.is_empty() {
-        return Some(BTreeMap::new());
-    }
-    let added = voters.incoming.difference(&voters.outgoing);
-    added
-        .map(|&node| Some((node, take_public_key(bytes)?)))
+    voters
+        .added()
+        .map(|node| Some((node, take_public_key(bytes)?)))
         .collect()
 }
 
@@ -287,7 +295,7 @@ pub(crate) fn put_proof(proof: &Proof, out: &mut Vec<u8>) {
 pub(crate) fn put_change(change: &Change, out: &mut Vec<u8>) {
     put_keys(&change.voters.incoming, out);
     put_keys(&change.voters.outgoing, out);
-    put_bound(&change.public_keys, out);
+    put_public_keys(&change.voters, &change.public_keys, out);
     put_proof(&change.votes, out);
     put_signature(change.signature, out);
 }
@@ -320,12 +328,12 @@ pub(crate) fn take_change(bytes: &mut &[u8]) -> Option<Change> {
         incoming: take_keys(bytes)?,
         outgoing: take_keys(bytes)?,
     };
-    let keys = take_bound(&voters, bytes)?;
+    let public_keys = take_public_keys(&voters, bytes)?;
     let proof = take_proof(bytes)?;
     let signature = Some(take_signature(bytes)?);
     Some(Change {
         voters,
-        public_keys: keys,
+        public_keys,
         votes: proof,
         signature,
     })

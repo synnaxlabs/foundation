@@ -353,17 +353,24 @@ impl Raft {
             return Err(Error::ChangePending { at });
         }
         let joint = self.voters.enter(voters.keys().copied().collect());
-        voters.retain(|&voter, _| !joint.outgoing.contains(&voter));
-        Ok(self.propose_entry(Data::Voters(self.change(joint, voters))))
+        let public_keys = joint
+            .added()
+            .filter_map(|voter| voters.remove_entry(&voter))
+            .collect();
+        Ok(self.propose_entry(Data::Voters(self.change(joint, public_keys))))
     }
 
-    // A configuration change that binds `keys`, with this leader's votes as its
+    // A configuration change that binds `public_keys`, with this leader's votes as its
     // proof.
-    fn change(&self, voters: Voters, keys: BTreeMap<node::Key, PublicKey>) -> Change {
+    fn change(
+        &self,
+        voters: Voters,
+        public_keys: BTreeMap<node::Key, PublicKey>,
+    ) -> Change {
         let proof = self.votes.clone();
         Change {
             voters,
-            public_keys: keys,
+            public_keys,
             votes: proof.expect("invariant: only a leader writes a configuration"),
             signature: None,
         }

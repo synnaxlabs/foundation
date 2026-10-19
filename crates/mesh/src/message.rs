@@ -444,15 +444,10 @@ mod tests {
         (keys(), keys(), public, a_proof(), a_signature()).prop_map(
             |(incoming, outgoing, public, votes, signature)| {
                 let voters = Voters { incoming, outgoing };
-                let added = voters.incoming.difference(&voters.outgoing).copied();
-                let keys = if voters.outgoing.is_empty() {
-                    BTreeMap::new()
-                } else {
-                    added.zip(public).collect()
-                };
+                let public_keys = voters.added().zip(public).collect();
                 raft::Change {
                     voters,
-                    public_keys: keys,
+                    public_keys,
                     votes,
                     signature: Some(signature),
                 }
@@ -811,33 +806,63 @@ mod tests {
     }
 
     #[test]
-    fn a_link_of_three_voters_that_adds_one_is_489_bytes() {
+    fn a_link_of_three_voters_is_457_bytes_and_489_when_it_adds_one() {
         assert_eq!(LINK, 489);
         let bare = chained(Vec::new()).encode().len();
-        for count in [2, 20] {
-            let chain = (1..=count)
-                .map(|index| Link {
-                    at: at(2, index),
-                    change: raft::Change {
-                        voters: Voters {
-                            incoming: [1, 2, 3].map(key).into(),
-                            outgoing: [1, 2, 4].map(key).into(),
+        let same = (BTreeMap::new(), [1, 2, 3], 457);
+        let adds = ([(key(3), public(3))].into(), [1, 2, 4], LINK);
+        for (public_keys, outgoing, link) in [same, adds] {
+            for count in [2, 20] {
+                let chain = (1..=count)
+                    .map(|index| Link {
+                        at: at(2, index),
+                        change: raft::Change {
+                            voters: Voters {
+                                incoming: [1, 2, 3].map(key).into(),
+                                outgoing: outgoing.map(key).into(),
+                            },
+                            public_keys: public_keys.clone(),
+                            votes: Proof {
+                                grant: Grant::Vote,
+                                candidate: key(1),
+                                voters: [1_u8, 2, 3]
+                                    .map(|id| (key(id), Some(signature(id))))
+                                    .into(),
+                            },
+                            signature: Some(signature(6)),
                         },
-                        public_keys: [(key(3), public(3))].into(),
-                        votes: Proof {
-                            grant: Grant::Vote,
-                            candidate: key(1),
-                            voters: [1_u8, 2, 3]
-                                .map(|id| (key(id), Some(signature(id))))
-                                .into(),
-                        },
-                        signature: Some(signature(6)),
-                    },
-                })
-                .collect();
-            let encoded = chained(chain).encode().len();
-            assert_eq!(encoded - bare, LINK * usize::try_from(count).unwrap());
+                    })
+                    .collect();
+                let encoded = chained(chain).encode().len();
+                assert_eq!(encoded - bare, link * usize::try_from(count).unwrap());
+            }
         }
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a change binds the keys of exactly the voters it adds"
+    )]
+    fn encode_panics_on_a_change_that_binds_a_voter_it_does_not_add() {
+        let mut link = Link {
+            at: at(2, 4),
+            change: change(Some(signature(6))),
+        };
+        link.change.public_keys.insert(key(2), public(9));
+        chained(vec![link]).encode();
+    }
+
+    #[test]
+    #[should_panic(
+        expected = "invariant: a change binds the keys of exactly the voters it adds"
+    )]
+    fn encode_panics_on_a_change_that_lacks_the_key_of_a_voter_it_adds() {
+        let mut link = Link {
+            at: at(2, 4),
+            change: change(Some(signature(6))),
+        };
+        link.change.public_keys.pop_first().unwrap();
+        chained(vec![link]).encode();
     }
 
     #[test]

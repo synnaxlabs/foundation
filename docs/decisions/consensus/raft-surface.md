@@ -18,14 +18,18 @@
   leader whose votes it holds. `Claim::signer` is the node whose signature a claim needs
   (architect, #881,
   https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032591908).
-  `raft::Change.keys` holds the public key of each voter that the entry adds: in a
-  joint entry, each node of `voters.incoming` that `voters.outgoing` lacks, and none
-  in a leave entry. `Raft::propose_voters` takes a map of each voter of the new set to
-  its key, and the joint entry binds the keys of the voters that it adds. `raft` keeps
-  the keys with the entry and sends them in each link, and does not read them in its
-  walk. The leader's signature of the change covers them (architect, #1106,
+  `raft::Change.public_keys` holds the public key of each voter that the entry adds:
+  in a joint entry, each node of `voters.incoming` that `voters.outgoing` lacks, and
+  none in a leave entry. `Raft::propose_voters` takes a map of each voter of the new
+  set to its key, and the joint entry binds the keys of the voters that it adds. `raft`
+  keeps the keys with the entry and sends them in each link, and does not read them in
+  its walk. The leader's signature of the change covers them (architect, #1106,
   2026-10-19T12:43:33Z:
   https://github.com/synnaxlabs/foundation/issues/1106#issuecomment-6267490155).
+  `Voters::added` gives the voters that a change adds, the one rule for `raft` and for
+  the byte form, and the field is `public_keys`, since a bound is a limit in this repo
+  (architect, #3380,
+  https://github.com/synnaxlabs/foundation/pull/3380#issuecomment-6270310245).
   `raft` gives this node's own entries, grants, and changes with no signature
   (`None`).
   `Ready::sign` gives each `None` the signature that the caller's closure makes for

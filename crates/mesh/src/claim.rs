@@ -10,7 +10,7 @@ use raft::{Body, Claim, Message, Raft, Ready, Signature};
 use types::ed25519::{Pair, PrivateKey, PublicKey};
 use types::node;
 
-use crate::bytes::{put_bound, put_grant, put_key, put_keys, put_position};
+use crate::bytes::{put_grant, put_key, put_keys, put_position, put_public_keys};
 
 const GRANT: &[u8] = b"foundation/grant/1";
 const CHANGE: &[u8] = b"foundation/voters/1";
@@ -226,7 +226,7 @@ fn statement(claim: &Claim<'_>) -> Vec<u8> {
             put_position(at, &mut bytes);
             put_keys(&voters.incoming, &mut bytes);
             put_keys(&voters.outgoing, &mut bytes);
-            put_bound(keys, &mut bytes);
+            put_public_keys(voters, keys, &mut bytes);
             bytes
         }
     }
@@ -544,6 +544,38 @@ mod tests {
         assert_eq!(statement(&claim), expected);
     }
 
+    #[test]
+    fn a_change_signs_its_voters_and_public_keys_in_the_form_of_its_entry() {
+        let voters = Voters {
+            incoming: [key(3), key(9), key(12)].into(),
+            outgoing: [key(3)].into(),
+        };
+        let public = |byte| PublicKey::new([byte; 32]).unwrap();
+        let public_keys = [(key(9), public(0xa9)), (key(12), public(0xac))].into();
+        let at = common::at(7, 5);
+        let signed = statement(&Claim::Change {
+            leader: key(3),
+            at,
+            voters: &voters,
+            public_keys: &public_keys,
+        });
+        let change = Change {
+            voters,
+            public_keys,
+            votes: Proof {
+                grant: Grant::Vote,
+                candidate: key(3),
+                voters: BTreeMap::new(),
+            },
+            signature: Some(raft::Signature([3; 64])),
+        };
+        let mut entry = Vec::new();
+        let data = Data::Voters(change);
+        crate::entry::encode(&[raft::Entry { at, data }], &mut entry);
+        let form = &signed[b"foundation/voters/1".len() + 16 + 8 + 8..];
+        assert_eq!(&entry[8 + 8 + 1..][..form.len()], form);
+    }
+
     // The joint configuration that leader 1 wrote at index 2 of `TERM`.
     fn joint() -> Voters {
         Voters {
@@ -574,7 +606,7 @@ mod tests {
         let change = signed_change();
         assert_eq!(change.votes, proven().proof.unwrap());
         let joint = joint();
-        let keys = common::bound(&joint);
+        let keys = common::public_keys(&joint);
         let claim = Claim::Change {
             leader: key(1),
             at: written(),
@@ -589,7 +621,7 @@ mod tests {
     fn verify_panics_for_a_signer_with_no_key() {
         let change = signed_change();
         let joint = joint();
-        let keys = common::bound(&joint);
+        let keys = common::public_keys(&joint);
         let claim = Claim::Change {
             leader: key(1),
             at: written(),
@@ -625,11 +657,12 @@ mod tests {
             outgoing: BTreeSet::new(),
             ..joint.clone()
         };
-        let keys = common::bound(&joint);
+        let keys = common::public_keys(&joint);
         let relayed = [(key(4), public(5))].into();
+        let none = BTreeMap::new();
         let moved = [
             (key(1), later, &joint, &keys),
-            (key(1), written(), &left, &keys),
+            (key(1), written(), &left, &none),
             (key(2), written(), &joint, &keys),
             (key(1), written(), &joint, &relayed),
         ];
