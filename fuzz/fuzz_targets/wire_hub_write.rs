@@ -140,7 +140,7 @@ fn check_error(error: Error, part: Part) {
         ),
         Part::Ends => matches!(
             error,
-            Error::Empty | Error::Length { .. } | Error::Run { .. }
+            Error::Empty | Error::Length { .. } | Error::Run { .. } | Error::Samples
         ),
         Part::Counts { .. } => matches!(
             error,
@@ -233,7 +233,7 @@ fn counts(set: &KeySet, time: Time, entries: &[usize]) -> usize {
 
 /// The items of `message`, `N` bytes each, with each first `u32`.
 fn items<const N: usize>(message: &[u8]) -> impl Iterator<Item = u32> + '_ {
-    message.chunks_exact(N).map(|item| {
+    message.as_chunks::<N>().0.iter().map(|item| {
         let first = item.first_chunk().expect("an item holds a u32");
         u32::from_le_bytes(*first)
     })
@@ -249,8 +249,11 @@ fn run(set: &Arc<KeySet>, bytes: &[u8], in_place: bool) -> Vec<Seen> {
     let mut seen = Vec::new();
     let mut part = Part::Head;
     let mut time = Time::Node;
-    // The entries of the ends of the frame that came.
+    // The entries of the ends of the frame that came, and the ends still due.
     let mut entries = Vec::new();
+    let mut ends = 0;
+    // The counts that came after the last end, before the draft.
+    let mut early = 0;
     // The bytes of the frame that came.
     let mut received = 0;
     loop {
@@ -270,7 +273,9 @@ fn run(set: &Arc<KeySet>, bytes: &[u8], in_place: bool) -> Vec<Seen> {
             Ok(Due::Draft { layout, form }) => {
                 assert_eq!(part, Part::Ends, "a draft is due outside the ends");
                 let body = layout.body_len();
-                let remain = counts(set, time, &entries);
+                let remain = counts(set, time, &entries)
+                    .checked_sub(early)
+                    .expect("no more counts came than are due");
                 match layout.draft(&pool, form) {
                     Ok(draft) => {
                         part = counted(remain, body, false);
@@ -332,14 +337,29 @@ fn run(set: &Arc<KeySet>, bytes: &[u8], in_place: bool) -> Vec<Seen> {
                         assert_eq!(&out[..], message, "the head changed");
                         time = head.time;
                         entries.clear();
+                        ends = usize::try_from(head.series).expect("a u32 fits");
+                        early = 0;
                         Step::Head(head)
                     }
                     Ok(step) => {
                         match part {
                             Part::Ends => {
-                                entries.extend(items::<END>(message).map(|entry| {
+                                let at = (ends * END).min(message.len());
+                                let (run, after) = message.split_at(at);
+                                entries.extend(items::<END>(run).map(|entry| {
                                     usize::try_from(entry).expect("a u32 fits")
-                                }))
+                                }));
+                                ends -= run.len() / END;
+                                if !after.is_empty() {
+                                    assert!(
+                                        matches!(time, Time::Frame(_)),
+                                        "a head that the node stamps took counts"
+                                    );
+                                    let counts: Vec<_> =
+                                        items::<COUNT>(after).collect();
+                                    early = counts.len();
+                                    given = Some(counts);
+                                }
                             }
                             Part::Counts { .. } => {
                                 given = Some(items::<COUNT>(message).collect());

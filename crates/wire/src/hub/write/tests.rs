@@ -272,23 +272,23 @@ mod lead {
     }
 
     #[test]
-    fn gives_whole_ends_and_whole_counts_in_each_message() {
+    fn gives_whole_ends_then_whole_counts_in_each_message() {
         let frame = create_frame(Path::Live, 2, 1);
         let lead = Lead::new(LIVE, &frame);
         let messages = |bytes_max| lead.messages(bytes_max).collect::<Vec<_>>();
         assert_eq!(messages(8), [0..7, 7..15, 15..23, 23..31, 31..39]);
-        assert_eq!(messages(19), [0..7, 7..23, 23..31, 31..39]);
-        assert_eq!(messages(1024), [0..7, 7..31, 31..39]);
+        assert_eq!(messages(19), [0..7, 7..23, 23..39]);
+        assert_eq!(messages(1024), [0..7, 7..39]);
     }
 
-    /// A `bytes_max` of `usize::MAX` gives the lead in three messages, with no
+    /// A `bytes_max` of `usize::MAX` gives the lead in two messages, with no
     /// overflow.
     #[test]
     fn gives_the_messages_of_a_largest_bytes_max() {
         let frame = create_frame(Path::Live, 2, 1);
         let lead = Lead::new(LIVE, &frame);
         let messages: Vec<_> = lead.messages(usize::MAX).collect();
-        assert_eq!(messages, [0..7, 7..31, 31..39]);
+        assert_eq!(messages, [0..7, 7..39]);
     }
 
     #[test]

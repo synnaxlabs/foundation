@@ -6,7 +6,8 @@
 //! - [`Head`]: kind 7, the time (`u8`, live 0, backfill 1, node 2), the form (`u8`, raw
 //!   0, encoded 1), and the count of series (`u32`).
 //! - The run of counts: after the run of ends, the samples of each series of each
-//!   present group (`u32`), in group order. A head of [`Time::Node`] has none.
+//!   present group (`u32`), in group order. A head of [`Time::Node`] has none. After
+//!   the head, each message holds whole ends, then whole counts.
 //! - [`Lead`]: the head, the run of ends, and the run of counts of one frame.
 //! - [`Reply`]: taken 1 or lost 2, then the frame (`u64`), the group (`u32`), the seq
 //!   (`u64`), and the count (`u32`); refused 3, then the frame, the group, and the code
@@ -215,7 +216,7 @@ impl<'f> Lead<'f> {
 
     /// The messages of the encoded lead for a stream whose messages hold at most
     /// `bytes_max` bytes, as ranges of it, in order. The head is one message, and
-    /// each other message holds whole ends or whole counts.
+    /// each other message holds whole ends, then whole counts.
     ///
     /// # Panics
     ///
@@ -225,18 +226,20 @@ impl<'f> Lead<'f> {
             bytes_max >= Head::LEN.max(ends::LEN),
             "a message of {bytes_max} bytes holds no head or no end"
         );
-        let ended = self.ended();
-        let runs = [
-            (Head::LEN..ended, ends::LEN),
-            (ended..self.bytes(), counts::LEN),
-        ];
-        let runs = runs.into_iter().flat_map(move |(run, len)| {
-            let most = bytes_max.strict_div(len).strict_mul(len);
-            let end = run.end;
-            run.step_by(most)
-                .map(move |at| at..end.min(at.saturating_add(most)))
+        let (ended, bytes) = (self.ended(), self.bytes());
+        let whole = |room: usize, len: usize| room.strict_div(len).strict_mul(len);
+        let mut at = Head::LEN;
+        let rest = iter::from_fn(move || {
+            let start = at;
+            let ends = ended.saturating_sub(at).min(whole(bytes_max, ends::LEN));
+            at = at.strict_add(ends);
+            if at >= ended {
+                let room = whole(bytes_max.strict_sub(ends), counts::LEN);
+                at = at.strict_add(bytes.strict_sub(at).min(room));
+            }
+            (at > start).then_some(start..at)
         });
-        iter::once(0..Head::LEN).chain(runs)
+        iter::once(0..Head::LEN).chain(rest)
     }
 
     /// The bytes of the head and the run of ends.
@@ -247,7 +250,8 @@ impl<'f> Lead<'f> {
 
 /// The run of counts after the run of ends of a head of [`Time::Frame`]: the samples
 /// of each series of each present group, at least 1, in group order. A group is
-/// present when the ends hold its index. Each message holds whole counts.
+/// present when the ends hold its index. The run starts in the message of the last
+/// end when that message has room, and each message holds whole counts.
 mod counts {
     use super::slots;
 

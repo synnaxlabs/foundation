@@ -34,9 +34,9 @@ use crate::{Away, State};
 pub use client::{Reply, Request};
 
 /// The most bytes of client bodies that one hub holds at once, over each of its links:
-/// the body of a request from its decode until the caller sends or drops its
-/// [`Reply`], the open of a read until it decodes after the wait for the home of its
-/// index, the open of a write until it decodes, and the ends of each write stream, 16
+/// the body of a request from its decode until the caller sends or drops its [`Reply`],
+/// the open of a read until it decodes after the wait for the home of its index, the
+/// open of a write until it decodes, and the ends and counts of each write stream, 20
 /// bytes for each channel of its open and one for its index, from the decode of the
 /// open until the stream ends, and its decoded names, 16 bytes and the length of each,
 /// from that decode until it sends its places. A body that does not fit stops with

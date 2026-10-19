@@ -214,26 +214,6 @@ impl<const SKIP: bool> Assembly<SKIP> {
         }
     }
 
-    /// The ranges of the frame: one for each index among the ends. Time is linear in
-    /// the ranges of a draft, and in the ends of a skipped frame.
-    ///
-    /// # Panics
-    ///
-    /// When neither a draft nor a skip came.
-    pub(super) fn ranges(&self) -> usize {
-        match &self.stage {
-            Stage::Body(draft) => draft.ranges().count(),
-            Stage::Skipped if SKIP => self
-                .ends
-                .iter()
-                .filter(|&&(entry, _)| self.set.index(entry) == entry)
-                .count(),
-            stage => {
-                unreachable!("invariant: ranges come after a draft, not {stage:?}")
-            }
-        }
-    }
-
     /// Sets the counts of the ranges of the draft in order, from range `first` on. A
     /// skipped frame drops them.
     ///

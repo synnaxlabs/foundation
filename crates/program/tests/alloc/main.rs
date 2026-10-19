@@ -130,7 +130,7 @@ fn writes_a_frame_with_no_allocation() {
             .await;
             start(&mut write, &places, places.len()).await;
             for seq in 0..WARM + COUNTED {
-                for _ in ["head", "ends", "counts", "body"] {
+                for _ in ["head", "ends and counts", "body"] {
                     let message = write.receiver.recv().await.expect("receives");
                     message.expect("a message of the frame");
                 }
