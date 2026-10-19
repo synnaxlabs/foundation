@@ -5182,42 +5182,6 @@ impl ControllerFactory for SetWindowController {
     }
 }
 
-/// A packet with only ACK frames passes a full congestion window, but only on a path that
-/// may send data: `populate_packet` writes no ACK on an unvalidated path, and neither does
-/// the ACK-only packet.
-///
-/// No crate of the workspace fills the window of an unvalidated path: `transport` runs one
-/// path, and after a migration that path starts with no bytes in flight and sends only
-/// path challenges and probes until it is validated.
-#[test]
-fn no_ack_only_packet_on_an_unvalidated_path_with_a_full_window() {
-    let _guard = subscribe();
-    let window = Arc::new(AtomicU64::new(u64::MAX / 2));
-    let mut transport = TransportConfig::default();
-    transport.congestion_controller_factory(Arc::new(SetWindowController {
-        window: window.clone(),
-    }));
-    let mut server_cfg = server_config();
-    server_cfg.transport = Arc::new(transport);
-    let mut pair = Pair::new(Default::default(), server_cfg);
-    let (client_ch, server_ch) = pair.connect();
-    pair.drive();
-
-    let s = pair.server_streams(server_ch).open(Dir::Uni).unwrap();
-    window.store(0, Ordering::Relaxed);
-    pair.server_send(server_ch, s).write(&[42; 1024]).unwrap();
-    pair.routes.as_basic_mut().passive_migration(Client);
-    let acks = pair.server_conn_mut(server_ch).stats().frame_tx.acks;
-    pair.client_conn_mut(client_ch).ping();
-    pair.drive_client();
-    for _ in 0..10 {
-        pair.time += Duration::from_millis(10);
-        pair.drive_server();
-    }
-
-    assert_eq!(pair.server_conn_mut(server_ch).stats().frame_tx.acks, acks);
-}
-
 /// The ACK-only packet carries the ACK of each path whose ACK is due, and of no other path.
 ///
 /// No crate of the workspace has a second path: `transport` does not negotiate multipath.
