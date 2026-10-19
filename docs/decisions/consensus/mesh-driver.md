@@ -160,10 +160,12 @@
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025). The
   messages for one member wait in a queue of 64 that drops its oldest, because `raft`
   sends again. Before it adds a message, the queue drops each message that the new one
-  replaces (`raft::Message::replaces`), so a member that does not answer holds one
-  heartbeat and the appends that its progress keeps in flight (`laptop.architect`,
-  2026-10-19T19:31:21Z:
-  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916). A
+  replaces (`raft::Message::replaces`), so a member that does not answer holds at
+  most one heartbeat, one `PreVote`, one `Vote`, and the appends of its window
+  (`INFLIGHT`, or one for a learner) (`laptop.architect`, 2026-10-19T19:31:21Z:
+  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916, and
+  2026-10-19T19:53:12Z:
+  https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275950285). A
   write that finds the pool full (`block::Error::Exhausted`), or that the system
   refuses memory for (`Refused`), does not stop the group, because each may
   succeed later (MEMORY BOUNDS): the task writes the same `Ready` again at each tick,

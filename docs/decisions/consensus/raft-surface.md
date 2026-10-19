@@ -210,11 +210,16 @@
   2026-10-12T18:29:52Z
   (https://github.com/synnaxlabs/foundation/issues/1361#issuecomment-6130215772), with
   the deferral of #2471.
-  `Message::replaces(&self, older)` tells the caller that `older`, a message to the
-  same node that has not gone yet, can drop when this one goes after it: a heartbeat
-  replaces each heartbeat of the same sender at its term or a lower one. `raft` owns
-  the rule, and the caller's queue applies it, so the queue of a node that does not
-  answer holds one heartbeat, not one for each tick. Lost: the queue reads the body
-  itself, which puts a rule of `raft` in its caller. Decided by `laptop.architect`,
-  2026-10-19T19:31:21Z
-  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916).
+  `Message::replaces(&self, older)` tells the caller that `older`, a message that has
+  not gone yet, can drop when this one goes after it. Both have the same sender and
+  the same receiver, and one of these holds: `older` has a lower term, and this one is
+  not a `PreVote` or a `PreVoteReply`, whose term is not the sender's own; or both are a
+  `Heartbeat`, both a `PreVote`, or both a `Vote`, and `older` has the same term or a
+  lower one. `raft` owns the rule, and the caller's queue applies it, so the queue of a
+  node that does not answer holds one heartbeat, not one for each tick, and no message
+  of a term that its sender left. Lost: a receiver still at the lower term can apply
+  later, when the commit index that `older` named comes in an append of the new term.
+  Decided by `laptop.architect`, 2026-10-19T19:31:21Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916), and
+  for the lower term and the requests of a vote, 2026-10-19T19:53:12Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275950285).

@@ -613,9 +613,10 @@ fn assert_ends_in_a_send<E: Future<Output = ()> + 'static>(
             .await;
         }
         clock.sleep(seconds(25)).await;
-        for _ in 0..2 {
-            assert!(!quiet(&mesh, 2).await, "the task of node 2 does not wait");
-        }
+        // A task that does not wait takes a message at the instant it comes, so a
+        // message that a later instant finds shows that the task waits in a send.
+        clock.sleep(Span::from_nanos(1)).await;
+        assert!(!quiet(&mesh, 2).await, "the task of node 2 does not wait");
         end(node, mesh).await;
         pending::<()>().await;
     };

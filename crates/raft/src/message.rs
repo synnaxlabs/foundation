@@ -167,15 +167,25 @@ impl Proof {
 }
 
 impl Message {
-    /// Whether `older`, a message to the same node that has not gone yet, can drop
-    /// when this one goes after it, with no loss to the receiver. A heartbeat replaces
-    /// each heartbeat of the same sender at its term or a lower one.
+    /// Whether `older`, a message that has not gone yet, can drop when this one goes
+    /// after it: the sender left the term of `older`, or this one is a request of the
+    /// same kind that brings all that `older` brings. False when they differ in sender
+    /// or receiver.
     #[must_use]
     pub fn replaces(&self, older: &Message) -> bool {
-        matches!(self.body, Body::Heartbeat { .. })
-            && matches!(older.body, Body::Heartbeat { .. })
-            && older.from == self.from
-            && older.term <= self.term
+        if older.from != self.from || older.to != self.to {
+            return false;
+        }
+        // The term of a pre-vote and its reply is not the sender's own.
+        let left = older.term < self.term
+            && !matches!(self.body, Body::PreVote { .. } | Body::PreVoteReply { .. });
+        let again = matches!(
+            (&self.body, &older.body),
+            (Body::Heartbeat { .. }, Body::Heartbeat { .. })
+                | (Body::PreVote { .. }, Body::PreVote { .. })
+                | (Body::Vote { .. }, Body::Vote { .. })
+        ) && older.term <= self.term;
+        left || again
     }
 
     // The claims of the proof in rising key order, then of each of `links`, then of
@@ -364,6 +374,29 @@ mod tests {
         message(from, term, Body::Heartbeat { commit: 0 })
     }
 
+    fn append(from: u64, term: u64) -> Message {
+        let body = Body::Append {
+            prev: Position::default(),
+            entries: Vec::new(),
+            commit: 0,
+        };
+        message(from, term, body)
+    }
+
+    fn pre_vote(from: u64, term: u64) -> Message {
+        let last = Position::default();
+        message(from, term, Body::PreVote { last })
+    }
+
+    fn vote(from: u64, term: u64) -> Message {
+        let last = Position::default();
+        message(from, term, Body::Vote { last })
+    }
+
+    fn answer(from: u64, term: u64, body: fn(Answer) -> Body) -> Message {
+        message(from, term, body(Answer::Granted(None)))
+    }
+
     #[test]
     fn a_heartbeat_replaces_a_heartbeat_of_its_term_and_sender() {
         let older = Message {
@@ -380,20 +413,86 @@ mod tests {
     }
 
     #[test]
-    fn a_heartbeat_keeps_a_message_of_another_kind() {
-        let append = Body::Append {
-            prev: Position::default(),
-            entries: Vec::new(),
-            commit: 0,
-        };
-        assert!(!heartbeat(1, 5).replaces(&message(1, 5, append.clone())));
-        assert!(!message(1, 5, append).replaces(&heartbeat(1, 5)));
+    fn a_pre_vote_replaces_a_pre_vote_of_its_term_or_a_lower_one() {
+        assert!(pre_vote(1, 5).replaces(&pre_vote(1, 5)));
+        assert!(pre_vote(1, 5).replaces(&pre_vote(1, 4)));
+        assert!(!pre_vote(1, 4).replaces(&pre_vote(1, 5)));
+    }
+
+    #[test]
+    fn a_vote_replaces_a_vote_of_its_term_or_a_lower_one() {
+        assert!(vote(1, 5).replaces(&vote(1, 5)));
+        assert!(vote(1, 5).replaces(&vote(1, 4)));
+        assert!(!vote(1, 4).replaces(&vote(1, 5)));
+    }
+
+    #[test]
+    fn a_message_of_a_higher_term_replaces_each_message_of_a_lower_one() {
+        let replies: [fn(Answer) -> Body; 2] = [
+            |answer| Body::PreVoteReply { answer },
+            |answer| Body::VoteReply { answer },
+        ];
+        let older = [
+            heartbeat(1, 4),
+            append(1, 4),
+            pre_vote(1, 4),
+            vote(1, 4),
+            answer(1, 4, replies[0]),
+            answer(1, 4, replies[1]),
+            message(1, 4, Body::HeartbeatReply),
+            message(1, 4, Body::AppendReply { last: 2 }),
+            message(1, 4, Body::AppendReject { hint: 2 }),
+        ];
+        let newer = [
+            heartbeat(1, 5),
+            append(1, 5),
+            vote(1, 5),
+            answer(1, 5, replies[1]),
+            message(1, 5, Body::HeartbeatReply),
+        ];
+        for newer in &newer {
+            for older in &older {
+                assert!(newer.replaces(older), "{newer:?} keeps {older:?}");
+            }
+            assert!(!newer.replaces(&append(1, 5)), "{newer:?}");
+        }
+    }
+
+    #[test]
+    fn a_pre_vote_or_its_reply_of_a_higher_term_keeps_a_message_of_a_lower_one() {
+        let reply = answer(1, 5, |answer| Body::PreVoteReply { answer });
+        for older in [heartbeat(1, 4), append(1, 4), vote(1, 4)] {
+            assert!(!pre_vote(1, 5).replaces(&older), "{older:?}");
+            assert!(!reply.replaces(&older), "{older:?}");
+        }
+    }
+
+    #[test]
+    fn a_message_of_another_kind_at_its_term_keeps_older() {
+        assert!(!heartbeat(1, 5).replaces(&append(1, 5)));
+        assert!(!append(1, 5).replaces(&heartbeat(1, 5)));
+        assert!(!vote(1, 5).replaces(&pre_vote(1, 5)));
+        assert!(!append(1, 5).replaces(&append(1, 5)));
         let reply = message(1, 5, Body::HeartbeatReply);
         assert!(!reply.replaces(&message(1, 5, Body::HeartbeatReply)));
     }
 
     #[test]
-    fn a_heartbeat_keeps_a_heartbeat_of_another_sender() {
+    fn a_message_keeps_a_message_of_another_sender() {
         assert!(!heartbeat(1, 5).replaces(&heartbeat(2, 5)));
+        assert!(!vote(1, 5).replaces(&heartbeat(2, 4)));
+    }
+
+    #[test]
+    fn a_message_keeps_a_message_to_another_receiver() {
+        let other = Message {
+            to: node::Key::from_u128(8),
+            ..heartbeat(1, 4)
+        };
+        assert!(!heartbeat(1, 5).replaces(&other));
+        assert!(!vote(1, 5).replaces(&Message {
+            to: other.to,
+            ..vote(1, 5)
+        }));
     }
 }

@@ -619,8 +619,9 @@ impl Mesh {
     }
 
     /// Waits for the next message for the member `to`. Each message is signed, and
-    /// what it relies on is on disk. A message that 64 newer ones follow is
-    /// dropped: `raft` sends again. One task at a time waits for one member.
+    /// what it relies on is on disk. A message that a newer one replaces, or that 64
+    /// newer ones follow, is dropped: `raft` sends again. One task at a time waits for
+    /// one member.
     ///
     /// # Errors
     ///
@@ -6936,29 +6937,45 @@ mod tests {
 
         use super::*;
 
-        /// Gives node 1 one heartbeat of leader 2 in each term of `terms`, with no
-        /// read of a reply between them. Gives the term of each reply that the queue
-        /// for node 2 then holds, in the order of the queue.
+        /// Gives node 1 one append of leader 2 for each index of `indexes`, one entry
+        /// each, with no read of a reply between them. Gives the last index of each
+        /// reply that the queue for node 2 then holds, in the order of the queue.
         async fn replies(
             mesh: &Mesh,
             clock: &Clock,
-            terms: RangeInclusive<u64>,
-        ) -> Vec<Term> {
-            for term in terms.map(Term) {
-                let heartbeat = Body::Heartbeat { commit: 0 };
-                let heartbeat = common::proven_in(term, 2, 1, heartbeat);
-                assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+            indexes: RangeInclusive<u64>,
+        ) -> Vec<u64> {
+            for index in indexes {
+                let append = Body::Append {
+                    prev: Position {
+                        term: Term(u64::from(index > 1)),
+                        index: index.checked_sub(1).unwrap(),
+                    },
+                    entries: vec![Entry {
+                        at: Position {
+                            term: Term(1),
+                            index,
+                        },
+                        data: Data::Bytes(vec![9]),
+                    }],
+                    commit: 0,
+                };
+                let append = common::proven_in(Term(1), 2, 1, append);
+                assert_eq!(mesh.receive(public(2), append), Ok(()));
             }
             clock.sleep(TICK).await;
             let mut replies = Vec::new();
             while let Poll::Ready(reply) = now(pin!(mesh.outgoing(key(2)))).await {
                 let reply = reply.unwrap();
+                let Body::AppendReply { last } = reply.body else {
+                    panic!("{reply:?} is not an append reply");
+                };
                 let expected = raft::Message {
-                    term: reply.term,
-                    ..message(1, 2, Body::HeartbeatReply)
+                    term: Term(1),
+                    ..message(1, 2, Body::AppendReply { last })
                 };
                 assert_eq!(reply, expected);
-                replies.push(reply.term);
+                replies.push(last);
             }
             replies
         }
@@ -6968,18 +6985,49 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
                 let replies = replies(&mesh, &node.clock(), 1..=64).await;
-                assert_eq!(replies, (1..=64).map(Term).collect::<Vec<_>>());
+                assert_eq!(replies, (1..=64).collect::<Vec<_>>());
             });
         }
 
-        // Node 2 answers each message of leader 1, and node 3 answers none.
+        /// Gives the term and kind of each message that the queue for `to` holds,
+        /// in the order of the queue, and empties it.
+        async fn drain(mesh: &Mesh, to: u8) -> Vec<(u64, &'static str)> {
+            let mut queued = Vec::new();
+            while let Poll::Ready(sent) = now(pin!(mesh.outgoing(key(to)))).await {
+                let sent = sent.unwrap();
+                let kind = match sent.body {
+                    Body::PreVote { .. } => "pre-vote",
+                    Body::Vote { .. } => "vote",
+                    Body::Heartbeat { .. } => "heartbeat",
+                    Body::Append { .. } => "append",
+                    Body::PreVoteReply { .. }
+                    | Body::VoteReply { .. }
+                    | Body::HeartbeatReply
+                    | Body::AppendReply { .. }
+                    | Body::AppendReject { .. } => "reply",
+                };
+                queued.push((sent.term.0, kind));
+            }
+            queued
+        }
+
+        // Node 2 answers each message of leader 1, and node 3 answers only the
+        // first append, while node 1 commits a proposal at each tick.
         #[test]
-        fn holds_one_heartbeat_for_a_member_that_does_not_answer() {
+        fn holds_one_heartbeat_and_the_window_for_a_member_that_does_not_answer() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-                elect(&mesh).await;
+                let first = elect(&mesh).await;
+                let reply = message(3, 1, Body::AppendReply { last: first.index });
+                let reply = raft::Message {
+                    term: first.term,
+                    ..reply
+                };
+                assert_eq!(mesh.receive(public(3), reply), Ok(()));
+                drain(&mesh, 3).await;
                 let clock = node.clock();
                 for _ in 0..3 * ELECTION_TICKS {
+                    mesh.propose(home_to(1)).await.unwrap();
                     clock.sleep(TICK).await;
                     while let Poll::Ready(sent) = now(pin!(mesh.outgoing(key(2)))).await
                     {
@@ -7001,14 +7049,29 @@ mod tests {
                         assert_eq!(mesh.receive(public(2), reply), Ok(()));
                     }
                 }
-                let group = mesh.group.borrow();
-                let queued = &group.queues[&key(3)].messages;
-                let heartbeats = queued
-                    .iter()
-                    .filter(|message| matches!(message.body, Body::Heartbeat { .. }))
-                    .count();
-                assert_eq!(heartbeats, 1);
-                assert_eq!(group.raft.role(), raft::Role::Leader);
+                // The window of a voter in `raft` holds 8 appends.
+                let mut expected = vec![(1, "append"); 8];
+                expected.push((1, "heartbeat"));
+                assert_eq!(drain(&mesh, 3).await, expected);
+            });
+        }
+
+        // Node 3 answers nothing, and node 2 answers only the campaigns of node 1,
+        // so node 1 loses its term and wins the next one 8 times.
+        #[test]
+        fn holds_no_message_of_a_term_that_its_sender_left() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                let mut term = elect(&mesh).await.term;
+                for _ in 0..8 {
+                    let next = elect(&mesh).await.term;
+                    assert!(next > term);
+                    term = next;
+                }
+                node.clock().sleep(TICK).await;
+                let expected = ["pre-vote", "vote", "append", "heartbeat"];
+                let expected = expected.map(|kind| (term.0, kind));
+                assert_eq!(drain(&mesh, 3).await, expected);
             });
         }
 
@@ -7017,7 +7080,7 @@ mod tests {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
                 let replies = replies(&mesh, &node.clock(), 1..=65).await;
-                assert_eq!(replies, (2..=65).map(Term).collect::<Vec<_>>());
+                assert_eq!(replies, (2..=65).collect::<Vec<_>>());
             });
         }
     }
