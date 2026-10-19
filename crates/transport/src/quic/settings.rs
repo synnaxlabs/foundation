@@ -236,6 +236,7 @@ fn streams(role: &Role, max: NonZeroU32) -> (VarInt, VarInt) {
 
 fn transport(setup: &Setup) -> TransportConfig {
     let idle_ms = idle_ms(setup.idle);
+    let idle = Duration::from_millis(idle_ms);
     let window = VarInt::try_from(setup.window_bytes).unwrap_or(VarInt::MAX);
     // noq-proto gives credit back in steps of 1/8 of a window, so a stream with the
     // connection's credit can run out while the connection has room.
@@ -258,8 +259,10 @@ fn transport(setup: &Setup) -> TransportConfig {
         .max_idle_timeout(Some(IdleTimeout::from(
             VarInt::from_u64(idle_ms).expect("invariant: i64 nanoseconds fit"),
         )))
-        .keep_alive_interval(Some(Duration::from_millis(idle_ms) / 3))
-        .initial_rtt(Duration::from_millis(333))
+        .keep_alive_interval(Some(idle / 3))
+        // With no round-trip sample, the first two PTOs, at 3 and 9 initial RTTs, come
+        // within 9/10 of the idle.
+        .initial_rtt(Duration::from_millis(333).min(idle / 10))
         .packet_threshold(3)
         .time_threshold(9.0 / 8.0)
         .persistent_congestion_threshold(3)
@@ -820,6 +823,29 @@ mod tests {
                 assert_eq!(lost(&pair.client), None);
                 assert_eq!(lost(&pair.server), None);
             });
+        }
+
+        #[test]
+        fn keeps_a_connection_whose_finished_is_lost_with_no_round_trip_sample() {
+            let (client, server) = testing::run(1, |shard| {
+                let mut pair = Pair::new(shard, Span::SECOND, DELAY);
+                pair.dial(pair::SERVER_KEY.public());
+                // Indices in `sent`. The server loses each ACK of the client's
+                // Initials, so the client has no round-trip sample. The client loses
+                // its ACK of the server's Initials, then its Finished.
+                let (client, server) = ([3, 4], [0, 1]);
+                for _ in 0..3000 {
+                    let sent = pair.client.sent.len();
+                    pair.client.drops = usize::from(client.contains(&sent));
+                    let sent = pair.server.sent.len();
+                    pair.server.drops = usize::from(server.contains(&sent));
+                    pair.run(Duration::from_millis(1));
+                }
+                let client = lost(&pair.client).map(|(_, error)| error.clone());
+                (client, connected(&pair.server))
+            });
+            assert_eq!(client, None);
+            assert!(server);
         }
 
         #[test]
