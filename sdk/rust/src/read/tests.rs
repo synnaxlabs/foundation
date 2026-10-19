@@ -268,6 +268,81 @@ fn a_call_after_an_answer_that_did_not_come_gives_its_error_again() {
     }
 }
 
+/// A reader whose thread answers each call only after a send on the sender that it
+/// gives, with a frame of the count of the call plus 1.
+fn gated() -> (Reader, std_mpsc::Sender<()>, JoinHandle<usize>) {
+    let (go, gate) = std_mpsc::channel::<()>();
+    let (reader, served) = reader(move |call, frame| {
+        #[expect(clippy::disallowed_methods, reason = "the thread waits for the test")]
+        gate.recv().unwrap();
+        *frame = self::frame(u32::try_from(call).unwrap() + 1, &[]);
+        Ok(())
+    });
+    (reader, go, served)
+}
+
+const WAIT: Duration = Duration::from_secs(10);
+
+#[test]
+fn a_call_within_gives_none_until_the_frame_comes_and_sends_the_call_once() {
+    let (mut reader, go, served) = gated();
+    for _ in 0..2 {
+        let none = reader.next_within(Duration::from_millis(1)).unwrap();
+        assert!(none.is_none());
+    }
+    go.send(()).unwrap();
+    let frame = reader.next_within(WAIT).unwrap().unwrap();
+    assert_eq!(frame.count(), 1);
+    drop(reader);
+    assert_eq!(served.join().unwrap(), 1);
+}
+
+#[test]
+fn a_call_of_next_after_none_gets_the_frame_of_that_call_then_sends_again() {
+    let (mut reader, go, served) = gated();
+    assert!(reader.next_within(Duration::ZERO).unwrap().is_none());
+    go.send(()).unwrap();
+    assert_eq!(reader.next().unwrap().count(), 1);
+    go.send(()).unwrap();
+    assert_eq!(reader.next_within(WAIT).unwrap().unwrap().count(), 2);
+    drop(reader);
+    assert_eq!(served.join().unwrap(), 2);
+}
+
+#[test]
+fn a_call_within_gives_the_error_of_the_thread_and_ends_the_reader() {
+    let failed = Error::Stream(program::Error::Unanswered);
+    let error = failed.clone();
+    let (mut reader, served) = reader(move |_, _| Err(error.clone()));
+    assert_eq!(reader.next_within(WAIT).map(drop), Err(failed.clone()));
+    assert_eq!(reader.next_within(WAIT).map(drop), Err(failed));
+    drop(reader);
+    assert_eq!(served.join().unwrap(), 1);
+}
+
+#[test]
+fn a_call_within_of_a_reader_whose_task_ended_gives_closed_after_a_close_else_panicked()
+{
+    for (closed, error) in LOST {
+        let (opens, mut opened) = mpsc::unbounded_channel();
+        let served = spawn(move || {
+            let Open {
+                opened: answer,
+                mut calls,
+                ..
+            } = received(&mut opened);
+            answer.send(Ok(places())).unwrap();
+            drop(calls.blocking_recv());
+        });
+        let closed = Arc::new(AtomicBool::new(closed));
+        let mut reader = Reader::open(&opens, &closed, config()).unwrap();
+        assert_eq!(reader.next_within(WAIT).map(drop), Err(error.clone()));
+        served.join().unwrap();
+        assert_eq!(reader.next_within(WAIT).map(drop), Err(error.clone()));
+        assert_eq!(reader.next().map(drop), Err(error));
+    }
+}
+
 #[test]
 fn a_frame_gives_only_its_series() {
     let stamps = [5_i64, 6].map(i64::to_le_bytes).concat();

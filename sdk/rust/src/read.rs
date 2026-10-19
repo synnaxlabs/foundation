@@ -4,7 +4,8 @@ use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::time::Duration;
 
 pub use program::Mode;
 use program::Refusal;
@@ -55,6 +56,8 @@ pub struct Reader {
     closed: Arc<AtomicBool>,
     /// The frame of the last call, which goes to the client's thread and back.
     frame: Frame,
+    /// Set while a call that [`Reader::next_within`] sent has no answer yet.
+    pending: bool,
     /// The error that ended the reader.
     ended: Option<Error>,
 }
@@ -87,6 +90,7 @@ impl Reader {
             answers,
             closed: Arc::clone(closed),
             frame: Frame::new(),
+            pending: false,
             ended: None,
         })
     }
@@ -115,17 +119,57 @@ impl Reader {
         reason = "the frame borrows the reader, which `Iterator` cannot give"
     )]
     pub fn next(&mut self) -> Result<&Frame, Error> {
+        self.sent()?;
+        let answer = wait(&self.answers, &self.closed);
+        self.answered(answer)
+    }
+
+    /// Like [`Reader::next`], but gives `None` when no frame came within `timeout`.
+    /// The call stays out: the next call of `next` or `next_within` waits for its
+    /// frame, so no frame is lost. The wait reads the monotonic clock of the OS.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`Reader::next`].
+    pub fn next_within(&mut self, timeout: Duration) -> Result<Option<&Frame>, Error> {
+        self.sent()?;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a call of a stream blocks its caller, and the bound of the wait is \
+                      no time of data"
+        )]
+        let answer = match self.answers.recv_timeout(timeout) {
+            Ok(answer) => Ok(answer),
+            Err(RecvTimeoutError::Timeout) => return Ok(None),
+            Err(RecvTimeoutError::Disconnected) => Err(lost(&self.closed)),
+        };
+        self.answered(answer).map(Some)
+    }
+
+    /// Sends the frame of the last call to the client's thread, unless a call is out.
+    /// Gives the error that ended the reader.
+    fn sent(&mut self) -> Result<(), Error> {
         if let Some(error) = &self.ended {
             return Err(error.clone());
         }
-        let frame = mem::replace(&mut self.frame, Frame::new());
+        if !self.pending {
+            let frame = mem::replace(&mut self.frame, Frame::new());
+            send(&self.calls, frame, &self.closed)
+                .map_err(|error| self.ended.insert(error).clone())?;
+            self.pending = true;
+        }
+        Ok(())
+    }
+
+    /// The frame of `answer`, the answer to the call that is out, or the error that
+    /// ends the reader.
+    fn answered(&mut self, answer: Result<Answer, Error>) -> Result<&Frame, Error> {
         // A lost answer ends the reader too: its call can still fill `calls`.
-        let answer = send(&self.calls, frame, &self.closed)
-            .and_then(|()| wait(&self.answers, &self.closed))
-            .and_then(|(answer, frame)| {
-                self.frame = frame;
-                answer
-            });
+        let answer = answer.and_then(|(answer, frame)| {
+            self.pending = false;
+            self.frame = frame;
+            answer
+        });
         match answer {
             Ok(()) => Ok(&self.frame),
             Err(error) => Err(self.ended.insert(error).clone()),
