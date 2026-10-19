@@ -246,8 +246,7 @@ impl Mesh {
                 .map_err(Error::Member)?;
         check_members(&state, config.key, &config.private_key, &voters)?;
         put(&config.store, &config.pool, &chunks, &tree.chunks).await?;
-        let pool = Rc::clone(&config.pool);
-        let files = &config.files;
+        let (pool, files) = (Rc::clone(&config.pool), &config.files);
         let (log, stored) = open_log(files, &config.dir, Rc::clone(&pool)).await?;
         let logged = stored != log::Stored::default();
         let blocks = log.blocks();
@@ -1835,7 +1834,8 @@ mod tests {
                         if protocol == Protocol::Blob {
                             let silent = {
                                 let mut board = board.lock().unwrap();
-                                *board.blobs.entry(id).or_default() += 1;
+                                let blobs = board.blobs.entry(id).or_default();
+                                *blobs = blobs.checked_add(1).unwrap();
                                 board.silent.contains(&id)
                             };
                             if silent {

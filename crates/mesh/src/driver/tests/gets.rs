@@ -17,7 +17,34 @@ fn a_voter_down_at_the_apply_uses_the_spec_when_it_comes_back() {
     cluster.run(seconds(5));
     cluster.start_voter(3);
     cluster.run(seconds(5));
-    assert_used(&cluster.board(), &IDS, pointer(1, &definitions), &definitions);
+    assert_used(
+        &cluster.board(),
+        &IDS,
+        pointer(1, &definitions),
+        &definitions,
+    );
+}
+
+// Voter 3 is down at the apply of a change of 40 subjects, so it lacks each of more
+// than 40 chunks. A get that waited `RETRY` would take more than 40 s. Voter 2 takes
+// three puts at the apply, and voter 3 gets each of the 41 chunks from voter 1, the
+// first holder.
+#[test]
+fn a_voter_that_lacks_many_chunks_gets_each_at_once() {
+    let mut cluster = Cluster::new(0);
+    cluster.start_voter(1);
+    cluster.start_voter(2);
+    cluster.run(seconds(5));
+    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let definitions = create_subjects(&labels, 512);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(10));
+    cluster.start_voter(3);
+    cluster.run(seconds(10));
+    let board = cluster.board();
+    assert_used(&board, &[3], pointer(1, &definitions), &definitions);
+    assert_eq!(board.blobs, [(1, 41), (2, 3)].into());
 }
 
 // Voter 3 loses the root of the spec in use while it is down.
@@ -30,7 +57,12 @@ fn a_voter_that_lost_a_chunk_gets_it_from_another_voter() {
         node.files().remove(&path).await.unwrap();
     });
     cluster.run(seconds(5));
-    assert_used(&cluster.board(), &[3], pointer(1, &definitions), &definitions);
+    assert_used(
+        &cluster.board(),
+        &[3],
+        pointer(1, &definitions),
+        &definitions,
+    );
 }
 
 // Voter 1, a holder and the first peer of voter 3, loses the root while it runs, so
@@ -131,7 +163,12 @@ fn applied() -> (Cluster, BTreeMap<Name, Definition>) {
     let definitions = create_subjects(&["plant.a"], 1);
     cluster.change(1, base(), &definitions);
     cluster.run(seconds(5));
-    assert_used(&cluster.board(), &IDS, pointer(1, &definitions), &definitions);
+    assert_used(
+        &cluster.board(),
+        &IDS,
+        pointer(1, &definitions),
+        &definitions,
+    );
     (cluster, definitions)
 }
 

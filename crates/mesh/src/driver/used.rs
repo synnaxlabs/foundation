@@ -30,7 +30,8 @@ use spec::Pointer;
 /// The directory of the file that names the pointer in use, in
 /// [`Config::dir`](super::Config::dir).
 pub(super) const SPEC: &str = "spec";
-/// The time between two reads of a pointer that failed for a cause that can pass.
+/// The wait before a read or a get that follows one that failed for a cause that can
+/// pass.
 const RETRY: Span = Span::SECOND;
 
 /// The spec that this node uses, and the newest committed pointer that it does not
@@ -63,9 +64,12 @@ pub(super) struct Newest {
 enum Step {
     /// Read its spec now.
     Read,
-    /// After `RETRY`, get the chunk that the last read missed from the store, or else
-    /// from the peers, and read again only when it has it.
+    /// Get the chunk that the last read missed from the store, or else from the peers,
+    /// and read again only when it has it.
     Get(Digest),
+    /// After `RETRY`, get the chunk again: the last get did not find it, or its store
+    /// call failed.
+    Missed(Digest),
     /// After `RETRY`, read again.
     Retry,
     /// Nothing: its tree or its spec is at fault.
@@ -170,8 +174,8 @@ impl Used {
     ) -> Poll<(Pointer, Job)> {
         let ready = match self.newest.as_ref().map(|newest| newest.step) {
             None | Some(Step::Stuck) => false,
-            Some(Step::Read) => true,
-            Some(Step::Get(_) | Step::Retry) => {
+            Some(Step::Read | Step::Get(_)) => true,
+            Some(Step::Missed(_) | Step::Retry) => {
                 let sleep = retry.get_or_insert_with(|| clock.sleep(RETRY));
                 Pin::new(sleep).poll(cx).is_ready()
             }
@@ -183,7 +187,7 @@ impl Used {
         *retry = None;
         self.task = None;
         let job = match newest.step {
-            Step::Get(digest) => Job::Get(digest, Vec::new()),
+            Step::Get(digest) | Step::Missed(digest) => Job::Get(digest, Vec::new()),
             Step::Read | Step::Retry | Step::Stuck => {
                 let mut chunks = self.chunks.clone();
                 for chunk in &newest.got {
@@ -235,8 +239,10 @@ impl Used {
                 newest.step = Step::Read;
                 return false;
             }
-            (Done::Got(digest, Ok(None)), Some(_)) => missing(digest),
-            (Done::Got(_, Err(error)), Some(_)) => Cause::Blob(error),
+            (Done::Got(digest, got), Some(newest)) => {
+                newest.step = Step::Missed(digest);
+                got.map_or_else(Cause::Blob, |_| missing(digest))
+            }
         };
         self.spec.behind = Some(Behind { pointer, cause });
         false
@@ -375,6 +381,23 @@ fn behind(pointer: Pointer, failed: Done) -> Used {
     used
 }
 
+// The chunk of `digest` from `store`, which first gets it from the peers when it lacks
+// it. `None` when no peer gave it.
+async fn get(
+    store: &blob::Store,
+    transport: &Transport,
+    clock: &Clock,
+    digest: Digest,
+    peers: &[Contact],
+) -> Result<Option<Vec<u8>>, blob::Error> {
+    if let Some(chunk) = store.get(digest).await? {
+        return Ok(Some(chunk.to_vec()));
+    }
+    peer::get(store, transport, clock, digest, peers).await?;
+    let got = store.get(digest).await?;
+    Ok(got.map(|chunk| chunk.to_vec()))
+}
+
 /// Runs the job of each new committed pointer of `group`, and makes a spec that reads
 /// and has no problem the spec in use. It ends when the group stops or drops.
 pub(super) async fn keep(
@@ -411,14 +434,7 @@ pub(super) async fn keep(
         let mut gave = pin!(async {
             match job {
                 Job::Get(digest, peers) => {
-                    let got = async {
-                        if let Some(chunk) = store.get(digest).await? {
-                            return Ok(Some(chunk.to_vec()));
-                        }
-                        peer::get(&store, &transport, &clock, digest, &peers).await?;
-                        let got = store.get(digest).await?;
-                        Ok(got.map(|chunk| chunk.to_vec()))
-                    };
+                    let got = get(&store, &transport, &clock, digest, &peers);
                     Gave::Got(digest, got.await)
                 }
                 Job::Read { listed, chunks } => {
