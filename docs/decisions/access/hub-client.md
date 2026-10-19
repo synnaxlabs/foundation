@@ -410,26 +410,38 @@
   writer goes on. `Writer::finish` gives it after `Finished`. Until PR 2, `hub` sends
   only `Stored` of group 0 and never ends a group. Plan by `laptop.architect`
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114) and
-  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269218439. Lost: a
-  `Stored` of the whole write, which a group that ends can hold back for ever.
-  PR 2: the node opens one home writer for each group of a write, in group order,
-  once the home of each index is this node, and the write no longer stops with
-  `MALFORMED` for many indexes. This supersedes that stop in the amendment of #2718
-  PR 2 above. A group whose home is another node stops the open with `NOT_HOME`, with
-  no control taken, until #3104. A frame of a stream of one group goes to its writer as
-  it is. A frame of many groups is copied into one draft for each group that it holds,
-  and a group whose copy finds no block gets `Refused(Full)` or `Refused(Large)` while
-  the other groups go on. Each group of a frame of `Time::Node` gets its own stamp.
-  Each frame takes one outcome block for each group that it holds before its draft.
-  Each group takes the block of its next `Stored` on its own, so a stream holds at most
-  two such blocks for each group. A removed channel of a group sends `Ended { group,
-  Removed }`, and a `Disk` error or a failed commit of a group sends `Ended { group,
-  Failed }`, in the block of its next or due `Stored`. The `Ended` comes before the
-  outcome of its frame, each later outcome of the group is `Outcome::Ended`, and no
-  `Stored` of the group follows. The other groups and the stream go on. A stream error,
-  a bad frame, or `BUSY` still stops every group. Plan
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269218439. A frame
+  that the home took after the last `Stored` of an ended group may not be on disk: a
+  commit due at the end can still reach the disk, and its `Stored` drops.
+  `Writer::stored` gives `Error::Unstored` once each other group is stored, and again
+  at each later call. OK with these two doc changes by `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269891329). Lost:
+  a `Stored` of the whole write, which a group that ends can hold back for ever.
+  PR 2: the node opens one home writer for each group of a write, in group order, once
+  the home of each index is this node, and the write no longer stops with `MALFORMED`
+  for many indexes. This supersedes that stop in the amendment of #2718 PR 2 above. A
+  group whose home is another node stops the open with `NOT_HOME`, with no control
+  taken, until #3104. A frame of a stream of one group goes to its writer as it is. A
+  frame of many groups is copied into one draft for each group that it holds, and a
+  group whose copy finds no block gets `Refused(Full)` or `Refused(Large)` while the
+  other groups go on. Each group of a frame of `Time::Node` gets its own stamp. A frame
+  of `k` groups takes `k` outcome blocks before its drafts, and a pool with fewer free
+  blocks stops the stream with `BUSY`. Each group takes the block of its next `Stored`
+  on its own, so a stream holds at most two such blocks for each group, and none while
+  it idles. A removed channel of a group sends `Ended { group, Removed }`, and a `Disk`
+  error or a failed commit of a group sends `Ended { group, Failed }`, in the block of
+  its next or due `Stored`, also for a write of one group, in place of the reset with
+  `UNKNOWN` or `FAILED`: the failure of one group ends only that group
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267198734). The
+  `Ended` comes before the outcome of its frame, each later outcome of the group is
+  `Outcome::Ended`, and no `Stored` of the group follows. The other groups and the
+  stream go on. A stream error, a bad frame, or `BUSY` still stops every group. Plan
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269723864 and
-  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269769681), sent
-  to `laptop.architect`. Lost: one home writer for all groups, which cannot end one
-  group, and one block of `Stored` for all groups, which can pass the largest block of
-  the pool.
+  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269769681), OK by
+  `laptop.architect`
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269891329). The
+  test of a later open that fails after an earlier one moves to #3104, whose first
+  forward can fail after a local open
+  (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269834724). Lost:
+  one home writer for all groups, which cannot end one group, and one block of `Stored`
+  for all groups, which can pass the largest block of the pool.
