@@ -213,7 +213,7 @@ fn unhomed<'a>(
 }
 
 // The error of a refused spec change.
-pub(super) fn refused(cause: Refused) -> Error {
+fn refused(cause: Refused) -> Error {
     match cause {
         Refused::Stale { base, pointer } => Error::Stale { base, pointer },
         Refused::Quorum { held, voters } => Error::Quorum {
