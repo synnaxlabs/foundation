@@ -10,6 +10,7 @@
 #include <open62541/plugin/certificategroup_default.h>
 #include <open62541/server_config_default.h>
 /* For the continuation points that each session holds. */
+#include "client/ua_client_internal.h"
 #include "server/ua_server_internal.h"
 #pragma GCC diagnostic pop
 
@@ -157,6 +158,11 @@ void shim_server_publishes(UA_Server *server, UA_UInt32 most) {
     UA_Server_getConfig(server)->maxNotificationsPerPublish = most;
 }
 
+/* Sets the most Publish requests that `server` holds for each session. */
+void shim_server_holds(UA_Server *server, UA_UInt32 most) {
+    UA_Server_getConfig(server)->maxPublishReqPerSession = most;
+}
+
 /* Sets the shortest publishing interval that `server` grants, in ms. */
 void shim_server_publishing(UA_Server *server, UA_Double ms) {
     UA_Server_getConfig(server)->publishingIntervalLimits.min = ms;
@@ -200,6 +206,8 @@ typedef struct {
     size_t monitors;
     /* The Publish requests. */
     size_t publishes;
+    /* The Publish requests answered with BadTooManyPublishRequests. */
+    size_t refused;
 } shim_counts;
 
 /* Gives whether `msg`, of `length` bytes, ends with `end`. */
@@ -209,8 +217,8 @@ static UA_Boolean ends_with(const char *msg, size_t length, const char *end) {
 }
 
 /* A logger that counts the Browse, CreateMonitoredItems, and Publish requests of its
- * server and the continuation points of its sessions, and passes each message to the
- * logger before it. */
+ * server, its refusals of Publish requests, and the continuation points of its
+ * sessions, and passes each message to the logger before it. */
 typedef struct {
     UA_Logger logger;
     const UA_Logger *next;
@@ -230,6 +238,10 @@ static void count_message(void *context, UA_LogLevel level, UA_LogCategory categ
         counter->counts.monitors++;
     else if(ends_with(msg, length, "| Processing PublishRequest with RequestId %u%.0s"))
         counter->counts.publishes++;
+    else if(ends_with(msg, length,
+                      "| Sending out a publish response triggered by too many publish "
+                      "requests%.0s"))
+        counter->counts.refused++;
     session_list_entry *entry;
     LIST_FOREACH(entry, &counter->server->sessions, pointers) {
         size_t held = entry->session.continuationPointsSize;
@@ -288,6 +300,14 @@ void shim_log_at(UA_EventLoop *el, int level, int category, const char *text) {
 /* Sets the receive buffer size that `client` gives in its next HEL. */
 void shim_client_receive(UA_Client *client, UA_UInt32 size) {
     UA_Client_getConfig(client)->localConnectionConfig.recvBufferSize = size;
+}
+
+/* Gives the count of blocks that `client` keeps for the decode of a Publish answer. */
+size_t shim_client_blocks(UA_Client *client) {
+    size_t count = 0;
+    for(PublishBlock *block = client->publishArena.blocks; block; block = block->next)
+        count++;
+    return count;
 }
 
 /* Sets the MaxMessageSize that `client` gives in its next HEL and takes. */

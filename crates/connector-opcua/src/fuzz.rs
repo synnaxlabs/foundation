@@ -450,6 +450,75 @@ mod tests {
         decode(&data);
     }
 
+    /// Zeroed memory of 16-byte blocks that a decode takes in order.
+    struct Bump {
+        memory: Vec<u128>,
+        used: usize,
+    }
+
+    /// The [`ffi::Calloc`] of a [`Bump`], NULL when it is full.
+    unsafe extern "C" fn bump(
+        context: *mut c_void,
+        count: usize,
+        size: usize,
+    ) -> *mut c_void {
+        // SAFETY: the context of each decode of the test is a live `Bump`.
+        let bump = unsafe { &mut *context.cast::<Bump>() };
+        let blocks = count.saturating_mul(size).div_ceil(16);
+        match bump
+            .memory
+            .get_mut(bump.used..bump.used.saturating_add(blocks))
+        {
+            Some(taken) => {
+                bump.used += blocks;
+                taken.as_mut_ptr().cast()
+            }
+            None => std::ptr::null_mut(),
+        }
+    }
+
+    /// Under a calloc, an `ExtensionObject` of a type that the decoder does not know
+    /// keeps its string type id in the first block of the calloc, as nothing frees a
+    /// copy.
+    #[test]
+    fn an_unknown_type_id_lives_in_the_memory_of_the_calloc() {
+        let object = &ffi::types()[21];
+        assert_eq!(object.name(), "ExtensionObject");
+        let name = b"Foundation";
+        let mut bytes = vec![0x03, 0x01, 0x00];
+        bytes.extend(i32::try_from(name.len()).unwrap().to_le_bytes());
+        bytes.extend(name);
+        bytes.extend([0x01, 2, 0, 0, 0, 7, 7]);
+        let input = Bytes {
+            length: bytes.len(),
+            data: bytes.as_mut_ptr(),
+        };
+        let mut memory = Bump {
+            memory: vec![0; 64],
+            used: 0,
+        };
+        let mut options = DecodeOptions::default();
+        options.context = (&raw mut memory).cast();
+        options.calloc = Some(bump);
+        let mut value = [0_usize; 6];
+        // SAFETY: the value holds the 48 bytes of an `ExtensionObject`, aligned to 8,
+        // and the calloc gives memory that lives to the end of the test.
+        let code = unsafe {
+            ffi::UA_decodeBinary(
+                &raw const input,
+                value.as_mut_ptr().cast(),
+                object,
+                &raw mut options,
+            )
+        };
+        let first = memory.memory.as_ptr().addr();
+        // `content.encoded.typeId.identifier.string`: its length, then its data.
+        assert_eq!(
+            (Status(code), value[2], value[3].wrapping_sub(first)),
+            (Status::GOOD, name.len(), 0)
+        );
+    }
+
     #[test]
     fn a_data_value_reads_its_value_or_its_fault_and_its_time() {
         let read = |bytes: &[u8]| {

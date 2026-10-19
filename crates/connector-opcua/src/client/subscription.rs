@@ -69,6 +69,68 @@ pub(super) struct Changes {
     /// The status of the first status change, or `BadNoSubscription` when open62541
     /// deleted the subscription with none.
     ended: Cell<Option<Status>>,
+    /// The count of Publish requests in flight that the first change into the empty
+    /// buffer replaced with 0, and that [`Changes::take`] restores.
+    publishes: Cell<u16>,
+}
+
+impl Changes {
+    /// Makes room in the buffer and in `given` for the changes of [`PUBLISHES`]
+    /// answers of `each` changes, and in `client` for the decode of one such answer.
+    ///
+    /// # Safety
+    ///
+    /// `client` lives, and decodes no Publish answer.
+    unsafe fn reserve(
+        &self,
+        client: *mut ffi::Client,
+        given: &mut Vec<Change>,
+        each: usize,
+    ) {
+        let count = each.saturating_mul(usize::from(PUBLISHES));
+        for buffer in [&mut *self.buffer.borrow_mut(), given] {
+            buffer.reserve(count.saturating_sub(buffer.len()));
+        }
+        // SAFETY: the caller keeps the client alive and out of a decode.
+        let status = Status(unsafe { ffi::shim_client_reserve(client, each) });
+        assert_eq!(
+            status,
+            Status::GOOD,
+            "the memory of the decode of {each} changes"
+        );
+    }
+
+    /// Adds `change`. The first change into the empty buffer stops the Publish
+    /// requests of `client`.
+    ///
+    /// # Safety
+    ///
+    /// `client` lives.
+    unsafe fn push(&self, client: *mut ffi::Client, change: Change) {
+        let mut buffer = self.buffer.borrow_mut();
+        if buffer.is_empty() {
+            // SAFETY: the caller keeps the client alive.
+            self.publishes
+                .set(unsafe { ffi::shim_client_publishes(client, 0) });
+        }
+        buffer.push(change);
+    }
+
+    /// Swaps the changes into `given`, which it clears first. When it gives changes,
+    /// it resumes the Publish requests of `client` at the count that the stop
+    /// replaced, so a count that open62541 lowered holds.
+    ///
+    /// # Safety
+    ///
+    /// `client` lives.
+    unsafe fn take(&self, client: *mut ffi::Client, given: &mut Vec<Change>) {
+        given.clear();
+        mem::swap(given, &mut self.buffer.borrow_mut());
+        if !given.is_empty() {
+            // SAFETY: the caller keeps the client alive.
+            unsafe { ffi::shim_client_publishes(client, self.publishes.get()) };
+        }
+    }
 }
 
 /// The callbacks of the subscription of a client, which each get its [`Calls`].
@@ -94,7 +156,10 @@ impl Client {
     /// serves, stays in the client until [`Client::changes`] gives it, with no drop.
     /// While a change waits, the client sends no Publish request, so at most the
     /// answers of the [`PUBLISHES`] requests in flight wait, and later values wait in
-    /// the queues of the server.
+    /// the queues of the server. It reserves the memory of the changes of
+    /// [`PUBLISHES`] answers that each hold the changes that the queues of its items
+    /// hold, at most the most changes of an answer that fits, so the first drives
+    /// allocate no memory for them.
     ///
     /// # Errors
     ///
@@ -113,7 +178,10 @@ impl Client {
     ///
     /// When `sampling` is not positive. On a second call, also after an error, as a
     /// `CreateSubscription` that failed in the client can still make a subscription.
-    #[cfg_attr(not(test), expect(dead_code, reason = "PR 5 of #2622 calls it"))]
+    #[cfg_attr(
+        not(any(test, feature = "sim")),
+        expect(dead_code, reason = "PR 5 of #2622 calls it")
+    )]
     pub(crate) async fn subscribe(
         &mut self,
         nodes: &[Node],
@@ -170,6 +238,17 @@ impl Client {
                 );
             }
         }
+        let queued = (items.iter().flatten())
+            .map(|item| usize::try_from(item.queue.max(1)).unwrap_or(usize::MAX))
+            .fold(0, usize::saturating_add);
+        // SAFETY: the client lives, and decodes no answer between drives.
+        unsafe {
+            (self.calls.changes).reserve(
+                self.raw.as_ptr(),
+                &mut self.changes,
+                most.min(queued),
+            );
+        }
         Ok(Revised {
             interval: span(interval),
             items,
@@ -186,7 +265,10 @@ impl Client {
     /// first status change of the subscription, which can be Good, such as
     /// `GoodSubscriptionTransferred`, or `BadNoSubscription` when open62541 deleted it
     /// with no status change.
-    #[cfg_attr(not(test), expect(dead_code, reason = "PR 5 of #2622 calls it"))]
+    #[cfg_attr(
+        not(any(test, feature = "sim")),
+        expect(dead_code, reason = "PR 5 of #2622 calls it")
+    )]
     pub(crate) async fn changes(
         &mut self,
         until: impl Future<Output = ()>,
@@ -202,13 +284,9 @@ impl Client {
             }
         }))
         .await?;
-        self.changes.clear();
         let changes = &self.calls.changes;
-        mem::swap(&mut self.changes, &mut changes.buffer.borrow_mut());
-        if !self.changes.is_empty() {
-            // SAFETY: the client lives.
-            unsafe { ffi::shim_client_publishes(self.raw.as_ptr(), PUBLISHES) };
-        }
+        // SAFETY: the client lives.
+        unsafe { changes.take(self.raw.as_ptr(), &mut self.changes) };
         match changes.ended.get() {
             Some(status) if self.changes.is_empty() => Err(status),
             _ => Ok(&self.changes),
@@ -251,8 +329,7 @@ fn saturate(count: usize) -> u32 {
 }
 
 /// Adds a change of the item with the client handle `item` to the [`Changes`] of the
-/// [`Calls`] at `context`, and stops the Publish requests of `client` when they held
-/// none.
+/// [`Calls`] at `context`.
 ///
 /// # Safety
 ///
@@ -274,18 +351,15 @@ unsafe extern "C" fn changed(
         unsafe { ffi::shim_value_times(value, &raw mut source, &raw mut server) };
     // SAFETY: the value lives.
     let value = unsafe { Value::of(value) };
-    let mut buffer = calls.changes.buffer.borrow_mut();
-    if buffer.is_empty() {
-        // SAFETY: the client lives.
-        unsafe { ffi::shim_client_publishes(client, 0) };
-    }
-    buffer.push(Change {
+    let change = Change {
         index: item.addr(),
         value,
         source: value::stamp(source),
         server: value::stamp(server),
         overflow,
-    });
+    };
+    // SAFETY: the client lives.
+    unsafe { calls.changes.push(client, change) };
 }
 
 /// Keeps the status of `change` in the [`Changes`] of the [`Calls`] at `context`,

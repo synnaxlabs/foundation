@@ -15,7 +15,7 @@ use super::{
 use crate::client::service::Request;
 use crate::client::subscription::{Change, Revised, Sampled};
 use crate::client::{Client, PUBLISHES};
-use crate::ffi::Status;
+use crate::ffi::{self, Status};
 use crate::node::Node;
 use crate::unwind::caught;
 use crate::value::{Fault, Value};
@@ -615,6 +615,86 @@ fn a_waiting_change_stops_the_publish_requests() {
         next,
         Ok(vec![changed_to(7.0, true), changed_to(8.0, false)])
     );
+}
+
+/// A server that holds 1 Publish request refuses the second at the subscribe, and the
+/// client then sends 1 Publish request for each `changes`, so the server refuses no
+/// more.
+#[test]
+fn a_take_keeps_the_publish_requests_that_a_refusal_lowers() {
+    let (refused, sent) = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            let level = add_level(&peer);
+            peer.server.set_publishing(1000.0);
+            peer.server.set_held(1);
+            let counts = peer.server.count();
+            let mut client = peer.connected().await;
+            let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+            assert!(revised.is_ok(), "{revised:?}");
+            let first = client.changes(future::pending()).await.map(untimed);
+            assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
+            let mut sent = Vec::new();
+            for value in 1..=5 {
+                let taken = peer.server.count();
+                level.set(f64::from(value));
+                let got = client.changes(future::pending()).await.map(untimed);
+                assert_eq!(got, Ok(vec![changed_to(f64::from(value), false)]));
+                sent.push(taken.publishes());
+            }
+            client.close().await;
+            (counts.refused(), sent)
+        })
+        .await
+    })
+    .0;
+    assert_eq!((refused, sent), (1, vec![1; 5]));
+}
+
+/// The subscribe reserves one block for the decode of a Publish answer. An answer of
+/// 4 KiB takes a second block, which the client frees after the answer.
+#[test]
+fn an_answer_past_the_reserve_keeps_only_the_reserved_block() {
+    let (changes, blocks) = run(0, async |node| {
+        serve(&node, 4, async |mut peer| {
+            peer.server.add_bytes(&numbered(0), 4096);
+            let mut client = peer.connected().await;
+            let revised = client.subscribe(&[numbered(0)], LEVEL).await;
+            assert!(revised.is_ok(), "{revised:?}");
+            // SAFETY: the client lives.
+            let reserved =
+                unsafe { ffi::test::shim_client_blocks(client.raw.as_ptr()) };
+            let changes = client.changes(future::pending()).await.map(<[_]>::len);
+            // SAFETY: the client lives.
+            let after = unsafe { ffi::test::shim_client_blocks(client.raw.as_ptr()) };
+            client.close().await;
+            (changes, [reserved, after])
+        })
+        .await
+    })
+    .0;
+    assert_eq!((changes, blocks), (Ok(1), [1, 1]));
+}
+
+/// A reserve past the memory of the process fails with `BadOutOfMemory` and keeps the
+/// block of the subscribe: of more changes than a size holds, of more bytes than a
+/// block with its header holds, and of more bytes than the allocator gives.
+#[test]
+fn a_reserve_past_the_memory_fails_and_keeps_the_block() {
+    let (names, blocks) = on_level(100, async |_, client, _| {
+        let raw = client.raw.as_ptr();
+        let statuses = [
+            // SAFETY: the client lives, and no answer decodes.
+            unsafe { ffi::shim_client_reserve(raw, usize::MAX) },
+            // SAFETY: as above.
+            unsafe { ffi::test::__Client_PublishArena_reserve(raw, usize::MAX) },
+            // SAFETY: as above.
+            unsafe { ffi::test::__Client_PublishArena_reserve(raw, usize::MAX / 2) },
+        ];
+        // SAFETY: the client lives.
+        let blocks = unsafe { ffi::test::shim_client_blocks(raw) };
+        (statuses.map(|status| Status(status).name()), blocks)
+    });
+    assert_eq!((names, blocks), (["BadOutOfMemory"; 3], 1));
 }
 
 /// Once subscribed, a client keeps [`PUBLISHES`] of its [`READS`] for the Publish

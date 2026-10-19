@@ -3,12 +3,13 @@
 //! decode that fails. A read through the connection manager makes a fixed count of
 //! allocations, and a drive with nothing ready makes none. A tick of the `opcua` kind
 //! allocates only what its read allocates, and the write of its frame allocates
-//! nothing for a channel of any width. The count covers each thread, so this
-//! binary has no test harness.
+//! nothing for a channel of any width. A Publish answer allocates a fixed count for
+//! any count of changes, and the first drives of a subscription allocate no memory
+//! for its changes. The count covers each thread, so this binary has no test harness.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
-use std::future::{Future as _, poll_fn};
+use std::future::poll_fn;
 use std::pin::pin;
 
 use connector_opcua::bench::{Client, Manager, client};
@@ -31,6 +32,8 @@ fn main() {
     a_failed_decode_stops_the_round_trip();
     a_read_through_the_manager_allocates_a_fixed_count();
     a_read_of_a_client_allocates_a_fixed_count();
+    a_publish_answer_allocates_a_fixed_count();
+    the_first_drives_allocate_no_change_buffer();
     a_tick_of_the_kind_allocates_what_its_read_allocates();
     a_write_of_a_frame_of_any_type_allocates_nothing();
 }
@@ -207,6 +210,96 @@ fn a_read_of_a_client_allocates_a_fixed_count() {
             "reads 2 to 100 of {count} of {variable:?}"
         );
     }
+}
+
+/// Runs `body` with a client of a server of `counters` counters, and closes the
+/// client.
+fn subscribed<T: Send + 'static>(
+    counters: usize,
+    body: impl AsyncFnOnce(&mut client::Client, &env::clock::Clock) -> T + Send + 'static,
+) -> T {
+    let mut sim = Sim::new(sim::Config::default());
+    let node = sim.node(sim::node::Config::default());
+    let run = move |node: sim::node::Node, _| async move {
+        let (clock, address) = (node.clock(), node.addresses()[0]);
+        let body = async |server: &client::Server| {
+            let mut client = server.connect(1).await;
+            let out = body(&mut client, &clock).await;
+            client.close().await;
+            out
+        };
+        let rng = node.entropy().rng();
+        client::Server::counting(node.clock(), node.net(), address, rng, counters, body)
+            .await
+    };
+    sim.run_on(&node, run).expect("the run ends")
+}
+
+/// The output of `future` and the allocations in its polls.
+async fn polled<T>(future: impl Future<Output = T>) -> (T, u64) {
+    let mut future = pin!(future);
+    let mut count = 0;
+    let out = poll_fn(|cx| {
+        let (poll, allocations) = ALLOCATOR.count(|| future.as_mut().poll(cx));
+        count += allocations;
+        poll
+    })
+    .await;
+    (out, count)
+}
+
+/// The changes and the allocations of the polls of answers 3 to 20 of `count`
+/// counters.
+fn answers(count: usize) -> Vec<(usize, u64)> {
+    subscribed(count, async move |client, _| {
+        client.subscribe(count).await;
+        let mut answers = Vec::new();
+        for _ in 1..=20 {
+            answers.push(polled(client.changes()).await);
+        }
+        answers.split_off(2)
+    })
+}
+
+/// The decode of a Publish answer takes its memory from the client, which keeps it,
+/// and the change buffers hold each change, so an answer of 100 changes allocates what
+/// an answer of 1 change allocates: the Publish request that it sends again, its ask,
+/// and the segments of the sim net.
+fn a_publish_answer_allocates_a_fixed_count() {
+    assert_eq!(answers(1), [(1, 6); 18], "answers 3 to 20 of 1 change");
+    assert_eq!(
+        answers(100),
+        [(100, 6); 18],
+        "answers 3 to 20 of 100 changes"
+    );
+}
+
+/// The most changes in a Publish answer at the default receive limit of open62541.
+const MOST: usize = 13_785;
+
+/// After `subscribe`, the client is not driven while the server answers each Publish
+/// request in flight with the most changes. A read then takes in the 2 such answers,
+/// and `changes` gives them, 3 times. The subscribe reserves the memory of
+/// both change buffers and of the decode, so each drive allocates the same count: the
+/// read, the segments of the sim net, and the Publish requests that `changes` sends
+/// again.
+fn the_first_drives_allocate_no_change_buffer() {
+    let drives = subscribed(2 * MOST, async |client, clock| {
+        client.subscribe(2 * MOST).await;
+        let mut drives = Vec::new();
+        for _ in 0..3 {
+            clock.sleep(Span::SECOND).await;
+            let ((), read) = polled(client.read(client::Variable::Number)).await;
+            let (changes, count) = polled(client.changes()).await;
+            drives.push((changes, read, count));
+        }
+        drives
+    });
+    assert_eq!(
+        drives,
+        [(2 * MOST, 62, 7); 3],
+        "the changes and counts of 3 drives"
+    );
 }
 
 /// Ticks 3 to 100 of a run of the `opcua` kind allocate what a read of a client

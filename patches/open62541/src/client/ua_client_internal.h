@@ -118,6 +118,26 @@ void
 __Client_AsyncService_abort(UA_Client *client, UA_UInt32 requestId,
                             const UA_ByteString *body);
 
+/* A block of the memory of the decode of a Publish answer. Its memory follows
+ * the header at an offset aligned to 16 bytes. */
+typedef struct PublishBlock {
+    struct PublishBlock *next;
+    size_t size;
+    size_t used;
+} PublishBlock;
+
+/* The memory of the decode of each async Publish answer. Each answer takes
+ * zeroed memory from the first block of the list, and the reset after its
+ * callback frees each block but the last (the oldest), which it keeps empty. */
+typedef struct {
+    PublishBlock *blocks;
+} PublishArena;
+
+/* Makes the kept block of the arena hold at least size bytes. Call it only
+ * between answers. */
+UA_StatusCode
+__Client_PublishArena_reserve(UA_Client *client, size_t size);
+
 typedef struct CustomCallback {
     UA_UInt32 callbackId;
 
@@ -193,6 +213,7 @@ struct UA_Client {
 
     /* Async Service */
     UA_AsyncServiceList asyncServiceCalls;
+    PublishArena publishArena;
 
     /* Subscriptions */
     LIST_HEAD(, UA_Client_NotificationsAckNumber) pendingNotificationsAcks;
