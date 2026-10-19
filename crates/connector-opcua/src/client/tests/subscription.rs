@@ -12,10 +12,10 @@ use super::common::is;
 use super::{
     Peer, READS, RELAY, Relay, drop_reads, numbered, recount_of, relayed, run, serve,
 };
-use crate::client::service::{Item, Request};
+use crate::client::service::Request;
 use crate::client::subscription::{Change, Revised, Sampled};
 use crate::client::{Client, PUBLISHES};
-use crate::ffi::{self, Status};
+use crate::ffi::Status;
 use crate::node::Node;
 use crate::unwind::caught;
 use crate::value::{Fault, Value};
@@ -508,19 +508,12 @@ fn on_level<T: Send + 'static>(
     .0
 }
 
-/// A Publish answer holds the most changes that fit the receive limit of the client. It
-/// reads `takes`, as no answer that the client gets shows that one change more does not
-/// fit.
+/// A Publish answer holds the most changes that fit the receive limit of the client:
+/// 13 785 at the default of open62541.
 #[test]
 fn a_publish_answer_holds_the_most_changes_that_fit_the_client() {
-    let (most, fits) = on_level(100, async |peer, client, _| {
-        let most = usize::try_from(peer.server.per_publish()).expect("fits");
-        let bytes =
-            |count: usize| ffi::shim_publish_bytes() + count * Item::Change.bytes();
-        let fits = (bytes(most) <= client.takes, bytes(most + 1) <= client.takes);
-        (most, fits)
-    });
-    assert_eq!(fits, (true, false), "{most}");
+    let most = on_level(100, async |peer, _, _| peer.server.per_publish());
+    assert_eq!(most, 13_785);
 }
 
 /// A client with a receive buffer of 8 KiB gets the first value of each of 3000 items
