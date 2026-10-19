@@ -295,11 +295,12 @@ fn kept_alive(least: u32) -> (Result<Span, Status>, usize) {
 /// A subscribe fails with `BadOutOfRange`, and sends no Publish request, when the
 /// server gives a publishing interval times a keep-alive count over 5 min, half of
 /// the timeout of a Publish request in open62541. At 5 min, the server takes the
-/// [`PUBLISHES`] requests and the one after the answer of the first change.
+/// [`PUBLISHES`] requests, and none after the answer of the first change, which waits
+/// for `changes`.
 #[test]
 fn a_keep_alive_past_5_min_fails_with_no_publish_request() {
     let (at, past) = (kept_alive(300), kept_alive(301));
-    let publishes = usize::from(PUBLISHES) + 1;
+    let publishes = usize::from(PUBLISHES);
     assert_eq!(
         (at, past),
         (
@@ -428,7 +429,8 @@ fn a_refused_call_gives_its_status_to_each_item() {
 }
 
 /// Runs `body` on a client subscribed to the Double of [`add_level`] at [`LEVEL`],
-/// after its first change, and gives its output. The server gives a publishing
+/// after its first change and once the server holds [`PUBLISHES`] Publish requests, and
+/// gives its output. The server gives a publishing
 /// interval of 1 s, so the item asks for a queue of 8, and grants queues of at most
 /// `queues` and each count of notifications of a Publish answer that the client asks
 /// for.
@@ -459,6 +461,8 @@ fn on_level<T: Send + 'static>(
             );
             let first = client.changes(future::pending()).await.map(untimed);
             assert_eq!(first, Ok(vec![changed_to(0.0, false)]));
+            let sent = client.idle(peer.clock.sleep(ms(100))).await;
+            assert_eq!((sent, peer.server.held()), (Ok(()), u32::from(PUBLISHES)));
             let out = body(&mut peer, &mut client, &level).await;
             client.close().await;
             out
@@ -554,6 +558,34 @@ fn a_change_that_a_read_takes_in_comes_at_the_next_changes() {
     assert_eq!(none, Ok(vec![]));
     assert_eq!(read, Ok(Value::F64(1.0)));
     assert_eq!(next, Ok(vec![changed_to(1.0, false)]));
+}
+
+/// While a change waits for `changes`, the client sends no Publish request, also when
+/// it reads, so at most the answers of the requests in flight wait in it, and later
+/// values wait in the queue of 2 of the server, the oldest dropped.
+#[test]
+fn a_waiting_change_stops_the_publish_requests() {
+    let (publishes, first, next) = on_level(2, async |peer, client, level| {
+        let counts = peer.server.count();
+        for value in 1..=8 {
+            level.set(f64::from(value));
+            peer.clock.sleep(ms(1000)).await;
+            client.read_one(&numbered(0)).await.expect("the level");
+        }
+        let publishes = counts.publishes();
+        let first = client.changes(future::ready(())).await.map(untimed);
+        let next = client.changes(peer.clock.sleep(ms(5000))).await;
+        (publishes, first, next.map(untimed))
+    });
+    assert_eq!(publishes, 0);
+    assert_eq!(
+        first,
+        Ok(vec![changed_to(1.0, false), changed_to(2.0, false)])
+    );
+    assert_eq!(
+        next,
+        Ok(vec![changed_to(7.0, true), changed_to(8.0, false)])
+    );
 }
 
 /// Once subscribed, a client keeps [`PUBLISHES`] of its [`READS`] for the Publish

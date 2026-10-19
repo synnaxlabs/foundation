@@ -91,8 +91,10 @@ impl Client {
     /// the server makes the subscription, the client keeps [`PUBLISHES`] Publish
     /// requests in flight, and [`Client::read`] and the services send fewer to keep the
     /// sum from the call. Each change that comes, also while the client reads or
-    /// serves, stays in the client until [`Client::changes`] gives it, with no bound
-    /// and no drop.
+    /// serves, stays in the client until [`Client::changes`] gives it, with no drop.
+    /// While a change waits, the client sends no Publish request, so at most the
+    /// answers of the [`PUBLISHES`] requests in flight wait, and later values wait in
+    /// the queues of the server.
     ///
     /// # Errors
     ///
@@ -201,6 +203,10 @@ impl Client {
         self.changes.clear();
         let changes = &self.calls.changes;
         mem::swap(&mut self.changes, &mut changes.buffer.borrow_mut());
+        if !self.changes.is_empty() {
+            // SAFETY: the client lives.
+            unsafe { ffi::shim_client_publishes(self.raw.as_ptr(), PUBLISHES) };
+        }
         match changes.ended.get() {
             Some(status) if self.changes.is_empty() => Err(status),
             _ => Ok(&self.changes),
@@ -243,13 +249,15 @@ fn saturate(count: usize) -> u32 {
 }
 
 /// Adds a change of the item with the client handle `item` to the [`Changes`] of the
-/// [`Calls`] at `context`.
+/// [`Calls`] at `context`, and stops the Publish requests of `client` when they held
+/// none.
 ///
 /// # Safety
 ///
-/// `context` points at live [`Calls`], and `value` at the value of the change.
+/// `client` and the [`Calls`] at `context` live, and `value` points at the value of the
+/// change.
 unsafe extern "C" fn changed(
-    _: *mut ffi::Client,
+    client: *mut ffi::Client,
     _: u32,
     context: *mut c_void,
     _: u32,
@@ -264,7 +272,12 @@ unsafe extern "C" fn changed(
         unsafe { ffi::shim_value_times(value, &raw mut source, &raw mut server) };
     // SAFETY: the value lives.
     let value = unsafe { Value::of(value) };
-    calls.changes.buffer.borrow_mut().push(Change {
+    let mut buffer = calls.changes.buffer.borrow_mut();
+    if buffer.is_empty() {
+        // SAFETY: the client lives.
+        unsafe { ffi::shim_client_publishes(client, 0) };
+    }
+    buffer.push(Change {
         index: item.addr(),
         value,
         source: value::stamp(source),

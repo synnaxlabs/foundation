@@ -188,24 +188,29 @@
   a Publish answer of two chunks with 9 reads of 8 chunks passes the bound. Lost: a
   queue cap of `(READS + PUBLISHES) * (CHUNKS - 1)` (77 chunks, about 5 MiB a channel,
   past the memory picked for the Pi). Each change stays in the client until `changes`
-  gives it, with no drop. The change buffers grow as needed in PR 4b of #2622, and the
-  reserve of `PUBLISHES` answers at `subscribe` comes in PR 4c with its counting test,
-  which merges before PR 5 (`laptop.architect-2`, 2026-10-19T21:52:11Z,
+  gives it, with no drop. While a change waits, the client sends no Publish request, so
+  at most the answers of the `PUBLISHES` requests in flight wait in it, as section 4 of
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272 sizes the
+  buffer, and later values wait in the queues of the server, the oldest dropped. The
+  change buffers grow as needed in PR 4b of #2622, and the reserve of `PUBLISHES`
+  answers at `subscribe` comes in PR 4c with its counting test, which merges before PR 5
+  (`laptop.architect-2`, 2026-10-19T21:52:11Z,
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669).
   `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
   `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
-  interval)), and a queue of each item that holds two revised intervals. When the
-  revised interval times the revised keep-alive count is over 5 min, half of the 10 min
-  timeout of a Publish request in open62541, `subscribe` fails with `BadOutOfRange` and
-  sends no Publish request: the client sends Publish requests only after this check. At
-  `BadNoSubscription` in a Publish answer, the patched open62541 deletes each local
-  subscription, so `changes` ends with `BadNoSubscription` and no Publish request goes
-  out again; the release only logs it and sends again at once (`laptop.architect-2`,
-  2026-10-19T22:06:54Z,
-  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278430237).
-  Supersedes the interval and keep-alive of item 1 of
-  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272, and the
-  patch of a 10 min timeoutHint. Lost: no check, as a server that revises the keep-alive
+  interval)), and a queue of each item that holds the samples of two revised publishing
+  intervals. When the revised interval times the revised keep-alive count is over 5 min,
+  half of the 10 min timeout of a Publish request in open62541, `subscribe` fails with
+  `BadOutOfRange` and sends no Publish request: the client sends Publish requests only
+  after this check. At `BadNoSubscription` in a Publish answer, the patched open62541
+  deletes each local subscription, so `changes` ends with `BadNoSubscription` and no
+  Publish request goes out again; the release only logs it and sends again at once
+  (`laptop.architect-2`, 2026-10-19T22:06:54Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278430237). This caps
+  the publishing interval of item 1 of
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6157348272 at 1 min,
+  and adds the keep-alive count. Lost: no check, as a server that revises the keep-alive
   up can hold a Publish request past its timeout and break the bound of `READS`. Lost: a
   `ModifySubscription` at a long keep-alive, as a server that raises the count does it
-  again.
+  again. Lost: a patch of the 10 min `timeoutHint` of a Publish request, as the
+  requested keep-alive keeps the server under it.
