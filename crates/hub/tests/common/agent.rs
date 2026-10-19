@@ -122,8 +122,8 @@ impl Stream {
     }
 
     /// Sends one frame of a write whose groups hold `counts` samples: `head`, the run
-    /// of `ends` in one message, the run of `counts` in one message when the head is
-    /// not of [`Time::Node`], and `body` in messages of 4 KiB.
+    /// of `ends` in one message, with the run of `counts` after its last end when the
+    /// head is not of [`Time::Node`], and `body` in messages of 4 KiB.
     pub(crate) async fn frame(
         &mut self,
         head: Head,
@@ -136,11 +136,10 @@ impl Stream {
         self.send(&out).await;
         let mut out = vec![0; ends.len() * wire::hub::ends::LEN];
         wire::hub::ends::encode(ends.iter().copied(), &mut out);
-        self.send(&out).await;
         if head.time != Time::Node {
-            let out: Vec<u8> = counts.iter().flat_map(|n| n.to_le_bytes()).collect();
-            self.send(&out).await;
+            out.extend(counts.iter().flat_map(|n| n.to_le_bytes()));
         }
+        self.send(&out).await;
         for part in body.chunks(1 << 12) {
             self.send(part).await;
         }

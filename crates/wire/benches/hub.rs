@@ -333,8 +333,8 @@ fn encode_a_write_head(bencher: Bencher<'_, '_>) {
 }
 
 /// Decodes a program's frame of `series` series of one 8 byte sample at the node with
-/// [`write::Frames`]: its head, a run of one message, a run of one count, a draft from
-/// a pool, and a body of one message received in place.
+/// [`write::Frames`]: its head, a run of one message with one count after its last
+/// end, a draft from a pool, and a body of one message received in place.
 #[divan::bench(args = SERIES)]
 fn decode_a_write_frame(bencher: Bencher<'_, '_>, series: u32) {
     decode_write(bencher, series, true);
@@ -366,11 +366,10 @@ fn decode_write(bencher: Bencher<'_, '_>, series: u32, in_place: bool) {
         series,
     }
     .encode(&mut head);
-    let run = run_of(series);
-    let counts = 1_u32.to_le_bytes();
+    let ended = [run_of(series), 1_u32.to_le_bytes().to_vec()].concat();
     let body = vec![7; usize::try_from(series * 8).expect("a u32 fits a usize")];
     let mut frame = || {
-        let mut messages = [&head[..], &run[..], &counts[..], &body[..]].into_iter();
+        let mut messages = [&head[..], &ended[..], &body[..]].into_iter();
         loop {
             let step = match frames.due().expect("the layout holds") {
                 write::Due::Body(rest) if in_place => {
