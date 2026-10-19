@@ -1,28 +1,40 @@
 //! The time of a write of 2 values through `sdk` and through `program`, against a node
-//! process on loopback, and of the two legs that `sdk` adds between the caller and the
-//! client's thread. Run with `cargo bench -p node --bench sdk`.
+//! process on loopback, of the two legs that `sdk` adds between the caller and the
+//! client's thread, and of a write and the read of its frame. Run with
+//! `cargo bench -p node --bench sdk`.
 //!
 //! Each line gives the p50 and p99 of the calls of each round, in µs:
 //!
 //! - `leg to task`: from a `try_send` on a Tokio channel of 1 to the return of the
-//!   `recv` of a task on an `os` shard, as `Writer::send` sends each call to the task
-//!   of `served` in `sdk/rust/src/write.rs`.
+//!   `recv` of a task on an `os` shard, as `send` in `sdk/rust/src/lib.rs` sends each
+//!   call to the task of `served` in `sdk/rust/src/write.rs`.
 //! - `leg to caller`: from the task's `try_send` on a `std` `sync_channel` of 1 to the
 //!   return of the caller's `recv`, as `served` sends each outcome to `wait`.
 //! - `sdk`: `sdk::Writer::write` of 2 values with the node's stamp.
 //! - `program`: `program::Writer::draft` and `write` of the same frame, on an `os`
 //!   shard of its own, as `served` writes it.
+//! - `sdk read`: an `sdk` write, then `sdk::Reader::next` of its frame, with a latest
+//!   reader of the same client, and `series` and `lost` of each place.
+//! - `program read`: a `program` write, then `program::Reader::next` of its frame, as
+//!   the task of `sdk/rust/src/read.rs` reads it.
+//! - `sdk read twice`: `sdk read` with a reader that names `plant.a` twice.
+//! - `sdk next held`: `sdk::Reader::next`, and `series` and `lost` of each place,
+//!   after an `sdk` write and a spin of 1 ms, when the client's thread holds the
+//!   frame: the two legs and the work of the task, with no wait for the node. Its
+//!   rounds are of 500 calls.
 //!
 //! The channels are those of `Writer::open`, and each shard is one of `Client::start`
-//! in `sdk/rust/src/lib.rs`: `os`, with the caller's log. Before each call of the
-//! first three lines, the caller spins for [`GAP`], so that the task parks before each
-//! send, as it does between the writes of a program.
+//! in `sdk/rust/src/lib.rs`: `os`, with the caller's log. Before each call of the legs
+//! and of the `sdk` lines, the caller spins for [`GAP`], so that the task parks before
+//! each send, as it does between the calls of a program.
 //!
-//! Each write must give `Taken`: the ring of the home shard holds 17,000 to 20,000
-//! frames of the bench, and a frame past it is `Lost`. The `sdk` and `program` lines
-//! write 11,000 together, also under `cargo test`, so that a test fails when they do
-//! not fit. Judge `sdk` against `program` from one run, and each leg against its p50: a
-//! p99 far over it is a wait for a wake.
+//! Each write must give `Taken`: the node never trims the ring, and each write takes at
+//! most one record of 4,096 bytes, so the ring of 32 MiB of each shard of the bench
+//! takes the at most 5,500 writes of a line at any speed of the host. A frame past it
+//! is `Lost`. Each line runs on a node of its own, also under `cargo test`, so that a
+//! test fails when a line does not fit.
+//! Judge `sdk` against `program` from one run, and each leg against its p50: a p99 far
+//! over it is a wait for a wake.
 //!
 //! Only Unix: the rig stops its node with SIGTERM.
 
@@ -37,9 +49,10 @@ mod bench;
 /// Only Unix: the channels of the bench, and the session of its `program` line.
 #[cfg(all(unix, not(loom)))]
 #[expect(
+    dead_code,
     clippy::unwrap_used,
     clippy::missing_assert_message,
-    reason = "a helper of the node tests fails loud"
+    reason = "a helper of the node tests fails loud, and the bench uses only some"
 )]
 #[path = "../../tests/it/plant.rs"]
 mod plant;

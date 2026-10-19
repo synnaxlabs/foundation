@@ -60,3 +60,72 @@
   call, `close` too, gives the cause: `close` gives `Error::Session` with it when the
   session ended before the close (`laptop.architect-2`, 2026-10-16T22:20:16Z,
   https://github.com/synnaxlabs/foundation/pull/2933#issuecomment-6225794091).
+  `Client::open_reader(read::Config)` opens a `sdk::read::Reader` of channels by name,
+  all of one index. `read::Config::new` gives `Mode::Complete`. The client's thread
+  opens one `program::Reader` of the names, in a task of its own. The node refuses
+  channels of more than one index with `Refused(Refusal::Malformed)`, as for a writer.
+  The person decided this (laptop.monitor, 2026-10-19T12:29:44Z,
+  https://github.com/synnaxlabs/foundation/issues/3265#issuecomment-6267235296): the
+  client-side merge by time and the probe of the index of each name leave #3265, and the
+  node merges a read of more than one index in #3356, with the write half on #3283.
+  Supersedes
+  https://github.com/synnaxlabs/foundation/issues/3265#issuecomment-6256102155. Place
+  `n` of a reader is `Config::channels[n]`, so a channel named twice is at each of its
+  places. Then comes the index, when `channels` does not name it, as for a writer.
+  `Frame::index`, `series`, `lost`, and `Error::Decode::place` give these places, and
+  each lookup is O(1) (`laptop.architect-2`, 2026-10-19T00:18:31Z, item 1 of
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6256977605). A name of
+  no channel gives `Refused(Refusal::Unknown)`: the node gives it when no name is of a
+  channel, and the client when only some are, until #3356 makes the read open by name.
+  The frames come in the order of their stamps (`laptop.architect-2`,
+  2026-10-19T12:43:15Z,
+  https://github.com/synnaxlabs/foundation/issues/3265#issuecomment-6267484776). The
+  task decodes each series with `codec` into a frame that the reader keeps, with the
+  lost seqs of `program::Reader::lost` (edge `sdk` -> `codec`: `laptop.architect`,
+  2026-10-18T22:45:56Z, item 2 of
+  https://github.com/synnaxlabs/foundation/issues/3265#issuecomment-6256109116). Each
+  frame that the node sent and the caller did not read holds a part of the receive
+  window of the client's session. When the window is full, each stream of the client
+  waits: the answers to its writers, its other readers, and the renewal of its hello,
+  and the node closes the session when the hello ends. Read each reader as its frames
+  come, or read on a client of its own (item 3 of the 2026-10-19T00:18:31Z comment).
+  Flow control for each reader is #3309. The frames of the readers of a client take
+  blocks of a pool of their own, of 8 MiB, apart from `FRAMES`, the pool of the
+  drafts of its writers, so `write_series` keeps its bound. The pool reserves about
+  504 MiB of address space of the OS, with no commit charge, and gives back the pages
+  of a size that it no longer uses when another size needs them, so it holds at most
+  8 MiB, and up to two partial pages more of each of its sizes. On macOS, the pages of
+  the free blocks of a size in use that it gives to another size stay in memory until
+  the OS needs them, so the bound of 8 MiB holds only on Linux (`laptop.architect-2`,
+  2026-10-19T18:36:13Z,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6274472373, and
+  2026-10-19T18:55:15Z,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6274841526). When
+  the OS refuses the reservation or its first page, `connect` gives `Memory`. A frame
+  whose memory the OS refuses later waits in `next`, which tries again until the OS
+  gives the memory or the session closes (`laptop.architect-2`, 2026-10-19T14:39:03Z,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270455282, and
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270555497;
+  `laptop.architect` for what it states of `program`,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270603246). A frame
+  of more than 7,340,032 bytes, encoded, ends the reader with
+  `Stream(Pool(TooLarge { .. }))`
+  (`laptop.architect-2`, 2026-10-19T13:10:47Z,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6268015959; a key
+  choice of kinds (d) and (8), OK of `laptop.monitor`, 2026-10-19T13:41:28Z,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6268640271: a frame of
+  the node is at most about 1 MiB, `BODY_MAX`). The node gives its largest frame at the
+  open, and the sdk sizes the pool from it, in item 1 of #3366.
+  `crates/node/benches/sdk/` gives the p50 and p99 of each round of a read. On a quiet
+  host at f176f91e9
+  (https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6272905066), a frame
+  that comes before the call of `next` takes 14.9-16.0 µs p50 and 17.9-21.4 µs p99
+  (`sdk next held`), and a call that waits before its frame comes takes the decode and
+  the leg to the caller, 2.9-8.1 µs p50 and 3.9-9.9 µs p99. Both are over the P1 limit
+  of 2.5 µs. Accepted as the price of SDK CLIENT, with no spin before the park. The
+  purge of an idle size, whose next frame faults its pages again, is accepted too: one
+  reader keeps one block of each size, which fits the budget up to the largest frame of
+  the node, and several readers of one client can purge. Its bench and judgment are item
+  1 of #3366. Decided by `laptop.architect-2` on 2026-10-19T18:05:17Z
+  (https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6273874154).
