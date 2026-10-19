@@ -2,17 +2,16 @@
 //! sim transport. Run with `cargo bench -p program --bench write`.
 //!
 //! A node by hand opens a write for each line, takes each frame whole, and answers it
-//! with `Taken` and then `Stored` for each group. The program times four calls for each
-//! frame: the `draft`, the first poll of `write`, which sends the head, the ends, and
-//! the body, once the outcome is in its transport, the second poll, which takes it, and
-//! a poll of `stored`, which takes the `Stored`. Each line gives ns per frame:
+//! with `Taken`. The program times three calls for each frame: the `draft`, the first
+//! poll of `write`, which sends the head, the ends, and the body, and, once the
+//! outcome is in its transport, the second poll, which takes it. Each line gives ns
+//! per frame:
 //!
 //! - `timer`: an empty closure, the floor of each timed call.
 //! - `1x2`: an index and one data channel, one sample of each.
 //! - `100x2`: an index and one data channel, 100 samples of each: a body of 1600
 //!   bytes, over one segment of the carrier.
 //! - `1x64`: an index and 63 data channels, one sample of each.
-//! - `64x(1x2)`: 64 groups, each an index and one data channel, one sample of each.
 //!
 //! A second table gives the p99 of the single calls of each line, ns per frame: the
 //! draft and the send, and the whole call. Judge a change by `net`, and compare two
@@ -45,7 +44,7 @@ mod table;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use program::write::{Config, Outcome, Time, Writer};
+use program::write::{Config, Outcome, Time};
 use table::Line;
 use types::authority::Authority;
 use types::channel;
@@ -70,67 +69,43 @@ const ANSWERED: Span = Span::from_nanos(10_000_000);
 
 /// The frames of one line.
 struct Shape {
-    names: [&'static str; 4],
-    /// The series of each frame, the index of each group first in the group.
+    names: [&'static str; 3],
+    /// The series of each frame, the index first.
     series: usize,
-    /// The groups of each frame, each of `series / groups` series.
-    groups: usize,
     /// The samples of each series.
     samples: u32,
 }
 
-const LINES: [Shape; 4] = [
+const LINES: [Shape; 3] = [
     Shape {
-        names: ["1x2 draft", "1x2 send", "1x2 outcome", "1x2 stored"],
+        names: ["1x2 draft", "1x2 send", "1x2 outcome"],
         series: 2,
-        groups: 1,
         samples: 1,
     },
     Shape {
-        names: ["100x2 draft", "100x2 send", "100x2 outcome", "100x2 stored"],
+        names: ["100x2 draft", "100x2 send", "100x2 outcome"],
         series: 2,
-        groups: 1,
         samples: 100,
     },
     Shape {
-        names: ["1x64 draft", "1x64 send", "1x64 outcome", "1x64 stored"],
+        names: ["1x64 draft", "1x64 send", "1x64 outcome"],
         series: 64,
-        groups: 1,
-        samples: 1,
-    },
-    Shape {
-        names: [
-            "64x(1x2) draft",
-            "64x(1x2) send",
-            "64x(1x2) outcome",
-            "64x(1x2) stored",
-        ],
-        series: 128,
-        groups: 64,
         samples: 1,
     },
 ];
 
 impl Shape {
-    /// The places of the write: the index of each group first in the group.
+    /// The places of the write: the index first.
     fn places(&self) -> Vec<Place> {
-        let size = self.series / self.groups;
-        (0..self.series)
-            .map(|at| {
-                let index = at - at % size;
-                let key = u128::try_from(at + 1).expect("few");
-                let data = if at == index {
-                    Scalar::Stamp
-                } else {
-                    Scalar::I64
-                };
-                Place {
-                    key: channel::Key::from_u128(key),
-                    data_type: Type::Scalar(data),
-                    name: format!("c{key}").parse().expect("a valid name"),
-                    index,
-                }
-            })
+        let place = |key: u128, data_type| Place {
+            key: channel::Key::from_u128(key),
+            data_type,
+            name: format!("c{key}").parse().expect("a valid name"),
+            index: 0,
+        };
+        let series = u128::try_from(self.series).expect("few");
+        std::iter::once(place(1, Type::Scalar(Scalar::Stamp)))
+            .chain((2..=series).map(|key| place(key, Type::Scalar(Scalar::I64))))
             .collect()
     }
 
@@ -139,9 +114,9 @@ impl Shape {
         8 * usize::try_from(self.samples).expect("few")
     }
 
-    /// The bytes of the head, the ends, the counts, and the body of a frame.
+    /// The bytes of the head, the ends, the count, and the body of a frame.
     fn total(&self) -> usize {
-        7 + 8 * self.series + 4 * self.groups + self.series * self.len()
+        7 + 8 * self.series + 4 + self.series * self.len()
     }
 }
 
@@ -151,38 +126,52 @@ fn main() {
             let mut timer = Line::new("timer", FRAMES);
             let mut lines = Vec::new();
             let mut calls = Vec::new();
+            let mut context = Context::from_waker(Waker::noop());
             for shape in &LINES {
                 let config = Config {
                     authority: Authority(1),
                     lease: None,
-                    channels: shape
-                        .places()
+                    channels: shape.places()[1..]
                         .iter()
-                        .enumerate()
-                        .filter(|&(at, place)| place.index != at)
-                        .map(|(_, place)| place.name.clone())
+                        .map(|place| place.name.clone())
                         .collect(),
                 };
                 let mut writer = session.writer(config).await.expect("opens");
                 let layout: Vec<(usize, usize)> = (0..shape.series)
                     .map(|entry| (entry, shape.len()))
                     .collect();
-                let [draft, sends, outcome, stored] = shape.names;
-                let mut parts =
-                    [draft, sends, outcome, stored].map(|n| Line::new(n, FRAMES));
+                let [draft, sends, outcome] = shape.names;
+                let mut parts = [draft, sends, outcome].map(|n| Line::new(n, FRAMES));
                 let mut out = Vec::with_capacity(ROUNDS * FRAMES);
                 let mut whole = Vec::with_capacity(ROUNDS * FRAMES);
                 for round in 0..WARMUP + ROUNDS {
                     for _ in 0..FRAMES {
                         timer.add(table::timed(&ALLOCATOR, || ()).1);
-                        let [drafted, sent, taken, kept] =
-                            frame(&mut writer, &node, shape, &layout).await;
+                        let (ready, drafted) = table::timed(&ALLOCATOR, || {
+                            let draft =
+                                pin!(writer.draft(Form::Raw, shape.samples, &layout));
+                            matches!(draft.poll(&mut context), Poll::Ready(Ok(_)))
+                        });
+                        assert!(ready, "the pool has a block");
+                        let mut write = pin!(writer.write(Time::Frame(Path::Live)));
+                        let (pending, sent) = table::timed(&ALLOCATOR, || {
+                            write.as_mut().poll(&mut context).is_pending()
+                        });
+                        assert!(pending, "the write waits for its outcome");
+                        node.clock().sleep(ANSWERED).await;
+                        let (ready, taken) = table::timed(&ALLOCATOR, || {
+                            matches!(
+                                write.as_mut().poll(&mut context),
+                                Poll::Ready(Ok(_))
+                            )
+                        });
+                        assert!(ready, "the outcome is in the transport");
                         if round >= WARMUP {
                             out.push(drafted.0 + sent.0);
                             whole.push(drafted.0 + sent.0 + taken.0);
                         }
                         for (line, figures) in
-                            parts.iter_mut().zip([drafted, sent, taken, kept])
+                            parts.iter_mut().zip([drafted, sent, taken])
                         {
                             line.add(figures);
                         }
@@ -203,42 +192,7 @@ fn main() {
     });
 }
 
-/// Times the calls of one frame: the draft, the send, the outcome, and the stored.
-async fn frame(
-    writer: &mut Writer,
-    node: &sim::node::Node,
-    shape: &Shape,
-    layout: &[(usize, usize)],
-) -> [(u64, u64); 4] {
-    let mut context = Context::from_waker(Waker::noop());
-    let (ready, drafted) = table::timed(&ALLOCATOR, || {
-        let draft = pin!(writer.draft(Form::Raw, shape.samples, layout));
-        matches!(draft.poll(&mut context), Poll::Ready(Ok(_)))
-    });
-    assert!(ready, "the pool has a block");
-    let (sent, taken) = {
-        let mut write = pin!(writer.write(Time::Frame(Path::Live)));
-        let (pending, sent) = table::timed(&ALLOCATOR, || {
-            write.as_mut().poll(&mut context).is_pending()
-        });
-        assert!(pending, "the write waits for its outcome");
-        node.clock().sleep(ANSWERED).await;
-        let (ready, taken) = table::timed(&ALLOCATOR, || {
-            matches!(write.as_mut().poll(&mut context), Poll::Ready(Ok(_)))
-        });
-        assert!(ready, "the outcome is in the transport");
-        (sent, taken)
-    };
-    let (ready, kept) = table::timed(&ALLOCATOR, || {
-        let stored = pin!(writer.stored());
-        matches!(stored.poll(&mut context), Poll::Ready(Ok(())))
-    });
-    assert!(ready, "the `Stored` is in the transport");
-    [drafted, sent, taken, kept]
-}
-
-/// Opens the write of each line, takes each frame whole, and answers it with `Taken`
-/// for each group and then `Stored` for each group.
+/// Opens the write of each line, takes each frame whole, and answers it with `Taken`.
 async fn answer(session: transport::Session, node: sim::node::Node) {
     let mut writes = Vec::new();
     for shape in &LINES {
@@ -255,27 +209,19 @@ async fn answer(session: transport::Session, node: sim::node::Node) {
                 let message = write.receiver.recv().await.expect("receives");
                 got += message.expect("a message of the frame").len();
             }
-            let frame = u64::try_from(frame).expect("a frame");
-            let groups = 0..u32::try_from(shape.groups).expect("few");
-            let taken = groups.clone().map(|group| Reply::Outcome {
-                frame,
-                group,
+            let reply = Reply::Outcome {
+                frame: u64::try_from(frame).expect("a frame"),
+                group: 0,
                 outcome: Outcome::Taken {
                     range: Range {
                         seq,
                         count: shape.samples,
                     },
                 },
-            });
-            let stored = groups.map(|group| Reply::Stored {
-                group,
-                frames: frame,
-            });
-            for reply in taken.chain(stored) {
-                let mut bytes = vec![0; reply.encoded_len()];
-                reply.encode(&mut bytes);
-                send(write.sender.as_mut().expect("two-way"), &bytes).await;
-            }
+            };
+            let mut bytes = vec![0; reply.encoded_len()];
+            reply.encode(&mut bytes);
+            send(write.sender.as_mut().expect("two-way"), &bytes).await;
             seq += u64::from(shape.samples);
         }
         writes.push(write);
