@@ -3,7 +3,7 @@ use std::future;
 use hub::writer::{Config, Writer};
 use proptest::prelude::*;
 use types::authority::Authority;
-use types::time::{Span, Stamp};
+use types::time::{Interval, Span, Stamp};
 
 use super::Stamps;
 use crate::common::{create_status, env, run_with};
@@ -136,6 +136,87 @@ fn a_refusal_at_the_last_stamp_is_stamped_after_it() {
     assert_eq!(stamps.after(Stamp::from_nanos(11)), Stamp::from_nanos(12));
 }
 
+fn interval(earliest: i64, latest: i64) -> Interval {
+    Interval {
+        earliest: Stamp::from_nanos(earliest),
+        latest: Stamp::from_nanos(latest),
+    }
+}
+
+fn sample(stamps: &mut Stamps, time: Interval, held: i64) -> (i64, i64) {
+    let (stamp, error) = stamps.sample(time, Stamp::from_nanos(held));
+    (stamp.nanos(), error.nanos())
+}
+
+#[test]
+fn a_sample_is_stamped_at_its_midpoint_within_half_its_width() {
+    let first = |time| sample(&mut Stamps::default(), time, 0);
+    assert_eq!(first(interval(100, 201)), (150, 51));
+    assert_eq!(first(interval(-201, -100)), (-151, 51));
+    assert_eq!(first(interval(300, 300)), (300, 0));
+}
+
+#[test]
+fn a_sample_stamped_after_the_last_stamp_adds_how_far_it_is_late() {
+    let mut stamps = Stamps::default();
+    assert_eq!(sample(&mut stamps, interval(100, 200), 0), (150, 50));
+    assert_eq!(sample(&mut stamps, interval(100, 140), 0), (151, 51));
+}
+
+#[test]
+fn a_sample_held_past_its_stamp_adds_nothing() {
+    let mut stamps = Stamps::default();
+    sample(&mut stamps, interval(100, 200), 0);
+    assert_eq!(sample(&mut stamps, interval(100, 140), 152), (151, 20));
+    assert_eq!(sample(&mut stamps, interval(100, 140), 152), (152, 20));
+    assert_eq!(sample(&mut stamps, interval(100, 140), 140), (153, 33));
+}
+
+#[test]
+fn a_reversed_sample_interval_gives_the_same_stamp() {
+    let mut stamps = Stamps::default();
+    assert_eq!(sample(&mut stamps, interval(201, 100), 0), (150, 51));
+}
+
+#[test]
+fn the_widest_sample_interval_saturates_the_error() {
+    let mut stamps = Stamps::default();
+    let widest = interval(i64::MIN, i64::MAX);
+    assert_eq!(sample(&mut stamps, widest, 0), (-1, i64::MAX));
+    let late = interval(i64::MAX - 1, i64::MAX - 1);
+    assert_eq!(sample(&mut stamps, late, i64::MIN), (i64::MAX - 1, 0));
+}
+
+#[test]
+#[should_panic(expected = "stamp overflow: 9223372036854775807 ns + 1 ns")]
+fn a_sample_after_the_last_instant_panics() {
+    let mut stamps = Stamps::default();
+    let last = interval(i64::MAX, i64::MAX);
+    sample(&mut stamps, last, 0);
+    sample(&mut stamps, last, 0);
+}
+
+/// A sample: its true time `at` within `time`, and the time its value holds until.
+#[derive(Clone, Debug)]
+struct Sample {
+    time: Interval,
+    at: i64,
+    held: i64,
+}
+
+fn sample_input() -> impl Strategy<Value = Sample> {
+    (0..1_000i64, 0..100i64, 0..=100u8, -50..200i64).prop_map(
+        |(earliest, width, part, held)| {
+            let at = earliest + width * i64::from(part) / 100;
+            Sample {
+                time: interval(earliest, earliest + width),
+                at,
+                held: at + held,
+            }
+        },
+    )
+}
+
 /// A call of [`Stamps`]: a stamp at some time, or a refusal whose stamp before is
 /// some time after the last stamp.
 #[derive(Clone, Debug)]
@@ -176,6 +257,26 @@ proptest! {
             prop_assert_eq!(stamp, Stamp::from_nanos(expected));
             prop_assert!(last.is_none_or(|last| stamp.nanos() > last));
             last = Some(stamp.nanos());
+        }
+    }
+
+    /// Each stamp of a sample is after the one before it, and within its error of a
+    /// time at which its value held: from its true time to `held`.
+    #[test]
+    fn sample_stamps_increase_and_their_errors_hold_the_value(
+        samples in prop::collection::vec(sample_input(), 1..50),
+    ) {
+        let mut stamps = Stamps::default();
+        let mut last = None::<i64>;
+        for Sample { time, at, held } in samples {
+            let (stamp, error) = sample(&mut stamps, time, held);
+            prop_assert!(last.is_none_or(|last| stamp > last));
+            let nearest = stamp.clamp(at, at.max(held));
+            prop_assert!(
+                stamp.abs_diff(nearest) <= error.unsigned_abs(),
+                "stamp {stamp} ns, error {error} ns, value from {at} to {held} ns"
+            );
+            last = Some(stamp);
         }
     }
 }

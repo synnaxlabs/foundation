@@ -43,6 +43,7 @@ const INTERVAL: Span = Span::from_nanos(1_000_000_000);
 /// # use buffer::{Buffer, Layout};
 /// # use types::channel::{Key, Slots};
 /// # use types::frame::key_set::{Group, Interner};
+/// # use types::node;
 /// # use types::sample::{Scalar, Type};
 /// #
 /// # type Error = Box<dyn std::error::Error>;
@@ -109,6 +110,7 @@ const INTERVAL: Span = Span::from_nanos(1_000_000_000);
 /// let writer = shard.open_writer(writer::Writer {
 ///     subject: "a".parse()?,
 ///     authority: Authority(1),
+///     via: node::Key::from_u128(1),
 ///     lease: None,
 ///     set,
 /// })?;
@@ -520,12 +522,17 @@ impl Shard {
         let Writer {
             subject,
             authority,
+            via,
             lease,
             set,
         } = writer;
         let (now, mesh) = self.clocks().ok_or(writer::Error::Unsynced)?;
         let lease = lease.map(writer::lease).transpose()?;
-        let control = control::Writer { subject, authority };
+        let control = control::Writer {
+            subject,
+            authority,
+            via,
+        };
         let entries = set.entries();
         let mut claims = Vec::with_capacity(set.groups().len());
         for &entry in set.groups() {
@@ -1193,6 +1200,7 @@ mod tests {
     use types::frame::key_set::Group;
     use types::log::Mark;
     use types::name::Name;
+    use types::node;
     use types::sample::{Scalar, Type};
     use types::time::Span;
 
@@ -1222,6 +1230,9 @@ mod tests {
     };
     const LIVE: Label = Label::Path(Path::Live);
     const BACKFILL: Label = Label::Path(Path::Backfill);
+    /// The node of each writer of a test.
+    const VIA: node::Key =
+        node::Key::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
     /// Indexes whose handoffs to a 255-byte subject no record of `BODY_MAX` holds
     /// together.
     const WIDE: u32 = 14;
@@ -1464,6 +1475,7 @@ mod tests {
         Writer {
             subject: subject.parse().expect("a valid name"),
             authority: Authority(authority),
+            via: VIA,
             lease: None,
             set: Arc::clone(set),
         }
@@ -1611,7 +1623,13 @@ mod tests {
 
     /// The bytes of a handoff to `subject` at authority 1.
     fn handoff_to(subject: &str) -> Vec<u8> {
-        [&[1], subject.as_bytes()].concat()
+        handoff_at(1, VIA, subject)
+    }
+
+    /// The bytes of a handoff to `subject` at `authority`, through `via`.
+    fn handoff_at(authority: u8, via: node::Key, subject: &str) -> Vec<u8> {
+        let via = via.as_u128().to_le_bytes();
+        [&[authority], &via[..], subject.as_bytes()].concat()
     }
 
     /// The length of an entry header in a record's table.
@@ -2541,7 +2559,7 @@ mod tests {
                 .expect("synced");
             shard.committed().await.expect("the commit ends");
             let ring = test.ring().await;
-            let to_y = [&[3], "subject-y".as_bytes()].concat();
+            let to_y = handoff_at(3, VIA, "subject-y");
             assert_eq!(find(&ring, &to_y).len(), 1, "y takes index 2");
             assert_eq!(
                 find(&ring, &to_x).len(),
@@ -2774,7 +2792,7 @@ mod tests {
             assert_eq!(shard.write(b, LIVE, again), Ok(&[applied(0, 1, 1)][..]));
             shard.committed().await.expect("the commit ends");
             let ring = test.ring().await;
-            let handoffs = find(&ring, &[&[2], subject.as_bytes()].concat());
+            let handoffs = find(&ring, &handoff_at(2, VIA, &subject));
             assert_eq!(handoffs.len(), 1, "only the index of the frame records it");
             let series = find(&ring, &key(Slot::new(1)).as_u128().to_le_bytes());
             assert_eq!(series.len(), 1, "the lost frame stores nothing");
@@ -2803,7 +2821,7 @@ mod tests {
             assert_eq!(shard.write(b, LIVE, live), Ok(&[lost(0, 0, 1)][..]));
             drop(blocks);
             shard.committed().await.expect("the commit ends");
-            let handoff = [&[2], subject.as_bytes()].concat();
+            let handoff = handoff_at(2, VIA, &subject);
             assert_eq!(find(&test.ring().await, &handoff).len(), 1);
         });
     }
@@ -3059,6 +3077,45 @@ mod tests {
                 shard.write(a, LIVE, next),
                 Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
             );
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn records_no_handoff_when_the_holder_reopens_through_its_node_in_the_grace() {
+        let (mut sim, node) = cut_after(704, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            shard.open_writer(writer("a", 1, &set)).expect("synced");
+            shard.committed().await.expect("the commit ends");
+            assert_eq!(find(&test.ring().await, &handoff_to("a")).len(), 2);
+        })
+        .expect("the run after the cut ends");
+    }
+
+    #[test]
+    fn records_a_handoff_when_the_holder_reopens_through_another_node_in_the_grace() {
+        let (mut sim, node) = cut_after(705, false);
+        sim.run_on(&node, |node, tasks| async move {
+            let test = Test::new(node, tasks);
+            let set = two_indexes();
+            let mut shard = test.shard(AREA).await;
+            let c = node::Key::from_u128(0xc);
+            let through_c = Writer {
+                via: c,
+                ..writer("a", 1, &set)
+            };
+            let a = shard.open_writer(through_c).expect("synced");
+            let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
+            assert_eq!(
+                shard.write(a, LIVE, next),
+                Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
+            );
+            shard.committed().await.expect("the commit ends");
+            let to_c = handoff_at(1, c, "a");
+            assert_eq!(find(&test.ring().await, &to_c).len(), 2);
         })
         .expect("the run after the cut ends");
     }
@@ -3367,7 +3424,7 @@ mod tests {
             drop(blocks);
             shard.close_writer(c);
             shard.committed().await.expect("the commit ends");
-            let to_b = [&[2], "subject-b".as_bytes()].concat();
+            let to_b = handoff_at(2, VIA, "subject-b");
             let handoffs = find(&test.ring().await, &to_b);
             assert_eq!(handoffs.len(), 2, "the close of c records each index of b");
         });
@@ -3746,13 +3803,14 @@ mod tests {
         .expect("the run after the cut ends");
     }
 
-    #[test]
-    fn open_panics_on_a_handoff_record_that_does_not_decode() {
-        let (mut sim, node) = create_node(175);
+    /// The panic message of an open of a shard whose ring holds one handoff record
+    /// with `damaged` as its body.
+    fn panic_of_open(seed: u64, damaged: Vec<u8>) -> String {
+        let (mut sim, node) = create_node(seed);
         let ended = sim.run_on(&node, |node, tasks| async move {
             let test = Test::new(node, tasks);
             let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
-            let body = test.pool.copy(&[1, 0xff]).expect("the pool has a block");
+            let body = test.pool.copy(&damaged).expect("the pool has a block");
             let record = Entry {
                 index: key(Slot::new(0)),
                 slot: Slot::new(0),
@@ -3774,10 +3832,25 @@ mod tests {
             panic!("the open panics: {ended:?}");
         };
         assert_eq!(thread, "run_on");
+        message
+    }
+
+    #[test]
+    fn open_panics_on_a_handoff_record_that_does_not_decode() {
+        let damaged = [&handoff_at(1, VIA, "")[..], &[0xff]].concat();
         let invalid = "invalid utf-8 sequence of 1 bytes from index 0";
         assert_eq!(
-            message,
+            panic_of_open(175, damaged),
             format!("the handoff subject is not UTF-8: {invalid}")
+        );
+    }
+
+    #[test]
+    fn open_panics_on_a_handoff_record_that_ends_in_its_node() {
+        let damaged = handoff_at(1, VIA, "")[..16].to_vec();
+        assert_eq!(
+            panic_of_open(176, damaged),
+            "the handoff body of 16 bytes has no node"
         );
     }
 
@@ -3960,7 +4033,11 @@ mod tests {
             // b outranks a; its handoff finds no block and waits.
             let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
             shard.committed().await.expect("the commit ends");
-            assert_eq!(find(&test.ring().await, &[2, b'b']).len(), 0, "b waits");
+            assert_eq!(
+                find(&test.ring().await, &handoff_at(2, VIA, "b")).len(),
+                0,
+                "b waits"
+            );
             assert_eq!(stored(&shard, Slot::new(0), Path::Live), 1);
             drop((blocks, more));
             // The empty group records the waiting handoff and stores no sample.
@@ -3968,7 +4045,7 @@ mod tests {
             assert_eq!(shard.write(b, LIVE, empty), Ok(&[applied(0, 2, 0)][..]));
             shard.committed().await.expect("the commit ends");
             assert_eq!(
-                find(&test.ring().await, &[2, b'b']).len(),
+                find(&test.ring().await, &handoff_at(2, VIA, "b")).len(),
                 1,
                 "the empty write recorded the handoff to b"
             );
