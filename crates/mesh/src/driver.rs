@@ -277,6 +277,7 @@ impl Mesh {
         tasks.tasks().spawn(used::keep(
             Weak::clone(&weak),
             Rc::clone(&config.store),
+            Rc::clone(&config.transport),
             config.files,
             config.dir,
             config.clock.clone(),
@@ -960,6 +961,25 @@ impl Group {
         Some((member.public_key(), addresses))
     }
 
+    // The members that the task of the spec in use gets a missing chunk from, in
+    // order: each holder of the change of the newest pointer, then each other voter,
+    // each in key order, without this node.
+    fn peers(&self) -> Vec<peer::Contact> {
+        let own = self.raft.key();
+        let none = BTreeSet::new();
+        let newest = self.used.newest.as_ref();
+        let holders = newest.map_or(&none, |newest| &newest.holders);
+        let voters = self.raft.voters();
+        let others = voters.nodes().filter(|key| !holders.contains(key));
+        holders
+            .iter()
+            .copied()
+            .chain(others)
+            .filter(|&key| key != own)
+            .filter_map(|key| self.contact(key))
+            .collect()
+    }
+
     // Gives `raft` an input, and wakes each call when the leader or the term changes.
     fn input<T>(&mut self, input: impl FnOnce(&mut Raft) -> T) -> T {
         let lead = (self.raft.leader(), self.raft.term());
@@ -1055,15 +1075,17 @@ impl Group {
     // Applies `change`, and gives the task of the spec in use each pointer that moves.
     fn apply_change(&mut self, change: Change) -> Result<bool, Refused> {
         let listed = match &change {
-            Change::Spec { chunks, .. } => Some(chunks.clone()),
+            Change::Spec {
+                chunks, holders, ..
+            } => Some((chunks.clone(), holders.clone())),
             Change::Home { .. }
             | Change::Join(_)
             | Change::Ticket { .. }
             | Change::Card(_) => None,
         };
         let applied = self.state.apply(change)?;
-        if let Some(listed) = listed {
-            self.used.committed(self.state.pointer(), listed);
+        if let Some((listed, holders)) = listed {
+            self.used.committed(self.state.pointer(), listed, holders);
         }
         Ok(applied)
     }
@@ -1530,8 +1552,10 @@ mod tests {
         applies: BTreeMap<u8, Proposal>,
         /// The base and the definitions that each node gives `Mesh::apply` next.
         changes: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
-        /// The node that answers no blob stream.
-        silent: Option<u8>,
+        /// The nodes that answer no blob stream.
+        silent: BTreeSet<u8>,
+        /// The blob streams that each node served.
+        blobs: BTreeMap<u8, usize>,
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
@@ -1809,7 +1833,11 @@ mod tests {
                         };
                         let (protocol, _) = wire::header::decode(&header).unwrap();
                         if protocol == Protocol::Blob {
-                            let silent = board.lock().unwrap().silent == Some(id);
+                            let silent = {
+                                let mut board = board.lock().unwrap();
+                                *board.blobs.entry(id).or_default() += 1;
+                                board.silent.contains(&id)
+                            };
                             if silent {
                                 std::future::pending::<()>().await;
                             }
@@ -3069,6 +3097,7 @@ mod tests {
     mod cards;
     mod contested;
     mod founding;
+    mod gets;
     mod home;
     mod in_use;
     mod join;

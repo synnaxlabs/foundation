@@ -48,7 +48,7 @@ impl Cluster {
     }
 
     /// Node `node` calls `Mesh::apply` of `definitions` on `base` at its next tick.
-    fn change(
+    pub(super) fn change(
         &self,
         node: u8,
         base: Pointer,
@@ -743,7 +743,7 @@ fn each_member_refuses_a_change_whose_holders_lack_a_majority_of_its_voters() {
 }
 
 /// Asserts that each of `ids` uses the spec of `definitions` at `pointer`.
-fn assert_used(
+pub(super) fn assert_used(
     board: &Board,
     ids: &[u8],
     pointer: Pointer,
@@ -793,7 +793,7 @@ fn an_apply_in_a_region_of_two_voters_commits_and_each_uses_the_spec() {
 #[test]
 fn an_apply_whose_one_live_peer_never_answers_gives_quorum_at_the_deadline() {
     let mut cluster = Cluster::new(0);
-    cluster.board.lock().unwrap().silent = Some(2);
+    cluster.board.lock().unwrap().silent = [2].into();
     cluster.start_voter(1);
     cluster.start_voter(2);
     cluster.run(seconds(5));
@@ -862,7 +862,7 @@ fn an_apply_of_a_follower_counts_a_follower_that_restarted() {
     cluster.sim.crash(&node, Crash::Power);
     cluster.start_voter(q);
     cluster.run(seconds(5));
-    cluster.board.lock().unwrap().silent = Some(leader);
+    cluster.board.lock().unwrap().silent = [leader].into();
     let definitions = create_subjects(&["plant.a"], 1);
     cluster.change(p, base(), &definitions);
     cluster.run(seconds(5));

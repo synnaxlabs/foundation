@@ -116,6 +116,34 @@ impl Mesh {
 /// The public key of a member and the addresses of its card.
 pub(super) type Contact = (PublicKey, Vec<Address>);
 
+/// Gets the chunk of `digest` from the first peer of `peers`, in order, that gives it
+/// within [`DEADLINE`], and puts it in `store`. A peer whose get fails, gives no
+/// chunk, or passes the deadline leaves the get to the next peer.
+///
+/// # Errors
+///
+/// The error of `store` when it fails or refuses the put of the chunk. No later peer
+/// is asked.
+pub(super) async fn get(
+    store: &blob::Store,
+    transport: &Transport,
+    clock: &Clock,
+    digest: Digest,
+    peers: &[Contact],
+) -> Result<(), blob::Error> {
+    for contact in peers {
+        let get = on_peer(transport, contact, async |session| {
+            blob::peer::get(store, session, &[digest]).await
+        });
+        match within(clock, DEADLINE, get).await {
+            Some(Ok(Ok(misses))) if misses.is_empty() => return Ok(()),
+            Some(Ok(Err(blob::peer::Error::Store(error)))) => return Err(error),
+            Some(_) | None => {}
+        }
+    }
+    Ok(())
+}
+
 // Runs `call` on the session of `transport` to the peer of `contact`, which it dials
 // when it has none open. A call that failed on a session that ended dials once more:
 // a session to a process that restarted ends only at its first use.

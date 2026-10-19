@@ -15,10 +15,13 @@ use env::clock::{Clock, Sleep};
 use env::files::{Files, Mode};
 use spec::definition::Definition;
 use spec::tree::{self, Chunks};
+use transport::Transport;
 use types::digest::Digest;
 use types::name::{Name, Prefix};
+use types::node;
 use types::time::Span;
 
+use super::peer::{self, Contact};
 use super::{Call, Group, Mesh, Slot};
 use crate::error::{Error, Stopped};
 use crate::used::{Behind, Cause, Spec};
@@ -48,6 +51,8 @@ pub(super) struct Newest {
     pub(super) pointer: Pointer,
     // The chunks that its change listed, until a read takes them.
     listed: BTreeSet<Digest>,
+    // The holders that its change named, which a get asks first.
+    pub(super) holders: BTreeSet<node::Key>,
     // Each chunk of its tree that a read got from the store.
     pub(super) got: Vec<Vec<u8>>,
     step: Step,
@@ -58,8 +63,8 @@ pub(super) struct Newest {
 enum Step {
     /// Read its spec now.
     Read,
-    /// After `RETRY`, get the chunk that the last read missed, and read again only
-    /// when the store gives it.
+    /// After `RETRY`, get the chunk that the last read missed from the store, or else
+    /// from the peers, and read again only when it has it.
     Get(Digest),
     /// After `RETRY`, read again.
     Retry,
@@ -69,7 +74,9 @@ enum Step {
 
 /// One call of the store or one read that the task makes for a pointer.
 enum Job {
-    Get(Digest),
+    /// Get the chunk of the digest, and ask the peers in order when the store lacks
+    /// it.
+    Get(Digest, Vec<Contact>),
     Read {
         listed: BTreeSet<Digest>,
         // The tree in use, and each chunk of `Newest::got`.
@@ -100,15 +107,21 @@ enum Done {
 
 impl Used {
     /// Takes the pointer of a `Spec` change that applied, with the chunks that the
-    /// change listed. A pointer at or below one that this node knows, as on the
-    /// replay of the log after an open, changes nothing.
-    pub(super) fn committed(&mut self, pointer: Pointer, listed: BTreeSet<Digest>) {
+    /// change listed and its holders. A pointer at or below one that this node knows,
+    /// as on the replay of the log after an open, changes nothing.
+    pub(super) fn committed(
+        &mut self,
+        pointer: Pointer,
+        listed: BTreeSet<Digest>,
+        holders: BTreeSet<node::Key>,
+    ) {
         if pointer.version <= self.known() {
             return;
         }
         self.newest = Some(Newest {
             pointer,
             listed,
+            holders,
             got: Vec::new(),
             step: Step::Read,
         });
@@ -147,7 +160,8 @@ impl Used {
         self.newest.as_ref().map(|newest| newest.pointer) != Some(pointer)
     }
 
-    // The next job for the newest pointer, once its step allows one.
+    // The next job for the newest pointer, once its step allows one. A get lists no
+    // peer: `keep` takes them from the group.
     fn next(
         &mut self,
         clock: &Clock,
@@ -169,7 +183,7 @@ impl Used {
         *retry = None;
         self.task = None;
         let job = match newest.step {
-            Step::Get(digest) => Job::Get(digest),
+            Step::Get(digest) => Job::Get(digest, Vec::new()),
             Step::Read | Step::Retry | Step::Stuck => {
                 let mut chunks = self.chunks.clone();
                 for chunk in &newest.got {
@@ -343,6 +357,7 @@ fn behind(pointer: Pointer, failed: Done) -> Used {
     let newest = Newest {
         pointer,
         listed: BTreeSet::new(),
+        holders: BTreeSet::new(),
         got: Vec::new(),
         step: Step::Read,
     };
@@ -365,6 +380,7 @@ fn behind(pointer: Pointer, failed: Done) -> Used {
 pub(super) async fn keep(
     group: Weak<RefCell<Group>>,
     store: Rc<blob::Store>,
+    transport: Rc<Transport>,
     files: Files,
     dir: PathBuf,
     clock: Clock,
@@ -382,7 +398,10 @@ pub(super) async fn keep(
             }
             let prefix = group.state.prefix().clone();
             let next = group.used.next(&clock, &mut retry, cx);
-            next.map(|(pointer, job)| {
+            next.map(|(pointer, mut job)| {
+                if let Job::Get(_, peers) = &mut job {
+                    *peers = group.peers();
+                }
                 Some((pointer, job, prefix, group.used.retry(pointer)))
             })
         });
@@ -391,10 +410,16 @@ pub(super) async fn keep(
         };
         let mut gave = pin!(async {
             match job {
-                Job::Get(digest) => {
-                    let got = store.get(digest).await;
-                    let got = got.map(|chunk| chunk.map(|chunk| chunk.to_vec()));
-                    Gave::Got(digest, got)
+                Job::Get(digest, peers) => {
+                    let got = async {
+                        if let Some(chunk) = store.get(digest).await? {
+                            return Ok(Some(chunk.to_vec()));
+                        }
+                        peer::get(&store, &transport, &clock, digest, &peers).await?;
+                        let got = store.get(digest).await?;
+                        Ok(got.map(|chunk| chunk.to_vec()))
+                    };
+                    Gave::Got(digest, got.await)
                 }
                 Job::Read { listed, chunks } => {
                     let mut got = Vec::new();
