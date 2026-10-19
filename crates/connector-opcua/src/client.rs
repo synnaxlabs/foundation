@@ -134,9 +134,9 @@ pub(crate) enum Error {
 }
 
 /// Why open62541 refuses the [`Credentials`] of a client. Its `Display` names the
-/// part, such as "the key does not parse". `Key`, `Mismatch`, `Uri`, `Empty`, and
-/// `Invalid` can also come from a lack of memory, as open62541 or aws-lc gives one
-/// result for it and for the cause.
+/// part, such as "the key does not parse". Each refusal other than `Time` and
+/// `Trailing` can also come from a lack of memory, as its check gives one result for
+/// it and for the cause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     /// `certificate` does not parse or holds no RSA key.
