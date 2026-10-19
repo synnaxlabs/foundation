@@ -108,9 +108,11 @@ const INTERVAL: Span = Span::from_nanos(1_000_000_000);
 /// }
 /// frame.set_count(0, 1);
 /// let writer = shard.open_writer(writer::Writer {
-///     subject: "a".parse()?,
-///     authority: Authority(1),
-///     via: node::Key::from_u128(1),
+///     holder: control::Writer {
+///         subject: "a".parse()?,
+///         authority: Authority(1),
+///         via: node::Key::from_u128(1),
+///     },
 ///     lease: None,
 ///     set,
 /// })?;
@@ -519,25 +521,14 @@ impl Shard {
         &mut self,
         writer: Writer,
     ) -> Result<writer::Key, writer::Error> {
-        let Writer {
-            subject,
-            authority,
-            via,
-            lease,
-            set,
-        } = writer;
+        let Writer { holder, lease, set } = writer;
         let (now, mesh) = self.clocks().ok_or(writer::Error::Unsynced)?;
         let lease = lease.map(writer::lease).transpose()?;
-        let control = control::Writer {
-            subject,
-            authority,
-            via,
-        };
         let entries = set.entries();
         let mut claims = Vec::with_capacity(set.groups().len());
         for &entry in set.groups() {
             let place = self.place(entries[entry].slot);
-            let key = self.indexes[place].gate.open(control.clone(), lease, now);
+            let key = self.indexes[place].gate.open(holder.clone(), lease, now);
             claims.push(Claim { place, key });
         }
         let session = Session {
@@ -1473,9 +1464,11 @@ mod tests {
 
     fn writer(subject: &str, authority: u8, set: &Arc<KeySet>) -> Writer {
         Writer {
-            subject: subject.parse().expect("a valid name"),
-            authority: Authority(authority),
-            via: VIA,
+            holder: control::Writer {
+                subject: subject.parse().expect("a valid name"),
+                authority: Authority(authority),
+                via: VIA,
+            },
             lease: None,
             set: Arc::clone(set),
         }
@@ -3103,10 +3096,8 @@ mod tests {
             let set = two_indexes();
             let mut shard = test.shard(AREA).await;
             let c = node::Key::from_u128(0xc);
-            let through_c = Writer {
-                via: c,
-                ..writer("a", 1, &set)
-            };
+            let mut through_c = writer("a", 1, &set);
+            through_c.holder.via = c;
             let a = shard.open_writer(through_c).expect("synced");
             let next = frame(&test.pool, &set, &[(0, &[20]), (1, &[2]), (2, &[20])]);
             assert_eq!(
