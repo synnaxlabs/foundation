@@ -1111,6 +1111,8 @@
   the time check gives `Failed(BadCertificateInvalid)` when its load of the certificate
   fails (`laptop.monitor`, 2026-10-19 14:46 UTC,
   https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607, item 2;
+  for the trust load, 2026-10-19 16:56 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6272561677;
   `laptop.architect-2`, 2026-10-19 14:49 UTC,
   https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270087670). This
   supersedes the order of the checks and the abort on out of memory of step 3 of
