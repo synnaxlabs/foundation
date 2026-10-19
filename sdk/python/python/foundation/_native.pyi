@@ -4,12 +4,20 @@ import os
 import uuid
 from collections.abc import Iterable
 from types import TracebackType
-from typing import Any, Literal, Self, SupportsIndex, TypeAlias, final
+from typing import (
+    Any,
+    Literal,
+    Self,
+    SupportsFloat,
+    SupportsIndex,
+    TypeAlias,
+    final,
+)
 
 import numpy
 from numpy.typing import NDArray
 
-_Value: TypeAlias = numpy.bool_ | SupportsIndex | float | uuid.UUID
+_Value: TypeAlias = numpy.bool_ | SupportsIndex | SupportsFloat | uuid.UUID
 
 def connect(
     address: str | None = None,
@@ -109,7 +117,7 @@ class Client:
         channels: str | Iterable[str],
         *,
         authority: int = 0,
-        lease: float | None = None,
+        lease: SupportsFloat | None = None,
         on_loss: Literal["warn", "raise", "ignore"] = "warn",
     ) -> Writer:
         """Opens a writer of `channels` at the home of their index, and blocks until the
@@ -170,10 +178,11 @@ class Writer:
         stamp of the frame, in nanoseconds since the UNIX epoch; with none, the node
         stamps the frame. A value is a `bool` or a `numpy.bool_` for `bool`, an `int`
         (or an object with `__index__`) for an integer type and for `timestamp` and
-        `duration` (nanoseconds), a `float` or an `int` for `f32` and `f64`, and a
-        `uuid.UUID` for `uuid`. The call reads `values` after it waits for a call of
-        another thread that sends. A change of `values` after that read is not in the
-        frame. Other Python threads run while it waits.
+        `duration` (nanoseconds), a `float` (or an object with `__float__`, such as an
+        `int`) for `f32` and `f64`, and a `uuid.UUID` for `uuid`. The call reads
+        `values` after it waits for a call of another thread that sends. A change of
+        `values` after that read is not in the frame. Other Python threads run while it
+        waits.
 
         Raises `TypeError` for a value that is not of its place's type, a place of a
         type that is not a scalar, a key that is not a name or a place, or one value

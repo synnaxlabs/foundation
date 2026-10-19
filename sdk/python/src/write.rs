@@ -319,10 +319,11 @@ impl Writer {
     /// stamp of the frame, in nanoseconds since the UNIX epoch; with none, the node
     /// stamps the frame. A value is a `bool` or a `numpy.bool_` for `bool`, an `int`
     /// (or an object with `__index__`) for an integer type and for `timestamp` and
-    /// `duration` (nanoseconds), a `float` or an `int` for `f32` and `f64`, and a
-    /// `uuid.UUID` for `uuid`. The call reads `values` after it waits for a call of
-    /// another thread that sends. A change of `values` after that read is not in the
-    /// frame. Other Python threads run while it waits.
+    /// `duration` (nanoseconds), a `float` (or an object with `__float__`, such as an
+    /// `int`) for `f32` and `f64`, and a `uuid.UUID` for `uuid`. The call reads
+    /// `values` after it waits for a call of another thread that sends. A change of
+    /// `values` after that read is not in the frame. Other Python threads run while it
+    /// waits.
     ///
     /// Raises `TypeError` for a value that is not of its place's type, a place of a
     /// type that is not a scalar, a key that is not a name or a place, or one value
