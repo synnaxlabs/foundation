@@ -776,6 +776,7 @@ mod tests {
                 }),
             ),
             ("unjoined_reused", unfit(Unfit::Reused { key: index(5) })),
+            ("unjoined_full", unfit(Unfit::Full)),
             (
                 "unjoined_unknown",
                 region::Refused::Unknown {
@@ -891,6 +892,7 @@ mod tests {
             "unjoined_held",
             "unjoined_taken",
             "unjoined_reused",
+            "unjoined_full",
             "unjoined_unknown",
             "unjoined_ticket_forged",
             "unjoined_scope",

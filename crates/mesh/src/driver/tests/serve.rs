@@ -940,18 +940,6 @@ fn serve_stops_a_two_way_stream_at_a_second_message() {
     assert_eq!(finished, Err(stopped));
 }
 
-/// The member with `key` and private key `private`, named `name`, with a card that
-/// it signed.
-fn member_of(key: node::Key, private: &PrivateKey, name: &str) -> Member {
-    let mut card = common::member(1).card.card().clone();
-    card.name = name.parse().unwrap();
-    card.public_key = private.public();
-    Member {
-        card: card::Signed::sign(key, card, private),
-        ..common::member(1)
-    }
-}
-
 /// The signature of the pre-vote that `voter`, with private key `private`, grants to
 /// node 2 in `TERM`.
 fn pre_vote_of(voter: node::Key, private: &PrivateKey) -> raft::Signature {
@@ -978,9 +966,8 @@ fn pre_vote_of(voter: node::Key, private: &PrivateKey) -> raft::Signature {
     }
 }
 
-// Voter 2 asks for votes with a proof that also holds the pre-votes of 700 applied
-// members that are no voters. A stale heartbeat would get that proof back, in a
-// message over `BYTES_MIN`. Past 254 grants the message does not decode, so node 1
+// Voter 2 asks for votes with a proof that also holds the pre-votes of 700 nodes
+// that are no voters. Past 254 grants the message does not decode, so node 1
 // neither takes nor answers it.
 #[test]
 fn serve_stops_at_a_vote_whose_proof_has_more_grants_than_two_sets_of_voters() {
@@ -992,13 +979,6 @@ fn serve_stops_at_a_vote_whose_proof_has_more_grants_than_two_sets_of_voters() {
                 node::Key::from_u128(1000 + u128::from(at)),
                 PrivateKey(private),
             )
-        })
-        .collect();
-    let members: Vec<Member> = extras
-        .iter()
-        .zip(0..)
-        .map(|((key, private), at)| {
-            member_of(*key, private, &format!("plant.extra{at}"))
         })
         .collect();
     let mut voters: BTreeMap<node::Key, Option<raft::Signature>> = extras
@@ -1034,8 +1014,7 @@ fn serve_stops_at_a_vote_whose_proof_has_more_grants_than_two_sets_of_voters() {
     ));
     let (served, finished) = run(
         move |node, tasks, incoming| async move {
-            let mut config = config(&node, &tasks, 1, &IDS, &IDS).await;
-            config.founding.members.extend(members);
+            let config = config(&node, &tasks, 1, &IDS, &IDS).await;
             let mesh = Mesh::start(config).await.unwrap();
             let served = mesh.serve(public(2), incoming).await;
             node.clock().sleep(HALF).await;

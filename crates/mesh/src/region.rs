@@ -25,6 +25,9 @@ use crate::member::Member;
 use crate::status::{self, Status};
 use crate::ticket::{self, Options, Record};
 
+/// The most members that a region holds, voters and learners together.
+pub const MEMBERS_MAX: usize = 128;
+
 /// The region before the first entry of its log: its prefix, its founding members and
 /// voters, its spec before the first change, and the home of each founding index that
 /// it holds. It is the same at each member and at each open. A founding node builds it
@@ -455,6 +458,9 @@ impl State {
         if self.members.contains_key(&key) {
             return Err(Unfit::Duplicate { key });
         }
+        if self.members.len() >= MEMBERS_MAX {
+            return Err(Unfit::Full);
+        }
         if let Some(key) = self.holder(card.card().public_key) {
             return Err(Unfit::Held { key });
         }
@@ -700,6 +706,8 @@ pub enum Unfit {
         /// The status channel key.
         key: channel::Key,
     },
+    /// The region holds [`MEMBERS_MAX`] members.
+    Full,
 }
 
 impl fmt::Display for Unfit {
@@ -728,6 +736,10 @@ impl fmt::Display for Unfit {
             Self::Reused { key } => {
                 write!(f, "the status channel key {key} is already in use")
             }
+            Self::Full => write!(
+                f,
+                "the region holds {MEMBERS_MAX} members, the most that it can hold"
+            ),
         }
     }
 }
@@ -1356,6 +1368,56 @@ mod tests {
         assert_eq!(state, before);
         let admitted = state.apply(Change::Join(Box::new(join(7, 3, "plant.edge.a"))));
         assert_eq!(admitted, Ok(false));
+    }
+
+    // Members 1 to `count`, and single-use ticket 7 for `plant.edge`.
+    fn holding_members(count: usize) -> State {
+        let ids: Vec<u8> = (1..=u8::try_from(count).unwrap()).collect();
+        let mut state =
+            create_state(name("plant").into(), create_members(&ids)).unwrap();
+        let recorded = state.apply(ticket_change(7, options("plant.edge", false)));
+        assert_eq!(recorded, Ok(false));
+        state
+    }
+
+    #[test]
+    fn a_join_to_a_region_of_members_max_members_is_refused() {
+        let mut state = holding_members(MEMBERS_MAX);
+        let before = bound(state.clone(), 200, 200);
+        assert_eq!(
+            apply_join(&mut state, join(7, 200, "plant.edge.a")),
+            Err(Unfit::Full.into())
+        );
+        assert_eq!(state, before);
+        let text = "the region holds 128 members, the most that it can hold";
+        assert_eq!(Unfit::Full.to_string(), text);
+    }
+
+    #[test]
+    fn a_region_of_one_member_less_admits_a_join() {
+        let mut state = holding_members(MEMBERS_MAX - 1);
+        assert_eq!(
+            apply_join(&mut state, join(7, 200, "plant.edge.a")),
+            Ok(false)
+        );
+        assert_eq!(state.keys().count(), MEMBERS_MAX);
+    }
+
+    // So a repeat of an applied join stays safe in a full region.
+    #[test]
+    fn a_join_for_a_member_of_a_full_region_is_a_duplicate() {
+        let mut state = holding_members(MEMBERS_MAX);
+        assert_eq!(
+            apply_join(&mut state, join(7, 1, "plant.edge.a")),
+            Err(Unfit::Duplicate { key: node(1) }.into())
+        );
+    }
+
+    #[test]
+    fn a_founding_of_more_than_members_max_members_is_refused() {
+        let ids: Vec<u8> = (1..=129).collect();
+        let created = create_state(name("plant").into(), create_members(&ids));
+        assert_eq!(created.err(), Some(Unfit::Full));
     }
 
     // A status name of `len` bytes.
