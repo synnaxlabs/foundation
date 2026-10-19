@@ -1,5 +1,6 @@
 //! Polling a registered wait or race allocates nothing, and so do a tick from the third
-//! call on, a stamped request, and a set of a status count. This binary has no test
+//! call on, a stamped request, each call of a fit and of a sample stamp, and a set of a
+//! status count. This binary has no test
 //! harness: the count covers each thread, and a harness allocates on its own thread at
 //! any time.
 
@@ -16,11 +17,11 @@ use std::task::{Context, Wake, Waker};
 use connector::cancel::Token;
 use connector::kind::Table;
 use connector::pace::Timer;
-use connector::stamp::Stamps;
+use connector::stamp::{Fit, Fitted, Stamps};
 use connector::testing::{self, Rig};
 use types::channel;
 use types::name::Name;
-use types::time::Rate;
+use types::time::{Monotonic, Rate, Span, Stamp};
 
 /// A waker with a reference count, as a task has. It counts its wakes.
 #[derive(Default)]
@@ -56,6 +57,7 @@ fn main() {
     );
     check_ticks();
     check_stamps();
+    check_fit();
     status::check(status::Shows::Nothing);
     status::check(status::Shows::Error);
     status::check(status::Shows::Note);
@@ -132,6 +134,27 @@ fn check_stamps() {
         0,
         "a stamped request allocates nothing"
     );
+}
+
+/// Checks that 64 calls each of `Fit::between`, `Fit::before`, `Fit::mesh`, and
+/// `Stamps::sample` allocate nothing.
+fn check_fit() {
+    let mut fit = Fit::default();
+    let mut stamps = Stamps::default();
+    let ((), allocations) = ALLOCATOR.count(|| {
+        for n in 0..64_i64 {
+            let device = Monotonic(n.unsigned_abs() * 1_000);
+            let mesh = Stamp::from_nanos(n * 1_000 + 500);
+            let early = mesh - Span::from_nanos(100);
+            let kept = Fitted::Kept;
+            assert_eq!(fit.between(device, early, mesh), kept, "a true read fits");
+            assert_eq!(fit.before(device, mesh), kept, "a true timestamp fits");
+            let time = fit.mesh(device).expect("the fit bounds the clock");
+            assert_eq!(time.earliest, early, "the fit holds the reading");
+            std::hint::black_box(stamps.sample(time, mesh));
+        }
+    });
+    assert_eq!(allocations, 0, "a fit and a sample stamp allocate nothing");
 }
 
 /// The inputs of a hub on a new shard of `node`.

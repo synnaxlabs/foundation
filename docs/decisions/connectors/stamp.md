@@ -39,3 +39,21 @@
   `hub::writer::Writer` (the hub then knows that a request has two ends); the
   nanosecond after the later of the two (it puts the refused frame after a frame from
   a later read); `now` as a closure (a caller can pass a clock that is not mesh time).
+- **STAMP FIT (#2622)** `connector::stamp::Fit` fits one device clock to mesh time,
+  and `Stamps::sample` stamps a sample from the mesh time that a fit gives
+  (`laptop.architect-2`, 2026-10-14T01:37:20Z, PR 2:
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6158936229). `Fit`
+  holds one `estimate::overlap::Overlap` of 200 ppm, over offsets of mesh time minus
+  device time. `between` gives both edges and `before` gives a high edge. An offset is
+  computed in `i128`. A low edge under the range of a `Span` is left out, and a high
+  edge under it becomes `i64::MIN` ns, so a reading never claims more than it knows
+  and no input panics (read of the ruling, with the question to `laptop.architect-2`
+  open: https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6269891659,
+  item 2). A `before` older than the newest reading is checked against the earliest
+  mesh time that the fit gives at its device time: one under it restarts the fit, and
+  else it adds nothing. A refusal as `Backwards` or `Disjoint` of a `between`, or as
+  `Disjoint` of a new `before`, restarts the fit from that reading. `sample` takes the
+  floor of the midpoint, as `request` does. Lost: `Fit` inside `Stamps` (a writer
+  with the values of two devices then needs two `Stamps` for one index, so a stamp can
+  go back); a fit that keeps each reading and solves a line (it allocates, and its
+  bound is not hard).

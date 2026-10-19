@@ -4,6 +4,10 @@
 //! - `now`: one read of mesh time by `Writer::now`.
 //! - `request`: `Stamps::request` of a request that is ready at once, so the line is
 //!   its two reads of mesh time and the rule of the stamp.
+//! - `before`: `Fit::before` of a fit that bounds the clock, one value later in device
+//!   time each call.
+//! - `mesh`: `Fit::mesh` of that fit.
+//! - `sample`: `Stamps::sample` of an interval 1 us later each call.
 //!
 //! Each figure is ps per call, so a change under 1 ns shows, with the count of the
 //! allocations of the calls.
@@ -16,11 +20,12 @@ use std::task::{Context, Poll, Waker};
 use std::time::Instant;
 
 use connector::kind::Table;
-use connector::stamp::Stamps;
+use connector::stamp::{Fit, Fitted, Stamps};
 use connector::testing::{self, Rig};
 use hub::writer::Writer;
 use types::channel;
 use types::name::Name;
+use types::time::{Interval, Monotonic, Span, Stamp};
 
 #[global_allocator]
 static ALLOCATOR: counting::Allocator = counting::Allocator::new();
@@ -51,6 +56,9 @@ fn main() {
                 black_box(writer.now());
             }),
             request(&writer),
+            before(),
+            mesh(),
+            sample(),
         ]
     });
     print(&lines.expect("the run ends"));
@@ -66,6 +74,51 @@ fn request(writer: &Writer) -> Line {
             panic!("the request is ready")
         };
         black_box(stamped);
+    })
+}
+
+/// A fit of a clock 500 ns behind mesh time, from one read at device time 0.
+fn fit() -> Fit {
+    let mut fit = Fit::default();
+    let fitted =
+        fit.between(Monotonic(0), Stamp::from_nanos(400), Stamp::from_nanos(500));
+    assert_eq!(fitted, Fitted::Kept, "one reading fits");
+    fit
+}
+
+/// The line `before`.
+fn before() -> Line {
+    let mut fit = fit();
+    let mut device = 0;
+    time("before", || {
+        device += 1_000;
+        let arrived = Stamp::from_nanos(i64::try_from(device).expect("small") + 500);
+        let fitted = black_box(fit.before(Monotonic(device), black_box(arrived)));
+        assert_eq!(fitted, Fitted::Kept, "a true reading fits");
+    })
+}
+
+/// The line `mesh`.
+fn mesh() -> Line {
+    let fit = fit();
+    let mut device = 0;
+    time("mesh", || {
+        device += 1_000;
+        black_box(fit.mesh(black_box(Monotonic(device))));
+    })
+}
+
+/// The line `sample`.
+fn sample() -> Line {
+    let mut stamps = Stamps::default();
+    let mut earliest = Stamp::from_nanos(0);
+    time("sample", || {
+        earliest = earliest + Span::MICROSECOND;
+        let interval = Interval {
+            earliest,
+            latest: earliest + Span::from_nanos(200),
+        };
+        black_box(stamps.sample(black_box(interval), earliest));
     })
 }
 
