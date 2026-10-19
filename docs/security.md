@@ -230,12 +230,15 @@ state on `main`.
   also admits a `raft` request only from a voter of the newest configuration (RAFT
   VOTERS, #654), and `raft` drops a reply from any other node. `Mesh::receive`
   refuses such a request (`Error::NotVoter`). It answers `removed` (`Error::Removed`,
-  code 17) only to a `PreVote` or a `Vote` at or below its commit index from a sender
-  that a committed configuration removed, so a stranger cannot learn from the answer
-  which nodes the log held. A former voter can learn an upper bound of the commit index
-  from it. A sender stops its group only when a majority of the other voters of its
-  own configuration give that answer inside two election timeouts, so a minority that
-  lags or lies cannot stop it alone (#1105, #1822). `node` serves
+  code 17) only to a `PreVote` or a `Vote` at or below its commit index, or below the
+  term at it, from a sender that a committed configuration removed, so a stranger
+  cannot learn from the answer which nodes the log held. A former voter can learn the
+  commit index of a voter, and the term at it, from the answers to votes with
+  different last positions. Neither holds data. A sender stops its group only when a
+  majority of the other voters of its own configuration give that answer inside two
+  election timeouts. That configuration can be smaller than the one in force, so a
+  minority of the voters in force that lags or lies can still stop a node that missed
+  its removal and a later add of itself (#1105, #1822, #3355). `node` serves
   mesh streams when it has a region (NODE MESH).
   A voter that lies can still break safety, because a false `AppendReply` counts as
   held, so `raft` trusts its voters (RAFT SURFACE, #352 item 2). A join that a

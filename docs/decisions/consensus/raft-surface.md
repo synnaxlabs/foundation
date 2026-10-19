@@ -177,11 +177,12 @@
   ("I approve long term fix on 522"), #522. `Raft::admission(&Message) -> Admission`
   says how `mesh` takes a message from another node: `Admitted` for a reply or a
   request of a voter of the newest configuration, `Removed` for a `PreVote` or a `Vote`
-  whose last index is at or below the commit, from a node that a committed
-  configuration removed (the configuration before the entries or a committed `Voters`
-  entry held it, and the last committed configuration lacks it), and `NotVoter` for
-  each other request. `mesh` keeps no copy of the configurations (#1105, #1762). It
-  replaces `Raft::removed` (decided by `laptop.architect`, 2026-10-19T12:57:24Z:
+  whose last index is at or below the commit, or whose last term is below the term at
+  the commit, from a node that a committed configuration removed (the configuration
+  before the entries or a committed `Voters` entry held it, and the last committed
+  configuration lacks it), and `NotVoter` for each other request. `mesh` keeps no copy
+  of the configurations (#1105, #1762). It replaces `Raft::removed` (decided by
+  `laptop.architect`, 2026-10-19T12:57:24Z:
   https://github.com/synnaxlabs/foundation/issues/1107#issuecomment-6267749373).
   `Raft::removed_by(by) -> Option<BTreeSet<node::Key>>` takes a `removed` answer from
   voter `by`, and gives each voter whose answer counts once they are a majority of the

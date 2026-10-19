@@ -7,8 +7,8 @@
   this order: the peer holds the key of the member that the message names
   (`Error::Spoofed`), a request comes from a voter of this node's configuration
   (`Raft::admission`: `Error::Removed` for a `PreVote` or a `Vote` at or below the
-  commit of a sender that a committed configuration removed, else `Error::NotVoter`),
-  and each claim holds (`Error::Claim`), the claims being what
+  commit, or below the term at it, of a sender that a committed configuration removed,
+  else `Error::NotVoter`), and each claim holds (`Error::Claim`), the claims being what
   `Raft::claims` gives, so a link that the node does not read is not checked. So a
   node with a configuration refuses a leader that is not a voter of that
   configuration, when a change that the node does not hold made that leader a voter.
