@@ -11,8 +11,12 @@ mod tests;
 /// The fit of one device clock to mesh time: what each reading of that clock allows,
 /// for a clock that drifts from mesh time by at most 200 ppm. Readings come in any
 /// order. A reading that disagrees with the readings before it, as after a restart or
-/// a jump of the clock, starts a new fit from that reading. Mesh times are taken as
-/// exact: the error of the fit covers only the device clock.
+/// a jump of the clock, starts a new fit from that reading. A clock that goes back by
+/// less than the width of a reading is not caught until a reading disagrees. A reading
+/// whose offset `mesh - device` is more than 2^62 ns (146 years) from that of the
+/// first reading also starts a new fit, and a `between` reading wider than 2^62 ns
+/// bounds the clock only from above. Mesh times are taken as exact: the error of the
+/// fit covers only the device clock.
 #[derive(Clone, Debug)]
 pub struct Fit {
     overlap: Overlap,
@@ -52,12 +56,11 @@ impl Fit {
     }
 
     /// The mesh time of `device`, or `None` until the readings of this fit bound the
-    /// clock from both sides, when drift since them makes the bound 36500 days or
-    /// wider, and when the bound is past the range of a stamp.
+    /// clock from both sides, and when the bound is past the range of a stamp.
     #[must_use]
     pub fn mesh(&self, device: Monotonic) -> Option<Interval> {
         let base = self.base?;
-        let m = self.overlap.at(device).filter(|m| m.known())?;
+        let m = self.overlap.at(device)?;
         let time = i128::from(device.0) + base + i128::from(m.offset().nanos());
         let error = i128::from(m.error().nanos());
         let (earliest, latest) = (time - error, time + error);
@@ -72,26 +75,29 @@ impl Fit {
     }
 
     /// Adds a reading of offsets from `low` to `high`, or a new fit from it when it
-    /// disagrees.
+    /// disagrees or is out of reach.
     fn read(&mut self, device: Monotonic, low: Option<i128>, high: i128) -> Fitted {
+        let low = low.filter(|&low| high - low <= REACH);
         let base = *self.base.get_or_insert(high);
-        match push(
-            &mut self.overlap,
-            device,
-            low.map(|l| l - base),
-            high - base,
-        ) {
-            Ok(()) => Fitted::Kept,
-            Err(Error::Disjoint) => {
-                *self = Self {
-                    base: Some(high),
-                    ..Self::default()
-                };
-                push(&mut self.overlap, device, low.map(|l| l - high), 0)
-                    .expect("invariant: an empty fit holds any one reading");
-                Fitted::Restarted
+        let near = |edge: i128| edge.abs_diff(base) <= REACH.unsigned_abs();
+        if near(high) && low.is_none_or(near) {
+            match push(
+                &mut self.overlap,
+                device,
+                low.map(|l| l - base),
+                high - base,
+            ) {
+                Ok(()) => return Fitted::Kept,
+                Err(Error::Disjoint) => {}
             }
         }
+        *self = Self {
+            base: Some(high),
+            ..Self::default()
+        };
+        push(&mut self.overlap, device, low.map(|l| l - high), 0)
+            .expect("invariant: an empty fit holds any one reading");
+        Fitted::Restarted
     }
 }
 
@@ -101,7 +107,8 @@ impl Fit {
 pub enum Fitted {
     /// The fit holds the reading with the readings before it.
     Kept,
-    /// The reading disagreed with the fit, and a new fit starts from it.
+    /// The reading disagreed with the fit or was out of its reach, and a new fit
+    /// starts from it.
     Restarted,
 }
 
@@ -110,30 +117,26 @@ fn offset(device: Monotonic, mesh: Stamp) -> i128 {
     i128::from(mesh.nanos()) - i128::from(device.0)
 }
 
-/// Pushes the edges `low` and `high` from the base. An edge past the range of a span
-/// stops at that range when that claims less, and is left out when it would claim
-/// more.
+/// The farthest an edge gets from the base, in ns. Drift over any device time widens
+/// an edge by under 2^52 ns, so an edge never reaches the range of a span.
+const REACH: i128 = 1 << 62;
+
+/// Pushes the edges `low` and `high`, each within [`REACH`] of the base.
 fn push(
     overlap: &mut Overlap,
     device: Monotonic,
     low: Option<i128>,
     high: i128,
 ) -> Result<(), Error> {
-    let low = low
-        .filter(|&low| low >= i64::MIN.into())
-        .map(|low| span(low.min(i64::MAX.into())));
-    let high = (high <= i64::MAX.into()).then(|| span(high.max(i64::MIN.into())));
-    match (low, high) {
-        (Some(low), Some(high)) => overlap.push(device, low, high),
-        (Some(low), None) => overlap.push_low(device, low),
-        (None, Some(high)) => overlap.push_high(device, high),
-        (None, None) => Ok(()),
+    match low {
+        Some(low) => overlap.push(device, span(low), span(high)),
+        None => overlap.push_high(device, span(high)),
     }
 }
 
 /// `nanos` inside the range of an `i64` as a span.
 fn span(nanos: i128) -> Span {
-    Span::from_nanos(i64::try_from(nanos).expect("invariant: in range"))
+    Span::from_nanos(i64::try_from(nanos).expect("invariant: in reach"))
 }
 
 /// `nanos` as a stamp, stopped at the range of a stamp.

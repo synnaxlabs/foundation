@@ -38,10 +38,11 @@ impl Stamps {
     }
 
     /// Gives the stamp of a sample whose true mesh time is within `time`, with its ends
-    /// in either order, and whose value holds until at least `held`, with the error of that stamp. The stamp is
-    /// the midpoint of `time`, or 1 ns after the last stamp when that is later. The
-    /// error is half the width of `time`, rounded up, plus how far the stamp is past
-    /// the later of the midpoint and `held`, and stops at `i64::MAX` ns.
+    /// in either order, and whose value holds until at least `held`, with the error of
+    /// that stamp. The stamp is the midpoint of `time`, or 1 ns after the last stamp
+    /// when that is later. The error is half the width of `time`, rounded up, plus how
+    /// far the stamp is past the later of the midpoint and `held`, and stops at
+    /// `i64::MAX` ns.
     ///
     /// # Panics
     ///

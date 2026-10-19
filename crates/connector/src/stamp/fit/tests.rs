@@ -203,74 +203,107 @@ fn an_old_before_reading_under_the_low_edge_of_an_odd_fit_restarts_the_fit() {
 fn an_old_before_reading_of_a_fit_with_no_low_edge_is_kept() {
     let mut fit = Fit::default();
     assert_eq!(fit.before(Monotonic(10_000), at(10_000)), Fitted::Kept);
-    assert_eq!(fit.before(Monotonic(5_000), at(MIN)), Fitted::Kept);
-}
-
-/// The fit holds offsets from that of its first reading, `i64::MAX` ns here. A low
-/// edge of `i64::MIN` ns from it is kept, and the next reading narrows the fit to it.
-#[test]
-fn a_low_edge_at_the_lowest_span_is_kept() {
-    let mut fit = Fit::default();
-    assert_eq!(fit.before(Monotonic(0), at(MAX)), Fitted::Kept);
-    assert_eq!(fit.between(Monotonic(0), at(-1), at(MAX)), Fitted::Kept);
-    assert_eq!(fit.before(Monotonic(0), at(-1)), Fitted::Kept);
-    assert_eq!(fit.mesh(Monotonic(0)), Some(within(-1, -1)));
-}
-
-/// A low edge under `i64::MIN` ns from the first offset is left out: the lowest span
-/// would claim more than the reading knows.
-#[test]
-fn a_low_edge_under_the_lowest_span_is_left_out() {
-    let mut fit = Fit::default();
-    assert_eq!(fit.before(Monotonic(0), at(MAX)), Fitted::Kept);
-    assert_eq!(fit.between(Monotonic(0), at(-2), at(MAX)), Fitted::Kept);
-    assert_eq!(fit.before(Monotonic(0), at(-2)), Fitted::Kept);
-    assert_eq!(fit.mesh(Monotonic(0)), None);
-}
-
-/// A `between` reading whose low edge is left out still narrows the fit from above.
-#[test]
-fn a_between_reading_with_no_low_edge_keeps_its_high_edge() {
-    let mut fit = Fit::default();
-    assert_eq!(fit.before(Monotonic(0), at(MAX)), Fitted::Kept);
-    assert_eq!(fit.between(Monotonic(0), at(-2), at(-1)), Fitted::Kept);
-    assert_eq!(fit.between(Monotonic(0), at(-1), at(0)), Fitted::Kept);
-    assert_eq!(fit.mesh(Monotonic(0)), Some(within(-1, -1)));
-}
-
-/// A high edge under `i64::MIN` ns from the first offset becomes the lowest span,
-/// which claims less: a later `-1` agrees with a `before` of `-2`.
-#[test]
-fn a_high_edge_under_the_lowest_span_becomes_the_lowest_span() {
-    let mut fit = Fit::default();
-    assert_eq!(fit.before(Monotonic(0), at(MAX)), Fitted::Kept);
-    assert_eq!(fit.before(Monotonic(0), at(-2)), Fitted::Kept);
-    assert_eq!(fit.between(Monotonic(0), at(-1), at(MAX)), Fitted::Kept);
-    assert_eq!(fit.mesh(Monotonic(0)), Some(within(-1, -1)));
-}
-
-/// A low edge over `i64::MAX` ns from the first offset becomes the highest span,
-/// which claims less, and still restarts a fit that it disagrees with.
-#[test]
-fn a_low_edge_over_the_highest_span_becomes_the_highest_span() {
-    let mut fit = Fit::default();
-    assert_eq!(fit.before(Monotonic(0), at(MIN)), Fitted::Kept);
     assert_eq!(
-        fit.between(Monotonic(0), at(MAX), at(MAX)),
+        fit.before(Monotonic(5_000), at(-1_000_000_000)),
+        Fitted::Kept
+    );
+}
+
+/// 2^62 ns: the farthest an offset gets from the first offset of a fit.
+const REACH: i64 = 1 << 62;
+
+#[test]
+fn a_reading_at_the_reach_of_the_fit_is_kept() {
+    let mut fit = Fit::default();
+    assert_eq!(fit.before(Monotonic(0), at(0)), Fitted::Kept);
+    assert_eq!(fit.before(Monotonic(0), at(-REACH)), Fitted::Kept);
+    assert_eq!(
+        fit.between(Monotonic(0), at(-REACH), at(-REACH)),
+        Fitted::Kept
+    );
+    assert_eq!(fit.mesh(Monotonic(0)), Some(within(-REACH, -REACH)));
+}
+
+#[test]
+fn a_reading_past_the_reach_of_the_fit_restarts_it() {
+    let mut fit = Fit::default();
+    assert_eq!(fit.before(Monotonic(0), at(0)), Fitted::Kept);
+    assert_eq!(fit.before(Monotonic(0), at(-REACH - 1)), Fitted::Restarted);
+    assert_eq!(
+        fit.between(Monotonic(0), at(-REACH - 2), at(0)),
         Fitted::Restarted
     );
-    assert_eq!(fit.mesh(Monotonic(0)), Some(within(MAX, MAX)));
+    assert_eq!(fit.mesh(Monotonic(0)), None);
+    let mut fit = Fit::default();
+    assert_eq!(fit.before(Monotonic(0), at(0)), Fitted::Kept);
+    let far = REACH + 1;
+    assert_eq!(
+        fit.between(Monotonic(0), at(far), at(far)),
+        Fitted::Restarted
+    );
+    assert_eq!(fit.mesh(Monotonic(0)), Some(within(far, far)));
 }
 
-/// A high edge over `i64::MAX` ns from the first offset is left out: the highest span
-/// would claim more than the reading knows.
 #[test]
-fn a_high_edge_over_the_highest_span_is_left_out() {
+fn a_between_reading_wider_than_the_reach_bounds_only_from_above() {
     let mut fit = Fit::default();
-    assert_eq!(fit.before(Monotonic(0), at(MIN)), Fitted::Kept);
-    assert_eq!(fit.before(Monotonic(0), at(MAX)), Fitted::Kept);
-    assert_eq!(fit.between(Monotonic(0), at(MIN), at(MIN)), Fitted::Kept);
-    assert_eq!(fit.mesh(Monotonic(0)), Some(within(MIN, MIN)));
+    assert_eq!(
+        fit.between(Monotonic(0), at(0), at(REACH + 1)),
+        Fitted::Kept
+    );
+    assert_eq!(fit.mesh(Monotonic(0)), None);
+    assert_eq!(
+        fit.between(Monotonic(0), at(1), at(REACH + 1)),
+        Fitted::Kept
+    );
+    assert_eq!(fit.mesh(Monotonic(0)), Some(within(1, REACH + 1)));
+}
+
+/// A first value with a timestamp centuries old, mapped as PR 5 maps server time.
+#[test]
+fn true_reads_bound_the_clock_after_a_stale_first_value() {
+    let now = 1_790_000_000_000_000_000i64;
+    let device = |s: i64| Monotonic(s.abs_diff(MIN));
+    let mut fit = Fit::default();
+    assert_eq!(
+        fit.before(device(MIN + 1_000_000_000), at(now)),
+        Fitted::Kept
+    );
+    for i in 0..100 {
+        let s = now + i * 1_000_000_000;
+        let fitted = fit.between(device(s), at(s - 1_000_000), at(s));
+        assert_eq!(fitted == Fitted::Restarted, i == 0);
+        assert!(fit.mesh(device(s)).is_some());
+    }
+}
+
+#[test]
+fn a_high_edge_far_under_the_fit_restarts_it() {
+    let mut fit = Fit::default();
+    assert_eq!(fit.between(Monotonic(5), at(MIN + 1), at(1)), Fitted::Kept);
+    assert_eq!(fit.before(Monotonic(5), at(MIN)), Fitted::Restarted);
+    assert_eq!(fit.mesh(Monotonic(5)), None);
+}
+
+/// True readings near the lowest offset from the first, one of them old.
+#[test]
+fn an_old_reading_far_from_the_first_holds_the_truth() {
+    let (t, d) = (10_000_000_000u64, 1_000_000_000u64);
+    let a = 10_000_000_000i64;
+    let mut fit = Fit::default();
+    assert_eq!(fit.before(Monotonic(t), at(a)), Fitted::Kept);
+    assert_eq!(fit.before(Monotonic(t), at(a + MIN)), Fitted::Restarted);
+    let sent = a + MIN - 1_000_000_000;
+    assert_eq!(
+        fit.between(Monotonic(t - d), at(sent), at(sent + 1_000_000)),
+        Fitted::Kept
+    );
+    let truth = at(a + MIN - 200_000);
+    let mesh = fit.mesh(Monotonic(t)).expect("bounded");
+    assert!(
+        mesh.earliest <= truth && truth <= mesh.latest,
+        "{mesh:?} does not hold {truth:?}"
+    );
 }
 
 /// A bound past the latest stamp is `None`, and one that only ends past it stops at it.
@@ -286,27 +319,15 @@ fn a_bound_past_the_range_of_a_stamp_is_none() {
     assert_eq!(fit.mesh(Monotonic(0)), None);
 }
 
-/// 36,500 days in ns: the widest bound that a fit gives.
-const WIDEST: i64 = 36_500 * 86_400 * 1_000_000_000;
-
-/// A device time far from a reading of a fit almost 2 x 36,500 days wide, where 200 ppm
-/// makes the bound wider than 36,500 days.
+/// A device time far from a reading of a fit 2^61 ns wide.
 const FAR: i64 = 1_000_000_000_000_000_000;
-
-#[test]
-fn a_bound_of_36500_days_or_wider_is_none() {
-    let mut fit = Fit::default();
-    let width = 2 * WIDEST - 2;
-    assert_eq!(fit.between(Monotonic(0), at(0), at(width)), Fitted::Kept);
-    assert_eq!(fit.mesh(Monotonic(0)), Some(within(0, width)));
-    assert_eq!(fit.mesh(Monotonic(FAR.unsigned_abs())), None);
-}
 
 #[test]
 fn a_true_old_before_of_a_wide_fit_is_kept() {
     let mut fit = Fit::default();
+    let wide = REACH / 2;
     assert_eq!(
-        fit.between(Monotonic(FAR.unsigned_abs()), at(FAR), at(FAR + 2 * WIDEST)),
+        fit.between(Monotonic(FAR.unsigned_abs()), at(FAR), at(FAR + wide)),
         Fitted::Kept
     );
     assert_eq!(
@@ -431,7 +452,8 @@ proptest! {
 
     /// Any reading of any device time: no reading panics, a restart holds only its
     /// reading, and a fit of true readings of one device time, with any first offset,
-    /// holds the true mesh time.
+    /// holds the true mesh time, and bounds it after a `between` reading of 2^62 ns or
+    /// less.
     #[test]
     fn any_reading_keeps_its_edges_on_their_sides(
         device in any::<u64>(),
@@ -463,14 +485,19 @@ proptest! {
 
         for first in [early, late] {
             let mut fit = Fit::default();
-            prop_assert_eq!(fit.before(device, first.max(truth)), Fitted::Kept);
-            prop_assert_eq!(fit.between(device, answered, sent), Fitted::Kept);
-            prop_assert_eq!(fit.before(device, answered), Fitted::Kept);
-            prop_assert_eq!(fit.between(device, first.min(truth), late), Fitted::Kept);
-            if let Some(mesh) = fit.mesh(device) {
+            let fitted = [
+                fit.before(device, first.max(truth)),
+                fit.between(device, first.min(truth), late),
+                fit.before(device, answered),
+                fit.between(device, answered, sent),
+            ];
+            let mesh = fit.mesh(device);
+            let width = i128::from(answered.nanos()) - i128::from(sent.nanos());
+            prop_assert!(mesh.is_some() || width > 1 << 62, "{fitted:?}");
+            if let Some(mesh) = mesh {
                 prop_assert!(
                     mesh.earliest <= truth && truth <= mesh.latest,
-                    "{mesh:?} does not hold {truth:?}"
+                    "{mesh:?} does not hold {truth:?} after {fitted:?}"
                 );
             }
         }

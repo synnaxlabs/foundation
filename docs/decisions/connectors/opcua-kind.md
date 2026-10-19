@@ -31,9 +31,10 @@
   fit with one crate-private function and no `as` cast (`laptop.architect-2`,
   2026-10-19T13:20:40Z:
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6268217457). The map
-  is `Monotonic(s.abs_diff(i64::MIN))`, which holds each `Stamp`, so no server time
-  drops: `Fit` holds its offsets from the offset of its first reading, so a server far
-  ahead of mesh time still fits (`laptop.architect-2`, 2026-10-19T15:07:34Z, B:
+  is `Monotonic(s.abs_diff(i64::MIN))`, which holds each `Stamp`, so no server time that
+  a `Stamp` holds drops: `Fit` holds its offsets from the offset of its first reading,
+  so a server far ahead of mesh time still fits (`laptop.architect-2`,
+  2026-10-19T15:07:34Z, B:
   https://github.com/synnaxlabs/foundation/pull/3386#issuecomment-6270475292, which
   supersedes item 1 of
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6270224530 and item
