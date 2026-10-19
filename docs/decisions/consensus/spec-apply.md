@@ -40,19 +40,29 @@
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551. A put
   gives `Error::Pool` or `Error::Blob` on a failure. The node then puts the listed
   chunks with `blob::peer::put` on each other voter of both halves of `raft.voters()`,
-  all at once, in calls of at most 32 chunks in order on one session, each of which
-  ends after `peer::DEADLINE` (10 s on the `env` clock) with no result. A holder is the
-  node when it is a voter, or a voter whose calls each ended `Ok`; a failed dial or call
-  leaves a voter no holder. A voter counts only while a half that holds it lacks a
-  majority, so the holders are at most the sum of the majorities of the halves, at
-  most 128, which `HOLDERS_MAX` holds (SPEC CHANGE). Once the holders are a
+  all at once, in calls of at most 16 chunks in order, each of which fails after
+  `peer::DEADLINE` (10 s on the `env` clock) with no result, its dials included. A call
+  whose session ended dials once more, as a session to a peer that restarted ends only
+  at its first use. A holder is the node when it is a voter, or a voter whose calls each
+  ended `Ok` while a half that holds it lacked a majority; another failed dial or call
+  leaves a voter no holder. A failed read of the node's store for a call gives
+  `Error::Blob` at once. So the holders are at most the sum of the majorities of the
+  halves, at most 128, which `HOLDERS_MAX` holds (SPEC CHANGE). `Error::Stopped` comes
+  as for `Mesh::set_home`, also while the puts wait. Once the holders are a
   majority of each half, the node drops the puts still open and proposes. When the
   holders are not a majority of each half once each put ended, or at the apply, the
   call gives `Error::Quorum { held, voters }` for the first half that lacks one, the
   incoming half first, and proposes nothing before the apply. Decided by
   `laptop.architect`, 2026-10-19T17:02:16Z
   (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202), which
-  supersedes the one holder and the count before the put of 6059603551.
+  supersedes the count before the put of item 2 of
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643 and the one
+  holder of
+  https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178.
+  The holder rule, the docs, and `HOLDERS_MAX` = 128: `laptop.architect`,
+  2026-10-19T17:21:45Z
+  (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273042572). The 16
+  chunks of a call and the redial: approval owed on #3399.
   `Mesh::open` puts each chunk of the
   founding tree in the store. A change that the state refuses as stale gives
   `Error::Stale { base, pointer }`. A call learns the refusal of its own entry from
@@ -108,6 +118,6 @@
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
   Supersedes the list of each chunk of the new tree and `Large` on its count
   (https://github.com/synnaxlabs/foundation/issues/1083#issuecomment-6055806836). The
-  put of each chunk of the new tree, the count before the put, the full list on a base
+  put of each chunk of the new tree, the full list on a base
   root that is not a tree node, and the name `Config::store`, 2026-10-08T11:53:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643).
