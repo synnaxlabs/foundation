@@ -77,7 +77,7 @@ impl Reply {
 
 /// Which streams a client session may give next: the hello stream first, then, once a
 /// hello is admitted, requests one at a time and reads.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Gate {
     hello_taken: Cell<bool>,
     admission: Admission,
@@ -86,6 +86,15 @@ pub(crate) struct Gate {
 }
 
 impl Gate {
+    /// The gate of a new client session of `node`.
+    pub(crate) fn new(node: types::node::Key) -> Self {
+        Self {
+            hello_taken: Cell::default(),
+            admission: Admission::new(node),
+            open: Cell::default(),
+        }
+    }
+
     /// Gives `true` for the first stream of the session only: the hello stream.
     pub(crate) fn first(&self) -> bool {
         !self.hello_taken.replace(true)
@@ -255,10 +264,9 @@ async fn renew(
     if !take(session, receiver, sender).await? {
         return Ok(Served::Ended);
     }
+    let mut expiry = pin!(session.client.admission.expiry(&session.state));
     loop {
-        // A fresh wait for each renewal, since a renewal can move the end earlier.
         let mut renewal = pin!(take(session, receiver, sender));
-        let mut expiry = pin!(session.client.admission.expiry(&session.state));
         let renewed = poll_fn(|cx| match renewal.as_mut().poll(cx) {
             Poll::Ready(renewed) => Poll::Ready(renewed),
             Poll::Pending => expiry.as_mut().poll(cx).map(Err),
@@ -285,11 +293,7 @@ async fn take(
     if signed.hello.nonce != nonce {
         return Err(Error::Stale);
     }
-    let node = session.state.borrow().node;
-    session
-        .client
-        .admission
-        .take(&session.state, node, signed)?;
+    session.client.admission.admit(&session.state, signed)?;
     Ok(true)
 }
 
