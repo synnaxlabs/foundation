@@ -30,16 +30,17 @@ pub enum Error {
         /// The sender that the message names.
         from: node::Key,
     },
-    /// A request from a member that is not a voter of this node's configuration, and
-    /// that no committed configuration removed.
+    /// A request from a member that is not a voter of this node's configuration, other
+    /// than one that gives `Removed`.
     NotVoter {
         /// The sender.
         from: node::Key,
     },
-    /// A request from `from`, which a committed configuration removed: an earlier
-    /// committed configuration held it, and the last one lacks it. The stream stops
-    /// with the `removed` code, and `from` stops its group when this node is a voter
-    /// of its configuration.
+    /// A `PreVote` or a `Vote` from `from`, which a committed configuration removed,
+    /// whose last index is at or below this node's commit: an earlier committed
+    /// configuration held `from`, and the last one lacks it. The stream stops with the
+    /// `removed` code. `from` stops its group once a majority of the other incoming
+    /// voters of its newest configuration answered so.
     Removed {
         /// The sender.
         from: node::Key,
@@ -486,8 +487,9 @@ pub enum Stopped {
         cause: Unknown,
     },
     /// A majority of the voters of the newest configuration in this node's log
-    /// answered `removed`: a committed configuration lacks this node. Open the mesh
-    /// again only after a join that gives a new configuration.
+    /// answered `removed`, each in the last two election timeouts: a committed
+    /// configuration lacks this node. Open the mesh again only after a join that
+    /// gives a new configuration.
     Removed {
         /// The voters that answered.
         by: BTreeSet<node::Key>,

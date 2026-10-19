@@ -27,6 +27,17 @@ fn set(ids: &[u8]) -> BTreeSet<node::Key> {
 }
 
 fn node(id: u8, voters: &[u8]) -> Raft {
+    restart(id, Hard::default(), voters, Vec::new(), 0)
+}
+
+// Node `id` with `hard`, the voters before `entries`, and `applied`.
+fn restart(
+    id: u8,
+    hard: Hard,
+    voters: &[u8],
+    entries: Vec<Entry>,
+    applied: u64,
+) -> Raft {
     let config = Config {
         key: key(id),
         election_ticks: ELECTION,
@@ -34,13 +45,13 @@ fn node(id: u8, voters: &[u8]) -> Raft {
         fits: |_| true,
     };
     let start = Start {
-        hard: Hard::default(),
+        hard,
         voters: Voters {
             incoming: set(voters),
             outgoing: BTreeSet::new(),
         },
-        entries: Vec::new(),
-        applied: 0,
+        entries,
+        applied,
     };
     Raft::new(config, start).unwrap()
 }
@@ -543,7 +554,8 @@ fn removed_answers_once_a_leader_gives_the_commit_of_the_leave() {
 // `Start.voters` holds node 4, so only the committed join holds it. A start from
 // node 2's disk up to a commit below the join holds nothing about node 4, a start up
 // to the join or to the last leave admits it as a voter, and a start up to the second
-// leave answers it `removed`.
+// leave answers it `removed`. A start from the whole disk at each of these commits
+// admits it: the newest configuration holds it.
 #[test]
 fn removed_answers_a_node_that_only_a_committed_entry_held() {
     use Admission::{Admitted, NotVoter, Removed};
@@ -565,20 +577,17 @@ fn removed_answers_a_node_that_only_a_committed_entry_held() {
         last(&more, 2)
     };
     let admitted = |raft: &Raft, commit| [1, 4].map(|id| admission(raft, id, commit));
-    let commit = propose(&mut nodes, &[1, 2, 3, 4]);
-    for id in 1..=4 {
-        let got = admitted(&nodes[&key(id)], commit);
-        assert_eq!(got, [Admitted, Admitted], "node {id}");
-    }
-    let commit = propose(&mut nodes, &[1, 2, 3]);
-    for id in 1..=4 {
-        let got = admitted(&nodes[&key(id)], commit);
-        assert_eq!(got, [Admitted, Removed], "node {id}");
-    }
-    let commit = propose(&mut nodes, &[1, 2, 3, 4]);
-    for id in 1..=4 {
-        let got = admitted(&nodes[&key(id)], commit);
-        assert_eq!(got, [Admitted, Admitted], "node {id}");
+    let steps: [(&[u8], _); 3] = [
+        (&[1, 2, 3, 4], Admitted),
+        (&[1, 2, 3], Removed),
+        (&[1, 2, 3, 4], Admitted),
+    ];
+    for (voters, want) in steps {
+        let commit = propose(&mut nodes, voters);
+        for id in 1..=4 {
+            let got = admitted(&nodes[&key(id)], commit);
+            assert_eq!(got, [Admitted, want], "node {id}");
+        }
     }
 
     let disk = committed.remove(&key(2)).unwrap();
@@ -596,27 +605,20 @@ fn removed_answers_a_node_that_only_a_committed_entry_held() {
         (at[5], Admitted),
     ];
     for (applied, want) in cases {
+        let hard = nodes[&key(2)].hard();
+        let start = |entries: &[Entry]| {
+            restart(2, hard.clone(), &[1, 2, 3], entries.to_vec(), applied)
+        };
         let through = usize::try_from(applied).unwrap();
-        let start = Start {
-            hard: nodes[&key(2)].hard(),
-            voters: Voters {
-                incoming: set(&[1, 2, 3]),
-                outgoing: BTreeSet::new(),
-            },
-            entries: disk[..through].to_vec(),
-            applied,
-        };
-        let config = Config {
-            key: key(2),
-            election_ticks: ELECTION,
-            heartbeat_ticks: 1,
-            fits: |_| true,
-        };
-        let raft = Raft::new(config, start).unwrap();
-        let got = admitted(&raft, applied);
+        let got = admitted(&start(&disk[..through]), applied);
         assert_eq!(got, [Admitted, want], "applied {applied}");
+        let raft = start(&disk);
+        assert!(raft.voters().contains(key(4)), "applied {applied}");
+        let got = admitted(&raft, applied);
+        assert_eq!(got, [Admitted, Admitted], "applied {applied}");
     }
 }
+
 // Whether a message crosses between the sides {1, 4} and {2, 3}.
 fn crosses(message: &Message) -> bool {
     let side = |at: node::Key| at == key(1) || at == key(4);

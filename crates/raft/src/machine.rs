@@ -141,6 +141,10 @@ pub struct Raft {
     peers: BTreeMap<node::Key, Peer>,
     // The first answer of each other voter to the current campaign.
     answers: BTreeMap<node::Key, Answer>,
+    // The tick of the last `removed` answer of each voter in force.
+    removals: BTreeMap<node::Key, u64>,
+    // Ticks since `Raft::new`.
+    ticks: u64,
     // The leader's proof: the voters that elected it, itself included, with the
     // votes that arrive after the win. `None` in every other role.
     votes: Option<Proof>,
@@ -222,6 +226,8 @@ impl Raft {
             before,
             peers,
             answers: BTreeMap::new(),
+            removals: BTreeMap::new(),
+            ticks: 0,
             votes: None,
             outbox: Vec::new(),
             election_ticks: u64::from(election_ticks),
@@ -298,6 +304,29 @@ impl Raft {
             }
             Some(_) | None => Admission::NotVoter,
         }
+    }
+
+    /// Takes a `removed` answer from voter `by`. Gives each voter whose answer counts,
+    /// once they are a majority of the other voters of the incoming half of the
+    /// newest configuration in the log. An answer counts for `2 × election_ticks`
+    /// ticks, and the answers clear when the configuration in force changes. An
+    /// answer from a node that is not a voter of that configuration changes nothing.
+    #[must_use]
+    pub fn removed_by(&mut self, by: node::Key) -> Option<BTreeSet<node::Key>> {
+        if !self.voters.contains(by) {
+            return None;
+        }
+        let now = self.ticks;
+        let window = 2 * self.election_ticks;
+        self.removals.insert(by, now);
+        self.removals.retain(|_, at| now - *at < window);
+        let others = self.voters.incoming.iter().filter(|&&key| key != self.key);
+        let answered: BTreeSet<node::Key> = others
+            .clone()
+            .filter(|key| self.removals.contains_key(key))
+            .copied()
+            .collect();
+        (answered.len() > others.count() / 2).then_some(answered)
     }
 
     /// The state that must be on disk before a message of this term leaves.
@@ -433,6 +462,7 @@ impl Raft {
     /// unless [`Raft::campaign`] would do nothing. A leader sends heartbeats, and
     /// steps down when it has not heard from a quorum for `election_ticks`.
     pub fn tick(&mut self, random: u64) {
+        self.ticks += 1;
         self.election_elapsed += 1;
         if self.role == Role::Leader {
             self.tick_leader();
@@ -835,6 +865,7 @@ impl Raft {
             return;
         }
         self.in_force = at;
+        self.removals.clear();
         self.before = self.log.voters_before(at.index);
         let last = self.log.last().index;
         let old = std::mem::replace(&mut self.voters, voters.clone());
@@ -5253,6 +5284,118 @@ mod tests {
             assert_eq!(admission(pre_vote(3)), Admission::Admitted);
             let heartbeat = Body::Heartbeat { commit: 3 };
             assert_eq!(admission(heartbeat), Admission::Admitted);
+        }
+    }
+
+    mod removed_by {
+        use super::*;
+
+        fn voters(incoming: &[u8], outgoing: &[u8]) -> Voters {
+            Voters {
+                incoming: incoming.iter().copied().map(key).collect(),
+                outgoing: outgoing.iter().copied().map(key).collect(),
+            }
+        }
+
+        fn config(term: u64, index: u64, voters: Voters) -> Entry {
+            Entry {
+                at: position(term, index),
+                data: change(2, voters),
+            }
+        }
+
+        fn keys(ids: &[u8]) -> BTreeSet<node::Key> {
+            ids.iter().copied().map(key).collect()
+        }
+
+        #[test]
+        fn a_majority_of_the_other_incoming_voters_gives_the_voters() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            assert_eq!(raft.removed_by(key(2)), None);
+            assert_eq!(raft.removed_by(key(2)), None);
+            assert_eq!(raft.removed_by(key(3)), Some(keys(&[2, 3])));
+        }
+
+        #[test]
+        fn a_new_configuration_clears_the_answers() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            assert_eq!(raft.removed_by(key(2)), None);
+            let joint = config(1, 1, voters(&[1, 2, 3, 4], &[1, 2, 3]));
+            let joint = append(Position::default(), vec![joint], 0);
+            raft.step(message(2, 1, joint)).unwrap();
+            assert_eq!(raft.removed_by(key(3)), None);
+            assert_eq!(raft.removed_by(key(4)), Some(keys(&[3, 4])));
+        }
+
+        // Configuration A is in force at index 1, B at index 2, and a new leader cuts
+        // B, so A is in force again.
+        #[test]
+        fn a_configuration_that_comes_back_clears_the_answers() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let a = config(1, 1, voters(&[1, 2, 3], &[1, 2]));
+            raft.step(message(2, 1, append(Position::default(), vec![a], 0)))
+                .unwrap();
+            assert_eq!(raft.removed_by(key(2)), None);
+            let b = config(1, 2, voters(&[1, 2, 3, 4], &[1, 2, 3]));
+            raft.step(message(2, 1, append(position(1, 1), vec![b], 0)))
+                .unwrap();
+            let cut = append(position(1, 1), entries(&[(2, 2)]), 0);
+            raft.step(message(3, 2, cut)).unwrap();
+            assert_eq!(raft.voters(), &voters(&[1, 2, 3], &[1, 2]));
+            assert_eq!(raft.removed_by(key(3)), None);
+        }
+
+        #[test]
+        fn an_answer_counts_for_two_election_timeouts() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            assert_eq!(raft.removed_by(key(2)), None);
+            for _ in 0..2 * CONFIG.election_ticks - 1 {
+                raft.tick(0);
+            }
+            assert_eq!(raft.removed_by(key(3)), Some(keys(&[2, 3])));
+        }
+
+        #[test]
+        fn an_answer_drops_after_two_election_timeouts() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            assert_eq!(raft.removed_by(key(2)), None);
+            for _ in 0..2 * CONFIG.election_ticks {
+                raft.tick(0);
+            }
+            assert_eq!(raft.removed_by(key(3)), None);
+            assert_eq!(raft.removed_by(key(2)), Some(keys(&[2, 3])));
+        }
+
+        #[test]
+        fn an_answer_of_a_node_that_is_not_a_voter_changes_nothing() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            assert_eq!(raft.removed_by(key(9)), None);
+            assert_eq!(raft.removed_by(key(2)), None);
+            assert_eq!(raft.removed_by(key(3)), Some(keys(&[2, 3])));
+        }
+
+        // Node 4 votes only in the outgoing half, so its answer does not count.
+        #[test]
+        fn an_answer_of_an_outgoing_voter_does_not_count() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let joint = config(1, 1, voters(&[1, 2, 3], &[1, 4, 5]));
+            let joint = append(Position::default(), vec![joint], 0);
+            raft.step(message(2, 1, joint)).unwrap();
+            assert_eq!(raft.removed_by(key(4)), None);
+            assert_eq!(raft.removed_by(key(5)), None);
+            assert_eq!(raft.removed_by(key(2)), None);
+            assert_eq!(raft.removed_by(key(3)), Some(keys(&[2, 3])));
+        }
+
+        // Node 1 is the only voter of the incoming half, so no answer stops it.
+        #[test]
+        fn no_answer_stops_a_node_with_no_other_incoming_voter() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            let joint = config(1, 1, voters(&[1], &[1, 2, 3]));
+            let joint = append(Position::default(), vec![joint], 0);
+            raft.step(message(2, 1, joint)).unwrap();
+            assert_eq!(raft.removed_by(key(2)), None);
+            assert_eq!(raft.removed_by(key(3)), None);
         }
     }
 

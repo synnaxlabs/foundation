@@ -14,6 +14,7 @@ use transport::{Class, Session, Transport};
 use types::node;
 
 use super::{Group, REMOVED, header};
+use crate::error::Stopped;
 use crate::message::Message;
 
 /// What sends the messages of one group: one task for each member, so a member that
@@ -110,10 +111,9 @@ impl Senders {
                         let group = self.group();
                         let mut group = group.borrow_mut();
                         if code == REMOVED
-                            && group.voter(to)
-                            && let Some(stopped) = group.removed(to)
+                            && let Some(by) = group.raft.removed_by(to)
                         {
-                            group.stop(stopped);
+                            group.stop(Stopped::Removed { by });
                             return;
                         }
                         stream = None;

@@ -69,8 +69,8 @@ const QUEUE_MAX: usize = 64;
 const LOG: &str = "log";
 /// The code of a stream with a message that the mesh refused.
 const REFUSED: Code = Code(16);
-/// The code of a stream with a request from a node that a committed configuration
-/// removed.
+/// The code of a stream with a `PreVote` or a `Vote` that `Raft::admission` gives
+/// `Removed`.
 const REMOVED: Code = Code(17);
 /// The code of a stream with a `Card` change of a member whose card the leader
 /// proposed less than a minute before.
@@ -762,14 +762,6 @@ struct Group {
     calls: BTreeMap<u64, Waker>,
     used: Used,
     bound: Bound,
-    removals: Removals,
-}
-
-// The voters that answered `removed`, and the configuration in force when they did.
-#[derive(Debug, Default)]
-struct Removals {
-    under: Voters,
-    by: BTreeSet<node::Key>,
 }
 
 impl Group {
@@ -798,7 +790,6 @@ impl Group {
             calls: BTreeMap::new(),
             used,
             bound: Bound::default(),
-            removals: Removals::default(),
         }
     }
 
@@ -935,27 +926,6 @@ impl Group {
     // Whether `key` votes in one half of the configuration, at least.
     fn voter(&self, key: node::Key) -> bool {
         self.raft.voters().contains(key)
-    }
-
-    // Takes the `removed` answer of voter `by`. Gives the stop once the voters that
-    // answered under the configuration in force are a majority of its incoming half,
-    // this node not counted. A voter that a committed configuration added back is
-    // held by a majority of the others, and each of those admits it.
-    fn removed(&mut self, by: node::Key) -> Option<Stopped> {
-        let voters = self.raft.voters();
-        if self.removals.under != *voters {
-            self.removals = Removals {
-                under: voters.clone(),
-                by: BTreeSet::new(),
-            };
-        }
-        self.removals.by.insert(by);
-        let own = self.raft.key();
-        let others = || voters.incoming.iter().filter(move |&&key| key != own);
-        let answered = others().filter(|key| self.removals.by.contains(key));
-        (answered.count() > others().count() / 2).then(|| Stopped::Removed {
-            by: self.removals.by.clone(),
-        })
     }
 
     // Gives `raft` an input, and wakes each call when the leader or the term changes.
@@ -7072,6 +7042,21 @@ mod tests {
                 self.sim.run_for(span).unwrap();
             }
 
+            /// Loses each datagram between `a` and `b`, each way.
+            fn cut(&mut self, a: u8, b: u8) {
+                let config = link::Config {
+                    loss: 1.0,
+                    ..link::Config::default()
+                };
+                let node = |id| {
+                    let at = MEMBERS.iter().position(|&member| member == id).unwrap();
+                    self.nodes[at].clone()
+                };
+                let (a, b) = (node(a), node(b));
+                self.sim.link(&a, &b, config);
+                self.sim.link(&b, &a, config);
+            }
+
             fn record(&self) -> MutexGuard<'_, Record> {
                 self.record.lock().unwrap()
             }
@@ -7111,7 +7096,9 @@ mod tests {
                     entries,
                     commit,
                 };
-                mesh.receive(public(1), proven(1, id, append)).unwrap();
+                let leader = if id == 1 { 2 } else { 1 };
+                mesh.receive(public(leader), proven(leader, id, append))
+                    .unwrap();
             }
             let (serving, streams, refused) =
                 (mesh.clone(), tasks.clone(), Arc::clone(&record));
@@ -7337,6 +7324,62 @@ mod tests {
             assert_eq!(run.record().stopped, BTreeMap::new());
         }
 
+        // Node 4 holds the joint and the leave that remove it, not committed.
+        // Nodes 2 and 3 hold both committed, so its campaign is at their commit.
+        #[test]
+        fn a_removed_node_with_the_leave_in_its_log_stops_at_its_campaign() {
+            let mut run = Run::new();
+            let sets = [(&[1, 2, 3][..], &[1, 2, 3, 4][..]), (&[1, 2, 3], &[])];
+            let entries = changes(1, &sets);
+            run.start(opening(2, &entries, 2, 2), false);
+            run.start(opening(3, &entries, 2, 2), false);
+            let removed = Opening {
+                voters: vec![1, 2, 3, 4],
+                ..opening(4, &entries, 2, 0)
+            };
+            run.start(removed, false);
+            run.run(seconds(20));
+            let stopped = Stopped::Removed {
+                by: [key(2), key(3)].into(),
+            };
+            assert_eq!(run.record().stopped, [(4, stopped)].into());
+        }
+
+        // Node 5 holds only the change to {1, 2, 3, 4}, and nodes 2 and 3 answer
+        // its campaign with `removed`: 2 of 4. Leader 4 then commits the change
+        // that adds node 5 back, which node 5 cannot get (the links 4-5 and 1-4 are
+        // cut). Past the window, lagging node 1 answers too: no stop.
+        #[test]
+        fn stale_answers_do_not_stop_a_voter_that_was_added_back() {
+            let mut run = Run::new();
+            let all = [1, 2, 3, 4, 5];
+            let sets = [
+                (&[1, 2, 3, 4][..], &all[..]),
+                (&[1, 2, 3, 4], &[]),
+                (&all[..], &[1, 2, 3, 4][..]),
+                (&all[..], &[]),
+            ];
+            let entries = changes(1, &sets);
+            run.cut(4, 5);
+            run.cut(1, 4);
+            let at = |id, through, commit| Opening {
+                voters: all.to_vec(),
+                ..opening(id, &entries, through, commit)
+            };
+            run.start(at(2, 2, 2), false);
+            run.start(at(3, 2, 2), false);
+            run.start(at(5, 2, 1), false);
+            run.run(seconds(10));
+            assert!(!run.refused(2, 5).is_empty(), "node 2 refused nothing");
+            assert_eq!(run.record().stopped, BTreeMap::new());
+            run.start(at(4, 4, 4), true);
+            run.run(seconds(10));
+            assert_eq!(run.record().stopped, BTreeMap::new());
+            run.start(at(1, 2, 2), false);
+            run.run(seconds(10));
+            assert_eq!(run.record().stopped, BTreeMap::new());
+        }
+
         // Node 2 holds only the committed removal of node 4. Node 4 holds the
         // committed change that adds it back, so its votes name an index past the
         // commit of node 2.
@@ -7408,45 +7451,6 @@ mod tests {
                 refused.iter().all(|error| *error == not_voter),
                 "{refused:?}"
             );
-        }
-
-        // Node 1 holds voters {1, 2, 3}, so the answers of 2 and 3 are a majority of
-        // the others. A repeat counts once.
-        #[test]
-        fn removed_answers_of_a_majority_of_the_other_voters_stop_the_group() {
-            solo(|node, tasks| async move {
-                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-                let removed = |by| mesh.group.borrow_mut().removed(key(by));
-                assert_eq!(removed(2), None);
-                assert_eq!(removed(2), None);
-                let stopped = Stopped::Removed {
-                    by: [key(2), key(3)].into(),
-                };
-                assert_eq!(removed(3), Some(stopped));
-            });
-        }
-
-        // Voter 2 answers, then a configuration that adds node 4 comes, then voter 3
-        // answers: no stop. Voter 4 then makes a majority of {2, 3, 4}.
-        #[test]
-        fn a_new_configuration_clears_the_removed_answers() {
-            solo(|node, tasks| async move {
-                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-                let removed = |by| mesh.group.borrow_mut().removed(key(by));
-                assert_eq!(removed(2), None);
-                let joint = changes(2, &[(&[1, 2, 3, 4][..], &[1, 2, 3][..])]);
-                let append = Body::Append {
-                    prev: Position::default(),
-                    entries: joint,
-                    commit: 0,
-                };
-                assert_eq!(mesh.receive(public(2), proven(2, 1, append)), Ok(()));
-                assert_eq!(removed(3), None);
-                let stopped = Stopped::Removed {
-                    by: [key(3), key(4)].into(),
-                };
-                assert_eq!(removed(4), Some(stopped));
-            });
         }
 
         // Node 4 is a member that no configuration in the log of node 2 held, and
