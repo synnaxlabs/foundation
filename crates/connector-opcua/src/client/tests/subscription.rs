@@ -468,7 +468,9 @@ fn on_level<T: Send + 'static>(
     .0
 }
 
-/// A Publish answer holds the most changes that fit the receive limit of the client.
+/// A Publish answer holds the most changes that fit the receive limit of the client. It
+/// reads `takes`, as no answer that the client gets shows that one change more does not
+/// fit.
 #[test]
 fn a_publish_answer_holds_the_most_changes_that_fit_the_client() {
     let (most, fits) = on_level(100, async |peer, client, _| {
