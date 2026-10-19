@@ -96,8 +96,9 @@
   `Frames::open` takes the end of the stream as `None` (`laptop.architect`,
   2026-10-16T06:47:02Z,
   https://github.com/synnaxlabs/foundation/issues/2808#issuecomment-6209795527). So
-  does the decoder, and a message that the decoder refuses leaves it as it was
-  (`laptop.architect`, 2026-10-16T07:19:58Z,
+  does the decoder, and a message that the decoder refuses leaves it as it was,
+  other than `Error::ManyIndexes`, after which the decoder is done (Amended (#3283)
+  below) (`laptop.architect`, 2026-10-16T07:19:58Z,
   https://github.com/synnaxlabs/foundation/pull/2839#issuecomment-6210275086). The plan
   (https://github.com/synnaxlabs/foundation/issues/1749#issuecomment-6204280445) was
   approved by `laptop.architect` at 2026-10-15T23:19:38Z
@@ -376,7 +377,7 @@
   `KeySet::ordered` checks these rules and gives `key_set::Error`, which `Opening`
   maps to them. After the start, `client::Reader` gives `Error::ManyIndexes` for the
   first place whose index is not that of place 0, and is then done. Ruled by
-  `laptop.architect`
+  `laptop.architect` at 2026-10-19T15:10:51Z
   (https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6270542720).
   `Place::index` is a `usize`, as the other places of the crate are, not the `u32` of
   the plan; the wire holds a `u32`. This replaces the lost flag of #3266 above: the
