@@ -1,5 +1,6 @@
 //! The writes of a session: one write stream each, on the channels of one index.
 
+use std::iter;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -148,9 +149,9 @@ impl Writer {
     ///
     /// # Errors
     ///
-    /// [`Error::Unsent`] for a frame of no sample or no series, or a frame of
-    /// [`Time::Node`] that is encoded or holds more than one sample, with nothing sent
-    /// and the draft dropped; the writer goes on. Else the error that ended the writer,
+    /// [`Error::Unsent`] for a frame of no series or with a group of no sample, or a
+    /// frame of [`Time::Node`] that is encoded or holds more than one sample in a
+    /// group, with nothing sent and the draft dropped; the writer goes on. Else the error that ended the writer,
     /// given again at each later call: the error that ended the renewal, or
     /// [`Error::Refused`] when the node stopped the stream (`UNKNOWN` when a channel
     /// was removed, `FAILED` when the home failed, `BUSY` when the home has no block
@@ -168,9 +169,15 @@ impl Writer {
             .take()
             .expect("a write sends the draft of a call of `Writer::draft`");
         self.check()?;
-        let count = frame.ranges().next().map_or(0, |(_, range)| range.count);
         let form = frame.form();
-        if count == 0 || time == Time::Node && (form != Form::Raw || count != 1) {
+        let unsent = |count| {
+            count == 0 || time == Time::Node && (form != Form::Raw || count != 1)
+        };
+        let mut counts = frame.ranges().map(|(_, range)| range.count);
+        let first = counts.next().unwrap_or(0);
+        if let Some(count) =
+            iter::once(first).chain(counts).find(|&count| unsent(count))
+        {
             return Err(Error::Unsent { count, form });
         }
         let written = self.written(time, frame).await;

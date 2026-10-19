@@ -9,7 +9,7 @@ use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::task::Poll;
 
 pub use program::Place;
-pub use program::write::{Outcome, Refusal};
+pub use program::write::{End, Outcome, Refusal};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use types::authority::Authority;
@@ -133,12 +133,13 @@ impl Writer {
         self.bytes_max
     }
 
-    /// Writes a frame of one sample of each place of `values`, in any order, and
-    /// blocks until the node took, lost, or refused it. A value of the index place is
-    /// the stamp of the frame. With none, the node stamps it: mesh time now, or 1 ns
-    /// after the last stamp that the node gave this writer when now is not after it.
-    /// So after a stamp of the caller ahead of now, a frame that the node stamps can
-    /// get [`Refusal::Order`].
+    /// Writes a frame of one sample of each place of `values`, in any order, and blocks
+    /// until the node took, lost, or refused it, or the write of its group ended
+    /// ([`Outcome::Ended`], and each later frame gets the same). A value of the index
+    /// place is the stamp of the frame. With none, the node stamps it: mesh time now,
+    /// or 1 ns after the last stamp that the node gave this writer when now is not
+    /// after it. So after a stamp of the caller ahead of now, a frame that the node
+    /// stamps can get [`Refusal::Order`].
     ///
     /// # Errors
     ///
@@ -183,9 +184,11 @@ impl Writer {
 
     /// Writes a frame of `count` samples of each place of `series`, in any order, each
     /// in the raw form of its place's type, and blocks until the node took, lost, or
-    /// refused it. The series of [`Writer::index`] holds the stamps of the frame. A
-    /// frame of one channel of 8-byte samples and its index holds at most about 3,500
-    /// samples (the largest block of the frames of the session, 57,344 bytes).
+    /// refused it, or the write of its group ended ([`Outcome::Ended`], and each later
+    /// frame gets the same). The series of [`Writer::index`] holds the stamps of the
+    /// frame. A frame of one channel of 8-byte samples and its index holds at most
+    /// about 3,500 samples (the largest block of the frames of the session, 57,344
+    /// bytes).
     ///
     /// # Errors
     ///

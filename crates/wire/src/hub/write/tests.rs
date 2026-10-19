@@ -289,6 +289,16 @@ mod lead {
         assert_eq!(messages(1024), [0..7, 7..31, 31..39]);
     }
 
+    /// A `bytes_max` of `usize::MAX` gives the lead in three messages, with no
+    /// overflow.
+    #[test]
+    fn gives_the_messages_of_a_largest_bytes_max() {
+        let frame = create_frame(Path::Live, 2, 1);
+        let lead = Lead::new(LIVE, &frame);
+        let messages: Vec<_> = lead.messages(usize::MAX).collect();
+        assert_eq!(messages, [0..7, 7..31, 31..39]);
+    }
+
     #[test]
     #[should_panic(expected = "a message of 7 bytes holds no head or no end")]
     fn panics_on_messages_that_hold_no_end() {
