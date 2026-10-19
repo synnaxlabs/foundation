@@ -438,10 +438,10 @@ impl Writer {
     /// close ends before its send raises `RuntimeError`. A close after a close gives
     /// `None`, and in a forked process it gives `None` and ends nothing.
     ///
-    /// Raises `Stopped` when the node stopped the stream, or when a group ended with a
-    /// taken frame that may not be on disk, `ConnectionError` when the session failed,
-    /// `RuntimeError` when the client closed, and `PanicException` when the client's
-    /// thread panicked.
+    /// Raises `Stopped` when the node stopped the stream or the write of its group
+    /// ended, and then a frame that the node took may not be on disk. Raises
+    /// `ConnectionError` when the session failed, `RuntimeError` when the client
+    /// closed, and `PanicException` when the client's thread panicked.
     fn close(&self, py: Python<'_>) -> PyResult<()> {
         if process::id() != self.process {
             return Ok(());
@@ -865,7 +865,8 @@ np.array = guard(np.array, array)
 
     /// The end of the one group of a writer raises `Stopped` with the code of a stream
     /// that the node stopped for the same cause. It calls the map, not `write`: no
-    /// node gives `Outcome::Ended` until #3372, which adds the test through `write`.
+    /// node gives `Outcome::Ended` until PR 2 of #3283, which adds the test through
+    /// `write`.
     #[test]
     fn ended_raises_stopped_with_the_code_of_each_end() {
         Python::initialize();
