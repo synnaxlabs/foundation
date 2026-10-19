@@ -214,10 +214,24 @@ impl<const SKIP: bool> Assembly<SKIP> {
         }
     }
 
-    /// The group of each index among the ends, in order, which is group order: one for
-    /// each range of the draft. Call it once the layout is valid.
-    pub(super) fn groups(&self) -> impl Iterator<Item = u32> {
-        groups(&self.set, &self.ends)
+    /// The ranges of the frame: one for each index among the ends. Time is linear in
+    /// the ranges of a draft, and in the ends of a skipped frame.
+    ///
+    /// # Panics
+    ///
+    /// When neither a draft nor a skip came.
+    pub(super) fn ranges(&self) -> usize {
+        match &self.stage {
+            Stage::Body(draft) => draft.ranges().count(),
+            Stage::Skipped if SKIP => self
+                .ends
+                .iter()
+                .filter(|&&(entry, _)| self.set.index(entry) == entry)
+                .count(),
+            stage => {
+                unreachable!("invariant: ranges come after a draft, not {stage:?}")
+            }
+        }
     }
 
     /// Sets the counts of the ranges of the draft in order, from range `first` on. A
@@ -231,15 +245,12 @@ impl<const SKIP: bool> Assembly<SKIP> {
         first: usize,
         counts: impl IntoIterator<Item = u32>,
     ) {
-        let draft = match &mut self.stage {
-            Stage::Body(draft) => draft,
-            Stage::Skipped if SKIP => return,
+        match &mut self.stage {
+            Stage::Body(draft) => draft.set_counts(first, counts),
+            Stage::Skipped if SKIP => {}
             stage => {
                 unreachable!("invariant: counts come after a draft, not {stage:?}")
             }
-        };
-        for (group, count) in groups(&self.set, &self.ends).skip(first).zip(counts) {
-            draft.set_count(group, count);
         }
     }
 
@@ -320,20 +331,6 @@ impl<const SKIP: bool> Assembly<SKIP> {
 #[inline(never)]
 fn due_draft(what: &str) -> ! {
     panic!("a draft is due before {what}")
-}
-
-/// The group of each index among `ends`, in order. Each entry of `ends` is in `set`.
-fn groups<'a>(
-    set: &'a KeySet,
-    ends: &'a [(usize, usize)],
-) -> impl Iterator<Item = u32> + 'a {
-    let entries = set.entries();
-    ends.iter().filter_map(move |&(entry, _)| {
-        let place = entries
-            .get(entry)
-            .expect("invariant: each end is of the set");
-        (set.index(entry) == entry).then_some(place.group)
-    })
 }
 
 /// The body of `draft` from `start` on.
