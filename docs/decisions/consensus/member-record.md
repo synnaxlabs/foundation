@@ -224,35 +224,38 @@
   Region state cannot see the keys of the spec, so the status key check covers members
   only. The name and key checks are one function, which `State::new` also runs on the
   founding members; both give a `region::Unfit`, which `Refused::Unfit` wraps. The
-  learners of `raft` are all members other than this node (MESH DRIVER), so the bound
-  holds the peers of a leader, voters and learners together, at `MEMBERS_MAX` - 1 = 127.
-  The applied state alone keeps it: two joins that stamp at 127 members both get an
-  entry, and the apply refuses the second as `Full`, and binds only its node key, so its
-  node gets `Refused(Unfit(Full))` from `admit`. Refusal kind 19 is `Full`. Lost: a
-  check at the leader that gives `Contested`, a second guard that tells the node to join
-  with a new key. Decided by `laptop.architect`, 2026-10-19T18:04:58Z
+  learners of `raft` are all members other than this node, so the bound holds the peers
+  of a leader, voters and learners together, at `MEMBERS_MAX` - 1 = 127. The applied
+  state alone keeps it: two joins that stamp at 127 members both get an entry, and the
+  apply refuses the second as `Full`, and binds only its node key, so its node gets
+  `Refused(Unfit(Full))` from `admit`. Refusal kind 19 is `Full`. Lost: a check at the
+  leader that gives `Contested`, a second guard that tells the node to join with a new
+  key. Decided by `laptop.architect`, 2026-10-19T18:04:58Z
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6273867884), which
   changes the cost section of the plan
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124). No
   change frees a place in the bound until a member can leave, also an ephemeral one
-  (#3355). A refused `Full` join still binds its node key in `State::joined`, which
-  #3302 caps. At the pace of a learner in RAFT SURFACE (one append in flight, a
-  heartbeat each `election_ticks`), the queues of 127 learners hold about 8.3 MB of
-  appends of 64 KiB. On box2 (Intel Xeon Platinum 8488C, release), 127 learners that
-  answer cost an idle leader about 7.5 ms/s of CPU: 7.2 ms/s for 127 QUIC sessions on
-  loopback, at one frame a second each, and 0.31 ms/s for `raft` and `mesh` in the sim
-  driver. A catch-up of 127 learners at once, with entries of 50,255 B and proposals
-  during it, queues at most 6.5 MB of encoded messages and adds 17.4 MB of RSS
+  (#3355). A holder of a reusable ticket can fill a region to `MEMBERS_MAX`. Then each
+  join is refused until a member leaves (#3355). A refused `Full` join still binds its
+  node key in `State::joined`, which #3302 caps. At the pace of a learner in RAFT
+  SURFACE (one append in flight, a heartbeat each `election_ticks`), the queues of 127
+  learners hold about 8.3 MB of appends of 64 KiB. On box2 (Intel Xeon Platinum 8488C,
+  release), 127 learners that answer cost an idle leader about 7.5 ms/s of CPU: 7.2 ms/s
+  for 127 QUIC sessions on loopback, at one frame a second each, and 0.31 ms/s for
+  `raft` and `mesh` in the sim driver. A catch-up of 127 learners at once, with entries
+  of 50,255 B and proposals during it, queues at most 6.5 MB of encoded messages and
+  adds 17.4 MB of RSS
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275380947). So 128
   holds under the 10 ms/s that `laptop.architect` set, 2026-10-19T19:01:39Z
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274961164).
   Deferred: appends whose entries the queues of all peers share. Trigger: before
-  `MEMBERS_MAX` grows past 128.
-  A learner that does not answer costs the leader its queue of `QUEUE_MAX` = 64
-  messages, the oldest dropped: 10.6 kB of heartbeats, 1.3 MB for 127 such learners
-  (box2, Intel Xeon Platinum 8488C). It is the cost of a fault, not of an idle node.
-  Decided by `laptop.architect`, 2026-10-19T18:37:21Z
-  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274494595).
+  `MEMBERS_MAX` grows past 128. A learner reads the log only from the leader. Fan-out
+  from any voter is deferred to #3368, with its trigger: a region needs more than 128
+  members. A learner that stops answering costs the leader its queue of `QUEUE_MAX` = 64
+  messages, the oldest dropped: at most one append and the heartbeats. It is the cost of
+  a fault, not of an idle node. Decided by `laptop.architect`, 2026-10-19T18:37:21Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274494595), as
+  2026-10-19T19:01:39Z (6274961164) changes it.
   A member and a `Join` hold at most 64 status entries, as the 32 of `Addresses`.
   Decided by `laptop.architect` (2026-10-07T10:44:26Z):
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. The type

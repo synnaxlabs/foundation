@@ -183,18 +183,20 @@ state on `main`.
   signed ticket, and voters record membership (BQ11a). Every node checks each `Join`
   change at apply: the card's signature, a name and status channel names that are not
   reserved, under the region, not too long, and not held by a member, a key that is not
-  yet a member, status keys that no member holds, and the ticket's admission, scope,
-  uses, and expiry. The checks of the ticket's admission, scope, and expiry come before
-  the member checks, and the check of its use after them, so a join refusal names a key
-  or a name of the region only to a peer with a good admission (MEMBER RECORD). A status
-  holds at most 64 entries, so decode refuses more, and checks no signature. So a forged
-  card or a body that does not decode in a committed entry is a refused change, not a
-  stopped group. The proposing voter and the join answer are not built (#336). A ticket
-  holder that learns a node key out of band can take it with its own join, when that
-  join gets to the leader first. The real join is refused. A join that apply refuses
-  still binds its node key, so a voter that lies can deny a node key that it learns,
-  with no ticket. The node joins with a new key. The key gives no authority before its
-  join applies (MESH DRIVER).
+  yet a member, a region of fewer than `MEMBERS_MAX` = 128 members, status keys that no
+  member holds, and the ticket's admission, scope, uses, and expiry. The checks of the
+  ticket's admission, scope, and expiry come before the member checks, and the check of
+  its use after them, so a join refusal names a key or a name of the region only to a
+  peer with a good admission (MEMBER RECORD). A status holds at most 64 entries, so
+  decode refuses more, and checks no signature. So a forged card or a body that does not
+  decode in a committed entry is a refused change, not a stopped group. The proposing
+  voter and the join answer are not built (#336). A ticket holder that learns a node key
+  out of band can take it with its own join, when that join gets to the leader first.
+  The real join is refused. A join that apply refuses still binds its node key, so a
+  voter that lies can deny a node key that it learns, with no ticket. The node joins
+  with a new key. The key gives no authority before its join applies (MESH DRIVER). A
+  holder of a reusable ticket can fill a region to `MEMBERS_MAX`. Then each join is
+  refused until a member leaves (#3355).
 - `apply` signs the plan hash, and every node checks every change record (BQ12). So
   a voter that lies can stall its region, and cannot change access, keys, or
   placement. Not built (`spec`). Until #1213, a `Change::Spec` has no signature, and
