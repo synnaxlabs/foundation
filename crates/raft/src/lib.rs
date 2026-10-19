@@ -20,7 +20,7 @@ use types::node;
 
 pub use config::{Config, Start};
 pub use log::{Change, Data, Entry};
-pub use machine::{Raft, Ready, Role};
+pub use machine::{Admission, Raft, Ready, Role};
 pub use message::{Answer, Body, Claim, Grant, Link, Message, Proof, Signature};
 pub use voters::{NoMajority, Voters};
 

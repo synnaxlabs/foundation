@@ -31,16 +31,16 @@ pub enum Error {
         /// The sender that the message names.
         from: node::Key,
     },
-    /// A request from a member that is not a voter of this node's configuration, and
-    /// that no committed configuration removed.
+    /// A request from a member that is not a voter of this node's configuration,
+    /// other than one that gets `Removed`.
     NotVoter {
         /// The sender.
         from: node::Key,
     },
-    /// A request from `from`, which a committed configuration removed: an earlier
-    /// committed configuration held it, and the last one lacks it. The stream stops
-    /// with the `removed` code, and `from` stops its group when this node is a voter
-    /// of its configuration.
+    /// A `PreVote` or a `Vote` from `from`, which a committed configuration removed
+    /// (`raft::Admission::Removed`). The stream stops with the `removed` code. `from`
+    /// stops its group when a majority of the other voters of the incoming half of its
+    /// configuration give this answer inside the window of `Raft::removed_by`.
     Removed {
         /// The sender.
         from: node::Key,
@@ -551,11 +551,13 @@ pub enum Stopped {
         /// Why its bytes are not a change.
         cause: Unknown,
     },
-    /// Voter `by` answered `removed`: a committed configuration lacks this node. Open
-    /// the mesh again only after a join that gives a new configuration.
+    /// A majority of the other voters of the incoming half of the newest configuration
+    /// in this node's log answered `removed`, each in the last two election timeouts: a
+    /// committed configuration lacks this node. Open the mesh again only after a join
+    /// that gives a new configuration.
     Removed {
-        /// The voter that answered.
-        by: node::Key,
+        /// The voters that answered.
+        by: BTreeSet<node::Key>,
     },
     /// Each `Mesh` of the group dropped. Only `Watch::next` and
     /// `used::Watch::next` give it: get a new watch from the mesh that opens next.
@@ -571,10 +573,18 @@ impl fmt::Display for Stopped {
                 "the committed entry at index {} of term {} is not a change: {cause}",
                 at.index, at.term.0
             ),
-            Self::Removed { by } => write!(
-                f,
-                "voter {by} answered removed: a committed configuration lacks this node"
-            ),
+            Self::Removed { by } => {
+                f.write_str("voters ")?;
+                for (at, key) in by.iter().enumerate() {
+                    if at > 0 {
+                        f.write_str(", ")?;
+                    }
+                    key.fmt(f)?;
+                }
+                f.write_str(
+                    " answered removed: a committed configuration lacks this node",
+                )
+            }
             Self::Dropped => f.write_str("each mesh of the group dropped"),
         }
     }
