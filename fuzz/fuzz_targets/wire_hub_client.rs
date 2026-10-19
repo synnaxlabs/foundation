@@ -252,6 +252,7 @@ fn drive(bytes: &[u8], mode: Mode) {
             continue;
         };
         assert_eq!(*remain, 0, "a start before the last place");
+        assert_eq!(many(all), None, "a start of a read of more than one index");
         assert_eq!(start.places, *all, "the places differ");
         let keys = start.set.entries().iter().map(|entry| entry.key);
         assert!(
