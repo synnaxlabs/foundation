@@ -153,6 +153,19 @@ impl Disk {
     }
 }
 
+/// The test public key of `voter`.
+pub(crate) fn public(voter: node::Key) -> PublicKey {
+    let mut bytes = [1; 32];
+    bytes[..16].copy_from_slice(&voter.as_u128().to_le_bytes());
+    PublicKey::new(bytes).expect("not of small order")
+}
+
+/// Each node of `ids` with its test public key.
+pub(crate) fn keyed(ids: &[u8]) -> BTreeMap<node::Key, PublicKey> {
+    let voters = ids.iter().map(|&id| node::Key::from_u128(u128::from(id)));
+    voters.map(|voter| (voter, public(voter))).collect()
+}
+
 // A configuration entry's data as `leader` writes it, with no signature yet.
 pub(crate) fn change(leader: node::Key, voters: Voters) -> Data {
     Data::Voters(Change {
@@ -423,11 +436,6 @@ impl Network {
         let pending = self.pending(node);
         let raft = &mut self.nodes[node];
         let before = raft.voters().clone();
-        let public = |voter: node::Key| {
-            let mut bytes = [1; 32];
-            bytes[..16].copy_from_slice(&voter.as_u128().to_le_bytes());
-            PublicKey::new(bytes).expect("not of small order")
-        };
         let keyed = voters.iter().map(|&voter| (voter, public(voter))).collect();
         let result = raft.propose_voters(keyed);
         let (role, term) = (raft.role(), raft.term());
