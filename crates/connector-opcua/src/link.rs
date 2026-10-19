@@ -1655,12 +1655,14 @@ const POLICIES: [&str; 3] = [
 /// open62541`: the production code names no security policy, certificate group, or
 /// certificate function, and no function or field that adds policies of its own
 /// choice, other than [`POLICIES`] in `POLICIES` of `shim.c`, the memory store, the
-/// two certificate functions of the client, and the stubs of `shim.c` that abort.
+/// four certificate functions of the client, and the stubs of `shim.c` that abort.
 #[test]
 fn the_production_code_adds_only_the_three_policies() {
     let allowed = [
         "UA_CertificateGroup_Memorystore",
         "UA_CertificateUtils_checkKeyPair",
+        "UA_CertificateUtils_checkTime",
+        "UA_CertificateUtils_checkTrust",
         "UA_CertificateUtils_getApplicationUri",
     ];
     let policy = |name: &str| {

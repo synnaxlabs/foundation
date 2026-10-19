@@ -16,6 +16,7 @@ use std::fmt;
 
 use types::authority::Authority;
 use types::name::Name;
+use types::node;
 
 pub use gate::{Gate, Key, Permit};
 
@@ -27,6 +28,10 @@ pub struct Writer {
     pub subject: Name,
     /// The writer's authority, already capped by access.
     pub authority: Authority,
+    /// The node whose program opened the writer, or this node for a writer opened
+    /// here. The home records it with each handoff. The gate never compares it to
+    /// choose the holder.
+    pub via: node::Key,
 }
 
 impl fmt::Display for Writer {
@@ -97,6 +102,7 @@ mod tests {
         let writer = Writer {
             subject: "people.alice".parse().expect("valid name"),
             authority: Authority(200),
+            via: node::Key::from_u128(1),
         };
         assert_eq!(writer.to_string(), "people.alice at authority 200");
     }

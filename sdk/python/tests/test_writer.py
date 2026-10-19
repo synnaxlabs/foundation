@@ -365,7 +365,7 @@ class WriterTest(unittest.TestCase):
 
     def test_open_writer_raises_for_each_argument_that_it_does_not_take(self) -> None:
         cases = [
-            ([], {}, ValueError, "the writer names no channel"),
+            ([], {}, ValueError, "the stream names no channel"),
             ([5], {}, TypeError, "a channel name is a str, not int"),
             (
                 "plant.a",

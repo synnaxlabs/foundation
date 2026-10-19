@@ -17,7 +17,8 @@ use pyo3::exceptions::{
 use pyo3::prelude::*;
 use pyo3::sync::MutexExt;
 use pyo3::types::{PyBool, PyDict, PyInt, PyString, PyTuple};
-use sdk::write::{Outcome, Place, Refusal};
+use sdk::Place;
+use sdk::write::{Outcome, Refusal};
 use types::sample::{Scalar, Type, Value};
 use types::time::{Span, Stamp};
 use types::{frame, hash};
@@ -823,7 +824,7 @@ mod tests {
 
     use pyo3::prelude::*;
     use pyo3::types::PyDict;
-    use sdk::write::Place;
+    use sdk::Place;
     use types::channel;
     use types::sample::{Scalar, Type, Value};
 

@@ -104,16 +104,16 @@ const CARD: u8 = 5;
 /// limit of a node.
 pub(crate) const CHUNKS_MAX: usize = 1024;
 
-/// The most holders of one `Spec` change, so that a change with [`CHUNKS_MAX`]
-/// chunks stays at about 33 KiB.
-pub(crate) const HOLDERS_MAX: usize = 64;
+/// The most holders of one `Spec` change: the sum of the majorities of two halves of
+/// 127 voters each, so that the holders that an apply counts always fit.
+pub(crate) const HOLDERS_MAX: usize = 128;
 
 /// The most homes of one `Spec` change, so that a change at each bound stays at about
 /// 50 KiB.
 pub(crate) const HOMES_MAX: usize = 512;
 
 /// The most bytes of the byte form of a change: a `Spec` change at each bound.
-pub(crate) const BYTES_MAX: usize = 50_255;
+pub(crate) const BYTES_MAX: usize = 51_279;
 
 impl Change {
     /// Adds the one byte form of the change to `out`: a kind byte, then the body of
@@ -575,12 +575,12 @@ mod tests {
     }
 
     #[test]
-    fn a_spec_change_with_more_than_64_holders_does_not_decode() {
+    fn a_spec_change_with_more_than_128_holders_does_not_decode() {
         let change = held(HOLDERS_MAX);
         let mut bytes = encoded(&change);
         assert_eq!(Change::decode(&bytes), Ok(change));
         let at = bytes.len() - HOLDERS_MAX * 16 - 4;
-        bytes[at..at + 2].copy_from_slice(&65_u16.to_le_bytes());
+        bytes[at..at + 2].copy_from_slice(&129_u16.to_le_bytes());
         let end = bytes.len() - 2;
         bytes.splice(end..end, u128::MAX.to_le_bytes());
         let length = bytes.len();
@@ -594,7 +594,7 @@ mod tests {
     #[should_panic(
         expected = "invariant: a spec change has at most HOLDERS_MAX holders"
     )]
-    fn encode_of_a_spec_change_with_more_than_64_holders_panics() {
+    fn encode_of_a_spec_change_with_more_than_128_holders_panics() {
         encoded(&held(HOLDERS_MAX.checked_add(1).unwrap()));
     }
 

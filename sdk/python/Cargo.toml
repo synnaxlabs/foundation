@@ -23,6 +23,7 @@ sector = { path = "../../crates/sector" }
 types = { path = "../../crates/types" }
 
 [dev-dependencies]
+os = { path = "../../crates/os" }
 transport = { path = "../../crates/transport" }
 
 [lints]
