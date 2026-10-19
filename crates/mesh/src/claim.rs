@@ -546,34 +546,20 @@ mod tests {
 
     #[test]
     fn a_change_signs_its_voters_and_public_keys_in_the_form_of_its_entry() {
-        let voters = Voters {
-            incoming: [key(3), key(9), key(12)].into(),
-            outgoing: [key(3)].into(),
+        let entry = common::voters_entry(1, written(), joint());
+        let Data::Voters(change) = &entry.data else {
+            unreachable!()
         };
-        let public = |byte| PublicKey::new([byte; 32]).unwrap();
-        let public_keys = [(key(9), public(0xa9)), (key(12), public(0xac))].into();
-        let at = common::at(7, 5);
-        let signed = statement(&Claim::Change {
-            leader: key(3),
-            at,
-            voters: &voters,
-            public_keys: &public_keys,
-        });
-        let change = Change {
-            voters,
-            public_keys,
-            votes: Proof {
-                grant: Grant::Vote,
-                candidate: key(3),
-                voters: BTreeMap::new(),
-            },
-            signature: Some(raft::Signature([3; 64])),
-        };
-        let mut entry = Vec::new();
-        let data = Data::Voters(change);
-        crate::entry::encode(&[raft::Entry { at, data }], &mut entry);
-        let form = &signed[b"foundation/voters/1".len() + 16 + 8 + 8..];
-        assert_eq!(&entry[8 + 8 + 1..][..form.len()], form);
+        let mut bytes = Vec::new();
+        crate::entry::encode(std::slice::from_ref(&entry), &mut bytes);
+        let (position, form) = (&bytes[..16], &bytes[17..]);
+        let voters_and_public_keys = &form[..2 * (8 + 3 * 16) + 32];
+        let mut signed = CHANGE.to_vec();
+        put_key(key(1), &mut signed);
+        signed.extend(position);
+        signed.extend(voters_and_public_keys);
+        let signature = change.signature.unwrap().0;
+        assert_eq!(public(1).verify(&signed, &signature), Ok(()));
     }
 
     // The joint configuration that leader 1 wrote at index 2 of `TERM`.

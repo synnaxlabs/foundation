@@ -209,8 +209,8 @@ fn others(id: u8) -> Vec<u8> {
 }
 
 #[test]
-fn a_link_of_three_voters_in_each_set_is_457_bytes() {
-    let link = Link {
+fn a_link_of_three_voters_in_each_set_is_457_bytes_and_489_when_it_adds_one() {
+    let mut link = Link {
         at: Position {
             term: Term(1),
             index: 1,
@@ -230,6 +230,9 @@ fn a_link_of_three_voters_in_each_set_is_457_bytes() {
         },
     };
     assert_eq!(self::link(&link), 457);
+    link.change.voters.outgoing = set(&[1, 2, 4]);
+    link.change.public_keys = keyed(&[3]);
+    assert_eq!(self::link(&link), 489);
 }
 
 #[test]

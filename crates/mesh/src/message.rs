@@ -866,6 +866,20 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(
+        expected = "invariant: a change binds the keys of exactly the voters it adds"
+    )]
+    fn encode_panics_on_a_change_that_binds_another_node_in_place_of_a_voter_it_adds() {
+        let mut link = Link {
+            at: at(2, 4),
+            change: change(Some(signature(6))),
+        };
+        let added = link.change.public_keys.remove(&key(1)).unwrap();
+        link.change.public_keys.insert(key(3), added);
+        chained(vec![link]).encode();
+    }
+
+    #[test]
     fn a_proposal_and_its_answers_have_a_fixed_byte_form() {
         let propose = Message::Propose {
             change: Change::Home {

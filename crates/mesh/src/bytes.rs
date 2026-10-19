@@ -164,7 +164,10 @@ pub(crate) fn put_public_keys(
 ) {
     assert!(
         public_keys.keys().copied().eq(voters.added()),
-        "invariant: a change binds the keys of exactly the voters it adds"
+        "invariant: a change binds the keys of exactly the voters it adds: binds \
+         {:?}, adds {:?}",
+        public_keys.keys().collect::<Vec<_>>(),
+        voters.added().collect::<Vec<_>>(),
     );
     for &key in public_keys.values() {
         put_public_key(key, out);
