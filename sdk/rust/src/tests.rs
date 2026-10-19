@@ -58,8 +58,9 @@ fn present(range: std::ops::Range<*const u8>) -> usize {
         .count()
 }
 
-/// Only Linux: the test reads `/proc/self/pagemap`. Frames of one size fill the
-/// budget, then frames of another size need it.
+/// Only Linux: macOS takes back a discarded page only under memory pressure, so no
+/// test can fix its count of pages. Frames of one size fill the budget, then frames
+/// of another size need it.
 #[cfg(target_os = "linux")]
 #[test]
 fn the_reads_pool_gives_back_the_pages_of_a_size_that_another_size_needs() {
