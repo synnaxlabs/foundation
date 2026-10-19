@@ -190,7 +190,7 @@ impl Pair {
     /// Starts a dial from the client to the server, which must prove `peer`.
     /// Nothing is sent yet.
     pub(super) fn dial(&mut self, peer: PublicKey) {
-        let key = self.client.endpoint.connect(self.now(), peer, SERVER);
+        let key = self.client.endpoint.connect(self.now(), Some(peer), SERVER);
         self.client.key = Some(key);
     }
 
@@ -375,7 +375,7 @@ impl Foreign {
 
     /// Dials `remote` at `now`, which must prove `peer`.
     pub(super) fn dial(&mut self, now: Monotonic, peer: PublicKey, remote: SocketAddr) {
-        let dial = self.settings.client(peer);
+        let dial = self.settings.client(Some(peer));
         self.connect(now, dial, remote);
     }
 

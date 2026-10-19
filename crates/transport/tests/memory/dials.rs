@@ -39,7 +39,7 @@ fn run() -> (usize, usize) {
             let dialed = transport.dial(SERVER.public(), &[Address::Udp(dead)]).await;
             let attempts = vec![(Address::Udp(dead), Error::TimedOut)];
             let unreachable = Error::Unreachable {
-                peer: SERVER.public(),
+                peer: Some(SERVER.public()),
                 attempts,
             };
             assert_eq!(dialed.err(), Some(unreachable), "dial {dial}");

@@ -315,7 +315,10 @@ fn unreachable(addresses: Vec<SocketAddr>, cause: &transport::Error) {
     let Err(error) = Client::connect(&node, subject) else {
         panic!("a client of an unreachable node connected");
     };
-    let unreachable = transport::Error::Unreachable { peer, attempts };
+    let unreachable = transport::Error::Unreachable {
+        peer: Some(peer),
+        attempts,
+    };
     assert_eq!(
         error,
         Error::Session(program::Error::Transport(unreachable))

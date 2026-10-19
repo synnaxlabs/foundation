@@ -202,7 +202,7 @@ fn reach_after_a_crash_gives_unanswered_at_the_address() {
     let reached = reached(&mut sim, &host);
     let at = listen(&host);
     let error = transport::Error::Unreachable {
-        peer: KEY.public(),
+        peer: Some(KEY.public()),
         attempts: vec![(Address::Udp(at), transport::Error::TimedOut)],
     };
     assert_eq!(reached, Err(client::Error::Unanswered { at, error }));
@@ -242,7 +242,7 @@ fn reach_dials_the_loopback_ip_of_the_family_for_an_unspecified_ip() {
         let reached = reached(&mut sim, &host);
         let at = SocketAddr::new(loopback, PORT);
         let error = transport::Error::Unreachable {
-            peer: KEY.public(),
+            peer: Some(KEY.public()),
             attempts: vec![(Address::Udp(at), transport::Error::TimedOut)],
         };
         assert_eq!(reached, Err(client::Error::Unanswered { at, error }));

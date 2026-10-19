@@ -220,7 +220,7 @@ fn a_client_with_a_wrong_public_key_gets_the_error_of_the_handshake() {
     };
     let error = Client::connect(&node, subject).unwrap_err();
     let unreachable = transport::Error::Unreachable {
-        peer,
+        peer: Some(peer),
         attempts: vec![(
             transport::Address::Udp(node.addresses[0]),
             transport::Error::Authentication { expected: peer },
@@ -268,7 +268,7 @@ fn a_client_of_an_address_that_no_node_reads_is_unreachable() {
     };
     let error = Client::connect(&node, subject).unwrap_err();
     let unreachable = transport::Error::Unreachable {
-        peer,
+        peer: Some(peer),
         attempts: vec![(transport::Address::Udp(address), transport::Error::TimedOut)],
     };
     assert_eq!(

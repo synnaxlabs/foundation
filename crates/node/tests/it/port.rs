@@ -59,7 +59,7 @@ fn the_port_binds_at_once_when_the_lock_is_free() {
     let peer = start(&shards, "peer", move |tasks| async move {
         let (client, pool) = client(tasks);
         let session = client
-            .dial(KEY.public(), &[Address::Udp(listen)])
+            .dial(Some(KEY.public()), &[Address::Udp(listen)])
             .await
             .expect("a session");
         // The node rejects a stream only once it has the session too.

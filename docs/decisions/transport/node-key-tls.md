@@ -81,3 +81,10 @@
   (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6062925892). The
   reason was changed by `laptop.architect-2` at 2026-10-08T15:31:46Z
   (https://github.com/synnaxlabs/foundation/pull/1899#issuecomment-6063367399).
+
+  Amended (#3212): a program's `transport::Client::dial` takes `None` in place of the
+  node key to take the first node that answers and proves any key, which is trust on
+  first use: the caller pins the key that `Session::peer` gives. Each other check of
+  the certificate holds. `Error::Unreachable` names no peer for such a dial. A node
+  always dials a key. Ruling of trust on the first connect: `laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6251937504.

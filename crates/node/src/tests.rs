@@ -3070,7 +3070,7 @@ pub(crate) mod port {
                 }
                 Dialer::Program => {
                     let (program, pool) = program(&own, tasks);
-                    let session = program.dial(KEY.public(), &at).await;
+                    let session = program.dial(Some(KEY.public()), &at).await;
                     client = Some(program);
                     (session, pool)
                 }
@@ -3480,7 +3480,7 @@ pub(crate) mod port {
         assert_eq!(sim.run(), Ok(()));
         let seen = seen.lock().unwrap().take().expect("the peer ran");
         let unreachable = transport::Error::Unreachable {
-            peer: KEY.public(),
+            peer: Some(KEY.public()),
             attempts: vec![(Address::Udp(listen(&host)), transport::Error::TimedOut)],
         };
         assert_eq!(seen, Err(unreachable));
@@ -3812,7 +3812,9 @@ pub(crate) mod port {
         let own = peer.clone();
         let started = peer.shards().start(shard, move |tasks| async move {
             let (client, _pool) = program(&own, tasks);
-            let dialed = client.dial(KEY.public(), &[Address::Udp(listen)]).await;
+            let dialed = client
+                .dial(Some(KEY.public()), &[Address::Udp(listen)])
+                .await;
             let refused = dialed.expect_err("the dial fails");
             assert!(
                 matches!(refused, transport::Error::Unreachable { .. }),
@@ -4763,7 +4765,7 @@ pub(crate) mod port {
             assert_eq!(node.join(), Ok(()));
             let peer = OTHER.1.public();
             let unreachable = transport::Error::Unreachable {
-                peer,
+                peer: Some(peer),
                 attempts: vec![(
                     Address::Udp(listen(&host)),
                     transport::Error::Authentication { expected: peer },
@@ -5457,7 +5459,12 @@ pub(crate) mod port {
         ) -> Vec<transport::Session> {
             let mut held = Vec::new();
             for _ in 0..count {
-                held.push(program.dial(KEY.public(), at).await.expect("a session"));
+                held.push(
+                    program
+                        .dial(Some(KEY.public()), at)
+                        .await
+                        .expect("a session"),
+                );
             }
             held
         }
@@ -5517,7 +5524,10 @@ pub(crate) mod port {
                 let closed = closings(&held, &tasks);
                 let (mut sent, mut after) = (Vec::new(), Vec::new());
                 for _ in 0..2 {
-                    let new = program.dial(KEY.public(), &at).await.expect("a session");
+                    let new = program
+                        .dial(Some(KEY.public()), &at)
+                        .await
+                        .expect("a session");
                     sent.push(sent_clock(&new, &pool, &own).await);
                     own.clock().sleep(Span::SECOND).await;
                     after.push(closed.borrow().clone());
@@ -5559,7 +5569,10 @@ pub(crate) mod port {
                 let (program, pool) = program(&own, tasks.clone());
                 let held = create_sessions(&program, &at, 3).await;
                 let closed = closings(&held, &tasks);
-                let new = program.dial(KEY.public(), &at).await.expect("a session");
+                let new = program
+                    .dial(Some(KEY.public()), &at)
+                    .await
+                    .expect("a session");
                 let sent = sent_clock(&new, &pool, &own).await;
                 own.clock().sleep(Span::SECOND).await;
                 *seen.lock().unwrap() = Some((sent, closed.borrow().clone()));
@@ -5593,7 +5606,10 @@ pub(crate) mod port {
                 let of_member = closings(std::slice::from_ref(&member), &tasks);
                 let sent_member = sent_clock(&member, &node_pool, &own).await;
                 let at_member = closed.borrow().clone();
-                let new = program.dial(KEY.public(), &at).await.expect("a session");
+                let new = program
+                    .dial(Some(KEY.public()), &at)
+                    .await
+                    .expect("a session");
                 let sent = sent_clock(&new, &pool, &own).await;
                 own.clock().sleep(Span::SECOND).await;
                 let closed = (
@@ -5630,7 +5646,10 @@ pub(crate) mod port {
                 held.remove(100).close(Code(0));
                 let closed = closings(&held, &tasks);
                 own.clock().sleep(Span::SECOND).await;
-                let new = program.dial(KEY.public(), &at).await.expect("a session");
+                let new = program
+                    .dial(Some(KEY.public()), &at)
+                    .await
+                    .expect("a session");
                 let sent = sent_clock(&new, &pool, &own).await;
                 own.clock().sleep(Span::SECOND).await;
                 *seen.lock().unwrap() = Some((sent, closed.borrow().clone()));
@@ -5767,7 +5786,10 @@ pub(crate) mod port {
                 let of_other = sent_clock(&other, &second_pool, &own).await;
                 placed.close(Code(0));
                 own.clock().sleep(Span::SECOND).await;
-                let new = program.dial(KEY.public(), &at).await.expect("a session");
+                let new = program
+                    .dial(Some(KEY.public()), &at)
+                    .await
+                    .expect("a session");
                 let of_new = sent_clock(&new, &pool, &own).await;
                 own.clock().sleep(Span::SECOND).await;
                 *seen.lock().unwrap() =
@@ -5814,10 +5836,16 @@ pub(crate) mod port {
             shard(&late, move |own, tasks| async move {
                 let at = [Address::Udp(listen)];
                 let (program, pool) = program(&own, tasks.clone());
-                let oldest = program.dial(KEY.public(), &at).await.expect("a session");
+                let oldest = program
+                    .dial(Some(KEY.public()), &at)
+                    .await
+                    .expect("a session");
                 let closed = closings(std::slice::from_ref(&oldest), &tasks);
                 own.clock().sleep(LATE).await;
-                let new = program.dial(KEY.public(), &at).await.expect("a session");
+                let new = program
+                    .dial(Some(KEY.public()), &at)
+                    .await
+                    .expect("a session");
                 let sent = sent_clock(&new, &pool, &own).await;
                 own.clock().sleep(Span::SECOND).await;
                 *seen.lock().unwrap() = Some((sent, closed.borrow().clone()));
@@ -5906,7 +5934,7 @@ pub(crate) mod port {
                 let (other, out) = (own.clone(), Arc::clone(&seen_program));
                 tasks.spawn(async move {
                     let session =
-                        late.dial(KEY.public(), &at).await.expect("a session");
+                        late.dial(Some(KEY.public()), &at).await.expect("a session");
                     let sent = sent_clock(&session, &late_pool, &other).await;
                     *out.lock().unwrap() = Some(sent);
                     other.clock().sleep(Span::MINUTE).await;
@@ -6060,8 +6088,10 @@ pub(crate) mod port {
                     let new = second.dial(KEY.public(), &at).await.expect("a session");
                     let of_old = old.closed().await;
                     own.clock().sleep(Span::SECOND).await;
-                    let next =
-                        program.dial(KEY.public(), &at).await.expect("a session");
+                    let next = program
+                        .dial(Some(KEY.public()), &at)
+                        .await
+                        .expect("a session");
                     let later = [new, next];
                     let of_later = closings(&later, &tasks);
                     own.clock().sleep(Span::SECOND).await;

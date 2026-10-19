@@ -148,8 +148,8 @@ impl Endpoint {
         }
     }
 
-    /// Dials `remote` and expects it to prove `peer`. The dial ends in
-    /// [`Event::Connected`] or [`Event::Closed`] for the key.
+    /// Dials `remote` and expects it to prove `peer`, or any node key for `None`. The
+    /// dial ends in [`Event::Connected`] or [`Event::Closed`] for the key.
     ///
     /// # Panics
     ///
@@ -157,7 +157,7 @@ impl Endpoint {
     pub(crate) fn connect(
         &mut self,
         now: Monotonic,
-        peer: PublicKey,
+        peer: Option<PublicKey>,
         remote: SocketAddr,
     ) -> connection::Key {
         let now = self.instant(now);
@@ -1041,7 +1041,7 @@ mod tests {
                     NonZeroUsize::MIN,
                 );
                 let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 0);
-                endpoint.connect(Monotonic(0), server(), remote);
+                endpoint.connect(Monotonic(0), Some(server()), remote);
             });
         }
     }
@@ -1168,11 +1168,11 @@ mod tests {
                     NonZeroUsize::MIN,
                 );
                 let mut buffer = Vec::new();
-                endpoint.connect(Monotonic(0), server(), pair::SERVER);
+                endpoint.connect(Monotonic(0), Some(server()), pair::SERVER);
                 while endpoint.transmit(Monotonic(0), &mut buffer).is_some() {}
                 let earliest = endpoint.deadline().expect("a deadline");
                 let later = pair::at(Duration::from_millis(500));
-                endpoint.connect(later, server(), pair::SERVER);
+                endpoint.connect(later, Some(server()), pair::SERVER);
                 while endpoint.transmit(later, &mut buffer).is_some() {}
                 assert_eq!(endpoint.deadline(), Some(earliest));
             });

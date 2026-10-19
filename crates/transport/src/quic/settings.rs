@@ -134,8 +134,8 @@ impl Settings {
         (settings, endpoint)
     }
 
-    /// The settings for a dial that expects `expected`.
-    pub(super) fn client(&self, expected: PublicKey) -> ClientConfig {
+    /// The settings for a dial that expects `expected`, or any node key for `None`.
+    pub(super) fn client(&self, expected: Option<PublicKey>) -> ClientConfig {
         self.dial(self.tls.client(expected))
     }
 
@@ -576,7 +576,7 @@ mod tests {
             testing::run(1, |shard| {
                 let (now, mut buffer) = (pair::at(Duration::ZERO), Vec::new());
                 let mut dialer = program(shard);
-                dialer.connect(now, pair::SERVER_KEY.public(), pair::SERVER);
+                dialer.connect(now, Some(pair::SERVER_KEY.public()), pair::SERVER);
                 let initial = dialer.transmit(now, &mut buffer).expect("an Initial");
                 let issued = ids(initial.contents).1.expect("a source ID").to_vec();
                 // A program resets a short packet only to an ID that it could issue.
@@ -594,7 +594,7 @@ mod tests {
                 let (now, mut buffer) =
                     (pair::at(Duration::from_millis(1)), Vec::new());
                 let mut dialer = program(shard);
-                dialer.connect(now, pair::SERVER_KEY.public(), pair::SERVER);
+                dialer.connect(now, Some(pair::SERVER_KEY.public()), pair::SERVER);
                 let initial = dialer.transmit(now, &mut buffer).expect("an Initial");
                 let initial = initial.contents.to_vec();
                 let mut endpoint = program(shard);
@@ -953,7 +953,7 @@ mod tests {
                 let mut pair = Pair::new(shard, idle, ROUND_TRIP);
                 pair.foreign = Some(foreign);
                 let (now, peer) = (pair.now(), pair::FOREIGN_KEY.public());
-                let key = pair.client.endpoint.connect(now, peer, pair::FOREIGN);
+                let key = pair.client.endpoint.connect(now, Some(peer), pair::FOREIGN);
                 pair.client.key = Some(key);
                 pair.run(Duration::from_secs(2));
                 let foreign = pair.foreign.as_mut().expect("a foreign peer");

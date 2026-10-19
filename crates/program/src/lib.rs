@@ -140,7 +140,7 @@ impl Session {
             frames,
             reads,
         } = config;
-        let session = transport.dial(node, &addresses).await?;
+        let session = transport.dial(Some(node), &addresses).await?;
         let (mut sender, mut receiver) = session.open(Class::Complete).await?;
         let mut connection = [0; 16];
         entropy.fill(&mut connection);

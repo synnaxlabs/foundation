@@ -19,8 +19,8 @@ use crate::code::Code;
 pub enum Error {
     /// No address reached the peer.
     Unreachable {
-        /// The peer that was dialed.
-        peer: PublicKey,
+        /// The peer that was dialed, or `None` for a dial that took any node.
+        peer: Option<PublicKey>,
         /// Each address tried, with why it failed.
         attempts: Vec<(Address, Error)>,
     },
@@ -95,7 +95,10 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unreachable { peer, attempts } => {
-                write!(f, "no address reached peer {peer}")?;
+                match peer {
+                    Some(peer) => write!(f, "no address reached peer {peer}")?,
+                    None => write!(f, "no address reached a node")?,
+                }
                 attempts.iter().try_for_each(|(address, error)| {
                     write!(f, "; {address:?}: {error}")
                 })
@@ -158,7 +161,7 @@ mod tests {
         fn names_each_failed_address() {
             let at: SocketAddr = "10.0.0.1:7400".parse().expect("a valid address");
             let error = Error::Unreachable {
-                peer: key(),
+                peer: Some(key()),
                 attempts: vec![
                     (Address::Udp(at), Error::TimedOut),
                     (Address::Tcp(at), Error::Authentication { expected: key() }),
@@ -171,6 +174,20 @@ mod tests {
                      answering; Tcp(10.0.0.1:7400): the peer did not prove key {0}",
                     hex()
                 ),
+            );
+        }
+
+        #[test]
+        fn names_no_peer_for_a_dial_that_took_any_node() {
+            let at: SocketAddr = "10.0.0.1:7400".parse().expect("a valid address");
+            let error = Error::Unreachable {
+                peer: None,
+                attempts: vec![(Address::Udp(at), Error::TimedOut)],
+            };
+            check(
+                &error,
+                "no address reached a node; Udp(10.0.0.1:7400): the peer stopped \
+                 answering",
             );
         }
 

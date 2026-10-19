@@ -232,7 +232,10 @@ impl Agent {
             pool: std::rc::Rc::clone(&pool),
         };
         let client = transport::Client::new(config).expect("a client");
-        let session = client.dial(public_key(&HOME), &[at]).await.expect("dials");
+        let session = client
+            .dial(Some(public_key(&HOME)), &[at])
+            .await
+            .expect("dials");
         let (sender, receiver) = session.open(Class::Complete).await.expect("opens");
         let mut hello = Stream {
             pool: std::rc::Rc::clone(&pool),
