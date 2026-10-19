@@ -79,6 +79,7 @@ proptest! {
             // and it refuses the leader (#1485).
             prop_assume!(
                 network.disks[node].applied >= at.index
+                    || !network.unprovable
                     || network.nodes[node].term() <= network.nodes[leader].term(),
                 "a learner at a term this group cannot prove refuses the leader"
             );

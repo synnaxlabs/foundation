@@ -203,9 +203,9 @@ pub(crate) struct Network {
     // `refused`; any other error fails the run.
     wiped: Vec<bool>,
     pub(crate) refused: Vec<Error>,
-    // During `settle`, a candidate's reply at a term past every led one was
+    // Since `settle` began, a candidate's reply at a term past every led one was
     // refused as unproven: the group cannot prove its term (#1485).
-    unprovable: bool,
+    pub(crate) unprovable: bool,
     crash: Vec<Option<Kept>>,
     flight: Vec<Message>,
     leaders: BTreeMap<Term, node::Key>,
