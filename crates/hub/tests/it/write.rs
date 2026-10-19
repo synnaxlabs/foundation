@@ -1065,9 +1065,9 @@ fn stops_a_write_whose_lease_is_zero_as_malformed() {
     assert_eq!(home.served, [Err(lease), Ok(Got::Ended)]);
 }
 
-/// A write holds 20 bytes for each channel of its open and one for its index in the
-/// share of its subject until it ends. The open of `value` is 8 bytes, so it fits
-/// where its ends do not.
+/// A write holds 20 bytes for each place of its writers in the share of its subject
+/// from the home of each index until it ends. The open of `value` is 8 bytes and its
+/// names 21, so they fit where its ends do not.
 #[test]
 fn stops_a_write_whose_ends_pass_the_share_as_busy() {
     let home = read_session(
@@ -1075,7 +1075,7 @@ fn stops_a_write_whose_ends_pass_the_share_as_busy() {
         async |_| {},
         |mut agent| async move {
             agent.admit().await;
-            let held = agent.unfinished(BODY_BYTES_MAX - 39, &[]).await;
+            let held = agent.unfinished(BODY_BYTES_MAX - 60, &[]).await;
             agent.sleep(Span::MILLISECOND).await;
             let mut busy = agent.write(&["value"]).await;
             assert_eq!(busy.recv().await, reset_with(BUSY));
@@ -1105,8 +1105,8 @@ fn stops_a_write_whose_ends_pass_the_share_as_busy() {
 }
 
 /// A write holds its decoded names in the share of its subject, 16 bytes and the
-/// length of each, until it sends its places. The ends of `value` are 40 bytes and its
-/// names 21, so its ends fit where its names do not.
+/// length of each, from the decode of its open until it sends its places. The names of
+/// `value` are 21 bytes.
 #[test]
 fn stops_a_write_whose_names_pass_the_share_as_busy() {
     let home = read_session(
@@ -1114,7 +1114,7 @@ fn stops_a_write_whose_names_pass_the_share_as_busy() {
         async |_| {},
         |mut agent| async move {
             agent.admit().await;
-            let held = agent.unfinished(BODY_BYTES_MAX - 60, &[]).await;
+            let held = agent.unfinished(BODY_BYTES_MAX - 20, &[]).await;
             agent.sleep(Span::MILLISECOND).await;
             let mut busy = agent.write(&["value"]).await;
             assert_eq!(busy.recv().await, reset_with(BUSY));
@@ -1676,4 +1676,35 @@ fn opens_a_write_whose_channel_moves_to_a_second_index_during_its_home_wait() {
     });
     let served = std::mem::take(&mut *served.lock().expect("not poisoned"));
     assert_eq!(served, [Ok(Got::Ended), Ok(Got::Ended)]);
+}
+
+/// A write on two indexes holds the ends of its four places, 80 bytes, not of its two
+/// channels and one index.
+#[test]
+fn holds_the_ends_of_each_place_of_a_write_on_two_indexes() {
+    let home = read_session(
+        452,
+        async |_| {},
+        |mut agent| async move {
+            agent.admit().await;
+            let mut stream = write_two(&agent).await;
+            agent.sleep(Span::MILLISECOND).await;
+            let held = agent.unfinished(BODY_BYTES_MAX - 79, &[]).await;
+            agent.sleep(Span::MILLISECOND).await;
+            drop(held);
+            agent.sleep(Span::MILLISECOND).await;
+            assert_eq!(end(&mut stream).await, []);
+            finish(&mut agent).await;
+        },
+    );
+    let share = serve::Error::Share {
+        subject: name(SUBJECT),
+        length: BODY_BYTES_MAX - 79,
+        held: 80,
+    };
+    assert!(
+        home.served.contains(&Err(share)),
+        "served: {:?}",
+        home.served
+    );
 }

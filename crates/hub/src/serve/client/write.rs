@@ -39,14 +39,17 @@ pub(super) async fn serve(
 ) -> Result<(), Error> {
     let state = &session.state;
     let open = open(session, subject.clone(), write, receiver).await?;
-    let ends = Frames::bytes(open.channels.len() + 1);
-    let ends = u64::try_from(ends).expect("invariant: a u64 holds a usize");
-    let _reserved = Reserved::new(state, subject.clone(), ends)?;
     let decoded = Reserved::new(state, subject.clone(), held(&open.channels))?;
-    let Some(split) = here(state, subject, open, receiver).await? else {
+    let Some(homed) = here(state, subject.clone(), open, receiver).await? else {
         sender.finish()?;
         return Ok(());
     };
+    let ends = Frames::bytes(homed.places());
+    let ends = u64::try_from(ends).expect("invariant: a u64 holds a usize");
+    let _reserved = Reserved::new(state, subject, ends)?;
+    let split = homed
+        .split()
+        .map_err(|error| Error::Writer(Box::new(error)))?;
     let Split {
         set,
         entries,
@@ -87,15 +90,14 @@ fn held(names: &[Name]) -> u64 {
     u64::try_from(bytes).expect("invariant: a u64 holds a usize")
 }
 
-/// Opens a writer of each group of `open` at this node, the home of each index, or
-/// gives `None` when the program finishes first.
+/// Resolves the channels of `open` and waits for this node to be the home of each
+/// index, or gives `None` when the program finishes first.
 async fn here(
     state: &Rc<RefCell<State>>,
     subject: Name,
     open: Open,
     receiver: &mut Receiver,
-) -> Result<Option<Split>, Error> {
-    let refused = |error| Error::Writer(Box::new(error));
+) -> Result<Option<Homed>, Error> {
     let config = writer::Config {
         subject,
         authority: open.authority,
@@ -111,7 +113,9 @@ async fn here(
     let Some(homed) = unless(program, Homed::new(state, config)).await? else {
         return Ok(None);
     };
-    homed.map_err(refused)?.split().map(Some).map_err(refused)
+    homed
+        .map(Some)
+        .map_err(|error| Error::Writer(Box::new(error)))
 }
 
 /// Sends the places of the write and their run: place `n` is entry `n` of `set`, with

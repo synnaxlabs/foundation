@@ -231,6 +231,12 @@ impl Homed {
         Ok((writer, self.channels))
     }
 
+    /// The places of the set of all groups: each index and each of its data
+    /// channels.
+    pub(crate) fn places(&self) -> usize {
+        self.groups.iter().map(|(_, data)| data.len() + 1).sum()
+    }
+
     /// Opens one writer at the home for each group, in the group order of the set of
     /// all groups, as [`Homed::open`] opens one. Gives the writers with that set, the
     /// entry in it of each channel of the config, in its order, and the channels of

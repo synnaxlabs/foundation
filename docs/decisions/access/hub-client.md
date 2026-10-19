@@ -460,7 +460,10 @@
   which needs a walk of the queue of outcomes at each `Stored`.
   PR 2: the node opens one home writer for each group of a write, in group order, once
   the home of each index is this node, and the write no longer stops with `MALFORMED`
-  for many indexes. This supersedes that stop in the amendment of #2718 PR 2 above. A
+  for many indexes. This supersedes that stop in the amendment of #2718 PR 2 above.
+  The stream holds the ends and counts of each place of its writers, each index and
+  each channel of its groups, from the home of each index, in place of each channel
+  of the open and one index from the decode of the open (MEMORY BOUNDS). A
   group whose home is another node stops the open with `NOT_HOME`, with no control
   taken, until #3104. A frame of a stream of one group goes to its writer as it is. A
   frame of many groups is copied into one draft for each group that it holds, and a

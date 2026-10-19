@@ -91,13 +91,15 @@
   the request bodies, read opens, write opens, and ends of write streams of a hub
   count in its body budget, `BODIES_BYTES_MAX` (32 MiB), and those of one subject in
   `BODY_BYTES_MAX` (16 MiB) (HUB CLIENT). A write stream holds 20 bytes for each
-  channel of its open and one for its index: 16 of ends and 4 of the counts that come
-  before a draft (`laptop.architect`, 2026-10-19T19:14:38Z:
+  place of its writers, each index and each channel of its groups: 16 of ends and 4 of
+  the counts that come before a draft (`laptop.architect`, 2026-10-19T19:14:38Z:
   https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6275215145), from
-  the decode of its open until the stream ends. Its decoded names, 16 bytes and the
-  length of each, count from that decode until the stream sends its places. A write open
-  is at most `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for each channel, so its
-  ends and counts are at most 640 KiB, and the budget bounds the places of all write
+  the home of each index until the stream ends (#3283 PR 2,
+  https://github.com/synnaxlabs/foundation/pull/3384). Its decoded names, 16 bytes and
+  the length of each, count from the decode of its open until the stream sends its
+  places. A write open is at most `OPEN_BYTES_MAX` (64 KiB), with at least 2 bytes for
+  each channel, and each channel adds at most two places, itself and its index, so its
+  ends and counts are at most 1,280 KiB, and the budget bounds the places of all write
   streams of a node at 1,677,721. The cost: the writers of a subject hold their ends in
   its share until their streams end, so wide writers can make the requests and read
   opens of that subject stop with `BUSY`. Limits: the budget counts only the ends and
