@@ -51,16 +51,15 @@ impl Progress {
         }
     }
 
-    // Records an `Append` sent for entries up to `last`, or a probe when `last` is
-    // the index before `next`.
+    // Records an `Append` sent for entries up to `last`, or with no entry when
+    // `last` is the index before `next`. Each takes a slot of the window, so a
+    // follower that answers nothing pauses also when its appends carry no entry.
     pub(crate) fn sent(&mut self, last: u64) {
         match &mut self.state {
             State::Probe { waiting } => *waiting = true,
             State::Replicate { inflight } => {
-                if last >= self.next {
-                    inflight.push_back(last);
-                    self.next = last + 1;
-                }
+                inflight.push_back(last);
+                self.next = self.next.max(last + 1);
             }
         }
     }
@@ -207,6 +206,21 @@ mod tests {
         progress.sent(2);
         assert!(progress.accepted(5));
         assert_eq!((progress.next, progress.matched), (6, 5));
+    }
+
+    #[test]
+    fn appends_with_no_entry_fill_the_window() {
+        let mut progress = Progress::new(0);
+        progress.sent(0);
+        progress.accepted(0);
+        for _ in 0..INFLIGHT {
+            assert!(!progress.paused());
+            progress.sent(0);
+        }
+        assert!(progress.paused());
+        assert_eq!(progress.next, 1);
+        progress.accepted(0);
+        assert!(!progress.paused());
     }
 
     #[test]
