@@ -50,8 +50,8 @@
   edge. Then a high edge more than 2^62 ns over `c` adds nothing, as the fit already
   holds a high edge under it, and any other edge more than 2^62 ns from `c` starts a new
   fit from its reading, so each edge stays within 2^62 ns plus drift of `c` and no input
-  panics (`laptop.architect-2`, ruling owed:
-  https://github.com/synnaxlabs/foundation/pull/3386#issuecomment-6272521433). A mesh
+  panics (`laptop.architect-2`, 2026-10-19T18:14:00Z, round 3 item 1:
+  https://github.com/synnaxlabs/foundation/pull/3386#issuecomment-6274052652). A mesh
   bound past the range of a `Stamp` on the side that claims less becomes `i64::MIN` or
   `i64::MAX` ns, and `mesh` gives `None` past it on the side that claims more
   (`laptop.architect-2`, 2026-10-19T15:07:34Z, B:
@@ -69,4 +69,8 @@
   hide a disagreement); `c` of 0, which drops each server time past the range of an
   offset; `Fit` inside `Stamps` (a writer with the values of two devices then needs two
   `Stamps` for one index, so a stamp can go back); a fit that keeps each reading and
-  solves a line (it allocates, and its bound is not hard).
+  solves a line (it allocates, and its bound is not hard); a restart on any edge out of
+  reach (one source time 146 years old drops the bound); leaving out a far low edge (a
+  fit from `before` alone never bounds the clock); a restart only on a high edge under
+  `i64::MIN`, which keeps the table of B (an old reading widened past the range drops an
+  edge; round 3 item 1 of the ruling of 2026-10-19T18:14:00Z).
