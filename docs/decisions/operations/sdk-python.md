@@ -98,9 +98,10 @@
   https://github.com/synnaxlabs/foundation/pull/3394#issuecomment-6274374226).
   `tests/test_stubs.py` asserts that the stub defines each public item of the module,
   with its parameters, defaults, bases, `final`, and doc, that each annotation names a
-  type, and that each value that the module gives (a return, a property, and each
-  attribute of an exception) is of the type that the stub states, as is each argument
-  of the tests that call `assert_takes` (#3212 PR 1c,
+  type, that each value that the module gives (a return, also `None`, a property, and
+  each attribute of an exception) is of the type that the stub states, and that each
+  argument that a test gives is of the type of its parameter (#3212 PR 1c;
+  `box2.builder-5`, plan, 2026-10-19T16:53:36Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6272502641).
   The types of the stub are a key choice of kind 2 that `laptop.monitor` accepted at
   2026-10-19T17:24Z
@@ -111,11 +112,11 @@
   PyO3 bump; it works only on an inline `#[pymodule] mod`, and a `&Bound<PyAny>`
   argument needs its type as a string in `#[pyo3(signature)]`, so the second copy of
   each type moves into Rust; and no introspection states `code` and `seqs`, which the
-  module sets when it raises. When the guide of PyO3 no longer calls the feature
-  experimental, the stub is generated, and `test_stubs.py` keeps only what the generator
-  cannot state. The keys of the `dict` of `write` and `write_series`, and the values
-  of the `dict` of `write`, are `Any` until #3408. The feature `sim` adds test-only
-  functions, so a test asserts that a panic on the caller's thread gives
+  module sets when it raises. The generated stub may come back when the guide of PyO3
+  no longer calls the feature experimental; then `test_stubs.py` keeps only what the
+  generator cannot state. The keys of the `dict` of `write` and `write_series`, and the
+  values of the `dict` of `write`, are `Any` until #3408. The feature `sim` adds
+  test-only functions, so a test asserts that a panic on the caller's thread gives
   `PanicException`, not an abort
   (`laptop.architect-2`, 2026-10-17T18:39:00Z,
   https://github.com/synnaxlabs/foundation/issues/3059#issuecomment-6238735903). One
