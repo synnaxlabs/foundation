@@ -274,11 +274,18 @@ fn a_trust_with_a_damaged_or_empty_block_of_another_label_ends_the_connect() {
 #[test]
 fn a_trust_whose_begin_line_starts_no_block_drops_it() {
     let (other, server) = blocks();
-    let server = server.replacen("-----BEGIN", "----BEGIN", 1);
-    assert_eq!(
-        trusting(format!("{other}{server}")),
-        Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED))
-    );
+    for begin in [
+        "----BEGIN CERTIFICATE-----",
+        "-----BEGIN CERTIFICATE----",
+        "-----BEGIN CERTIFICATE-----\u{A0}x",
+    ] {
+        let server = server.replacen("-----BEGIN CERTIFICATE-----", begin, 1);
+        assert_eq!(
+            trusting(format!("{other}{server}")),
+            Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED)),
+            "{begin}"
+        );
+    }
 }
 
 #[test]
@@ -310,17 +317,132 @@ fn a_begin_line_with_white_space_after_its_dashes_starts_a_block() {
 #[test]
 fn a_trust_whose_end_line_names_another_label_ends_the_connect() {
     let (other, server) = blocks();
-    for begin in [
-        "-----BEGIN CERTIFICATE------",
-        "-----BEGIN  CERTIFICATE-----",
+    for (line, with) in [
+        (
+            "-----BEGIN CERTIFICATE-----",
+            "-----BEGIN CERTIFICATE------",
+        ),
+        (
+            "-----BEGIN CERTIFICATE-----",
+            "-----BEGIN  CERTIFICATE-----",
+        ),
+        (
+            "-----END CERTIFICATE-----",
+            "-----END CERTIFICATE-----\u{A0}x",
+        ),
     ] {
-        let server = server.replacen("-----BEGIN CERTIFICATE-----", begin, 1);
+        let server = server.replacen(line, with, 1);
         assert_eq!(
             trusting(format!("{other}{server}")),
             Err(invalid(2)),
-            "{begin}"
+            "{with}"
         );
     }
+}
+
+/// The `Line` refusal of line `number` of the trust.
+fn line(number: usize) -> Error {
+    Error::Refused(Refusal::Line { number })
+}
+
+/// [`TRUST`] with `tail` before the `\n` of line `at`, from 0, of its second block, and
+/// the number from 1 of that line in the trust.
+fn with_tail(at: usize, tail: &[u8]) -> (Vec<u8>, usize) {
+    let (other, server) = blocks();
+    let number = other.matches('\n').count() + at + 1;
+    let mut trust = other.into_bytes();
+    for (index, line) in server.split_inclusive('\n').enumerate() {
+        let line = line.as_bytes();
+        if index == at {
+            trust.extend_from_slice(&line[..line.len() - 1]);
+            trust.extend_from_slice(tail);
+            trust.push(b'\n');
+        } else {
+            trust.extend_from_slice(line);
+        }
+    }
+    (trust, number)
+}
+
+#[test]
+fn a_line_of_a_block_with_a_high_byte_after_its_text_ends_the_connect() {
+    let last = blocks().1.lines().count() - 1;
+    for at in [0, 1, 2, last] {
+        for tail in [b"\xA0".as_slice(), b" \xFF\r", b"\x80 "] {
+            let (trust, number) = with_tail(at, tail);
+            assert_eq!(trusting(trust), Err(line(number)), "{at} {tail:?}");
+        }
+    }
+}
+
+#[test]
+fn a_line_of_a_block_of_only_a_high_byte_ends_the_connect() {
+    let (trust, number) = with_tail(0, b"\n\xA0");
+    assert_eq!(trusting(trust), Err(line(number + 1)));
+}
+
+#[test]
+fn a_trust_whose_last_byte_is_high_ends_the_connect() {
+    let (mut trust, number) = with_tail(blocks().1.lines().count() - 1, b"\xA0");
+    assert_eq!(trust.pop(), Some(b'\n'));
+    assert_eq!(trusting(trust), Err(line(number)));
+}
+
+#[test]
+fn a_begin_line_with_a_high_byte_at_a_piece_of_a_long_line_ends_the_connect() {
+    let (trust, number) = with_tail(0, b"\xA0");
+    let at = blocks().0.len();
+    let text = "x".repeat(253);
+    let trust = [&trust[..at], text.as_bytes(), &trust[at..]].concat();
+    assert_eq!(trusting(trust), Err(line(number)));
+}
+
+#[test]
+fn a_client_that_trusts_a_pem_with_utf_8_text_outside_its_blocks_reads() {
+    let (other, server) = blocks();
+    let long = "é".repeat(200);
+    for trust in [
+        format!("{other}Certigna é\n{server}"),
+        format!("{other}-----BEGIN A NOTE é\na note that ends in -----é\n{server}"),
+        format!("{long}\n{other}{long}\n{server}{long}"),
+    ] {
+        let read = trusting(trust).expect("the client connects");
+        assert_eq!(read.answer, Ok(read.value));
+    }
+}
+
+#[test]
+fn a_begin_line_with_a_nul_before_its_dashes_is_text() {
+    let trust = [b"-----BEGIN X\0-----\xA0\n", TRUST].concat();
+    let read = trusting(trust).expect("the client connects");
+    assert_eq!(read.answer, Ok(read.value));
+}
+
+#[test]
+fn a_begin_line_with_no_label_and_a_high_byte_ends_the_connect() {
+    let trust = [b"-----BEGIN -----\xA0\n", TRUST].concat();
+    assert_eq!(trusting(trust), Err(line(1)));
+}
+
+#[test]
+fn a_begin_line_with_no_space_or_four_dashes_starts_no_block() {
+    for begin in [b"-----BEGINX-----".as_slice(), b"-----BEGIN X----"] {
+        let trust = [begin, b"\nnote \xA0\n", TRUST].concat();
+        let read = trusting(trust).expect("the client connects");
+        assert_eq!(read.answer, Ok(read.value), "{begin:?}");
+    }
+}
+
+#[test]
+fn an_end_line_of_10_bytes_ends_a_block() {
+    let trust = [b"-----BEGIN X-----\n-----END X\nnote \xA0\n", TRUST].concat();
+    assert_eq!(trusting(trust), Err(invalid(1)));
+}
+
+#[test]
+fn an_end_line_with_no_space_ends_no_block() {
+    let block = b"-----BEGIN X-----\n-----ENDXYZ\nnote \xA0\n-----END X-----\n";
+    assert_eq!(trusting([block, TRUST].concat()), Err(line(3)));
 }
 
 #[test]
@@ -404,6 +526,7 @@ fn a_group_whose_trust_does_not_load_is_refused() {
         b"no certificate",
         BROKEN_TRUST,
         ONE_BLOCK_TRUST,
+        &with_tail(0, b"\xA0").0,
     ];
     for trust in trusts {
         let status = crate::validity::verify(SERVER.certificate, Some(trust), START);
@@ -482,6 +605,11 @@ fn a_refusal_names_the_part_that_fails() {
         (
             Refusal::Trailing { number: 3 },
             "the PEM block of certificate 3 of the trust holds bytes after it",
+        ),
+        (
+            Refusal::Line { number: 4 },
+            "line 4 of the trust, in a PEM block, holds a byte of 0x80 to 0xFF, which \
+             PEM does not allow",
         ),
         (
             Refusal::Uri,
