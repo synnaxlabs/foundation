@@ -204,14 +204,13 @@
   stops when a write of the log fails, when a committed change has 0 bytes or a kind
   that this build does not know, or when each `Mesh` drops: this build cannot judge such
   an entry, and a newer build can. A group also stops (`Stopped::Removed`, with the
-  voters that answered) when `Raft::removed_by` gives the voters (RAFT VOTERS).
-  An entry with no change (the first entry of a leader)
-  is not a change of 0 bytes. A committed entry of a known kind whose body does not
-  decode is `Refused::Body` on every node, and the group goes on, so one voter that
-  proposes bad bytes cannot halt the region. One `pub(crate)` type of `change` holds the
-  kind and the length of such a body: `Malformed::Body` and `Refused::Body` each hold
-  it, and the driver moves it from one to the other (decided by `laptop.architect`,
-  2026-10-11T12:05:22Z:
+  voters that answered) when `Raft::removed_by` gives the voters (RAFT VOTERS). An entry
+  with no change (the first entry of a leader) is not a change of 0 bytes. A committed
+  entry of a known kind whose body does not decode is `Refused::Body` on every node, and
+  the group goes on, so one voter that proposes bad bytes cannot halt the region. One
+  `pub(crate)` type of `change` holds the kind and the length of such a body:
+  `Malformed::Body` and `Refused::Body` each hold it, and the driver moves it from one
+  to the other (decided by `laptop.architect`, 2026-10-11T12:05:22Z:
   https://github.com/synnaxlabs/foundation/issues/1509#issuecomment-6108834570). From
   the first stable release (C9d), a change to the body or to a cap of a known kind (the
   64 status entries of a `Join`) takes a new kind, which writers use only after the
