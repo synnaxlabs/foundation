@@ -1224,6 +1224,11 @@ mod corpus {
                 done(),
             ),
             (
+                corpus!("two_groups_counts_after_ends_cut"),
+                vec![],
+                End::Message(Error::Length { len: 3 }),
+            ),
+            (
                 corpus!("two_groups_counts_after_ends_over_run"),
                 vec![],
                 run(3, 2),
@@ -1259,6 +1264,11 @@ mod corpus {
             ),
             (
                 corpus!("two_groups_skip"),
+                vec![None],
+                cut(812, Some(131_119)),
+            ),
+            (
+                corpus!("two_groups_skip_counts_after_ends"),
                 vec![None],
                 cut(812, Some(131_119)),
             ),
