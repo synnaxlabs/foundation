@@ -1497,8 +1497,8 @@ impl Streams {
 
     /// Opens a stream of `class` of `connection`'s `inner` in `dir`, and gives its
     /// sender, and its receiver when it goes both ways. `None` until the peer's
-    /// hello, and when the peer allows no more now. While no `Command` stream of
-    /// this side in `dir` is open, only a `Command` takes the last one.
+    /// hello, when the peer allows no more now, and, for a class other than
+    /// `Command`, when it allows only one more.
     pub(super) fn open(
         &mut self,
         inner: &mut noq_proto::Connection,
@@ -1507,16 +1507,8 @@ impl Streams {
         class: Class,
     ) -> Option<(Sender, Option<Receiver>)> {
         let peer = self.peer.hello()?;
-        let side = inner.side();
         let mut streams = inner.streams();
-        let commands = || {
-            self.halves.iter().any(|(id, half)| {
-                id.initiator() == side
-                    && id.dir() == dir
-                    && half.claim.class == Class::Command
-            })
-        };
-        if class != Class::Command && streams.available(dir) == 1 && !commands() {
+        if class != Class::Command && streams.available(dir) == 1 {
             return None;
         }
         let id = streams.open(dir)?;

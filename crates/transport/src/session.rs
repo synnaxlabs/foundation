@@ -865,7 +865,8 @@ mod tests {
     }
 
     /// Opens 3 `Complete` streams and a `Command` to a peer of `streams_max` 3, while
-    /// a fourth `Complete` waits, which opens once one `Complete` ends.
+    /// a fourth `Complete` waits. It still waits once one `Complete` ends, and opens
+    /// once the `Command` ends.
     fn others_and_a_command(two_way: bool) {
         let (mut sim, ..) = testing::sessions(
             0,
@@ -880,15 +881,22 @@ mod tests {
                 assert!(poll_once(waiting.as_mut()).await.is_none());
                 let now = side.node.clock().now();
                 let command = pin!(open_with(&side, two_way, Class::Command, b"c"));
-                let _command = within(&side, command, now).await;
+                let command = within(&side, command, now).await;
                 assert!(poll_once(waiting.as_mut()).await.is_none());
-                let freed = free(&side, held.remove(0)).await;
+                free(&side, held.remove(0)).await;
+                side.node.clock().sleep(FREE_WAIT).await;
+                assert!(poll_once(waiting.as_mut()).await.is_none());
+                let freed = free(&side, command).await;
                 let _opened = within(&side, waiting, freed).await;
                 side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
             },
             |side| async move {
-                let (first, _held) = accept_apart(&side, 4, Class::Complete).await;
+                let (first, mut held) = accept_apart(&side, 4, Class::Complete).await;
                 read_to_end(first, b"a").await;
+                let at = held
+                    .iter()
+                    .position(|incoming| incoming.class == Class::Command);
+                read_to_end(held.remove(at.expect("a `Command`")), b"c").await;
                 accept_last(&side).await;
             },
         );
@@ -943,6 +951,53 @@ mod tests {
             },
         );
         assert_eq!(sim.run(), Ok(()), "two-way {two_way}");
+    }
+
+    #[test]
+    fn a_command_that_the_peer_stopped_leaves_the_last_stream_to_a_command() {
+        for two_way in [false, true] {
+            let (mut sim, ..) = testing::sessions(
+                0,
+                allowing(3),
+                move |side| async move {
+                    let mut held = Vec::new();
+                    for _ in 0..3 {
+                        held.push(
+                            open_with(&side, two_way, Class::Complete, b"a").await,
+                        );
+                    }
+                    let command = open_with(&side, two_way, Class::Command, b"c").await;
+                    let mut waiting =
+                        pin!(open_with(&side, two_way, Class::Complete, b"b"));
+                    assert!(poll_once(waiting.as_mut()).await.is_none());
+                    // Past the stop of the peer, while this side holds the sender.
+                    side.node.clock().sleep(spans(Span::MILLISECOND, 100)).await;
+                    assert!(poll_once(waiting.as_mut()).await.is_none());
+                    let freed = side.node.clock().now();
+                    drop(command);
+                    let second = pin!(open_with(&side, two_way, Class::Command, b"d"));
+                    let _second = within(&side, second, freed).await;
+                    assert!(poll_once(waiting.as_mut()).await.is_none());
+                    side.node.clock().sleep(spans(Span::MILLISECOND, 50)).await;
+                },
+                |side| async move {
+                    let (first, _held) = accept_apart(&side, 4, Class::Command).await;
+                    let stream::Incoming {
+                        mut receiver,
+                        sender,
+                        ..
+                    } = first;
+                    let read = receiver.recv().await.map(|m| m.map(|b| b.to_vec()));
+                    assert_eq!(read, Ok(Some(b"c".to_vec())));
+                    receiver.stop(Code(5));
+                    if let Some(mut sender) = sender {
+                        sender.finish().expect("finished");
+                    }
+                    side.node.clock().sleep(spans(Span::MILLISECOND, 400)).await;
+                },
+            );
+            assert_eq!(sim.run(), Ok(()), "two-way {two_way}");
+        }
     }
 
     #[test]
