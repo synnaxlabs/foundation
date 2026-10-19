@@ -479,14 +479,18 @@ mod tests {
 
         #[test]
         fn gives_the_peer_of_a_node_one_more_stream_of_each_kind_at_the_largest_max() {
-            let largest = u64::from(u32::MAX);
-            let counts = |role| {
-                let (bi, uni) = streams(&role, NonZeroU32::MAX);
-                (bi.into_inner(), uni.into_inner())
-            };
-            let node = counts(Role::Node(testing::SERVER));
-            assert_eq!(node, (largest + 1, largest + 2));
-            assert_eq!(counts(Role::Program), (largest, largest + 1));
+            testing::run(1, |shard| {
+                let mut pair = Pair::with(shard, Span::SECOND, DELAY, |config| {
+                    config.streams_max = NonZeroU32::MAX;
+                });
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_millis(100));
+                let largest = u64::from(u32::MAX);
+                let mut streams = pair.client.connection().streams();
+                assert_eq!(streams.available(Dir::Bi), largest + 1);
+                // The hello took one.
+                assert_eq!(streams.available(Dir::Uni), largest + 1);
+            });
         }
 
         #[test]
