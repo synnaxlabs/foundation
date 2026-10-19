@@ -678,17 +678,18 @@ impl Replies {
             } => self.outcome(frame, group, outcome)?,
             Reply::Stored { group, frames } => {
                 let state = open(&mut self.groups, group)?;
-                let answered = self.answered;
-                let bound = if frames < state.stored {
-                    state.stored
-                } else {
-                    answered
-                };
-                if frames < state.stored || frames > answered {
+                if frames < state.stored {
                     return Err(Error::Stored {
                         group,
                         frames,
-                        bound,
+                        bound: state.stored,
+                    });
+                }
+                if frames > self.answered {
+                    return Err(Error::Stored {
+                        group,
+                        frames,
+                        bound: self.answered,
                     });
                 }
                 state.settle(&mut self.unsettled, |state| state.stored = frames);
