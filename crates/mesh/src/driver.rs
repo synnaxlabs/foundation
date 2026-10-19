@@ -1531,12 +1531,6 @@ mod tests {
         changes: BTreeMap<u8, (Pointer, BTreeMap<Name, Definition>)>,
         /// The node that answers no blob stream.
         silent: Option<u8>,
-        /// The member whose session of the transport each node puts in its group at
-        /// its next tick, as its sender does.
-        cached: BTreeMap<u8, u8>,
-        /// The members whose session in the group of each node had ended when its
-        /// last call of `applies` or `changes` returned.
-        ended: BTreeMap<u8, BTreeSet<node::Key>>,
         /// Each spec change of `applies` that returned, in order: its node, the
         /// pointer on that node at the return, and what the change gave.
         applied: Vec<(u8, Pointer, Result<Pointer, Error>)>,
@@ -1973,14 +1967,6 @@ mod tests {
     async fn apply(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
         loop {
             clock.sleep(TICK).await;
-            let cached = board.lock().unwrap().cached.remove(&id);
-            if let Some(to) = cached {
-                let contact = mesh.group.borrow().contact(key(to));
-                let (public_key, addresses) = contact.unwrap();
-                let session = mesh.transport.dial(public_key, &addresses).await;
-                let session = session.unwrap();
-                mesh.group.borrow_mut().sessions.insert(key(to), session);
-            }
             let (spec, change) = {
                 let mut board = board.lock().unwrap();
                 (board.applies.remove(&id), board.changes.remove(&id))
@@ -2002,14 +1988,7 @@ mod tests {
                 (None, None) => continue,
             };
             let pointer = mesh.pointer();
-            let sessions = &mesh.group.borrow().sessions;
-            let ended = sessions
-                .iter()
-                .filter(|(_, session)| session.ended().is_some());
-            let ended = ended.map(|(&member, _)| member).collect();
-            let mut board = board.lock().unwrap();
-            board.applied.push((id, pointer, result));
-            board.ended.insert(id, ended);
+            board.lock().unwrap().applied.push((id, pointer, result));
         }
     }
 

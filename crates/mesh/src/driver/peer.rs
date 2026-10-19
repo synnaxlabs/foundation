@@ -12,7 +12,7 @@ use types::digest::Digest;
 use types::node;
 use types::time::Span;
 
-use super::{Call, Mesh, send};
+use super::{Call, Mesh};
 use crate::error::{Error, Miss, Missed};
 
 /// How long one get or put of chunks on a peer may take, its dial included.
@@ -94,40 +94,27 @@ impl Mesh {
     }
 
     // Puts `digests` on `to` in calls of at most `CHUNKS` chunks, in order, and gives
-    // why the last attempt of the first call that did not end `Ok` within `DEADLINE`,
-    // its dials included, failed. A call whose session was lost dials once more: a
-    // session to a process of `to` that restarted fails only at its first use.
+    // why the first call that did not end `Ok` within `DEADLINE`, its dials included,
+    // failed. A call whose session ended dials once more: a session to a process of
+    // `to` that restarted ends only at its first use.
     async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<(), Miss> {
         for call in digests.chunks(CHUNKS) {
             let put = async {
                 let session = self.dial(to).await?;
                 let first = blob::peer::put(&self.store, &session, call).await;
-                if !self.lost(to, &first) {
+                let broken = matches!(first, Err(blob::peer::Error::Stream(_)));
+                if !broken || session.ended().is_none() {
                     return first.map_err(Miss::Put);
                 }
                 let session = self.dial(to).await?;
-                let last = blob::peer::put(&self.store, &session, call).await;
-                self.lost(to, &last);
-                last.map_err(Miss::Put)
+                let put = blob::peer::put(&self.store, &session, call).await;
+                put.map_err(Miss::Put)
             };
             within(&self.clock, DEADLINE, put)
                 .await
                 .unwrap_or(Err(Miss::Deadline))?;
         }
         Ok(())
-    }
-
-    // Whether `put` failed as its session to `to` was lost, which drops the handle of
-    // the group.
-    fn lost(&self, to: node::Key, put: &Result<(), blob::peer::Error>) -> bool {
-        let Err(blob::peer::Error::Stream(error)) = put else {
-            return false;
-        };
-        let lost = send::lost(error);
-        if lost {
-            self.group.borrow_mut().sessions.remove(&to);
-        }
-        lost
     }
 
     // The session of the transport to member `to`, which it dials at the addresses
