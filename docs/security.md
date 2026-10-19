@@ -587,6 +587,8 @@ text of the `opcua` kind
 open62541 reads (`connector_opcua::Kind::parse`, #2523), the readers of the answers of
 a browse and a describe, which the browse of the kind calls (`node_of`, `unit_of`,
 `Answer::browsed`, and `Answer::target` in `connector_opcua::client`, #2914), the
+readers of the answers of a subscription (`Answer::subscription`, `Answer::created`,
+`shim_monitor_result`, and `shim_value_times` in `connector_opcua::client`, #3440), the
 `address` of the
 `modbus` kind (`connector_modbus::Kind::parse`, #2789), the text of a browse path and
 pattern, which no front end reads yet (`connector::browse`, #2827), the file `name` of
