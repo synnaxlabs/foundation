@@ -256,6 +256,12 @@ impl Writes {
         layout: &Layout<'_>,
     ) -> Result<(), Error> {
         self.heads += 1;
+        // A head names at least one series and each series its index, so the frame
+        // of a stream of one group holds it. This skips the walk of the series.
+        if self.groups.len() == 1 {
+            self.pending.push((0, alloc(state, Outcome::LEN_MAX)?));
+            return Ok(());
+        }
         for group in layout.groups() {
             self.pending.push((group, alloc(state, Outcome::LEN_MAX)?));
         }
