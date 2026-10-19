@@ -44,7 +44,7 @@ mod table;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
-use program::write::{Config, Outcome, Time};
+use program::write::{Config, Outcome, Time, Writer};
 use table::Line;
 use types::authority::Authority;
 use types::channel;
@@ -126,7 +126,6 @@ fn main() {
             let mut timer = Line::new("timer", FRAMES);
             let mut lines = Vec::new();
             let mut calls = Vec::new();
-            let mut context = Context::from_waker(Waker::noop());
             for shape in &LINES {
                 let config = Config {
                     authority: Authority(1),
@@ -148,33 +147,8 @@ fn main() {
                 for round in 0..WARMUP + ROUNDS {
                     for _ in 0..FRAMES {
                         timer.add(table::timed(&ALLOCATOR, || ()).1);
-                        let (ready, drafted) = table::timed(&ALLOCATOR, || {
-                            let draft =
-                                pin!(writer.draft(Form::Raw, shape.samples, &layout));
-                            matches!(draft.poll(&mut context), Poll::Ready(Ok(_)))
-                        });
-                        assert!(ready, "the pool has a block");
-                        let (sent, taken) = {
-                            let mut write = pin!(writer.write(Time::Frame(Path::Live)));
-                            let (pending, sent) = table::timed(&ALLOCATOR, || {
-                                write.as_mut().poll(&mut context).is_pending()
-                            });
-                            assert!(pending, "the write waits for its outcome");
-                            node.clock().sleep(ANSWERED).await;
-                            let (ready, taken) = table::timed(&ALLOCATOR, || {
-                                matches!(
-                                    write.as_mut().poll(&mut context),
-                                    Poll::Ready(Ok(_))
-                                )
-                            });
-                            assert!(ready, "the outcome is in the transport");
-                            (sent, taken)
-                        };
-                        let (ready, kept) = table::timed(&ALLOCATOR, || {
-                            let stored = pin!(writer.stored());
-                            matches!(stored.poll(&mut context), Poll::Ready(Ok(())))
-                        });
-                        assert!(ready, "the `Stored` is in the transport");
+                        let [drafted, sent, taken, kept] =
+                            frame(&mut writer, &node, shape, &layout).await;
                         if round >= WARMUP {
                             out.push(drafted.0 + sent.0);
                             whole.push(drafted.0 + sent.0 + taken.0);
@@ -199,6 +173,40 @@ fn main() {
             print_p99(&mut calls);
         })
     });
+}
+
+/// Times the calls of one frame: the draft, the send, the outcome, and the stored.
+async fn frame(
+    writer: &mut Writer,
+    node: &sim::node::Node,
+    shape: &Shape,
+    layout: &[(usize, usize)],
+) -> [(u64, u64); 4] {
+    let mut context = Context::from_waker(Waker::noop());
+    let (ready, drafted) = table::timed(&ALLOCATOR, || {
+        let draft = pin!(writer.draft(Form::Raw, shape.samples, layout));
+        matches!(draft.poll(&mut context), Poll::Ready(Ok(_)))
+    });
+    assert!(ready, "the pool has a block");
+    let (sent, taken) = {
+        let mut write = pin!(writer.write(Time::Frame(Path::Live)));
+        let (pending, sent) = table::timed(&ALLOCATOR, || {
+            write.as_mut().poll(&mut context).is_pending()
+        });
+        assert!(pending, "the write waits for its outcome");
+        node.clock().sleep(ANSWERED).await;
+        let (ready, taken) = table::timed(&ALLOCATOR, || {
+            matches!(write.as_mut().poll(&mut context), Poll::Ready(Ok(_)))
+        });
+        assert!(ready, "the outcome is in the transport");
+        (sent, taken)
+    };
+    let (ready, kept) = table::timed(&ALLOCATOR, || {
+        let stored = pin!(writer.stored());
+        matches!(stored.poll(&mut context), Poll::Ready(Ok(())))
+    });
+    assert!(ready, "the `Stored` is in the transport");
+    [drafted, sent, taken, kept]
 }
 
 /// Opens the write of each line, takes each frame whole, and answers it with `Taken`
