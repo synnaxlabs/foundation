@@ -6,8 +6,9 @@ use types::frame::{Draft, Form, Layout};
 
 use super::{Error, Head, Time, counts};
 use crate::common::rest_of_run;
+use crate::hub::ends;
 use crate::hub::part::{Assembly, Next, to_usize};
-use crate::hub::{ends, run};
+use crate::hub::run as items;
 
 /// The frames of a program's write stream after the places, at the node. The node
 /// receives each message and makes each draft from the pool of the home. The entries
@@ -18,10 +19,14 @@ pub struct Frames {
     places: u32,
     next: Next,
     head: Option<Head>,
-    /// The counts of the frame's run of counts, from its draft or skip on.
+    /// The counts of the frame's run of counts: for a head of [`Time::Frame`], the
+    /// indexes among the ends that came.
     counts: u32,
     /// The counts that came. The run of counts is due while it is below `counts`.
     counted: u32,
+    /// The counts that came before the draft, in group order. It holds one count for
+    /// each place at most, so it never grows.
+    early: Vec<u32>,
     assembly: Assembly<true>,
 }
 
@@ -63,10 +68,12 @@ pub enum Step {
 }
 
 impl Frames {
-    /// The bytes that a `Frames` of `places` places holds for their ends.
+    /// The bytes that a `Frames` of `places` places holds for their ends and for the
+    /// counts that come before the draft.
     #[must_use]
     pub const fn bytes(places: usize) -> usize {
         Assembly::<true>::bytes(places)
+            .saturating_add(places.saturating_mul(counts::LEN))
     }
 
     /// The frames of a write stream whose places are the entries of `set`, in order.
@@ -84,6 +91,7 @@ impl Frames {
             head: None,
             counts: 0,
             counted: 0,
+            early: Vec::with_capacity(to_usize(places)),
             assembly: Assembly::reserved(set),
         }
     }
@@ -125,8 +133,10 @@ impl Frames {
     /// the head, [`Error::Length`], [`Error::Path`] for a time that no head has,
     /// [`Error::Form`], [`Error::Series`], [`Error::Stamp`], and [`Error::Places`] for
     /// more series than places. For a message of the run of ends, the errors of its
-    /// bytes, then [`Error::Run`]. For a message of the run of counts, the errors of
-    /// its bytes, then [`Error::Run`] and [`Error::Samples`]. For a body message,
+    /// ends, then [`Error::Run`], then, for the counts after its last end, the errors
+    /// of a message of the run of counts. For a message of the run of counts, the
+    /// errors of its bytes, then [`Error::Run`] and [`Error::Samples`]. For a body
+    /// message,
     /// [`Error::Empty`] and [`Error::Body`]. The frames stay as they were. The caller
     /// then stops the stream as `MALFORMED`.
     ///
@@ -136,16 +146,10 @@ impl Frames {
     #[inline]
     pub fn decode(&mut self, message: &[u8]) -> Result<Step, Error> {
         self.assembly.check_undrafted("the next message");
-        if self.counted < self.counts {
-            return self.counts(message);
-        }
         match self.next {
+            Next::Ends { remain } => self.ends(remain, message),
+            _ if self.counted < self.counts => self.counts(message),
             Next::Head => self.head(message),
-            Next::Ends { .. } => {
-                let (ends, last) = self.next.ends(message)?;
-                self.assembly.ends(ends, last);
-                Ok(Step::More)
-            }
             Next::Body(body) => {
                 let last = self.next.take(message.len())?;
                 self.assembly.body(body.at(), message);
@@ -173,7 +177,7 @@ impl Frames {
     }
 
     /// Takes the draft, which is of the layout and form of [`Due::Draft`]. Gives the
-    /// frame when it has no run of counts and no body, else [`Step::More`].
+    /// frame when no count and no body is still to come, else [`Step::More`].
     ///
     /// # Panics
     ///
@@ -262,14 +266,60 @@ impl Frames {
         Ok(Step::Head(head))
     }
 
-    /// Starts the run of counts of a draft or a skip: one count for each range. A
-    /// head of [`Time::Node`] has none, and each of its ranges holds 1.
+    /// Takes a message of the run of ends, which `remain` ends of the head's series
+    /// did not reach. For a head of [`Time::Frame`], each index among its ends adds a
+    /// count to the run, and the bytes after its last end are the first counts.
+    fn ends(&mut self, remain: u32, message: &[u8]) -> Result<Step, Error> {
+        let time = self.head.expect("invariant: ends follow a head").time;
+        let (message, early) = match time {
+            Time::Frame(_) => message.split_at(
+                to_usize(remain)
+                    .saturating_mul(ends::LEN)
+                    .min(message.len()),
+            ),
+            Time::Node => (message, &[][..]),
+        };
+        let mut next = self.next;
+        let (ends, last) = next.ends(message)?;
+        let counts = match time {
+            Time::Frame(_) => self.counts.strict_add(self.indexes(ends.clone())),
+            Time::Node => 0,
+        };
+        let (early, uncounted) = if early.is_empty() {
+            (&[][..], counts)
+        } else {
+            Self::checked(early, counts)?
+        };
+        self.next = next;
+        self.counts = counts;
+        self.assembly.ends(ends, last);
+        self.early
+            .extend(early.iter().map(|&bytes| u32::from_le_bytes(bytes)));
+        self.counted = counts.strict_sub(uncounted);
+        Ok(Step::More)
+    }
+
+    /// The ends among `ends` whose place is the index of its group. A place that the
+    /// set does not hold is none: the layout refuses it.
+    fn indexes(&self, ends: ends::Iter<'_>) -> u32 {
+        let set = self.assembly.set();
+        let indexes = ends
+            .filter(|&(place, _)| {
+                let place = to_usize(place);
+                set.entries().get(place).is_some_and(|entry| {
+                    set.groups().get(to_usize(entry.group)) == Some(&place)
+                })
+            })
+            .count();
+        u32::try_from(indexes)
+            .expect("invariant: a message holds at most u32::MAX ends")
+    }
+
+    /// Starts the run of counts of a draft or a skip with the counts that came before
+    /// it. A head of [`Time::Node`] has none, and each of its ranges holds 1.
     fn drafted(&mut self) -> Step {
         match self.head.expect("invariant: a draft has a head").time {
-            Time::Frame(_) => {
-                self.counts = u32::try_from(self.assembly.ranges())
-                    .expect("invariant: a frame has at most u32::MAX groups");
-            }
+            Time::Frame(_) => self.assembly.count(0, self.early.drain(..)),
             Time::Node => self.assembly.count(0, std::iter::repeat(1)),
         }
         self.counted()
@@ -277,12 +327,22 @@ impl Frames {
 
     /// Takes a message of the run of counts.
     fn counts(&mut self, message: &[u8]) -> Result<Step, Error> {
-        let counts = run::<{ counts::LEN }>(message)?;
-        rest_of_run(self.uncounted(), counts.len())?;
+        let (counts, _) = Self::checked(message, self.uncounted())?;
+        Ok(self.fill(counts))
+    }
+
+    /// The counts of `message`, of a run in which `remain` counts did not come, and
+    /// the counts that do not come after them.
+    fn checked(
+        message: &[u8],
+        remain: u32,
+    ) -> Result<(&[[u8; counts::LEN]], u32), Error> {
+        let counts = items::<{ counts::LEN }>(message)?;
+        let rest = rest_of_run(remain, counts.len())?;
         if counts.contains(&[0; counts::LEN]) {
             return Err(Error::Samples);
         }
-        Ok(self.fill(counts))
+        Ok((counts, rest))
     }
 
     /// The counts of the run that did not come.

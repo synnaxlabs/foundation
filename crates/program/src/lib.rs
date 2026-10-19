@@ -553,8 +553,9 @@ pub enum Error {
         /// The form of the frame.
         form: Form,
     },
-    /// The write of each group ended with a frame that its home took and that is not on
-    /// disk: the place of the group's index, and why it ended. The other groups go on.
+    /// The write of each group ended with a frame that its home took and whose `Stored`
+    /// did not come, so it may not be on disk: the place of the group's index, and why
+    /// it ended. The other groups go on.
     /// [`Writer::stored`] gives it once each taken frame of every other group is on
     /// disk, and again at each later call, so an `Ok` never says that a frame of an
     /// ended group is on disk. [`Writer::finish`] gives it after `Finished`.
@@ -611,7 +612,9 @@ impl fmt::Display for Error {
                  {count} in the {form:?} form, so it was not sent"
             ),
             Self::Unstored(groups) => {
-                f.write_str("the write ended with a taken frame not on disk for")?;
+                f.write_str(
+                    "the write ended with a taken frame that may not be on disk for",
+                )?;
                 for (at, (place, end)) in groups.iter().enumerate() {
                     let and = if at == 0 { "" } else { "," };
                     write!(f, "{and} the group of index place {place} ({end:?})")?;

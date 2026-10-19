@@ -188,8 +188,9 @@ impl Writer {
     /// # Errors
     ///
     /// The error that ended the writer, as [`Writer::write`] gives it, and
-    /// [`Error::Unstored`] for each group whose write ended with a taken frame that is
-    /// not on disk; the writer goes on, and each later call gives it again.
+    /// [`Error::Unstored`] for each group whose write ended with a taken frame whose
+    /// `Stored` did not come, so it may not be on disk; the writer goes on, and each
+    /// later call gives it again.
     pub async fn stored(&mut self) -> Result<(), Error> {
         self.check()?;
         let mut waited = Ok(());
@@ -204,8 +205,8 @@ impl Writer {
     }
 
     /// Drops a held draft, finishes the stream, and waits until each frame that the
-    /// home took is on disk and the node finished the stream. Control ends when the
-    /// stream finishes. Dropping the call drops the writer.
+    /// home took is on disk, or its group ended, and the node finished the stream.
+    /// Control ends when the stream finishes. Dropping the call drops the writer.
     ///
     /// # Errors
     ///
@@ -221,8 +222,8 @@ impl Writer {
         self.unstored()
     }
 
-    /// [`Error::Unstored`] for each group whose write ended with a taken frame that is
-    /// not on disk.
+    /// [`Error::Unstored`] for each group whose write ended with a taken frame whose
+    /// `Stored` did not come.
     fn unstored(&self) -> Result<(), Error> {
         let groups: Vec<_> = self
             .replies

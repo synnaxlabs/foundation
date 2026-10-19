@@ -389,18 +389,21 @@
   is key choice (f), sent to `laptop.monitor` with the plan.
   PR 1b: a write frame is `Head { time, form, series }`, the run of its ends, a run of
   counts, and its body. The run of counts holds one `u32` of at least 1 for each group
-  whose index entry is among the ends, in group order, in messages of whole counts. A
-  head of `Time::Node` has no run of counts, and each of its groups holds one sample. So
-  the wire holds no count of counts and no node count, and neither can be wrong. A
-  series of a group whose index the ends do not hold gets the layout error
+  whose index entry is among the ends, in group order. After the head, each message
+  holds whole ends, then whole counts, so the run of counts starts in the message of
+  the last end when that message has room. `Frames` keeps the counts that come before
+  the draft, at most 4 bytes for each place, and sets them into the draft when it
+  comes. A head of `Time::Node` has no run of counts, and each of its groups holds one
+  sample. So the wire holds no count of counts and no node count, and neither can be
+  wrong. A series of a group whose index the ends do not hold gets the layout error
   `IndexAbsent`. Each outcome holds `group` (`u32`) after `frame`, and the outcomes of a
   frame come in group order: `Replies::sent` takes the groups of each frame, and an
   outcome of that frame for another group gives `Error::Group { frame, group, next }`,
   also for a group that the frame does not hold. `Outcome::Ended(End)` (kind 5,
   `End::Removed` or `End::Failed`) answers a group whose writer ended. The node makes
-  the draft due at the last end, and sets each count of the run into the draft, so the
-  ends of a write stream stay 16 bytes for each place (MEMORY BOUNDS). Decided by
-  `laptop.architect` at 2026-10-19T13:14:46Z
+  the draft due at the last end, and sets each count of the run into the draft, so a
+  write stream holds 20 bytes for each place: 16 of ends and 4 of counts (MEMORY
+  BOUNDS). Decided by `laptop.architect` at 2026-10-19T13:14:46Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268096380), on the
   revision https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917.
   `Error::Group` with `next`, a unit `Error::Stamp`, and PR 1c, where `Reply::Stored {
@@ -417,26 +420,44 @@
   a `bytes_max`. The run of counts is private to it. Approved by `laptop.architect` at
   2026-10-19T17:45:52Z
   (https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6273514088).
+  Lost: counts in messages of their own (6268096380), because each message costs the
+  node about 270 ns of a frame of 2 samples (`relay` `live 1x2`, box1). Lost: counts in
+  the first message of the body, because that message then comes from two blocks.
+  Decided by `laptop.architect`, 2026-10-19T19:14:38Z
+  (https://github.com/synnaxlabs/foundation/pull/3369#issuecomment-6275215145).
   PR 1c: `Reply::Stored { group, frames }` (kind 4, 13 bytes) counts the frames of one
   group on disk, and `Reply::Ended { group, end }` (kind 6, 6 bytes) ends the write of
   one group before each later outcome of that group, which is `Outcome::Ended`.
-  `Replies::new` takes the count of groups. The write is stored when each group ended
-  or has each taken frame on disk, and `Replies::unstored` gives each group that ended
-  with a taken frame not on disk. A reply that names no group of the write gives
-  `Error::Groups`, a reply of an ended group other than `Outcome::Ended` gives
-  `Error::Ended`, and an `Outcome::Ended` of a group that did not end gives
-  `Error::Unended`. In `program`, `Writer::stored` never waits on an ended group: it
-  gives `Error::Unstored` with the index place and the end of each such group, and the
-  writer goes on. `Writer::finish` gives it after `Finished`. Until PR 2, `hub` sends
-  only `Stored` of group 0 and never ends a group. Plan by `laptop.architect`
-  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114) and
-  https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269218439. A frame
-  that the home took after the last `Stored` of an ended group may not be on disk: a
-  commit due at the end can still reach the disk, and its `Stored` drops.
-  `Writer::stored` gives `Error::Unstored` once each other group is stored, and again
-  at each later call. OK with these two doc changes by `laptop.architect`
-  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269891329). Lost:
-  a `Stored` of the whole write, which a group that ends can hold back for ever.
+  `Replies::new` takes the count of groups. The write is stored when each group ended or
+  has each taken frame on disk, and `Replies::unstored` gives each group that ended with
+  a taken frame whose `Stored` did not come. A `Stored` or an `Ended` that names no
+  group of the write gives `Error::Groups`, a reply of an ended group other than
+  `Outcome::Ended` of its end gives `Error::Ended`, and an `Outcome::Ended` of a group
+  that did not end gives `Error::Unended`. In `program`, `Writer::stored` never waits on
+  an ended group: it gives `Error::Unstored` with the index place and the end of each
+  such group, and the writer goes on. `Writer::finish` gives it after `Finished`. Until
+  PR 2, `hub` sends only `Stored` of group 0 and never ends a group. A frame that the
+  home took after the last `Stored` of an ended group may not be on disk: a commit due
+  at the end can still reach the disk, and its `Stored` drops. `Writer::stored` gives
+  `Error::Unstored` once each other group is stored, and again at each later call. Plan
+  by `laptop.architect` at 2026-10-19T13:10:34Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114), and
+  plan of PR 1c by `box1.builder-4`
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269218439). OK by
+  `laptop.architect` at 2026-10-19T14:40:13Z
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6269891329), with
+  two doc changes: the doc of `Reply::Ended` states that a frame taken after the last
+  `Stored` of its group may not be on disk, and the doc of `Error::Unstored` states when
+  `stored` and `finish` give it. The end of one group in place of the end of the stream
+  (kind 9) and the meaning of `Unstored` (d) went to `laptop.monitor` as key choices in
+  a factory message, which has no link. Supersedes `Stored { frames }`, a count of the
+  frames of the stream
+  (https://github.com/synnaxlabs/foundation/pull/3161#issuecomment-6248601265), and the
+  `Ok` of `Writer::finish` once the last `Stored` covers each taken frame
+  (https://github.com/synnaxlabs/foundation/pull/3201#issuecomment-6251244519). Lost: a
+  `Stored` of the whole write, which a group that ends can hold back for ever. Lost: a
+  `Stored` bound for each group (the oldest frame whose outcome of that group is due),
+  which needs a walk of the queue of outcomes at each `Stored`.
   PR 2: the node opens one home writer for each group of a write, in group order, once
   the home of each index is this node, and the write no longer stops with `MALFORMED`
   for many indexes. This supersedes that stop in the amendment of #2718 PR 2 above. A
