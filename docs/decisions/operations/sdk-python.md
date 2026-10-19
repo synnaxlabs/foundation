@@ -98,6 +98,9 @@
   the module, with its parameters, defaults, bases, `final`, and doc, and that each
   annotation names a type (#3212 PR 1c,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6272502641). The
+  types of the stub are a key choice of kind 2 that `laptop.monitor` accepted at
+  2026-10-19T17:24Z, with the defaults that let `connect()` and `open_writer("pt_1")`
+  give no other argument. The
   feature `sim` adds test-only functions, so a test asserts that a panic on the caller's
   thread gives `PanicException`, not an abort (`laptop.architect-2`,
   2026-10-17T18:39:00Z,
