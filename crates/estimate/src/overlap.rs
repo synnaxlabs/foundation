@@ -54,8 +54,9 @@ impl Overlap {
 
     /// Narrows the overlap with one reading: at local time `at`, the offset is at
     /// least `low` and at most `high`. A reading older than the newest one narrows the
-    /// overlap from the newest local time on, widened by drift to that time. On an
-    /// error, the overlap does not change.
+    /// overlap from the newest local time on, widened by drift to that time; an edge
+    /// that drift widens past the range of a span is left out. On an error, the overlap
+    /// does not change.
     ///
     /// # Errors
     ///
