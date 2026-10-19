@@ -28,12 +28,11 @@
 //! and of the `sdk` lines, the caller spins for [`GAP`], so that the task parks before
 //! each send, as it does between the calls of a program.
 //!
-//! Each write must give `Taken`, and a frame past the ring of the home shard is
-//! `Lost`. A ring holds more writes when several share a commit, which depends on the
-//! host: a CI runner lost frame 10,795 of two lines on one node. So each line writes
-//! its 5,500 frames on a node of its own, with twice the disk budget of the node tests,
-//! where the ring holds 12,500 writes of a commit each (`sdk next held` on box1), also
-//! under `cargo test`, so that a test fails when they do not fit.
+//! Each write must give `Taken`: the node never trims the ring, and each write takes at
+//! most one record of 4,096 bytes, so the ring of 32 MiB of each shard of the bench
+//! takes the at most 5,500 writes of a line at any speed of the host. A frame past it
+//! is `Lost`. Each line runs on a node of its own, also under `cargo test`, so that a
+//! test fails when a line does not fit.
 //! Judge `sdk` against `program` from one run, and each leg against its p50: a p99 far
 //! over it is a wait for a wake.
 //!

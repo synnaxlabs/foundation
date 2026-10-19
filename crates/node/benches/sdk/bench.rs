@@ -27,8 +27,7 @@ const WARMUP: usize = 500;
 const GAP: Duration = Duration::from_micros(100);
 
 /// The spin of the caller after a write of [`Timed::Held`], which is longer than the
-/// time for its frame to reach the client's thread. Each such write is then a commit of
-/// its own, one record of the ring.
+/// time for its frame to reach the client's thread.
 const HELD: Duration = Duration::from_millis(1);
 
 /// What a call of a line times.
@@ -82,12 +81,11 @@ pub(crate) fn run() {
     }
 }
 
-/// The spans of `line` against a node of its own, whose disk budget is twice that of
-/// [`Rig::new`], so that its ring holds the 5,500 writes of a line also when each is a
-/// commit of its own.
+/// The spans of `line` against a node of its own, with four times the disk budget of
+/// [`Rig::new`]: 32 MiB for each core.
 fn alone<T>(line: impl FnOnce(&sdk::Node, sdk::Subject) -> T) -> T {
     let mut rig = Rig::new();
-    rig.disk *= 2;
+    rig.disk *= 4;
     rig.keep(POOL, rig.disk);
     let (mut rig, node, subject) = crate::plant::planted_on(rig);
     let spans = line(&node, subject);
