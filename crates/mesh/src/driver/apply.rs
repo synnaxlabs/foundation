@@ -113,9 +113,7 @@ impl Mesh {
         // base shares with the new tree, and `diff` never reads a shared chunk.
         put(&self.store, &self.pool, &chunks, &update.chunks).await?;
         let voters = self.group.borrow().raft.voters().clone();
-        let holders = self.spread(&voters, &listed).await;
-        let quorum = voters.quorum(|key| holders.contains(&key));
-        quorum.map_err(|short| refused(short.into()))?;
+        let holders = self.spread(&voters, &listed).await?;
         let listed = listed.into_iter().collect();
         self.settle_spec(base, root, listed, holders, homes).await
     }
@@ -212,7 +210,7 @@ fn unhomed<'a>(
 }
 
 // The error of a refused spec change.
-fn refused(cause: Refused) -> Error {
+pub(super) fn refused(cause: Refused) -> Error {
     match cause {
         Refused::Stale { base, pointer } => Error::Stale { base, pointer },
         Refused::Quorum { held, voters } => Error::Quorum { held, voters },

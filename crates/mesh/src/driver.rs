@@ -18,7 +18,7 @@ use env::tasks::{self, Tasks};
 use raft::{Body, Data, Entry, Position, Raft, Ready, Start, Voters};
 use spec::Pointer;
 use spec::tree::Chunks;
-use transport::{Code, Session, Transport};
+use transport::{Address, Code, Session, Transport};
 use types::channel;
 use types::digest::Digest;
 use types::ed25519::{PrivateKey, PublicKey};
@@ -674,6 +674,25 @@ impl Watch {
     }
 }
 
+// The slot of a call in `Group::calls`, which it frees when it drops.
+struct Call<'a> {
+    group: &'a RefCell<Group>,
+    slot: u64,
+}
+
+impl<'a> Call<'a> {
+    fn new(group: &'a RefCell<Group>) -> Self {
+        let slot = group.borrow_mut().slot();
+        Self { group, slot }
+    }
+}
+
+impl Drop for Call<'_> {
+    fn drop(&mut self) {
+        self.group.borrow_mut().calls.remove(&self.slot);
+    }
+}
+
 // The state of a watch that gives a value each time its key `K` changes: its waker's
 // place in `Group::watches`, which it frees when it drops, and the last key given.
 struct Slot<K> {
@@ -928,6 +947,14 @@ impl Group {
     // Whether `key` votes in one half of the configuration, at least.
     fn voter(&self, key: node::Key) -> bool {
         self.raft.voters().contains(key)
+    }
+
+    // The public key of member `key` and the addresses of its card, as the group
+    // holds them now.
+    fn contact(&self, key: node::Key) -> Option<(PublicKey, Vec<Address>)> {
+        let member = self.state.member(key)?;
+        let addresses = member.card.card().addresses.as_slice().to_vec();
+        Some((member.public_key(), addresses))
     }
 
     // Gives `raft` an input, and wakes each call when the leader or the term changes.
@@ -1399,6 +1426,7 @@ mod tests {
     use types::node::SealKey;
     use wire::Protocol;
 
+    use super::peer::within;
     use super::*;
     use crate::card;
     use crate::change::{CHUNKS_MAX, Unknown};
@@ -1782,7 +1810,15 @@ mod tests {
                             if silent {
                                 std::future::pending::<()>().await;
                             }
-                            drop(blob::peer::serve(&mesh.store, incoming).await);
+                            // A test arms each fault of the files.
+                            match blob::peer::serve(&mesh.store, incoming).await {
+                                Ok(())
+                                | Err(blob::peer::Error::Stream(_))
+                                | Err(blob::peer::Error::Store(blob::Error::Files(
+                                    _,
+                                ))) => {}
+                                Err(error) => panic!("a voter refused a put: {error}"),
+                            }
                             return;
                         }
                         assert_eq!(protocol, Protocol::Mesh);
@@ -2762,23 +2798,6 @@ mod tests {
         let last = Position::default();
         assert_eq!(asked.body, Body::PreVote { last });
         asked.term
-    }
-
-    /// What `future` gives, or `None` when it waits for longer than `limit`.
-    async fn within<F: Future>(
-        clock: &Clock,
-        limit: Span,
-        future: F,
-    ) -> Option<F::Output> {
-        let mut future = pin!(future);
-        let mut end = clock.sleep(limit);
-        poll_fn(|cx| {
-            if let Poll::Ready(output) = future.as_mut().poll(cx) {
-                return Poll::Ready(Some(output));
-            }
-            Pin::new(&mut end).poll(cx).map(|()| None)
-        })
-        .await
     }
 
     /// Gives the output of `future` when it does not wait.

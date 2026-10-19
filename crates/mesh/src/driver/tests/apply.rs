@@ -776,6 +776,114 @@ fn an_apply_whose_one_live_peer_never_answers_gives_quorum_at_the_deadline() {
     assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
 }
 
+// The follower `p` sends no `raft` message to the follower `q`, which restarts, and
+// the leader holds each blob stream with no answer. So the apply of `p` commits only
+// when its put reaches the new process of `q`.
+#[test]
+fn an_apply_of_a_follower_counts_a_follower_that_restarted() {
+    let mut cluster = Cluster::new(4);
+    cluster.script(home_to);
+    cluster.start();
+    cluster.run(seconds(5));
+    let leader = cluster.take().0[0];
+    let mut followers = IDS.into_iter().filter(|&id| id != leader);
+    let (p, q) = (followers.next().unwrap(), followers.next().unwrap());
+    let node = cluster.node(q).clone();
+    cluster.sim.crash(&node, Crash::Power);
+    cluster.start_voter(q);
+    cluster.run(seconds(5));
+    cluster.board.lock().unwrap().silent = Some(leader);
+    let definitions = create_subjects(&["plant.a"], 1);
+    cluster.change(p, base(), &definitions);
+    cluster.run(seconds(5));
+    let moved = pointer(1, &definitions);
+    assert_eq!(cluster.board().applied, [(p, moved, Ok(moved))]);
+}
+
+// The cards of voters 2 and 3 have addresses where no node answers, so the puts
+// wait in their dials.
+#[test]
+fn an_apply_whose_puts_wait_gives_stopped_as_soon_as_the_group_stops() {
+    let entries = solo_stored(|node, tasks| async move {
+        let mesh = Mesh::start(dialed_at(&node, &tasks, 1, PORT, &IDS, &IDS).await);
+        let mesh = mesh.await.unwrap();
+        let clock = node.clock();
+        let definitions = create_subjects(&["plant.a"], 1);
+        let mut apply = pin!(mesh.apply(base(), definitions, BTreeMap::new()));
+        assert_eq!(within(&clock, seconds(1), apply.as_mut()).await, None);
+        let stopped = stop(&node, &mesh);
+        let given = within(&clock, Span::MILLISECOND, apply).await;
+        assert_eq!(given, Some(Err(Error::Stopped(stopped))));
+    });
+    assert_eq!(specs(&entries), []);
+}
+
+// The store of voter 2 fails the put of the chunks, so the proposer is the one holder
+// of the two voters.
+#[test]
+fn an_apply_whose_one_peer_fails_its_put_gives_quorum() {
+    let mut cluster = Cluster::new(0);
+    cluster.board.lock().unwrap().learners = [3].into();
+    cluster.start();
+    cluster.run(seconds(5));
+    cluster
+        .node(2)
+        .fail_file(Path::new(BLOB), Operation::SyncDir);
+    cluster.change(1, base(), &create_subjects(&["plant.a"], 1));
+    cluster.run(seconds(1));
+    let quorum = Error::Quorum { held: 1, voters: 2 };
+    assert_eq!(cluster.board().applied, [(1, base(), Err(quorum))]);
+}
+
+// The put on the peers reads the chunk files of the proposer, which fail.
+#[test]
+fn an_apply_whose_store_fails_a_read_for_a_peer_gives_the_error_of_the_store() {
+    let mut cluster = Cluster::new(0);
+    cluster.start();
+    cluster.run(seconds(5));
+    let definitions = create_subjects(&["plant.a"], 1);
+    let root = spec::region::tree(&mut Chunks::default(), &definitions).root;
+    let path = Path::new(BLOB).join(root.to_string());
+    cluster.node(1).fail_file(&path, Operation::ReadAt);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(5));
+    let cause = files::Error::Io {
+        path,
+        operation: Operation::ReadAt,
+        code: 5,
+    };
+    let failed = Error::Blob(blob::Error::Files(cause));
+    assert_eq!(cluster.board().applied, [(1, base(), Err(failed))]);
+}
+
+// Voter 1 leaves 127 voters for voter 128. With no chunk to put, each put ends `Ok`
+// at once, in the order of the keys.
+#[test]
+fn spread_in_a_joint_configuration_counts_a_majority_of_each_half() {
+    solo(|node, tasks| async move {
+        let members: Vec<u8> = (1..=128).collect();
+        let mesh = open(&node, &tasks, 1, &members, &[1]).await.unwrap();
+        let keys = |ids: std::ops::RangeInclusive<u8>| ids.map(key).collect();
+        let voters = Voters {
+            incoming: keys(2..=128),
+            outgoing: keys(1..=127),
+        };
+        assert_eq!(mesh.spread(&voters, &[]).await, Ok(keys(1..=65)));
+    });
+}
+
+#[test]
+fn spread_on_a_node_that_is_not_a_voter_counts_only_the_voters() {
+    solo(|node, tasks| async move {
+        let mesh = open(&node, &tasks, 1, &[1, 2, 3, 4], &[1]).await.unwrap();
+        let voters = Voters {
+            incoming: [2, 3, 4].map(key).into(),
+            outgoing: BTreeSet::new(),
+        };
+        assert_eq!(mesh.spread(&voters, &[]).await, Ok([2, 3].map(key).into()));
+    });
+}
+
 // Each chunk takes a round trip of 200 ms, so one call of all 1024 chunks would miss
 // the deadline.
 #[test]
