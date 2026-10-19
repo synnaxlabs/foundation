@@ -13,7 +13,7 @@ use wire::hub::FromHome;
 use wire::hub::client::{
     self, Challenge, Mode, Open, Place, Places, Read, Request, Response, Signed, write,
 };
-use wire::hub::write::{Head, Reply};
+use wire::hub::write::{Head, Reply, Time};
 
 use crate::net::{HOME, NODE, own_pool, public_key};
 
@@ -121,12 +121,13 @@ impl Stream {
         }
     }
 
-    /// Sends one frame of a write: `head`, the run of `ends` in one message, the run
-    /// of `counts` in one message when it is not empty, and `body` in messages of 4 KiB.
+    /// Sends one frame of a write of one group of `count` samples: `head`, the run of
+    /// `ends` in one message, `count` in one message when the head is not of
+    /// [`Time::Node`], and `body` in messages of 4 KiB.
     pub(crate) async fn frame(
         &mut self,
         head: Head,
-        counts: &[u32],
+        count: u32,
         ends: &[(u32, u32)],
         body: &[u8],
     ) {
@@ -136,9 +137,8 @@ impl Stream {
         let mut out = vec![0; ends.len() * wire::hub::ends::LEN];
         wire::hub::ends::encode(ends.iter().copied(), &mut out);
         self.send(&out).await;
-        if !counts.is_empty() {
-            let out: Vec<u8> = counts.iter().flat_map(|n| n.to_le_bytes()).collect();
-            self.send(&out).await;
+        if head.time != Time::Node {
+            self.send(&count.to_le_bytes()).await;
         }
         for part in body.chunks(1 << 12) {
             self.send(part).await;

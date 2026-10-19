@@ -313,7 +313,7 @@ async fn program(
             for _ in 0..FRAMES {
                 let (ends, body) = frame(case, &start.places, stamp);
                 stamp += i64::from(case.count);
-                stream.frame(head(case), &counts(case), &ends, &body).await;
+                stream.frame(head(case), case.count, &ends, &body).await;
             }
             progress.sent.fetch_add(FRAMES, Ordering::Relaxed);
             let mut outcomes = 0;
@@ -359,15 +359,6 @@ fn head(case: &Case) -> Head {
         },
         form: Form::Raw,
         series: case.series,
-    }
-}
-
-/// The run of counts of each frame of `case`: none for a head that the node stamps.
-fn counts(case: &Case) -> Vec<u32> {
-    if case.node {
-        Vec::new()
-    } else {
-        vec![case.count]
     }
 }
 
