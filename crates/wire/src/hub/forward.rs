@@ -358,6 +358,17 @@ mod tests {
         }
 
         #[test]
+        fn refuses_too_many_places_before_a_bad_place() {
+            assert_eq!(
+                decode(&mut decoder(1, 4), &encode_places(&[1, 0])),
+                Err(Error::Run {
+                    items: 2,
+                    remain: 1
+                })
+            );
+        }
+
+        #[test]
         fn refuses_a_message_after_the_run_ended() {
             let mut run = decoder(1, 4);
             assert_eq!(decode(&mut run, &encode_places(&[0])), Ok(vec![0]));
