@@ -85,16 +85,29 @@ fn monitored(
     sampling: Span,
     limit: impl FnOnce(&Peer<'_>) + Send + 'static,
 ) -> Subscribed {
+    limited(count, sampling, None, limit)
+}
+
+/// [`monitored`], with a client whose receive buffer is `receive` bytes, or the
+/// default of open62541 for `None`.
+fn limited(
+    count: u32,
+    sampling: Span,
+    receive: Option<u32>,
+    limit: impl FnOnce(&Peer<'_>) + Send + 'static,
+) -> Subscribed {
     run(0, async move |node| {
         serve(&node, 4, async |mut peer| {
             peer.server.set_publishing(10.0);
             limit(&peer);
             for index in 0..count {
-                peer.server.add_scalar(&numbered(index), Value::U32(index));
+                peer.server
+                    .add_scalar(&numbered(index), Value::F64(f64::from(index)));
             }
             let nodes: Vec<Node> = (0..count).map(numbered).collect();
             let counts = peer.server.count();
-            let mut client = peer.connected().await;
+            let url = peer.url.clone();
+            let mut client = peer.limited(&url, receive, None).await;
             let revised = client.subscribe(&nodes, sampling).await;
             let calls = counts.monitors();
             let mut changes = Vec::new();
@@ -117,7 +130,12 @@ fn monitored(
 /// The value of each of `count` nodes of [`numbered`], by index.
 fn numbers(count: u32) -> Vec<(usize, Result<Value, Fault>)> {
     (0..count)
-        .map(|index| (usize::try_from(index).expect("fits"), Ok(Value::U32(index))))
+        .map(|index| {
+            (
+                usize::try_from(index).expect("fits"),
+                Ok(Value::F64(f64::from(index))),
+            )
+        })
         .collect()
 }
 
@@ -271,6 +289,16 @@ fn a_publish_answer_holds_the_most_changes_that_fit_the_client() {
         (most, fits)
     });
     assert_eq!(fits, (true, false), "{most}");
+}
+
+/// A client with a receive buffer of 8 KiB gets the first value of each of 3000 items
+/// with no error, so each Publish answer fits it.
+#[test]
+fn each_publish_answer_fits_a_small_client() {
+    let (revised, _, changes) = limited(3000, SAMPLING, Some(8192), |peer| {
+        peer.server.set_per_publish(u32::MAX);
+    });
+    assert_eq!((revised, changes), (Ok(made(3000)), numbers(3000)));
 }
 
 /// A queue of 2 with 3 changes in one publishing interval drops the oldest, and the
