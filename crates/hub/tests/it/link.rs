@@ -727,9 +727,9 @@ fn stops_a_request_whose_body_is_over_the_room_of_the_hub() {
     );
     assert_eq!(
         over.to_string(),
-        "16777216 bytes of a body or of the ends or names of a write do not fit under \
-         the cap of 33554432 bytes: the open requests, reads, and writes of the hub \
-         hold 16777217 bytes"
+        "16777216 bytes of a body or of the ends, counts, or names of a write do not \
+         fit under the cap of 33554432 bytes: the open requests, reads, and writes of \
+         the hub hold 16777217 bytes"
     );
 }
 
@@ -855,9 +855,9 @@ fn takes_a_request_of_another_subject_while_a_body_trickles() {
     );
     assert_eq!(
         over.to_string(),
-        "1 bytes of a body or of the ends or names of a write do not fit under the \
-         share of 16777216 bytes of subject ops.agent: its open requests, reads, and \
-         writes hold 16777216 bytes"
+        "1 bytes of a body or of the ends, counts, or names of a write do not fit \
+         under the share of 16777216 bytes of subject ops.agent: its open requests, \
+         reads, and writes hold 16777216 bytes"
     );
 }
 

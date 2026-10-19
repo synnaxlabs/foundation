@@ -214,13 +214,14 @@
   (https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6246212678).
   Amended (#2718 PR 2): the node serves a write stream at the home of its index. The
   open holds its `length` in the hub's body budget until it decodes. Then the stream
-  holds 16 bytes for each channel of the open and one for its index until the stream
-  ends, and its decoded names, 16 bytes and the length of each, until it sends its
-  places. Ends or names that do not fit stop with `BUSY` before the writer opens (MEMORY
-  BOUNDS). A write whose channels are on more than one index stops with `MALFORMED`
-  before the node waits for a home, so a refused open takes no control at the gate. A
-  frame of `Time::Node` gets mesh time, or 1 ns after the last stamp that the node gave
-  a frame of the stream that the home took or lost, when mesh time is not after it.
+  holds 20 bytes for each place of the open (16 for its ends and 4 for its count), as
+  PR 1b states, until the stream ends, and its decoded names, 16 bytes and the length
+  of each, until it sends its places. Ends or names that do not fit stop with `BUSY`
+  before the writer opens (MEMORY BOUNDS). A write whose channels are on more than one
+  index stops with `MALFORMED` before the node waits for a home, so a refused open
+  takes no control at the gate. A frame of `Time::Node` gets mesh time, or 1 ns after
+  the last stamp that the node gave a frame of the stream that the home took or lost,
+  when mesh time is not after it.
   After each commit, the node sends `Stored { frames }` with the count of frames of the
   stream through the last frame that it took before it called the commit. Refused and
   lost frames count, and frames of both paths count in the one count, so a program drops
