@@ -1103,18 +1103,20 @@
   that its check allocates, so no refusal comes after that allocation. A check refuses
   only on its own status, and any other status, such as `BadOutOfMemory` of the trust
   load when a push, the BIO, or the stack fails, gives `client::Error::Failed`, as the
-  realloc of the policies in `shim_add_policies` does. Where the release gives one
-  status for out of memory and the cause (`BadInvalidArgument` of the policies when
+  realloc of the policies in `shim_add_policies` does. Where a check gives one result
+  for out of memory and the cause (`BadCertificateInvalid` of the policies when
+  `UA_OpenSSL_LoadCertificate` gives NULL, `BadInvalidArgument` of the policies when
   `i2d_X509` fails, the key pair check, the URI check when `X509_get_ext_d2i` gives
   NULL, and the trust load when `d2i_X509` or `PEM_bytes_read_bio` fails, which gives
-  `Invalid`, or `Empty` at the first DER certificate), the refusal names the cause, and
-  the time check gives `Failed(BadCertificateInvalid)` when its load of the certificate
-  fails (`laptop.monitor`, 2026-10-19 14:46 UTC,
+  `Invalid`, or `Empty` at the first DER certificate, as the load does not read the
+  `ERR_R_MALLOC_FAILURE` of aws-lc, #3391), the refusal names the cause, and the time
+  check gives `Failed(BadCertificateInvalid)` when its load of the certificate fails
+  (`laptop.monitor`, 2026-10-19 14:46 UTC,
   https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270025607, item 2;
-  for the trust load, 2026-10-19 16:56 UTC,
-  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6272561677;
   `laptop.architect-2`, 2026-10-19 14:49 UTC,
-  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270087670). This
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6270087670; for the
+  trust load, `laptop.monitor`, 2026-10-19 16:56 UTC,
+  https://github.com/synnaxlabs/foundation/pull/3371#issuecomment-6272561677). This
   supersedes the order of the checks and the abort on out of memory of step 3 of
   https://github.com/synnaxlabs/foundation/issues/2934#issuecomment-6266751872. The own
   certificate is valid from `notBefore` up to, not at, `notAfter`, to the second, at the
