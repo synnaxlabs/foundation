@@ -277,6 +277,14 @@ pub enum Error {
         /// The index that it names.
         index: u32,
     },
+    /// A place of a read names an index other than that of place 0: a read has one
+    /// index.
+    Indexes {
+        /// The place.
+        place: u32,
+        /// The index that it names.
+        index: u32,
+    },
     /// The sample type of a place does not read.
     Sample(text::Error<sample::Error>),
     /// The name of a place does not read.
@@ -365,6 +373,11 @@ impl fmt::Display for Error {
             Self::Index { place, index } => write!(
                 f,
                 "place {place} names place {index} as its index, which is not an index"
+            ),
+            Self::Indexes { place, index } => write!(
+                f,
+                "place {place} names place {index} as its index, and a read has the one \
+                 index of place 0"
             ),
             Self::Sample(cause) => {
                 write!(f, "the sample type of a place does not read: {cause}")

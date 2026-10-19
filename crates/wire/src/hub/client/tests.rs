@@ -698,6 +698,10 @@ fn names_each_error() {
             "place 2 names place 3 as its index, which is not an index",
         ),
         (
+            Error::Indexes { place: 2, index: 3 },
+            "place 2 names place 3 as its index, and a read has the one index of place 0",
+        ),
+        (
             Error::Sample(text::Error::Parse(sample::Error::Syntax)),
             "the sample type of a place does not read: expected a sample type such as \
              f64, f32[3], list<u8, 16>, string, or bytes",

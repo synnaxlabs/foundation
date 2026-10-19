@@ -584,8 +584,9 @@ fn refuses_a_read_finished_before_it_opened() {
     }
 }
 
-/// Places that name one channel twice, also apart, or that `wire` refuses, are not
-/// valid: the program stops the read as `MALFORMED`.
+/// Places that name one channel twice, also apart, or that `wire` refuses, such as
+/// places of two indexes, are not valid: the program stops the read as `MALFORMED`,
+/// with no panic.
 #[test]
 fn stops_a_read_whose_places_are_not_valid() {
     let twice = vec![place(1, STAMP, "time", 0), place(1, STAMP, "again", 0)];
@@ -595,11 +596,22 @@ fn stops_a_read_whose_places_are_not_valid() {
         place(10, I64, "again", 1),
     ];
     let unstamped = vec![place(10, I64, "a", 1), place(1, I64, "time", 1)];
+    let two = vec![
+        place(10, I64, "a", 1),
+        place(1, STAMP, "time", 1),
+        place(20, I64, "b", 3),
+        place(2, STAMP, "other", 3),
+    ];
     let repeated =
         |n| Error::Message(wire::hub::client::Error::Repeated { key: key(n) });
     let cases = [
         (414, twice, repeated(1)),
         (418, apart, repeated(10)),
+        (
+            424,
+            two,
+            Error::Message(wire::hub::client::Error::Indexes { place: 2, index: 3 }),
+        ),
         (
             419,
             unstamped,

@@ -34,7 +34,7 @@ impl Reader {
     pub fn new(mode: Mode) -> Self {
         Self {
             latest: mode == Mode::Latest,
-            opening: Opening::default(),
+            opening: Opening::read(),
         }
     }
 
@@ -45,7 +45,8 @@ impl Reader {
     /// # Errors
     ///
     /// Those of [`write::Opening::decode`](crate::hub::client::write::Opening::decode),
-    /// for the places of the read.
+    /// for the places of the read, where a place also breaks a rule when its index is
+    /// not that of place 0: [`Error::Indexes`].
     ///
     /// # Panics
     ///
