@@ -28,20 +28,8 @@
   base root whose chunk is not a tree node is a base tree that the store cannot give.
   The node puts each chunk of the new tree in its store, not only the listed ones,
   because `diff` never reads a chunk that the two trees share, so a chunk that the store
-  lost is found only by a put. On `Ok`, a put of each chunk of the new tree has
-  returned. The node then puts the listed chunks with `blob::peer::put` on each other
-  voter of both halves of `raft.voters()`, all at once, in calls of at most 32 chunks
-  in order on one session, each of which ends after `peer::DEADLINE` (10 s on the `env`
-  clock) with no result. A holder is the node when it is a voter, or a voter whose
-  calls each ended `Ok`; a failed dial or call leaves a voter no holder. A voter counts
-  only while a half that holds it lacks a majority, so the holders are at most the sum
-  of the majorities of the halves, which the voter bound of SPEC CHANGE keeps within
-  `HOLDERS_MAX`. Once the holders are a majority of each half, the node
-  drops the puts still open and proposes. When the holders are not a majority of each
-  half once each put ended, or at the apply, the call gives `Error::Quorum { held,
-  voters }` for the first half that lacks one, the incoming half first, and proposes
-  nothing before the apply. Decided by `laptop.architect`, 2026-10-19T17:02:16Z
-  (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202). BLOB STORE gives what a put
+  lost is found only by a put.
+  On `Ok`, a put of each chunk of the new tree has returned. BLOB STORE gives what a put
   holds after a fault. Decided by `laptop.architect`, 2026-10-08T12:13:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551), which
   supersedes the postcondition of item 2 of
@@ -50,7 +38,22 @@
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059781924), which
   supersedes the second sentence of the SPEC APPLY text of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059603551. A put
-  gives `Error::Pool` or `Error::Blob` on a failure. `Mesh::open` puts each chunk of the
+  gives `Error::Pool` or `Error::Blob` on a failure. The node then puts the listed
+  chunks with `blob::peer::put` on each other voter of both halves of `raft.voters()`,
+  all at once, in calls of at most 32 chunks in order on one session, each of which
+  ends after `peer::DEADLINE` (10 s on the `env` clock) with no result. A holder is the
+  node when it is a voter, or a voter whose calls each ended `Ok`; a failed dial or call
+  leaves a voter no holder. A voter counts only while a half that holds it lacks a
+  majority, so the holders are at most the sum of the majorities of the halves, which
+  the voter bound of SPEC CHANGE keeps within `HOLDERS_MAX`. Once the holders are a
+  majority of each half, the node drops the puts still open and proposes. When the
+  holders are not a majority of each half once each put ended, or at the apply, the
+  call gives `Error::Quorum { held, voters }` for the first half that lacks one, the
+  incoming half first, and proposes nothing before the apply. Decided by
+  `laptop.architect`, 2026-10-19T17:02:16Z
+  (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202), which
+  supersedes the one holder and the count before the put of 6059603551.
+  `Mesh::open` puts each chunk of the
   founding tree in the store. A change that the state refuses as stale gives
   `Error::Stale { base, pointer }`. A call learns the refusal of its own entry from
   `Applied`, which keeps the refusal of each applied entry above the lowest open floor
