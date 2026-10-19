@@ -49,8 +49,8 @@ enum Record {
     /// The open writer with this key.
     Open(Key),
     /// A writer with no open claim: it closed after the record, or the gate
-    /// recovered it.
-    Closed(Writer),
+    /// recovered it. Boxed, as it is rare and a `Writer` is large.
+    Closed(Box<Writer>),
 }
 
 #[derive(Debug)]
@@ -71,7 +71,7 @@ enum Seat {
     },
     /// The holder from the index log after a restart, not yet reopened.
     Recovered {
-        writer: Writer,
+        writer: Box<Writer>,
         until: Monotonic,
     },
 }
@@ -97,10 +97,10 @@ impl Gate {
     pub fn recover(last: Writer, now: Monotonic, grace: Lease) -> Self {
         Self {
             seat: Seat::Recovered {
-                writer: last.clone(),
+                writer: Box::new(last.clone()),
                 until: deadline(now, grace),
             },
-            record: Some(Record::Closed(last)),
+            record: Some(Record::Closed(Box::new(last))),
             ..Self::default()
         }
     }
@@ -152,7 +152,7 @@ impl Gate {
         let i = self.position(key);
         let claim = self.claims.remove(i);
         if matches!(self.record, Some(Record::Open(open)) if open == key) {
-            self.record = Some(Record::Closed(claim.writer));
+            self.record = Some(Record::Closed(Box::new(claim.writer)));
         }
         if matches!(self.seat, Seat::Held { key: held, .. } if held == key) {
             self.elect(now);
@@ -258,7 +258,7 @@ impl Gate {
         match &self.seat {
             Seat::Empty => None,
             Seat::Held { key, .. } => Some(&self.claim(*key).writer),
-            Seat::Recovered { writer, .. } => Some(writer),
+            Seat::Recovered { writer, .. } => Some(writer.as_ref()),
         }
     }
 
@@ -313,7 +313,7 @@ impl Gate {
     fn last(&self) -> Option<&Writer> {
         match self.record.as_ref()? {
             Record::Open(key) => Some(&self.claim(*key).writer),
-            Record::Closed(writer) => Some(writer),
+            Record::Closed(writer) => Some(writer.as_ref()),
         }
     }
 
