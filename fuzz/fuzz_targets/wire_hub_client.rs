@@ -153,7 +153,7 @@ fn unkinded(message: &[u8]) {
     match (message.first(), Reply::decode(message)) {
         (_, Ok(decoded)) => assert_eq!(reply(&decoded), message, "the reply changed"),
         (None, Err(error)) => assert_eq!(error, hub::Error::Empty),
-        (Some(&kind), Err(error)) if !(1..=5).contains(&kind) => {
+        (Some(&kind), Err(error)) if !(1..=6).contains(&kind) => {
             assert_eq!(error, hub::Error::Kind { kind }, "{message:?}");
         }
         (Some(_), Err(error)) => assert!(

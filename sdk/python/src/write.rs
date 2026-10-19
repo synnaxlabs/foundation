@@ -865,8 +865,8 @@ np.array = guard(np.array, array)
 
     /// The end of the one group of a writer raises `Stopped` with the code of a stream
     /// that the node stopped for the same cause. It calls the map, not `write`: no
-    /// node gives `Outcome::Ended` until PR 2 of #3283, which adds the test through
-    /// `write`.
+    /// node gives `Outcome::Ended` until PR 2 of #3283, and PR 4 of #3283 adds the
+    /// test through `write`.
     #[test]
     fn ended_raises_stopped_with_the_code_of_each_end() {
         Python::initialize();
