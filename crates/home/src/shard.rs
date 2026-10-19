@@ -1623,12 +1623,12 @@ mod tests {
 
     /// The bytes of a handoff to `subject` at authority 1.
     fn handoff_to(subject: &str) -> Vec<u8> {
-        handoff_at(1, subject)
+        handoff_at(1, VIA, subject)
     }
 
-    /// The bytes of a handoff to `subject` at `authority`, through [`VIA`].
-    fn handoff_at(authority: u8, subject: &str) -> Vec<u8> {
-        let via = VIA.as_u128().to_le_bytes();
+    /// The bytes of a handoff to `subject` at `authority`, through `via`.
+    fn handoff_at(authority: u8, via: node::Key, subject: &str) -> Vec<u8> {
+        let via = via.as_u128().to_le_bytes();
         [&[authority], &via[..], subject.as_bytes()].concat()
     }
 
@@ -2559,7 +2559,7 @@ mod tests {
                 .expect("synced");
             shard.committed().await.expect("the commit ends");
             let ring = test.ring().await;
-            let to_y = handoff_at(3, "subject-y");
+            let to_y = handoff_at(3, VIA, "subject-y");
             assert_eq!(find(&ring, &to_y).len(), 1, "y takes index 2");
             assert_eq!(
                 find(&ring, &to_x).len(),
@@ -2792,7 +2792,7 @@ mod tests {
             assert_eq!(shard.write(b, LIVE, again), Ok(&[applied(0, 1, 1)][..]));
             shard.committed().await.expect("the commit ends");
             let ring = test.ring().await;
-            let handoffs = find(&ring, &handoff_at(2, &subject));
+            let handoffs = find(&ring, &handoff_at(2, VIA, &subject));
             assert_eq!(handoffs.len(), 1, "only the index of the frame records it");
             let series = find(&ring, &key(Slot::new(1)).as_u128().to_le_bytes());
             assert_eq!(series.len(), 1, "the lost frame stores nothing");
@@ -2821,7 +2821,7 @@ mod tests {
             assert_eq!(shard.write(b, LIVE, live), Ok(&[lost(0, 0, 1)][..]));
             drop(blocks);
             shard.committed().await.expect("the commit ends");
-            let handoff = handoff_at(2, &subject);
+            let handoff = handoff_at(2, VIA, &subject);
             assert_eq!(find(&test.ring().await, &handoff).len(), 1);
         });
     }
@@ -3114,7 +3114,7 @@ mod tests {
                 Ok(&[applied(0, 1, 1), applied(2, 1, 1)][..])
             );
             shard.committed().await.expect("the commit ends");
-            let to_c = [&[1], &c.as_u128().to_le_bytes()[..], b"a"].concat();
+            let to_c = handoff_at(1, c, "a");
             assert_eq!(find(&test.ring().await, &to_c).len(), 2);
         })
         .expect("the run after the cut ends");
@@ -3424,7 +3424,7 @@ mod tests {
             drop(blocks);
             shard.close_writer(c);
             shard.committed().await.expect("the commit ends");
-            let to_b = handoff_at(2, "subject-b");
+            let to_b = handoff_at(2, VIA, "subject-b");
             let handoffs = find(&test.ring().await, &to_b);
             assert_eq!(handoffs.len(), 2, "the close of c records each index of b");
         });
@@ -3809,7 +3809,7 @@ mod tests {
         let ended = sim.run_on(&node, |node, tasks| async move {
             let test = Test::new(node, tasks);
             let buffer = test.create_buffer(AREA, BODY_MAX, 4).await;
-            let damaged = [&handoff_at(1, "")[..], &[0xff]].concat();
+            let damaged = [&handoff_at(1, VIA, "")[..], &[0xff]].concat();
             let body = test.pool.copy(&damaged).expect("the pool has a block");
             let record = Entry {
                 index: key(Slot::new(0)),
@@ -4019,7 +4019,7 @@ mod tests {
             let b = shard.open_writer(writer("b", 2, &set)).expect("synced");
             shard.committed().await.expect("the commit ends");
             assert_eq!(
-                find(&test.ring().await, &handoff_at(2, "b")).len(),
+                find(&test.ring().await, &handoff_at(2, VIA, "b")).len(),
                 0,
                 "b waits"
             );
@@ -4030,7 +4030,7 @@ mod tests {
             assert_eq!(shard.write(b, LIVE, empty), Ok(&[applied(0, 2, 0)][..]));
             shard.committed().await.expect("the commit ends");
             assert_eq!(
-                find(&test.ring().await, &handoff_at(2, "b")).len(),
+                find(&test.ring().await, &handoff_at(2, VIA, "b")).len(),
                 1,
                 "the empty write recorded the handoff to b"
             );
