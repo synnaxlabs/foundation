@@ -95,16 +95,15 @@ impl Mesh {
 
     // Puts `digests` on `to` in calls of at most `CHUNKS` chunks, in order, and gives
     // why the first call that did not end `Ok` within `DEADLINE`, its dials included,
-    // failed. A call whose session ended dials once more: a session to a process of
-    // `to` that restarted ends only at its first use.
+    // failed. A call that failed on a session that ended dials once more: a session
+    // to a process of `to` that restarted ends only at its first use.
     async fn put_on(&self, to: node::Key, digests: &[Digest]) -> Result<(), Miss> {
         for call in digests.chunks(CHUNKS) {
             let put = async {
                 let session = self.dial(to).await?;
-                let first = blob::peer::put(&self.store, &session, call).await;
-                let broken = matches!(first, Err(blob::peer::Error::Stream(_)));
-                if !broken || session.ended().is_none() {
-                    return first.map_err(Miss::Put);
+                match blob::peer::put(&self.store, &session, call).await {
+                    Err(_) if session.ended().is_some() => {}
+                    first => return first.map_err(Miss::Put),
                 }
                 let session = self.dial(to).await?;
                 let put = blob::peer::put(&self.store, &session, call).await;
