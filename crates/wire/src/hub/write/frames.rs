@@ -265,13 +265,12 @@ impl Frames {
     /// Starts the run of counts of a draft or a skip: one count for each range. A
     /// head of [`Time::Node`] has none, and each of its ranges holds 1.
     fn drafted(&mut self) -> Step {
-        let ranges = self.assembly.groups().count();
         match self.head.expect("invariant: a draft has a head").time {
             Time::Frame(_) => {
-                self.counts = u32::try_from(ranges)
+                self.counts = u32::try_from(self.assembly.ranges())
                     .expect("invariant: a frame has at most u32::MAX groups");
             }
-            Time::Node => self.assembly.count(0, std::iter::repeat_n(1, ranges)),
+            Time::Node => self.assembly.count(0, std::iter::repeat(1)),
         }
         self.counted()
     }
