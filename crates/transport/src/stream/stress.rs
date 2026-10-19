@@ -500,7 +500,8 @@ fn check(plan: &Plan, report: &Report) -> Result<(), String> {
     Ok(())
 }
 
-/// One test for each case: a run that failed before #1456.
+/// One test for each case: a run that failed before #1456, or a plan of a red-team
+/// campaign (#1712).
 macro_rules! cases {
     ($($name:ident: $case:literal,)*) => {$(
         #[test]
