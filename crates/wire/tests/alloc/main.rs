@@ -268,8 +268,7 @@ fn write_frames() {
     .encode(&mut head);
     let mut run = [0; 2 * ends::LEN];
     ends::encode([(0, 16), (1, 32)], &mut run);
-    let mut counts = [0; write::counts::LEN];
-    write::counts::encode([2], &mut counts);
+    let counts = 2_u32.to_le_bytes();
     let body = [7; 32];
     for round in 0..2 {
         let (steps, allocations) = ALLOCATOR.count(|| {

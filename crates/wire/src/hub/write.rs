@@ -5,8 +5,9 @@
 //!
 //! - [`Head`]: kind 7, the time (`u8`, live 0, backfill 1, node 2), the form (`u8`, raw
 //!   0, encoded 1), and the count of series (`u32`).
-//! - [`counts`]: after the run of ends, a run of the samples of each series of each
+//! - The run of counts: after the run of ends, the samples of each series of each
 //!   present group (`u32`), in group order. A head of [`Time::Node`] has none.
+//! - [`Lead`]: the head, the run of ends, and the run of counts of one frame.
 //! - [`Reply`]: taken 1 or lost 2, then the frame (`u64`), the group (`u32`), the seq
 //!   (`u64`), and the count (`u32`); refused 3, then the frame, the group, and the code
 //!   (`u8`, waiting 1, reserved 2, expired 3, order 4, codec 5, full 6, large 7); ended
@@ -14,10 +15,13 @@
 //!   then the count of frames that it covers (`u64`).
 
 use std::collections::VecDeque;
+use std::iter;
+use std::ops::Range;
 
+use types::frame::key_set::KeySet;
 use types::frame::{self, Form, Path};
 
-use super::{Error, Fields, Writer, slots};
+use super::{Error, Fields, Writer, ends, slots};
 
 mod frames;
 
@@ -39,7 +43,7 @@ const STORED: u8 = 4;
 const ENDED: u8 = 5;
 
 /// The head of one frame that a program writes, after the places. The run of its
-/// [`ends`](super::ends) follows, then the run of its [`counts`], then its body.
+/// [`ends`](super::ends) follows, then its run of counts, then its body.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Head {
     /// Where the frame's stamps come from, and its path.
@@ -122,14 +126,132 @@ impl Head {
     }
 }
 
+/// The lead of one frame that a program writes: its head, its run of ends, and, for
+/// [`Time::Frame`], its run of counts.
+#[derive(Clone, Copy, Debug)]
+pub struct Lead<'f> {
+    time: Time,
+    frame: &'f frame::Frame,
+}
+
+impl<'f> Lead<'f> {
+    /// The most bytes of the lead of a frame whose places are the entries of `set`.
+    #[must_use]
+    pub fn most(set: &KeySet) -> usize {
+        let ends = ends::LEN.strict_mul(set.entries().len());
+        let counts = counts::LEN.strict_mul(set.groups().len());
+        Head::LEN.strict_add(ends).strict_add(counts)
+    }
+
+    /// The lead of `frame`, whose stamps come from `time`.
+    ///
+    /// # Panics
+    ///
+    /// When the path of `time` is not the path of `frame` (the live path for
+    /// [`Time::Node`]), or when `time` is [`Time::Node`] and `frame` is in the
+    /// encoded form or holds other than one sample of each series.
+    #[must_use]
+    pub fn new(time: Time, frame: &'f frame::Frame) -> Self {
+        let path = match time {
+            Time::Frame(path) => path,
+            Time::Node => Path::Live,
+        };
+        assert_eq!(
+            frame.path(),
+            path,
+            "the frame is not on the path of its time"
+        );
+        if time == Time::Node {
+            assert_eq!(
+                frame.form(),
+                Form::Raw,
+                "a frame that the node stamps is in the encoded form"
+            );
+            assert!(
+                frame.ranges().all(|(_, range)| range.count == 1),
+                "a frame that the node stamps holds other than one sample of each series"
+            );
+        }
+        Self { time, frame }
+    }
+
+    /// The bytes of the encoded lead.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        let counts = match self.time {
+            Time::Frame(_) => self.frame.ranges().count(),
+            Time::Node => 0,
+        };
+        self.ended().strict_add(counts.strict_mul(counts::LEN))
+    }
+
+    /// Writes the lead into `out`.
+    ///
+    /// # Panics
+    ///
+    /// When `out` is not [`Lead::bytes`] bytes, or when a group of the frame holds no
+    /// sample.
+    pub fn encode(&self, out: &mut [u8]) {
+        assert_eq!(out.len(), self.bytes(), "out is not the bytes of the lead");
+        let to_u32 = |n: usize| u32::try_from(n).expect("a frame's ends fit a u32");
+        let (head, rest) = out.split_at_mut(Head::LEN);
+        Head {
+            time: self.time,
+            form: self.frame.form(),
+            series: to_u32(self.frame.ends().count()),
+        }
+        .encode(head);
+        let (run, rest) = rest.split_at_mut(self.ended().strict_sub(Head::LEN));
+        let ended = self
+            .frame
+            .ends()
+            .map(|(entry, end)| (to_u32(entry), to_u32(end)));
+        ends::encode(ended, run);
+        if !rest.is_empty() {
+            counts::encode(self.frame.ranges().map(|(_, range)| range.count), rest);
+        }
+    }
+
+    /// The messages of the encoded lead for a stream whose messages hold at most
+    /// `bytes_max` bytes, as ranges of it, in order. The head is one message, and
+    /// each other message holds whole ends or whole counts.
+    ///
+    /// # Panics
+    ///
+    /// When `bytes_max` is under [`Head::LEN`] or [`ends::LEN`](super::ends::LEN).
+    pub fn messages(&self, bytes_max: usize) -> impl Iterator<Item = Range<usize>> {
+        assert!(
+            bytes_max >= Head::LEN.max(ends::LEN),
+            "a message of {bytes_max} bytes holds no head or no end"
+        );
+        let ended = self.ended();
+        let runs = [
+            (Head::LEN..ended, ends::LEN),
+            (ended..self.bytes(), counts::LEN),
+        ];
+        let runs = runs.into_iter().flat_map(move |(run, len)| {
+            let most = bytes_max.strict_div(len).strict_mul(len);
+            let end = run.end;
+            run.step_by(most)
+                .map(move |at| at..end.min(at.strict_add(most)))
+        });
+        iter::once(0..Head::LEN).chain(runs)
+    }
+
+    /// The bytes of the head and the run of ends.
+    fn ended(&self) -> usize {
+        Head::LEN.strict_add(self.frame.ends().count().strict_mul(ends::LEN))
+    }
+}
+
 /// The run of counts after the run of ends of a head of [`Time::Frame`]: the samples
 /// of each series of each present group, at least 1, in group order. A group is
 /// present when the ends hold its index. Each message holds whole counts.
-pub mod counts {
+mod counts {
     use super::slots;
 
     /// The bytes of one count.
-    pub const LEN: usize = 4;
+    pub(super) const LEN: usize = 4;
 
     /// Writes the first `out.len() / LEN` counts of `counts` into `out`, one message of
     /// the run. It takes no more, so a caller that passes `by_ref()` writes the rest
@@ -139,7 +261,7 @@ pub mod counts {
     ///
     /// When `out` is empty or not a whole count of counts, when `counts` gives fewer
     /// counts than `out` holds, or when a count is 0.
-    pub fn encode(counts: impl IntoIterator<Item = u32>, out: &mut [u8]) {
+    pub(super) fn encode(counts: impl IntoIterator<Item = u32>, out: &mut [u8]) {
         let slots = slots::<LEN>(out);
         let len = slots.len();
         let written = slots
