@@ -959,6 +959,7 @@ fn an_apply_whose_store_fails_a_read_for_a_peer_names_the_error_of_the_store() {
     cluster.node(1).fail_file(&path, Operation::ReadAt);
     cluster.change(1, base(), &definitions);
     cluster.run(seconds(5));
+    let shown = path.display().to_string();
     let cause = files::Error::Io {
         path,
         operation: Operation::ReadAt,
@@ -978,7 +979,7 @@ fn an_apply_whose_store_fails_a_read_for_a_peer_names_the_error_of_the_store() {
         quorum.to_string(),
         format!(
             "1 of 2 voters hold the chunks of the spec change, not a majority; \
-             plant.node2: its put failed: read_at of {BLOB}/{root} failed with OS error 5"
+             plant.node2: its put failed: read_at of {shown} failed with OS error 5"
         )
     );
 }
