@@ -317,15 +317,25 @@ fn a_begin_line_with_white_space_after_its_dashes_starts_a_block() {
 #[test]
 fn a_trust_whose_end_line_names_another_label_ends_the_connect() {
     let (other, server) = blocks();
-    for begin in [
-        "-----BEGIN CERTIFICATE------",
-        "-----BEGIN  CERTIFICATE-----",
+    for (line, with) in [
+        (
+            "-----BEGIN CERTIFICATE-----",
+            "-----BEGIN CERTIFICATE------",
+        ),
+        (
+            "-----BEGIN CERTIFICATE-----",
+            "-----BEGIN  CERTIFICATE-----",
+        ),
+        (
+            "-----END CERTIFICATE-----",
+            "-----END CERTIFICATE-----\u{A0}x",
+        ),
     ] {
-        let server = server.replacen("-----BEGIN CERTIFICATE-----", begin, 1);
+        let server = server.replacen(line, with, 1);
         assert_eq!(
             trusting(format!("{other}{server}")),
             Err(invalid(2)),
-            "{begin}"
+            "{with}"
         );
     }
 }
