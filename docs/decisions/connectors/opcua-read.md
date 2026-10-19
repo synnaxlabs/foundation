@@ -99,7 +99,9 @@
   is Good or Uncertain, such as `GoodCallAgain`, gives its results, each with its own
   status, as the OPC Foundation reference client does. Only a Bad service result of such
   an answer is an error (`laptop.architect-2`, 2026-10-19T00:31:17Z,
-  https://github.com/synnaxlabs/foundation/pull/3268#issuecomment-6257117078). A
+  https://github.com/synnaxlabs/foundation/pull/3268#issuecomment-6257117078).
+  A `CreateSubscription` or `CreateMonitoredItems` answer whose service result is not
+  Good fails, as open62541 then makes no subscription or item. A
   CreateSession, ActivateSession, or GetEndpoints answer of the connect that open62541
   makes still ends the connect, with `BadDecodingError`, at a code that is neither Good
   nor Bad, and a FindServers answer of such a code keeps the given URL (#3317). A close by the client, also at the timeout
@@ -182,3 +184,8 @@
   and a Publish answer of two chunks with 9 reads of 8 chunks passes the bound. Lost: a
   queue cap of `(READS + PUBLISHES) * (CHUNKS - 1)` (77 chunks, about 5 MiB a channel,
   past the memory picked for the Pi).
+  Each change stays in the client until `changes` gives it, with no drop. The change
+  buffers grow as needed in PR 4b of #2622, and the reserve of `PUBLISHES` answers at
+  `subscribe` comes in PR 4c with its counting test, which merges before PR 5
+  (`laptop.architect-2`, 2026-10-19T21:52:11Z,
+  https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278199669).
