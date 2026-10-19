@@ -598,7 +598,7 @@ class ArgumentTest(unittest.TestCase):
 
     def test_a_data_directory_with_a_nul_byte_is_refused(self) -> None:
         with self.assertRaises(ValueError) as raised:
-            self.connect(data="a\0b")
+            foundation.connect(data="a\0b")
         self.assertEqual(str(raised.exception), "data: the path holds a NUL byte")
 
     def test_other_threads_run_while_a_client_dials(self) -> None:
