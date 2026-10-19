@@ -128,11 +128,7 @@ impl Writer {
         let shared = &self.session.0;
         let layout = Layout::new(&self.set, series).map_err(Error::Layout)?;
         let mut draft = shared.retry(|| layout.draft(&shared.frames, form)).await?;
-        for group in 0..to_u32(self.set.groups().len()) {
-            if draft.range(group).is_some() {
-                draft.set_count(group, count);
-            }
-        }
+        draft.set_counts(0, iter::repeat(count));
         Ok(self.draft.insert(draft))
     }
 
@@ -371,8 +367,4 @@ async fn start(
             };
         }
     }
-}
-
-fn to_u32(value: usize) -> u32 {
-    u32::try_from(value).expect("invariant: a frame of a writer fits the wire")
 }
