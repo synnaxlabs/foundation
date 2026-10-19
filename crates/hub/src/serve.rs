@@ -57,8 +57,7 @@ pub enum Error {
     OneWay,
     /// The stream's class is not the class of the open's mode. Code `MALFORMED`.
     Class(Class),
-    /// The keys of the open of a read, or the channels of the open of a write, are on
-    /// more than one index. Code `MALFORMED`.
+    /// The keys of the open of a read are on more than one index. Code `MALFORMED`.
     ManyIndexes,
     /// The selector of a read matches more than [`wire::hub::client::PLACES_MAX`]
     /// places with their index. Code `MALFORMED`.
