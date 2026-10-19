@@ -42,8 +42,12 @@
   chunks with `blob::peer::put` on each other voter of both halves of `raft.voters()`,
   all at once, in calls of at most 16 chunks in order, each of which fails after
   `peer::DEADLINE` (10 s on the `env` clock) with no result, its dials included. A call
-  whose session ended dials once more, as a session to a peer that restarted ends only
-  at its first use. A holder is the node when it is a voter, or a voter whose calls each
+  that fails as its session was lost dials once more, as a session to a peer that
+  restarted fails only at its first use. Each such failure drops the session from the
+  group. The errors of a lost session are the ones at which the sender drops its
+  session, and one function decides them for both. The call dials at most once more,
+  inside its own deadline, and a miss gives the cause of the last attempt. A holder is
+  the node when it is a voter, or a voter whose calls each
   ended `Ok` while a half that holds it lacked a majority; another failed dial or call,
   also a failed read of the node's store for a call, leaves a voter no holder. So the
   holders are at most the sum of the majorities of the
@@ -71,7 +75,8 @@
   `laptop.architect`, 2026-10-19T17:48:57Z
   (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273571109), on the
   condition of `laptop.monitor` that a failed apply names its cause until #3405 lands.
-  The redial: approval owed on #3399.
+  The redial: `laptop.architect`, 2026-10-19T17:56:52Z
+  (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273716895).
   `Mesh::open` puts each chunk of the
   founding tree in the store. A change that the state refuses as stale gives
   `Error::Stale { base, pointer }`. A call learns the refusal of its own entry from
