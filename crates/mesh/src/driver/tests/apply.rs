@@ -679,7 +679,7 @@ fn apply_in_a_region_of_three_voters_with_no_peer_gives_quorum_and_proposes_noth
             name: Some(name(&format!("plant.node{id}"))),
             cause: Miss::Dial(transport::Error::Unreachable {
                 peer: Some(public(id)),
-                attempts: Vec::new(),
+                attempts: Box::default(),
             }),
         };
         let quorum = Error::Quorum {

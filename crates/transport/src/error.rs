@@ -23,7 +23,7 @@ pub enum Error {
         /// [`Client::dial_any`](crate::Client::dial_any).
         peer: Option<PublicKey>,
         /// Each address tried, with why it failed.
-        attempts: Vec<(Address, Error)>,
+        attempts: Box<[(Address, Error)]>,
     },
     /// In [`Error::Unreachable`], the cause at an address this node cannot send to:
     /// its port is 0, its IP is unspecified, or this node runs no carrier for its
@@ -134,6 +134,8 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+const _: () = assert!(size_of::<Error>() == 56, "an error stays 56 bytes");
+
 #[cfg(test)]
 mod tests {
     use std::net::SocketAddr;
@@ -166,7 +168,8 @@ mod tests {
                 attempts: vec![
                     (Address::Udp(at), Error::TimedOut),
                     (Address::Tcp(at), Error::Authentication { expected: key() }),
-                ],
+                ]
+                .into_boxed_slice(),
             };
             check(
                 &error,
@@ -183,7 +186,7 @@ mod tests {
             let at: SocketAddr = "10.0.0.1:7400".parse().expect("a valid address");
             let error = Error::Unreachable {
                 peer: None,
-                attempts: vec![(Address::Udp(at), Error::TimedOut)],
+                attempts: vec![(Address::Udp(at), Error::TimedOut)].into_boxed_slice(),
             };
             check(
                 &error,

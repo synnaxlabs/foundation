@@ -3481,7 +3481,8 @@ pub(crate) mod port {
         let seen = seen.lock().unwrap().take().expect("the peer ran");
         let unreachable = transport::Error::Unreachable {
             peer: Some(KEY.public()),
-            attempts: vec![(Address::Udp(listen(&host)), transport::Error::TimedOut)],
+            attempts: vec![(Address::Udp(listen(&host)), transport::Error::TimedOut)]
+                .into_boxed_slice(),
         };
         assert_eq!(seen, Err(unreachable));
         let error = ::buffer::Error::Files(env::files::Error::Io {
@@ -4767,7 +4768,8 @@ pub(crate) mod port {
                 attempts: vec![(
                     Address::Udp(listen(&host)),
                     transport::Error::Authentication { expected: peer },
-                )],
+                )]
+                .into_boxed_slice(),
             };
             let error = ::hub::reader::Error::Transport(unreachable);
             assert_eq!(opened.lock().unwrap().take(), Some(Some(error)));

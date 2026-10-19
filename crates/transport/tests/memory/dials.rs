@@ -37,7 +37,8 @@ fn run() -> (usize, usize) {
         let mut counts = [0; 2];
         for dial in 1..=LAST {
             let dialed = transport.dial(SERVER.public(), &[Address::Udp(dead)]).await;
-            let attempts = vec![(Address::Udp(dead), Error::TimedOut)];
+            let attempts =
+                vec![(Address::Udp(dead), Error::TimedOut)].into_boxed_slice();
             let unreachable = Error::Unreachable {
                 peer: Some(SERVER.public()),
                 attempts,

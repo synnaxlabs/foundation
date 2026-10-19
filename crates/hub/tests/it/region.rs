@@ -741,7 +741,7 @@ fn a_reader_of_an_index_at_a_member_with_no_address_does_not_reach_it() {
         let error = opened.expect_err("the other node has no address");
         let unreachable = transport::Error::Unreachable {
             peer: Some(public_key(&PEER)),
-            attempts: Vec::new(),
+            attempts: Box::default(),
         };
         assert_eq!(error, reader::Error::Transport(unreachable));
         assert_eq!(

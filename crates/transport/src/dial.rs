@@ -247,7 +247,7 @@ mod tests {
     fn unreachable(
         node: &Node,
         addresses: Vec<Address>,
-        attempts: Vec<(Address, Error)>,
+        attempts: Box<[(Address, Error)]>,
     ) {
         testing::transport(node, CLIENT, move |transport, _| async move {
             let peer = SERVER.public();
@@ -668,7 +668,8 @@ mod tests {
             (Address::Udp(other), Error::Authentication { expected }),
             (Address::Udp(PORT_ZERO), Error::Unroutable),
             (Address::Tcp(other), Error::Unroutable),
-        ];
+        ]
+        .into_boxed_slice();
         unreachable(&client, addresses, attempts);
         assert_eq!(sim.run(), Ok(()));
     }
@@ -700,7 +701,8 @@ mod tests {
             (Address::Tcp(b), Error::Unroutable),
             (Address::Tcp(a), Error::Unroutable),
             (relay, Error::Unroutable),
-        ];
+        ]
+        .into_boxed_slice();
         unreachable(&client, addresses, attempts);
         assert_eq!(sim.run(), Ok(()));
     }
@@ -756,7 +758,7 @@ mod tests {
         testing::transport(&client, CLIENT, move |transport, node| async move {
             let (start, peer) = (node.clock().now(), SERVER.public());
             let dialed = transport.dial(peer, &[]).await;
-            let attempts = Vec::new();
+            let attempts = Box::default();
             assert_eq!(
                 dialed.err(),
                 Some(Error::Unreachable {

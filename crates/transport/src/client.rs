@@ -310,7 +310,7 @@ mod tests {
             let dialed = client(&shard).dial_any(&[]).await;
             let unreachable = Error::Unreachable {
                 peer: None,
-                attempts: Vec::new(),
+                attempts: Box::default(),
             };
             assert_eq!(dialed.err(), Some(unreachable));
         });
@@ -328,7 +328,7 @@ mod tests {
             let peer = SERVER.public();
             let dialed = client.dial(peer, &at).await;
             let cause = || Error::Authentication { expected: peer };
-            let attempts = vec![(at[0], cause()), (at[1], cause())];
+            let attempts = vec![(at[0], cause()), (at[1], cause())].into_boxed_slice();
             assert_eq!(
                 dialed.err(),
                 Some(Error::Unreachable {
@@ -354,7 +354,7 @@ mod tests {
         testing::transport(&node, SERVER, move |transport, _| async move {
             let peer = OTHER.public();
             let dialed = transport.dial(peer, &[at]).await;
-            let attempts = vec![(at, Error::TimedOut)];
+            let attempts = vec![(at, Error::TimedOut)].into_boxed_slice();
             assert_eq!(
                 dialed.err(),
                 Some(Error::Unreachable {

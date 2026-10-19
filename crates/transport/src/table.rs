@@ -414,7 +414,7 @@ mod tests {
     /// What a dial to `peer` at [`dead`] on `node` gives.
     fn unreachable(peer: PublicKey, node: &Node) -> Error {
         let [address] = dead(node);
-        let attempts = vec![(address, Error::TimedOut)];
+        let attempts = vec![(address, Error::TimedOut)].into_boxed_slice();
         Error::Unreachable {
             peer: Some(peer),
             attempts,
@@ -651,7 +651,7 @@ mod tests {
             let third = transport.dial(SERVER.public(), &[]).await;
             let none = Error::Unreachable {
                 peer: Some(SERVER.public()),
-                attempts: Vec::new(),
+                attempts: Box::default(),
             };
             assert_eq!(third.err(), Some(none));
         });
@@ -1582,7 +1582,7 @@ mod tests {
             let others: Vec<_> = others.collect();
             for &peer in &others[1..] {
                 let dialed = transport.dial(peer, &[]).await;
-                let attempts = Vec::new();
+                let attempts = Box::default();
                 assert_eq!(
                     dialed.err(),
                     Some(Error::Unreachable {
