@@ -1080,6 +1080,32 @@ fn records_the_handoff_at_the_end_of_a_lease_that_the_end_of_a_lease_starts() {
     }
 }
 
+/// The handoff to a writer that this node opens names this node as its `via`.
+#[test]
+fn records_this_node_in_the_handoff_to_its_writer() {
+    let ring = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let out = Arc::clone(&ring);
+    run(35, move |test| async move {
+        let _writer = test.writer("subject-a", &["value"]).await;
+        test.clock.sleep(SETTLE).await;
+        let file = test
+            .node
+            .files()
+            .open(FilePath::new(RING), env::files::Mode::Read)
+            .await
+            .expect("opens");
+        let block = test.pool.alloc(1 << 16).expect("a block");
+        let read = file.read_at(0, block).await.expect("reads");
+        *out.lock().expect("not poisoned") = read.to_vec();
+    });
+    let ring = ring.lock().expect("not poisoned");
+    let body = [&[1], &NODE.as_u128().to_le_bytes()[..], b"subject-a"].concat();
+    assert!(
+        ring.windows(body.len()).any(|bytes| bytes == body),
+        "no handoff body names this node"
+    );
+}
+
 /// A restored holder with no writer on its index loses control at the end of its
 /// grace, which only the wake at the carry of the reader's open lets the gate task
 /// see.
