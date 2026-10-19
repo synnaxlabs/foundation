@@ -247,8 +247,9 @@
   each `heartbeat_ticks`. A learner never votes or campaigns, so it needs no heartbeat
   at the rate of an election. A leader sends a learner the commit index at the next tick
   after the commit index that it can take moves: in its next append with entries, or
-  else in a heartbeat. A leader sends a learner that a call adds an append at once, so
-  its catch-up does not wait for a quorum check. Decided by `laptop.architect`,
+  else in a heartbeat. A leader sends a learner that a call adds an append at once,
+  unless an append to it is in flight or the learner holds the whole log, so its
+  catch-up does not wait for a quorum check. Decided by `laptop.architect`,
   2026-10-19T19:01:39Z
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6274961164), for
   the cost of 127 learners; the resend and the append at once to a learner that a call

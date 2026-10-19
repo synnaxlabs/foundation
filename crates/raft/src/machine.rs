@@ -568,12 +568,13 @@ impl Raft {
     /// quorum check can get the same entries again about each second check. It sends
     /// each learner a message at least once each `election_ticks` of its own ticks, and
     /// the commit index at the next tick after the commit index that it can take moves.
-    /// It sends a learner that a call adds an append at once. A learner stays until a
-    /// later call leaves it out: neither the quorum check nor a change of the
-    /// configuration releases it. A node that a later call leaves out, and that the
-    /// configuration in force does not hold, is released as a node that a change
-    /// removed is. This node never sends a learner a PreVote or a Vote. Each node keeps
-    /// the set, so a node that becomes leader has it.
+    /// It sends a learner that a call adds an append at once, unless an append to it is
+    /// in flight or the learner holds the whole log. A learner stays until a later call
+    /// leaves it out: neither the quorum check nor a change of the configuration
+    /// releases it. A node that a later call leaves out, and that the configuration in
+    /// force does not hold, is released as a node that a change removed is. This node
+    /// never sends a learner a PreVote or a Vote. Each node keeps the set, so a node
+    /// that becomes leader has it.
     pub fn set_learners(&mut self, keys: impl IntoIterator<Item = node::Key>) {
         let mut learners: BTreeSet<node::Key> = keys.into_iter().collect();
         learners.remove(&self.key);
@@ -4968,6 +4969,80 @@ mod tests {
             sent(&mut raft);
             raft.set_learners([key(9)]);
             assert_eq!(carrying(&sent(&mut raft), 9).len(), 1);
+        }
+
+        // Node 9 does not answer its probe, leaves the set, and comes back. Its peer
+        // stays, because node 9 holds nothing.
+        #[test]
+        fn a_learner_that_a_call_adds_again_gets_no_second_probe_until_the_check() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            sent(&mut raft);
+            raft.set_learners([key(9)]);
+            assert_eq!(to(&sent(&mut raft)), [key(9)]);
+            raft.set_learners([]);
+            raft.set_learners([key(9)]);
+            assert_eq!(to(&sent(&mut raft)), []);
+            assert_eq!(checked_to(&mut raft, 9), [Body::Heartbeat { commit: 0 }]);
+            raft.step(message(9, 1, Body::HeartbeatReply)).unwrap();
+            assert_eq!(
+                checked_to(&mut raft, 9),
+                [
+                    Body::Heartbeat { commit: 0 },
+                    append(position(1, 1), Vec::new(), 1)
+                ]
+            );
+        }
+
+        // Node 9 leaves the set while a change is pending and its append of `y` is in
+        // flight, `z` comes, and a call adds node 9 again.
+        #[test]
+        fn a_learner_that_a_call_adds_again_gets_no_append_while_one_is_in_flight() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            accepted(&mut raft, 9, 1);
+            raft.propose_voters(keyed(&[1, 2, 3, 4])).unwrap();
+            accepted(&mut raft, 2, 2);
+            accepted(&mut raft, 9, 2);
+            sent(&mut raft);
+            raft.propose(b"y".to_vec()).unwrap();
+            assert_eq!(carrying(&sent(&mut raft), 9).len(), 1);
+            raft.set_learners([]);
+            raft.propose(b"z".to_vec()).unwrap();
+            sent(&mut raft);
+            raft.set_learners([key(9)]);
+            assert_eq!(carrying(&sent(&mut raft), 9), []);
+            accepted(&mut raft, 9, 3);
+            assert_eq!(carrying(&sent(&mut raft), 9).len(), 1);
+        }
+
+        // Node 9 leaves the set while a change is pending and refuses its append of
+        // `y`, so its `next` is past the end that it gets.
+        #[test]
+        fn a_removed_learner_that_refuses_gets_a_probe_at_once() {
+            let mut raft = raft(&[1, 2, 3], Hard::default());
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            accepted(&mut raft, 9, 1);
+            raft.propose_voters(keyed(&[1, 2, 3, 4])).unwrap();
+            raft.propose(b"x".to_vec()).unwrap();
+            accepted(&mut raft, 9, 3);
+            sent(&mut raft);
+            raft.propose(b"y".to_vec()).unwrap();
+            assert_eq!(carrying(&sent(&mut raft), 9).len(), 1);
+            raft.set_learners([]);
+            raft.step(message(9, 1, Body::AppendReject { hint: 3 }))
+                .unwrap();
+            let to_9: Vec<Body> = sent(&mut raft)
+                .into_iter()
+                .filter(|m| m.to == key(9))
+                .map(|m| m.body)
+                .collect();
+            assert_eq!(to_9, [append(position(1, 3), Vec::new(), 1)]);
         }
 
         // A network that loses nothing and keeps the order of each link, with a delay

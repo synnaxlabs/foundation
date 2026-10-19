@@ -207,8 +207,8 @@ pub(crate) struct Network {
     // `refused`; any other error fails the run.
     wiped: Vec<bool>,
     pub(crate) refused: Vec<Error>,
-    // Since `settle` began, a candidate's reply at a term past every led one was
-    // refused as unproven: the group cannot prove its term (#1485).
+    // After `settle` mended the network, a candidate's reply at a term past every led
+    // one was refused as unproven: the group cannot prove its term (#1485).
     pub(crate) unprovable: bool,
     crash: Vec<Option<Kept>>,
     flight: Vec<Message>,
