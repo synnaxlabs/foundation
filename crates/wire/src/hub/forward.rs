@@ -126,6 +126,7 @@ pub mod places {
 
     impl Run {
         /// A decoder of the run of `forward`, for an open of `channels` channels.
+        #[must_use]
         pub fn new(forward: Forward, channels: u32) -> Self {
             Self {
                 remain: forward.places,
@@ -161,6 +162,7 @@ pub mod places {
         }
 
         /// Each place of the run came.
+        #[must_use]
         pub fn ended(&self) -> bool {
             self.remain == 0
         }
@@ -196,11 +198,9 @@ mod tests {
         run.decode(message).map(Iterator::collect)
     }
 
-    /// The places of `message`, as the one message of a run of its places.
+    /// The places of `message`, as the first message of a run that it does not fill.
     fn decode_places(message: &[u8], channels: u32) -> Result<Vec<u32>, Error> {
-        let places =
-            u32::try_from(message.len() / places::LEN).expect("the count fits");
-        decode(&mut decoder(places.max(1), channels), message)
+        decode(&mut decoder(u32::MAX, channels), message)
     }
 
     /// The first place of `places` that is not after the place before it or not
@@ -424,7 +424,8 @@ mod tests {
                 let mut decoded = Vec::new();
                 for chunk in places.chunks(per) {
                     prop_assert!(!run.ended());
-                    let mut message = vec![0xaa; chunk.len() * places::LEN];
+                    let mut message = encode_places(chunk);
+                    message.fill(0xaa);
                     places::encode(iter.by_ref(), &mut message);
                     let got = decode(&mut run, &message);
                     prop_assert_eq!(got.as_deref(), Ok(chunk));
