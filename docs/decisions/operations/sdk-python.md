@@ -94,14 +94,24 @@
   defaults of #2177 land before it
   (https://github.com/synnaxlabs/foundation/issues/2923#issuecomment-6238857409). The
   wheel gives the stub `foundation/_native.pyi`, with the doc of each item, and
-  `py.typed`. `tests/test_stubs.py` asserts that the stub defines each public item of
-  the module, with its parameters, defaults, bases, `final`, and doc, and that each
-  annotation names a type (#3212 PR 1c,
-  https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6272502641). The
-  types of the stub are a key choice of kind 2 that `laptop.monitor` accepted at
+  `py.typed` (`laptop.architect-2`, 2026-10-19T18:31:12Z,
+  https://github.com/synnaxlabs/foundation/pull/3394#issuecomment-6274374226).
+  `tests/test_stubs.py` asserts that the stub defines each public item of the module,
+  with its parameters, defaults, bases, `final`, and doc, that each annotation names a
+  type, and that values of the module are of the types that the stub states (#3212 PR
+  1c, https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6272502641).
+  The types of the stub are a key choice of kind 2 that `laptop.monitor` accepted at
   2026-10-19T17:24Z, with the defaults that let `connect()` and `open_writer("pt_1")`
-  give no other argument. The
-  feature `sim` adds test-only functions, so a test asserts that a panic on the caller's
+  give no other argument. The stub is written by hand. A stub that PyO3
+  `experimental-inspect` generates lost: in PyO3 0.30.1 its guide calls it still in
+  development, so its text can move with a PyO3 bump; it works only on an inline
+  `#[pymodule] mod`, and a `&Bound<PyAny>` argument needs its type as a string in
+  `#[pyo3(signature)]`, so the second copy of each type moves into Rust; and no
+  introspection states `code` and `seqs`, which the module sets when it raises. When
+  the guide of PyO3 no longer calls the feature experimental, the stub is generated,
+  and `test_stubs.py` keeps only what the generator cannot state. The keys and values
+  of the `dict` of `write` and `write_series` are `Any` until #3408. The feature
+  `sim` adds test-only functions, so a test asserts that a panic on the caller's
   thread gives `PanicException`, not an abort (`laptop.architect-2`,
   2026-10-17T18:39:00Z,
   https://github.com/synnaxlabs/foundation/issues/3059#issuecomment-6238735903). One
