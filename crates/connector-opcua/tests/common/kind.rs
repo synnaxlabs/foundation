@@ -307,13 +307,14 @@ fn read(key: u128) -> (String, String) {
     (format!("plant.v{key}"), format!("ns=2;i={}", key - 1))
 }
 
-/// The config of a connector of `address` at 10 Hz that reads `nodes` nodes, from
+/// The config of a connector of `address` that polls `nodes` nodes at 10 Hz, from
 /// `ns=2;i=1` into the channel of key 2 on.
 pub(crate) fn config(address: &str, nodes: usize) -> Document {
     let text = |text: &str| value::Kind::String(text.into());
     let attributes = vec![
         attribute("address", text(address)),
         attribute("rate", text("10Hz")),
+        attribute("polled", value::Kind::Bool(true)),
     ];
     let blocks = (2..).take(nodes).map(read).map(|(channel, node)| Block {
         keyword: "read".into(),

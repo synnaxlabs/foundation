@@ -178,10 +178,6 @@ impl Client {
     ///
     /// When `sampling` is not positive. On a second call, also after an error, as a
     /// `CreateSubscription` that failed in the client can still make a subscription.
-    #[cfg_attr(
-        not(any(test, feature = "sim")),
-        expect(dead_code, reason = "PR 5 of #2622 calls it")
-    )]
     pub(crate) async fn subscribe(
         &mut self,
         nodes: &[Node],
@@ -265,10 +261,6 @@ impl Client {
     /// first status change of the subscription, which can be Good, such as
     /// `GoodSubscriptionTransferred`, or `BadNoSubscription` when open62541 deleted it
     /// with no status change.
-    #[cfg_attr(
-        not(any(test, feature = "sim")),
-        expect(dead_code, reason = "PR 5 of #2622 calls it")
-    )]
     pub(crate) async fn changes(
         &mut self,
         until: impl Future<Output = ()>,

@@ -763,7 +763,6 @@ impl Client {
     /// The error of a service request, as [`Client::read`] gives it, or of a value
     /// that is not Good: `BadNoData` for none, `BadTypeMismatch` when it holds no
     /// scalar `DateTime`, and `BadOutOfRange` when a [`Stamp`] cannot hold it.
-    #[cfg_attr(not(test), expect(dead_code, reason = "PR 5 of #2622 calls it"))]
     pub(crate) async fn time(&mut self) -> Result<Stamp, Status> {
         let node = Node::ns0(ffi::TIME);
         let answer = self.serve(&Request::values(&[(&node).into()])).await?;

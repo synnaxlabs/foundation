@@ -28,6 +28,7 @@ use crate::value::{self, Cause, Fault, SCALARS, Value};
 #[cfg(test)]
 #[cfg(feature = "sim")]
 mod tests;
+mod watch;
 
 const SAMPLE_TYPE: Code = Code::new("opcua.sample-type");
 const LARGE_READ: Code = Code::new("opcua.large-read");
@@ -213,7 +214,13 @@ async fn run(ctx: Context<Config>) -> Result<(), Error> {
         &mut ctx.rng(),
         &ctx.config().address,
         ctx.cancel().wait(),
-        async |client| read(&ctx, client, &mut frames).await,
+        async |client| {
+            if ctx.config().polled {
+                read(&ctx, client, &mut frames).await
+            } else {
+                watch::run(&ctx, client, &mut frames).await
+            }
+        },
     )
     .await?;
     ran.unwrap_or(Ok(()))
@@ -307,7 +314,7 @@ async fn read(
             Ok(values) => values,
             Err(status) => return Err(failed(client.url(), Call::Read, status)),
         };
-        frames.write(values, stamp)?;
+        frames.write(values.iter().map(Some), stamp)?;
     }
     Ok(())
 }
@@ -354,7 +361,7 @@ pub async fn writes(
         let ((), stamp) = frames.writer.request(std::future::ready(())).await;
         let mut written = Ok(());
         measures.push(measure(&mut || {
-            written = frames.write(&values, stamp);
+            written = frames.write(values.iter().map(Some), stamp);
         }));
         written?;
     }
@@ -419,10 +426,11 @@ impl<'a> Frames<'a> {
         }))
     }
 
-    /// Writes one frame of `values`, the values of the reads in order, at `stamp`,
-    /// with each value that is Good and of the sample type of its channel. It counts
-    /// each other value in [`Left`], and the note of the context names the first node
-    /// of another type.
+    /// Writes one frame of `values`, the value or `None` of each read in order, at
+    /// `stamp`, with each value that is Good and of the sample type of its channel. It
+    /// counts each other value in [`Left`]. The note of the context names the first
+    /// node of another type, and a frame with none keeps the note unless it has a
+    /// value of the node of the note.
     ///
     /// # Errors
     ///
@@ -430,15 +438,21 @@ impl<'a> Frames<'a> {
     ///
     /// # Panics
     ///
-    /// When `values` does not have one value for each read.
-    fn write(
+    /// When `values` does not have one value or `None` for each read.
+    fn write<'v>(
         &mut self,
-        values: &[Result<Value, Fault>],
+        values: impl IntoIterator<Item = Option<&'v Result<Value, Fault>>>,
         stamp: Stamp,
     ) -> Result<(), Error> {
         let (mut bad, mut uncertain, mut mistyped) = (0, 0, 0);
         let mut first = None;
-        let kept = values.iter().enumerate().map(|(at, value)| {
+        let noted = self.left.noted.map(|(at, _)| at);
+        let mut absent = false;
+        let kept = values.into_iter().enumerate().map(|(at, value)| {
+            let Some(value) = value else {
+                absent |= noted == Some(at);
+                return None;
+            };
             let sample = self.types[at];
             match Why::of(value, sample) {
                 Ok(value) => Some(value),
@@ -460,7 +474,9 @@ impl<'a> Frames<'a> {
         // `write` takes each value before it returns, so the counts are whole after it.
         let written = self.writer.write(kept, stamp);
         self.left.add(bad, uncertain, mistyped);
-        self.left.note(self.ctx, first);
+        if first.is_some() || !absent {
+            self.left.note(self.ctx, first);
+        }
         written
     }
 }
@@ -473,7 +489,7 @@ impl Left {
         self.mistyped.add(mistyped);
     }
 
-    /// Sets the note of `ctx` for `mistyped`, when it is not the note of the tick
+    /// Sets the note of `ctx` for `mistyped`, when it is not the note of the frame
     /// before: the read at a value of another type, its type, and the sample type of
     /// its channel. `None` clears the note.
     #[inline]
@@ -575,6 +591,7 @@ pub(crate) enum Call {
     Read,
     Check,
     Browse,
+    Subscribe,
 }
 
 /// Why a run ended with [`Error::Device`].
@@ -586,6 +603,14 @@ pub(crate) enum Failure {
         call: Call,
         status: Status,
     },
+    /// The server does not watch `node` of the read of `channel`, with `status`.
+    Unwatched {
+        node: String,
+        channel: String,
+        status: Status,
+    },
+    /// The subscription to the server at `address` ended with `status`.
+    Ended { address: String, status: Status },
     /// The tags and names before the pages of a browse pass [`crate::browse::BYTES`].
     Names,
     /// A browse for a cursor of an earlier browse reads past
@@ -606,9 +631,25 @@ impl fmt::Display for Failure {
                     Call::Read => "the read from",
                     Call::Check => "the connectivity check of",
                     Call::Browse => "the browse of",
+                    Call::Subscribe => "the subscribe to",
                 };
                 write!(f, "{call} {address} failed with {}", status.name())
             }
+            Self::Unwatched {
+                node,
+                channel,
+                status,
+            } => write!(
+                f,
+                "the server does not watch the node `{node}` of the channel \
+                 `{channel}`: {}",
+                status.name()
+            ),
+            Self::Ended { address, status } => write!(
+                f,
+                "the subscription to {address} ended with {}",
+                status.name()
+            ),
             Self::Names => write!(
                 f,
                 "the tags and names of the browse pass {} MiB",

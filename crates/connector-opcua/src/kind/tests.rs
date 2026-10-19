@@ -330,12 +330,19 @@ fn attribute(key: &str, kind: value::Kind) -> Attribute {
     }
 }
 
-/// The config of a connector of `address` at 10 Hz with `reads`.
-fn config(address: &str, rate: &str, reads: &[(&str, String)]) -> Document {
+/// The config of a connector of `address` at `rate` with `reads`, which polls when
+/// `polled`.
+fn config(
+    address: &str,
+    rate: &str,
+    polled: bool,
+    reads: &[(&str, String)],
+) -> Document {
     let text = |text: &str| value::Kind::String(text.into());
     let attributes = vec![
         attribute("address", text(address)),
         attribute("rate", text(rate)),
+        attribute("polled", value::Kind::Bool(polled)),
     ];
     let blocks = reads.iter().map(|(channel, node)| Block {
         keyword: "read".into(),
@@ -464,7 +471,7 @@ struct Record {
     logged: Vec<String>,
 }
 
-/// Runs `script` on a scene of `setup` at 10 Hz, as [`run_at`] does.
+/// Runs `script` on a scene of `setup` that polls at 10 Hz, as [`run_at`] does.
 fn run<S, F>(setup: Setup, script: S) -> Record
 where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
@@ -473,9 +480,19 @@ where
     run_at("10Hz", setup, script)
 }
 
-/// Runs `script` on a scene of `setup` that reads at `rate`, with its server started,
-/// and records the frames of each channel until 1 s after the script returns.
+/// Runs `script` on a scene of `setup` that polls at `rate`, as [`scene`] does.
 fn run_at<S, F>(rate: &'static str, setup: Setup, script: S) -> Record
+where
+    S: FnOnce(Rc<Scene>) -> F + Send + 'static,
+    F: Future<Output = Result<(), Error>> + 'static,
+{
+    scene(rate, true, setup, script)
+}
+
+/// Runs `script` on a scene of `setup` that reads at `rate`, and polls when `polled`,
+/// with its server started, and records the frames of each channel until 1 s after
+/// the script returns.
+fn scene<S, F>(rate: &'static str, polled: bool, setup: Setup, script: S) -> Record
 where
     S: FnOnce(Rc<Scene>) -> F + Send + 'static,
     F: Future<Output = Result<(), Error>> + 'static,
@@ -484,7 +501,7 @@ where
         let rig = rig(&node, tasks.clone()).await;
         let hub = rig.hub();
         let address = format!("opc.tcp://{}:4840", node.addresses()[0]);
-        let config = config(&address, rate, &setup.reads);
+        let config = config(&address, rate, polled, &setup.reads);
         let status = rig.define_status("opcua", &name(PLC), &config);
         let channels = setup.channels.iter();
         let channels: Vec<_> = channels
@@ -1270,12 +1287,12 @@ impl kind::Kind for Count {
         let one = |&scalar| Ok(crate::value::Value::one(scalar));
         let good: Vec<_> = frames.types.iter().map(one).collect();
         let ((), stamp) = frames.writer.request(future::ready(())).await;
-        frames.write(&good, stamp)?;
+        frames.write(good.iter().map(Some), stamp)?;
         let ((), stamp) = frames.writer.request(future::ready(())).await;
         let count = (self.0)(ctx.config().reads.len());
         let bad = || Err(Fault::status(Status::BAD_NOT_FOUND));
         let values: Vec<_> = std::iter::repeat_with(bad).take(count).collect();
-        frames.write(&values, stamp)
+        frames.write(values.iter().map(Some), stamp)
     }
 }
 
@@ -1310,7 +1327,7 @@ fn write_after_a_full_frame(kind: Count) {
         let channels = setup.channels.iter();
         let channels = channels.map(|(text, def)| (name(text), def.clone()));
         rig.define(channels.collect());
-        let config = config("opc.tcp://plc:4840", "10Hz", &setup.reads);
+        let config = config("opc.tcp://plc:4840", "10Hz", true, &setup.reads);
         let _connector = rig.supervise("opcua", name(PLC), config).await;
         node.clock().sleep(Span::SECOND).await;
     });
@@ -1876,4 +1893,264 @@ fn refuses_to_discover() {
         "Write the connector block by hand".into(),
     );
     assert_eq!(diagnostics, [expected]);
+}
+
+/// Runs `script` on a scene of `setup` that subscribes at 50 Hz, as [`scene`] does.
+/// The server samples each 20 ms and publishes each 100 ms, so a change arrives up to
+/// 80 ms after its source timestamp.
+fn watch<S, F>(setup: Setup, script: S) -> Record
+where
+    S: FnOnce(Rc<Scene>) -> F + Send + 'static,
+    F: Future<Output = Result<(), Error>> + 'static,
+{
+    scene("50Hz", false, setup, script)
+}
+
+/// The offset of mesh time from the clock of the node of `scene`, in ns.
+async fn mesh_offset(scene: &Scene) -> i64 {
+    let rival = open_rival(scene.rig.hub(), Authority(1), DATA).await;
+    let monotonic = i64::try_from(scene.node.clock().now().0).expect("small");
+    rival.now().nanos() - monotonic
+}
+
+/// The mesh time of each read of `node` that served a new value, given `offset`.
+fn changed(outcome: &Record, node: &str, offset: i64) -> Vec<(f64, i64)> {
+    let mut changed: Vec<(f64, i64)> = Vec::new();
+    for served in &outcome.served[node] {
+        if changed
+            .last()
+            .is_none_or(|&(value, _)| value != served.value)
+        {
+            let time = i64::try_from(served.time.0).expect("small") + offset;
+            changed.push((served.value, time));
+        }
+    }
+    changed
+}
+
+/// The most that a stamp of [`watch`] gets from the true mesh time of its value in a
+/// run of 10 s: the fit holds the server clock to 200 ppm of the 10 s since its last
+/// read of the current time, plus the half round trip of that read, under 1 ms.
+const FIT: i64 = 3_000_000;
+
+/// Asserts that `frames` hold each change of each node of [`Setup::three`] at once,
+/// each at its true mesh time within [`FIT`], with stamps that increase.
+fn assert_at_their_time(outcome: &Record, offset: i64) {
+    let frames = &outcome.frames;
+    let first = changed(outcome, A, offset);
+    let served: Vec<_> = first.iter().map(|&(value, _)| value).collect();
+    for (key, node) in [(2, A), (3, B), (4, C)] {
+        assert_eq!(values(frames, key), served, "{node}");
+        assert_eq!(changed(outcome, node, offset), first, "{node}");
+    }
+    let stamps: Vec<_> = frames.iter().map(|frame| stamp(frame, 1)).collect();
+    for (stamp, (_, time)) in stamps.iter().zip(&first) {
+        assert!((stamp - time).abs() <= FIT, "{stamps:?} against {first:?}");
+    }
+    assert!(stamps.is_sorted_by(|a, b| a < b), "{stamps:?}");
+}
+
+/// A server clock 5 min ahead of mesh time: the fit of its current time places each
+/// source timestamp.
+#[test]
+fn writes_each_change_at_the_mesh_time_of_its_source_timestamp() {
+    let offset = Arc::new(AtomicI64::new(0));
+    let mesh = Arc::clone(&offset);
+    let outcome = watch(Setup::three(), |scene| async move {
+        mesh.store(mesh_offset(&scene).await, Ordering::Relaxed);
+        scene
+            .variables
+            .set_clock(Span::from_nanos(5 * Span::MINUTE.nanos()));
+        for at in [430, 1_230] {
+            scene.after(ms(at), |scene| async move {
+                scene.variables.change(Quality::GOOD);
+            });
+        }
+        scene.supervise(ms(2_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(keys(&outcome.frames), vec![vec![1, 2, 3, 4]; 3]);
+    assert_at_their_time(&outcome, offset.load(Ordering::Relaxed));
+    assert_eq!(last(&outcome.statuses, IN), 9);
+    assert_eq!(last(&outcome.statuses, MISSED), 0);
+}
+
+/// The span of `minutes` min.
+fn minutes(minutes: i64) -> Span {
+    Span::from_nanos(minutes * Span::MINUTE.nanos())
+}
+
+/// The wall time of the node of `scene`, which the server clock is ahead of.
+fn wall(scene: &Scene) -> Stamp {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "a source timestamp is on the wall time of the simulated device"
+    )]
+    let now = scene.node.wall().now().time;
+    now
+}
+
+/// A server clock that jumps 1 min ahead between two changes: the server timestamp
+/// of the second restarts the fit, so each stays at its true time.
+#[test]
+fn writes_each_change_at_its_time_after_the_server_clock_jumps_ahead() {
+    let offset = Arc::new(AtomicI64::new(0));
+    let mesh = Arc::clone(&offset);
+    let outcome = watch(Setup::three(), |scene| async move {
+        mesh.store(mesh_offset(&scene).await, Ordering::Relaxed);
+        scene.variables.set_clock(minutes(5));
+        scene.after(ms(430), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        scene.after(ms(830), |scene| async move {
+            scene.variables.set_clock(minutes(6));
+        });
+        scene.after(ms(1_230), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        scene.supervise(ms(2_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(keys(&outcome.frames), vec![vec![1, 2, 3, 4]; 3]);
+    assert_at_their_time(&outcome, offset.load(Ordering::Relaxed));
+}
+
+/// A server clock that jumps 1 min back: the change before the next read of the
+/// current time maps before the last stamp, so it takes the stamp 1 ns after it, and
+/// the change after that read is at its true time.
+#[test]
+fn writes_a_change_after_the_last_stamp_once_the_server_clock_jumps_back() {
+    let offset = Arc::new(AtomicI64::new(0));
+    let mesh = Arc::clone(&offset);
+    let outcome = watch(Setup::three(), |scene| async move {
+        mesh.store(mesh_offset(&scene).await, Ordering::Relaxed);
+        scene.variables.set_clock(minutes(5));
+        for at in [430, 1_230, 11_230] {
+            scene.after(ms(at), |scene| async move {
+                scene.variables.change(Quality::GOOD);
+            });
+        }
+        scene.after(ms(830), |scene| async move {
+            scene.variables.set_clock(minutes(4));
+        });
+        scene.supervise(ms(12_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    let frames = &outcome.frames;
+    assert_eq!(keys(frames), vec![vec![1, 2, 3, 4]; 4]);
+    let stamps: Vec<_> = frames.iter().map(|frame| stamp(frame, 1)).collect();
+    let first = changed(&outcome, A, offset.load(Ordering::Relaxed));
+    for at in [0, 1, 3] {
+        assert!(
+            (stamps[at] - first[at].1).abs() <= FIT,
+            "{stamps:?} {first:?}"
+        );
+    }
+    assert_eq!(stamps[2], stamps[1] + 1);
+}
+
+/// A first value whose source timestamp is 1 h old takes the stamp 1 ns after the
+/// last stamp.
+#[test]
+fn writes_a_value_of_an_old_source_timestamp_after_the_last_stamp() {
+    let outcome = watch(Setup::three(), |scene| async move {
+        scene.after(ms(430), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        scene.after(ms(1_230), |scene| async move {
+            let old = wall(&scene) - minutes(60);
+            scene.variables.change_at(Quality::GOOD, old);
+        });
+        scene.supervise(ms(2_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let frames = &outcome.frames;
+    assert_eq!(keys(frames), vec![vec![1, 2, 3, 4]; 3]);
+    assert_eq!(stamp(&frames[2], 1), stamp(&frames[1], 1) + 1);
+    assert_eq!(values(frames, 2), [0.0, 1.0, 2.0]);
+}
+
+/// A source timestamp of 0, and one of 1800, before the map of the device time:
+/// each value takes its server timestamp.
+#[test]
+fn writes_a_value_of_a_source_timestamp_of_0_or_1800_at_its_server_timestamp() {
+    let offset = Arc::new(AtomicI64::new(0));
+    let mesh = Arc::clone(&offset);
+    let outcome = watch(Setup::three(), |scene| async move {
+        mesh.store(mesh_offset(&scene).await, Ordering::Relaxed);
+        scene.after(ms(430), |scene| async move {
+            scene.variables.change_at(Quality::GOOD, Stamp::EPOCH);
+        });
+        scene.after(ms(1_230), |scene| async move {
+            let year_1800 = Stamp::from_nanos(-5_364_662_400 * Span::SECOND.nanos());
+            scene.variables.change_at(Quality::GOOD, year_1800);
+        });
+        scene.supervise(ms(2_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(keys(&outcome.frames), vec![vec![1, 2, 3, 4]; 3]);
+    assert_at_their_time(&outcome, offset.load(Ordering::Relaxed));
+}
+
+/// A server that stops ends the subscription with a device error, and the next run
+/// subscribes again to the server that starts, with no step of the user.
+#[test]
+fn subscribes_again_after_the_server_stops_and_starts() {
+    let outcome = watch(Setup::three(), |scene| async move {
+        scene.after(ms(1_050), |scene| async move { scene.stop().await });
+        scene.after(ms(3_050), |scene| async move { scene.serve() });
+        scene.after(ms(4_030), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        scene.supervise(ms(5_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let address = "opc.tcp://10.0.0.1:4840";
+    let ended = format!("the subscription to {address} ended with BadConnectionClosed");
+    let refused = format!("the connect to {address} failed with BadConnectionRejected");
+    assert_eq!(errors(&outcome.statuses), [(2, ended), (2, refused)]);
+    assert_eq!(last(&outcome.statuses, RESTARTS), 2);
+    let frames = &outcome.frames;
+    assert_eq!(values(frames, 2), [0.0, 0.0, 1.0]);
+}
+
+/// A node that the server does not have ends each run with a device error that names
+/// it, and writes nothing.
+#[test]
+fn fails_on_a_node_that_the_server_does_not_watch() {
+    let mut setup = Setup::three();
+    setup.reads[1].1 = "ns=3;s=Missing".into();
+    let outcome = watch(setup, |scene| async move { scene.supervise(ms(350)).await });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    let unwatched = "the server does not watch the node `ns=3;s=Missing` of the \
+                     channel `plant.b`: BadNodeIdUnknown";
+    assert_eq!(errors(&outcome.statuses), [(2, unwatched.into())]);
+    assert_eq!(outcome.frames.len(), 0);
+}
+
+/// A change to a status that is not Good is left out and counted, and a frame with
+/// no value left is not written.
+#[test]
+fn leaves_out_and_counts_each_change_that_is_not_good() {
+    let outcome = watch(Setup::three(), |scene| async move {
+        scene.after(ms(1_050), |scene| async move {
+            scene.variables.set_quality(A, Quality(0x8000_0000));
+            scene.variables.set_quality(B, Quality(0x4000_0000));
+        });
+        scene.after(ms(1_230), |scene| async move {
+            scene.variables.change(Quality::GOOD);
+        });
+        scene.supervise(ms(2_050)).await
+    });
+    assert!(outcome.result.is_ok(), "{:?}", outcome.result);
+    assert_eq!(errors(&outcome.statuses), []);
+    assert_eq!(keys(&outcome.frames), [vec![1, 2, 3, 4], vec![1, 4]]);
+    let statuses = &outcome.statuses;
+    assert_eq!(last(statuses, BAD), 2);
+    assert_eq!(last(statuses, UNCERTAIN), 2);
+    assert_eq!(last(statuses, IN), 4);
 }
