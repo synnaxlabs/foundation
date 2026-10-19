@@ -854,14 +854,19 @@ impl Raft {
 
     // Records that a follower holds the leader's log up to `last`, as the leader.
     fn accepted(&mut self, from: node::Key, last: Held) {
-        let accepted = self.heard_from(from).is_some_and(|peer| {
+        let Some(news) = self.heard_from(from).map(|peer| {
             peer.answered = true;
             peer.progress.accepted(last.index())
-        });
-        if !accepted || self.advance() {
+        }) else {
             return;
+        };
+        if news {
+            if self.advance() {
+                return;
+            }
+            self.release_removed();
         }
-        self.release_removed();
+        // A reply that is not news can answer a probe that `fit` left with no entry.
         self.catch_up(from);
     }
 
@@ -959,13 +964,19 @@ impl Raft {
         self.send_appends(..);
     }
 
-    // Sends one follower the entries it lacks, when it lacks any.
+    // Sends one follower the entries it lacks, or a probe.
     fn catch_up(&mut self, to: node::Key) {
-        let last = self.log.last().index;
+        let end = end(
+            &self.voters,
+            &self.learners,
+            to,
+            self.log.last().index,
+            self.removed_end(),
+        );
         if self
             .peers
             .get(&to)
-            .is_some_and(|peer| peer.progress.behind(last))
+            .is_some_and(|peer| peer.progress.probing() || peer.progress.behind(end))
         {
             self.send_appends(to..=to);
         }
@@ -978,7 +989,7 @@ impl Raft {
     // carries its commit index.
     fn send_appends<R: RangeBounds<node::Key>>(&mut self, range: R) {
         let commit = self.log.committed();
-        let removed_end = self.removed_end();
+        let (log_end, removed_end) = (self.log.last().index, self.removed_end());
         let (key, term, votes) = (self.key, self.term, &self.votes);
         let mut links = None;
         for (&to, peer) in self.peers.range_mut(range) {
@@ -993,11 +1004,7 @@ impl Raft {
                 .log
                 .at(next - 1)
                 .expect("invariant: a follower's next entry follows the leader's log");
-            let end = if full(&self.voters, &self.learners, to) {
-                self.log.last().index
-            } else {
-                removed_end
-            };
+            let end = end(&self.voters, &self.learners, to, log_end, removed_end);
             if learner(&self.voters, &self.learners, to)
                 && !peer.progress.probing()
                 && !peer.progress.behind(end)
@@ -1612,6 +1619,22 @@ fn learner(voters: &Voters, learners: &BTreeSet<node::Key>, key: node::Key) -> b
 // Whether `key` gets the whole log: a voter in force, or a learner.
 fn full(voters: &Voters, learners: &BTreeSet<node::Key>, key: node::Key) -> bool {
     voters.contains(key) || learners.contains(&key)
+}
+
+// The last index that a leader with a log that ends at `last` sends `key`: `last` to
+// a voter in force or a learner, else `removed_end`.
+fn end(
+    voters: &Voters,
+    learners: &BTreeSet<node::Key>,
+    key: node::Key,
+    last: u64,
+    removed_end: u64,
+) -> u64 {
+    if full(voters, learners, key) {
+        last
+    } else {
+        removed_end
+    }
 }
 
 // The nodes that `log` keeps a peer for on node `key`: every node but `key`.
@@ -4895,6 +4918,36 @@ mod tests {
             accepted(&mut raft, 9, 2);
             assert_eq!(sent(&mut raft), []);
             assert_eq!(checked_to(&mut raft, 9), [Body::Heartbeat { commit: 0 }]);
+        }
+
+        // Node 9 loses the append and is silent through one check, so the probe at
+        // its expiry carries the votes, and `fits` drops its entry.
+        #[test]
+        fn an_expired_window_sends_the_lost_entry_after_an_empty_probe() {
+            let config = Config {
+                fits: |m| m.proof.is_none() || m.body.entries().is_empty(),
+                ..CONFIG
+            };
+            let mut raft =
+                Raft::new(config, start(&[1, 2, 3], Hard::default())).unwrap();
+            raft.set_learners([key(9)]);
+            elect(&mut raft, &[2]);
+            accepted(&mut raft, 2, 1);
+            accepted(&mut raft, 9, 1);
+            raft.propose(b"x".to_vec()).unwrap();
+            assert_eq!(carrying(&sent(&mut raft), 9).len(), 1);
+            checked(&mut raft);
+            checked(&mut raft);
+            raft.step(message(9, 1, Body::HeartbeatReply)).unwrap();
+            assert_eq!(
+                checked_to(&mut raft, 9),
+                [
+                    Body::Heartbeat { commit: 1 },
+                    append(position(1, 1), Vec::new(), 1)
+                ]
+            );
+            accepted(&mut raft, 9, 1);
+            assert_eq!(carrying(&sent(&mut raft), 9).len(), 1);
         }
 
         // Node 9 leaves the set and comes back while a change is pending, so its peer
