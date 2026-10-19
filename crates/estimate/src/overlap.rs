@@ -6,7 +6,6 @@ use std::fmt;
 use types::time::{Monotonic, Span};
 
 use crate::drift::PER_NANO;
-use crate::measurement::saturated;
 use crate::{Drift, Measurement};
 
 /// The offsets that every reading of one clock allows. Each reading, widened by drift,
@@ -61,7 +60,7 @@ impl Overlap {
     /// # Errors
     ///
     /// [`Error::Disjoint`] when the reading shares no offset with the overlap, or `low`
-    /// is above `high`: the clock jumped or restarted, or it drifts faster than `drift`.
+    /// is above `high`: the clock jumped, or it drifts faster than `drift`.
     pub fn push(&mut self, at: Monotonic, low: Span, high: Span) -> Result<(), Error> {
         self.narrow(Reading {
             at,
@@ -71,7 +70,8 @@ impl Overlap {
     }
 
     /// Narrows the overlap with a reading open above: at local time `at`, the offset
-    /// is at least `low`. A stamp before a start command gives one.
+    /// is at least `low`. A stamp before a start command gives one. A reading older
+    /// than the newest one counts as in [`Overlap::push`].
     ///
     /// # Errors
     ///
@@ -86,7 +86,7 @@ impl Overlap {
 
     /// Narrows the overlap with a reading open below: at local time `at`, the offset
     /// is at most `high`. A read return gives one for the newest sample the host
-    /// knows.
+    /// knows. A reading older than the newest one counts as in [`Overlap::push`].
     ///
     /// # Errors
     ///
@@ -160,15 +160,17 @@ struct Reading {
 
 impl Reading {
     /// The reading at `newest` when it is older, widened by drift and rounded outward.
+    /// An edge that widens past the range of a span is left out.
     fn widened_to(self, newest: Monotonic, drift: Drift) -> Self {
         if self.at >= newest {
             return self;
         }
         let (low, high) = self.edges_at(newest, drift);
+        let span = |nanos: i128| i64::try_from(nanos).ok().map(Span::from_nanos);
         Self {
             at: newest,
-            low: low.map(|low| saturated(low.div_euclid(PER_NANO))),
-            high: high.map(|high| saturated(-(-high).div_euclid(PER_NANO))),
+            low: low.and_then(|low| span(low.div_euclid(PER_NANO))),
+            high: high.and_then(|high| span(-(-high).div_euclid(PER_NANO))),
         }
     }
 
@@ -559,6 +561,42 @@ mod tests {
             let err = check(200_000, &pushes, 1_000_000);
             assert_eq!(err, Err(Error::Disjoint));
         }
+
+        #[test]
+        fn misses_a_restart_that_the_width_of_a_reading_covers() {
+            // As above, with a third read wide enough to hold both offsets after drift.
+            let pushes = [
+                m(4_000_000, 1_900_000, 1_000_000),
+                m(5_000_000, 100_000, 1_000_000),
+                m(1_000_000, 3_550_000, 2_500_000),
+            ];
+            assert_eq!(
+                check(200_000, &pushes, 1_000_000),
+                Ok(Some((1_074_600, 26_200)))
+            );
+        }
+
+        #[test]
+        fn leaves_out_an_edge_widened_past_the_lowest_span() {
+            let pushes = [Push::High(SECOND_NS, i64::MIN), Push::Low(0, i64::MIN)];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(None));
+            let pushes = [
+                Push::High(SECOND_NS, i64::MIN),
+                Push::Low(0, i64::MIN + 1_000),
+            ];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(Some((i64::MIN, 0))));
+        }
+
+        #[test]
+        fn leaves_out_an_edge_widened_past_the_highest_span() {
+            let pushes = [Push::Low(SECOND_NS, i64::MAX), Push::High(0, i64::MAX)];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(None));
+            let pushes = [
+                Push::Low(SECOND_NS, i64::MAX),
+                Push::High(0, i64::MAX - 1_000),
+            ];
+            assert_eq!(check(1_000, &pushes, SECOND_NS), Ok(Some((i64::MAX, 0))));
+        }
     }
 
     mod properties {
@@ -654,7 +692,7 @@ mod tests {
             ) {
                 let mut readings = readings;
                 readings.sort_by_key(|r| r.at());
-                let newest = readings.iter().map(|r| r.at()).max().expect("one or more");
+                let newest = readings.last().expect("one or more").at();
                 let now = newest + later;
                 let (mut low, mut high) = (None, None);
                 for r in &readings {

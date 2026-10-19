@@ -5,22 +5,27 @@
   drift to the newest local time and pushed there, so it narrows the overlap from the
   newest on (`laptop.architect-2`, 2026-10-19T15:07:34Z, A:
   https://github.com/synnaxlabs/foundation/pull/3386#issuecomment-6270475292). One that
-  shares no offset returns `Disjoint` (the clock jumped or restarted, or it drifts
-  faster than its bound). It does not change the overlap, and the caller starts a new
-  one with a gap. Each reading holds true mesh time, with the node's own error in its
-  bound, so the drift covers only the device oscillator. The drift is fixed for the life
-  of an overlap, because a smaller drift would need readings that it dropped. This reads
-  r6 Q5's lower-envelope fit with the rate bounded by `Drift`, not fitted. A line fit of
-  offset and rate lost: it is honest only if the rate stays constant, and no datasheet
-  bounds oscillator wander. A measured rate needs a signed rate in the model, not a
-  smaller `Drift`. A reading gives a low edge, a high edge, or both, at one device time.
-  A read return bounds the newest sample the host knows only from above. A low edge
-  comes from a mesh stamp before the device acts (a start command or a request), from a
-  device counter read between two mesh stamps, or from a latency that the hardware
-  guarantees. The overlap gives a bound only when it has both a low edge and a high edge
-  (`Overlap::at` gives `None` before that). Decided by the `time` builder; the person
-  accepted it on 2026-10-05 ('#1 is fine'). The person accepted one-sided readings on
-  2026-10-05 ("Accept #133"). Supersedes: r6 Q5 method 1 (a fitted rate from read-return
-  upper bounds). Lost: `Backwards` for an older reading (a reading handled late then
-  throws away a good fit); a check of an older reading in each caller (each caller
-  repeats the drift).
+  shares no offset returns `Disjoint` (the clock jumped, or it drifts faster than its
+  bound). A clock that goes back raises the offset, so it shows only when a later
+  reading's low edge passes the overlap: a jump back by less than the width of a reading
+  plus drift is not caught (`laptop.architect-2`, ruling owed:
+  https://github.com/synnaxlabs/foundation/pull/3386#issuecomment-6272521433). An older
+  reading whose edge widens past the range of a `Span` leaves that edge out. It does not
+  change the overlap, and the caller starts a new one with a gap. Each reading holds
+  true mesh time, with the node's own error in its bound, so the drift covers only the
+  device oscillator. The drift is fixed for the life of an overlap, because a smaller
+  drift would need readings that it dropped. This reads r6 Q5's lower-envelope fit with
+  the rate bounded by `Drift`, not fitted. A line fit of offset and rate lost: it is
+  honest only if the rate stays constant, and no datasheet bounds oscillator wander. A
+  measured rate needs a signed rate in the model, not a smaller `Drift`. A reading gives
+  a low edge, a high edge, or both, at one device time. A read return bounds the newest
+  sample the host knows only from above. A low edge comes from a mesh stamp before the
+  device acts (a start command or a request), from a device counter read between two
+  mesh stamps, or from a latency that the hardware guarantees. The overlap gives a bound
+  only when it has both a low edge and a high edge (`Overlap::at` gives `None` before
+  that). Decided by the `time` builder; the person accepted it on 2026-10-05 ('#1 is
+  fine'). The person accepted one-sided readings on 2026-10-05 ("Accept #133").
+  Supersedes: r6 Q5 method 1 (a fitted rate from read-return upper bounds). Lost:
+  `Backwards` for an older reading (a reading handled late then throws away a good fit;
+  it also showed a clock that went back at its first reading); a check of an older
+  reading in each caller (each caller repeats the drift).
