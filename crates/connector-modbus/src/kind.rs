@@ -80,7 +80,10 @@ impl kind::Kind for Kind {
     async fn run(&self, ctx: Context<Config>) -> Result<(), Error> {
         let config = ctx.config();
         let channels = config.reads.iter().map(|read| read.channel.clone());
-        let mut writer = poll::Writer::open(&ctx, channels.collect()).await?;
+        let Some(mut writer) = poll::Writer::open(&ctx, channels.collect()).await?
+        else {
+            return Ok(());
+        };
         let groups = groups(config, writer.types())?;
         let Some(client) = ctx.cancel().race(connect(&ctx)).await else {
             return Ok(());

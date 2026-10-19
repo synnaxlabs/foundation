@@ -13,7 +13,8 @@ pub struct Settings {
     /// else the node stops with [`crate::Error::Transport`]. Default 1 MiB.
     pub window_bytes: usize,
     /// The most streams of each kind a peer may have open at once, per session. A
-    /// peer that opens one more waits for credit. Default 64.
+    /// peer that opens one more waits for credit. A peer may have one more open,
+    /// which only a [`transport::Class::Command`] stream takes. Default 64.
     pub streams_max: NonZeroU32,
     /// How long a silent peer keeps its session. Positive, else the node stops with
     /// [`crate::Error::Transport`]. Default 30 s.

@@ -90,7 +90,10 @@ impl Kind for Polls {
     }
 
     async fn run(&self, ctx: Context<()>) -> Result<(), Error> {
-        let mut writer = Writer::open(&ctx, self.channels.map(name).to_vec()).await?;
+        let channels = self.channels.map(name).to_vec();
+        let Some(mut writer) = Writer::open(&ctx, channels).await? else {
+            return Ok(());
+        };
         *self.types.lock().expect("no panic") = writer.types().collect();
         for values in &self.writes {
             if ctx.cancel().race(ctx.clock().sleep(TICK)).await.is_none() {
