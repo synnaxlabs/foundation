@@ -58,6 +58,7 @@ impl Scripted {
 
 impl kind::Kind for Scripted {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())

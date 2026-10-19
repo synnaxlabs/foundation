@@ -42,6 +42,7 @@ struct Ticks {
 
 impl Kind for Ticks {
     type Config = ();
+    const SCHEMA: document::schema::Body = crate::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())
@@ -80,6 +81,7 @@ struct Refuses;
 
 impl Kind for Refuses {
     type Config = ();
+    const SCHEMA: document::schema::Body = crate::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())
@@ -99,6 +101,7 @@ struct Ends;
 
 impl Kind for Ends {
     type Config = ();
+    const SCHEMA: document::schema::Body = crate::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())
@@ -305,6 +308,7 @@ struct Secret {
 
 impl Kind for Secret {
     type Config = ();
+    const SCHEMA: document::schema::Body = crate::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())

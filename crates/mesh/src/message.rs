@@ -13,12 +13,18 @@ use crate::bytes::{
 };
 use crate::change::Change;
 use crate::entry;
+use crate::refusal::Refusal;
+use crate::region::Request;
 
 const RAFT: u8 = 1;
 const PROPOSE: u8 = 2;
 const PROPOSED: u8 = 3;
 const NOT_LEADER: u8 = 4;
 const NOT_LEADER_WITH_LEADER: u8 = 5;
+const JOIN: u8 = 6;
+const JOINED: u8 = 7;
+const UNJOINED: u8 = 8;
+const FOUNDING: u8 = 9;
 
 const PRE_VOTE: u8 = 1;
 const PRE_VOTE_REPLY: u8 = 2;
@@ -43,6 +49,25 @@ pub(crate) const VOTERS_MAX: usize = 127;
 
 // The grants of the two sets of a joint configuration.
 const GRANTS_MAX: usize = 2 * VOTERS_MAX;
+
+/// The most bytes of the byte form of a founding that a join answer holds: 64 MiB.
+/// No later build makes it smaller, or a region that one build founds has no join.
+pub(crate) const FOUNDING_BYTES_MAX: usize = 64 << 20;
+
+/// The bytes of a [`Message::Founding`] before its part.
+pub(crate) const FOUNDING_HEAD: usize = 1;
+
+/// Writes the byte form of a [`Message::Founding`] of `part` to `out`, which is
+/// [`FOUNDING_HEAD`] bytes longer than `part`.
+///
+/// # Panics
+///
+/// When `out` has another length.
+pub(crate) fn put_founding(part: &[u8], out: &mut [u8]) {
+    let (head, rest) = out.split_at_mut(FOUNDING_HEAD);
+    head.copy_from_slice(&[FOUNDING]);
+    rest.copy_from_slice(part);
+}
 
 /// Whether the byte form of `message` is at most [`BYTES_MIN`] bytes, for
 /// `raft::Config::fits`.
@@ -100,6 +125,30 @@ pub(crate) enum Message {
         /// The leader that the receiver knows.
         leader: Option<node::Key>,
     },
+    /// Asks a voter to admit the sender by a ticket. It is the one message of its
+    /// stream, and the answer comes on the reply half.
+    Join {
+        /// The request.
+        request: Box<Request>,
+    },
+    /// Answers a [`Message::Join`] that the receiver admits. The next messages of the
+    /// reply half are each a [`Message::Founding`], and their parts make the byte
+    /// form of the founding of the region.
+    Joined {
+        /// The length of the byte form of the founding, at most
+        /// [`FOUNDING_BYTES_MAX`].
+        bytes: usize,
+    },
+    /// Answers a [`Message::Join`] that the receiver does not admit.
+    Unjoined {
+        /// Why.
+        refusal: Refusal,
+    },
+    /// The next part of the byte form of the founding, after a [`Message::Joined`].
+    Founding {
+        /// The bytes of the part.
+        part: Vec<u8>,
+    },
 }
 
 impl Message {
@@ -134,14 +183,32 @@ impl Message {
                     put_key(*leader, &mut out);
                 }
             }
+            Self::Join { request } => {
+                out.push(JOIN);
+                request.encode(&mut out);
+            }
+            Self::Joined { bytes } => {
+                out.push(JOINED);
+                put_count(*bytes, &mut out);
+            }
+            Self::Unjoined { refusal } => {
+                out.push(UNJOINED);
+                refusal.encode(&mut out);
+            }
+            Self::Founding { part } => {
+                let bytes = part.len().checked_add(FOUNDING_HEAD);
+                out.resize(bytes.expect("invariant: a part fits in memory"), 0);
+                put_founding(part, &mut out);
+            }
         }
         out
     }
 
     /// The message that `bytes` is the byte form of, or `None` when it is the byte
     /// form of no message, of an `Append` with an entry of more than
-    /// [`entry::BYTES_MAX`] bytes, or of a proof of more grants than two sets of
-    /// [`VOTERS_MAX`] voters.
+    /// [`entry::BYTES_MAX`] bytes, of a proof of more grants than two sets of
+    /// [`VOTERS_MAX`] voters, or of a `Joined` of more than [`FOUNDING_BYTES_MAX`]
+    /// bytes.
     pub(crate) fn decode(mut bytes: &[u8]) -> Option<Self> {
         let bytes = &mut bytes;
         let message = match u8::from_le_bytes(take(bytes)?) {
@@ -177,6 +244,20 @@ impl Message {
             NOT_LEADER => Self::NotLeader { leader: None },
             NOT_LEADER_WITH_LEADER => Self::NotLeader {
                 leader: Some(take_key(bytes)?),
+            },
+            JOIN => Self::Join {
+                request: Box::new(Request::decode(bytes)?),
+            },
+            JOINED => Self::Joined {
+                bytes: usize::try_from(take_count(bytes)?)
+                    .ok()
+                    .filter(|&bytes| bytes <= FOUNDING_BYTES_MAX)?,
+            },
+            UNJOINED => Self::Unjoined {
+                refusal: Refusal::decode(bytes)?,
+            },
+            FOUNDING => Self::Founding {
+                part: std::mem::take(bytes).to_vec(),
             },
             _ => return None,
         };
@@ -331,7 +412,7 @@ mod tests {
 
     use super::*;
     use crate::change;
-    use crate::common::{at, key};
+    use crate::common::{at, key, member, name, public, ticket, unchecked};
 
     fn a_position() -> impl Strategy<Value = Position> {
         (any::<u64>(), any::<u64>()).prop_map(|(term, index)| at(term, index))
@@ -444,7 +525,35 @@ mod tests {
             prop::option::of(any::<u128>()).prop_map(|leader| Message::NotLeader {
                 leader: leader.map(node::Key::from_u128),
             });
-        prop_oneof![4 => raft, 1 => propose, 1 => proposed, 1 => not_leader]
+        let join = (1..=5_u8, 0..=3_u8).prop_map(|(id, count)| Message::Join {
+            request: Box::new(request(id, count)),
+        });
+        let joined =
+            (0..=FOUNDING_BYTES_MAX).prop_map(|bytes| Message::Joined { bytes });
+        let founding = prop::collection::vec(any::<u8>(), 0..=16)
+            .prop_map(|part| Message::Founding { part });
+        prop_oneof![
+            4 => raft,
+            1 => propose,
+            1 => proposed,
+            1 => not_leader,
+            1 => join,
+            1 => joined,
+            1 => crate::refusal::tests::refusals()
+                .prop_map(|refusal| Message::Unjoined { refusal }),
+            1 => founding,
+        ]
+    }
+
+    // The join of node `id` by ticket 1, with `count` status names.
+    fn request(id: u8, count: u8) -> Request {
+        let card = member(id).card;
+        Request {
+            ticket: public(1),
+            card: unchecked(&card),
+            admission: ticket(1).admission(&card),
+            status: (0..count).map(|i| name(&format!("s{i}"))).collect(),
+        }
     }
 
     fn le(number: u64) -> [u8; 8] {
@@ -731,6 +840,38 @@ mod tests {
             assert_eq!(message.encode(), expected, "{message:?}");
             assert_eq!(Message::decode(&expected), Some(message));
         }
+    }
+
+    #[test]
+    fn a_join_is_its_kind_then_the_request() {
+        let request = request(2, 2);
+        let mut expected = vec![6];
+        request.encode(&mut expected);
+        let join = Message::Join {
+            request: Box::new(request),
+        };
+        assert_eq!(join.encode(), expected);
+        assert_eq!(Message::decode(&expected), Some(join));
+    }
+
+    // A joining node refuses a founding over the bound before it reads a part.
+    #[test]
+    fn a_joined_is_its_kind_then_the_length_up_to_the_most_of_a_founding() {
+        let most = u64::try_from(FOUNDING_BYTES_MAX).unwrap();
+        let joined = Message::Joined {
+            bytes: FOUNDING_BYTES_MAX,
+        };
+        let expected = [&[7][..], &most.to_le_bytes()].concat();
+        assert_eq!(joined.encode(), expected);
+        assert_eq!(Message::decode(&expected), Some(joined));
+        let over = [&[7][..], &(most + 1).to_le_bytes()].concat();
+        assert_eq!(Message::decode(&over), None);
+        let part = Message::Founding { part: vec![4, 5] };
+        assert_eq!(part.encode(), [9, 4, 5]);
+        assert_eq!(Message::decode(&[9, 4, 5]), Some(part));
+        let mut out = [0; 3];
+        put_founding(&[4, 5], &mut out);
+        assert_eq!(out, [9, 4, 5]);
     }
 
     #[test]

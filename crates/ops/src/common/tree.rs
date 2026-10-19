@@ -334,6 +334,7 @@ impl Device for Session<'_> {
 
 impl kind::Kind for Tree {
     type Config = Vec<Name>;
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
         let reads = config

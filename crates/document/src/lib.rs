@@ -21,6 +21,8 @@ mod map;
 pub mod read;
 pub mod schema;
 mod span;
+#[cfg(feature = "sim")]
+pub mod testing;
 pub mod value;
 
 use std::fmt;

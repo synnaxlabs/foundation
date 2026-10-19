@@ -24,6 +24,7 @@ mod file;
 pub mod log;
 mod member;
 mod message;
+mod refusal;
 pub mod region;
 pub mod status;
 #[cfg(any(test, feature = "sim"))]

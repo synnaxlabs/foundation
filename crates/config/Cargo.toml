@@ -18,5 +18,7 @@ workspace = true
 [dev-dependencies]
 base64ct = { workspace = true }
 config-hcl = { path = "../config-hcl" }
+connector = { path = "../connector", features = ["sim"] }
 connector-influx = { path = "../connector-influx" }
+document = { path = "../document", features = ["sim"] }
 proptest = { workspace = true }

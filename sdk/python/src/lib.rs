@@ -8,22 +8,74 @@ use std::process;
 use std::sync::{Mutex, PoisonError};
 
 use pyo3::exceptions::{
-    PyConnectionError, PyOSError, PyRuntimeError, PyTypeError, PyValueError,
+    PyConnectionError, PyException, PyOSError, PyRuntimeError, PyTypeError,
+    PyValueError,
 };
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
+use pyo3::types::{PyInt, PyString};
+use types::authority::Authority;
 use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
+use types::time::Span;
 
 #[cfg(feature = "sim")]
 mod sim;
 #[cfg(test)]
 mod tests;
+mod write;
+
+pyo3::create_exception!(
+    foundation,
+    Refused,
+    PyConnectionError,
+    "The node refused the session or closed it, with a code: connect again. `code` is \
+     its name in lower case: `refused` when the spec does not list the subject or its \
+     key, `unsynced` when the node has no mesh time yet, `stale`, `via`, `expired`, or \
+     `changed` for a hello that the node refused, or a code of `Stopped`."
+);
+pyo3::create_exception!(
+    foundation,
+    Stopped,
+    PyException,
+    "The node stopped a write, with a code. At the open, no writer opened, and the \
+     session goes on. A writer that raises it has ended, and each later call raises it \
+     again. `code` is its name in lower case. At the open: `unknown` for a name of no \
+     channel, `not_home` when the node is not the home of the index, `malformed` for \
+     channels of more than one index or a lease that the home refuses, `failed` when \
+     the home cannot open the write, `refused` when the access check of the node \
+     refuses the write, and `busy` when the node has no room for the open. Later: \
+     `unknown` when a channel was removed, `failed` when the home failed, `busy` when \
+     the home has no room for the outcome of a frame, and `malformed` for a frame that \
+     breaks a rule of the wire."
+);
+pyo3::create_exception!(
+    foundation,
+    Rejected,
+    PyException,
+    "The node refused one frame of a writer, and took none of it. `code` is why: \
+     `waiting`, `reserved`, `expired`, `order`, `codec`, `full`, or `large`. The \
+     writer goes on."
+);
+pyo3::create_exception!(
+    foundation,
+    DataLost,
+    PyException,
+    "The node found no room for a live frame, so its samples are a gap in the log. \
+     `seqs` is a `dict` from the name of each channel of the frame to the `range` of \
+     the seqs of its lost samples. The writer goes on, as a later frame can find room."
+);
 
 #[pymodule]
 fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = module.py();
     module.add_function(wrap_pyfunction!(connect, module)?)?;
     module.add_class::<Client>()?;
+    module.add_class::<write::Writer>()?;
+    module.add("Refused", py.get_type::<Refused>())?;
+    module.add("Stopped", py.get_type::<Stopped>())?;
+    module.add("Rejected", py.get_type::<Rejected>())?;
+    module.add("DataLost", py.get_type::<DataLost>())?;
     #[cfg(feature = "sim")]
     sim::add(module)?;
     Ok(())
@@ -92,7 +144,7 @@ fn connect(
     };
     let client = py
         .detach(|| sdk::Client::connect(&node, subject))
-        .map_err(|e| error(&e))?;
+        .map_err(|e| error(py, &e))?;
     Ok(Client {
         session: Mutex::new(Some(client)),
         process: process::id(),
@@ -204,7 +256,7 @@ fn local(
                 data.join("data").display()
             )))
         }
-        Err(e) => Err(error(&e)),
+        Err(e) => Err(error(py, &e)),
     }
 }
 
@@ -281,7 +333,8 @@ impl Client {
 
     /// Closes the session, and blocks until the close goes out, the transport drains
     /// each close (up to 3 s), and the client's thread ends. A close during another
-    /// close waits for it to end, and gives `None`, as a close after it does.
+    /// close waits for it to end, and gives `None`, as a close after it does. A close
+    /// during an `open_writer` of another thread also waits for that open to end.
     ///
     /// Raises `ConnectionError` with the cause when the session ended before the close,
     /// and `PanicException` when the client's thread panicked. Only the close that ends
@@ -296,7 +349,70 @@ impl Client {
                 self.session.lock().unwrap_or_else(PoisonError::into_inner);
             client.take().map_or(Ok(()), sdk::Client::close)
         })
-        .map_err(|e| error(&e))
+        .map_err(|e| error(py, &e))
+    }
+
+    /// Opens a writer of `channels` at the home of their index, and blocks until the
+    /// node opened it. `channels` is one channel name or an iterable of names, all of
+    /// one index. Place `n` is `channels[n]`, and the index is place `len(channels)`
+    /// when `channels` does not name it. `authority` (0 to 255) is the writer's
+    /// authority over its channels: a writer of a higher authority takes control from
+    /// it. `lease` is the seconds that the writer may go with no write and keep
+    /// control, or `None` for no limit. `on_loss` is what a write does when the node
+    /// took no room for a live frame: `"warn"` logs a warning on the `foundation`
+    /// logger, `"raise"` raises `DataLost`, and `"ignore"` does nothing. Other Python
+    /// threads run while it waits.
+    ///
+    /// Raises `TypeError` for an argument of a wrong type; `ValueError` for no
+    /// channel, a name that does not parse, an `authority` outside 0 to 255, a `lease`
+    /// that is not a finite number over 0, or another `on_loss`, with no writer
+    /// opened; `Stopped` when the node refused the open, with a text that names each
+    /// channel of the open for `unknown`; `ConnectionError` when the session failed;
+    /// `RuntimeError` when the client closed or in a process that the program forked;
+    /// and `PanicException` when the client's thread panicked.
+    #[pyo3(
+        signature = (
+            channels, *, authority=Level(Authority(0)), lease=None, on_loss="warn"
+        ),
+        text_signature = "(self, channels, *, authority=0, lease=None, on_loss='warn')"
+    )]
+    fn open_writer(
+        &self,
+        py: Python<'_>,
+        channels: &Bound<'_, PyAny>,
+        authority: Level,
+        lease: Option<f64>,
+        on_loss: &str,
+    ) -> PyResult<write::Writer> {
+        let loss = write::Loss::parse(on_loss)?;
+        let names = names(channels)?;
+        let mut config = sdk::write::Config::new(names.clone());
+        config.authority = authority.0;
+        config.lease = lease.map(span).transpose()?;
+        owned(self.process)?;
+        // The lock is taken without the GIL, which a closing thread needs to return.
+        let writer = py
+            .detach(|| {
+                let client =
+                    self.session.lock().unwrap_or_else(PoisonError::into_inner);
+                client
+                    .as_ref()
+                    .ok_or(sdk::Error::Closed)?
+                    .open_writer(config)
+            })
+            .map_err(|e| {
+                if !matches!(
+                    e,
+                    sdk::Error::Stream(program::Error::Refused(
+                        program::Refusal::Unknown
+                    ))
+                ) {
+                    return error(py, &e);
+                }
+                let names: Vec<_> = names.iter().map(Name::as_str).collect();
+                exception(py, &e, format!("{e}: the open names {}", names.join(", ")))
+            })?;
+        Ok(write::Writer::new(writer, self.process, loss))
     }
 
     fn __enter__(this: Py<Self>) -> Py<Self> {
@@ -313,15 +429,93 @@ impl Client {
         raised: &Bound<'_, PyAny>,
         _traceback: &Bound<'_, PyAny>,
     ) -> PyResult<()> {
-        match self.close(py) {
-            Err(close) if !raised.is_none() => {
-                raised
-                    .call_method1("add_note", (format!("the close raised {close}"),))?;
-                Ok(())
-            }
-            closed => closed,
-        }
+        exit(self.close(py), raised)
     }
+}
+
+/// The outcome of a `__exit__` whose close gave `closed`: when the block raised
+/// `raised`, an error of the close is a note on it.
+fn exit(closed: PyResult<()>, raised: &Bound<'_, PyAny>) -> PyResult<()> {
+    match closed {
+        Err(close) if !raised.is_none() => {
+            raised.call_method1("add_note", (format!("the close raised {close}"),))?;
+            Ok(())
+        }
+        closed => closed,
+    }
+}
+
+/// Raises `RuntimeError` in a process other than `process`, the process that
+/// connected.
+fn owned(process: u32) -> PyResult<()> {
+    let now = process::id();
+    if now == process {
+        return Ok(());
+    }
+    Err(PyRuntimeError::new_err(format!(
+        "the client connected in process {process}, and this is process {now}: \
+         connect again in this process"
+    )))
+}
+
+/// The channel names of the argument `channels`: a name or an iterable of names.
+fn names(channels: &Bound<'_, PyAny>) -> PyResult<Vec<Name>> {
+    let parse = |name: &Bound<'_, PyAny>| -> PyResult<Name> {
+        let name = name.cast::<PyString>().map_err(|_other| {
+            let kind = name.get_type().name();
+            PyTypeError::new_err(match kind {
+                Ok(kind) => format!("a channel name is a str, not {kind}"),
+                Err(_) => "a channel name is a str".to_owned(),
+            })
+        })?;
+        name.to_str()?
+            .parse::<Name>()
+            .map_err(|e| PyValueError::new_err(format!("channels: {e}")))
+    };
+    if channels.is_instance_of::<PyString>() {
+        return Ok(vec![parse(channels)?]);
+    }
+    channels.try_iter()?.map(|name| parse(&name?)).collect()
+}
+
+/// The argument `authority` of `open_writer`: an `int` from 0 to 255.
+#[derive(Clone, Copy)]
+struct Level(Authority);
+
+impl<'a, 'py> FromPyObject<'a, 'py> for Level {
+    type Error = PyErr;
+
+    fn extract(object: Borrowed<'a, 'py, PyAny>) -> PyResult<Self> {
+        let int = object.cast::<PyInt>().map_err(|_other| {
+            match object.get_type().name() {
+                Ok(kind) => {
+                    PyTypeError::new_err(format!("authority is an int, not {kind}"))
+                }
+                Err(e) => e,
+            }
+        })?;
+        let level = int.extract().map_err(|_outside| {
+            PyValueError::new_err(format!("authority is {}, outside 0 to 255", *int))
+        })?;
+        Ok(Self(Authority(level)))
+    }
+}
+
+/// The span of the lease `lease`, in seconds.
+fn span(lease: f64) -> PyResult<Span> {
+    let nanos = (lease * 1e9).round();
+    // The bound is the first f64 past `i64::MAX`, and a NaN fails both tests.
+    #[expect(clippy::cast_precision_loss, reason = "2^63 is exact in an f64")]
+    if !(nanos >= 1.0 && nanos < i64::MAX as f64) {
+        return Err(PyValueError::new_err(format!(
+            "lease is {lease:?} s, not a finite number of seconds over 0"
+        )));
+    }
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "the test above keeps a whole number of nanoseconds in i64"
+    )]
+    Ok(Span::from_nanos(nanos as i64))
 }
 
 impl Drop for Client {
@@ -363,15 +557,65 @@ fn bytes(name: &str, value: &[u8]) -> PyResult<[u8; 32]> {
 }
 
 /// The Python exception of `error`.
-fn error(error: &sdk::Error) -> PyErr {
-    let text = error.to_string();
+fn error(py: Python<'_>, error: &sdk::Error) -> PyErr {
+    exception(py, error, error.to_string())
+}
+
+/// The Python exception of `error`, with the text `text`.
+fn exception(py: Python<'_>, error: &sdk::Error, text: String) -> PyErr {
     match error {
+        sdk::Error::Session(program::Error::Refused(refusal)) => {
+            coded(py, Refused::new_err(text), *refusal)
+        }
+        sdk::Error::Stream(program::Error::Refused(refusal)) => {
+            coded(py, Stopped::new_err(text), *refusal)
+        }
+        sdk::Error::Stream(
+            program::Error::Layout(_)
+            | program::Error::Unsent { .. }
+            | program::Error::Pool(_)
+            | program::Error::Body { .. }
+            | program::Error::Open { .. }
+            | program::Error::Unnamed,
+        ) => PyValueError::new_err(text),
         sdk::Error::Thread { .. } | sdk::Error::Closed => PyRuntimeError::new_err(text),
         sdk::Error::Bind(_) => PyOSError::new_err(text),
-        sdk::Error::Session(_) | sdk::Error::Stream(_) | sdk::Error::Local(_) => {
-            PyConnectionError::new_err(text)
-        }
+        sdk::Error::Session(_)
+        | sdk::Error::Local(_)
+        | sdk::Error::Stream(
+            program::Error::Transport(_)
+            | program::Error::Message(_)
+            | program::Error::Unanswered
+            | program::Error::Reply(_)
+            | program::Error::Frame(_)
+            | program::Error::Unplaced(_),
+        ) => PyConnectionError::new_err(text),
         sdk::Error::Panicked => PanicException::new_err(text),
         sdk::Error::Value { .. } => PyTypeError::new_err(text),
+    }
+}
+
+/// `error` with the attribute `code`, the code of `refusal`.
+fn coded(py: Python<'_>, error: PyErr, refusal: program::Refusal) -> PyErr {
+    match error.value(py).setattr("code", code(refusal)) {
+        Ok(()) => error,
+        Err(e) => e,
+    }
+}
+
+/// The code of `refusal` in lower case.
+fn code(refusal: program::Refusal) -> &'static str {
+    match refusal {
+        program::Refusal::Malformed => "malformed",
+        program::Refusal::Unknown => "unknown",
+        program::Refusal::NotHome => "not_home",
+        program::Refusal::Failed => "failed",
+        program::Refusal::Busy => "busy",
+        program::Refusal::Refused => "refused",
+        program::Refusal::Unsynced => "unsynced",
+        program::Refusal::Stale => "stale",
+        program::Refusal::Via => "via",
+        program::Refusal::Expired => "expired",
+        program::Refusal::Changed => "changed",
     }
 }

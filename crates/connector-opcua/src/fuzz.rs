@@ -73,8 +73,8 @@ fn read(clock: Clock, data: &[u8]) -> (Status, Status) {
 /// `data[..2]` picks, by its remainder by the table length. When the decode gives
 /// `Good`, it encodes the value, decodes those bytes with as many zeros after them as
 /// their length (#435), and encodes again. A `DataValue` gives the same read of its
-/// value, or the same fault, from both decodes. An input of fewer than 2 bytes decodes
-/// nothing.
+/// value, or the same fault, and the same time (`value::time`), or the same status,
+/// from both decodes. An input of fewer than 2 bytes decodes nothing.
 ///
 /// # Panics
 ///
@@ -130,7 +130,8 @@ pub fn decode(data: &[u8]) {
     }
 }
 
-/// The text of the read of `value`, a `DataValue`: a `NaN` equals itself.
+/// The text of the read of `value`, a `DataValue`, as a sample and as a time: a `NaN`
+/// equals itself.
 ///
 /// # Panics
 ///
@@ -139,13 +140,16 @@ fn read_of(value: &Value) -> String {
     let data_value = &raw const ffi::types()[DATA_VALUE];
     assert!(std::ptr::eq(value.data_type, data_value), "a DataValue");
     // SAFETY: `value` is a live `DataValue`, as the assert checks.
-    match unsafe { crate::value::Value::of(value.pointer().cast()) } {
+    let sample = match unsafe { crate::value::Value::of(value.pointer().cast()) } {
         Ok(read) => format!("{read:?}"),
         Err(fault) => match fault.cause() {
             Cause::Status(status) => status.name().to_owned(),
             Cause::Type(opc_type) => opc_type.to_string(),
         },
-    }
+    };
+    // SAFETY: as above.
+    let time = unsafe { crate::value::time(value.pointer().cast()) };
+    format!("{sample}, {time:?}")
 }
 
 /// Splits `data` into the type that its first two bytes pick and the rest.
@@ -447,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn a_data_value_reads_its_value_or_its_fault() {
+    fn a_data_value_reads_its_value_or_its_fault_and_its_time() {
         let read = |bytes: &[u8]| {
             let data_value = &ffi::types()[DATA_VALUE];
             let (value, _) = Value::decode(data_value, bytes)
@@ -460,14 +464,17 @@ mod tests {
         let string = [0x01, 0x0c, 2, 0, 0, 0, b'h', b'i'];
         let doubles = [0x01, 0x8b, 0, 0, 0, 0];
         let bad = [0x02, 0, 0, 0x34, 0x80];
+        let mut time = vec![0x01, 0x0d];
+        time.extend((ffi::UNIX_EPOCH + 1).to_le_bytes());
         assert_eq!(
-            [&double[..], &string, &doubles, &bad, &[0]].map(read),
+            [&double[..], &string, &doubles, &bad, &[0], &time].map(read),
             [
-                "F64(1.5)",
-                "String",
-                "array of Double",
-                "BadNodeIdUnknown",
-                "BadNoData"
+                "F64(1.5), Err(BadTypeMismatch)",
+                "String, Err(BadTypeMismatch)",
+                "array of Double, Err(BadTypeMismatch)",
+                "BadNodeIdUnknown, Err(BadNodeIdUnknown)",
+                "BadNoData, Err(BadNoData)",
+                "DateTime, Ok(Stamp(100))"
             ]
         );
         let mut data = vec![u8::try_from(DATA_VALUE).unwrap(), 0];
@@ -482,15 +489,15 @@ mod tests {
         assert_eq!(
             ones.collect::<Vec<_>>(),
             [
-                "Bool(true)",
-                "I8(1)",
-                "U8(1)",
-                "I16(1)",
-                "U16(1)",
-                "I32(1)",
-                "U32(1)",
-                "I64(1)",
-                "U64(1)"
+                "Bool(true), Err(BadTypeMismatch)",
+                "I8(1), Err(BadTypeMismatch)",
+                "U8(1), Err(BadTypeMismatch)",
+                "I16(1), Err(BadTypeMismatch)",
+                "U16(1), Err(BadTypeMismatch)",
+                "I32(1), Err(BadTypeMismatch)",
+                "U32(1), Err(BadTypeMismatch)",
+                "I64(1), Err(BadTypeMismatch)",
+                "U64(1), Err(BadTypeMismatch)"
             ]
         );
         let mut float = vec![0x01, 0x0a];
@@ -499,7 +506,11 @@ mod tests {
         range.extend([0; 16]);
         assert_eq!(
             [&float[..], &range, &[0x01, 0]].map(read),
-            ["F32(1.5)", "Range", "BadNoData"]
+            [
+                "F32(1.5), Err(BadTypeMismatch)",
+                "Range, Err(BadTypeMismatch)",
+                "BadNoData, Err(BadNoData)"
+            ]
         );
     }
 

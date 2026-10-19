@@ -67,6 +67,8 @@ pub(crate) struct Setup {
     pub(crate) message_bytes_max: usize,
     /// At least twice `message_bytes_max`.
     pub(crate) window_bytes: usize,
+    /// The most streams of each kind that the peer may have open, other than the ones
+    /// that `streams` adds.
     pub(crate) streams_max: NonZeroU32,
     /// Positive.
     pub(crate) idle: Span,
@@ -221,6 +223,17 @@ fn server(
     server
 }
 
+/// The most two-way and one-way streams that the peer of `role` may have open: one
+/// more of each kind at a node, which only a `Command` stream takes, and one more
+/// one-way stream for the peer's hello, whose credit does not come back when it ends.
+fn streams(role: &Role, max: NonZeroU32) -> (VarInt, VarInt) {
+    let kept = u64::from(matches!(role, Role::Node(_)));
+    let bi = u64::from(max.get()) + kept;
+    let uni = bi + 1;
+    let varint = |count| VarInt::from_u64(count).expect("invariant: a u32 and two fit");
+    (varint(bi), varint(uni))
+}
+
 fn transport(setup: &Setup) -> TransportConfig {
     let idle_ms = idle_ms(setup.idle);
     let window = VarInt::try_from(setup.window_bytes).unwrap_or(VarInt::MAX);
@@ -228,10 +241,7 @@ fn transport(setup: &Setup) -> TransportConfig {
     // connection's credit can run out while the connection has room.
     let stream_window = setup.window_bytes.saturating_mul(2);
     let stream_window = VarInt::try_from(stream_window).unwrap_or(VarInt::MAX);
-    let streams = VarInt::from_u32(setup.streams_max.get());
-    // One more for the peer's hello, whose credit does not come back when it ends.
-    let uni = u64::from(setup.streams_max.get()) + 1;
-    let uni = VarInt::from_u64(uni).expect("invariant: a u32 and one fit a varint");
+    let (bi, uni) = streams(&setup.role, setup.streams_max);
     let mut mtu = MtuDiscoveryConfig::default();
     mtu.upper_bound(PAYLOAD_IPV6)
         .interval(Duration::from_secs(600))
@@ -239,7 +249,7 @@ fn transport(setup: &Setup) -> TransportConfig {
         .minimum_change(20);
     let mut transport = TransportConfig::default();
     transport
-        .max_concurrent_bidi_streams(streams)
+        .max_concurrent_bidi_streams(bi)
         .max_concurrent_uni_streams(uni)
         .stream_receive_window(stream_window)
         .receive_window(window)
@@ -468,16 +478,32 @@ mod tests {
         }
 
         #[test]
-        fn lets_the_peer_open_streams_max_streams_of_each_kind() {
+        fn gives_the_peer_of_a_node_one_more_stream_of_each_kind_at_the_largest_max() {
+            testing::run(1, |shard| {
+                let mut pair = Pair::with(shard, Span::SECOND, DELAY, |config| {
+                    config.streams_max = NonZeroU32::MAX;
+                });
+                pair.dial(pair::SERVER_KEY.public());
+                pair.run(Duration::from_millis(100));
+                let largest = u64::from(u32::MAX);
+                let streams = pair.client.connection().streams();
+                assert_eq!(streams.available(Dir::Bi), largest + 1);
+                // The hello took one.
+                assert_eq!(streams.available(Dir::Uni), largest + 1);
+            });
+        }
+
+        #[test]
+        fn lets_the_peer_open_one_more_than_streams_max_streams_of_each_kind() {
             testing::run(1, |shard| {
                 let mut pair = dial(shard, Duration::from_millis(100));
                 let mut streams = pair.client.connection().streams();
                 for dir in [Dir::Bi, Dir::Uni] {
-                    let opened = (0..=testing::STREAMS_MAX)
+                    let opened = (0..=testing::STREAMS_MAX + 1)
                         .map_while(|_| streams.open(dir))
                         .count();
                     let max = usize::try_from(testing::STREAMS_MAX).expect("fits");
-                    assert_eq!(opened, max, "{dir:?}");
+                    assert_eq!(opened, max + 1, "{dir:?}");
                 }
             });
         }

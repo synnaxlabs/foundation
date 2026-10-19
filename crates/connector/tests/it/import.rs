@@ -15,6 +15,7 @@ struct Points;
 
 impl Kind for Points {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())
@@ -54,6 +55,7 @@ struct Blind;
 
 impl Kind for Blind {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())

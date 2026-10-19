@@ -51,6 +51,7 @@ pub(crate) async fn open(
         files: node.files(),
         dir: "mesh".into(),
         clock: node.clock(),
+        time: clock::Clock::new(node.clock()).1,
         entropy: node.entropy(),
         tasks: tasks.clone(),
         pool,

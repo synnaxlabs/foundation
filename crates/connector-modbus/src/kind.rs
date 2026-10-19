@@ -8,6 +8,7 @@ use connector::kind::{self, Channels, Context, Error};
 use connector::{pace, poll};
 use document::Document;
 use document::diagnostic::{Code, Diagnostic};
+use document::schema::Body;
 use env::net::host::Host;
 use env::net::{self, tcp};
 use types::sample::Type;
@@ -36,6 +37,7 @@ pub struct Kind;
 
 impl kind::Kind for Kind {
     type Config = Config;
+    const SCHEMA: Body = config::BODY;
 
     /// Reads `address`, `rate`, the optional `unit` and `order`, and one or more
     /// `read` blocks, each with the channel as its label, a `table`, and an
@@ -78,7 +80,10 @@ impl kind::Kind for Kind {
     async fn run(&self, ctx: Context<Config>) -> Result<(), Error> {
         let config = ctx.config();
         let channels = config.reads.iter().map(|read| read.channel.clone());
-        let mut writer = poll::Writer::open(&ctx, channels.collect()).await?;
+        let Some(mut writer) = poll::Writer::open(&ctx, channels.collect()).await?
+        else {
+            return Ok(());
+        };
         let groups = groups(config, writer.types())?;
         let Some(client) = ctx.cancel().race(connect(&ctx)).await else {
             return Ok(());

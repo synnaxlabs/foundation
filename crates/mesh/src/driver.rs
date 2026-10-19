@@ -30,12 +30,13 @@ use wire::Protocol;
 use crate::applied::Applied;
 use crate::change::{Change, Join, Malformed};
 use crate::claim::{self, Known, Signer};
-use crate::error::{self, Error, Stopped};
+use crate::error::{Error, Stopped};
 use crate::log::{self, Log};
 use crate::member::Member;
 use crate::message::{self, Message};
+use crate::refusal::Refusal;
 use crate::region::{self, Refused, Request};
-use crate::status::{self, Status};
+use crate::status::Status;
 use bound::Bound;
 pub use founding::founding;
 use send::Senders;
@@ -46,6 +47,7 @@ mod apply;
 mod bound;
 mod founding;
 mod home;
+mod join;
 mod propose;
 mod send;
 mod stream;
@@ -96,6 +98,8 @@ pub struct Config {
     pub dir: PathBuf,
     /// Times the ticks of the group.
     pub clock: Clock,
+    /// Gives the mesh time that stamps each join that this node admits.
+    pub time: clock::Reader,
     /// Gives each election timeout its random part.
     pub entropy: Entropy,
     /// Runs each task that the mesh spawns.
@@ -131,11 +135,9 @@ pub struct Mesh {
     store: Rc<blob::Store>,
     clock: Clock,
     cards: Rc<version::Cards>,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the join answer of #336 is the first user")
-    )]
     entropy: Entropy,
+    time: clock::Reader,
+    founding: Rc<founding::Shared>,
 }
 
 impl fmt::Debug for Mesh {
@@ -178,6 +180,8 @@ impl Mesh {
     ///   set can hold.
     /// - [`Error::Pool`] when the pool has no block for a chunk or the founding file,
     ///   and [`Error::Blob`] when a call of the store fails.
+    /// - [`Error::Unjoinable`] when the log holds no record and the byte form of
+    ///   `config.founding` is over the most bytes that a join answer holds.
     /// - [`Error::Founding`] when the log holds a record and `config.dir` holds another
     ///   founding, with the members of each in key order.
     /// - [`Error::Unfounded`] when the log holds a record, and `config.dir` holds no
@@ -246,6 +250,8 @@ impl Mesh {
         let logged = stored != log::Stored::default();
         let blocks = log.blocks();
         founding::keep(files, &config.dir, blocks, &config.founding, logged).await?;
+        let founding =
+            founding::Shared::new(files.clone(), config.dir.clone(), blocks.clone());
         let cards = version::Cards::new(&config, blocks.clone());
         let used = used::open(Opening {
             files,
@@ -263,8 +269,7 @@ impl Mesh {
         if raft.voters().quorum(|key| key == config.key).is_ok() {
             raft.campaign();
         }
-        let group = Group::new(raft, state, unapplied, used);
-        let group = Rc::new(RefCell::new(group));
+        let group = Rc::new(RefCell::new(Group::new(raft, state, unapplied, used)));
         let weak = Rc::downgrade(&group);
         let tasks = tasks::Group::new(config.tasks);
         tasks.tasks().spawn(used::keep(
@@ -289,6 +294,8 @@ impl Mesh {
             clock: config.clock,
             cards: Rc::new(cards),
             entropy: config.entropy,
+            time: config.time,
+            founding: Rc::new(founding),
         })
     }
 
@@ -456,7 +463,7 @@ impl Mesh {
     ///   a write holds it.
     #[cfg_attr(
         not(test),
-        expect(dead_code, reason = "the join answer of #336 is the first user")
+        expect(dead_code, reason = "a later PR of #336 is the first user")
     )]
     pub(crate) async fn propose_voters(
         &self,
@@ -557,40 +564,39 @@ impl Mesh {
         }
     }
 
-    /// The `Join` of `request` at the later edge of the mesh time of `time`, with a new
-    /// UUIDv7 key for each status name, when the applied state of this node admits
-    /// it. The caller proposes it, or forwards it to the leader. Each node checks the
-    /// join again when it applies it.
+    /// The `Join` of `request` at the later edge of the mesh time of this node, with a
+    /// new UUIDv7 key for each status name, when the applied state of this node
+    /// admits it. The caller proposes it, or forwards it to the leader. Each node
+    /// checks the join again when it applies it.
     ///
     /// # Errors
     ///
-    /// - [`Unstamped::Stopped`] when the group stopped.
-    /// - [`Unstamped::Unsynced`] when `time` has no mesh time, when its error is
+    /// - [`Refusal::Stopped`] when the group stopped.
+    /// - [`Refusal::Unsynced`] when this node has no mesh time, when its error is
     ///   unknown, or when the later edge is before the Unix epoch, where a UUIDv7
     ///   key has no time.
-    /// - [`Unstamped::Status`] when `request` names more than 64 status channels.
-    /// - [`Unstamped::Refused`] when the applied state of this node refuses the
+    /// - [`Refusal::Refused`] when the applied state of this node refuses the
     ///   join. A node whose state lags can refuse a join that the region admits.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "the join answer of #336 is the first user")
+    ///
+    /// # Panics
+    ///
+    /// When `request` names more than 64 status channels, which its decode refuses.
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "the decode bounds the status names"
     )]
-    pub(crate) fn stamp(
-        &self,
-        time: &clock::Reader,
-        request: Request,
-    ) -> Result<Change, Unstamped> {
-        if let Some(stopped) = self.group.borrow().stopped.get() {
-            return Err(Unstamped::Stopped(stopped.clone()));
+    pub(crate) fn stamp(&self, request: Request) -> Result<Change, Refusal> {
+        if self.group.borrow().stopped.get().is_some() {
+            return Err(Refusal::Stopped);
         }
-        let measurement = match time.status() {
+        let measurement = match self.time.status() {
             clock::Status::Synced(measurement)
             | clock::Status::Holdover(measurement, _) => measurement,
-            clock::Status::Unsynced(_) => return Err(Unstamped::Unsynced),
+            clock::Status::Unsynced(_) => return Err(Refusal::Unsynced),
         };
         let at = measurement.interval().latest;
         if !measurement.known() || at < Stamp::EPOCH {
-            return Err(Unstamped::Unsynced);
+            return Err(Refusal::Unsynced);
         }
         let key = |name| {
             let mut random = [0; 16];
@@ -603,10 +609,11 @@ impl Mesh {
             at,
             card: request.card,
             admission: request.admission,
-            status: Status::new(keys).map_err(Unstamped::Status)?,
+            status: Status::new(keys)
+                .expect("invariant: a request decodes with at most 64 status names"),
         };
         let group = self.group.borrow();
-        group.state.check(&join).map_err(Unstamped::Refused)?;
+        group.state.check(&join).map_err(Refusal::Refused)?;
         Ok(Change::Join(Box::new(join)))
     }
 
@@ -628,40 +635,6 @@ impl Mesh {
         .await
     }
 }
-
-/// Why this node stamps no join.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the join answer of #336 is the first user")
-)]
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Unstamped {
-    /// The node has no mesh time that can stamp a join: none yet, one with an unknown
-    /// error, or one whose later edge is before the Unix epoch.
-    Unsynced,
-    /// The join request names more than 64 status channels.
-    Status(status::Many),
-    /// The group stopped.
-    Stopped(Stopped),
-    /// The applied state of this node refuses the join, as apply would.
-    Refused(region::Refused),
-}
-
-impl fmt::Display for Unstamped {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Unsynced => f.write_str(
-                "this node has no mesh time with a known error at or after the Unix \
-                 epoch, so it stamps no join",
-            ),
-            Self::Status(many) => many.fmt(f),
-            Self::Stopped(stopped) => error::write_stopped(f, stopped),
-            Self::Refused(refused) => refused.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for Unstamped {}
 
 /// A watch of the home of one index.
 pub struct Watch {
@@ -1433,7 +1406,6 @@ mod tests {
     };
     use crate::file::Blocks;
     use crate::region::Unfit;
-    use crate::status::Many;
     use crate::ticket::{self, Options};
     use crate::used::{Behind, Spec};
 
@@ -1618,6 +1590,7 @@ mod tests {
             files: node.files(),
             dir: PathBuf::new(),
             clock: node.clock(),
+            time: synced(node),
             entropy: node.entropy(),
             tasks: tasks.clone(),
             transport: Rc::new(bind(
@@ -1854,20 +1827,14 @@ mod tests {
     }
 
     /// Stamps the join request of node `id`, and puts the join on the board.
-    async fn stamp(
-        mesh: Mesh,
-        clock: Clock,
-        time: clock::Reader,
-        id: u8,
-        board: Arc<Mutex<Board>>,
-    ) -> ! {
+    async fn stamp(mesh: Mesh, clock: Clock, id: u8, board: Arc<Mutex<Board>>) -> ! {
         loop {
             clock.sleep(TICK).await;
             let request = board.lock().unwrap().requests.remove(&id);
             let Some(request) = request else {
                 continue;
             };
-            let join = mesh.stamp(&time, request).unwrap();
+            let join = mesh.stamp(request).unwrap();
             board.lock().unwrap().stamped.insert(id, join);
         }
     }
@@ -2087,9 +2054,8 @@ mod tests {
         });
         let (stamping, clock, requests) =
             (mesh.clone(), node.clock(), Arc::clone(board));
-        let time = synced(node);
         tasks.spawn(async move {
-            stamp(stamping, clock, time, id, requests).await;
+            stamp(stamping, clock, id, requests).await;
         });
         let (setting, clock, sets) = (mesh.clone(), node.clock(), Arc::clone(board));
         tasks.spawn(async move {
@@ -3056,6 +3022,7 @@ mod tests {
     mod founding;
     mod home;
     mod in_use;
+    mod join;
     mod send;
     mod serve;
     mod version;
@@ -5324,28 +5291,32 @@ mod tests {
     // change uses.
     #[test]
     fn a_stamp_after_a_stop_gives_the_cause_and_draws_no_entropy() {
-        let draws = [false, true].map(|stamped| {
-            let drawn = Arc::new(Mutex::new([0; 16]));
-            let next = Arc::clone(&drawn);
-            solo(move |node, tasks| async move {
-                let unsynced = clock::Clock::new(node.clock()).1;
-                let time = synced(&node);
-                node.set_wall_error(None);
-                let unknown = synced(&node);
-                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
-                let cause = stop_by_an_empty_change(&mesh).await;
-                if stamped {
-                    for reader in [&time, &unsynced, &unknown] {
-                        let refused = mesh.stamp(reader, request(4, 7, &["disk"]));
-                        assert_eq!(refused, Err(Unstamped::Stopped(cause.clone())));
+        for case in ["synced", "unsynced", "unknown error"] {
+            let draws = [false, true].map(|stamped| {
+                let drawn = Arc::new(Mutex::new([0; 16]));
+                let next = Arc::clone(&drawn);
+                solo(move |node, tasks| async move {
+                    let time = match case {
+                        "synced" => synced(&node),
+                        "unsynced" => clock::Clock::new(node.clock()).1,
+                        _ => {
+                            node.set_wall_error(None);
+                            synced(&node)
+                        }
+                    };
+                    let config = config(&node, &tasks, 1, &IDS, &IDS).await;
+                    let mesh = Mesh::start(Config { time, ..config }).await.unwrap();
+                    stop_by_an_empty_change(&mesh).await;
+                    if stamped {
+                        let refused = mesh.stamp(request(4, 7, &["disk"]));
+                        assert_eq!(refused, Err(Refusal::Stopped), "{case}");
                     }
-                    assert_eq!(Unstamped::Stopped(cause).to_string(), EMPTY_CHANGE);
-                }
-                node.entropy().fill(&mut *next.lock().unwrap());
+                    node.entropy().fill(&mut *next.lock().unwrap());
+                });
+                *drawn.lock().unwrap()
             });
-            *drawn.lock().unwrap()
-        });
-        assert_eq!(draws[0], draws[1]);
+            assert_eq!(draws[0], draws[1], "{case}");
+        }
     }
 
     /// The change that records ticket `id`, which admits `prefix` until `expiry`, any
@@ -5370,7 +5341,26 @@ mod tests {
         tasks: &Tasks,
         tickets: &[Change],
     ) -> Mesh {
+        recorded_with(node, config(node, tasks, 1, &[1], &[1]).await, tickets).await
+    }
+
+    /// As [`recorded`], with the mesh time `time`.
+    async fn recorded_at(
+        node: &sim::node::Node,
+        tasks: &Tasks,
+        time: clock::Reader,
+        tickets: &[Change],
+    ) -> Mesh {
         let config = config(node, tasks, 1, &[1], &[1]).await;
+        recorded_with(node, Config { time, ..config }, tickets).await
+    }
+
+    /// As [`recorded`], opened with `config` of lone voter 1.
+    async fn recorded_with(
+        node: &sim::node::Node,
+        config: Config,
+        tickets: &[Change],
+    ) -> Mesh {
         let mesh = Mesh::open(config).await.unwrap();
         let mut watch = mesh.watch(INDEX);
         assert_eq!(watch.next().await, Ok(None));
@@ -5611,11 +5601,11 @@ mod tests {
                 ticket_of(8, "plant", true, inside),
                 ticket_of(9, "plant", true, start.latest + Span::HOUR),
             ];
-            let mesh = recorded(&node, &tasks, &tickets).await;
+            let mesh = recorded_at(&node, &tasks, time.clone(), &tickets).await;
             let interval = time.now().mesh.unwrap();
             assert!(interval.earliest < inside);
             let names = ["clock.error", "clock.offset"];
-            let stamped = mesh.stamp(&time, request(5, 9, &names)).unwrap();
+            let stamped = mesh.stamp(request(5, 9, &names)).unwrap();
             let Change::Join(join) = &stamped else {
                 panic!("{stamped:?} is not a join")
             };
@@ -5632,8 +5622,8 @@ mod tests {
                 expiry: inside,
                 at,
             };
-            let refused = Unstamped::Refused(region::Refused::Ticket(expired));
-            assert_eq!(mesh.stamp(&time, request(4, 8, &[])), Err(refused));
+            let refused = Refusal::Refused(region::Refused::Ticket(expired));
+            assert_eq!(mesh.stamp(request(4, 8, &[])), Err(refused));
             let mut watch = mesh.watch(INDEX);
             assert_eq!(watch.next().await, Ok(Some(key(2))));
             mesh.propose(stamped).await.unwrap();
@@ -5653,7 +5643,7 @@ mod tests {
             let expiry = time.now().mesh.unwrap().latest + Span::HOUR;
             let tickets = [ticket_of(8, "plant", false, expiry)];
             let mesh = recorded(&node, &tasks, &tickets).await;
-            let stamped = mesh.stamp(&time, request(4, 8, &[])).unwrap();
+            let stamped = mesh.stamp(request(4, 8, &[])).unwrap();
             node.clock().sleep(seconds(7200)).await;
             assert!(time.now().mesh.unwrap().earliest > expiry);
             let mut watch = mesh.watch(INDEX);
@@ -5671,7 +5661,6 @@ mod tests {
     #[test]
     fn a_join_that_the_applied_state_refuses_is_not_stamped() {
         solo(|node, tasks| async move {
-            let time = synced(&node);
             let tickets = [
                 ticket_of(7, "plant", true, LAST),
                 ticket_of(8, "plant", false, LAST),
@@ -5679,7 +5668,7 @@ mod tests {
             let mesh = recorded(&node, &tasks, &tickets).await;
             let mut watch = mesh.watch(INDEX);
             assert_eq!(watch.next().await, Ok(Some(key(2))));
-            mesh.propose(mesh.stamp(&time, request(4, 8, &[])).unwrap())
+            mesh.propose(mesh.stamp(request(4, 8, &[])).unwrap())
                 .await
                 .unwrap();
             mesh.propose(home_to(1)).await.unwrap();
@@ -5712,12 +5701,12 @@ mod tests {
                 ),
             ];
             for (request, refused) in cases {
-                let stamped = mesh.stamp(&time, request);
-                assert_eq!(stamped, Err(Unstamped::Refused(refused)));
+                let stamped = mesh.stamp(request);
+                assert_eq!(stamped, Err(Refusal::Refused(refused)));
             }
-            let unknown = Unstamped::Refused(region::Refused::Unknown {
+            let unknown = region::Refused::Unknown {
                 public_key: public(9),
-            });
+            };
             let text = format!("no ticket {} is recorded", public(9));
             assert_eq!(unknown.to_string(), text);
             assert_eq!(mesh.member(key(5)), None);
@@ -5740,15 +5729,11 @@ mod tests {
                     }
                 };
                 let config = config(&node, &tasks, 1, &[1], &[1]).await;
-                let mesh = Mesh::open(config).await.unwrap();
-                let stamped = mesh.stamp(&time, request(4, 8, &[]));
-                assert_eq!(stamped, Err(Unstamped::Unsynced), "{case}");
+                let mesh = Mesh::open(Config { time, ..config }).await.unwrap();
+                let stamped = mesh.stamp(request(4, 8, &[]));
+                assert_eq!(stamped, Err(Refusal::Unsynced), "{case}");
             });
         }
-        let text = "this node has no mesh time with a known error at or after the Unix \
-                    epoch, so it stamps no join";
-        assert_eq!(Unstamped::Unsynced.to_string(), text);
-        let _: &dyn std::error::Error = &Unstamped::Unsynced;
     }
 
     #[test]
@@ -5756,14 +5741,14 @@ mod tests {
     fn a_node_at_the_unix_epoch_stamps_a_join() {
         solo(|node, tasks| async move {
             let (mut clock, time) = clock::Clock::new(node.clock());
-            let mesh =
-                recorded(&node, &tasks, &[ticket_of(7, "plant", true, LAST)]).await;
+            let ticket = ticket_of(7, "plant", true, LAST);
+            let mesh = recorded_at(&node, &tasks, time.clone(), &[ticket]).await;
             node.step_wall(Span::from_nanos(-node.wall().now().time.nanos()));
             node.set_wall_error(Some(Span::from_nanos(0)));
             let source = clock.add();
             let wall = clock::source::Wall::new(node.wall(), node.clock());
             clock.push(source, wall.measure());
-            let stamped = mesh.stamp(&time, request(4, 7, &[])).unwrap();
+            let stamped = mesh.stamp(request(4, 7, &[])).unwrap();
             let Change::Join(join) = stamped else {
                 panic!("{stamped:?} is not a join")
             };
@@ -5776,14 +5761,14 @@ mod tests {
     fn a_node_in_holdover_stamps_a_join_at_the_later_edge() {
         solo(|node, tasks| async move {
             let (mut clock, time) = clock::Clock::new(node.clock());
-            let mesh =
-                recorded(&node, &tasks, &[ticket_of(7, "plant", true, LAST)]).await;
+            let ticket = ticket_of(7, "plant", true, LAST);
+            let mesh = recorded_at(&node, &tasks, time.clone(), &[ticket]).await;
             let source = clock.add();
             let wall = clock::source::Wall::new(node.wall(), node.clock());
             clock.push(source, wall.measure());
             clock.remove(source);
             assert!(matches!(time.status(), clock::Status::Holdover(..)));
-            let stamped = mesh.stamp(&time, request(4, 7, &[])).unwrap();
+            let stamped = mesh.stamp(request(4, 7, &[])).unwrap();
             let Change::Join(join) = stamped else {
                 panic!("{stamped:?} is not a join")
             };
@@ -5792,19 +5777,15 @@ mod tests {
     }
 
     #[test]
-    fn a_join_request_with_65_status_names_is_refused() {
+    #[should_panic(expected = "invariant: a request decodes with at most 64 status")]
+    fn a_join_request_with_65_status_names_is_a_defect() {
         solo(|node, tasks| async move {
             let mesh =
                 recorded(&node, &tasks, &[ticket_of(8, "plant", true, LAST)]).await;
-            let time = synced(&node);
             let names: Vec<_> = (0..65).map(|i| format!("s{i:02}")).collect();
             let names: Vec<_> = names.iter().map(String::as_str).collect();
-            let refused = mesh.stamp(&time, request(4, 8, &names));
-            let many = Unstamped::Status(Many { count: 65 });
-            assert_eq!(refused, Err(many.clone()));
-            assert_eq!(many.to_string(), "65 status entries, more than 64");
-            let names = &names[..64];
-            mesh.stamp(&time, request(4, 8, names)).unwrap();
+            mesh.stamp(request(4, 8, &names[..64])).unwrap();
+            mesh.stamp(request(4, 8, &names)).unwrap_err();
         });
     }
 

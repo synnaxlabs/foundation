@@ -224,8 +224,9 @@
   the record that the node holds, also after a stop (approved by the architect,
   2026-10-07T08:07:48Z:
   https://github.com/synnaxlabs/foundation/pull/1241#issuecomment-6033747689). `stamp`
-  gives `Unstamped::Stopped` (MEMBER RECORD). A stopped group does not start again: the
-  node opens the mesh again, and the open makes durable what it gives (MESH LOG). The
+  gives `Refusal::Stopped`, with no cause (MEMBER RECORD). A stopped group does not
+  start again: the node opens the mesh again, and the open makes durable what it gives
+  (MESH LOG). The
   task ends soon after the last `Mesh` drops, a write in progress ends first, and a
   write that waits for a block ends at the next tick; until then a new open gives
   `Error::Log`. Each open applies the log from index 1, until snapshots (#253). A watch

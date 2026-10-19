@@ -20,6 +20,11 @@ impl Mesh {
     /// `Card` change over the bound of [`Mesh::set_addresses`], or with code 19 for a
     /// contested `Join` change.
     ///
+    /// A stream that goes both ways carries one proposal or one join request, and
+    /// only a voter admits a join. A node that is not a voter answers that it has no
+    /// vote. The answer to a join that this node admits is the byte form of the
+    /// founding of the region, in parts.
+    ///
     /// # Errors
     ///
     /// - [`Error::Malformed`] when a message is the byte form of no message, or is not
@@ -37,10 +42,13 @@ impl Mesh {
     ///   node leads and proposed another card of that member less than a minute
     ///   before.
     /// - [`Error::Pool`] when the pool has no block: while the group waits to write its
-    ///   log, which refuses the message, or for the answer to a proposal, which the
+    ///   log, which refuses the message, or for an answer or a part of one, which the
     ///   peer then does not get, and the group can hold the entry of the proposal. A
     ///   `raft` message that gets it on a one-way stream is dropped, and the stream
     ///   goes on.
+    /// - [`Error::Files`] and [`Error::Unfounded`] when this node admits a join and
+    ///   cannot read its founding file. The reply half ends with no mesh code, and
+    ///   the node can ask again.
     /// - [`Error::Stream`] when the stream or its session fails.
     /// - [`Error::Stopped`] when the group stopped. On a stream that goes both ways,
     ///   the reply half then ends with no mesh code: the group can hold the entry.
@@ -83,15 +91,16 @@ impl Mesh {
         Ok(())
     }
 
-    /// Answers the one proposal of a stream that goes both ways, and reads to its end.
+    /// Answers the one proposal or join of a stream that goes both ways, and reads to
+    /// its end.
     async fn exchange(
         &self,
         peer: PublicKey,
         mut receiver: Receiver,
         mut sender: Sender,
     ) -> Result<(), Error> {
-        let answer = match self.ask(peer, &mut receiver).await {
-            Ok(answer) => answer.encode(),
+        let reply = match self.ask(peer, &mut receiver).await {
+            Ok(reply) => reply,
             // The group can stop in the write of the entry, so a stop is no refusal.
             Err(error @ Error::Stopped(_)) => return Err(error),
             Err(error) => {
@@ -102,10 +111,16 @@ impl Mesh {
                 return Err(error);
             }
         };
-        // The group can hold the entry of the proposal, so no error from here is a
-        // refusal: a sender that drops ends the reply half with no code of the mesh.
-        let answer = self.pool.copy(&answer).map_err(Error::Pool)?;
-        sender.send(answer).await?;
+        // The group can hold the entry of the proposal or the join, so no error from
+        // here is a refusal: a sender that drops ends the reply half with no code of
+        // the mesh.
+        match reply {
+            Reply::Message(message) => {
+                let answer = self.pool.copy(&message.encode()).map_err(Error::Pool)?;
+                sender.send(answer).await?;
+            }
+            Reply::Founding => self.send_founding(&mut sender).await?,
+        }
         sender.finish()?;
         // A reset takes back an answer that the peer does not have yet, so from here
         // only the receiver stops.
@@ -116,21 +131,36 @@ impl Mesh {
         Ok(())
     }
 
-    /// Reads the proposal, and gives the answer of the group to it.
+    /// Reads the proposal or the join, and gives the answer of the group to it.
     async fn ask(
         &self,
         peer: PublicKey,
         receiver: &mut Receiver,
-    ) -> Result<Message, Error> {
-        // The block of the proposal drops with this statement: the group writes the
+    ) -> Result<Reply, Error> {
+        // The block of the message drops with this statement: the group writes the
         // entry from the same pool.
-        let Some(Message::Propose { change }) =
-            receiver.recv().await?.as_deref().and_then(Message::decode)
-        else {
-            return Err(Error::Malformed);
-        };
-        self.answer(peer, change).await
+        let message = receiver.recv().await?.as_deref().and_then(Message::decode);
+        match message {
+            Some(Message::Propose { change }) => {
+                self.answer(peer, change).await.map(Reply::Message)
+            }
+            Some(Message::Join { request }) => {
+                Ok(match self.admit(peer, *request).await? {
+                    Ok(()) => Reply::Founding,
+                    Err(refusal) => Reply::Message(Message::Unjoined { refusal }),
+                })
+            }
+            _ => Err(Error::Malformed),
+        }
     }
+}
+
+/// What a stream that goes both ways sends back.
+enum Reply {
+    /// One message.
+    Message(Message),
+    /// A `Joined`, then the founding in parts.
+    Founding,
 }
 
 /// The code that stops a stream after `error`, or `None` when the stream failed. A
@@ -167,6 +197,7 @@ fn code(error: &Error) -> Option<Code> {
         | Error::Voters { .. }
         | Error::Limit { .. }
         | Error::Founding { .. }
+        | Error::Unjoinable { .. }
         | Error::Unfounded { .. }
         | Error::CardFile { .. } => Some(REFUSED),
     }
