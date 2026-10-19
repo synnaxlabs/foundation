@@ -138,7 +138,7 @@ fn encode_run(run: &[Place]) -> Vec<u8> {
 }
 
 /// Checks the decoders of a message with no kind byte, the opens, and of a reply,
-/// whose first byte is one of five kinds: one that decodes must encode to its bytes.
+/// whose first byte is one of six kinds: one that decodes must encode to its bytes.
 fn unkinded(message: &[u8]) {
     if let Ok(open) = Open::decode(message) {
         let mut out = vec![0; open.encoded_len()];
