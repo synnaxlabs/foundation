@@ -75,11 +75,12 @@ fn fits_1472(message: &Message) -> bool {
     bytes(message) <= 1472
 }
 
-/// Whether `message` with no link is at most 800 bytes: an append of 5 voters holds
-/// a few entries, and the chain of a node far behind is whole.
-pub(crate) fn fits_800(message: &Message) -> bool {
+/// Whether `message` with no link is at most 821 bytes: the append of the largest
+/// change of 5 voters, so an append holds a few entries, and the chain of a node far
+/// behind is whole.
+pub(crate) fn fits_821(message: &Message) -> bool {
     let chain: usize = message.chain.iter().map(link).sum();
-    bytes(message) - chain <= 800
+    bytes(message) - chain <= 821
 }
 
 fn key(id: u8) -> node::Key {
@@ -233,6 +234,44 @@ fn a_link_of_three_voters_in_each_set_is_457_bytes_and_489_when_it_adds_one() {
     link.change.voters.outgoing = set(&[1, 2, 4]);
     link.change.public_keys = keyed(&[3]);
     assert_eq!(self::link(&link), 489);
+}
+
+#[test]
+fn the_append_of_the_largest_change_of_5_voters_is_821_bytes() {
+    let change = Change {
+        voters: Voters {
+            incoming: set(&[1, 2, 3, 4, 5]),
+            outgoing: set(&[1]),
+        },
+        public_keys: keyed(&[2, 3, 4, 5]),
+        votes: Proof {
+            grant: Grant::Vote,
+            candidate: key(1),
+            voters: [1, 2, 3, 4, 5].map(|id| (key(id), None)).into(),
+        },
+        signature: None,
+    };
+    let at = |index| Position {
+        term: Term(1),
+        index,
+    };
+    let append = Message {
+        from: key(1),
+        to: key(2),
+        term: Term(1),
+        body: Body::Append {
+            prev: at(1),
+            entries: vec![Entry {
+                at: at(2),
+                data: Data::Voters(change),
+            }],
+            commit: 1,
+        },
+        proof: None,
+        chain: Vec::new(),
+    };
+    assert_eq!(bytes(&append), 821);
+    assert!(fits_821(&append));
 }
 
 #[test]
@@ -393,7 +432,7 @@ proptest! {
     // carries an entry when the leader has one to send.
     #[test]
     fn each_message_of_a_run_with_changes_fits((logs, actions) in run()) {
-        let mut network = Network::with_fits(&logs, 0, fits_800);
+        let mut network = Network::with_fits(&logs, 0, fits_821);
         for action in &actions {
             network.apply(action);
         }
@@ -404,7 +443,7 @@ proptest! {
         (logs, actions) in run_of_many(),
         random in any::<u64>(),
     ) {
-        let mut network = Network::with_fits(&logs, random, fits_800);
+        let mut network = Network::with_fits(&logs, random, fits_821);
         let (leader, _) = network.settle(&actions)?;
         let at = network.propose(leader).unwrap();
         let nodes: Vec<usize> = (0..network.nodes.len()).collect();
