@@ -356,7 +356,7 @@ impl<'a> Layout<'a> {
     }
 
     /// Each present group, in group order: the group of each index that the frame
-    /// holds. Time is linear in the number of series.
+    /// holds. Time is linear in the number of series of the frame.
     pub fn groups(&self) -> impl Iterator<Item = u32> + '_ {
         let set = self.set;
         self.series
@@ -1917,13 +1917,17 @@ mod tests {
         }
 
         #[test]
-        fn gives_the_groups_of_the_ranges_of_its_draft(case in cases()) {
+        fn gives_the_group_of_each_series_once_in_rising_order(case in cases()) {
             let (set, series) = shape(&case);
             let layout = Layout::new(&set, &series).unwrap();
-            let groups: Vec<u32> = layout.groups().collect();
-            let draft = layout.draft(&pool(1 << 20), case.form).unwrap();
-            let ranges: Vec<u32> = draft.ranges().map(|(group, _)| group).collect();
-            prop_assert_eq!(groups, ranges);
+            let groups: std::collections::BTreeSet<u32> = series
+                .iter()
+                .map(|&(entry, _)| set.entries()[entry].group)
+                .collect();
+            prop_assert_eq!(
+                layout.groups().collect::<Vec<_>>(),
+                groups.into_iter().collect::<Vec<_>>()
+            );
         }
 
         /// Key n has slot n, so shuffled keys give any slot order, and more groups
