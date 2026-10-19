@@ -208,8 +208,9 @@
   and the status keys, which the voter assigns (UUIDv7). Apply refuses, in this order,
   a forged card, an unknown ticket, each refusal of `Record::check`, a reserved name
   (A3), a name outside the region, a status channel `<name>.<status>` that is longer
-  than a name can be or reserved, a key that is already a member, a public key that the
-  card of a member holds (`Unfit::Held`; `laptop.architect`, 2026-10-08T22:29:26Z,
+  than a name can be or reserved, a key that is already a member, a join to a region
+  that holds `MEMBERS_MAX` = 128 members (`Unfit::Full`), a public key that the card
+  of a member holds (`Unfit::Held`; `laptop.architect`, 2026-10-08T22:29:26Z,
   https://github.com/synnaxlabs/foundation/issues/2023#issuecomment-6070338077), a
   name that a member holds, a status key that a member holds or that the join repeats
   (A4), and the refusal of `Record::unused`. So no refusal counts a use. A member's
@@ -217,9 +218,18 @@
   differ only in ASCII case (A3, X27), so each full name maps to at most one member.
   Region state cannot see the keys of the spec, so the status key check covers members
   only. The name and key checks are one function, which `State::new` also runs on the
-  founding members; both give a `region::Unfit`, which `Refused::Unfit` wraps. A member
-  and a `Join` hold at most 64 status entries, as the 32 of `Addresses`. Decided by
-  `laptop.architect` (2026-10-07T10:44:26Z):
+  founding members; both give a `region::Unfit`, which `Refused::Unfit` wraps. The
+  bound holds the peers of a leader, voters and learners together, at 127 (MESH
+  DRIVER). The applied state alone keeps it: two joins that stamp at 127 members both
+  get an entry, and the apply refuses the second as `Full` with the state unchanged, so
+  its node gets `Refused(Unfit(Full))` from `admit`. Refusal kind 19 is `Full`. Lost: a
+  check at the leader that gives `Contested`, a second guard that tells the node to
+  join with a new key. Decided by `laptop.architect`, 2026-10-19T18:04:58Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6273867884), which
+  changes the cost section of the plan
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124).
+  A member and a `Join` hold at most 64 status entries, as the 32 of `Addresses`.
+  Decided by `laptop.architect` (2026-10-07T10:44:26Z):
   https://github.com/synnaxlabs/foundation/pull/1328#issuecomment-6036265582. The type
   `mesh::status::Status` holds the cap of 64: `Status::new` refuses more (`Many`), and
   the decode refuses more before it reads an entry. So each `Member` that `encode`
