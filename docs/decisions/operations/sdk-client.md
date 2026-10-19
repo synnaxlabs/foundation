@@ -94,12 +94,13 @@
   drafts of its writers, so `write_series` keeps its bound. The pool reserves about
   504 MiB of address space of the OS, with no commit charge, and gives back the pages
   of a size that it no longer uses when another size needs them, so it holds at most
-  8 MiB, and up to two partial pages more of each of its sizes. On macOS, the pages of
-  the free frames of a size in use that it gives to another size stay in memory until
-  the OS needs them. When the OS refuses the reservation or its first page, `connect`
-  gives `Memory`. A frame whose memory the OS refuses later waits in `next`, which
-  tries again until the OS gives the memory or the session closes
-  (`laptop.architect-2`, 2026-10-19T14:39:03Z,
+  8 MiB, and up to two partial pages more of each of its sizes. On macOS, a page that
+  it gives back stays in memory until the OS needs it, so the bound of 8 MiB holds only
+  on Linux (`laptop.architect-2`, 2026-10-19T18:36:13Z,
+  https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6274472373). When
+  the OS refuses the reservation or its first page, `connect` gives `Memory`. A frame
+  whose memory the OS refuses later waits in `next`, which tries again until the OS
+  gives the memory or the session closes (`laptop.architect-2`, 2026-10-19T14:39:03Z,
   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6269865289,
   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270455282, and
   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6270555497;
