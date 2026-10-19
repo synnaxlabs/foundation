@@ -187,6 +187,18 @@ fn an_old_before_reading_that_disagrees_restarts_the_fit() {
     assert_eq!(fit.mesh(Monotonic(5_000)), Some(within(5_800, 5_898)));
 }
 
+/// At 5,000 ns, 200 ppm widens the fit from 900 to 1,101 ns by 1 ns each way, so an
+/// offset of 898 ns is under it.
+#[test]
+fn an_old_before_reading_under_the_low_edge_of_an_odd_fit_restarts_the_fit() {
+    let mut fit = Fit::default();
+    assert_eq!(
+        fit.between(Monotonic(10_000), at(10_900), at(11_101)),
+        Fitted::Kept
+    );
+    assert_eq!(fit.before(Monotonic(5_000), at(5_898)), Fitted::Restarted);
+}
+
 #[test]
 fn an_old_before_reading_of_a_fit_with_no_low_edge_is_kept() {
     let mut fit = Fit::default();
