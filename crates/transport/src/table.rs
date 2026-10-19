@@ -583,14 +583,8 @@ mod tests {
         });
         testing::start(&client, move |shard, _| async move {
             let client = Client::new(shard.client()).expect("a client");
-            let first = client
-                .dial(Some(SERVER.public()), &at)
-                .await
-                .expect("a session");
-            let second = client
-                .dial(Some(SERVER.public()), &at)
-                .await
-                .expect("a session");
+            let first = client.dial(SERVER.public(), &at).await.expect("a session");
+            let second = client.dial(SERVER.public(), &at).await.expect("a session");
             let closed = |code| Error::PeerClosed { code: Code(code) };
             assert_eq!(first.closed().await, closed(1));
             assert_eq!(second.closed().await, closed(2));

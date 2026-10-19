@@ -45,10 +45,7 @@ fn a_message_over_the_setting_is_refused() {
     peer(&mut sim, move |own, tasks| async move {
         let (program, pool) = program(&own, tasks);
         let at = [Address::Udp(listen)];
-        let session = program
-            .dial(Some(KEY.public()), &at)
-            .await
-            .expect("a session");
+        let session = program.dial(KEY.public(), &at).await.expect("a session");
         let (mut sender, _reply) =
             session.open(Class::Complete).await.expect("a stream");
         let over = sender.send(pool.copy(&[0; 2049]).unwrap()).await;
@@ -79,10 +76,7 @@ fn third_open(streams_max: u32) -> Span {
     let program_host = peer(&mut sim, move |own, tasks| async move {
         let (program, pool) = program(&own, tasks);
         let at = [Address::Udp(listen)];
-        let session = program
-            .dial(Some(KEY.public()), &at)
-            .await
-            .expect("a session");
+        let session = program.dial(KEY.public(), &at).await.expect("a session");
         let mut held = Vec::new();
         for _ in 0..2 {
             let (mut sender, reply) =
@@ -142,10 +136,7 @@ fn after_cut(idle: Span, cut: Span) -> Option<(transport::Error, Span)> {
         let (program, _pool) = program(&own, tasks);
         let at = [Address::Udp(listen)];
         let start = own.clock().now();
-        let session = program
-            .dial(Some(KEY.public()), &at)
-            .await
-            .expect("a session");
+        let session = program.dial(KEY.public(), &at).await.expect("a session");
         let error = session.closed().await;
         *seen.lock().unwrap() = Some((error, own.clock().now() - start));
         drop(program);

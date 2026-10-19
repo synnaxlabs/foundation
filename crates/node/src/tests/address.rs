@@ -156,7 +156,7 @@ fn dial(
         });
         let client = client.expect("a client");
         let at = [transport::Address::Udp(address.bound)];
-        let session = client.dial(Some(address.public_key), &at).await;
+        let session = client.dial(address.public_key, &at).await;
         *dialed.lock().unwrap() = Some(session.map(drop));
     });
     drop(started.expect("the peer starts"));

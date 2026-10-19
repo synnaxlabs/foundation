@@ -61,16 +61,13 @@ impl Client {
     }
 
     /// Connects to `node` at one of `addresses`, and checks that the node holds
-    /// `node`'s private key. For `None`, it takes the first node that answers and
-    /// proves any key: nothing proves that it is the node the caller means. The address
-    /// order, the stagger, and the errors are those of
-    /// [`Transport::dial`](crate::Transport::dial). The session's peer is
-    /// [`Peer::Node`](crate::Peer::Node) with the key that the node proved.
+    /// `node`'s private key. The address order, the stagger, and the errors are those
+    /// of [`Transport::dial`](crate::Transport::dial). The session's peer is
+    /// [`Peer::Node`](crate::Peer::Node) with `node`.
     ///
     /// # Errors
     ///
-    /// As [`Transport::dial`](crate::Transport::dial), with `node` in
-    /// [`Error::Unreachable`].
+    /// As [`Transport::dial`](crate::Transport::dial).
     ///
     /// ```
     /// use std::net::SocketAddr;
@@ -80,15 +77,38 @@ impl Client {
     ///
     /// async fn dial(c: &Client, node: PublicKey, at: SocketAddr)
     /// -> Result<Session, Error> {
-    ///     c.dial(Some(node), &[Address::Udp(at)]).await
+    ///     c.dial(node, &[Address::Udp(at)]).await
     /// }
     /// ```
     pub async fn dial(
         &self,
-        node: Option<PublicKey>,
+        node: PublicKey,
         addresses: &[Address],
     ) -> Result<Session, Error> {
-        let dialed = dial::dial(&self.carrier.handle(), node, addresses).await;
+        let dialed = dial::dial(&self.carrier.handle(), Some(node), addresses).await;
+        dialed.map(Session::new)
+    }
+
+    /// Dials the node at `addresses` and accepts the Ed25519 key of any certificate
+    /// of the template, which [`Session::peer`] then gives. Trust on first use:
+    /// nothing proves which node answered, so the caller pins the key. The address
+    /// order and the stagger are those of [`Client::dial`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Client::dial`], with no peer in [`Error::Unreachable`].
+    ///
+    /// ```
+    /// use std::net::SocketAddr;
+    ///
+    /// use transport::{Address, Client, Error, Peer};
+    ///
+    /// async fn key(c: &Client, at: SocketAddr) -> Result<Peer, Error> {
+    ///     Ok(c.dial_any(&[Address::Udp(at)]).await?.peer())
+    /// }
+    /// ```
+    pub async fn dial_any(&self, addresses: &[Address]) -> Result<Session, Error> {
+        let dialed = dial::dial(&self.carrier.handle(), None, addresses).await;
         dialed.map(Session::new)
     }
 }
@@ -236,10 +256,7 @@ mod tests {
         let at = [Address::Udp(address(&node))];
         testing::start(&program, move |shard, node| async move {
             let client = client(&shard);
-            let session = client
-                .dial(Some(SERVER.public()), &at)
-                .await
-                .expect("a session");
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
             assert_eq!(session.peer(), Peer::Node(SERVER.public()));
             assert_eq!(format!("{client:?}"), "Client { .. }");
             echo(&shard, &session).await;
@@ -257,10 +274,7 @@ mod tests {
         let at = [Address::Udp(address(&other)), Address::Udp(address(&node))];
         testing::start(&program, move |shard, node| async move {
             let client = client(&shard);
-            let session = client
-                .dial(Some(SERVER.public()), &at)
-                .await
-                .expect("a session");
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
             assert_eq!(session.peer(), Peer::Node(SERVER.public()));
             echo(&shard, &session).await;
             end(&node, session).await;
@@ -269,7 +283,7 @@ mod tests {
     }
 
     #[test]
-    fn a_client_with_no_key_takes_the_key_of_the_first_node_that_answers() {
+    fn dial_any_takes_the_key_of_the_first_node_that_answers() {
         let (mut sim, program, node) = nodes(0);
         serve(&node, 1);
         let other = sim.node(sim::node::Config::default());
@@ -278,11 +292,11 @@ mod tests {
         let both = [Address::Udp(address(&other)), at[0]];
         testing::start(&program, move |shard, node| async move {
             let client = client(&shard);
-            let session = client.dial(None, &at).await.expect("a session");
+            let session = client.dial_any(&at).await.expect("a session");
             assert_eq!(session.peer(), Peer::Node(SERVER.public()));
             echo(&shard, &session).await;
             end(&node, session).await;
-            let session = client.dial(None, &both).await.expect("a session");
+            let session = client.dial_any(&both).await.expect("a session");
             assert_eq!(session.peer(), Peer::Node(OTHER.public()));
             end(&node, session).await;
         });
@@ -290,10 +304,10 @@ mod tests {
     }
 
     #[test]
-    fn a_client_with_no_key_and_no_address_is_unreachable() {
+    fn dial_any_of_no_address_is_unreachable_with_no_peer() {
         let (mut sim, program, _) = nodes(0);
         testing::start(&program, |shard, _| async move {
-            let dialed = client(&shard).dial(None, &[]).await;
+            let dialed = client(&shard).dial_any(&[]).await;
             let unreachable = Error::Unreachable {
                 peer: None,
                 attempts: Vec::new(),
@@ -312,7 +326,7 @@ mod tests {
         testing::start(&program, move |shard, _| async move {
             let client = client(&shard);
             let peer = SERVER.public();
-            let dialed = client.dial(Some(peer), &at).await;
+            let dialed = client.dial(peer, &at).await;
             let cause = || Error::Authentication { expected: peer };
             let attempts = vec![(at[0], cause()), (at[1], cause())];
             assert_eq!(
@@ -359,10 +373,7 @@ mod tests {
         let at = [Address::Udp(address(&node))];
         testing::start(&program, move |shard, node| async move {
             let client = client(&shard);
-            let session = client
-                .dial(Some(SERVER.public()), &at)
-                .await
-                .expect("a session");
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
             drop(client);
             node.clock().sleep(spans(IDLE, 3)).await;
             let held = env::net::Error::AddressInUse { local: any(FREE) };
@@ -388,10 +399,7 @@ mod tests {
         ))];
         testing::start(&program, move |shard, node| async move {
             let client = client(&shard);
-            let session = client
-                .dial(Some(SERVER.public()), &at)
-                .await
-                .expect("a session");
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
             echo(&shard, &session).await;
             end(&node, session).await;
         });
@@ -408,10 +416,7 @@ mod tests {
         let at = [Address::Udp(SocketAddrV6::new(ip, PORT, 7, 2).into())];
         testing::start(&program, move |shard, node| async move {
             let client = client(&shard);
-            let session = client
-                .dial(Some(SERVER.public()), &at)
-                .await
-                .expect("a session");
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
             echo(&shard, &session).await;
             end(&node, session).await;
         });
@@ -428,7 +433,7 @@ mod tests {
         testing::start(&program, move |shard, node| async move {
             let client = client(&shard);
             for at in at {
-                let session = client.dial(Some(SERVER.public()), &[at]).await;
+                let session = client.dial(SERVER.public(), &[at]).await;
                 let session = session.expect("a session");
                 echo(&shard, &session).await;
                 end(&node, session).await;
@@ -490,10 +495,7 @@ mod tests {
                 ..shard.client()
             };
             let client = Client::new(config).expect("a client");
-            let session = client
-                .dial(Some(SERVER.public()), &at)
-                .await
-                .expect("a session");
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
             let closed = Error::PeerClosed { code: Code(0) };
             assert_eq!(session.closed().await, closed);
         });
@@ -515,10 +517,7 @@ mod tests {
         let at = [Address::Udp(address(&node))];
         testing::start(&program, move |shard, node| async move {
             let client = client(&shard);
-            let session = client
-                .dial(Some(SERVER.public()), &at)
-                .await
-                .expect("a session");
+            let session = client.dial(SERVER.public(), &at).await.expect("a session");
             let start = node.clock().now();
             assert_eq!(session.closed().await, Error::TimedOut);
             let took = node.clock().now() - start;
