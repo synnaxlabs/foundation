@@ -17,6 +17,8 @@ use types::node;
 
 pub(crate) const ELECTION: u32 = 5;
 pub(crate) const HEARTBEAT: u32 = 2;
+/// The most nodes of a run.
+pub(crate) const NODES_MAX: usize = 5;
 
 #[derive(Clone, Debug)]
 pub(crate) enum Action {
@@ -114,7 +116,8 @@ fn position() -> impl Strategy<Value = Position> {
 /// The last log position of each node, and the actions to run, with changes to the
 /// voters.
 pub(crate) fn run() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
-    let nodes = prop_oneof![1 => 1..=2_usize, 5 => Just(3), 1 => Just(4), 4 => Just(5)];
+    let nodes =
+        prop_oneof![1 => 1..=2_usize, 5 => Just(3), 1 => Just(4), 4 => Just(NODES_MAX)];
     run_of(nodes, false)
 }
 
@@ -122,7 +125,7 @@ pub(crate) fn run() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
 /// change.
 pub(crate) fn run_of_many() -> impl Strategy<Value = (Vec<Position>, Vec<Action>)> {
     run_of(
-        prop_oneof![5 => Just(3_usize), 1 => Just(4), 4 => Just(5)],
+        prop_oneof![5 => Just(3_usize), 1 => Just(4), 4 => Just(NODES_MAX)],
         true,
     )
 }
