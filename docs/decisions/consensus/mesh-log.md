@@ -25,8 +25,8 @@
   links is 922 bytes with its count (architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
   2026-10-07T04:31:40Z). When the joint entry adds one voter, its key makes the link
-  489 bytes and the chain 986 (architect, #3380,
-  https://github.com/synnaxlabs/foundation/pull/3380#issuecomment-6270172376). A
+  489 bytes and the chain 986 (architect, #3380, 2026-10-19T15:14:39Z:
+  https://github.com/synnaxlabs/foundation/pull/3380#issuecomment-6270626624). A
   granted `PreVoteReply` or `VoteReply` is the byte 1, then the signature; a refusal
   is the byte 0 alone. An entry is its term and index (8 bytes each), then a data
   byte: empty (0) alone; bytes (1), an 8-byte length, and the bytes; voters (2), the
@@ -37,7 +37,8 @@
   outgoing keys lack, and none when the outgoing keys are empty, so each change binds
   exactly the voters it adds. It refuses a public key of small order. Encode panics
   on a change whose public keys are not those of the voters that it adds (architect,
-  #3380, https://github.com/synnaxlabs/foundation/pull/3380#issuecomment-6270310245).
+  #3380, 2026-10-19T14:59:43Z:
+  https://github.com/synnaxlabs/foundation/pull/3380#issuecomment-6270310245).
   No form holds a grant or a change with no signature: encode panics on one, because
   the caller signs before each write and send. `mesh::claim` signs each claim with
   the node's Ed25519 key. A grant signs `foundation/grant/1`, the voter (16 bytes,
@@ -51,7 +52,7 @@
   `foundation/voters/1`, because no node with the form before the keys shipped
   (architect, #1106,
   https://github.com/synnaxlabs/foundation/issues/1106#issuecomment-6267490155).
-  Supersedes the form with no public keys (architect, #881,
+  Supersedes the form with no public keys (architect, #881, 2026-10-07T06:48:31Z:
   https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032591908).
   The signer in the bytes keeps two members that share a key from sharing a
   signature. Grants name no region; a second region adds the region key under

@@ -54,8 +54,7 @@ pub enum Data {
 pub struct Change {
     /// The configuration.
     pub voters: Voters,
-    /// The public key of each voter that the entry adds: in a joint entry, each node
-    /// of `voters.incoming` that `voters.outgoing` lacks. Empty in a leave entry. A
+    /// The public key of each node of [`Voters::added`]: none in a leave entry. A
     /// `Raft` keeps them with the entry and never reads them.
     pub public_keys: BTreeMap<node::Key, PublicKey>,
     /// The votes that elected the leader that wrote the entry, in the entry's term.
