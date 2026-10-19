@@ -594,8 +594,8 @@ fn a_stop_names_its_cause() {
         "each mesh of the group dropped"
     );
     assert_eq!(
-        Stopped::Removed { by: OTHER }.to_string(),
-        "voter 00000000-0000-0000-0000-000000000002 answered removed: a committed \
+        Stopped::Removed { by: [OTHER].into() }.to_string(),
+        "voters 00000000-0000-0000-0000-000000000002 answered removed: a committed \
          configuration lacks this node"
     );
 }

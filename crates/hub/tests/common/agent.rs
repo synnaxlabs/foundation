@@ -163,8 +163,8 @@ impl Stream {
         let mut decoded = None;
         let client::Start {
             places: run,
-            set,
             home: mut reader,
+            ..
         } = loop {
             if let Some(decoded) = decoded {
                 break decoded;
@@ -175,7 +175,6 @@ impl Stream {
         };
         let places = Places {
             count: u32::try_from(run.len()).expect("the count fits a u32"),
-            index: u32::try_from(set.groups()[0]).expect("the index fits a u32"),
         };
         let Ok(FromHome::Opened { live }) = reader.decode(Some(&next().await)) else {
             panic!("then `Opened`");

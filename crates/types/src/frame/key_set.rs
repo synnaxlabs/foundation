@@ -31,7 +31,7 @@ impl Key {
 
 /// The channels of the frames of a session, sorted by slot, with each entry's type and
 /// index group. Every frame of the session points at it. An [`Interner`] makes the
-/// key sets of a node, and [`KeySet::ordered`] makes the set of a reader that is of no
+/// key sets of a node, and [`KeySet::ordered`] makes the set of a stream that is of no
 /// node.
 #[derive(Debug)]
 pub struct KeySet {
@@ -41,51 +41,62 @@ pub struct KeySet {
 }
 
 impl KeySet {
-    /// The key set of one group whose entries are `channels`, in order: entry `n` has
-    /// slot `n`, and the entry at `index` is the group's index. Every such set has the
-    /// same key, one that no [`Interner`] gives, so the key does not tell two of them
-    /// apart. Its slots are its own, not a node's: never look up one in a [`Slots`].
+    /// The key set whose entries are `channels`, in order: entry `n` has slot `n`, and
+    /// the third value of entry `n` is the entry of the index of its group. An index is
+    /// the index of its own group. Group numbers follow the order of the index
+    /// entries. Every such set has the same key, one that no [`Interner`] gives, so
+    /// the key does not tell two of them apart. Its slots are its own, not a node's:
+    /// never look up one in a [`Slots`].
     ///
     /// # Errors
     ///
-    /// [`Repeated`] with the least key that two entries share.
+    /// For the first entry in entry order that breaks a rule of the indexes,
+    /// [`Error::Index`] or [`Error::Unstamped`]; else [`Error::Repeated`] with the
+    /// least key that two entries share.
     ///
     /// # Panics
     ///
-    /// When `index` is not below the count of `channels`, when the entry at `index` is
-    /// not of type `Stamp`, or when `channels` holds more than 2^32 entries.
+    /// When `channels` holds more than 2^32 entries.
     pub fn ordered(
-        channels: impl IntoIterator<Item = (channel::Key, Type)>,
-        index: usize,
-    ) -> Result<Self, Repeated> {
-        let entries: Arc<[Entry]> = channels
-            .into_iter()
-            .enumerate()
-            .map(|(at, (key, data_type))| Entry {
-                slot: Slot::new(
-                    u32::try_from(at).expect("a key set holds at most 2^32 entries"),
-                ),
+        channels: impl IntoIterator<Item = (channel::Key, Type, usize)>,
+    ) -> Result<Self, Error> {
+        let channels: Vec<_> = channels.into_iter().collect();
+        let stamp = Type::Scalar(Scalar::Stamp);
+        for (at, &(_, data_type, index)) in channels.iter().enumerate() {
+            if !matches!(channels.get(index), Some(&(.., own)) if own == index) {
+                return Err(Error::Index { entry: at, index });
+            }
+            if at == index && data_type != stamp {
+                return Err(Error::Unstamped {
+                    entry: at,
+                    sample: data_type,
+                });
+            }
+        }
+        let groups: Arc<[usize]> = (channels.iter().enumerate())
+            .filter(|&(at, &(.., index))| at == index)
+            .map(|(at, _)| at)
+            .collect();
+        let fit = "a key set holds at most 2^32 entries";
+        let entry = |(at, &(key, data_type, index)): (usize, &(_, _, usize))| {
+            let group = groups
+                .binary_search(&index)
+                .expect("invariant: the index of an entry is a group");
+            Entry {
+                slot: Slot::new(u32::try_from(at).expect(fit)),
                 key,
                 data_type,
-                group: 0,
-            })
-            .collect();
-        let entry = entries.get(index).unwrap_or_else(|| {
-            panic!("the index is entry {index} of {}", entries.len())
-        });
-        let stamp = Type::Scalar(Scalar::Stamp);
-        assert!(
-            entry.data_type == stamp,
-            "the index entry {index} has type {}, not {stamp}",
-            entry.data_type
-        );
+                group: u32::try_from(group).expect(fit),
+            }
+        };
+        let entries: Arc<[Entry]> = channels.iter().enumerate().map(entry).collect();
         if let Some(key) = repeated(entries.iter().map(|entry| entry.key)) {
-            return Err(Repeated { key });
+            return Err(Error::Repeated(Repeated { key }));
         }
         Ok(Self {
             key: Key::ORDERED,
             entries,
-            groups: Arc::new([index]),
+            groups,
         })
     }
 
@@ -279,6 +290,48 @@ impl fmt::Display for Repeated {
 }
 
 impl std::error::Error for Repeated {}
+
+/// Why [`KeySet::ordered`] refuses its channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The index of `entry` is entry `index`, which is not an entry whose index is
+    /// itself.
+    Index {
+        /// The entry.
+        entry: usize,
+        /// The index that it names.
+        index: usize,
+    },
+    /// Entry `entry` is an index of type `sample`, not `Stamp`.
+    Unstamped {
+        /// The entry.
+        entry: usize,
+        /// Its sample type.
+        sample: Type,
+    },
+    /// Two entries share a key.
+    Repeated(Repeated),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Index { entry, index } => write!(
+                f,
+                "the index of entry {entry} is entry {index}, which is not an entry \
+                 whose index is itself"
+            ),
+            Self::Unstamped { entry, sample } => write!(
+                f,
+                "the index entry {entry} has type {sample}, not {}",
+                Type::Scalar(Scalar::Stamp)
+            ),
+            Self::Repeated(repeated) => fmt::Display::fmt(repeated, f),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 /// The least key that `keys` holds twice.
 fn repeated(keys: impl Iterator<Item = channel::Key>) -> Option<channel::Key> {
@@ -718,10 +771,19 @@ mod tests {
     mod ordered {
         use super::*;
 
+        /// The set of `channels` as one group, whose index is the entry at `index`.
+        fn one(
+            channels: impl IntoIterator<Item = (channel::Key, Type)>,
+            index: usize,
+        ) -> Result<KeySet, Error> {
+            let channels = channels.into_iter();
+            KeySet::ordered(channels.map(|(key, data_type)| (key, data_type, index)))
+        }
+
         fn check(channels: &[(u32, Type)], index: usize, repeated: u32) {
             let channels = channels.iter().map(|&(n, data_type)| (key(n), data_type));
-            let error = KeySet::ordered(channels, index).expect_err("a repeat");
-            assert_eq!(error, Repeated { key: key(repeated) });
+            let error = one(channels, index).expect_err("a repeat");
+            assert_eq!(error, Error::Repeated(Repeated { key: key(repeated) }));
             assert_eq!(
                 error.to_string(),
                 format!("channel {} appears twice in a key set", key(repeated))
@@ -739,7 +801,7 @@ mod tests {
         /// `interned`, since no test can intern 2^32 - 1 sets.
         #[test]
         fn has_a_key_that_no_interner_gives() {
-            let set = KeySet::ordered([(key(1), STAMP)], 0).unwrap();
+            let set = one([(key(1), STAMP)], 0).unwrap();
             assert_eq!(set.key(), Key::new(u32::MAX));
             let last = usize::try_from(u32::MAX - 1).unwrap();
             assert_eq!(interned(last), Key::new(u32::MAX - 1));
@@ -754,20 +816,41 @@ mod tests {
             let _key = interned(usize::try_from(u32::MAX).unwrap());
         }
 
-        #[test]
-        #[should_panic(expected = "the index is entry 2 of 2")]
-        fn panics_on_an_index_past_the_entries() {
-            let _set = KeySet::ordered([(key(1), STAMP), (key(2), F64)], 2);
+        /// The error of `channels`, and its message.
+        fn refusal(channels: &[(u32, Type, usize)]) -> (Error, String) {
+            let channels = channels
+                .iter()
+                .map(|&(n, data_type, index)| (key(n), data_type, index));
+            let error = KeySet::ordered(channels).expect_err("a refusal");
+            (error, error.to_string())
+        }
+
+        fn index(entry: usize, index: usize) -> (Error, String) {
+            let message = format!(
+                "the index of entry {entry} is entry {index}, which is not an entry \
+                 whose index is itself"
+            );
+            (Error::Index { entry, index }, message)
+        }
+
+        fn unstamped(entry: usize, sample: Type) -> (Error, String) {
+            let message =
+                format!("the index entry {entry} has type {sample}, not timestamp");
+            (Error::Unstamped { entry, sample }, message)
         }
 
         #[test]
-        #[should_panic(expected = "the index entry 1 has type f64, not timestamp")]
-        fn panics_on_an_index_that_is_not_a_stamp() {
-            let _set = KeySet::ordered([(key(1), STAMP), (key(2), F64)], 1);
+        fn refuses_an_index_past_the_entries() {
+            assert_eq!(refusal(&[(1, STAMP, 2), (2, F64, 2)]), index(0, 2));
+        }
+
+        #[test]
+        fn refuses_an_index_that_is_not_a_stamp() {
+            assert_eq!(refusal(&[(1, STAMP, 1), (2, F64, 1)]), unstamped(1, F64));
         }
 
         /// Distinct keys of random types, and the position of one `Stamp` among them.
-        fn channels() -> impl Strategy<Value = (Vec<(channel::Key, Type)>, usize)> {
+        fn one_group() -> impl Strategy<Value = (Vec<(channel::Key, Type)>, usize)> {
             let kind = prop_oneof![Just(F64), Just(U8), Just(STAMP)];
             prop::collection::btree_set(0_u32..1000, 1..40)
                 .prop_map(|keys| keys.into_iter().collect::<Vec<_>>())
@@ -786,8 +869,8 @@ mod tests {
 
         proptest! {
             #[test]
-            fn keeps_the_order_of_its_channels((channels, index) in channels()) {
-                let set = KeySet::ordered(channels.iter().copied(), index).unwrap();
+            fn keeps_the_order_of_its_channels((channels, index) in one_group()) {
+                let set = one(channels.iter().copied(), index).unwrap();
                 prop_assert_eq!(set.key().get(), u32::MAX);
                 prop_assert_eq!(set.groups(), [index]);
                 prop_assert_eq!(set.entries().len(), channels.len());
@@ -801,6 +884,128 @@ mod tests {
                 }
                 let past = u32::try_from(channels.len()).unwrap();
                 prop_assert_eq!(set.find(slot(past)), None);
+            }
+        }
+
+        #[test]
+        fn numbers_groups_by_the_order_of_their_indexes() {
+            let set = KeySet::ordered([
+                (key(5), F64, 3),
+                (key(6), STAMP, 1),
+                (key(7), U8, 1),
+                (key(8), STAMP, 3),
+            ])
+            .unwrap();
+            assert_eq!(set.key().get(), u32::MAX);
+            assert_eq!(set.groups(), [1, 3]);
+            assert_eq!(
+                set.entries(),
+                [
+                    entry_of(0, 5, F64, 1),
+                    entry_of(1, 6, STAMP, 0),
+                    entry_of(2, 7, U8, 0),
+                    entry_of(3, 8, STAMP, 1),
+                ]
+            );
+            let indexes: Vec<_> = (0..4).map(|at| set.index(at)).collect();
+            assert_eq!(indexes, [3, 1, 1, 3]);
+        }
+
+        fn entry_of(n: u32, channel: u32, data_type: Type, group: u32) -> Entry {
+            Entry {
+                slot: slot(n),
+                key: key(channel),
+                data_type,
+                group,
+            }
+        }
+
+        #[test]
+        fn refuses_the_least_repeated_key_of_two_groups() {
+            let error = KeySet::ordered([
+                (key(9), STAMP, 0),
+                (key(4), STAMP, 1),
+                (key(9), F64, 1),
+                (key(4), F64, 0),
+            ])
+            .expect_err("a repeat");
+            assert_eq!(error, Error::Repeated(Repeated { key: key(4) }));
+        }
+
+        #[test]
+        fn refuses_an_index_of_one_entry_past_the_entries() {
+            assert_eq!(refusal(&[(1, STAMP, 0), (2, F64, 2)]), index(1, 2));
+        }
+
+        #[test]
+        fn refuses_an_index_of_another_group() {
+            let channels = [(1, STAMP, 0), (2, F64, 0), (3, F64, 1)];
+            assert_eq!(refusal(&channels), index(2, 1));
+        }
+
+        #[test]
+        fn refuses_a_second_index_that_is_not_a_stamp() {
+            assert_eq!(refusal(&[(1, STAMP, 0), (2, F64, 1)]), unstamped(1, F64));
+        }
+
+        /// The first entry that breaks a rule of the indexes gives the error, and a
+        /// repeat comes only after the rules of the indexes.
+        #[test]
+        fn refuses_the_first_entry_that_breaks_a_rule() {
+            let channels = [(1, F64, 0), (1, F64, 5), (2, F64, 1)];
+            assert_eq!(refusal(&channels), unstamped(0, F64));
+            let channels = [(1, STAMP, 0), (1, F64, 5), (2, U8, 2)];
+            assert_eq!(refusal(&channels), index(1, 5));
+            let channels = [(1, STAMP, 0), (1, F64, 0), (2, F64, 1)];
+            assert_eq!(refusal(&channels), index(2, 1));
+        }
+
+        /// Distinct keys, each data channel on a random index among them.
+        fn channels() -> impl Strategy<Value = Vec<(channel::Key, Type, usize)>> {
+            prop::collection::btree_set(0_u32..1000, 1..40)
+                .prop_map(|keys| keys.into_iter().collect::<Vec<_>>())
+                .prop_shuffle()
+                .prop_flat_map(|keys| {
+                    let count = keys.len();
+                    let indexes = prop::collection::vec(any::<bool>(), count);
+                    let picks =
+                        prop::collection::vec(any::<prop::sample::Index>(), count);
+                    (Just(keys), indexes, picks)
+                })
+                .prop_map(|(keys, indexes, picks)| {
+                    let mut own: Vec<_> =
+                        (0..keys.len()).filter(|&at| indexes[at]).collect();
+                    if own.is_empty() {
+                        own.push(0);
+                    }
+                    keys.into_iter()
+                        .enumerate()
+                        .map(|(at, n)| match own.binary_search(&at) {
+                            Ok(_) => (key(n), STAMP, at),
+                            Err(_) => (key(n), F64, own[picks[at].index(own.len())]),
+                        })
+                        .collect()
+                })
+        }
+
+        proptest! {
+            #[test]
+            fn keeps_the_order_and_index_of_its_channels(channels in channels()) {
+                let set = KeySet::ordered(channels.iter().copied()).unwrap();
+                let own: Vec<_> = channels
+                    .iter()
+                    .enumerate()
+                    .filter(|&(at, &(.., index))| at == index)
+                    .map(|(at, _)| at)
+                    .collect();
+                prop_assert_eq!(set.groups(), own.as_slice());
+                for (at, (entry, &(key, data_type, index))) in
+                    set.entries().iter().zip(&channels).enumerate()
+                {
+                    prop_assert_eq!(entry.slot, slot(u32::try_from(at).unwrap()));
+                    prop_assert_eq!((entry.key, entry.data_type), (key, data_type));
+                    prop_assert_eq!(set.index(at), index);
+                }
             }
         }
     }

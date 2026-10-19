@@ -511,8 +511,8 @@ fn failed(session: &program::Session, error: program::Error) -> Error {
 
 /// The places of a stream of `names` in `entries`, the places of the node, whose index
 /// is entry `index`: place `n` is `names[n]`, then the index when `names` does not name
-/// it. Gives the entry of each place, the places, and the place of the index, or `None`
-/// when a name is no entry.
+/// it. Each place names the place of the index as its index. Gives the entry of each
+/// place, the places, and the place of the index, or `None` when a name is no entry.
 fn placed(
     names: &[Name],
     entries: &[Place],
@@ -529,7 +529,11 @@ fn placed(
             each.push(index);
             each.len() - 1
         });
-    let places = each.iter().map(|&entry| entries[entry].clone()).collect();
+    let place = |&entry: &usize| Place {
+        index: at,
+        ..entries[entry].clone()
+    };
+    let places = each.iter().map(place).collect();
     Some((each, places, at))
 }
 

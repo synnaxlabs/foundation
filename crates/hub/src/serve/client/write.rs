@@ -123,7 +123,6 @@ async fn start(
     names: Vec<Name>,
 ) -> Result<(), Error> {
     let set = writer.set();
-    let index = set.groups()[0];
     let places: Vec<Place> = {
         let channels = &state.borrow().channels;
         let entries = set.entries();
@@ -131,17 +130,20 @@ async fn start(
         for (&n, name) in writer.entries().iter().zip(&names) {
             of[n] = Some(name);
         }
-        of[index].get_or_insert_with(|| channels.index(entries[index].key).0);
-        let place = |(entry, name): (&Entry, Option<&Name>)| Place {
+        for &index in set.groups() {
+            of[index].get_or_insert_with(|| channels.index(entries[index].key).0);
+        }
+        let place = |(at, (entry, name)): (usize, (&Entry, Option<&Name>))| Place {
             key: entry.key,
             data_type: channels.known(entry.key).sample(),
             name: name
                 .expect("invariant: each entry is a channel of the open or its index")
                 .clone(),
+            index: set.index(at),
         };
-        entries.iter().zip(of).map(place).collect()
+        entries.iter().zip(of).enumerate().map(place).collect()
     };
-    super::places(state, sender, index, &places).await
+    super::places(state, sender, &places).await
 }
 
 /// Writes each frame of the program with `writer` and sends its outcome, until the

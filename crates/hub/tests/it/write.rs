@@ -36,11 +36,18 @@ use crate::sessions::{Got, Kept, OTHER, recorded, rules, run_program, serve_each
 /// When the home of a test changes what the write meets, after the program opened it.
 const START: Span = Span::from_nanos(100_000_000);
 
-fn place(key: u128, data_type: types::sample::Type, channel: &str) -> Place {
+/// The place of `channel`, whose group's index is at place `index`.
+fn place(
+    key: u128,
+    data_type: types::sample::Type,
+    channel: &str,
+    index: usize,
+) -> Place {
     Place {
         key: channel::Key::from_u128(key),
         data_type,
         name: name(channel),
+        index,
     }
 }
 
@@ -128,7 +135,7 @@ async fn write(agent: &Agent) -> Stream {
     let start = stream.started().await;
     assert_eq!(
         start.places,
-        [place(1, STAMP, "time"), place(2, I64, "value")]
+        [place(1, STAMP, "time", 0), place(2, I64, "value", 0)]
     );
     stream
 }
@@ -136,8 +143,10 @@ async fn write(agent: &Agent) -> Stream {
 /// Opens a complete read of `value`, whose places are `value`, then `time`.
 async fn read(agent: &Agent) -> (Stream, wire::hub::Reader) {
     let mut stream = agent.read(Mode::Complete, &["value"]).await;
-    let (places, _, reader) = stream.opened().await;
-    assert_eq!(places, Places { count: 2, index: 1 });
+    let (places, run, reader) = stream.opened().await;
+    assert_eq!(places, Places { count: 2 });
+    let indexes: Vec<_> = run.iter().map(|place| place.index).collect();
+    assert_eq!(indexes, [1, 1]);
     (stream, reader)
 }
 

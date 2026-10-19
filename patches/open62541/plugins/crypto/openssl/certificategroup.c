@@ -448,18 +448,63 @@ openSSLPushCertificate(const UA_Byte **at, const UA_Byte *end, STACK_OF(X509) *s
     return UA_TRUSTLOAD_GOOD;
 }
 
+/* Gives the line, from 1 and counted by `\n`, of the first piece of a PEM block in
+ * `trust` that aws-lc reads in two ways by the sign of `char`, else 0. aws-lc reads
+ * the pieces of `BIO_gets` (at most 253 bytes, each through its `\n`) and drops the
+ * bytes of 0x20 or less as a `char` at the end of each, so it keeps the bytes through
+ * the last one of 0x21 to 0x7F where `char` is signed, and more where it is unsigned
+ * only when a byte after them is 0x80 to 0xFF. A block runs from a piece that starts
+ * `-----BEGIN ` and whose kept bytes hold no NUL and end in `-----`, through the next
+ * piece whose kept bytes start `-----END `. */
+static size_t
+openSSLAmbiguousLine(const UA_ByteString trust) {
+    const UA_Byte *at = trust.data;
+    const UA_Byte *end = trust.data + trust.length;
+    size_t line = 1;
+    UA_Boolean inside = false;
+    while(at < end) {
+        size_t left = (size_t)(end - at);
+        size_t length = 0;
+        while(length < left && length < 253 && at[length++] != '\n') {}
+        size_t kept = length;
+        UA_Boolean high = false;
+        while(kept > 0 && (at[kept - 1] <= ' ' || at[kept - 1] >= 0x80)) {
+            high |= at[kept - 1] >= 0x80;
+            kept--;
+        }
+        size_t text = 0;
+        while(text < kept && at[text] != '\0')
+            text++;
+        UA_Boolean begins = kept >= 16 && text == kept &&
+                            memcmp(at, "-----BEGIN ", 11) == 0 &&
+                            memcmp(at + kept - 5, "-----", 5) == 0;
+        if((inside || begins) && high)
+            return line;
+        if(begins)
+            inside = true;
+        else if(kept >= 10 && memcmp(at, "-----END ", 9) == 0)
+            inside = false;
+        line += at[length - 1] == '\n';
+        at += length;
+    }
+    return 0;
+}
+
 /* Pushes each certificate of the bytestring onto the stack, and gives why it does
- * not load, with the number from 1 of the certificate that fails in `number`. A
- * bytestring that starts with a DER certificate is DER certificates back to back,
- * and bytes after the last one are one more. Else it is PEM: each block of
- * `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED CERTIFICATE`. aws-lc reads a line
- * in pieces of at most 253 bytes, drops the bytes of 0x20 or less as a `char` at the
- * end of each, so also 0x80 to 0xFF where `char` is signed, and starts a block at a
- * piece from `-----BEGIN ` to `-----`. It skips other text and a block of another
- * label, but fails on a block of any label that it cannot read, such as an empty one,
- * damaged base64, or an `END` line that does not name its label, which counts as one
- * more. A block with any byte after its certificate fails, also trust settings,
- * which the verify of the group does not apply. Clears the error queue of the thread.
+ * not load, with the number from 1 of the certificate that fails in `number`, or of
+ * the line for `UA_TRUSTLOAD_LINE`. A bytestring that starts with a DER certificate
+ * is DER certificates back to back, and bytes after the last one are one more. Else
+ * it is PEM: each block of `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED
+ * CERTIFICATE`. aws-lc reads a line in pieces of at most 253 bytes, drops the bytes
+ * of 0x20 or less as a `char` at the end of each, so also 0x80 to 0xFF where `char`
+ * is signed, and starts a block at a piece from `-----BEGIN ` to `-----`. It skips
+ * other text and a block of another label, but fails on a block of any label that it
+ * cannot read, such as an empty one, damaged base64, or an `END` line that does not
+ * name its label, which counts as one more. A piece of a block with a byte of 0x80 to
+ * 0xFF after its last byte of 0x21 to 0x7F, or anywhere when it has none, fails
+ * before aws-lc reads, so each target reads alike. A block with any byte after its
+ * certificate fails, also trust settings, which the verify of the group does not
+ * apply. Clears the error queue of the thread.
  */
 static UA_TrustLoad
 openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
@@ -476,12 +521,16 @@ openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
         ERR_clear_error();
         return load;
     }
+    *number = openSSLAmbiguousLine(cert);
+    if(*number > 0) {
+        ERR_clear_error();
+        return UA_TRUSTLOAD_LINE;
+    }
     BIO *bio = BIO_new_mem_buf((void *)cert.data, (ossl_ssize_t)cert.length);
     if(!bio) {
         ERR_clear_error();
         return UA_TRUSTLOAD_NOMEMORY;
     }
-    *number = 0;
     load = UA_TRUSTLOAD_GOOD;
     unsigned char *der;
     long length;

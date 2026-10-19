@@ -43,11 +43,13 @@ fn key(key: u128) -> channel::Key {
     channel::Key::from_u128(key)
 }
 
-fn place(at: u128, data_type: Type, channel: &str) -> Place {
+/// The place of `channel`, whose group's index is at place `index`.
+fn place(at: u128, data_type: Type, channel: &str, index: usize) -> Place {
     Place {
         key: key(at),
         data_type,
         name: name(channel),
+        index,
     }
 }
 
@@ -198,12 +200,12 @@ fn stamp_of(reader: &Reader, frame: &Frame) -> i64 {
 
 /// The places of a writer of `series` places: `time`, then `i64` channels.
 fn wide(series: usize) -> Vec<Place> {
-    [place(1, STAMP, "time")]
+    [place(1, STAMP, "time", 0)]
         .into_iter()
         .chain(
             (2..)
                 .take(series - 1)
-                .map(|at| place(at, I64, &format!("c{at:05}"))),
+                .map(|at| place(at, I64, &format!("c{at:05}"), 0)),
         )
         .collect()
 }
@@ -214,7 +216,7 @@ async fn opened_with(session: &transport::Session, places: &[Place]) -> Incoming
         Write::decode(first).expect("a write").body()
     })
     .await;
-    start(&mut write, places, 0, places.len()).await;
+    start(&mut write, places, places.len()).await;
     write
 }
 
@@ -244,7 +246,7 @@ fn writes_each_frame_to_a_reader_on_the_home_in_order() {
         let mut writer = session.writer(config(&["value"], 1)).await.expect("opens");
         assert_eq!(
             writer.places(),
-            [place(1, STAMP, "time"), place(2, I64, "value")]
+            [place(1, STAMP, "time", 0), place(2, I64, "value", 0)]
         );
         assert_eq!(writer.index(), 0);
         frame(&mut writer, 1, 0, &[(2, 10)]).await;
@@ -274,8 +276,8 @@ fn gives_the_place_of_the_index() {
                 Write::decode(first).expect("a write").body()
             })
             .await;
-            let places = [place(2, I64, "value"), place(1, STAMP, "time")];
-            start(&mut write, &places, 1, places.len()).await;
+            let places = [place(2, I64, "value", 1), place(1, STAMP, "time", 1)];
+            start(&mut write, &places, places.len()).await;
             node.clock().sleep(QUIET).await;
         },
         |session, node| {
@@ -651,7 +653,11 @@ fn ends_the_writer_after_a_call_that_dropped_while_it_sent() {
 
 /// Accepts the next write of `session` and opens it with `time` and `value`.
 async fn opened(session: &transport::Session) -> Incoming {
-    opened_with(session, &[place(1, STAMP, "time"), place(2, I64, "value")]).await
+    opened_with(
+        session,
+        &[place(1, STAMP, "time", 0), place(2, I64, "value", 0)],
+    )
+    .await
 }
 
 /// Takes the head, the ends, and the body of a frame of 2 series.
@@ -808,9 +814,9 @@ fn keeps_the_writer_whole_after_a_dropped_stored() {
 fn refuses_a_writer_whose_frame_lead_no_block_of_its_pool_holds() {
     const CHANNELS: usize = 126;
     let names: Vec<String> = (0..CHANNELS).map(|at| format!("c{at:03}")).collect();
-    let places: Vec<Place> = [place(1, STAMP, "time")]
+    let places: Vec<Place> = [place(1, STAMP, "time", 0)]
         .into_iter()
-        .chain(names.iter().zip(2..).map(|(n, at)| place(at, I64, n)))
+        .chain(names.iter().zip(2..).map(|(n, at)| place(at, I64, n, 0)))
         .collect();
     raw(
         716,
@@ -1085,9 +1091,9 @@ fn gives_the_error_of_the_renewal_to_an_open_writer() {
 /// places, and the program stops the write as `MALFORMED`.
 #[test]
 fn stops_a_write_whose_places_are_not_valid() {
-    let twice = vec![place(1, STAMP, "time"), place(1, STAMP, "again")];
-    let whole = vec![place(1, STAMP, "time"), place(2, I64, "value")];
-    let other = vec![place(1, STAMP, "time"), place(2, I64, "other")];
+    let twice = vec![place(1, STAMP, "time", 0), place(1, STAMP, "again", 0)];
+    let whole = vec![place(1, STAMP, "time", 0), place(2, I64, "value", 0)];
+    let other = vec![place(1, STAMP, "time", 0), place(2, I64, "other", 0)];
     let message = Error::Message;
     let cases = [
         (
@@ -1111,7 +1117,7 @@ fn stops_a_write_whose_places_are_not_valid() {
                     Write::decode(first).expect("a write").body()
                 })
                 .await;
-                start(&mut write, &places, 0, sent).await;
+                start(&mut write, &places, sent).await;
                 if sent < places.len() {
                     let sender = write.sender.as_mut().expect("two-way");
                     sender.finish().expect("finishes");

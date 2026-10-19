@@ -201,3 +201,7 @@
   line, of https://github.com/synnaxlabs/foundation/pull/2327#issuecomment-6104388686,
   and item 4 ("remove `Copy`") of
   https://github.com/synnaxlabs/foundation/pull/2327#issuecomment-6103904407.
+
+  Amended (#3283): `Places` holds only the count of places, and each `Place` holds the
+  place of the index of its channel's group after the key. The rules are in HUB
+  CLIENT, Amended (#3283).
