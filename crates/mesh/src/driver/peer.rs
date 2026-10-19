@@ -20,9 +20,9 @@ use crate::region::Refused;
 /// How long one get or put of chunks on a peer may take, its dial included.
 pub(super) const DEADLINE: Span = Span::from_nanos(10 * Span::SECOND.nanos());
 
-/// The most chunks that one put on a peer carries, so that a call ends within
-/// [`DEADLINE`] on a slow link.
-pub(super) const CHUNKS: usize = 32;
+/// The most chunks that one put on a peer carries, so that a call of the largest
+/// chunks ends within [`DEADLINE`] over links of 100 ms.
+pub(super) const CHUNKS: usize = 16;
 
 impl Mesh {
     /// Puts each chunk of `digests` of the store on each voter of `voters` but this

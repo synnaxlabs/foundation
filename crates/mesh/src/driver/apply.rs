@@ -25,7 +25,7 @@ impl Mesh {
     /// returned. The change lists each chunk of the new tree that the tree of `base`
     /// lacks, or each chunk of the new tree when the store cannot give the tree of
     /// `base`. It then puts the listed chunks on each other voter of both halves of the
-    /// voters, all at once, in calls of at most 32 chunks, each of which fails after 10
+    /// voters, all at once, in calls of at most 16 chunks, each of which fails after 10
     /// seconds with no result, and proposes once the holders are a majority of each
     /// half. A holder is this node when it is a voter, or a voter whose calls each
     /// ended `Ok` while a half that holds it lacked a majority. A follower forwards the change to the leader. Returns the pointer once its entry has

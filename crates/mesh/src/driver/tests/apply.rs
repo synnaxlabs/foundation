@@ -901,6 +901,31 @@ fn an_apply_of_the_most_chunks_commits_over_links_of_100_ms() {
     assert_used(&board, &IDS, moved, &definitions);
 }
 
+// Each of 40 subjects of 512 keys fills one chunk of 16 417 bytes, the size at which
+// the chunker cuts, and each chunk takes about 340 ms, so a call of 32 chunks would
+// miss the deadline.
+#[test]
+fn an_apply_of_the_largest_chunks_commits_over_links_of_100_ms() {
+    let mut cluster = Cluster::new(0);
+    cluster.delay(Span::from_nanos(100 * Span::MILLISECOND.nanos()));
+    cluster.start();
+    cluster.run(seconds(10));
+    let labels: Vec<String> = (0..40).map(|at| format!("plant.s{at}")).collect();
+    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
+    let definitions = create_subjects(&labels, 512);
+    let mut chunks = Chunks::default();
+    let update = spec::region::tree(&mut chunks, &definitions);
+    let largest = update.chunks.iter().map(|&d| chunks.get(d).unwrap().len());
+    assert_eq!(largest.max(), Some(16_417));
+    assert_eq!(update.chunks.len(), 41);
+    cluster.change(1, base(), &definitions);
+    cluster.run(seconds(60));
+    let board = cluster.board();
+    let moved = pointer(1, &definitions);
+    assert_eq!(board.applied, [(1, moved, Ok(moved))]);
+    assert_used(&board, &IDS, moved, &definitions);
+}
+
 #[test]
 fn a_failed_put_gives_the_error_of_the_store_and_proposes_nothing() {
     let entries = solo_stored(|node, tasks| async move {
