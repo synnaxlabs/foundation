@@ -336,9 +336,11 @@ fn run(set: &Arc<KeySet>, bytes: &[u8], in_place: bool) -> Vec<Seen> {
                     }
                     Ok(step) => {
                         match part {
-                            Part::Ends => entries.extend(items::<END>(message).map(
-                                |entry| usize::try_from(entry).expect("a u32 fits"),
-                            )),
+                            Part::Ends => {
+                                entries.extend(items::<END>(message).map(|entry| {
+                                    usize::try_from(entry).expect("a u32 fits")
+                                }))
+                            }
                             Part::Counts { .. } => {
                                 given = Some(items::<COUNT>(message).collect());
                             }
@@ -416,7 +418,9 @@ fn check(set: &KeySet, seen: &[Seen]) {
                     .groups()
                     .iter()
                     .zip(0..)
-                    .filter(|&(&index, _)| series.get(index).is_some_and(Option::is_some))
+                    .filter(|&(&index, _)| {
+                        series.get(index).is_some_and(Option::is_some)
+                    })
                     .map(|(_, group)| group)
                     .collect();
                 let counts = match head.time {
