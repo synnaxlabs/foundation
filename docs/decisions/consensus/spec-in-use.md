@@ -8,21 +8,19 @@
   https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090235986). One task
   in `mesh` reads the spec of each committed pointer with `spec::region::definitions`
   over the chunks of the spec in use and the chunks that the change lists, and gets each
-  chunk that the read gives as `Missing` from `Config::store`, or else from the peers.
-  A spec that reads and has
-  no problem at `spec::region::check` takes effect. A spec with problems or a tree that
-  does not read leaves the last spec in use (SPEC CHANGE). After a missing chunk, the
-  task gets only that chunk at once, from `Config::store` and then from the peers, and
-  reads again only when it has it. A get that finds no chunk asks again each second
-  (`RETRY`, on the `env` clock). A get asks the peers in order, each call within
-  `peer::DEADLINE`: the holders of the newest change, then each other voter, in key
-  order, without this node. It dials as `Mesh::apply` does, with the same redial. A
-  failed call of this node's store ends the get with `Cause::Blob`. Each other failure
+  chunk that the read gives as `Missing` from `Config::store`, or else from the peers. A
+  spec that reads and has no problem at `spec::region::check` takes effect. A spec with
+  problems or a tree that does not read leaves the last spec in use (SPEC CHANGE). After
+  a missing chunk, the task gets only that chunk at once, from `Config::store` and then
+  from the peers, and reads again only when it has it. A get that finds no chunk asks
+  again each second (`RETRY`, on the `env` clock). A get asks the peers in order, each
+  call within `peer::DEADLINE`: the holders of the newest change, then each other voter,
+  in key order, without this node. It dials as `Mesh::apply` does, with the same redial.
+  A failed call of this node's store ends the get with `Cause::Blob`. Each other failure
   of a peer moves to the next peer. When no peer gives the chunk, the cause stays
-  `Missing`. A failed store call or file call is read again each second.
-  The state is at most two trees: the chunks of the spec in use, which
-  `spec::region::definitions` gives (REGION CHECK; `laptop.architect-2`,
-  2026-10-08T16:16:05Z,
+  `Missing`. A failed store call or file call is read again each second. The state is at
+  most two trees: the chunks of the spec in use, which `spec::region::definitions` gives
+  (REGION CHECK; `laptop.architect-2`, 2026-10-08T16:16:05Z,
   https://github.com/synnaxlabs/foundation/pull/1891#issuecomment-6064178995), or
   `spec::region::tree` of the founding definitions, and the chunks of the tree of the
   newest committed pointer that the task got. A newer pointer drops the chunks of the
