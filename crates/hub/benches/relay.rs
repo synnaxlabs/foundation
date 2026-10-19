@@ -21,6 +21,8 @@
 //!   channels, so the home refuses each frame as `Waiting`.
 //! - `live 2x(1x2)`: frames of two groups, each as `live 1x2`, so the serve copies the
 //!   series of each group into a draft of its own writer.
+//! - `live 2x(1x64)`: as `live 2x(1x2)`, with an index and 63 data channels in
+//!   each group.
 //! - `live 8x(1x2)`: as `live 2x(1x2)`, with eight groups.
 //! - `live 1/8x(1x2)`: as `live 8x(1x2)`, with frames that hold one group.
 //!
@@ -100,7 +102,7 @@ struct Case {
     waiting: bool,
 }
 
-const CASES: [Case; 8] = [
+const CASES: [Case; 9] = [
     Case {
         name: "live 1x2",
         node: false,
@@ -153,6 +155,15 @@ const CASES: [Case; 8] = [
         groups: 2,
         present: 2,
         series: 2,
+        waiting: false,
+    },
+    Case {
+        name: "live 2x(1x64)",
+        node: false,
+        count: 1,
+        groups: 2,
+        present: 2,
+        series: 64,
         waiting: false,
     },
     Case {
