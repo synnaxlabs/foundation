@@ -84,9 +84,9 @@ fn bind_free(
     }
     let mut tries = 1;
     loop {
-        let mut port = local;
-        port.set_port(free()?);
-        match bind(fd, port) {
+        let mut at = local;
+        at.set_port(free()?);
+        match bind(fd, at) {
             Err(Error::AddressInUse { .. }) if tries < TRIES => tries += 1,
             bound => return bound,
         }
