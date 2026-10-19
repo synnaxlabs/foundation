@@ -8,12 +8,19 @@
   https://github.com/synnaxlabs/foundation/pull/2192#issuecomment-6090235986). One task
   in `mesh` reads the spec of each committed pointer with `spec::region::definitions`
   over the chunks of the spec in use and the chunks that the change lists, and gets each
-  chunk that the read gives as `Missing` from `Config::store`. A spec that reads and has
+  chunk that the read gives as `Missing` from `Config::store`, or else from the peers.
+  A spec that reads and has
   no problem at `spec::region::check` takes effect. A spec with problems or a tree that
-  does not read leaves the last spec in use (SPEC CHANGE). After a missing chunk, a
-  retry each second (`RETRY`, on the `env` clock) gets only that chunk, and reads again
-  only when the store gives it. A failed store call or file call is read again each
-  second. The state is at most two trees: the chunks of the spec in use, which
+  does not read leaves the last spec in use (SPEC CHANGE). After a missing chunk, the
+  task gets only that chunk at once, from `Config::store` and then from the peers, and
+  reads again only when it has it. A get that finds no chunk asks again each second
+  (`RETRY`, on the `env` clock). A get asks the peers in order, each call within
+  `peer::DEADLINE`: the holders of the newest change, then each other voter, in key
+  order, without this node. It dials as `Mesh::apply` does, with the same redial. A
+  failed call of this node's store ends the get with `Cause::Blob`. Each other failure
+  of a peer moves to the next peer. When no peer gives the chunk, the cause stays
+  `Missing`. A failed store call or file call is read again each second.
+  The state is at most two trees: the chunks of the spec in use, which
   `spec::region::definitions` gives (REGION CHECK; `laptop.architect-2`,
   2026-10-08T16:16:05Z,
   https://github.com/synnaxlabs/foundation/pull/1891#issuecomment-6064178995), or
@@ -61,4 +68,12 @@
   Supersedes: the base tree from the spec in use in item 2 of
   https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178, the wait
   of `Mesh::spec` in item 4 of the same comment, and the text of `Behind::pointer` in
+  https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6061345871. The get
+  from the peers: the plan of #1231, `laptop.architect`, 2026-10-19T17:02:16Z
+  (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202), and
+  items 2 and 3 of
+  https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6274225327, which
+  need no OK. The get at once after a miss, 2026-10-19T18:23:58Z
+  (https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6274236848), which
+  supersedes the wait of `RETRY` before each get of
   https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6061345871.
