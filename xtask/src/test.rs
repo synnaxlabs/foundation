@@ -41,7 +41,8 @@ pub(crate) struct Alone {
 /// `flags` on each cargo command. nextest leaves out each test whose full path is in
 /// `skipped`, which `Part::Serial` refuses. Each command runs to its end, and the run
 /// fails when one fails. Each target that shares the name of a target of `Alone` also
-/// runs in `Part::Serial`, as a cargo target flag selects by name.
+/// runs in `Part::Serial`, as a cargo target flag selects by name. It refuses a
+/// pattern after `--exclude`.
 pub(crate) fn run(
     root: &Path,
     cargo: &OsStr,
@@ -52,7 +53,9 @@ pub(crate) fn run(
     if part == Part::Serial && !skipped.is_empty() {
         return Err(vec!["`serial` skips no test".to_string()]);
     }
-    let alone = alone(root, &excluded(flags)).map_err(|e| vec![e])?;
+    let alone = excluded(flags)
+        .and_then(|excluded| alone(root, &excluded))
+        .map_err(|e| vec![e])?;
     let mut problems = Vec::new();
     for mut command in commands(cargo, part, &alone, flags, skipped) {
         let shown = format!("{command:?}");
@@ -69,11 +72,23 @@ pub(crate) fn run(
     }
 }
 
-/// The packages that `flags` leave out with `--exclude <package>`.
-fn excluded<'a>(flags: &[&'a str]) -> BTreeSet<&'a str> {
-    (flags.windows(2))
+/// The packages that `flags` leave out with `--exclude <package>` or
+/// `--exclude=<package>`. Fails on a pattern, which cargo also takes.
+fn excluded<'a>(flags: &[&'a str]) -> Result<BTreeSet<&'a str>, String> {
+    let spaced = (flags.windows(2))
         .filter(|pair| pair[0] == "--exclude")
-        .map(|pair| pair[1])
+        .map(|pair| pair[1]);
+    let joined = (flags.iter()).filter_map(|flag| flag.strip_prefix("--exclude="));
+    (spaced.chain(joined))
+        .map(|spec| {
+            if spec.contains(['*', '?', '[']) {
+                Err(format!(
+                    "`--exclude {spec}`: give a package name, not a pattern"
+                ))
+            } else {
+                Ok(spec)
+            }
+        })
         .collect()
 }
 
@@ -248,9 +263,9 @@ fn main() {
     #[test]
     fn alone_leaves_out_each_excluded_package() {
         let flags = ["--all-features", "--exclude", "g", "--exclude", "h"];
-        assert_eq!(excluded(&flags), BTreeSet::from(["g", "h"]));
+        assert_eq!(excluded(&flags), Ok(BTreeSet::from(["g", "h"])));
         assert_eq!(
-            alone(&fixture().join("gates"), &excluded(&flags)),
+            alone(&fixture().join("gates"), &excluded(&flags).unwrap()),
             Ok(Alone::default())
         );
     }
@@ -330,6 +345,50 @@ fn main() {
             &[],
         );
         assert_eq!(lines, ["test --workspace --exclude g --no-fail-fast --doc"]);
+    }
+
+    #[test]
+    fn serial_leaves_out_a_package_excluded_with_an_equals_sign() {
+        let (result, lines, program) = ran(
+            "xtask-test-serial-equals",
+            Part::Serial,
+            &["--exclude=g"],
+            &[],
+        );
+        let mut doc = Command::new(&program);
+        doc.args([
+            "test",
+            "--workspace",
+            "--exclude=g",
+            "--no-fail-fast",
+            "--doc",
+        ]);
+        let status = if cfg!(windows) {
+            "exit code: 1"
+        } else {
+            "exit status: 1"
+        };
+        assert_eq!(result, Err(vec![format!("{doc:?} ended with {status}")]));
+        assert_eq!(lines, ["test --workspace --exclude=g --no-fail-fast --doc"]);
+    }
+
+    #[test]
+    fn run_refuses_an_excluded_pattern_in_each_form() {
+        for (name, flags) in [
+            ("xtask-test-pattern-space", ["--exclude", "g*"].as_slice()),
+            ("xtask-test-pattern-equals", ["--exclude=g?"].as_slice()),
+            ("xtask-test-pattern-set", ["--exclude", "[g]"].as_slice()),
+        ] {
+            let (result, lines, _) = ran(name, Part::Nextest, flags, &[]);
+            let spec = flags.last().unwrap().trim_start_matches("--exclude=");
+            assert_eq!(
+                result,
+                Err(vec![format!(
+                    "`--exclude {spec}`: give a package name, not a pattern"
+                )])
+            );
+            assert_eq!(lines, Vec::<String>::new());
+        }
     }
 
     #[test]
