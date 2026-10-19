@@ -810,7 +810,6 @@ unsafe extern "C" {
         id: *mut u32,
     ) -> u32;
     pub(crate) fn shim_response_result(response: *const c_void) -> u32;
-    pub(crate) fn shim_response_status(response: *const c_void) -> u32;
     pub(crate) fn shim_read_count(response: *const ReadResponse) -> usize;
     pub(crate) fn shim_read_result(
         response: *const ReadResponse,
@@ -835,6 +834,7 @@ unsafe extern "C" {
         service: Service,
     ) -> *mut c_void;
     pub(crate) fn shim_answer_count(answer: *const c_void) -> usize;
+    pub(crate) fn shim_answer_result(answer: *const c_void, service: Service) -> u32;
     pub(crate) fn shim_answer_free(answer: *mut c_void, service: Service);
     pub(crate) fn shim_request_free(request: *mut c_void, service: Service);
     pub(crate) fn shim_request_bytes(

@@ -19,6 +19,12 @@
 #include "timer.h"
 #pragma GCC diagnostic pop
 
+/* `shim_client_publishes` calls `__Client_Subscriptions_backgroundPublish`, which
+ * asserts a client lock that only a build with threads takes. */
+#if UA_MULTITHREADING >= 100
+#error "shim_client_publishes takes no client lock"
+#endif
+
 #include "shim.h"
 
 #include <stdarg.h>
@@ -1012,11 +1018,6 @@ UA_StatusCode shim_response_result(const void *response) {
     return (result >> 30) >= 0x02 ? result : UA_STATUSCODE_GOOD;
 }
 
-/* Gives the service result of `response`, a response of a service. */
-UA_StatusCode shim_response_status(const void *response) {
-    return ((const UA_ResponseHeader *)response)->serviceResult;
-}
-
 /* Gives a Read request of the attribute `attributes[i]`, or the Value when
  * `attributes` is NULL, of the node `nodes[i]` for each `i` below `count`, with no
  * timestamps, which copies their names, or NULL when an allocation fails. */
@@ -1271,6 +1272,17 @@ _Static_assert(offsetof(UA_BrowseResponse, resultsSize) ==
  * than a CreateSubscription. */
 size_t shim_answer_count(const void *answer) {
     return ((const UA_BrowseResponse *)answer)->resultsSize;
+}
+
+/* Gives the service result of `answer`, an answer of `service`, when it fails the
+ * answer, else Good. A service that `send` sends by the subscription calls of
+ * open62541 fails at each result that is not Good, as open62541 then makes no
+ * subscription or item. Another fails at a Bad result. */
+UA_StatusCode shim_answer_result(const void *answer, size_t service) {
+    UA_StatusCode result = ((const UA_ResponseHeader *)answer)->serviceResult;
+    if(service == SERVICE_SUBSCRIBE || service == SERVICE_MONITOR)
+        return result;
+    return shim_response_result(answer);
 }
 
 /* Frees `request`, a request of `service`. */

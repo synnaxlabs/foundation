@@ -352,16 +352,9 @@ impl Answer {
     /// `CreateMonitoredItems`, when it is not Good, as open62541 then makes no
     /// subscription or item.
     pub(super) fn result(&self) -> Result<(), Status> {
-        let raw = self.raw.as_ptr();
-        let status = Status(
-            if matches!(self.service, Service::SUBSCRIBE | Service::MONITOR) {
-                // SAFETY: the answer lives.
-                unsafe { ffi::shim_response_status(raw) }
-            } else {
-                // SAFETY: the answer lives.
-                unsafe { ffi::shim_response_result(raw) }
-            },
-        );
+        // SAFETY: the answer lives, and is an answer of its service.
+        let status =
+            Status(unsafe { ffi::shim_answer_result(self.raw.as_ptr(), self.service) });
         if status == Status::GOOD {
             Ok(())
         } else {
