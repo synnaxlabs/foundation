@@ -1810,14 +1810,17 @@ mod tests {
                             if silent {
                                 std::future::pending::<()>().await;
                             }
+                            let served = blob::peer::serve(&mesh.store, incoming).await;
                             // A test arms each fault of the files.
-                            match blob::peer::serve(&mesh.store, incoming).await {
-                                Ok(())
-                                | Err(blob::peer::Error::Stream(_))
-                                | Err(blob::peer::Error::Store(blob::Error::Files(
-                                    _,
-                                ))) => {}
-                                Err(error) => panic!("a voter refused a put: {error}"),
+                            if let Err(error) = served {
+                                let armed = matches!(
+                                    error,
+                                    blob::peer::Error::Stream(_)
+                                        | blob::peer::Error::Store(blob::Error::Files(
+                                            _
+                                        ))
+                                );
+                                assert!(armed, "a voter refused a put: {error}");
                             }
                             return;
                         }
