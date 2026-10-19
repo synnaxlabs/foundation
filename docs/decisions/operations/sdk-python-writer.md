@@ -28,10 +28,11 @@
      channel name for a lost connection. Lost: one `Refused(Exception)` for both,
      because a caller of `connect` that catches `ConnectionError` then misses a
      refused session; and a `session` attribute on `Refused`, because
-     `except ConnectionError` then still catches a typo. `Stream` with `Layout`,
-     `Unsent`, `Pool`, `Body`, `Open`, or `Unnamed` raises `ValueError`: nothing was
-     sent, and the writer goes on, or, at the open, no writer opened. Each other
-     `Stream` or `Session` error raises `ConnectionError`.
+     `except ConnectionError` then still catches a typo. `Stream` of a writer with
+     `Layout`, `Unsent`, `Pool`, `Body`, `Open`, or `Unnamed` raises `ValueError`:
+     nothing was sent, and the writer goes on, or, at the open, no writer opened. A
+     `Pool` error of a reader raises `ConnectionError` (item 2 of SDK PYTHON READER).
+     Each other `Stream` or `Session` error raises `ConnectionError`.
   2. `sdk-python` takes `program` as a normal dependency and matches
      `program::Error::Refused` itself. Lost: a re-export of `program::Error` and
      `program::Refusal` from `sdk`, two public items that no Rust caller names yet. The

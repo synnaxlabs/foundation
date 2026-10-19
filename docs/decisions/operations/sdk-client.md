@@ -117,6 +117,7 @@
   https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6268640271: a frame of
   the node is at most about 1 MiB, `BODY_MAX`). The node gives its largest frame at the
   open, and the sdk sizes the pool from it, in item 1 of #3366.
+  `Reader::next_within` bounds the wait of `next` (item 4 of SDK PYTHON READER).
   `crates/node/benches/sdk/` gives the p50 and p99 of each round of a read. On a quiet
   host at f176f91e9
   (https://github.com/synnaxlabs/foundation/pull/3306#issuecomment-6272905066), a frame

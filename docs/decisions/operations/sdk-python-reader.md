@@ -27,8 +27,10 @@
   3. `DataLost.frame` is the frame after the loss when a reader raises it, and `None`
      when a writer raises it.
   4. `sdk::read::Reader::next_within(timeout)` gives `None` when no frame came within
-     `timeout`, and the call stays out, so no frame is lost. `__next__` waits in steps
-     of 100 ms with the GIL released, and runs the signal handlers between them. Its
+     `timeout`, and the call stays out, so no frame is lost. A drop of the reader while
+     its call is out ends its stream. `__next__` waits in steps of 100 ms with the GIL
+     released, and runs the signal handlers between them, and none while a `__next__`
+     of another thread holds the reader, so a program reads a reader on one thread. Its
      wait reads the monotonic clock of the OS on the caller's thread, only as the bound
      of a wait, never as a time of data.
   A close sets a flag before it takes the lock, and `__next__` reads the flag before
@@ -39,8 +41,10 @@
   `__next__`, as a program that keeps an array then gets an error or pays the copy
   anyway; a `Frame::take` in `sdk`, a new public item whose `Vec<u8>` does not have the
   alignment of an `f64` array; a timer in the task of the client for the bound, which
-  wakes the client's thread each 100 ms for each waiting reader; and `mode` as a class,
-  where a `str` matches `on_loss`.
+  wakes the client's thread each 100 ms for each waiting reader; `mode` as a class,
+  where a `str` matches `on_loss`; and each array made at the first read of its name,
+  which cuts the part only for a program that reads fewer channels than it opened, and
+  adds a cache to `Frame`.
   The numbers below come from `sdk/python/bench/read.py` at 9cea9ca19, with the
   `wheel` profile and the feature `sim` (the reader code of 8bb532882), and a release
   node, on box1 (Xeon Platinum 8488C, 32 CPUs, load 13 to 34 by `/proc/loadavg`), in
@@ -81,4 +85,5 @@
   queued frame of 1 place of 100 samples, at 1.27 to 3.07 µs. A cut of the part per
   sample needs arrays that view the buffers of the `sdk` frame, which this item rejects
   above. A cut of the part per array needs no `numpy` array for each series, which the
-  Python surface cannot give.
+  Python surface cannot give. `laptop.architect-2` accepted this judgment at 0804db16e
+  (https://github.com/synnaxlabs/foundation/pull/3436#issuecomment-6278228544).

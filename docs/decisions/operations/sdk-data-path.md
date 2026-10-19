@@ -28,6 +28,7 @@
   comes as usual; `"raise"` raises `DataLost` and closes the reader; `"ignore"` logs
   nothing. `Frame.lost` holds the loss in each case, and another value raises
   `ValueError` at the open. `laptop.monitor` decided this (factory message `719cfad0`,
+  2026-10-15T18:12:09Z,
   https://github.com/synnaxlabs/foundation/issues/2177#issuecomment-6199029552), under
   the person's words of 2026-10-15, "Best devx possible. You choose the path". Lost: a
   loss as an item of the loop, as each program then branches on the type of each item;
