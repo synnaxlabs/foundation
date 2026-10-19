@@ -39,8 +39,8 @@ pub enum Error {
     },
     /// A `PreVote` or a `Vote` from `from`, which a committed configuration removed
     /// (`raft::Admission::Removed`). The stream stops with the `removed` code. `from`
-    /// stops its group when a majority of the other voters of its configuration give
-    /// this answer inside the window of `Raft::removed_by`.
+    /// stops its group when a majority of the other voters of the incoming half of its
+    /// configuration give this answer inside the window of `Raft::removed_by`.
     Removed {
         /// The sender.
         from: node::Key,
@@ -551,10 +551,10 @@ pub enum Stopped {
         /// Why its bytes are not a change.
         cause: Unknown,
     },
-    /// A majority of the voters of the newest configuration in this node's log
-    /// answered `removed`, each in the last two election timeouts: a committed
-    /// configuration lacks this node. Open the mesh again only after a join that
-    /// gives a new configuration.
+    /// A majority of the other voters of the incoming half of the newest configuration
+    /// in this node's log answered `removed`, each in the last two election timeouts: a
+    /// committed configuration lacks this node. Open the mesh again only after a join
+    /// that gives a new configuration.
     Removed {
         /// The voters that answered.
         by: BTreeSet<node::Key>,

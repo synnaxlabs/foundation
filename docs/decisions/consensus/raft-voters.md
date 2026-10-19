@@ -76,7 +76,7 @@
   configuration" of the interim rule below (decided by the architect,
   2026-10-08T06:51:45Z:
   https://github.com/synnaxlabs/foundation/issues/1822#issuecomment-6054242092). The
-  term clause supersedes the last-index rule of that comment (`laptop.architect`,
+  term clause adds to the last-index rule of that comment (`laptop.architect`,
   2026-10-19T18:56:00Z:
   https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274855859). A sender
   that only an uncommitted entry held gets `NotVoter`: the entry can still be truncated,

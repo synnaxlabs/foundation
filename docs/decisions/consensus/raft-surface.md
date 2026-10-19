@@ -201,9 +201,11 @@
   voter `by`, and gives each voter whose answer counts once they are a majority of the
   other voters of the incoming half of the newest configuration in the log. An answer
   counts for `2 × election_ticks` ticks, and the answers clear when the configuration
-  in force changes. An answer from a node that is not a voter of that configuration
-  changes nothing (decided by `laptop.architect`, 2026-10-19T18:47:21Z:
-  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274691760).
+  in force changes. An answer from any other node changes nothing (decided by
+  `laptop.architect`, 2026-10-19T18:47:21Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6274691760; the text,
+  2026-10-19T21:47:53Z:
+  https://github.com/synnaxlabs/foundation/pull/3407#issuecomment-6278129919).
   `Voters::contains` and `Voters::nodes` are public. Decided by `laptop.architect`,
   2026-10-08T03:04:33Z:
   https://github.com/synnaxlabs/foundation/pull/1762#issuecomment-6051316777. After

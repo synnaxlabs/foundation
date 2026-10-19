@@ -105,9 +105,9 @@ impl Senders {
                     // Only a peer that opens no mesh, or skipped the check of
                     // `Mesh::open`, takes less than `BYTES_MIN`.
                     transport::Error::TooLarge { .. } => {}
-                    // A majority of the voters of this node's own configuration,
-                    // inside the window of `Raft::removed_by`, tells it that it
-                    // is out.
+                    // A majority of the other voters of the incoming half of this
+                    // node's own configuration, inside the window of
+                    // `Raft::removed_by`, tells it that it is out.
                     transport::Error::Stopped { code } => {
                         let group = self.group();
                         let mut group = group.borrow_mut();
