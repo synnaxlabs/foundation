@@ -136,14 +136,6 @@ impl Client {
                 );
             }
         }
-        let queued: usize = items
-            .iter()
-            .flatten()
-            .map(|item| usize::try_from(item.queue).unwrap_or(usize::MAX))
-            .fold(0, usize::saturating_add);
-        let room = usize::from(PUBLISHES) * most.min(queued);
-        self.changes.reserve(room);
-        self.calls.changes.buffer.borrow_mut().reserve(room);
         Ok(Revised {
             interval: span(interval),
             items,

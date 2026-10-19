@@ -173,19 +173,17 @@ fn on_level<T: Send + 'static>(
     .0
 }
 
-/// A Publish answer holds the most changes that fit the receive limit of the client,
-/// and the buffer of the client holds the changes of [`PUBLISHES`] answers.
+/// A Publish answer holds the most changes that fit the receive limit of the client.
 #[test]
 fn a_publish_answer_holds_the_most_changes_that_fit_the_client() {
-    let (most, fits, held) = on_level(4, async |peer, client, _| {
+    let (most, fits) = on_level(4, async |peer, client, _| {
         let most = usize::try_from(peer.server.per_publish()).expect("fits");
         let bytes =
             |count: usize| ffi::shim_publish_bytes() + count * Item::Change.bytes();
         let fits = (bytes(most) <= client.takes, bytes(most + 1) <= client.takes);
-        (most, fits, client.changes.capacity())
+        (most, fits)
     });
     assert_eq!(fits, (true, false), "{most}");
-    assert!(held >= usize::from(PUBLISHES) * 4, "{held}");
 }
 
 /// A queue of 2 with 3 changes in one publishing interval drops the oldest, and the
