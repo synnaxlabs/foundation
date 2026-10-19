@@ -280,6 +280,10 @@ impl Raft {
 
     /// How `mesh` takes `message`, a message from another node. After `Raft::new`,
     /// the commit is `Start.applied` until a leader gives a higher one.
+    ///
+    /// # Panics
+    ///
+    /// When the log does not hold the commit, a broken invariant of `Raft`.
     #[must_use]
     pub fn admission(&self, message: &Message) -> Admission {
         // A sender that holds a committed entry past the commit names a later last
