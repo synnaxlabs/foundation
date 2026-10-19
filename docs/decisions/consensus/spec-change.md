@@ -11,7 +11,7 @@
   still checks the base. Lost: a version in the record, which can disagree with the
   base. A record lists at most `CHUNKS_MAX` = 1024 digests, about 32 KiB, so that
   `message::BYTES_MIN` stays under 64 KiB, the default limit of a node; decode refuses a
-  larger count. `change::BYTES_MAX` = 50 255 bytes is the largest record of any kind: a
+  larger count. `change::BYTES_MAX` = 51 279 bytes is the largest record of any kind: a
   `Spec` change at each bound. `raft` drops the last entries of an `Append` until it
   fits `message::BYTES_MIN` = `BYTES_MAX` + 100, an `Append` of one such record with no
   proof and no link (RAFT SURFACE, MESH WIRE). So a record at the bound goes alone
@@ -25,19 +25,23 @@
   left for the rest of the append. Trigger:
   before a milestone applies a change that lists more than `CHUNKS_MAX` chunks, a `Spec`
   change can list them. The holders are the voters whose durable put of the listed
-  chunks the proposer counted; until #1231 they are only the proposer. A record lists at
-  most `HOLDERS_MAX` = 64 holders, and decode refuses a larger count, so a record at the
-  bounds of chunks and holders is 33 869 bytes. A majority of each half must fit in
-  `HOLDERS_MAX` holders, and a holder in both halves counts in each. So a configuration
-  with one set has at most 127 voters. Two halves that share no voter fit when their
-  majorities sum to at most 64. This binds only after #1231. Decided by
-  `laptop.architect`, 2026-10-08T12:38:01Z
+  chunks the proposer counted: the proposer when it is a voter, and each voter whose
+  put of them from the proposer ended `Ok` while a half that holds it lacked a majority
+  (SPEC APPLY). A record lists at most `HOLDERS_MAX` = 128 holders, and decode refuses a
+  larger count, so a record at the bounds of chunks and holders is 34 893 bytes.
+  `HOLDERS_MAX` is 128, the sum of the majorities of two halves of 127 voters each (MESH
+  WIRE), so the holders that SPEC APPLY counts always fit. Decided by
+  `laptop.architect`, 2026-10-19T17:21:45Z
+  (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273042572), which
+  supersedes the voter bound and its check by a change of voters of 6060034191,
+  `HOLDERS_MAX` = 64 of 6059278643, and the sum of 33 869 bytes of 6060184527. The
+  holders and decode decided by `laptop.architect`, 2026-10-08T12:38:01Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6060034191).
   Supersedes the voter bound and the sum of 33 873 bytes of
   https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643, and the
   voter bound of
-  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059660161. The sum
-  of 33 869 bytes: `laptop.architect`, 2026-10-08T12:46:52Z
+  https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059660161. The sum of
+  33 869 bytes: `laptop.architect`, 2026-10-08T12:46:52Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6060184527). The rule
   of a majority of each half is `raft::Voters::quorum` (#1875), which counts a majority
   as the commit of `raft` does (`Voters::committed`). So an empty half needs no holder
@@ -113,7 +117,7 @@
   holders, the refusal at apply, the quorum rule, and the trigger for `CHUNKS_MAX`,
   2026-10-08T11:03:36Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
-  `HOLDERS_MAX` and the move to `raft`, 2026-10-08T11:53:51Z
+  The move of the quorum rule to `raft` (`Voters::quorum`), 2026-10-08T11:53:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643). The
   panics of the hub and the check before them, agreed with `laptop.architect-2`,
   2026-10-08T20:08:50Z
