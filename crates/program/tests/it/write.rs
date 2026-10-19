@@ -666,13 +666,10 @@ fn sends_the_count_of_each_group_of_a_draft() {
             ];
             for (frame, (ends, counts, body, groups)) in (1..).zip(frames) {
                 message(&mut write).await;
-                let want: Vec<u8> = (ends.iter())
-                    .flat_map(|(at, end)| [at.to_le_bytes(), end.to_le_bytes()])
-                    .flatten()
-                    .collect();
-                assert_eq!(message(&mut write).await, want);
-                let want: Vec<u8> =
-                    counts.iter().flat_map(|n| n.to_le_bytes()).collect();
+                let ends = (ends.iter())
+                    .flat_map(|(at, end)| [at.to_le_bytes(), end.to_le_bytes()]);
+                let counts = counts.iter().map(|n| n.to_le_bytes());
+                let want: Vec<u8> = ends.chain(counts).flatten().collect();
                 assert_eq!(message(&mut write).await, want);
                 assert_eq!(message(&mut write).await.len(), body);
                 for &group in groups {
@@ -1026,8 +1023,8 @@ fn refuses_a_writer_whose_frame_lead_no_block_of_its_pool_holds() {
 }
 
 /// A node whose largest message is not a multiple of 8 gets each message of the run of
-/// ends but the last as the most whole ends under that size, then the count, and the
-/// body in messages of that size.
+/// ends but the last as the most whole ends under that size, the count after the last
+/// ends, and the body in messages of that size.
 #[test]
 fn sends_whole_ends_to_a_node_whose_message_is_not_a_multiple_of_8() {
     const SERIES: usize = 400;
@@ -1043,7 +1040,7 @@ fn sends_whole_ends_to_a_node_whose_message_is_not_a_multiple_of_8() {
                 let message = write.receiver.recv().await.expect("receives");
                 lens.push(message.expect("a message of the frame").len());
             }
-            assert_eq!(lens, [7, 1496, 1496, 208, 4, 1500, 1500, 200]);
+            assert_eq!(lens, [7, 1496, 1496, 212, 1500, 1500, 200]);
             answer(&mut write, 1, taken(0, 1)).await;
             node.clock().sleep(QUIET).await;
         },
@@ -1167,7 +1164,7 @@ fn replaces_a_held_draft_in_a_frames_pool_of_one_frame() {
             admit(&mut hello, &node.clock()).await;
             let mut write = opened(&session).await;
             let mut body = Vec::new();
-            for _ in ["head", "ends", "counts", "body"] {
+            for _ in ["head", "ends and counts", "body"] {
                 let message = write.receiver.recv().await.expect("receives");
                 body = message.expect("a message of the frame").to_vec();
             }

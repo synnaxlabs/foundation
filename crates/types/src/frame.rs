@@ -503,9 +503,10 @@ impl Draft {
         );
     }
 
-    /// Sets how many samples each series of a group holds, for each present group
-    /// from the `first` on, in group order, to the next of `counts`, until either
-    /// ends. Time is linear in the number of groups that it sets.
+    /// Sets how many samples each series of a group holds: for each present group in
+    /// group order, from the one at position `first` (0 is the first present group),
+    /// to the next of `counts`, until either ends. Time is linear in the number of
+    /// groups that it sets.
     pub fn set_counts(&mut self, first: usize, counts: impl IntoIterator<Item = u32>) {
         let (ranges, ..) = parts_mut(&mut self.0);
         for (record, count) in ranges.iter_mut().skip(first).zip(counts) {
