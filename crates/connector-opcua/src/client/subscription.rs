@@ -69,6 +69,9 @@ pub(super) struct Changes {
     /// The status of the first status change, or `BadNoSubscription` when open62541
     /// deleted the subscription with none.
     ended: Cell<Option<Status>>,
+    /// The count of Publish requests before the first change of `buffer` stopped
+    /// them, which open62541 lowers when the server refuses one.
+    publishes: Cell<u16>,
 }
 
 /// The callbacks of the subscription of a client, which each get its [`Calls`].
@@ -89,8 +92,9 @@ impl Client {
     /// `CreateMonitoredItems` calls of at most that many. Each answer of a Publish fits
     /// the receive limit of the client, for items of a scalar of at most 8 bytes. Once
     /// the server makes the subscription, the client keeps [`PUBLISHES`] Publish
-    /// requests in flight, and [`Client::read`] and the services send fewer to keep the
-    /// sum from the call. Each change that comes, also while the client reads or
+    /// requests in flight, one less for each that the server refuses as too many, down
+    /// to 1, and [`Client::read`] and the services send fewer to keep the sum from the
+    /// call. Each change that comes, also while the client reads or
     /// serves, stays in the client until [`Client::changes`] gives it, with no drop.
     /// While a change waits, the client sends no Publish request, so at most the
     /// answers of the [`PUBLISHES`] requests in flight wait, and later values wait in
@@ -206,8 +210,9 @@ impl Client {
         let changes = &self.calls.changes;
         mem::swap(&mut self.changes, &mut changes.buffer.borrow_mut());
         if !self.changes.is_empty() {
+            let count = changes.publishes.get();
             // SAFETY: the client lives.
-            unsafe { ffi::shim_client_publishes(self.raw.as_ptr(), PUBLISHES) };
+            unsafe { ffi::shim_client_publishes(self.raw.as_ptr(), count) };
         }
         match changes.ended.get() {
             Some(status) if self.changes.is_empty() => Err(status),
@@ -277,7 +282,8 @@ unsafe extern "C" fn changed(
     let mut buffer = calls.changes.buffer.borrow_mut();
     if buffer.is_empty() {
         // SAFETY: the client lives.
-        unsafe { ffi::shim_client_publishes(client, 0) };
+        let count = unsafe { ffi::shim_client_publishes(client, 0) };
+        calls.changes.publishes.set(count);
     }
     buffer.push(Change {
         index: item.addr(),

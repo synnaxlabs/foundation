@@ -793,10 +793,14 @@ UA_Client *shim_client_new(UA_EventLoop *el, UA_UInt32 chunks, UA_UInt32 queued,
 }
 
 /* Sets the count of Publish requests that `client` keeps in flight while it has a
- * subscription, and sends the ones that it lacks. With 0, it sends no more. */
-void shim_client_publishes(UA_Client *client, UA_UInt16 count) {
-    UA_Client_getConfig(client)->outStandingPublishRequests = count;
+ * subscription, sends the ones that it lacks, and gives the count before. With 0, it
+ * sends no more. */
+UA_UInt16 shim_client_publishes(UA_Client *client, UA_UInt16 count) {
+    UA_ClientConfig *config = UA_Client_getConfig(client);
+    UA_UInt16 before = config->outStandingPublishRequests;
+    config->outStandingPublishRequests = count;
     __Client_Subscriptions_backgroundPublish(client);
+    return before;
 }
 
 typedef UA_StatusCode (*policy_of)(UA_SecurityPolicy *policy,
