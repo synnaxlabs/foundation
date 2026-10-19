@@ -106,8 +106,8 @@ pub enum Error {
     /// The voters that hold the listed chunks of a spec change are not a majority of
     /// one half of the voters, so the pointer did not move. A holder is the proposer
     /// when it is a voter, or a voter whose put of those chunks from the proposer
-    /// ended `Ok`. This half comes first of the halves that lack a majority, incoming
-    /// before outgoing.
+    /// ended `Ok` while a half that holds it lacked a majority. This half comes first
+    /// of the halves that lack a majority, incoming before outgoing.
     Quorum {
         /// The voters of the half that hold the chunks.
         held: usize,

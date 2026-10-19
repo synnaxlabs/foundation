@@ -25,10 +25,10 @@ impl Mesh {
     /// returned. The change lists each chunk of the new tree that the tree of `base`
     /// lacks, or each chunk of the new tree when the store cannot give the tree of
     /// `base`. It then puts the listed chunks on each other voter of both halves of the
-    /// voters, all at once, in calls of at most 32 chunks that each end after 10
-    /// seconds, and proposes once the holders are a majority of each half. A holder is
-    /// this node when it is a voter, or a voter whose calls each ended `Ok`. A follower
-    /// forwards the change to the leader. Returns the pointer once its entry has
+    /// voters, all at once, in calls of at most 32 chunks, each of which fails after 10
+    /// seconds with no result, and proposes once the holders are a majority of each
+    /// half. A holder is this node when it is a voter, or a voter whose calls each
+    /// ended `Ok` while a half that holds it lacked a majority. A follower forwards the change to the leader. Returns the pointer once its entry has
     /// committed and this node applied it: `base` when the tree of `definitions` is the
     /// tree of `base` and each index of `homes` has a home in this node's state, as
     /// such a change leaves the pointer, and else a new pointer. It tries again when a
@@ -58,7 +58,7 @@ impl Mesh {
     /// - [`Error::Pool`] when the pool has no block for a chunk, and [`Error::Blob`]
     ///   when a call of the store fails.
     /// - [`Error::Quorum`] when the holders are not a majority of each half of the
-    ///   voters: before the proposal, once each put on a voter ended, or at the apply.
+    ///   voters once each put on a voter ended, or at the apply.
     /// - [`Error::Stale`] when the pointer at the apply of its entry is not `base`, and
     ///   either it is not the pointer this call makes, or an index of `homes` has no
     ///   home in this node's state when the call settles.
