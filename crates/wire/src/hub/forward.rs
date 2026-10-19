@@ -139,14 +139,13 @@ pub mod places {
     /// the place before it or not below `channels`.
     pub fn decode(run: &[u8], channels: u32) -> Result<Iter<'_>, Error> {
         let places = super::super::run::<LEN>(run)?;
-        let mut low = 0;
+        let mut before = None;
         for &bytes in places {
             let place = u32::from_le_bytes(bytes);
-            if place < low || place >= channels {
+            if place >= channels || before.is_some_and(|before| place <= before) {
                 return Err(Error::Place { place });
             }
-            // Below `channels`, so it does not overflow.
-            low = place + 1;
+            before = Some(place);
         }
         Ok(Iter(places.iter()))
     }
@@ -166,7 +165,8 @@ mod tests {
     }
 
     fn encode_places(places: &[u32]) -> Vec<u8> {
-        let mut out = vec![0xaa; places.len() * places::LEN];
+        let len = places.len().checked_mul(places::LEN).expect("the run fits");
+        let mut out = vec![0xaa; len];
         places::encode(places.iter().copied(), &mut out);
         out
     }
