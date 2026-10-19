@@ -1,4 +1,4 @@
-//! Only Linux: the test takes each free descriptor of the process.
+//! Only Unix: `os` has no `net` driver on Windows.
 //!
 //! A `[::]` bind on port 0 with one free descriptor, which the probe for a free port
 //! cannot also take. It sets the limit of the process, so it runs in a test binary of
@@ -6,7 +6,7 @@
 
 // Lets Clippy treat the helpers as test code.
 #![cfg(test)]
-#![cfg(target_os = "linux")]
+#![cfg(any(target_os = "linux", target_os = "macos"))]
 
 #[path = "common/descriptors.rs"]
 mod descriptors;
