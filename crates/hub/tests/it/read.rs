@@ -733,8 +733,15 @@ where
             region::open(&node, &tasks, Rc::clone(&transport), Vec::new(), channels())
                 .await;
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test =
-            Test::new(node.clone(), tasks.clone(), layout, POOL, Some(region)).await;
+        let mut test = Test::new(
+            node.clone(),
+            NODE,
+            tasks.clone(),
+            layout,
+            POOL,
+            Some(region),
+        )
+        .await;
         test.sync().await;
         test.hub.set_rules(rules());
         let session = transport.accept().await.expect("a session");
@@ -902,8 +909,15 @@ fn stops_a_read_whose_home_is_another_node_as_not_home() {
             region::open(&node, &tasks, Rc::clone(&transport), Vec::new(), channels())
                 .await;
         let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-        let mut test =
-            Test::new(node.clone(), tasks.clone(), layout, POOL, Some(region)).await;
+        let mut test = Test::new(
+            node.clone(),
+            NODE,
+            tasks.clone(),
+            layout,
+            POOL,
+            Some(region),
+        )
+        .await;
         test.sync().await;
         test.set_home(TIME, region::OTHER).await;
         test.set_home(TIME_B, NODE).await;

@@ -33,7 +33,7 @@ use super::{
     AREA, BODY_MAX, I64, LIVE, POOL, RING, SETTLE, STAMP, Test, channels, definition,
     fill, name, region, scrambled, without, write, write_series, write_wide,
 };
-use crate::net::{HOME, PEER, PORT, accept, own_pool, public_key, transport};
+use crate::net::{HOME, NODE, PEER, PORT, accept, own_pool, public_key, transport};
 
 /// The peer's message limit: the least that `transport` takes, so the home cuts a
 /// body and its ends into several messages.
@@ -141,7 +141,7 @@ pub(super) fn session_in<H, P>(
             None => None,
         };
         let mut test =
-            Test::new(node.clone(), tasks.clone(), layout, POOL, region).await;
+            Test::new(node.clone(), NODE, tasks.clone(), layout, POOL, region).await;
         test.sync().await;
         let (session, incoming) = accept(&transport).await;
         let link = test.hub.link(session.clone());

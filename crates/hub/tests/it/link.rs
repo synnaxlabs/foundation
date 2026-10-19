@@ -148,7 +148,8 @@ async fn home(
     synced: bool,
 ) -> Test {
     let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-    let mut test = Test::new(node.clone(), tasks.clone(), layout, pool, None).await;
+    let mut test =
+        Test::new(node.clone(), NODE, tasks.clone(), layout, pool, None).await;
     if synced {
         test.sync().await;
     }
@@ -1372,9 +1373,15 @@ fn reply_holds(end: End) -> (usize, usize, usize) {
         )
         .await;
         let layout = buffer::Layout::new(super::AREA, super::BODY_MAX).expect("a ring");
-        let mut test =
-            super::Test::new(node.clone(), tasks.clone(), layout, POOL, Some(region))
-                .await;
+        let mut test = super::Test::new(
+            node.clone(),
+            NODE,
+            tasks.clone(),
+            layout,
+            POOL,
+            Some(region),
+        )
+        .await;
         test.sync().await;
         test.hub.set_rules(rules());
         let session = transport.accept().await.expect("a session");

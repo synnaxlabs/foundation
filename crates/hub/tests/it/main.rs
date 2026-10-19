@@ -113,11 +113,12 @@ struct Test {
 }
 
 impl Test {
-    /// A hub on a new ring of `node` with `layout`, a pool of `pool` bytes, and
-    /// `region`, whose mesh clock does not run yet. The founding of `region` must hold
-    /// [`channels`].
+    /// A hub of the node `key` on a new ring of `node` with `layout`, a pool of `pool`
+    /// bytes, and `region`, whose mesh clock does not run yet. The founding of `region`
+    /// must hold [`channels`].
     async fn new(
         node: sim::node::Node,
+        key: types::node::Key,
         tasks: Tasks,
         layout: buffer::Layout,
         pool: usize,
@@ -159,7 +160,7 @@ impl Test {
                 ended: Rc::clone(&ended),
                 pause: Rc::clone(&pause),
             }),
-            node: NODE,
+            node: key,
             time: mesh.clone(),
             entropy: node.entropy(),
             region: region.as_ref().map(|region| hub::Region {
@@ -412,7 +413,7 @@ where
     let node = sim.node(sim::node::Config::default());
     sim.run_on(&node, move |node, tasks| async move {
         let layout = buffer::Layout::new(area, body_max).expect("a ring");
-        main(Test::new(node, tasks, layout, POOL, None).await).await
+        main(Test::new(node, NODE, tasks, layout, POOL, None).await).await
     })
     .expect("the run ends")
 }
@@ -948,7 +949,7 @@ fn create_sim(seed: u64) -> (sim::Sim, sim::node::Node) {
 /// A test on a hub of `node`, once the node has mesh time.
 async fn started(node: sim::node::Node, tasks: Tasks) -> Test {
     let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
-    let mut test = Test::new(node, tasks, layout, POOL, None).await;
+    let mut test = Test::new(node, NODE, tasks, layout, POOL, None).await;
     test.sync().await;
     test
 }
@@ -1083,9 +1084,16 @@ fn records_the_handoff_at_the_end_of_a_lease_that_the_end_of_a_lease_starts() {
 /// The handoff to a writer that this node opens names this node as its `via`.
 #[test]
 fn records_this_node_in_the_handoff_to_its_writer() {
+    // Not the key of the test hubs, so a fixed key in the hub fails.
+    const KEY: types::node::Key =
+        types::node::Key::from_u128(0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10);
     let ring = Arc::new(std::sync::Mutex::new(Vec::new()));
     let out = Arc::clone(&ring);
-    run(35, move |test| async move {
+    let (mut sim, node) = create_sim(35);
+    sim.run_on(&node, move |node, tasks| async move {
+        let layout = buffer::Layout::new(AREA, BODY_MAX).expect("a ring");
+        let mut test = Test::new(node, KEY, tasks, layout, POOL, None).await;
+        test.sync().await;
         let _writer = test.writer("subject-a", &["value"]).await;
         test.clock.sleep(SETTLE).await;
         let file = test
@@ -1097,9 +1105,10 @@ fn records_this_node_in_the_handoff_to_its_writer() {
         let block = test.pool.alloc(1 << 16).expect("a block");
         let read = file.read_at(0, block).await.expect("reads");
         *out.lock().expect("not poisoned") = read.to_vec();
-    });
+    })
+    .expect("the run ends");
     let ring = ring.lock().expect("not poisoned");
-    let body = [&[1], &NODE.as_u128().to_le_bytes()[..], b"subject-a"].concat();
+    let body = [&[1], &KEY.as_u128().to_le_bytes()[..], b"subject-a"].concat();
     assert!(
         ring.windows(body.len()).any(|bytes| bytes == body),
         "no handoff body names this node"
