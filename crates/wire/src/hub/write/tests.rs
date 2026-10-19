@@ -1135,8 +1135,10 @@ mod replies {
                 };
                 let before = replies.clone();
                 let got = replies.decode(&encode_reply(reply));
-                let (next, next_group) = due.get(at).copied().unwrap_or((sent.strict_add(1), 0));
-                let state = |group: u32| usize::try_from(group).ok().filter(|&group| group < 3);
+                let (next, next_group) =
+                    due.get(at).copied().unwrap_or((sent.strict_add(1), 0));
+                let state =
+                    |group: u32| usize::try_from(group).ok().filter(|&group| group < 3);
                 let want = match reply {
                     Reply::Outcome { frame, .. } if frame == 0 || frame > sent => {
                         Err(Error::Unasked { frame, sent })
@@ -1156,7 +1158,9 @@ mod replies {
                         let refused = match (state.ended, outcome) {
                             (Some(end), Outcome::Ended(given)) if given == end => None,
                             (Some(_), _) => Some(Error::Ended { group }),
-                            (None, Outcome::Ended(_)) => Some(Error::Unended { frame, group }),
+                            (None, Outcome::Ended(_)) => {
+                            Some(Error::Unended { frame, group })
+                        }
                             (None, Outcome::Taken { .. }) => {
                                 state.taken = frame;
                                 None
@@ -1177,7 +1181,8 @@ mod replies {
                         Err(Error::Groups { group, count: 3 })
                     }
                     Reply::Stored { group, frames } => {
-                        let state = &mut groups[state(group).expect("an arm above checks it")];
+                        let slot = state(group).expect("an arm above checks it");
+                        let state = &mut groups[slot];
                         if state.ended.is_some() {
                             Err(Error::Ended { group })
                         } else if frames < state.stored {
@@ -1190,7 +1195,8 @@ mod replies {
                         }
                     }
                     Reply::Ended { group, end } => {
-                        let state = &mut groups[state(group).expect("an arm above checks it")];
+                        let slot = state(group).expect("an arm above checks it");
+                        let state = &mut groups[slot];
                         if state.ended.is_some() {
                             Err(Error::Ended { group })
                         } else {

@@ -151,14 +151,14 @@ impl Writer {
     ///
     /// [`Error::Unsent`] for a frame of no series or with a group of no sample, or a
     /// frame of [`Time::Node`] that is encoded or holds more than one sample in a
-    /// group, with nothing sent and the draft dropped; the writer goes on. Else the error that ended the writer,
-    /// given again at each later call: the error that ended the renewal, or
-    /// [`Error::Refused`] when the node stopped the stream (`UNKNOWN` when a channel
-    /// was removed, `FAILED` when the home failed, `BUSY` when the home has no block
-    /// for the outcome of a frame, `MALFORMED` for a frame that breaks a rule of the
-    /// wire), [`Error::Transport`] (a reset of `Code(0)` after a call dropped while it
-    /// sent), and [`Error::Reply`] for a reply that `wire` refuses, a reply out of
-    /// order, or a stream that ends early.
+    /// group, with nothing sent and the draft dropped; the writer goes on. Else the
+    /// error that ended the writer, given again at each later call: the error that
+    /// ended the renewal, or [`Error::Refused`] when the node stopped the stream
+    /// (`UNKNOWN` when a channel was removed, `FAILED` when the home failed, `BUSY`
+    /// when the home has no block for the outcome of a frame, `MALFORMED` for a frame
+    /// that breaks a rule of the wire), [`Error::Transport`] (a reset of `Code(0)`
+    /// after a call dropped while it sent), and [`Error::Reply`] for a reply that
+    /// `wire` refuses, a reply out of order, or a stream that ends early.
     ///
     /// # Panics
     ///
@@ -284,8 +284,8 @@ impl Writer {
         Err(ended)
     }
 
-    /// Sends the head, the ends, the counts, and the body of `frame`. The body goes from
-    /// the frame's own block.
+    /// Sends the head, the ends, the counts, and the body of `frame`. The body goes
+    /// from the frame's own block.
     async fn send(&mut self, time: Time, frame: Draft) -> Result<(), Error> {
         let Self {
             session,
