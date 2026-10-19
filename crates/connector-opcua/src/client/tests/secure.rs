@@ -340,8 +340,7 @@ fn a_trust_whose_end_line_names_another_label_ends_the_connect() {
     }
 }
 
-/// The refusal of a trust whose line `number`, in a PEM block, holds a byte of 0x80 to
-/// 0xFF after its last byte of 0x21 to 0x7F.
+/// The `Line` refusal of line `number` of the trust.
 fn line(number: usize) -> Error {
     Error::Refused(Refusal::Line { number })
 }

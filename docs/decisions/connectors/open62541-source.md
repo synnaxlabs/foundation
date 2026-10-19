@@ -1083,13 +1083,19 @@
   aws-lc reads it, the load refuses a trust with a piece of a PEM block that holds a
   byte of 0x80 to 0xFF after its last byte of 0x21 to 0x7F, or anywhere in a piece that
   has none. A block runs from a piece that starts `-----BEGIN ` and whose kept bytes
-  end in `-----`, through the next piece that starts `-----END ` (`laptop.architect-2`,
-  2026-10-19 18:24 UTC,
+  hold no NUL and end in `-----`, through the next piece whose kept bytes start
+  `-----END ` (`laptop.architect-2`, 2026-10-19 18:24 UTC,
   https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216). So a
   `BEGIN` or `END` line of a block with such a byte after its dashes makes the load
-  refuse the trust. A `BEGIN` line with a byte of 0x21 to 0x7F after such a byte starts
-  no block on any target, so it is text and its block drops. Such an `END` line fails
-  in aws-lc on each target as `client::Refusal::Invalid`. Text outside the blocks
+  refuse the trust. A `BEGIN` line with a byte of 0x21 to 0x7F after such a byte is
+  read alike on each target, and the check passes it: when it ends in `-----`, it
+  starts a block of another label, whose label holds that byte; else it is text, and
+  its block drops (`laptop.monitor`, message 8b694c3c, recorded 2026-10-19 21:36 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6277920980, which
+  supersedes the first item of
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868 for
+  such a line). Such an `END` line fails in aws-lc on each target as
+  `client::Refusal::Invalid`. Text outside the blocks
   keeps any bytes. The check is in C, at the start of the PEM branch of
   `openSSLLoadEachCertificate`, so both loads of a trust pass it. The client gives
   `client::Refusal::Line { number }`, the line from 1 counted by `\n`, since the check
