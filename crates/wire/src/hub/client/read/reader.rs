@@ -56,11 +56,12 @@ impl Reader {
         let Some(stream::Start { places, set }) = self.opening.decode(message)? else {
             return Ok(None);
         };
-        let lead = places.first().map(|place| place.index);
+        let lead = places
+            .first()
+            .expect("invariant: places are not empty")
+            .index;
         let mut places_of = places.iter().enumerate();
-        if let Some((at, place)) =
-            places_of.find(|(_, place)| Some(place.index) != lead)
-        {
+        if let Some((at, place)) = places_of.find(|(_, place)| place.index != lead) {
             return Err(Error::ManyIndexes {
                 place: to_u32(at),
                 index: to_u32(place.index),
