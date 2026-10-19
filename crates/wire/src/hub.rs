@@ -621,7 +621,8 @@ pub enum Error {
     Stamp,
     /// The program finished its write stream inside a frame.
     Cut {
-        /// The bytes of the frame that came: its head, its ends, and its body.
+        /// The bytes of the frame that came: its head, its ends, its counts, and its
+        /// body.
         received: usize,
         /// The bytes of the frame, once its ends are whole.
         len: Option<NonZeroUsize>,
