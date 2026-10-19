@@ -22,8 +22,9 @@ static ALLOCATOR: counting::Allocator = counting::Allocator::new();
 /// The bytes that a scan looks for.
 type Needle = [u8; 32];
 
-/// The needle of scan `scan`. No other scan and no fill of one byte gives it, so a
-/// scan finds no copy that an earlier scan left and no fill of the allocator.
+/// The needle `scan`. No other value of this test and no fill of one byte gives it,
+/// so a scan finds no copy of another value and no fill of the allocator. `SEALED` is
+/// the needle of two scans: of `seal`, and of the put and get that open its value.
 const fn needle(scan: u8) -> Needle {
     let mut needle = *b"?a needle that no fill can give.";
     needle[0] = scan;
