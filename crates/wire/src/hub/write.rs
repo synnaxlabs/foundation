@@ -446,40 +446,54 @@ impl Reply {
     /// [`Reply::encoded_len`] bytes.
     pub fn encode(&self, out: &mut [u8]) {
         let mut out = Writer::new(out, self.encoded_len());
-        let (frame, group, outcome) = match *self {
+        let mut head = |kind: u8, frame: u64, group: u32| {
+            out.put(&[kind]);
+            out.put(&frame.to_le_bytes());
+            out.put(&group.to_le_bytes());
+        };
+        match *self {
             Self::Outcome {
                 frame,
                 group,
-                outcome,
-            } => (frame, group, outcome),
+                outcome: Outcome::Taken { range },
+            } => {
+                head(TAKEN, frame, group);
+                put_range(&mut out, range);
+            }
+            Self::Outcome {
+                frame,
+                group,
+                outcome: Outcome::Lost { range },
+            } => {
+                head(LOST, frame, group);
+                put_range(&mut out, range);
+            }
+            Self::Outcome {
+                frame,
+                group,
+                outcome: Outcome::Refused(refusal),
+            } => {
+                head(REFUSED, frame, group);
+                out.put(&[refusal.code()]);
+            }
+            Self::Outcome {
+                frame,
+                group,
+                outcome: Outcome::Ended(end),
+            } => {
+                head(OUTCOME_ENDED, frame, group);
+                out.put(&[end.code()]);
+            }
             Self::Stored { group, frames } => {
                 out.put(&[STORED]);
                 out.put(&group.to_le_bytes());
                 out.put(&frames.to_le_bytes());
-                return;
             }
             Self::Ended { group, end } => {
                 out.put(&[GROUP_ENDED]);
                 out.put(&group.to_le_bytes());
                 out.put(&[end.code()]);
-                return;
             }
-        };
-        let kind = match outcome {
-            Outcome::Taken { .. } => TAKEN,
-            Outcome::Lost { .. } => LOST,
-            Outcome::Refused(_) => REFUSED,
-            Outcome::Ended(_) => OUTCOME_ENDED,
-        };
-        out.put(&[kind]);
-        out.put(&frame.to_le_bytes());
-        out.put(&group.to_le_bytes());
-        match outcome {
-            Outcome::Taken { range } | Outcome::Lost { range } => {
-                put_range(&mut out, range);
-            }
-            Outcome::Refused(refusal) => out.put(&[refusal.code()]),
-            Outcome::Ended(end) => out.put(&[end.code()]),
         }
     }
 
