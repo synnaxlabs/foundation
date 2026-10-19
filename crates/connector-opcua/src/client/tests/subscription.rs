@@ -8,7 +8,10 @@ use std::rc::Rc;
 use types::quality::Quality;
 use types::time::Span;
 
-use super::{Peer, READS, drop_reads, numbered, run, serve};
+use super::common::is;
+use super::{
+    Peer, READS, RELAY, Relay, drop_reads, numbered, recount_of, relayed, run, serve,
+};
 use crate::client::service::Item;
 use crate::client::subscription::{Change, Revised, Sampled};
 use crate::client::{Client, PUBLISHES};
@@ -21,6 +24,13 @@ use crate::value::{Fault, Value};
 const SAMPLING: Span = Span::from_nanos(50_000_000);
 /// The sampling interval of the item of [`on_level`].
 const LEVEL: Span = Span::from_nanos(250_000_000);
+
+/// The binary encoding of a `CreateSubscription` response, a `NodeId` of 4 bytes.
+const SUBSCRIBE_RESPONSE: [u8; 4] = [0x01, 0x00, 0x16, 0x03];
+/// The binary encoding of a `CreateMonitoredItems` response, a `NodeId` of 4 bytes.
+const MONITOR_RESPONSE: [u8; 4] = [0x01, 0x00, 0xF2, 0x02];
+/// `GoodCallAgain`, a service result that is not Good and not Bad.
+const GOOD_CALL_AGAIN: Status = Status(0x00A9_0000);
 
 /// Gives the span of `ms` ms.
 const fn ms(ms: i64) -> Span {
@@ -151,6 +161,49 @@ fn a_sampling_past_100_ms_is_the_publishing_interval() {
             items: vec![Ok(item)]
         })
     );
+}
+
+/// Gives the subscribe of 2 nodes through a relay that gives each answer of the type
+/// `kind` the service result [`GOOD_CALL_AGAIN`], and a `CreateMonitoredItems` answer
+/// no results.
+fn called_again(kind: [u8; 4]) -> Result<Revised, Status> {
+    run(0, async move |node| {
+        serve(&node, 4, async |mut peer| {
+            for index in 0..2 {
+                peer.server.add_scalar(&numbered(index), Value::U32(index));
+            }
+            let url = format!("opc.tcp://{}:{RELAY}", node.addresses()[0]);
+            let rewrite = |message: &mut Vec<u8>| {
+                if is(message, kind) {
+                    message[40..44].copy_from_slice(&GOOD_CALL_AGAIN.0.to_le_bytes());
+                    if kind == MONITOR_RESPONSE {
+                        recount_of(message, 0);
+                    }
+                }
+            };
+            relayed(&node, &Relay::default(), rewrite, async {
+                let mut client = peer.connect(&url).await.expect("the client connects");
+                let nodes = [numbered(0), numbered(1)];
+                let revised = client.subscribe(&nodes, SAMPLING).await;
+                client.close().await;
+                revised
+            })
+            .await
+        })
+        .await
+    })
+    .0
+}
+
+/// A create answer whose service result is not Good fails, as open62541 then makes
+/// no subscription or item: the subscribe at a `CreateSubscription`, and each item of
+/// the call at a `CreateMonitoredItems`, also with too few results.
+#[test]
+fn a_create_answer_that_is_not_good_fails() {
+    let subscribe = called_again(SUBSCRIBE_RESPONSE);
+    let monitor = called_again(MONITOR_RESPONSE).map(|revised| revised.items);
+    let items = vec![Err(GOOD_CALL_AGAIN); 2];
+    assert_eq!((subscribe, monitor), (Err(GOOD_CALL_AGAIN), Ok(items)));
 }
 
 /// A call that the server refuses gives its status to each item of it.

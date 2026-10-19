@@ -1010,6 +1010,11 @@ UA_StatusCode shim_response_result(const void *response) {
     return (result >> 30) >= 0x02 ? result : UA_STATUSCODE_GOOD;
 }
 
+/* Gives the service result of `response`, a response of a service. */
+UA_StatusCode shim_response_status(const void *response) {
+    return ((const UA_ResponseHeader *)response)->serviceResult;
+}
+
 /* Gives a Read request of the attribute `attributes[i]`, or the Value when
  * `attributes` is NULL, of the node `nodes[i]` for each `i` below `count`, with no
  * timestamps, which copies their names, or NULL when an allocation fails. */

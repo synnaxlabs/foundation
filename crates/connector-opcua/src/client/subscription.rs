@@ -74,20 +74,22 @@ impl Client {
     /// Creates a subscription, and a monitored item for each node of `nodes` that
     /// samples at `sampling`. It asks for a publishing interval of the longer of
     /// `sampling` and 100 ms, and each item queues the values that it samples in two
-    /// publishing intervals that the server gives, the oldest dropped first. Each item asks for both timestamps and a
-    /// change of the status or the value. It reads the `MaxMonitoredItemsPerCall` of
-    /// the server, and sends the items in `CreateMonitoredItems` calls of at most that
-    /// many. Each answer of a Publish fits the receive limit of the client, for items
-    /// of a scalar of at most 8 bytes. From the call, the client keeps [`PUBLISHES`]
-    /// Publish requests in flight, and [`Client::read`] and the services send fewer to
-    /// keep the sum.
+    /// publishing intervals that the server gives, the oldest dropped first. Each item
+    /// asks for both timestamps and a change of the status or the value. It reads the
+    /// `MaxMonitoredItemsPerCall` of the server, and sends the items in
+    /// `CreateMonitoredItems` calls of at most that many. Each answer of a Publish fits
+    /// the receive limit of the client, for items of a scalar of at most 8 bytes. From
+    /// the call, the client keeps [`PUBLISHES`] Publish requests in flight, and
+    /// [`Client::read`] and the services send fewer to keep the sum. Each change that
+    /// comes, also while the client reads or serves, stays in the client until
+    /// [`Client::changes`] gives it, with no bound and no drop.
     ///
     /// # Errors
     ///
     /// The error of the read of `MaxMonitoredItemsPerCall`, or of a service request, as
     /// [`Client::serve`] gives it, of the `CreateSubscription` or of a
-    /// `CreateMonitoredItems` call. A Bad service result of a
-    /// `CreateMonitoredItems` call goes to each item of that call, also the
+    /// `CreateMonitoredItems` call, also a service result that is not Good. Such a
+    /// result of a `CreateMonitoredItems` call goes to each item of that call, also the
     /// `BadInternalError` that open62541 gives when the answer has more or fewer
     /// results than the call. `BadRequestTooLarge` goes to a node that does not fit
     /// one call.

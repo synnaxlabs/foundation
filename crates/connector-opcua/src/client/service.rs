@@ -347,10 +347,19 @@ impl Answer {
     ///
     /// # Errors
     ///
-    /// The service result when it is Bad.
+    /// The service result when it is Bad, or, of a `CreateSubscription` or a
+    /// `CreateMonitoredItems`, when it is not Good, as open62541 then makes no
+    /// subscription or item.
     pub(super) fn result(&self) -> Result<(), Status> {
+        let raw = self.raw.as_ptr();
         // SAFETY: the answer lives.
-        let status = Status(unsafe { ffi::shim_response_result(self.raw.as_ptr()) });
+        let status = Status(unsafe {
+            if matches!(self.service, Service::SUBSCRIBE | Service::MONITOR) {
+                ffi::shim_response_status(raw)
+            } else {
+                ffi::shim_response_result(raw)
+            }
+        });
         if status == Status::GOOD {
             Ok(())
         } else {
