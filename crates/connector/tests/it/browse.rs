@@ -18,6 +18,7 @@ struct Plant;
 
 impl Kind for Plant {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, config: &Document) -> Result<(), Vec<Diagnostic>> {
         match config.attributes.get("rate") {
@@ -97,6 +98,7 @@ struct Dice;
 
 impl Kind for Dice {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())
@@ -148,6 +150,7 @@ struct Vault(&'static str);
 
 impl Kind for Vault {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())
@@ -177,6 +180,7 @@ struct Blind;
 
 impl Kind for Blind {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())

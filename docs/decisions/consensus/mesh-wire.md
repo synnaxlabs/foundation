@@ -1,20 +1,26 @@
 - **MESH WIRE (#471)** `mesh` encodes what two nodes of a region say on a stream of
   `wire::Protocol::Mesh`, behind the `wire` stream header: a `raft::Message`, a proposal
   that a follower forwards to the leader, and its two answers (the position of the
-  entry, or "not the leader" with the leader the receiver knows). `wire` does not carry
-  them: the Rust SDK reuses `wire`, a client never opens a mesh stream, and `wire` must
-  not depend on `raft`. The encoding in `raft` lost: `raft` cannot see the format
-  version. A `raft` message travels on a one-way stream. A member forwards a proposal as
-  one two-way stream of `Class::Command`: the stream carries one proposal, the leader
-  writes one answer on its reply half, and then both halves end. So a proposal and its
-  answers name no sender and carry no request number (#779): a request number makes the
-  node that asks keep and remove open requests and handle a late answer (CLOCK WIRE),
-  and HUB WIRE already answers on the stream that asks. A stream breaks the protocol
-  when a message is the byte form of no message, when a one-way stream carries a
-  proposal or an answer, when a two-way stream does not start with a proposal, or when
-  it carries a second message. The receiver stops the stream with code 2
-  (`wire::header::MALFORMED`), the code that HUB WIRE gives for a broken protocol rule
-  (decided by the architect, 2026-10-07T08:15:18Z:
+  entry, or "not the leader" with the leader the receiver knows), and a join request
+  and its answers (`Unjoined`, or `Joined` and the `Founding` parts, MEMBER RECORD).
+  `wire` does not carry them: the Rust SDK reuses `wire`, a client never opens a mesh
+  stream, and `wire` must not depend on `raft`. The encoding in `raft` lost: `raft`
+  cannot see the format version. A `raft` message travels on a one-way stream. A
+  member forwards a proposal as one two-way stream of `Class::Command`: the stream
+  carries one proposal, the leader writes one answer on its reply half, and then both
+  halves end. So a proposal and its answers name no sender and carry no request number
+  (#779): a request number makes the node that asks keep and remove open requests and
+  handle a late answer (CLOCK WIRE), and HUB WIRE already answers on the stream that
+  asks. A node with a ticket opens a join stream as `Class::Complete`, and its reply
+  half carries one `Unjoined`, or one `Joined` and then its parts (`laptop.architect`,
+  2026-10-19T11:58:22Z, item 3 of
+  https://github.com/synnaxlabs/foundation/pull/3335#issuecomment-6266662803). A stream
+  breaks the protocol when a message is the byte form of no message, when a one-way
+  stream carries a proposal, a join, or an answer, when a two-way stream does not start
+  with a proposal or a join, or when the half that the receiver reads carries a second
+  message, other than the `Founding` parts after `Joined`. The receiver stops the stream
+  with code 2 (`wire::header::MALFORMED`), the code that HUB WIRE gives for a
+  broken protocol rule (decided by the architect, 2026-10-07T08:15:18Z:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6033866025, and
   2026-10-07T09:42:17Z:
   https://github.com/synnaxlabs/foundation/pull/1263#issuecomment-6035294122, point 3).
@@ -96,6 +102,11 @@
   the budget, which refuses some pools that work and passes some that stall. Decided by
   `laptop.architect`, 2026-10-16T00:21:57Z
   (https://github.com/synnaxlabs/foundation/pull/2781#issuecomment-6205117345).
+  The founding of a join answer is the one case of parts: `Joined` gives its length,
+  which `FOUNDING_BYTES_MAX` bounds before the receiver reads a part, and each
+  `Founding` part fits one message and the largest block of the pool (MEMBER RECORD;
+  `laptop.architect`, 2026-10-19T00:03:42Z:
+  https://github.com/synnaxlabs/foundation/issues/336#issuecomment-6256819172).
   The decode of the proof of a message refuses more than 254 grants, the two sets of a
   joint configuration of 127 voters each, so that each proof that `raft` keeps fits a
   message with no entry and no link. Decided by `laptop.architect`, 2026-10-12T20:07:11Z

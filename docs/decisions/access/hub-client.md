@@ -96,8 +96,9 @@
   `Frames::open` takes the end of the stream as `None` (`laptop.architect`,
   2026-10-16T06:47:02Z,
   https://github.com/synnaxlabs/foundation/issues/2808#issuecomment-6209795527). So
-  does the decoder, and a message that the decoder refuses leaves it as it was
-  (`laptop.architect`, 2026-10-16T07:19:58Z,
+  does the decoder, and a message that the decoder refuses leaves it as it was,
+  other than `Error::ManyIndexes`, after which the decoder is done (Amended (#3283)
+  below) (`laptop.architect`, 2026-10-16T07:19:58Z,
   https://github.com/synnaxlabs/foundation/pull/2839#issuecomment-6210275086). The plan
   (https://github.com/synnaxlabs/foundation/issues/1749#issuecomment-6204280445) was
   approved by `laptop.architect` at 2026-10-15T23:19:38Z
@@ -370,11 +371,19 @@
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114), and
   `Places` holds only `count`, from 1 to `PLACES_MAX`. A read has one index, so each of
   its places names it. `Opening` builds the key set with `KeySet::ordered`, and at the
-  last place gives `Error::Index` for the first place whose index is not a place whose
-  index is itself, then `Error::Unstamped` for an index that is not `Stamp`, then
-  `Error::Repeated`. This replaces the lost flag of #3266 above: the index is now a fact
-  of each group, not of the stream. Lost: a `Places` with a run of the index places,
-  whose length is not fixed and which can pass a message.
+  last place gives, for the first place in place order that breaks a rule,
+  `Error::Index` when its index is not a place whose index is itself, or
+  `Error::Unstamped` when it is an index that is not `Stamp`, then `Error::Repeated`.
+  `KeySet::ordered` checks these rules and gives `key_set::Error`, which `Opening`
+  maps to them. After the start, `client::Reader` gives `Error::ManyIndexes` for the
+  first place whose index is not that of place 0, and is then done. Ruled by
+  `laptop.architect` at 2026-10-19T15:10:51Z
+  (https://github.com/synnaxlabs/foundation/pull/3365#issuecomment-6270542720).
+  `Place::index` is a `usize`, as the other places of the crate are, not the `u32` of
+  the plan; the wire holds a `u32`. This replaces the lost flag of #3266 above: the
+  index is now a fact of each group, not of the stream. Lost: a `Places` with a run of
+  the index places, whose length is not fixed and which can pass a message. The format
+  is key choice (f), sent to `laptop.monitor` with the plan.
   PR 1b: a write frame is `Head { time, form, series }`, the run of its ends, a run of
   counts, and its body. The run of counts holds one `u32` of at least 1 for each group
   whose index entry is among the ends, in group order, in messages of whole counts. A
@@ -385,18 +394,22 @@
   frame come in group order: `Replies::sent` takes the groups of each frame, and an
   outcome of that frame for another group gives `Error::Group { frame, group, next }`,
   also for a group that the frame does not hold. `Outcome::Ended(End)` (kind 5,
-  `End::Removed` or `End::Failed`) answers a group whose writer ended. The ends of a
-  write stream are 24 bytes for each place: 16 for its end, and 8 for its group and
-  count (MEMORY BOUNDS). Decided by `laptop.architect` at 2026-10-19T13:14:46Z
+  `End::Removed` or `End::Failed`) answers a group whose writer ended. The node makes
+  the draft due at the last end, and sets each count of the run into the draft, so the
+  ends of a write stream stay 16 bytes for each place (MEMORY BOUNDS). Decided by
+  `laptop.architect` at 2026-10-19T13:14:46Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268096380), on the
   revision https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917.
   `Error::Group` with `next`, a unit `Error::Stamp`, and PR 1c, where `Reply::Stored {
   group, frames }` and `Reply::Ended { group, end }` come and which merges before PR 2,
-  are by `laptop.architect`
+  are by `laptop.architect` at 2026-10-19T13:54:38Z
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268910604). Until
-  PR 2, `hub` never gives `Outcome::Ended`. Key choice (f) went to `laptop.monitor`.
-  Lost: a count of each group in the head, which no message of a small
-  `message_bytes_max` holds for many groups.
+  PR 2, `hub` never gives `Outcome::Ended`. Key choice (f) went to `laptop.monitor`
+  with the revised plan
+  (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6267978917).
+  Supersedes the head `{ time, form, count, series }` and the one `Outcome` for each
+  frame of Amended (#2718). Lost: a count of each group in the head, which no message
+  of a small `message_bytes_max` holds for many groups.
   PR 1c: `Reply::Stored { group, frames }` (kind 4, 13 bytes) counts the frames of one
   group on disk, and `Reply::Ended { group, end }` (kind 6, 6 bytes) ends the write of
   one group before each later outcome of that group, which is `Outcome::Ended`.

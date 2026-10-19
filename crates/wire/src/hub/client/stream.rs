@@ -4,9 +4,9 @@
 use std::sync::Arc;
 
 use types::channel;
-use types::frame::key_set::KeySet;
+use types::frame::key_set::{self, KeySet};
 use types::name::Name;
-use types::sample::{Scalar, Type};
+use types::sample::Type;
 
 use super::{Body, Error, READ, fields};
 use crate::common::{Writer, rest_of_run};
@@ -74,7 +74,9 @@ fn check(length: u64) {
 
 /// A decoder of the start of a write stream at the program: the places and their run.
 #[derive(Debug, Default)]
-pub struct Opening(Next);
+pub struct Opening {
+    next: Next,
+}
 
 /// The message the stream expects next.
 #[derive(Debug, Default)]
@@ -119,20 +121,20 @@ impl Opening {
     ///
     /// When it gave the start before.
     pub fn decode(&mut self, message: Option<&[u8]>) -> Result<Option<Start>, Error> {
-        match (&mut self.0, message) {
+        match (&mut self.next, message) {
             (Next::Given, _) => {
                 panic!("a stream is decoded after the decoder gave its start")
             }
             (_, None) => Err(Error::Finished),
             (Next::Places, Some(message)) => {
-                self.0 = Next::Run(Run::new(Places::decode(message)?));
+                self.next = Next::Run(Run::new(Places::decode(message)?));
                 Ok(None)
             }
             (Next::Run(run), Some(message)) => {
                 let Some((places, set)) = run.decode(message)? else {
                     return Ok(None);
                 };
-                self.0 = Next::Given;
+                self.next = Next::Given;
                 Ok(Some(Start {
                     places,
                     set: Arc::new(set),
@@ -188,44 +190,29 @@ impl Run {
             *remain = rest;
             return Ok(None);
         }
-        let grouped = indexes(all).and_then(|()| {
-            let channels = all
-                .iter()
-                .map(|place| (place.key, place.data_type, place.index));
-            KeySet::ordered(channels)
-                .map_err(|repeated| Error::Repeated { key: repeated.key })
-        });
-        match grouped {
+        let channels = all
+            .iter()
+            .map(|place| (place.key, place.data_type, place.index));
+        match KeySet::ordered(channels) {
             Ok(set) => Ok(Some((std::mem::take(all), set))),
             Err(error) => {
                 all.truncate(to_usize(first));
-                Err(error)
+                Err(match error {
+                    key_set::Error::Index { entry, index } => Error::Index {
+                        place: to_u32(entry),
+                        index: to_u32(index),
+                    },
+                    key_set::Error::Unstamped { entry, sample } => Error::Unstamped {
+                        place: to_u32(entry),
+                        sample,
+                    },
+                    key_set::Error::Repeated(repeated) => {
+                        Error::Repeated { key: repeated.key }
+                    }
+                })
             }
         }
     }
-}
-
-/// Checks that the index of each of `places` is a place whose index is itself, of
-/// type `Stamp`, as [`Opening::decode`] states.
-fn indexes(places: &[Place]) -> Result<(), Error> {
-    for (at, place) in places.iter().enumerate() {
-        let index = places
-            .get(place.index)
-            .filter(|index| index.index == place.index);
-        let Some(index) = index else {
-            return Err(Error::Index {
-                place: to_u32(at),
-                index: to_u32(place.index),
-            });
-        };
-        if at == place.index && index.data_type != Type::Scalar(Scalar::Stamp) {
-            return Err(Error::Unstamped {
-                place: to_u32(at),
-                sample: index.data_type,
-            });
-        }
-    }
-    Ok(())
 }
 
 /// The first reply on a read or a write stream, of kind 6 on both. The run of its

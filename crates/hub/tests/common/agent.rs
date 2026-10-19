@@ -13,7 +13,7 @@ use wire::hub::FromHome;
 use wire::hub::client::{
     self, Challenge, Mode, Open, Place, Places, Read, Request, Response, Signed, write,
 };
-use wire::hub::write::{Head, Reply, counts};
+use wire::hub::write::{Head, Reply};
 
 use crate::net::{HOME, NODE, own_pool, public_key};
 
@@ -137,8 +137,7 @@ impl Stream {
         wire::hub::ends::encode(ends.iter().copied(), &mut out);
         self.send(&out).await;
         if !counts.is_empty() {
-            let mut out = vec![0; counts.len() * counts::LEN];
-            counts::encode(counts.iter().copied(), &mut out);
+            let out: Vec<u8> = counts.iter().flat_map(|n| n.to_le_bytes()).collect();
             self.send(&out).await;
         }
         for part in body.chunks(1 << 12) {

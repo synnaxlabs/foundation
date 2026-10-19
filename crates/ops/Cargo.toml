@@ -29,6 +29,7 @@ workspace = true
 [dev-dependencies]
 blob = { path = "../blob" }
 block = { path = "../block", features = ["sim"] }
+clock = { path = "../clock" }
 config-hcl = { path = "../config-hcl" }
 connector = { path = "../connector", features = ["sim"] }
 counting = { path = "../counting" }

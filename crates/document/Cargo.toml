@@ -5,6 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+# Exposes `testing` to the tests of each crate that states a body.
+sim = []
+
 [dependencies]
 types = { path = "../types" }
 

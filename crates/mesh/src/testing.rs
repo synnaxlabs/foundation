@@ -168,11 +168,15 @@ mod tests {
     use super::*;
     use types::channel;
     use types::digest::Digest;
+    use types::time::Stamp;
 
-    use crate::bytes::{put_change, put_position};
+    use crate::bytes::{put_change, put_count, put_name, put_position};
+    use crate::card;
     use crate::change::{self, CHUNKS_MAX, Malformed, Undecoded};
-    use crate::common::{at, key};
-    use crate::message::VOTERS_MAX;
+    use crate::common::{at, index, key, member, name, public, ticket, unchecked};
+    use crate::message::{FOUNDING_BYTES_MAX, VOTERS_MAX};
+    use crate::refusal::Refusal;
+    use crate::region::{self, Request, Unfit};
 
     #[test]
     fn a_change_gives_its_bytes_and_other_bytes_give_none() {
@@ -526,9 +530,34 @@ mod tests {
                 incoming: [key(1), key(2)].into(),
                 outgoing: [key(1)].into(),
             },
+            public_keys: [(key(2), public(2))].into(),
             votes: proof(),
             signature: Some(Signature([9; 64])),
         }
+    }
+
+    // An entry that holds a change with no added voter: the leave of `change`, and a
+    // joint that removes node 2.
+    fn unkeyed() -> [Entry; 2] {
+        let leave = raft::Change {
+            voters: Voters {
+                incoming: [key(1), key(2)].into(),
+                outgoing: BTreeSet::new(),
+            },
+            public_keys: BTreeMap::new(),
+            ..change()
+        };
+        let removes = raft::Change {
+            voters: Voters {
+                incoming: [key(1)].into(),
+                outgoing: [key(1), key(2)].into(),
+            },
+            ..leave.clone()
+        };
+        [leave, removes].map(|change| Entry {
+            at: at(3, 7),
+            data: Data::Voters(change),
+        })
     }
 
     /// An entry of each data kind: empty, bytes, and voters.
@@ -549,21 +578,75 @@ mod tests {
         ]
     }
 
-    // The bytes of each field of the change in the input `voters`, after its position
-    // and tag.
-    const FIELDS: [(&str, Range<usize>); 11] = [
+    // The bytes of each field of the change in the input `voters_keys`, after its
+    // position and tag.
+    const FIELDS: [(&str, Range<usize>); 12] = [
         ("incoming_count", 17..25),
         ("incoming_key", 25..57),
         ("outgoing_count", 57..65),
         ("outgoing_key", 65..81),
-        ("grant", 81..82),
-        ("candidate", 82..98),
-        ("vote_count", 98..106),
-        ("vote_key", 106..122),
-        ("vote_signature", 122..186),
-        ("second_vote", 186..266),
-        ("signature", 266..330),
+        ("added_key", BOUND..BOUND + 32),
+        ("grant", 113..114),
+        ("candidate", 114..130),
+        ("vote_count", 130..138),
+        ("vote_key", 138..154),
+        ("vote_signature", 154..218),
+        ("second_vote", 218..298),
+        ("signature", 298..362),
     ];
+
+    // Where the bound key of the change in `voters_keys` starts.
+    const BOUND: usize = 81;
+
+    // The bytes of the entry `voters_keys` from its bound key on.
+    const AFTER_BOUND: usize = 362 - BOUND;
+
+    // `bytes` in the form before a change bound keys: with no key at `at`.
+    fn unbound(bytes: &[u8], at: usize) -> Vec<u8> {
+        [&bytes[..at], &bytes[at.strict_add(32)..]].concat()
+    }
+
+    // `bytes` with the key at `at` replaced by the identity, a key of small order.
+    fn identity_at(bytes: &[u8], at: usize) -> Vec<u8> {
+        let mut identity = [0; 32];
+        identity[0] = 1;
+        [&bytes[..at], &identity, &bytes[at.strict_add(32)..]].concat()
+    }
+
+    // Each cut input of `mesh_entries` is `voters_keys`, or `voters`, cut inside the
+    // field that its name says.
+    fn check_cuts(inputs: &BTreeMap<&str, &[u8]>, keyed: &[u8], voters: &[u8]) {
+        for (field, range) in FIELDS {
+            let mut cuts = Vec::new();
+            if range.start < BOUND {
+                cuts.push(("voters", voters, range));
+            } else {
+                cuts.push(("voters_keys", keyed, range.clone()));
+                if field != "added_key" {
+                    let unbound = range.start.strict_sub(32)..range.end.strict_sub(32);
+                    cuts.push(("voters", voters, unbound));
+                }
+            }
+            for (input, whole, range) in cuts {
+                let name = format!("{input}_cut_in_{field}");
+                let cut = inputs[name.as_str()];
+                assert!(range.start <= cut.len() && cut.len() < range.end, "{name}");
+                assert_eq!(cut, &whole[..cut.len()], "{name}");
+                assert_eq!(round_trip_entries(cut), None, "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn each_entries_input_of_a_change_that_adds_no_voter_round_trips() {
+        let inputs = inputs!("mesh_entries": "voters_leave", "voters_removes");
+        let [leave, removes] = unkeyed();
+        for (name, want) in [("voters_leave", leave), ("voters_removes", removes)] {
+            assert_eq!(entry::decode(inputs[name]), Some(vec![want]), "{name}");
+            let round_trip = round_trip_entries(inputs[name]);
+            assert_eq!(round_trip.as_deref(), Some(inputs[name]), "{name}");
+        }
+    }
 
     #[test]
     fn each_entries_input_is_what_its_name_says() {
@@ -587,6 +670,19 @@ mod tests {
             "voters_cut_in_second_vote",
             "voters_cut_in_signature",
             "voters_incoming_falling",
+            "voters_keys",
+            "three_keys",
+            "voters_keys_cut_in_added_key",
+            "voters_keys_cut_in_grant",
+            "voters_keys_cut_in_candidate",
+            "voters_keys_cut_in_vote_count",
+            "voters_keys_cut_in_vote_key",
+            "voters_keys_cut_in_vote_signature",
+            "voters_keys_cut_in_second_vote",
+            "voters_keys_cut_in_signature",
+            "voters_keys_added_key_small_order",
+            "voters_leave",
+            "voters_removes",
         );
         assert_eq!(count_files("mesh_entries"), inputs.len());
         let [empty, bytes, voters] = entries();
@@ -594,8 +690,8 @@ mod tests {
             ("no_entries", vec![]),
             ("empty", vec![empty.clone()]),
             ("bytes", vec![bytes.clone()]),
-            ("voters", vec![voters.clone()]),
-            ("three", vec![empty, bytes, voters]),
+            ("voters_keys", vec![voters.clone()]),
+            ("three_keys", vec![empty, bytes, voters]),
         ] {
             assert_eq!(entry::decode(inputs[name]), Some(want), "{name}");
             let round_trip = round_trip_entries(inputs[name]);
@@ -608,18 +704,18 @@ mod tests {
         let mut tag = inputs["empty"].to_vec();
         tag[16] = 3;
         refused.push(("tag_3", tag));
-        let voters = inputs["voters"];
-        assert_eq!(FIELDS[FIELDS.len() - 1].1.end, voters.len());
-        for (field, range) in FIELDS {
-            let name = format!("voters_cut_in_{field}");
-            let cut = inputs[name.as_str()];
-            assert!(range.start <= cut.len() && cut.len() < range.end, "{name}");
-            assert_eq!(cut, &voters[..cut.len()], "{name}");
-            assert_eq!(round_trip_entries(cut), None, "{name}");
-        }
-        let mut falling = voters.to_vec();
+        let keyed = inputs["voters_keys"];
+        assert_eq!(BOUND + AFTER_BOUND, keyed.len());
+        let voters = unbound(keyed, BOUND);
+        refused.push(("voters", voters.clone()));
+        let three = inputs["three_keys"];
+        refused.push(("three", unbound(three, three.len() - AFTER_BOUND)));
+        check_cuts(&inputs, keyed, &voters);
+        let mut falling = voters;
         falling[25..41].copy_from_slice(&key(3).as_u128().to_le_bytes());
         refused.push(("voters_incoming_falling", falling));
+        let small = identity_at(keyed, BOUND);
+        refused.push(("voters_keys_added_key_small_order", small));
         for (name, want) in refused {
             assert_eq!(inputs[name], want, "{name}");
             assert_eq!(round_trip_entries(inputs[name]), None, "{name}");
@@ -645,10 +741,17 @@ mod tests {
     }
 
     /// The message that each valid input of `mesh_message` holds.
-    fn messages() -> [(&'static str, Message); 15] {
+    fn messages() -> [(&'static str, Message); 19] {
         let raft = |body| message(body, None, Vec::new());
         let heartbeat = || Body::Heartbeat { commit: 4 };
         let home = include_bytes!("../../../oracles/fuzz/mesh_change/home");
+        let card = member(2).card;
+        let request = Box::new(Request {
+            ticket: public(1),
+            card: unchecked(&card),
+            admission: ticket(1).admission(&card),
+            status: BTreeSet::from(["disk".parse().unwrap()]),
+        });
         [
             ("raft_pre_vote", raft(Body::PreVote { last: at(3, 6) })),
             (
@@ -667,7 +770,7 @@ mod tests {
             ("raft_heartbeat", raft(heartbeat())),
             ("raft_heartbeat_reply", raft(Body::HeartbeatReply)),
             (
-                "raft_append",
+                "raft_append_keys",
                 raft(Body::Append {
                     prev: at(2, 3),
                     entries: entries().into(),
@@ -681,7 +784,7 @@ mod tests {
                 message(heartbeat(), Some(proof()), Vec::new()),
             ),
             (
-                "raft_chain",
+                "raft_chain_keys",
                 message(heartbeat(), Some(proof()), vec![link()]),
             ),
             (
@@ -698,12 +801,152 @@ mod tests {
                     leader: Some(key(3)),
                 },
             ),
+            ("join", Message::Join { request }),
+            ("joined", Message::Joined { bytes: 300 }),
+            (
+                "unjoined",
+                Message::Unjoined {
+                    refusal: Refusal::NoVote,
+                },
+            ),
+            ("founding", Message::Founding { part: vec![7; 3] }),
         ]
     }
 
-    #[test]
-    fn each_message_input_is_what_its_name_says() {
-        let inputs = inputs!("mesh_message":
+    /// The answer of each kind of refusal of a join, by the name of its input.
+    fn unjoined() -> impl Iterator<Item = (&'static str, Message)> {
+        let refused = region_refusals()
+            .map(|(input, refused)| (input, Refusal::Refused(refused)));
+        let others = [
+            ("unjoined_contested", Refusal::Contested),
+            ("unjoined_unsynced", Refusal::Unsynced),
+            ("unjoined_unled", Refusal::Unled),
+            ("unjoined_stopped", Refusal::Stopped),
+        ];
+        refused
+            .chain(others)
+            .map(|(input, refusal)| (input, Message::Unjoined { refusal }))
+    }
+
+    /// Each kind of [`region::Refused`] of a join, by the name of its input.
+    fn region_refusals() -> impl Iterator<Item = (&'static str, region::Refused)> {
+        let unfit = region::Refused::Unfit;
+        let node = name("plant.node2");
+        [
+            (
+                "unjoined_forged",
+                region::Refused::Forged(card::Forged { node: key(2) }),
+            ),
+            (
+                "unjoined_reserved",
+                unfit(Unfit::Reserved { name: name("@b") }),
+            ),
+            (
+                "unjoined_outside",
+                unfit(Unfit::Outside {
+                    name: name("works.node2"),
+                    region: name("plant").into(),
+                }),
+            ),
+            (
+                "unjoined_long",
+                unfit(Unfit::Long {
+                    name: node.clone(),
+                    status: name("plant.node2.disk"),
+                }),
+            ),
+            (
+                "unjoined_duplicate",
+                unfit(Unfit::Duplicate { key: key(2) }),
+            ),
+            ("unjoined_held", unfit(Unfit::Held { key: key(2) })),
+            (
+                "unjoined_taken",
+                unfit(Unfit::Taken {
+                    name: node,
+                    key: key(3),
+                }),
+            ),
+            ("unjoined_reused", unfit(Unfit::Reused { key: index(5) })),
+            (
+                "unjoined_unknown",
+                region::Refused::Unknown {
+                    public_key: public(1),
+                },
+            ),
+        ]
+        .into_iter()
+        .chain(
+            ticket_refusals()
+                .map(|(input, refused)| (input, region::Refused::Ticket(refused))),
+        )
+    }
+
+    /// Each kind of [`crate::ticket::Refused`], by the name of its input.
+    fn ticket_refusals() -> impl Iterator<Item = (&'static str, crate::ticket::Refused)>
+    {
+        [
+            (
+                "unjoined_ticket_forged",
+                (crate::ticket::Refused::Forged {
+                    node: key(2),
+                    public_key: public(1),
+                }),
+            ),
+            (
+                "unjoined_scope",
+                (crate::ticket::Refused::Scope {
+                    name: name("works.node2"),
+                    prefix: name("plant"),
+                }),
+            ),
+            (
+                "unjoined_expired",
+                (crate::ticket::Refused::Expired {
+                    public_key: public(1),
+                    expiry: Stamp::from_nanos(5),
+                    at: Stamp::from_nanos(6),
+                }),
+            ),
+            (
+                "unjoined_used",
+                (crate::ticket::Refused::Used {
+                    public_key: public(1),
+                }),
+            ),
+        ]
+        .into_iter()
+    }
+
+    /// The join of node 2 by ticket 1, with the status names `names`.
+    fn join_with(names: impl IntoIterator<Item = String>) -> Message {
+        let card = member(2).card;
+        Message::Join {
+            request: Box::new(Request {
+                ticket: public(1),
+                card: unchecked(&card),
+                admission: ticket(1).admission(&card),
+                status: names.into_iter().map(|text| name(&text)).collect(),
+            }),
+        }
+    }
+
+    /// A join of two status names, with the last name first.
+    fn join_out_of_order() -> Vec<u8> {
+        let names = ["plant.node2.a", "plant.node2.b"];
+        let mut bytes = join_with(names.map(String::from)).encode();
+        let mut swapped = Vec::new();
+        for text in names.iter().rev() {
+            put_name(&name(text), &mut swapped);
+        }
+        let start = bytes.len().checked_sub(swapped.len()).unwrap();
+        bytes[start..].copy_from_slice(&swapped);
+        bytes
+    }
+
+    /// The inputs of `mesh_message`, by name.
+    fn message_inputs() -> BTreeMap<&'static str, &'static [u8]> {
+        inputs!("mesh_message":
             "raft_pre_vote",
             "raft_pre_vote_reply",
             "raft_vote",
@@ -715,6 +958,8 @@ mod tests {
             "raft_append_reject",
             "raft_proof",
             "raft_chain",
+            "raft_append_keys",
+            "raft_chain_keys",
             "propose",
             "proposed",
             "not_leader",
@@ -727,29 +972,75 @@ mod tests {
             "raft_chain_count_no_link",
             "raft_append_entry_over_bytes_max",
             "raft_proof_over_grants_max",
-        );
+            "join",
+            "joined",
+            "unjoined",
+            "founding",
+            "joined_over_founding_bytes_max",
+            "unjoined_forged",
+            "unjoined_reserved",
+            "unjoined_outside",
+            "unjoined_long",
+            "unjoined_duplicate",
+            "unjoined_held",
+            "unjoined_taken",
+            "unjoined_reused",
+            "unjoined_unknown",
+            "unjoined_ticket_forged",
+            "unjoined_scope",
+            "unjoined_expired",
+            "unjoined_used",
+            "unjoined_contested",
+            "unjoined_unsynced",
+            "unjoined_unled",
+            "unjoined_stopped",
+            "join_status_65",
+            "join_status_out_of_order",
+            "kind_10",
+        )
+    }
+
+    #[test]
+    fn each_message_input_is_what_its_name_says() {
+        let inputs = message_inputs();
         assert_eq!(count_files("mesh_message"), inputs.len());
-        for (name, want) in messages() {
+        for (name, want) in messages().into_iter().chain(unjoined()) {
             assert_eq!(Message::decode(inputs[name]), Some(want), "{name}");
             let round_trip = round_trip_message(inputs[name]);
             assert_eq!(round_trip.as_deref(), Some(inputs[name]), "{name}");
         }
 
-        let mut refused = vec![("none", vec![]), ("kind_6", vec![6])];
+        // `kind_6` is a join cut after its kind, and 10 is the first kind of no
+        // message.
+        let mut refused = vec![
+            ("none", vec![]),
+            ("kind_6", vec![6]),
+            ("kind_10", vec![10]),
+            ("join_status_out_of_order", join_out_of_order()),
+        ];
+        let names = (0..65).map(|at| format!("plant.node2.s{at}"));
+        refused.push(("join_status_65", join_with(names).encode()));
         let heartbeat = inputs["raft_heartbeat"];
         refused.push(("raft_heartbeat_trailing", [heartbeat, &[0]].concat()));
         // A heartbeat body is its kind and then the commit index.
         let mut body = heartbeat.to_vec();
         body[heartbeat.len() - 9] = 10;
         refused.push(("raft_body_10", body));
-        // The link of `raft_chain` sits between its count and the heartbeat body.
-        let chain = inputs["raft_chain"];
+        // The link of `raft_chain_keys` sits between its count and the heartbeat body.
+        // Its bound key comes after its position and its voters.
+        let chain = inputs["raft_chain_keys"];
         let links = inputs["raft_proof"].len() - 9;
         let link = link();
         let mut bytes = Vec::new();
         put_position(link.at, &mut bytes);
         put_change(&link.change, &mut bytes);
         assert_eq!(chain.len(), links + bytes.len() + 9);
+        let bound = link.change.public_keys.values().next().unwrap();
+        assert_eq!(bytes[16 + 64..16 + 96], bound.to_bytes());
+        refused.push(("raft_chain", unbound(chain, links + 16 + 64)));
+        let append = inputs["raft_append_keys"];
+        let at = append.len() - AFTER_BOUND;
+        refused.push(("raft_append", unbound(append, at)));
         refused.push(("raft_chain_count_no_link", chain[..links].to_vec()));
         let cut = inputs["raft_chain_cut_in_link"];
         assert!(links < cut.len() && cut.len() < links + bytes.len());
@@ -762,7 +1053,7 @@ mod tests {
     }
 
     // The message inputs that a bound of the decode refuses.
-    fn over_bounds() -> [(&'static str, Vec<u8>); 2] {
+    fn over_bounds() -> [(&'static str, Vec<u8>); 3] {
         let over = Entry {
             at: at(3, 4),
             data: Data::Bytes(vec![7; change::BYTES_MAX + 1]),
@@ -781,9 +1072,13 @@ mod tests {
         };
         let body = Body::Heartbeat { commit: 4 };
         let proof = message(body, Some(over), Vec::new()).encode();
+        let mut joined = Message::Joined { bytes: 0 }.encode();
+        joined.truncate(1);
+        put_count(FOUNDING_BYTES_MAX + 1, &mut joined);
         [
             ("raft_append_entry_over_bytes_max", entry),
             ("raft_proof_over_grants_max", proof),
+            ("joined_over_founding_bytes_max", joined),
         ]
     }
 
@@ -832,22 +1127,27 @@ mod tests {
 
     /// Each input of `mesh_log`, built from values, and whether it is valid.
     fn log_inputs() -> Vec<(String, Vec<u8>, bool)> {
-        let full = log::encode(3, Some(hard(true)), &entries());
-        let body = &full[HEADER..];
-        assert_eq!(record(1, 3, body), full);
+        let keyed = log::encode(3, Some(hard(true)), &entries());
+        assert_eq!(record(1, 3, &keyed[HEADER..]), keyed);
+        // `hard_full` and `no_hard_entries` hold the entries in the form before a
+        // change bound keys.
+        let unbound =
+            |record: &[u8]| unbound(record, record.len().strict_sub(AFTER_BOUND));
+        let body = unbound(&keyed[HEADER..]);
+        let full = record(1, 3, &body);
+        let entries_keyed = log::encode(1, None, &entries());
+        let entries = record(1, 1, &unbound(&entries_keyed[HEADER..]));
         let mut inputs = vec![
             ("no_hard".into(), log::encode(0, None, &[]), true),
-            (
-                "no_hard_entries".into(),
-                log::encode(1, None, &entries()),
-                true,
-            ),
+            ("no_hard_entries".into(), entries, false),
             (
                 "hard_term".into(),
                 log::encode(2, Some(hard(false)), &[]),
                 true,
             ),
-            ("hard_full".into(), full.clone(), true),
+            ("hard_full".into(), full.clone(), false),
+            ("hard_full_keys".into(), keyed.clone(), true),
+            ("no_hard_entries_keys".into(), entries_keyed, true),
         ];
         for (field, range) in HEADER_FIELDS {
             let cut = full[..range.start.midpoint(range.end)].to_vec();
@@ -860,8 +1160,8 @@ mod tests {
             let cut = record(1, 3, &body[..range.start.midpoint(range.end)]);
             inputs.push((format!("body_cut_in_{field}"), cut, false));
         }
-        inputs.push(("version_2".into(), record(2, 3, body), false));
-        let mut tag = body.to_vec();
+        inputs.push(("version_2".into(), record(2, 3, &body), false));
+        let mut tag = body.clone();
         tag[0] = 2;
         inputs.push(("hard_tag_2".into(), record(1, 3, &tag), false));
         let mut cut = full.split_last().unwrap().1.to_vec();
@@ -870,6 +1170,12 @@ mod tests {
         let mut after = [&full[..], &[0]].concat();
         seal_log_record(&mut after);
         inputs.push(("byte_after_entries".into(), after, false));
+        let mut cut = keyed.split_last().unwrap().1.to_vec();
+        seal_log_record(&mut cut);
+        inputs.push(("body_cut_in_entries_keys".into(), cut, false));
+        let mut after = [&keyed[..], &[0]].concat();
+        seal_log_record(&mut after);
+        inputs.push(("byte_after_entries_keys".into(), after, false));
         inputs
     }
 
@@ -897,6 +1203,10 @@ mod tests {
             "hard_tag_2",
             "body_cut_in_entries",
             "byte_after_entries",
+            "hard_full_keys",
+            "no_hard_entries_keys",
+            "body_cut_in_entries_keys",
+            "byte_after_entries_keys",
         );
         assert_eq!(count_files("mesh_log"), inputs.len());
         let built = log_inputs();

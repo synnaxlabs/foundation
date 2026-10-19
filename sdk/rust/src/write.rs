@@ -61,6 +61,7 @@ pub struct Writer {
     /// The place of the node of each place.
     nodes: Vec<usize>,
     index: usize,
+    bytes_max: usize,
     calls: mpsc::Sender<Call>,
     written: Receiver<Written>,
     /// Set when the client closed or dropped.
@@ -93,12 +94,13 @@ impl Writer {
             written: answer,
         };
         opens.send(open).map_err(|_ended| lost(closed))?;
-        let (node, index) = wait(&opened, closed)??;
+        let (node, index, bytes_max) = wait(&opened, closed)??;
         let (places, nodes, index) = ordered(&names, &node, index);
         Ok(Self {
             places,
             nodes,
             index,
+            bytes_max,
             calls,
             written,
             closed: Arc::clone(closed),
@@ -106,9 +108,10 @@ impl Writer {
         })
     }
 
-    /// The channels of the writer: the key, sample type, and name of each place.
-    /// Place `n` is `Config::channels[n]`, then the index when `Config::channels`
-    /// does not name it.
+    /// The channels of the writer: the key, sample type, name, and place of the index
+    /// of each place. Place `n` is `Config::channels[n]`, then the index when
+    /// `Config::channels` does not name it. Each place names the first place of the
+    /// index as its index, a later place of the index too.
     #[must_use]
     pub fn places(&self) -> &[Place] {
         &self.places
@@ -119,6 +122,15 @@ impl Writer {
     #[must_use]
     pub fn index(&self) -> usize {
         self.index
+    }
+
+    /// The most bytes of one frame of this writer, its head included: the largest
+    /// block of the session's pool of frames. It does not change while the writer is
+    /// open. [`Writer::write`] and [`Writer::write_series`] refuse a frame over it with
+    /// `Pool(TooLarge)`, and series whose bytes alone go over it never fit.
+    #[must_use]
+    pub fn bytes_max(&self) -> usize {
+        self.bytes_max
     }
 
     /// Writes a frame of one sample of each place of `values`, in any order, and
@@ -183,12 +195,19 @@ impl Writer {
     /// [`Writer::write`] gives it, or `IndexAbsent` for series with none of the index,
     /// `entry` the lowest place of the series and `index` [`Writer::index`], each with
     /// nothing sent; `Unsent` for a frame with no series; and `Pool(TooLarge)` for a
-    /// frame over the largest block.
+    /// frame over the largest block, or, before any copy, for series whose bytes go
+    /// over [`Writer::bytes_max`], `requested` their bytes.
     pub fn write_series(
         &mut self,
         count: u32,
         series: &[(usize, &[u8])],
     ) -> Result<Outcome, Error> {
+        let requested = series.iter().map(|(_, bytes)| bytes.len()).sum();
+        if requested > self.bytes_max {
+            let largest = self.bytes_max;
+            let large = block::Error::TooLarge { requested, largest };
+            return Err(Error::Stream(program::Error::Pool(large)));
+        }
         self.frame.clear(count);
         for &(place, bytes) in series {
             let (node, _) = self.place(place)?;
@@ -274,8 +293,9 @@ impl Writer {
     }
 }
 
-/// The places of the calls of a writer of `channels`, the place of the node of each,
-/// and the place of the index, from the places of the node and the place of its index.
+/// The places of the calls of a writer of `channels`, each naming the place of the
+/// index among them, the place of the node of each, and the place of the index, from
+/// the places of the node and the place of its index.
 ///
 /// # Panics
 ///
@@ -295,7 +315,11 @@ fn ordered(
         nodes.push(index);
         nodes.len() - 1
     });
-    let places = nodes.iter().map(|&n| node[n].clone()).collect();
+    let place = |&n: &usize| Place {
+        index: at,
+        ..node[n].clone()
+    };
+    let places = nodes.iter().map(place).collect();
     (places, nodes, at)
 }
 
@@ -320,12 +344,15 @@ fn lost(closed: &AtomicBool) -> Error {
     }
 }
 
+/// The places of the node, the place of its index, and the largest block of the
+/// session's pool of frames.
+type Opened = (Vec<Place>, usize, usize);
+
 /// The open of a writer, which the client's thread serves in a task of its own.
 #[derive(Debug)]
 pub(crate) struct Open {
     config: program::write::Config,
-    /// The places of the node and the place of its index.
-    opened: SyncSender<Result<(Vec<Place>, usize), Error>>,
+    opened: SyncSender<Result<Opened, Error>>,
     calls: mpsc::Receiver<Call>,
     written: SyncSender<Written>,
 }
@@ -405,13 +432,15 @@ struct Part {
 
 /// Opens the writer of `open` on `session`, and serves the calls of its [`Writer`]
 /// until the writer closes or drops, or `closed` changes. Its sender drops at the
-/// close of the client, so the writer drops before the session closes.
+/// close of the client, so the writer drops before the session closes. `bytes_max`
+/// is the largest block of the session's pool of frames.
 pub(crate) async fn serve(
     session: program::Session,
+    bytes_max: usize,
     open: Open,
     mut closed: watch::Receiver<()>,
 ) {
-    let mut served = pin!(served(session, open));
+    let mut served = pin!(served(session, bytes_max, open));
     let mut changed = pin!(closed.changed());
     poll_fn(|cx| {
         if changed.as_mut().poll(cx).is_ready() {
@@ -422,7 +451,7 @@ pub(crate) async fn serve(
     .await;
 }
 
-async fn served(session: program::Session, open: Open) {
+async fn served(session: program::Session, bytes_max: usize, open: Open) {
     let Open {
         config,
         opened,
@@ -440,7 +469,8 @@ async fn served(session: program::Session, open: Open) {
             return;
         }
     };
-    drop(opened.try_send(Ok((writer.places().to_vec(), writer.index()))));
+    let places = writer.places().to_vec();
+    drop(opened.try_send(Ok((places, writer.index(), bytes_max))));
     while let Some(call) = calls.recv().await {
         match call {
             Call::Write { frame, time } => {

@@ -18,20 +18,22 @@
   https://github.com/synnaxlabs/foundation/issues/2641#issuecomment-6246623008).
   This supersedes the `until` that completes of
   https://github.com/synnaxlabs/foundation/pull/2522#issuecomment-6136492404.
-  `wall` gives the wall time of the server, which a client compares with the time of
-  each channel token, so the caller gives the wall time of the client's node
-  (`laptop.architect-2`,
-  https://github.com/synnaxlabs/foundation/pull/2574#issuecomment-6147681882,
-  2026-10-13 14:19 UTC). It adds each namespace from 2 to the highest of `variables`,
-  gives each stream of the server the options of `listener`, and panics on a variable
-  of the number 0, which open62541 would add at a free number. The caller binds the
-  listener, so it knows the address before the serve, as with
-  `connector_influx::sim::serve`. The stop is an input, so the close drives the streams
-  while the delayed callbacks of open62541 drain, and each stream sends what it can in
-  that time. What still waits then drops with the manager, which resets its stream. On
-  each return, each stream that it accepted has ended. A drop of the future closes
-  the server with no wait and leaves what waits on each stream unsent. A drop in a
-  panic leaks the server (`laptop.architect-2`, 2026-10-18T00:25:33Z and 00:33:08Z:
+  The server clock is the wall time of `wall` plus the span of `Variables::set_clock`
+  (`laptop.architect-2`, 2026-10-19T12:37:09Z:
+  https://github.com/synnaxlabs/foundation/pull/3354#issuecomment-6267372432). A client
+  logs a warning when the time of a channel token is 10 s or more from its own, so the
+  caller gives the wall time of the client's node (`laptop.architect-2`,
+  https://github.com/synnaxlabs/foundation/pull/2574#issuecomment-6147681882, 2026-10-13
+  14:19 UTC). It adds each namespace from 2 to the highest of `variables`, gives each
+  stream of the server the options of `listener`, and panics on a variable of the number
+  0, which open62541 would add at a free number. The caller binds the listener, so it
+  knows the address before the serve, as with `connector_influx::sim::serve`. The stop
+  is an input, so the close drives the streams while the delayed callbacks of open62541
+  drain, and each stream sends what it can in that time. What still waits then drops
+  with the manager, which resets its stream. On each return, each stream that it
+  accepted has ended. A drop of the future closes the server with no wait and leaves
+  what waits on each stream unsent. A drop in a panic leaks the server
+  (`laptop.architect-2`, 2026-10-18T00:25:33Z and 00:33:08Z:
   https://github.com/synnaxlabs/foundation/pull/3068#issuecomment-6243700840 and
   https://github.com/synnaxlabs/foundation/pull/3068#issuecomment-6243765881). These
   supersede the reason "a drop of the future would leak the server" of
@@ -83,3 +85,17 @@
   https://github.com/synnaxlabs/foundation/pull/2961#issuecomment-6227618266, and at
   6b83bbdb3, 2026-10-17T01:30:18Z:
   https://github.com/synnaxlabs/foundation/pull/2961#issuecomment-6227973585).
+  `Variables::set_clock(ahead)` puts the clock of the server `ahead` of the `wall` time
+  of `serve`, in the value of `CurrentTime`, in each server and source timestamp, and
+  in the time of each channel token. A later call moves it, as a jump of the clock
+  does, and a negative `ahead` puts it behind. Past the last stamp or before the
+  first, the clock stays there (`laptop.architect-2`, 2026-10-19T12:37:09Z:
+  https://github.com/synnaxlabs/foundation/pull/3354#issuecomment-6267372432). The
+  token time shifts too, since open62541 stamps `createdAt` from the same clock, and a
+  client only logs a warning when it is 10 s or more off (`laptop.architect-2`,
+  2026-10-19T12:02:54Z:
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6266740401). This
+  supersedes the token time that does not shift of
+  https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6158936229, and
+  the server clock that is only `wall` of item 4 of
+  https://github.com/synnaxlabs/foundation/pull/2574#issuecomment-6147681882.

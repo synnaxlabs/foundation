@@ -105,6 +105,7 @@ struct Steps {
 
 impl Kind for Steps {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())

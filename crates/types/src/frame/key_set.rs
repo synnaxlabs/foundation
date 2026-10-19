@@ -50,34 +50,38 @@ impl KeySet {
     ///
     /// # Errors
     ///
-    /// [`Repeated`] with the least key that two entries share.
+    /// For the first entry in entry order that breaks a rule of the indexes,
+    /// [`Error::Index`] or [`Error::Unstamped`]; else [`Error::Repeated`] with the
+    /// least key that two entries share.
     ///
     /// # Panics
     ///
-    /// When the index of an entry is not below the count of `channels` or is not its
-    /// own index, when an index entry is not of type `Stamp`, or when `channels` holds
-    /// more than 2^32 entries.
+    /// When `channels` holds more than 2^32 entries.
     pub fn ordered(
         channels: impl IntoIterator<Item = (channel::Key, Type, usize)>,
-    ) -> Result<Self, Repeated> {
+    ) -> Result<Self, Error> {
         let channels: Vec<_> = channels.into_iter().collect();
-        let count = channels.len();
+        let stamp = Type::Scalar(Scalar::Stamp);
+        for (at, &(_, data_type, index)) in channels.iter().enumerate() {
+            if !matches!(channels.get(index), Some(&(.., own)) if own == index) {
+                return Err(Error::Index { entry: at, index });
+            }
+            if at == index && data_type != stamp {
+                return Err(Error::Unstamped {
+                    entry: at,
+                    sample: data_type,
+                });
+            }
+        }
         let groups: Arc<[usize]> = (channels.iter().enumerate())
             .filter(|&(at, &(.., index))| at == index)
             .map(|(at, _)| at)
             .collect();
         let fit = "a key set holds at most 2^32 entries";
         let entry = |(at, &(key, data_type, index)): (usize, &(_, _, usize))| {
-            let (.., own) = channels.get(index).unwrap_or_else(|| {
-                panic!("the index of entry {at} is entry {index} of {count}")
-            });
-            assert!(
-                *own == index,
-                "the index of entry {at} is entry {index}, whose index is entry {own}"
-            );
             let group = groups
                 .binary_search(&index)
-                .expect("invariant: an entry that is its own index is a group");
+                .expect("invariant: the index of an entry is a group");
             Entry {
                 slot: Slot::new(u32::try_from(at).expect(fit)),
                 key,
@@ -86,16 +90,8 @@ impl KeySet {
             }
         };
         let entries: Arc<[Entry]> = channels.iter().enumerate().map(entry).collect();
-        let stamp = Type::Scalar(Scalar::Stamp);
-        for &index in groups.iter() {
-            let data_type = entries[index].data_type;
-            assert!(
-                data_type == stamp,
-                "the index entry {index} has type {data_type}, not {stamp}"
-            );
-        }
         if let Some(key) = repeated(entries.iter().map(|entry| entry.key)) {
-            return Err(Repeated { key });
+            return Err(Error::Repeated(Repeated { key }));
         }
         Ok(Self {
             key: Key::ORDERED,
@@ -294,6 +290,48 @@ impl fmt::Display for Repeated {
 }
 
 impl std::error::Error for Repeated {}
+
+/// Why [`KeySet::ordered`] refuses its channels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Error {
+    /// The index of `entry` is entry `index`, which is not an entry whose index is
+    /// itself.
+    Index {
+        /// The entry.
+        entry: usize,
+        /// The index that it names.
+        index: usize,
+    },
+    /// Entry `entry` is an index of type `sample`, not `Stamp`.
+    Unstamped {
+        /// The entry.
+        entry: usize,
+        /// Its sample type.
+        sample: Type,
+    },
+    /// Two entries share a key.
+    Repeated(Repeated),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Index { entry, index } => write!(
+                f,
+                "the index of entry {entry} is entry {index}, which is not an entry \
+                 whose index is itself"
+            ),
+            Self::Unstamped { entry, sample } => write!(
+                f,
+                "the index entry {entry} has type {sample}, not {}",
+                Type::Scalar(Scalar::Stamp)
+            ),
+            Self::Repeated(repeated) => fmt::Display::fmt(repeated, f),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
 
 /// The least key that `keys` holds twice.
 fn repeated(keys: impl Iterator<Item = channel::Key>) -> Option<channel::Key> {
@@ -737,7 +775,7 @@ mod tests {
         fn one(
             channels: impl IntoIterator<Item = (channel::Key, Type)>,
             index: usize,
-        ) -> Result<KeySet, Repeated> {
+        ) -> Result<KeySet, Error> {
             let channels = channels.into_iter();
             KeySet::ordered(channels.map(|(key, data_type)| (key, data_type, index)))
         }
@@ -745,7 +783,7 @@ mod tests {
         fn check(channels: &[(u32, Type)], index: usize, repeated: u32) {
             let channels = channels.iter().map(|&(n, data_type)| (key(n), data_type));
             let error = one(channels, index).expect_err("a repeat");
-            assert_eq!(error, Repeated { key: key(repeated) });
+            assert_eq!(error, Error::Repeated(Repeated { key: key(repeated) }));
             assert_eq!(
                 error.to_string(),
                 format!("channel {} appears twice in a key set", key(repeated))
@@ -778,16 +816,37 @@ mod tests {
             let _key = interned(usize::try_from(u32::MAX).unwrap());
         }
 
-        #[test]
-        #[should_panic(expected = "the index of entry 0 is entry 2 of 2")]
-        fn panics_on_an_index_past_the_entries() {
-            let _set = one([(key(1), STAMP), (key(2), F64)], 2);
+        /// The error of `channels`, and its message.
+        fn refusal(channels: &[(u32, Type, usize)]) -> (Error, String) {
+            let channels = channels
+                .iter()
+                .map(|&(n, data_type, index)| (key(n), data_type, index));
+            let error = KeySet::ordered(channels).expect_err("a refusal");
+            (error, error.to_string())
+        }
+
+        fn index(entry: usize, index: usize) -> (Error, String) {
+            let message = format!(
+                "the index of entry {entry} is entry {index}, which is not an entry \
+                 whose index is itself"
+            );
+            (Error::Index { entry, index }, message)
+        }
+
+        fn unstamped(entry: usize, sample: Type) -> (Error, String) {
+            let message =
+                format!("the index entry {entry} has type {sample}, not timestamp");
+            (Error::Unstamped { entry, sample }, message)
         }
 
         #[test]
-        #[should_panic(expected = "the index entry 1 has type f64, not timestamp")]
-        fn panics_on_an_index_that_is_not_a_stamp() {
-            let _set = one([(key(1), STAMP), (key(2), F64)], 1);
+        fn refuses_an_index_past_the_entries() {
+            assert_eq!(refusal(&[(1, STAMP, 2), (2, F64, 2)]), index(0, 2));
+        }
+
+        #[test]
+        fn refuses_an_index_that_is_not_a_stamp() {
+            assert_eq!(refusal(&[(1, STAMP, 1), (2, F64, 1)]), unstamped(1, F64));
         }
 
         /// Distinct keys of random types, and the position of one `Stamp` among them.
@@ -870,30 +929,35 @@ mod tests {
                 (key(4), F64, 0),
             ])
             .expect_err("a repeat");
-            assert_eq!(error, Repeated { key: key(4) });
+            assert_eq!(error, Error::Repeated(Repeated { key: key(4) }));
         }
 
         #[test]
-        #[should_panic(expected = "the index of entry 1 is entry 2 of 2")]
-        fn panics_on_an_index_of_one_entry_past_the_entries() {
-            let _set = KeySet::ordered([(key(1), STAMP, 0), (key(2), F64, 2)]);
+        fn refuses_an_index_of_one_entry_past_the_entries() {
+            assert_eq!(refusal(&[(1, STAMP, 0), (2, F64, 2)]), index(1, 2));
         }
 
         #[test]
-        #[should_panic(expected = "the index of entry 2 is entry 1, whose index is \
-                                   entry 0")]
-        fn panics_on_an_index_of_another_group() {
-            let _set = KeySet::ordered([
-                (key(1), STAMP, 0),
-                (key(2), F64, 0),
-                (key(3), F64, 1),
-            ]);
+        fn refuses_an_index_of_another_group() {
+            let channels = [(1, STAMP, 0), (2, F64, 0), (3, F64, 1)];
+            assert_eq!(refusal(&channels), index(2, 1));
         }
 
         #[test]
-        #[should_panic(expected = "the index entry 1 has type f64, not timestamp")]
-        fn panics_on_a_second_index_that_is_not_a_stamp() {
-            let _set = KeySet::ordered([(key(1), STAMP, 0), (key(2), F64, 1)]);
+        fn refuses_a_second_index_that_is_not_a_stamp() {
+            assert_eq!(refusal(&[(1, STAMP, 0), (2, F64, 1)]), unstamped(1, F64));
+        }
+
+        /// The first entry that breaks a rule of the indexes gives the error, and a
+        /// repeat comes only after the rules of the indexes.
+        #[test]
+        fn refuses_the_first_entry_that_breaks_a_rule() {
+            let channels = [(1, F64, 0), (1, F64, 5), (2, F64, 1)];
+            assert_eq!(refusal(&channels), unstamped(0, F64));
+            let channels = [(1, STAMP, 0), (1, F64, 5), (2, U8, 2)];
+            assert_eq!(refusal(&channels), index(1, 5));
+            let channels = [(1, STAMP, 0), (1, F64, 0), (2, F64, 1)];
+            assert_eq!(refusal(&channels), index(2, 1));
         }
 
         /// Distinct keys, each data channel on a random index among them.

@@ -367,8 +367,7 @@ fn decode_write(bencher: Bencher<'_, '_>, series: u32, in_place: bool) {
     }
     .encode(&mut head);
     let run = run_of(series);
-    let mut counts = [0; write::counts::LEN];
-    write::counts::encode([1], &mut counts);
+    let counts = 1_u32.to_le_bytes();
     let body = vec![7; usize::try_from(series * 8).expect("a u32 fits a usize")];
     let mut frame = || {
         let mut messages = [&head[..], &run[..], &counts[..], &body[..]].into_iter();

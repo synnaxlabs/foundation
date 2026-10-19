@@ -266,7 +266,7 @@ impl Manager {
             answers: Box::default(),
             time: Nodes::unchecked(&[Node {
                 namespace: 0,
-                key: Key::Number(ffi::test::TIME),
+                key: Key::Number(ffi::TIME),
             }]),
             connections: manager,
         }

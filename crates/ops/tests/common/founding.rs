@@ -107,6 +107,7 @@ pub(crate) async fn create_mesh(
         files: node.files(),
         dir: PathBuf::new(),
         clock: node.clock(),
+        time: clock::Clock::new(node.clock()).1,
         entropy: node.entropy(),
         tasks: tasks.clone(),
         transport: Rc::new(transport),

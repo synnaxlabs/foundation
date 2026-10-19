@@ -737,6 +737,7 @@ mod own_kinds {
 
     impl kind::Kind for Own {
         type Config = ();
+        const SCHEMA: document::schema::Body = connector::testing::READS;
 
         fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
             Ok(())

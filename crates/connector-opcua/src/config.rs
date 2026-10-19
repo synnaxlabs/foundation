@@ -39,7 +39,7 @@ pub struct Config {
 }
 
 /// The body of the config.
-const BODY: Body = Body {
+pub(crate) const BODY: Body = Body {
     summary: "Polls the nodes of an OPC UA server at a rate.",
     attributes: &[
         schema::Attribute {
@@ -60,12 +60,22 @@ const BODY: Body = Body {
         label: Some("the channel"),
         forms: &[READ],
     }],
-    examples: &[],
+    examples: &[EXAMPLE],
 };
+
+/// A connector to one server.
+const EXAMPLE: &str = "\
+address = \"opc.tcp://plc:4840\"
+rate    = \"10Hz\"
+
+read \"plant.pressure\" {
+  node_id = \"ns=3;s=Pressure\"
+}
+";
 
 /// The body of a `read` block.
 const READ: Body = Body {
-    summary: "The node of one channel. One or more.",
+    summary: "The node of one channel. Zero or more.",
     attributes: &[schema::Attribute {
         name: "node_id",
         value: "a node ID, such as \"ns=3;s=SpikeData\"",

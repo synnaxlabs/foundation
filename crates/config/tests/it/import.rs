@@ -22,6 +22,7 @@ struct Points;
 
 impl Kind for Points {
     type Config = Vec<Name>;
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, config: &Document) -> Result<Vec<Name>, Vec<Diagnostic>> {
         let reads = config
@@ -106,6 +107,7 @@ struct Counting;
 
 impl Kind for Counting {
     type Config = ();
+    const SCHEMA: document::schema::Body = connector::testing::READS;
 
     fn parse(&self, _: &Document) -> Result<(), Vec<Diagnostic>> {
         Ok(())

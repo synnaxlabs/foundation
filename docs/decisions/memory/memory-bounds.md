@@ -105,7 +105,3 @@
   https://github.com/synnaxlabs/foundation/issues/2718#issuecomment-6247275705, item
   5, which closes the deferral of
   https://github.com/synnaxlabs/foundation/pull/3148#issuecomment-6246759669, item 3).
-  Amended (#3283): the ends of a write stream are 24 bytes for each place, 16 for its
-  end and 8 for its group and count, so its ends are at most 768 KiB, and the budget
-  bounds the places of all write streams of a node at 1,398,101 (HUB CLIENT, Amended
-  (#3283), PR 1b).

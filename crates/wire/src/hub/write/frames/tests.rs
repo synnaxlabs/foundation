@@ -74,7 +74,7 @@ fn draft(frames: &mut Frames, pool: &block::Pool) -> Step {
     frames.draft(draft)
 }
 
-/// Takes a live head, the ends of the index and place 1, and a count of 2.
+/// Takes a live head and the ends of the index and place 1.
 fn ends(frames: &mut Frames) {
     let step = frames.decode(&encode_head(LIVE, Form::Raw, 2));
     assert!(matches!(step, Ok(Step::Head(head)) if head.series == 2));
@@ -87,11 +87,22 @@ fn ends(frames: &mut Frames) {
         frames.decode(&encode_ends(&[(1, 32)])),
         Ok(Step::More)
     ));
+}
+
+/// Takes a count of 2, the run of counts of [`ends`].
+fn count(frames: &mut Frames) {
     assert!(matches!(frames.due(), Ok(Due::Message)));
     assert!(matches!(
         frames.decode(&encode_counts(&[2])),
         Ok(Step::More)
     ));
+}
+
+/// Takes the messages of [`ends`], a draft from `pool`, and [`count`].
+fn lead(frames: &mut Frames, pool: &block::Pool) {
+    ends(frames);
+    assert!(matches!(draft(frames, pool), Step::More));
+    count(frames);
 }
 
 /// The 32 bytes of a body: 2 stamps, then 2 samples of place 1.
@@ -114,11 +125,10 @@ fn check(frame: &types::frame::Frame, body: &[u8]) {
     assert_eq!(frame.series(2), None);
 }
 
-/// The bytes of the end and count of each place: an entry and an end, each a
-/// `usize`, and a group and a count, each a `u32`.
+/// The bytes of the ends of each place: an entry and an end, each a `usize`.
 #[test]
-fn holds_two_usizes_and_two_u32s_for_each_place() {
-    let place = 2 * size_of::<usize>() + 8;
+fn holds_two_usizes_for_each_place() {
+    let place = 2 * size_of::<usize>();
     let bytes = [0, 1, 3].map(Frames::bytes);
     assert_eq!(bytes, [0, place, 3 * place]);
 }
@@ -127,8 +137,7 @@ fn holds_two_usizes_and_two_u32s_for_each_place() {
 fn builds_a_frame_from_a_whole_body_message() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
-    ends(&mut frames);
-    assert!(matches!(draft(&mut frames, &pool), Step::More));
+    lead(&mut frames, &pool);
     let (frame, time) = frame(frames.decode(&body()).expect("the body"));
     assert_eq!(time, LIVE);
     check(&frame, &body());
@@ -140,8 +149,7 @@ fn finishes_between_frames() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
     assert_eq!(frames.finish(), Ok(()));
-    ends(&mut frames);
-    draft(&mut frames, &pool);
+    lead(&mut frames, &pool);
     frames.decode(&body()).expect("the body");
     assert_eq!(frames.finish(), Ok(()));
 }
@@ -158,9 +166,9 @@ fn gives_the_bytes_of_a_frame_that_the_stream_cuts() {
     frames.decode(&encode_ends(&[(0, 16)])).expect("the end");
     assert_eq!(frames.finish(), cut(15, None));
     frames.decode(&encode_ends(&[(1, 32)])).expect("the end");
+    draft(&mut frames, &pool);
     assert_eq!(frames.finish(), cut(23, NonZeroUsize::new(59)));
     frames.decode(&encode_counts(&[2])).expect("the count");
-    draft(&mut frames, &pool);
     assert_eq!(frames.finish(), cut(27, NonZeroUsize::new(59)));
     frames.decode(&body()[..20]).expect("the part");
     assert_eq!(frames.finish(), cut(47, NonZeroUsize::new(59)));
@@ -218,7 +226,7 @@ fn panics_on_a_draft_when_no_draft_is_due() {
         panic!("a draft is due");
     };
     let twice = layout.draft(&pool, form).expect("a block");
-    draft(&mut frames, &pool);
+    assert!(matches!(draft(&mut frames, &pool), Step::More));
     let _step = frames.draft(twice);
 }
 
@@ -226,8 +234,7 @@ fn panics_on_a_draft_when_no_draft_is_due() {
 fn builds_a_frame_from_a_body_received_in_place() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
-    ends(&mut frames);
-    draft(&mut frames, &pool);
+    lead(&mut frames, &pool);
     let body = body();
     for part in body.chunks(10) {
         let Ok(Due::Body(rest)) = frames.due() else {
@@ -245,13 +252,14 @@ fn builds_a_frame_from_a_body_received_in_place() {
 }
 
 #[test]
-fn gives_a_frame_of_no_body_at_its_draft() {
+fn gives_a_frame_of_no_body_at_its_last_count() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
     frames
         .decode(&encode_head(LIVE, Form::Raw, 1))
         .expect("the head");
     frames.decode(&encode_ends(&[(0, 0)])).expect("the ends");
+    assert!(matches!(draft(&mut frames, &pool), Step::More));
     assert_eq!(
         frames.finish(),
         Err(Error::Cut {
@@ -259,10 +267,25 @@ fn gives_a_frame_of_no_body_at_its_draft() {
             len: NonZeroUsize::new(19)
         })
     );
-    frames.decode(&encode_counts(&[1])).expect("the count");
-    let (frame, _) = frame(draft(&mut frames, &pool));
+    let step = frames.decode(&encode_counts(&[1])).expect("the count");
+    let (frame, _) = frame(step);
     assert_eq!(frame.series(0), Some(&[][..]));
+    assert_eq!(frame.range(0), Some(Range { seq: 0, count: 1 }));
     assert!(matches!(frames.due(), Ok(Due::Message)));
+}
+
+#[test]
+fn gives_a_frame_of_no_body_that_the_node_stamps_at_its_draft() {
+    let pool = create_pool();
+    let mut frames = Frames::new(create_set());
+    frames
+        .decode(&encode_head(Time::Node, Form::Raw, 1))
+        .expect("the head");
+    frames.decode(&encode_ends(&[(0, 0)])).expect("the ends");
+    let (frame, time) = frame(draft(&mut frames, &pool));
+    assert_eq!(time, Time::Node);
+    assert_eq!(frame.range(0), Some(Range { seq: 0, count: 1 }));
+    assert_eq!(frames.finish(), Ok(()));
 }
 
 #[test]
@@ -279,14 +302,14 @@ fn gives_the_time_and_form_of_each_head() {
             .decode(&encode_head(time, form, 1))
             .expect("the head");
         frames.decode(&encode_ends(&[(0, 8)])).expect("the ends");
-        if time != Time::Node {
-            frames.decode(&encode_counts(&[count])).expect("the count");
-        }
         let Ok(Due::Draft { form: due, .. }) = frames.due() else {
             panic!("a draft is due");
         };
         assert_eq!(due, form);
         draft(&mut frames, &pool);
+        if time != Time::Node {
+            frames.decode(&encode_counts(&[count])).expect("the count");
+        }
         let step = frames.decode(&[0; 8]).expect("the body");
         let Step::Frame { draft, time: given } = step else {
             panic!("a frame, not {step:?}");
@@ -380,8 +403,7 @@ fn refuses_a_run_message_of_more_ends_than_remain_and_keeps_the_run() {
 fn refuses_an_empty_or_long_body_message_and_keeps_the_body() {
     let pool = create_pool();
     let mut frames = Frames::new(create_set());
-    ends(&mut frames);
-    draft(&mut frames, &pool);
+    lead(&mut frames, &pool);
     assert_eq!(frames.decode(&[]).map(|_| ()), Err(Error::Empty));
     assert_eq!(frames.received(0).map(|_| ()), Err(Error::Empty));
     assert_eq!(
@@ -404,7 +426,6 @@ fn gives_the_layout_error_of_ends_out_of_order() {
     frames
         .decode(&encode_ends(&[(0, 16), (1, 8)]))
         .expect("the ends");
-    frames.decode(&encode_counts(&[1])).expect("the count");
     assert!(matches!(
         frames.due(),
         Err(types::frame::Error::End(BadEnd::Before { .. }))
@@ -412,7 +433,7 @@ fn gives_the_layout_error_of_ends_out_of_order() {
 }
 
 #[test]
-fn asks_one_count_of_a_group_whose_index_repeats() {
+fn gives_the_layout_error_of_a_repeated_index() {
     let mut frames = Frames::new(create_set());
     frames
         .decode(&encode_head(LIVE, Form::Raw, 2))
@@ -420,7 +441,6 @@ fn asks_one_count_of_a_group_whose_index_repeats() {
     frames
         .decode(&encode_ends(&[(0, 8), (0, 16)]))
         .expect("the ends");
-    frames.decode(&encode_counts(&[1])).expect("the count");
     assert!(matches!(
         frames.due(),
         Err(types::frame::Error::Unordered { entry: 0, last: 0 })
@@ -450,16 +470,19 @@ fn takes_the_next_frame_after_a_frame_of_no_body_finds_the_pool_full() {
         .decode(&encode_head(LIVE, Form::Raw, 1))
         .expect("the head");
     frames.decode(&encode_ends(&[(0, 0)])).expect("the ends");
-    frames.decode(&encode_counts(&[1])).expect("the count");
     let (held, error) = create_full(&mut frames, &pool);
     assert!(matches!(error, block::Error::Exhausted { .. }), "{error:?}");
     frames.skip();
+    assert!(matches!(frames.due(), Ok(Due::Message)));
+    assert!(matches!(
+        frames.decode(&encode_counts(&[1])),
+        Ok(Step::More)
+    ));
     assert!(frames.head.is_none(), "the skipped frame ended");
     drop(held);
     assert!(matches!(frames.due(), Ok(Due::Message)));
     assert_eq!(frames.finish(), Ok(()));
-    ends(&mut frames);
-    draft(&mut frames, &pool);
+    lead(&mut frames, &pool);
     let (frame, _) = frame(frames.decode(&body()).expect("the body"));
     check(&frame, &body());
 }
@@ -472,6 +495,7 @@ fn drops_the_body_of_a_skipped_frame_and_takes_the_next_frame() {
     let (held, _) = create_full(&mut frames, &pool);
     frames.skip();
     drop(held);
+    count(&mut frames);
     let body = body();
     assert!(matches!(frames.due(), Ok(Due::Message)));
     assert!(matches!(frames.decode(&body[..20]), Ok(Step::More)));
@@ -485,8 +509,7 @@ fn drops_the_body_of_a_skipped_frame_and_takes_the_next_frame() {
     assert!(matches!(frames.decode(&body[20..]), Ok(Step::More)));
     assert!(matches!(frames.due(), Ok(Due::Message)));
     assert_eq!(frames.finish(), Ok(()));
-    ends(&mut frames);
-    draft(&mut frames, &pool);
+    lead(&mut frames, &pool);
     let (frame, _) = frame(frames.decode(&body).expect("the body"));
     check(&frame, &body);
 }
@@ -496,6 +519,8 @@ fn refuses_an_empty_or_long_body_message_of_a_skipped_frame() {
     let mut frames = Frames::new(create_set());
     ends(&mut frames);
     frames.skip();
+    assert_eq!(frames.decode(&[0; 4]).map(|_| ()), Err(Error::Samples));
+    count(&mut frames);
     assert_eq!(frames.decode(&[]).map(|_| ()), Err(Error::Empty));
     assert_eq!(
         frames.decode(&[0; 33]).map(|_| ()),
@@ -523,7 +548,6 @@ fn create_refused() -> Frames {
     frames
         .decode(&encode_ends(&[(0, 16), (1, 8)]))
         .expect("the ends");
-    frames.decode(&encode_counts(&[1])).expect("the count");
     assert!(frames.due().is_err(), "the layout is not valid");
     frames
 }
@@ -553,6 +577,7 @@ fn panics_on_a_body_received_in_place_for_a_skipped_frame() {
     let mut frames = Frames::new(create_set());
     ends(&mut frames);
     frames.skip();
+    count(&mut frames);
     let _received = frames.received(1);
 }
 
@@ -566,9 +591,8 @@ fn two_ends(frames: &mut Frames, time: Time) {
     frames.decode(&ends).expect("the ends");
 }
 
-/// The frame of `frames` after its draft and a body of 32 bytes.
-fn two_frame(frames: &mut Frames, pool: &block::Pool) -> types::frame::Frame {
-    assert!(matches!(draft(frames, pool), Step::More));
+/// The frame of `frames` after a body of 32 bytes.
+fn two_frame(frames: &mut Frames) -> types::frame::Frame {
     frame(frames.decode(&[0; 32]).expect("the body")).0
 }
 
@@ -577,6 +601,7 @@ fn sets_the_count_of_each_group_from_the_run_of_counts() {
     let pool = create_pool();
     let mut frames = Frames::new(create_two());
     two_ends(&mut frames, LIVE);
+    assert!(matches!(draft(&mut frames, &pool), Step::More));
     assert!(matches!(frames.due(), Ok(Due::Message)));
     frames
         .decode(&encode_counts(&[1]))
@@ -592,7 +617,7 @@ fn sets_the_count_of_each_group_from_the_run_of_counts() {
     frames
         .decode(&encode_counts(&[3]))
         .expect("the second count");
-    let frame = two_frame(&mut frames, &pool);
+    let frame = two_frame(&mut frames);
     assert_eq!(frame.range(0), Some(Range { seq: 0, count: 1 }));
     assert_eq!(frame.range(1), Some(Range { seq: 0, count: 3 }));
 }
@@ -607,6 +632,7 @@ fn counts_only_the_groups_whose_index_the_ends_hold() {
     frames
         .decode(&encode_ends(&[(2, 8), (3, 16)]))
         .expect("the ends");
+    assert!(matches!(draft(&mut frames, &pool), Step::More));
     assert_eq!(
         frames.decode(&encode_counts(&[1, 1])).map(|_| ()),
         Err(Error::Run {
@@ -615,7 +641,6 @@ fn counts_only_the_groups_whose_index_the_ends_hold() {
         })
     );
     frames.decode(&encode_counts(&[2])).expect("the count");
-    assert!(matches!(draft(&mut frames, &pool), Step::More));
     let (frame, _) = frame(frames.decode(&[0; 16]).expect("the body"));
     assert_eq!(frame.range(0), None);
     assert_eq!(frame.range(1), Some(Range { seq: 0, count: 2 }));
@@ -644,11 +669,19 @@ fn refuses_each_run_of_counts_that_the_program_cannot_encode_and_keeps_it() {
     let pool = create_pool();
     let mut frames = Frames::new(create_two());
     two_ends(&mut frames, LIVE);
+    assert!(matches!(draft(&mut frames, &pool), Step::More));
     let cases = [
         (vec![], Error::Empty),
         (vec![1, 0, 0], Error::Length { len: 3 }),
         (
             encode_counts(&[1, 1, 1]),
+            Error::Run {
+                items: 3,
+                remain: 2,
+            },
+        ),
+        (
+            vec![0; 12],
             Error::Run {
                 items: 3,
                 remain: 2,
@@ -665,7 +698,7 @@ fn refuses_each_run_of_counts_that_the_program_cannot_encode_and_keeps_it() {
         "the frame holds a group of no sample"
     );
     frames.decode(&encode_counts(&[2, 4])).expect("the counts");
-    let frame = two_frame(&mut frames, &pool);
+    let frame = two_frame(&mut frames);
     assert_eq!(frame.range(0), Some(Range { seq: 0, count: 2 }));
     assert_eq!(frame.range(1), Some(Range { seq: 0, count: 4 }));
 }
@@ -679,7 +712,6 @@ fn refuses_a_series_of_a_group_whose_index_the_ends_do_not_hold() {
     frames
         .decode(&encode_ends(&[(0, 8), (3, 16)]))
         .expect("the ends");
-    frames.decode(&encode_counts(&[1])).expect("the count");
     assert!(matches!(
         frames.due(),
         Err(types::frame::Error::IndexAbsent { entry: 3, index: 2 })
@@ -778,11 +810,14 @@ proptest! {
                 let step = frames.decode(&encode_ends(run));
                 prop_assert!(matches!(step, Ok(Step::More)));
             }
-            let step = frames.decode(&encode_counts(&[case.count]));
-            prop_assert!(matches!(step, Ok(Step::More)));
-            let mut step = draft(&mut frames, &pool);
+            prop_assert!(matches!(draft(&mut frames, &pool), Step::More));
+            let mut step = frames
+                .decode(&encode_counts(&[case.count]))
+                .expect("the count");
             let fit = "the bytes of a frame fit a usize";
-            let run = ends::LEN.checked_mul(ends.len()).and_then(|n| n.checked_add(counts::LEN));
+            let run = ends::LEN
+                .checked_mul(ends.len())
+                .and_then(|n| n.checked_add(counts::LEN));
             let run = run.expect(fit);
             let mut received = Head::LEN.checked_add(run).expect(fit);
             let len = NonZeroUsize::new(received.checked_add(body.len()).expect(fit));
@@ -805,6 +840,297 @@ proptest! {
             for (&place, bytes) in case.present.iter().zip(&case.series) {
                 prop_assert_eq!(frame.series(to_usize(place)), Some(&bytes[..]));
             }
+        }
+    }
+}
+
+/// The inputs of the fuzz target `wire_hub_write` give the frames and ends that their
+/// names state.
+mod corpus {
+    use super::*;
+
+    /// How a stream of a fuzz input ends.
+    #[derive(Debug, PartialEq)]
+    enum End {
+        /// The input ended, with what `finish` gave.
+        Finished(Result<(), Error>),
+        /// A message gave an error.
+        Message(Error),
+        /// A draft's layout gave an error.
+        Layout(types::frame::Error),
+    }
+
+    /// The name of the input `$file` of the fuzz target `wire_hub_write`, and its
+    /// bytes.
+    macro_rules! corpus {
+        ($file:literal) => {
+            (
+                $file,
+                include_bytes!(concat!(
+                    "../../../../../../oracles/fuzz/wire_hub_write/",
+                    $file
+                ))
+                .as_slice(),
+            )
+        };
+    }
+
+    /// The set of the first byte of an input: an index, then `places - 1` channels of
+    /// `I64`, where bit 3 makes the second half of the places a second group.
+    fn create_input_set(first: u8) -> Arc<KeySet> {
+        let places = usize::from(first & 0b111) + 1;
+        let split = if first & 0b1000 != 0 && places > 1 {
+            places.div_ceil(2)
+        } else {
+            usize::MAX
+        };
+        let channels = (0..places).map(|entry| {
+            let index = if entry >= split { split } else { 0 };
+            let data = if entry == index {
+                Scalar::Stamp
+            } else {
+                Scalar::I64
+            };
+            let n = u128::try_from(entry)
+                .expect("at most 8 places")
+                .strict_add(1);
+            (key(n), Type::Scalar(data), index)
+        });
+        Arc::new(KeySet::ordered(channels).expect("a valid set"))
+    }
+
+    /// The ranges of each frame of a stream, `None` for a frame skipped on a full pool.
+    type Given = Vec<Option<Vec<(u32, Range)>>>;
+
+    /// The ranges of each frame that the fuzz input `bytes` gives, and how its stream
+    /// ends.
+    fn drive(bytes: &[u8]) -> (Given, End) {
+        let (&first, mut bytes) = bytes.split_first().expect("the input has a byte");
+        let pool = create_pool();
+        let mut frames = Frames::new(create_input_set(first));
+        let mut seen = Vec::new();
+        loop {
+            let step = match frames.due() {
+                Err(error) => return (seen, End::Layout(error)),
+                Ok(Due::Draft { layout, form }) => {
+                    let Ok(draft) = layout.draft(&pool, form) else {
+                        frames.skip();
+                        seen.push(None);
+                        continue;
+                    };
+                    frames.draft(draft)
+                }
+                Ok(Due::Body(_) | Due::Message) => {
+                    let Some((&len, rest)) = bytes.split_first() else {
+                        return (seen, End::Finished(frames.finish()));
+                    };
+                    let (message, rest) =
+                        rest.split_at(usize::from(len).min(rest.len()));
+                    bytes = rest;
+                    match frames.decode(message) {
+                        Ok(step) => step,
+                        Err(error) => return (seen, End::Message(error)),
+                    }
+                }
+            };
+            if let Step::Frame { draft, .. } = step {
+                seen.push(Some(draft.ranges().collect()));
+            }
+        }
+    }
+
+    /// The ranges of a frame: each group, and its count from seq 0.
+    fn ranges(groups: &[(u32, u32)]) -> Vec<(u32, Range)> {
+        let ranges = groups
+            .iter()
+            .map(|&(group, count)| (group, Range { seq: 0, count }));
+        ranges.collect()
+    }
+
+    fn cut(received: usize, len: Option<usize>) -> End {
+        End::Finished(Err(Error::Cut {
+            received,
+            len: len.and_then(NonZeroUsize::new),
+        }))
+    }
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "one case for each input")]
+    fn gives_the_frames_and_end_of_each_input_of_a_run_of_counts() {
+        let run = |items, remain| End::Message(Error::Run { items, remain });
+        let done = || End::Finished(Ok(()));
+        let one = |count| Some(ranges(&[(0, count)]));
+        let both = Some(ranges(&[(0, 1), (1, 1)]));
+        let cases = [
+            (corpus!("body_cut_grouped"), vec![], cut(54, Some(59))),
+            (
+                corpus!("body_empty_grouped"),
+                vec![],
+                End::Message(Error::Empty),
+            ),
+            (
+                corpus!("body_past_grouped"),
+                vec![],
+                End::Message(Error::Body {
+                    len: 40,
+                    remain: 32,
+                }),
+            ),
+            (
+                corpus!("counts_cut"),
+                vec![],
+                End::Message(Error::Length { len: 3 }),
+            ),
+            (corpus!("counts_end"), vec![], cut(23, Some(59))),
+            (
+                corpus!("counts_index_repeat"),
+                vec![],
+                End::Layout(types::frame::Error::Unordered { entry: 0, last: 0 }),
+            ),
+            (corpus!("counts_over_run"), vec![], run(2, 1)),
+            (
+                corpus!("counts_samples"),
+                vec![],
+                End::Message(Error::Samples),
+            ),
+            (
+                corpus!("cut_node_body"),
+                vec![None],
+                cut(34, Some(100_991_015)),
+            ),
+            (corpus!("node_body_cut"), vec![], cut(28, Some(39))),
+            (
+                corpus!("ends_bad_grouped"),
+                vec![],
+                End::Message(Error::Length { len: 5 }),
+            ),
+            (
+                corpus!("ends_cut_grouped"),
+                vec![],
+                End::Message(Error::Length { len: 7 }),
+            ),
+            (
+                corpus!("ends_empty_grouped"),
+                vec![],
+                End::Message(Error::Empty),
+            ),
+            (corpus!("ends_over_run_grouped"), vec![], run(2, 1)),
+            (corpus!("ends_whole_cut_grouped"), vec![], cut(15, None)),
+            (
+                corpus!("frame_backfill_encoded_grouped"),
+                vec![one(2)],
+                done(),
+            ),
+            (corpus!("frame_cut_grouped"), vec![one(2)], done()),
+            (corpus!("frame_grouped"), vec![one(2)], done()),
+            (corpus!("frame_no_body_grouped"), vec![one(1)], done()),
+            (corpus!("frame_node_grouped"), vec![one(1)], done()),
+            (
+                corpus!("head_empty_grouped"),
+                vec![],
+                End::Message(Error::Empty),
+            ),
+            (
+                corpus!("head_form_grouped"),
+                vec![],
+                End::Message(Error::Form { byte: 2 }),
+            ),
+            (
+                corpus!("head_kind_grouped"),
+                vec![],
+                End::Message(Error::Kind { kind: 1 }),
+            ),
+            (
+                corpus!("head_long_grouped"),
+                vec![],
+                End::Message(Error::Length { len: 8 }),
+            ),
+            (corpus!("head_only_grouped"), vec![], cut(7, None)),
+            (
+                corpus!("head_places_grouped"),
+                vec![],
+                End::Message(Error::Places {
+                    series: 3,
+                    places: 2,
+                }),
+            ),
+            (
+                corpus!("head_series_grouped"),
+                vec![],
+                End::Message(Error::Series),
+            ),
+            (
+                corpus!("head_short_grouped"),
+                vec![],
+                End::Message(Error::Length { len: 6 }),
+            ),
+            (
+                corpus!("head_stamp_form_grouped"),
+                vec![],
+                End::Message(Error::Stamp),
+            ),
+            (
+                corpus!("head_time_grouped"),
+                vec![],
+                End::Message(Error::Path { byte: 3 }),
+            ),
+            (
+                corpus!("index_absent_grouped"),
+                vec![],
+                End::Layout(types::frame::Error::IndexAbsent { entry: 1, index: 0 }),
+            ),
+            (
+                corpus!("layout_before_grouped"),
+                vec![],
+                End::Layout(types::frame::Error::End(BadEnd::Before {
+                    end: 8,
+                    start: 16,
+                })),
+            ),
+            (
+                corpus!("pool_full_grouped"),
+                vec![None],
+                cut(75, Some(4_194_315)),
+            ),
+            (
+                corpus!("skip_cut_grouped"),
+                vec![None],
+                cut(25_498, Some(98_331)),
+            ),
+            (corpus!("skip_frame_grouped"), vec![None, one(2)], done()),
+            (corpus!("two_frames_grouped"), vec![one(2), one(1)], done()),
+            (corpus!("two_groups"), vec![both.clone()], done()),
+            (corpus!("two_groups_counts_cut"), vec![], cut(43, Some(79))),
+            (corpus!("two_groups_counts_over_run"), vec![], run(3, 2)),
+            (
+                corpus!("two_groups_counts_samples"),
+                vec![],
+                End::Message(Error::Samples),
+            ),
+            (
+                corpus!("two_groups_counts_split"),
+                vec![both.clone()],
+                done(),
+            ),
+            (corpus!("two_groups_node"), vec![both.clone()], done()),
+            (
+                corpus!("two_groups_second"),
+                vec![Some(ranges(&[(1, 1)]))],
+                done(),
+            ),
+            (
+                corpus!("two_groups_skip"),
+                vec![None],
+                cut(812, Some(131_119)),
+            ),
+            (
+                corpus!("two_groups_two_frames"),
+                vec![both.clone(), both],
+                done(),
+            ),
+        ];
+        for ((name, bytes), frames, end) in cases {
+            assert_eq!(drive(bytes), (frames, end), "{name}");
         }
     }
 }

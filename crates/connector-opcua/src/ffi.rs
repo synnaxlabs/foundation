@@ -103,7 +103,6 @@ impl Status {
     pub(crate) const BAD_UNEXPECTED_ERROR: Self = Self(0x8001_0000);
     #[cfg(test)]
     pub(crate) const BAD_INTERNAL_ERROR: Self = Self(0x8002_0000);
-    #[cfg(test)]
     pub(crate) const BAD_OUT_OF_RANGE: Self = Self(0x803C_0000);
     #[cfg(test)]
     pub(crate) const BAD_NOT_SUPPORTED: Self = Self(0x803D_0000);
@@ -333,6 +332,14 @@ pub(crate) fn types() -> &'static [DataType; TYPES] {
 /// `UA_NS0ID_SERVER_SERVERCAPABILITIES_OPERATIONLIMITS_MAXNODESPERREAD`, the node of
 /// the most nodes of one Read request of a server, a `UInt32`. `shim.c` asserts it.
 pub(crate) const MAX_NODES_PER_READ: u32 = 11705;
+
+/// `UA_DATETIME_UNIX_EPOCH`, the 100 ns ticks of a `DateTime` from 1601 to the Unix
+/// epoch. `shim.c` asserts it.
+pub(crate) const UNIX_EPOCH: i64 = 116_444_736_000_000_000;
+
+/// `UA_NS0ID_SERVER_SERVERSTATUS_CURRENTTIME`, the node of the current time of a
+/// server. `shim.c` asserts it.
+pub(crate) const TIME: u32 = 2258;
 
 /// `UA_NS0ID_SERVER_SERVERSTATUS_STATE`, the node of the state of a server. `shim.c`
 /// asserts it.
@@ -829,6 +836,7 @@ unsafe extern "C" {
         count: usize,
     ) -> *mut c_void;
     pub(crate) fn shim_value_node(value: *const DataValue, out: *mut Node<'_>) -> u32;
+    pub(crate) fn shim_value_time(value: *const DataValue, out: *mut i64) -> u32;
     pub(crate) fn shim_value_unit(
         value: *const DataValue,
         uri: *mut Bytes,

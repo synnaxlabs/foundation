@@ -70,7 +70,13 @@ async fn forward(
     Ok(match Message::decode(&answer) {
         Some(Message::Proposed { at }) => Some(at),
         Some(
-            Message::Raft(_) | Message::Propose { .. } | Message::NotLeader { .. },
+            Message::Raft(_)
+            | Message::Propose { .. }
+            | Message::NotLeader { .. }
+            | Message::Join { .. }
+            | Message::Joined { .. }
+            | Message::Unjoined { .. }
+            | Message::Founding { .. },
         )
         | None => None,
     })

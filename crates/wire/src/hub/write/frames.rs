@@ -18,11 +18,10 @@ pub struct Frames {
     places: u32,
     next: Next,
     head: Option<Head>,
-    /// Each present group of the frame and its count, once its ends are whole.
-    counts: Vec<(u32, u32)>,
-    /// The counts that came. The run of counts is due while it is below
-    /// `counts.len()`.
-    counted: usize,
+    /// The counts of the frame's run of counts, from its draft or skip on.
+    counts: u32,
+    /// The counts that came. The run of counts is due while it is below `counts`.
+    counted: u32,
     assembly: Assembly<true>,
 }
 
@@ -64,11 +63,10 @@ pub enum Step {
 }
 
 impl Frames {
-    /// The bytes that a `Frames` of `places` places holds for their ends and counts.
+    /// The bytes that a `Frames` of `places` places holds for their ends.
     #[must_use]
     pub const fn bytes(places: usize) -> usize {
         Assembly::<true>::bytes(places)
-            .saturating_add(places.saturating_mul(size_of::<(u32, u32)>()))
     }
 
     /// The frames of a write stream whose places are the entries of `set`, in order.
@@ -84,7 +82,7 @@ impl Frames {
             places,
             next: Next::Head,
             head: None,
-            counts: Vec::with_capacity(set.entries().len()),
+            counts: 0,
             counted: 0,
             assembly: Assembly::reserved(set),
         }
@@ -107,6 +105,9 @@ impl Frames {
                 .assembly
                 .layout()
                 .map(|layout| Due::Draft { layout, form });
+        }
+        if self.counted < self.counts {
+            return Ok(Due::Message);
         }
         Ok(self
             .assembly
@@ -135,17 +136,14 @@ impl Frames {
     #[inline]
     pub fn decode(&mut self, message: &[u8]) -> Result<Step, Error> {
         self.assembly.check_undrafted("the next message");
-        if self.counted < self.counts.len() {
+        if self.counted < self.counts {
             return self.counts(message);
         }
         match self.next {
             Next::Head => self.head(message),
             Next::Ends { .. } => {
                 let (ends, last) = self.next.ends(message)?;
-                self.assembly.ends(ends, false);
-                if last {
-                    self.ended();
-                }
+                self.assembly.ends(ends, last);
                 Ok(Step::More)
             }
             Next::Body(body) => {
@@ -175,7 +173,7 @@ impl Frames {
     }
 
     /// Takes the draft, which is of the layout and form of [`Due::Draft`]. Gives the
-    /// frame when it has no body, else [`Step::More`].
+    /// frame when it has no run of counts and no body, else [`Step::More`].
     ///
     /// # Panics
     ///
@@ -183,10 +181,7 @@ impl Frames {
     #[inline]
     pub fn draft(&mut self, draft: Draft) -> Step {
         self.assembly.draft(draft);
-        match self.next.body() {
-            Some(_) => Step::More,
-            None => self.frame(),
-        }
+        self.drafted()
     }
 
     /// Takes no draft for the frame whose draft is due, when the pool of the home has
@@ -200,9 +195,7 @@ impl Frames {
     #[inline]
     pub fn skip(&mut self) {
         self.assembly.skip();
-        if self.next.body().is_none() {
-            self.frame();
-        }
+        self.drafted();
     }
 
     /// Checks the end of the stream, when the program finished it.
@@ -217,7 +210,7 @@ impl Frames {
     pub fn finish(&self) -> Result<(), Error> {
         self.assembly.check_undrafted("the end of the stream");
         let (remain, body) = match self.next {
-            Next::Head if self.counted == self.counts.len() => return Ok(()),
+            Next::Head if self.counted == self.counts => return Ok(()),
             Next::Head => (0, None),
             Next::Ends { remain } => (remain, None),
             Next::Body(body) => (0, Some(body)),
@@ -239,13 +232,9 @@ impl Frames {
         }
         let (at, len) =
             body.map_or((0, 0), |body| (body.at(), sum(body.at(), body.remain())));
-        // A head that the node stamps has no run of counts.
-        let counts = |n| match head.time {
-            Time::Frame(_) => product(n, counts::LEN),
-            Time::Node => 0,
-        };
+        let counts = |n| product(to_usize(n), counts::LEN);
         let counted = sum(run, counts(self.counted));
-        let whole = sum(run, counts(self.counts.len()));
+        let whole = sum(run, counts(self.counts));
         Err(Error::Cut {
             received: sum(counted, at),
             len: Some(
@@ -264,7 +253,7 @@ impl Frames {
             });
         }
         self.head = Some(head);
-        self.counts.clear();
+        self.counts = 0;
         self.counted = 0;
         self.assembly.head();
         self.next = Next::Ends {
@@ -273,30 +262,18 @@ impl Frames {
         Ok(Step::Head(head))
     }
 
-    /// Starts the run of counts after the last end: one count for each index among the
-    /// ends. A head of [`Time::Node`] has none, and each of its groups holds 1.
-    fn ended(&mut self) {
-        let set = self.assembly.set();
-        let entries = set.entries();
-        // Only an index above the last one counts, so that a group whose index repeats
-        // asks one count. The layout refuses such ends.
-        let mut last = None;
-        self.counts
-            .extend(self.assembly.entries().filter_map(|entry| {
-                let place = entries.get(entry)?;
-                let index =
-                    set.index(entry) == entry && last.is_none_or(|last| entry > last);
-                index.then(|| {
-                    last = Some(entry);
-                    (place.group, 1)
-                })
-            }));
-        if self.head.is_some_and(|head| head.time == Time::Node) {
-            self.counted = self.counts.len();
+    /// Starts the run of counts of a draft or a skip: one count for each range. A
+    /// head of [`Time::Node`] has none, and each of its ranges holds 1.
+    fn drafted(&mut self) -> Step {
+        let ranges = self.assembly.groups().count();
+        match self.head.expect("invariant: a draft has a head").time {
+            Time::Frame(_) => {
+                self.counts = u32::try_from(ranges)
+                    .expect("invariant: a frame has at most u32::MAX groups");
+            }
+            Time::Node => self.assembly.count(0, std::iter::repeat_n(1, ranges)),
         }
-        if self.counted == self.counts.len() {
-            self.assembly.whole();
-        }
+        self.counted()
     }
 
     /// Takes a message of the run of counts.
@@ -306,35 +283,36 @@ impl Frames {
         if counts.contains(&[0; counts::LEN]) {
             return Err(Error::Samples);
         }
-        self.fill(counts);
-        Ok(Step::More)
+        Ok(self.fill(counts))
     }
 
     /// The counts of the run that did not come.
     fn uncounted(&self) -> u32 {
-        let remain = self
-            .counts
-            .len()
+        self.counts
             .checked_sub(self.counted)
-            .expect("invariant: no more counts came than are due");
-        u32::try_from(remain).expect("invariant: a frame has at most u32::MAX groups")
+            .expect("invariant: no more counts came than are due")
     }
 
     /// Sets the next counts that are due from `counts`, which do not pass the run.
-    fn fill(&mut self, counts: &[[u8; counts::LEN]]) {
-        let due = self
-            .counts
-            .get_mut(self.counted..)
+    fn fill(&mut self, counts: &[[u8; counts::LEN]]) -> Step {
+        self.assembly.count(
+            to_usize(self.counted),
+            counts.iter().map(|&bytes| u32::from_le_bytes(bytes)),
+        );
+        let came = u32::try_from(counts.len())
             .expect("invariant: no more counts came than are due");
-        for ((_, count), &bytes) in due.iter_mut().zip(counts) {
-            *count = u32::from_le_bytes(bytes);
-        }
         self.counted = self
             .counted
-            .checked_add(counts.len())
-            .expect("invariant: the counts fit a usize");
-        if self.counted == self.counts.len() {
-            self.assembly.whole();
+            .checked_add(came)
+            .expect("invariant: no more counts came than are due");
+        self.counted()
+    }
+
+    /// The frame when its counts came and it has no body, else [`Step::More`].
+    fn counted(&mut self) -> Step {
+        match self.next.body() {
+            None if self.counted == self.counts => self.frame(),
+            _ => Step::More,
         }
     }
 
@@ -348,12 +326,9 @@ impl Frames {
     #[inline]
     fn frame(&mut self) -> Step {
         let head = self.head.take().expect("invariant: a frame has a head");
-        let Some(mut draft) = self.assembly.take() else {
+        let Some(draft) = self.assembly.take() else {
             return Step::More;
         };
-        for &(group, count) in &self.counts {
-            draft.set_count(group, count);
-        }
         Step::Frame {
             draft,
             time: head.time,
