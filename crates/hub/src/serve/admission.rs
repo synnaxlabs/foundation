@@ -37,8 +37,9 @@ impl Admission {
         }
     }
 
-    /// Admits `signed`, or renews the hello that the session holds with it. Checks no
-    /// nonce: the caller checks it.
+    /// Admits `signed`, or renews the hello that the session holds with it. A renewal
+    /// keeps the peer of the first hello. Checks no nonce: the node that carried the
+    /// hello checks it.
     ///
     /// # Errors
     ///
@@ -90,7 +91,7 @@ impl Admission {
     ) -> Result<Signed, Error> {
         let state = state.borrow();
         let admitted = self.admitted.borrow();
-        let (admitted, hello) = admitted
+        let (admitted, kept) = admitted
             .as_ref()
             .expect("invariant: a session verifies only after its hello");
         state
@@ -99,7 +100,7 @@ impl Admission {
             .map_err(Error::Access)?;
         Ok(Signed {
             hello: admitted.hello().clone(),
-            signature: *hello,
+            signature: *kept,
         })
     }
 
