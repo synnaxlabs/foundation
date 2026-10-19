@@ -6261,9 +6261,8 @@ mod tests {
                 });
             }
 
-            /// Some tests read the newest parts in the buffer or the tick of the shard:
-            /// a public call shows them only after a restart, which ends the run whose
-            /// state the test checks.
+            /// Some tests read the newest parts in the buffer: a public call shows them
+            /// only after a restart, which ends the run whose state the test checks.
             mod records {
                 use super::*;
 
@@ -6575,24 +6574,32 @@ mod tests {
                         assert!(shard.carry(Slot::new(0), common::key(Slot::new(0))));
                         shard.shed(Slot::new(0));
                         tick(&test, &mut shard).await;
-                        assert_eq!(shard.tick, None, "no index is carried");
+                        assert_eq!(shard.deadline(), None, "no index is carried");
                         assert!(shard.carry(Slot::new(0), common::key(Slot::new(0))));
-                        assert!(shard.tick.is_some(), "the parts wait");
                         let wall = test.node.wall();
                         test.tasks.spawn(async move { clock.run(wall).await });
                         while shard.now().is_none() {
                             test.clock.sleep(Span::from_nanos(1)).await;
                         }
+                        let now = test.reader.now().monotonic;
+                        let deadline = shard.deadline().expect("the parts wait");
+                        assert!(deadline <= now + INTERVAL, "the parts wait");
                         tick(&test, &mut shard).await;
                         shard.committed().await.expect("the commit ends");
-                        let newest = crate::named::Parts::newest(&shard.buffer);
-                        assert_eq!(newest[&Slot::new(0)].records(), []);
-                        assert_eq!(shard.tick, None, "no tick is due");
+                        let now = test.reader.now().monotonic;
+                        let deadline = shard.deadline().expect("the grace");
+                        assert!(deadline > now + INTERVAL, "no tick is due");
+                    })
+                    .expect("the run after the first cut ends");
+                    sim.crash(&node, sim::Crash::Power);
+                    sim.run_on(&node, |node, tasks| async move {
+                        let test = Test::new(node, tasks);
+                        let mut shard = test.shard(AREA).await;
                         let a = open(&mut shard, "a");
-                        shard.committed().await.expect("the commit ends");
+                        commit(&mut shard).await;
                         assert_eq!(caught_up(&mut shard, a, 0).await, [], "live tail");
                     })
-                    .expect("the run after the cut ends");
+                    .expect("the run after the second cut ends");
                 }
 
                 #[test]
@@ -7541,20 +7548,22 @@ mod tests {
 
                 #[test]
                 fn drops_at_a_tick_the_holds_of_a_shed_whose_carry_found_no_block() {
-                    run(212, |test| async move {
-                        let mut shard = test.shard(AREA).await;
-                        let held = open(&mut shard, "a");
-                        shard.committed().await.expect("the commit ends");
-                        close(&mut shard, held.into());
-                        tick(&test, &mut shard).await;
+                    let before = async |test: &Test, shard: &mut Shard, w| {
+                        acked(test, shard, w).await;
+                        let held = open(shard, "a");
+                        close(shard, held.into());
+                        shard.close_writer(w);
+                        tick(test, shard).await;
                         let blocks = test.fill();
                         shard.shed(Slot::new(0));
                         assert!(shard.carry(Slot::new(0), common::key(Slot::new(0))));
                         drop(blocks);
-                        tick(&test, &mut shard).await;
-                        shard.committed().await.expect("the commit ends");
-                        let newest = crate::named::Parts::newest(&shard.buffer);
-                        assert_eq!(newest[&Slot::new(0)].records(), []);
+                        tick(test, shard).await;
+                    };
+                    restart(212, before, async |_, shard: &mut Shard| {
+                        let a = open(shard, "a");
+                        commit(shard).await;
+                        assert_eq!(caught_up(shard, a, 0).await, [], "live tail");
                     });
                 }
 
