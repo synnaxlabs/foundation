@@ -11,7 +11,7 @@ use types::time::Span;
 /// What a writer opens with.
 #[derive(Clone, Debug)]
 pub struct Writer {
-    /// The holder that the gate ranks and the home records.
+    /// The writer as the gate ranks it. The home records it when it takes control.
     pub holder: control::Writer,
     /// The control lease, or `None` for no limit. It runs on each index apart: from
     /// when the writer takes control there, and again from each group applied or
