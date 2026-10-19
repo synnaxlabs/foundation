@@ -301,9 +301,9 @@ pub enum Reply {
         /// What the home did with the group.
         outcome: Outcome,
     },
-    /// Each frame among the first `frames` frames of the stream that holds `group`,
-    /// and whose `group` its home took, is on disk at that home. `frames` never goes
-    /// back, and never passes the frames whose groups each got an [`Outcome`].
+    /// Of the first `frames` frames of the stream, each frame that holds `group`, and
+    /// whose `group` its home took, is on disk at that home. `frames` never goes back,
+    /// and never passes the frames whose groups each got an [`Outcome`].
     Stored {
         /// The group that it covers.
         group: u32,
