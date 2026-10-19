@@ -199,12 +199,13 @@
   `subscribe(nodes, sampling)` asks for a publishing interval of the longer of
   `sampling` and 100 ms, at most 1 min, a keep-alive count of max(1, floor(1 min /
   interval)), and a queue of each item that holds the samples of two revised publishing
-  intervals. When the revised interval times the revised keep-alive count is over 5 min,
-  half of the 10 min timeout of a Publish request in open62541, `subscribe` fails with
-  `BadOutOfRange` and sends no Publish request: the client sends Publish requests only
-  after this check. At `BadNoSubscription` in a Publish answer, the patched open62541
-  deletes each local subscription, so `changes` ends with `BadNoSubscription` and no
-  Publish request goes out again; the release only logs it and sends again at once
+  intervals. When the revised interval is not positive, or times the larger of 1 and the
+  revised keep-alive count is over 5 min, half of the 10 min timeout of a Publish
+  request in open62541, `subscribe` fails with `BadOutOfRange` and sends no Publish
+  request: the client sends Publish requests only after this check. At
+  `BadNoSubscription` in a Publish answer, the patched open62541 deletes each local
+  subscription, so `changes` ends with `BadNoSubscription` and no Publish request goes
+  out again; the release only logs it and sends again at once
   (`laptop.architect-2`, 2026-10-19T22:06:54Z,
   https://github.com/synnaxlabs/foundation/pull/3435#issuecomment-6278430237). This caps
   the publishing interval of item 1 of

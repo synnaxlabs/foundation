@@ -104,9 +104,10 @@ impl Client {
     /// result of a `CreateMonitoredItems` call goes to each item of that call, also the
     /// `BadInternalError` that open62541 gives when the answer has more or fewer
     /// results than the call. `BadRequestTooLarge` goes to a node that does not fit
-    /// one call. `BadOutOfRange` when the publishing interval times the keep-alive
-    /// count that the server gives is over 5 min, half of the timeout of a Publish
-    /// request in open62541, with no Publish request sent.
+    /// one call. `BadOutOfRange` when the publishing interval that the server gives is
+    /// not positive, or times the larger of 1 and the keep-alive count that the server
+    /// gives is over 5 min, half of the timeout of a Publish request in open62541, with
+    /// no Publish request sent.
     ///
     /// # Panics
     ///
@@ -135,8 +136,9 @@ impl Client {
             .expect("invariant: at most 600 intervals of 100 ms fill 1 min");
         let request = Request::subscribe(ms(interval), keep_alive, saturate(most));
         let (id, interval, keep_alive) = self.serve(&request).await?.subscription();
-        let silence = interval * f64::from(keep_alive);
-        if silence > ms(SILENCE) || silence.is_nan() {
+        let silence = interval * f64::from(keep_alive.max(1));
+        let bounded = interval > 0.0 && silence <= ms(SILENCE);
+        if !bounded {
             return Err(Status::BAD_OUT_OF_RANGE);
         }
         // SAFETY: the client lives.

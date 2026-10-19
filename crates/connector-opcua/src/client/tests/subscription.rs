@@ -310,15 +310,31 @@ fn a_keep_alive_past_5_min_fails_with_no_publish_request() {
     );
 }
 
-/// A publishing interval that is not a number fails as one past the bound.
-#[test]
-fn a_publishing_interval_of_nan_fails() {
-    let revised = rewritten(|message| {
+/// Gives the publishing interval of [`rewritten`] with the revised publishing interval
+/// `interval` ms and keep-alive count `keep_alive` in the `CreateSubscription` answer.
+fn revised(interval: f64, keep_alive: u32) -> Result<Span, Status> {
+    let revised = rewritten(move |message| {
         if is(message, SUBSCRIBE_RESPONSE) {
-            message[56..64].copy_from_slice(&f64::NAN.to_le_bytes());
+            message[56..64].copy_from_slice(&interval.to_le_bytes());
+            message[68..72].copy_from_slice(&keep_alive.to_le_bytes());
         }
     });
-    assert_eq!(revised, Err(Status::BAD_OUT_OF_RANGE));
+    revised.map(|revised| revised.interval)
+}
+
+/// A revised publishing interval that is not positive fails as one past the bound. A
+/// keep-alive count of 0 holds a Publish request for one interval, as one of 1 does.
+#[test]
+fn a_revised_interval_that_is_not_positive_fails() {
+    let refused = Err(Status::BAD_OUT_OF_RANGE);
+    let got = [
+        revised(f64::NAN, 600),
+        revised(-1000.0, 600),
+        revised(0.0, 600),
+        revised(600_000.0, 0),
+        revised(100.0, 0),
+    ];
+    assert_eq!(got, [refused, refused, refused, refused, Ok(ms(100))]);
 }
 
 /// At a sampling of 2 min, the publishing interval is 1 min, so the server holds each
