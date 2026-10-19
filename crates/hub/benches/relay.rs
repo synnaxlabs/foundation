@@ -11,6 +11,8 @@
 //! - `timer`: an empty closure, the floor of each timed poll.
 //! - `write 1x2`: the control, `Writer::write` alone of a frame of one sample of an
 //!   index and a data channel.
+//! - `write 2x(1x2)`, `write 8x(1x2)`: as `write 1x2`, of frames of two and eight
+//!   groups, which one writer of the home takes whole.
 //! - `live 1x2`: frames as the control, of `Time::Frame(Path::Live)`.
 //! - `node 1x2`: as `live 1x2`, of `Time::Node`, so the node stamps the index.
 //! - `live 100x2`: as `live 1x2`, with 100 samples per series.
@@ -20,6 +22,7 @@
 //! - `live 2x(1x2)`: frames of two groups, each as `live 1x2`, so the serve copies the
 //!   series of each group into a draft of its own writer.
 //! - `live 8x(1x2)`: as `live 2x(1x2)`, with eight groups.
+//! - `live 1/8x(1x2)`: as `live 8x(1x2)`, with frames that hold one group.
 //!
 //! Compare two builds on one pinned core whose SMT sibling is idle.
 
@@ -44,6 +47,7 @@ mod serving;
 mod sessions;
 mod table;
 
+use std::iter;
 use std::pin::pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
@@ -52,12 +56,13 @@ use agent::Agent;
 use common::name;
 use env::tasks::Tasks;
 use fixture::{channel_name, create_hub};
-use hub::writer;
+use hub::home;
+use hub::writer::{self, Writer};
 use hub::{Hub, Served};
 use table::Line;
 use transport::Address;
 use types::authority::Authority;
-use types::frame::{Form, Path};
+use types::frame::{Draft, Form, Label, Path};
 use types::sample::{Scalar, Type};
 use types::time::Span;
 use wire::hub::client::Place;
@@ -74,6 +79,9 @@ const ROUNDS: usize = 50;
 const STEP: Span = Span::MILLISECOND;
 /// The keys of each case's channels start at a multiple of `LINE`.
 const LINE: u128 = 1000;
+/// The name and groups of each control line.
+const CONTROLS: [(&str, u32); 3] =
+    [("write 1x2", 1), ("write 2x(1x2)", 2), ("write 8x(1x2)", 8)];
 
 /// A write stream that the bench serves.
 struct Case {
@@ -82,20 +90,23 @@ struct Case {
     node: bool,
     /// Samples per series.
     count: u32,
-    /// Groups per frame, each on an index of its own.
+    /// Groups of the write, each on an index of its own.
     groups: u32,
+    /// Groups that each frame holds: those of the first places.
+    present: u32,
     /// Series per group: the index and its data channels.
     series: u32,
     /// A writer of the home holds control, so each frame is refused as `Waiting`.
     waiting: bool,
 }
 
-const CASES: [Case; 7] = [
+const CASES: [Case; 8] = [
     Case {
         name: "live 1x2",
         node: false,
         count: 1,
         groups: 1,
+        present: 1,
         series: 2,
         waiting: false,
     },
@@ -104,6 +115,7 @@ const CASES: [Case; 7] = [
         node: true,
         count: 1,
         groups: 1,
+        present: 1,
         series: 2,
         waiting: false,
     },
@@ -112,6 +124,7 @@ const CASES: [Case; 7] = [
         node: false,
         count: 100,
         groups: 1,
+        present: 1,
         series: 2,
         waiting: false,
     },
@@ -120,6 +133,7 @@ const CASES: [Case; 7] = [
         node: false,
         count: 1,
         groups: 1,
+        present: 1,
         series: 64,
         waiting: false,
     },
@@ -128,6 +142,7 @@ const CASES: [Case; 7] = [
         node: false,
         count: 1,
         groups: 1,
+        present: 1,
         series: 2,
         waiting: true,
     },
@@ -136,6 +151,7 @@ const CASES: [Case; 7] = [
         node: false,
         count: 1,
         groups: 2,
+        present: 2,
         series: 2,
         waiting: false,
     },
@@ -144,6 +160,16 @@ const CASES: [Case; 7] = [
         node: false,
         count: 1,
         groups: 8,
+        present: 8,
+        series: 2,
+        waiting: false,
+    },
+    Case {
+        name: "live 1/8x(1x2)",
+        node: false,
+        count: 1,
+        groups: 8,
+        present: 1,
         series: 2,
         waiting: false,
     },
@@ -214,25 +240,27 @@ async fn bench(
     let transport = net::transport(&node, &tasks, &net::own_pool(), net::HOME, 1 << 16);
     let indexes = (0..=CASES.len())
         .flat_map(|at| {
-            let groups = CASES.get(at).map_or(1, |case| case.groups);
+            let groups = CASES.get(at).map_or(8, |case| case.groups);
             (0..groups).map(move |g| group(at, g))
         })
         .map(|index| (index, index + 1..=index + 63));
     let (hub, now) = create_hub(&node, tasks.clone(), indexes).await;
     hub.set_rules(sessions::rules());
     let mut timer = Line::new("timer", FRAMES);
-    let mut lines = vec![control(&node, &hub, now, &mut timer, &progress).await];
+    let mut lines = Vec::new();
+    let mut stamp = now - 10_000_000;
+    for (name, groups) in CONTROLS {
+        let (line, after) =
+            control(&node, &hub, (name, groups), stamp, &mut timer).await;
+        lines.push(line);
+        stamp = after;
+    }
+    progress.stamp.store(stamp, Ordering::Relaxed);
     let (session, remote) = serving::program(&transport, &hub, &tasks).await;
     let mut partial = 0;
     for (at, case) in CASES.iter().enumerate() {
         let holder = if case.waiting {
-            let config = writer::Config {
-                subject: name("holder"),
-                authority: Authority(1),
-                lease: None,
-                channels: vec![channel_name(base(at) + 1)],
-            };
-            Some(hub.writer(config).await.expect("opens"))
+            Some(holder(&hub, at).await)
         } else {
             None
         };
@@ -279,44 +307,68 @@ async fn bench(
     (timer, lines, partial, stored)
 }
 
-/// The `write 1x2` line. Stores in `progress` the stamp after its last frame.
+/// A writer that holds the first channel of case `at`, so that its program waits.
+async fn holder(hub: &Hub, at: usize) -> Writer {
+    let config = writer::Config {
+        subject: name("holder"),
+        authority: Authority(1),
+        lease: None,
+        channels: vec![channel_name(base(at) + 1)],
+    };
+    hub.writer(config).await.expect("opens")
+}
+
+/// The control line `name` of `groups`, whose first stamp is after `stamp`. Gives
+/// the line and mesh time after its last frame.
 async fn control(
     node: &sim::node::Node,
     hub: &Hub,
-    now: i64,
+    (name, groups): (&'static str, u32),
+    mut stamp: i64,
     timer: &mut Line,
-    progress: &Progress,
-) -> Line {
-    let mut line = Line::new("write 1x2", FRAMES);
+) -> (Line, i64) {
+    let mut line = Line::new(name, FRAMES);
+    let channels = (0..groups).map(|g| channel_name(group(CASES.len(), g) + 1));
     let config = writer::Config {
-        subject: name("control"),
+        subject: common::name("control"),
         authority: Authority(1),
         lease: None,
-        channels: vec![channel_name(base(CASES.len()) + 1)],
+        channels: channels.collect(),
     };
     let mut writer = hub.writer(config).await.expect("opens");
-    let mut stamp = now - 10_000_000;
+    let series: Vec<_> = (0..writer.set().entries().len())
+        .map(|entry| (entry, 8))
+        .collect();
     for round in 0..WARMUP + ROUNDS {
         for _ in 0..FRAMES {
-            let mut draft =
-                writer.draft(Form::Raw, &[(0, 8), (1, 8)]).expect("a frame");
+            let mut draft = writer.draft(Form::Raw, &series).expect("a frame");
             stamp += 1;
-            for entry in 0..2 {
+            for &(entry, _) in &series {
                 let bytes = draft.series_mut(entry).expect("present");
                 bytes.copy_from_slice(&stamp.to_le_bytes());
             }
-            draft.set_count(0, 1);
+            draft.set_counts(0, iter::repeat_n(1, series.len() / 2));
             timer.add(table::timed(&ALLOCATOR, || ()).1);
-            line.add(table::timed(&ALLOCATOR, || common::write(&mut writer, draft)).1);
+            line.add(table::timed(&ALLOCATOR, || write(&mut writer, draft)).1);
         }
         node.clock().sleep(common::SETTLE).await;
         timer.close(round >= WARMUP);
         line.close(round >= WARMUP);
     }
-    progress
-        .stamp
-        .store(writer.now().nanos(), Ordering::Relaxed);
-    line
+    (line, writer.now().nanos())
+}
+
+/// Writes `draft` with `writer`, whose home applies each group.
+fn write(writer: &mut Writer, draft: Draft) {
+    let outcomes = writer
+        .write(Label::Path(Path::Live), draft)
+        .expect("the home takes it");
+    assert!(
+        outcomes
+            .iter()
+            .all(|o| matches!(o, home::Outcome::Applied { .. })),
+        "the home applies the frame: {outcomes:?}"
+    );
 }
 
 /// The program: opens a write for each case, and sends each round when the home lets
@@ -356,7 +408,7 @@ async fn program(
             }
             progress.sent.fetch_add(FRAMES, Ordering::Relaxed);
             let mut outcomes = 0;
-            while outcomes < FRAMES * usize::try_from(case.groups).expect("few") {
+            while outcomes < FRAMES * usize::try_from(case.present).expect("few") {
                 match stream.reply().await {
                     Reply::Outcome {
                         outcome: Outcome::Taken { .. },
@@ -401,13 +453,13 @@ fn head(case: &Case) -> Head {
             Time::Frame(Path::Live)
         },
         form: Form::Raw,
-        series: case.series * case.groups,
+        series: case.series * case.present,
     }
 }
 
 /// The count of each group of a frame of `case`.
 fn counts(case: &Case) -> Vec<u32> {
-    vec![case.count; usize::try_from(case.groups).expect("few")]
+    vec![case.count; usize::try_from(case.present).expect("few")]
 }
 
 /// The ends and body of a frame of `case` whose first stamp is `stamp`. The data
@@ -415,7 +467,17 @@ fn counts(case: &Case) -> Vec<u32> {
 fn frame(case: &Case, places: &[Place], stamp: i64) -> (Vec<(u32, u32)>, Vec<u8>) {
     let mut body = Vec::new();
     let mut ends = Vec::new();
+    let present = usize::try_from(case.present).expect("few");
+    let mut indexes = Vec::new();
+    for info in places {
+        if indexes.len() < present && !indexes.contains(&info.index) {
+            indexes.push(info.index);
+        }
+    }
     for (place, info) in places.iter().enumerate() {
+        if !indexes.contains(&info.index) {
+            continue;
+        }
         let index = info.data_type == Type::Scalar(Scalar::Stamp);
         for sample in 0..i64::from(case.count) {
             let value = if case.node && index {
