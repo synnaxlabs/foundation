@@ -1,14 +1,12 @@
 """The test-only functions of a build with the feature `sim`."""
 
-import sys
 import time
 import unittest
 
 import numpy as np
 
-import foundation
 from foundation import _native
-from test_client import Node, fork
+from test_client import Node
 from test_writer import planted
 
 
@@ -62,40 +60,25 @@ class WriterSimTest(unittest.TestCase):
     def test_series_over_the_bytes_of_one_frame_raise_before_their_copy(self) -> None:
         node = Node()
         self.addCleanup(node.stop)
-        planted(node).close()
-        data = node.data
+        client = planted(node)
+        self.addCleanup(client.close)
         count = 2**31
-
-        def child() -> object:
-            client = foundation.connect(data=data)
-            series = {
-                "plant.a": np.broadcast_to(np.zeros(1), count),
-                "plant.time": np.broadcast_to(np.zeros(1, np.int64), count),
-            }
-            with client.open_writer("plant.a") as writer:
-                kept = writer._kept
-                # 8 GiB of address space over the child's size, so a copy of the 16 GiB
-                # of `plant.a` fails the child and not the host.
-                if sys.platform == "linux":
-                    import resource
-
-                    with open("/proc/self/statm") as statm:
-                        size = int(statm.read().split()[0]) * resource.getpagesize()
-                    limit = (size + 2**33, size + 2**33)
-                    resource.setrlimit(resource.RLIMIT_AS, limit)
-                try:
-                    writer.write_series(series)
-                except ValueError as error:
-                    text = (
-                        "the series hold 2147483648 samples, 17179869184 bytes, over "
-                        "the 57344 bytes of one frame"
-                    )
-                    if str(error) != text:
-                        return str(error)
-                    return None if writer._kept == kept else writer._kept
-            return "no error"
-
-        self.assertEqual(fork(child), 0)
+        # A copy of the 16 GiB of `plant.a` fails the last assertion, or ends the
+        # process when the host cannot hold it.
+        series = {
+            "plant.a": np.broadcast_to(np.zeros(1), count),
+            "plant.time": np.broadcast_to(np.zeros(1, np.int64), count),
+        }
+        with client.open_writer("plant.a") as writer:
+            kept = writer._kept
+            with self.assertRaises(ValueError) as raised:
+                writer.write_series(series)
+            self.assertEqual(
+                str(raised.exception),
+                "the series hold 2147483648 samples, 17179869184 bytes, over the 57344 "
+                "bytes of one frame",
+            )
+            self.assertEqual(writer._kept, kept)
 
 
 if __name__ == "__main__":
