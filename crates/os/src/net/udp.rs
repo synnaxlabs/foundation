@@ -2,6 +2,7 @@
 //! through Tokio.
 
 use std::io::{self, IoSliceMut};
+use std::iter;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::num::NonZeroUsize;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
@@ -68,38 +69,40 @@ impl Udp {
     }
 }
 
-/// The binds that `bind_free` tries before it gives up.
+/// The ports from `free` that `bind_free` tries before the kernel picks one.
 const TRIES: usize = 8;
 
-/// Binds `fd` to `local`. Port 0 on `[::]` takes a port from `free`, which gives one
-/// that no IPv4 socket holds: the macOS search for a free IPv6 port skips IPv4 binds.
-/// Another socket can take that port before the bind, so it tries [`TRIES`] times.
+/// Binds `fd` to `local`. Port 0 on `[::]` first tries ports from `free`, which gives
+/// ports that no IPv4 socket holds: the macOS search for a free IPv6 port skips IPv4
+/// binds. When `free` gives none, or [`TRIES`] of its ports are in use, the kernel
+/// picks the port.
 fn bind_free(
     fd: BorrowedFd<'_>,
     local: SocketAddr,
-    mut free: impl FnMut() -> Result<u16, Error>,
+    free: impl FnMut() -> Option<u16>,
 ) -> Result<(), Error> {
-    if !(local.ip() == Ipv6Addr::UNSPECIFIED && local.port() == 0) {
-        return bind(fd, local);
-    }
-    let mut tries = 1;
-    loop {
-        let mut at = local;
-        at.set_port(free()?);
-        match bind(fd, at) {
-            Err(Error::AddressInUse { .. }) if tries < TRIES => tries += 1,
-            bound => return bound,
+    if matches!(local, SocketAddr::V6(v6) if v6.ip().is_unspecified() && v6.port() == 0)
+    {
+        for port in iter::from_fn(free).take(TRIES) {
+            let mut at = local;
+            at.set_port(port);
+            match bind(fd, at) {
+                Err(Error::AddressInUse { .. }) => {}
+                bound => return bound,
+            }
         }
     }
+    bind(fd, local)
 }
 
-/// A port that no IPv4 socket holds, from a probe socket that it closes.
-fn free_v4_port() -> Result<u16, Error> {
+/// A port that no IPv4 socket holds, from a probe socket that it closes, or `None`
+/// when the probe fails.
+fn free_v4_port() -> Option<u16> {
     let any = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), 0);
-    let fd = super::socket(any, SocketType::DGRAM, ipproto::UDP).map_err(io_error)?;
-    bind(fd.as_fd(), any)?;
+    let fd = super::socket(any, SocketType::DGRAM, ipproto::UDP).ok()?;
+    rustix::net::bind(&fd, &any).ok()?;
     let probe = UdpSocket::from(fd);
-    Ok(probe.local_addr().map_err(|e| from_io(&e))?.port())
+    Some(probe.local_addr().ok()?.port())
 }
 
 /// Sets the buffer sizes of `config` on `fd`, and lets an IPv6 socket take IPv4,
@@ -528,7 +531,7 @@ mod tests {
         #[test]
         fn a_held_any_v6_address_is_in_use() {
             let first = Udp::bind(&config(SocketAddr::new(any_v6().ip(), 0))).unwrap();
-            let local = first.0.bound.local;
+            let local = udp::Driver::local(&first.0);
             let held = Udp::bind(&config(local));
             assert_eq!(held.map(drop), Err(Error::AddressInUse { local }));
         }
@@ -539,11 +542,12 @@ mod tests {
         #[test]
         fn port_0_on_any_v6_skips_the_held_ipv4_ports() {
             let held: Vec<_> = (0..100).map(|_| loopback()).collect();
-            let held: Vec<_> = held.iter().map(|u| u.bound.local.port()).collect();
+            let held: Vec<_> =
+                held.iter().map(|u| udp::Driver::local(u).port()).collect();
             let local = SocketAddr::new(any_v6().ip(), 0);
             for _ in 0..5_000 {
                 let udp = Udp::bind(&config(local)).unwrap().0;
-                assert!(!held.contains(&udp.bound.local.port()));
+                assert!(!held.contains(&udp::Driver::local(&udp).port()));
             }
         }
 
@@ -559,24 +563,24 @@ mod tests {
             UdpSocket::from(fd).local_addr().unwrap().port()
         }
 
-        /// Gives each port of `ports` in turn, and counts the calls.
-        fn ports(
-            ports: &[u16],
-            calls: &mut usize,
-        ) -> impl FnMut() -> Result<u16, Error> {
+        /// Gives each port of `ports` in turn, then `None`, and counts the calls.
+        fn ports(ports: &[u16], calls: &mut usize) -> impl FnMut() -> Option<u16> {
             move || {
                 *calls += 1;
-                Ok(ports[*calls - 1])
+                ports.get(*calls - 1).copied()
             }
         }
 
+        /// The only kill on Linux of a probe that gives no port or port 0: Linux gives
+        /// a `[::]:0` bind a port that no IPv4 socket holds with or without the probe.
+        /// On macOS `port_0_on_any_v6_skips_the_held_ipv4_ports` kills it.
         #[test]
         fn free_v4_port_gives_a_port_that_ipv4_binds() {
             let port = free_v4_port().unwrap();
             assert_ne!(port, 0);
             let local = SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), port);
             let udp = Udp::bind(&config(local)).unwrap().0;
-            assert_eq!(udp.bound.local.port(), port);
+            assert_eq!(udp::Driver::local(&udp).port(), port);
         }
 
         #[test]
@@ -606,7 +610,7 @@ mod tests {
         #[test]
         fn a_held_free_port_tries_the_next() {
             let held = Udp::bind(&config(SocketAddr::new(any_v6().ip(), 0))).unwrap();
-            let taken = held.0.bound.local.port();
+            let taken = udp::Driver::local(&held.0).port();
             let port = free_v4_port().unwrap();
             let mut given = [taken; TRIES];
             given[TRIES - 1] = port;
@@ -620,16 +624,28 @@ mod tests {
         }
 
         #[test]
-        fn gives_up_after_the_last_try() {
+        fn the_kernel_picks_after_the_last_try() {
             let held = Udp::bind(&config(SocketAddr::new(any_v6().ip(), 0))).unwrap();
-            let taken = held.0.bound.local;
+            let taken = udp::Driver::local(&held.0).port();
             let fd = any_v6_fd();
             let mut calls = 0;
             let local = SocketAddr::new(any_v6().ip(), 0);
-            let given = [taken.port(); TRIES + 1];
+            let given = [taken; TRIES + 1];
             let bound = bind_free(fd.as_fd(), local, ports(&given, &mut calls));
-            assert_eq!(bound, Err(Error::AddressInUse { local: taken }));
+            assert_eq!(bound, Ok(()));
             assert_eq!(calls, TRIES);
+            assert_ne!(port_of(fd), taken);
+        }
+
+        #[test]
+        fn the_kernel_picks_with_no_free_port() {
+            let fd = any_v6_fd();
+            let mut calls = 0;
+            let local = SocketAddr::new(any_v6().ip(), 0);
+            let bound = bind_free(fd.as_fd(), local, ports(&[], &mut calls));
+            assert_eq!(bound, Ok(()));
+            assert_eq!(calls, 1);
+            assert_ne!(port_of(fd), 0);
         }
     }
 
