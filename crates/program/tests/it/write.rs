@@ -638,6 +638,81 @@ fn sends_ends_over_one_message_as_whole_ends() {
     );
 }
 
+/// A writer of two groups sets the count of each group that its draft holds: group 1
+/// alone, then both.
+#[test]
+fn sends_the_count_of_each_group_of_a_draft() {
+    let places = [
+        place(1, STAMP, "time", 0),
+        place(2, I64, "a", 0),
+        place(3, STAMP, "other", 2),
+        place(4, I64, "b", 2),
+    ];
+    by_hand(
+        727,
+        move |session, node| async move {
+            let mut write = opened_with(&session, &places).await;
+            let frames: [(&[(u32, u32)], &[u32], usize, &[u32]); 2] = [
+                (&[(2, 8), (3, 16)], &[1], 16, &[1]),
+                (&[(0, 16), (1, 32), (2, 48), (3, 64)], &[2, 2], 64, &[0, 1]),
+            ];
+            for (frame, (ends, counts, body, groups)) in (1..).zip(frames) {
+                message(&mut write).await;
+                let want: Vec<u8> = (ends.iter())
+                    .flat_map(|(at, end)| [at.to_le_bytes(), end.to_le_bytes()])
+                    .flatten()
+                    .collect();
+                assert_eq!(message(&mut write).await, want);
+                let want: Vec<u8> =
+                    counts.iter().flat_map(|n| n.to_le_bytes()).collect();
+                assert_eq!(message(&mut write).await, want);
+                assert_eq!(message(&mut write).await.len(), body);
+                for &group in groups {
+                    let outcome = taken(0, 1);
+                    reply(
+                        &mut write,
+                        Reply::Outcome {
+                            frame,
+                            group,
+                            outcome,
+                        },
+                    )
+                    .await;
+                }
+            }
+            node.clock().sleep(QUIET).await;
+        },
+        |session, node| {
+            Box::pin(async move {
+                let mut writer =
+                    session.writer(config(&["a", "b"], 1)).await.expect("opens");
+                let frames: [(u32, &[(usize, usize)]); 2] = [
+                    (1, &[(2, 8), (3, 8)]),
+                    (2, &[(0, 16), (1, 16), (2, 16), (3, 16)]),
+                ];
+                for (count, series) in frames {
+                    writer
+                        .draft(Form::Raw, count, series)
+                        .await
+                        .expect("a frame");
+                    let outcome = writer.write(Time::Frame(Path::Live)).await;
+                    assert!(
+                        matches!(outcome, Ok(Outcome::Taken { .. })),
+                        "{outcome:?}"
+                    );
+                }
+                node.clock().sleep(QUIET).await;
+            })
+        },
+    );
+}
+
+/// The next message of a frame on `write`.
+async fn message(write: &mut Incoming) -> Vec<u8> {
+    let message = write.receiver.recv().await.expect("receives");
+    message.expect("a message of the frame").to_vec()
+}
+
 /// A call dropped while it sent its frame ends the writer, and the home gets no part
 /// of the cut frame or of the next.
 #[test]

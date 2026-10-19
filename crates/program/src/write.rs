@@ -129,9 +129,10 @@ impl Writer {
         let shared = &self.session.0;
         let layout = Layout::new(&self.set, series).map_err(Error::Layout)?;
         let mut draft = shared.retry(|| layout.draft(&shared.frames, form)).await?;
-        // A frame of no series has no group, and its write gives `Unsent`.
-        if !series.is_empty() {
-            draft.set_count(0, count);
+        for group in 0..to_u32(self.set.groups().len()) {
+            if draft.range(group).is_some() {
+                draft.set_count(group, count);
+            }
         }
         Ok(self.draft.insert(draft))
     }
@@ -169,7 +170,7 @@ impl Writer {
             .take()
             .expect("a write sends the draft of a call of `Writer::draft`");
         self.check()?;
-        let count = frame.range(0).map_or(0, |range| range.count);
+        let count = frame.ranges().next().map_or(0, |(_, range)| range.count);
         let form = frame.form();
         if count == 0 || time == Time::Node && (form != Form::Raw || count != 1) {
             return Err(Error::Unsent { count, form });
