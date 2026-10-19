@@ -272,6 +272,32 @@ fn a_trust_with_a_damaged_or_empty_block_of_another_label_ends_the_connect() {
 }
 
 #[test]
+fn a_trust_whose_begin_line_starts_no_block_drops_it() {
+    let (other, server) = blocks();
+    let server = server.replacen("-----BEGIN", "----BEGIN", 1);
+    assert_eq!(
+        trusting(format!("{other}{server}")),
+        Err(Error::Failed(Status::BAD_CERTIFICATE_UNTRUSTED))
+    );
+}
+
+#[test]
+fn a_trust_whose_end_line_names_another_label_ends_the_connect() {
+    let (other, server) = blocks();
+    for begin in [
+        "-----BEGIN CERTIFICATE------",
+        "-----BEGIN  CERTIFICATE-----",
+    ] {
+        let server = server.replacen("-----BEGIN CERTIFICATE-----", begin, 1);
+        assert_eq!(
+            trusting(format!("{other}{server}")),
+            Err(invalid(2)),
+            "{begin}"
+        );
+    }
+}
+
+#[test]
 fn a_trust_that_does_not_parse_ends_the_connect() {
     assert_eq!(
         trusting(b"no certificate"),
@@ -424,7 +450,8 @@ fn a_refusal_names_the_part_that_fails() {
         ),
         (
             Refusal::Invalid { number: 2 },
-            "certificate 2 of the trust does not parse",
+            "certificate 2 of the trust, or a damaged PEM block in its place, does not \
+             parse",
         ),
         (
             Refusal::Trailing { number: 3 },

@@ -96,9 +96,10 @@ pub(crate) unsafe fn unconnected(el: *mut ffi::EventLoop) -> NonNull<ffi::Client
 /// The certificate and private key of a peer, each DER or PEM, and its `trust`: DER
 /// certificates back to back, or PEM. In PEM, a client trusts each block of
 /// `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED CERTIFICATE`, each with one DER
-/// certificate and no byte after it. It skips text outside the blocks, DER bytes, a
-/// block with a damaged `BEGIN` line, and a block of another label, but a block of
-/// any label that is empty or whose base64 or `END` line is damaged refuses the
+/// certificate and no byte after it. A block starts at a line that starts with
+/// `-----BEGIN ` and ends with `-----`. It skips text outside the blocks, DER
+/// bytes, and a block of another label, but a block of any label that is empty, or
+/// whose base64 is damaged or whose `END` line does not name its label, refuses the
 /// trust. It does not trust a certificate in a skipped part, so the connect to its
 /// server gives `BadCertificateUntrusted`. A client offers each of the three policies
 /// of the copy on them, with the URI of `certificate` as its application URI.
@@ -134,7 +135,7 @@ pub(crate) enum Error {
 }
 
 /// Why open62541 refuses the [`Credentials`] of a client. Its `Display` names the
-/// part, such as "certificate 2 of the trust does not parse".
+/// part, such as "the key does not parse".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
     /// `certificate` does not parse or holds no RSA key.
@@ -194,7 +195,11 @@ impl fmt::Display for Refusal {
             ),
             Self::Empty => f.write_str("the trust holds no certificate in DER or PEM"),
             Self::Invalid { number } => {
-                write!(f, "certificate {number} of the trust does not parse")
+                write!(
+                    f,
+                    "certificate {number} of the trust, or a damaged PEM block in its \
+                     place, does not parse"
+                )
             }
             Self::Trailing { number } => write!(
                 f,
@@ -212,7 +217,7 @@ impl fmt::Display for Refusal {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[cfg_attr(
     not(test),
-    expect(dead_code, reason = "the config gives the mode in PR 2b of #2934")
+    expect(dead_code, reason = "the config gives the mode in PR 2d of #2934")
 )]
 pub(crate) enum Mode {
     Sign,

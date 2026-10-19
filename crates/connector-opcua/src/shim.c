@@ -873,7 +873,8 @@ static shim_refusal_kind policy_refusal(UA_StatusCode status) {
  * outside the validity window of the certificate, a trust that does not load, and a
  * certificate with no URI. Writes the refusal to `refusal`, else `SHIM_REFUSAL_NONE`,
  * and gives a status other than `Good` for a refusal or a failure. A check that fails
- * on another status, such as out of memory, gives it with no refusal. */
+ * on another status, such as out of memory, gives it with no refusal, but where a
+ * check gives one status for out of memory and its cause, it refuses. */
 UA_StatusCode shim_client_secure(UA_Client *client, UA_MessageSecurityMode mode,
                                  const shim_security *security,
                                  shim_refusal *refusal) {

@@ -454,9 +454,10 @@ openSSLPushCertificate(const UA_Byte **at, const UA_Byte *end, STACK_OF(X509) *s
  * and bytes after the last one are one more. Else it is PEM: each block of
  * `CERTIFICATE`, `X509 CERTIFICATE`, or `TRUSTED CERTIFICATE`. aws-lc skips text
  * outside a block and a block of another label, but fails on a damaged or empty
- * block of any label, which counts as one more. A block with any byte after its
- * certificate fails, also trust settings, which the verify of the group does not
- * apply. Clears the error queue of the thread. */
+ * block of any label, also one whose `END` line names another label, which counts as
+ * one more. A block with any byte after its certificate fails, also trust settings,
+ * which the verify of the group does not apply. Clears the error queue of the thread.
+ */
 static UA_TrustLoad
 openSSLLoadEachCertificate(const UA_ByteString cert, STACK_OF(X509) *stack,
                            size_t *number) {
