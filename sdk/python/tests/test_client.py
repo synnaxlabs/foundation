@@ -597,9 +597,13 @@ class ArgumentTest(unittest.TestCase):
         self.assertEqual(str(raised.exception), "subject: a name or pattern is empty")
 
     def test_a_data_directory_with_a_nul_byte_is_refused(self) -> None:
-        with self.assertRaises(ValueError) as raised:
-            foundation.connect(data="a\0b")
-        self.assertEqual(str(raised.exception), "data: the path holds a NUL byte")
+        for connect in (foundation.connect, self.connect):
+            with self.subTest(connect=connect.__name__):
+                with self.assertRaises(ValueError) as raised:
+                    connect(data="a\0b")
+                self.assertEqual(
+                    str(raised.exception), "data: the path holds a NUL byte"
+                )
 
     def test_other_threads_run_while_a_client_dials(self) -> None:
         silent = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
