@@ -1054,7 +1054,7 @@ fn covers(doc: &str, on: Runners) -> bool {
 fn refused(shown: &str, item: &str) -> String {
     format!(
         "`{shown}`: `{item}` ignores a test on an OS outside the lists of LINUX CI. \
-         Fix: remove the `ignore` and add `--skip <path> # #<issue>` to the `tests` \
+         Fix: remove the `ignore` and add `- <path> # #<issue>` to the `tests` \
          list of each OS in `ci.yaml` where the test fails, or, in a case of \
          `docs/claude/testing.md`, \"No `#[ignore]`\", make its reason `only <OS>` \
          or start it with `only <OS>:`, where <OS> names each OS that runs the test: \
