@@ -353,7 +353,9 @@ class ClientTest(unittest.TestCase):
         )
 
     def test_the_data_directory_can_be_a_path(self) -> None:
-        with foundation.connect(data=pathlib.Path(self.node.data)) as client:
+        data = pathlib.Path(self.node.data)
+        assert_takes(self, "connect", data=data)
+        with foundation.connect(data=data) as client:
             self.assertEqual(client.address, self.node.address)
 
     def test_a_data_directory_with_no_admin_key_gives_no_subject(self) -> None:

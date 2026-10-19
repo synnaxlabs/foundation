@@ -121,6 +121,7 @@ class WriterTest(unittest.TestCase):
         self.addCleanup(self.client.close)
 
     def test_a_writer_gives_its_places_in_the_order_of_its_channels(self) -> None:
+        assert_takes(self, "Client.open_writer", ["plant.b", "plant.a"])
         with self.client.open_writer(["plant.b", "plant.a"]) as writer:
             assert_stated(self, writer, "Client.open_writer")
             self.assertEqual(
