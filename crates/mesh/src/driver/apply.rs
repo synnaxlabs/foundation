@@ -24,22 +24,21 @@ impl Mesh {
     /// put of each chunk of the new tree in [`Config::store`](super::Config::store) has
     /// returned. The change lists each chunk of the new tree that the tree of `base`
     /// lacks, or each chunk of the new tree when the store cannot give the tree of
-    /// `base`. It then puts the listed chunks on each other voter of both halves of
-    /// the voters, all at once, in calls of at most 32 chunks that each end after 10
+    /// `base`. It then puts the listed chunks on each other voter of both halves of the
+    /// voters, all at once, in calls of at most 32 chunks that each end after 10
     /// seconds, and proposes once the holders are a majority of each half. A holder is
     /// this node when it is a voter, or a voter whose calls each ended `Ok`. A follower
-    /// forwards the change to the leader. Returns the pointer once
-    /// its entry has committed and this node applied it: `base` when the tree of
-    /// `definitions` is the tree of `base` and each index of `homes` has a home in this
-    /// node's state, as such a change leaves the pointer, and else a new pointer. It
-    /// tries again when a new leader replaces the entry, and after each tick while no
-    /// leader takes it, as [`Mesh::set_home`] does. On `Ok`, the pointer is the one
-    /// this call makes, and each index of `homes` has a home in this node's state when
-    /// the call settles, the listed one or another. A call whose entry finds that
-    /// pointer, after a lost answer or an equal change of another call, returns it when
-    /// each index of `homes` has a home then, and else gives `Stale`. A retry that
-    /// finds a later pointer gives `Stale`, even when an entry of this call applied
-    /// before it.
+    /// forwards the change to the leader. Returns the pointer once its entry has
+    /// committed and this node applied it: `base` when the tree of `definitions` is the
+    /// tree of `base` and each index of `homes` has a home in this node's state, as
+    /// such a change leaves the pointer, and else a new pointer. It tries again when a
+    /// new leader replaces the entry, and after each tick while no leader takes it, as
+    /// [`Mesh::set_home`] does. On `Ok`, the pointer is the one this call makes, and
+    /// each index of `homes` has a home in this node's state when the call settles, the
+    /// listed one or another. A call whose entry finds that pointer, after a lost
+    /// answer or an equal change of another call, returns it when each index of `homes`
+    /// has a home then, and else gives `Stale`. A retry that finds a later pointer
+    /// gives `Stale`, even when an entry of this call applied before it.
     ///
     /// # Errors
     ///
