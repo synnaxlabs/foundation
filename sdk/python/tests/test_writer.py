@@ -557,6 +557,16 @@ class WriterTest(unittest.TestCase):
                     "the node refused the frame: another writer holds control",
                 )
 
+    def test_a_writer_of_authority_1_takes_control_from_one_of_no_authority(
+        self,
+    ) -> None:
+        with self.client.open_writer("plant.a") as low:
+            with self.client.open_writer("plant.a", authority=1) as high:
+                self.assertIsNone(high.write(1.5))
+                with self.assertRaises(foundation.Rejected) as raised:
+                    low.write(2.5)
+                self.assertEqual(raised.exception.code, "waiting")
+
     def test_a_write_after_the_lease_ran_out_raises_expired(self) -> None:
         with self.client.open_writer("plant.a", lease=0.05) as writer:
             time.sleep(1)
