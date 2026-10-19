@@ -100,8 +100,8 @@
   with its parameters, defaults, bases, `final`, and doc, that each annotation names a
   type, that each value that the module gives (a return, also `None`, a property, and
   each attribute of an exception) is of the type that the stub states, and that each
-  argument that a test gives is of the type of its parameter (#3212 PR 1c;
-  `box2.builder-5`, plan, 2026-10-19T16:53:36Z,
+  argument of the calls that check the stub is of the type of its parameter (#3212 PR
+  1c; `box2.builder-5`, plan, 2026-10-19T16:53:36Z,
   https://github.com/synnaxlabs/foundation/issues/3212#issuecomment-6272502641).
   The types of the stub are a key choice of kind 2 that `laptop.monitor` accepted at
   2026-10-19T17:24Z
