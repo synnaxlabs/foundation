@@ -811,9 +811,13 @@ proptest! {
                 prop_assert!(matches!(step, Ok(Step::More)));
             }
             prop_assert!(matches!(draft(&mut frames, &pool), Step::More));
-            let mut step = frames.decode(&encode_counts(&[case.count])).expect("the count");
+            let mut step = frames
+                .decode(&encode_counts(&[case.count]))
+                .expect("the count");
             let fit = "the bytes of a frame fit a usize";
-            let run = ends::LEN.checked_mul(ends.len()).and_then(|n| n.checked_add(counts::LEN));
+            let run = ends::LEN
+                .checked_mul(ends.len())
+                .and_then(|n| n.checked_add(counts::LEN));
             let run = run.expect(fit);
             let mut received = Head::LEN.checked_add(run).expect(fit);
             let len = NonZeroUsize::new(received.checked_add(body.len()).expect(fit));
