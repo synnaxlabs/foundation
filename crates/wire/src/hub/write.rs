@@ -571,6 +571,9 @@ pub struct Replies {
     groups: Box<[Group]>,
     /// The count of groups that are not [`Group::settled`].
     unsettled: usize,
+    /// The count of groups that ended with a taken frame past their last
+    /// [`Reply::Stored`].
+    unstored: usize,
 }
 
 /// The replies of one group.
@@ -589,6 +592,18 @@ impl Group {
     fn settled(&self) -> bool {
         self.ended.is_some() || self.stored >= self.taken
     }
+
+    /// Applies `change`, and counts the group again in `unsettled`, the count of groups
+    /// that are not settled.
+    fn settle(&mut self, unsettled: &mut usize, change: impl FnOnce(&mut Self)) {
+        let settled = self.settled();
+        change(self);
+        match (settled, self.settled()) {
+            (true, false) => *unsettled = unsettled.strict_add(1),
+            (false, true) => *unsettled = unsettled.strict_sub(1),
+            _ => {}
+        }
+    }
 }
 
 impl Replies {
@@ -602,6 +617,7 @@ impl Replies {
             answered: 0,
             groups: vec![Group::default(); groups].into_boxed_slice(),
             unsettled: 0,
+            unstored: 0,
         }
     }
 
@@ -661,8 +677,8 @@ impl Replies {
                 outcome,
             } => self.outcome(frame, group, outcome)?,
             Reply::Stored { group, frames } => {
+                let state = open(&mut self.groups, group)?;
                 let answered = self.answered;
-                let state = self.open(group)?;
                 let bound = if frames < state.stored {
                     state.stored
                 } else {
@@ -675,11 +691,14 @@ impl Replies {
                         bound,
                     });
                 }
-                self.settle(group, |state| state.stored = frames);
+                state.settle(&mut self.unsettled, |state| state.stored = frames);
             }
             Reply::Ended { group, end } => {
-                self.open(group)?;
-                self.settle(group, |state| state.ended = Some(end));
+                let state = open(&mut self.groups, group)?;
+                if state.taken > state.stored {
+                    self.unstored = self.unstored.strict_add(1);
+                }
+                state.settle(&mut self.unsettled, |state| state.ended = Some(end));
             }
         }
         Ok(reply)
@@ -709,7 +728,7 @@ impl Replies {
         }
         let Some(state) = usize::try_from(group)
             .ok()
-            .and_then(|at| self.groups.get(at))
+            .and_then(|at| self.groups.get_mut(at))
         else {
             unreachable!("invariant: `sent` checks each group of a frame")
         };
@@ -718,7 +737,7 @@ impl Replies {
             (Some(_), _) => return Err(Error::Ended { group }),
             (None, Outcome::Ended(_)) => return Err(Error::Unended { frame, group }),
             (None, Outcome::Taken { .. }) => {
-                self.settle(group, |state| state.taken = frame);
+                state.settle(&mut self.unsettled, |state| state.taken = frame);
             }
             (None, Outcome::Lost { .. } | Outcome::Refused(_)) => {}
         }
@@ -727,36 +746,6 @@ impl Replies {
             self.answered = frame;
         }
         Ok(())
-    }
-
-    /// The replies of `group`, while it has not ended.
-    fn open(&mut self, group: u32) -> Result<&mut Group, Error> {
-        let count = self.groups.len();
-        let state = usize::try_from(group)
-            .ok()
-            .and_then(|index| self.groups.get_mut(index))
-            .ok_or(Error::Groups { group, count })?;
-        state
-            .ended
-            .map_or(Ok(state), |_| Err(Error::Ended { group }))
-    }
-
-    /// Applies `change` to `group`, a group of the write, and counts it again among
-    /// the groups that are not settled.
-    fn settle(&mut self, group: u32, change: impl FnOnce(&mut Group)) {
-        let Some(state) = usize::try_from(group)
-            .ok()
-            .and_then(|at| self.groups.get_mut(at))
-        else {
-            unreachable!("invariant: group {group} of a reply is a group of the write")
-        };
-        let settled = state.settled();
-        change(state);
-        match (settled, state.settled()) {
-            (true, false) => self.unsettled = self.unsettled.strict_add(1),
-            (false, true) => self.unsettled = self.unsettled.strict_sub(1),
-            _ => {}
-        }
     }
 
     /// Whether each group of each frame sent got its outcome.
@@ -775,13 +764,30 @@ impl Replies {
     /// Each group that ended with a taken frame past its last [`Reply::Stored`], and
     /// its end, in group order.
     pub fn unstored(&self) -> impl Iterator<Item = (u32, End)> + '_ {
-        self.groups.iter().zip(0..).filter_map(|(group, key)| {
+        let groups = if self.unstored == 0 {
+            &[][..]
+        } else {
+            &self.groups[..]
+        };
+        groups.iter().zip(0..).filter_map(|(group, key)| {
             group
                 .ended
                 .filter(|_| group.taken > group.stored)
                 .map(|end| (key, end))
         })
     }
+}
+
+/// The replies of `group` of `groups`, while it has not ended.
+fn open(groups: &mut [Group], group: u32) -> Result<&mut Group, Error> {
+    let count = groups.len();
+    let state = usize::try_from(group)
+        .ok()
+        .and_then(|index| groups.get_mut(index))
+        .ok_or(Error::Groups { group, count })?;
+    state
+        .ended
+        .map_or(Ok(state), |_| Err(Error::Ended { group }))
 }
 
 fn put_range(out: &mut Writer<'_>, range: frame::Range) {
