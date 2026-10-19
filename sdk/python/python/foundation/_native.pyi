@@ -45,9 +45,11 @@ def connect(
     Raises `TypeError` for an argument of a wrong type, `ValueError` for an argument
     that does not parse or a pair given in half, `RuntimeError` when a thread of the
     client or of the read of `data` cannot start, `OSError` when the local UDP socket
-    cannot bind, `ConnectionError` when no source gives a value, the data directory
-    cannot be read, the client cannot reach the node, or the node refuses the subject,
-    and `PanicException` when a thread of the client or of the read of `data` panicked.
+    cannot bind, `MemoryError` when the OS refuses the memory of the pool of the frames
+    of the client's readers, `ConnectionError` when no source gives a value, the data
+    directory cannot be read, the client cannot reach the node, or the node refuses the
+    subject, and `PanicException` when a thread of the client or of the read of `data`
+    panicked.
     """
 
 class Refused(ConnectionError):
