@@ -336,8 +336,8 @@ fn line(number: usize) -> Error {
 /// the number from 1 of that line in the trust.
 fn with_tail(at: usize, tail: &[u8]) -> (Vec<u8>, usize) {
     let (other, server) = blocks();
+    let number = other.matches('\n').count() + at + 1;
     let mut trust = other.into_bytes();
-    let number = trust.iter().filter(|&&byte| byte == b'\n').count() + at + 1;
     for (index, line) in server.split_inclusive('\n').enumerate() {
         let line = line.as_bytes();
         if index == at {

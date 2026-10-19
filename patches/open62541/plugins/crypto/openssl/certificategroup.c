@@ -464,27 +464,27 @@ openSSLAmbiguousLine(const UA_ByteString trust) {
     UA_Boolean inside = false;
     while(at < end) {
         size_t left = (size_t)(end - at);
-        size_t length = left < 253 ? left : 253;
-        const UA_Byte *newline = (const UA_Byte *)memchr(at, '\n', length);
-        if(newline)
-            length = (size_t)(newline - at) + 1;
+        size_t length = 0;
+        while(length < left && length < 253 && at[length++] != '\n') {}
         size_t kept = length;
         UA_Boolean high = false;
         while(kept > 0 && (at[kept - 1] <= ' ' || at[kept - 1] >= 0x80)) {
             high |= at[kept - 1] >= 0x80;
             kept--;
         }
-        UA_Boolean begins = !inside && kept >= 16 &&
+        size_t text = 0;
+        while(text < kept && at[text] != '\0')
+            text++;
+        UA_Boolean begins = !inside && kept >= 16 && text == kept &&
                             memcmp(at, "-----BEGIN ", 11) == 0 &&
-                            memcmp(at + kept - 5, "-----", 5) == 0 &&
-                            !memchr(at, '\0', kept);
+                            memcmp(at + kept - 5, "-----", 5) == 0;
         if((inside || begins) && high)
             return line;
         if(begins)
             inside = true;
         else if(inside && kept >= 10 && memcmp(at, "-----END ", 9) == 0)
             inside = false;
-        line += newline != NULL;
+        line += at[length - 1] == '\n';
         at += length;
     }
     return 0;
