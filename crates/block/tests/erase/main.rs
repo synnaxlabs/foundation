@@ -40,12 +40,14 @@ impl Case {
     }
 }
 
-/// `Recarved` commits the fewest pages and runs first, and the last case leaves its
-/// needle past the first page.
-const CASES: [Case; 5] = [
+/// The last case leaves its needle past the first page. With the heap cases first, an
+/// erased case that commits only the first page of a 16 KiB budget meets that memory.
+const CASES: [Case; 6] = [
     Case::Recarved,
     Case::Pressed,
     Case::Lent { len: 32, at: 0 },
+    // Its needle is in a committed page that is not the first of its group of 64.
+    Case::Lent { len: 128, at: 1 },
     Case::Lent { len: 3000, at: 0 },
     Case::Lent { len: 3000, at: 1 },
 ];
@@ -59,20 +61,29 @@ fn main() {
     // A needle for each call, as an erased pool's memory can reuse memory that an
     // earlier pool freed with its needle in a page that the erased pool never commits.
     // The heap cases run first, so that the erased cases meet such memory.
-    for (case, byte) in CASES.into_iter().zip(0x20..) {
-        let held = freed(Pool::heap, case, &[byte; 32]);
+    let mut needles = (0..=u8::MAX).map(needle);
+    let mut next = || needles.next().expect("a needle for each call");
+    for case in CASES {
+        let held = freed(Pool::heap, case, &next());
         assert_eq!(
             held, 1,
             "a dropped `Pool::heap` frees the bytes of {case:?}"
         );
     }
-    for (case, byte) in CASES.into_iter().zip(0x30..) {
-        let held = freed(Pool::erased, case, &[byte; 32]);
+    for case in CASES {
+        let held = freed(Pool::erased, case, &next());
         assert_eq!(
             held, 0,
             "a dropped `Pool::erased` erases the bytes of {case:?}"
         );
     }
+}
+
+/// The needle of call `call`. No other call and no fill of one byte gives it.
+fn needle(call: u8) -> Needle {
+    let mut needle = *b"?a needle that no fill can give.";
+    needle[0] = call;
+    needle
 }
 
 /// Gives the count of freed allocations that hold `needle`, after `case` runs on the
