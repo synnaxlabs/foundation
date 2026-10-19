@@ -1,8 +1,10 @@
 //! The native module `foundation._native` of the Python SDK: the Rust SDK `sdk`, for
 //! Python.
 
+use std::fmt::Display;
 use std::mem;
 use std::net::SocketAddr;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Mutex, PoisonError};
@@ -13,7 +15,7 @@ use pyo3::exceptions::{
 };
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
-use pyo3::types::{PyInt, PyString, PyTuple};
+use pyo3::types::{PyDict, PyInt, PyRange, PyString, PyTuple};
 use types::authority::Authority;
 use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
@@ -500,6 +502,44 @@ enum Loss {
 }
 
 impl Loss {
+    /// Does what `self` says with `lost`, each name with the seqs that it lost, which
+    /// `what` names: nothing; a warning `<what>: <name> (<count>), ...` on the
+    /// `foundation` logger; or `DataLost` of that text, with `seqs`, a `dict` from each
+    /// name to the `range` of its seqs, and `frame`.
+    fn act<'py, N>(
+        self,
+        py: Python<'py>,
+        what: &str,
+        lost: impl Iterator<Item = (N, Range<u128>)> + Clone,
+        frame: &Bound<'py, PyAny>,
+    ) -> PyResult<()>
+    where
+        N: Display + IntoPyObject<'py>,
+    {
+        if self == Self::Ignore {
+            return Ok(());
+        }
+        let named: Vec<_> = lost
+            .clone()
+            .map(|(name, seqs)| format!("{name} ({})", seqs.end - seqs.start))
+            .collect();
+        let text = format!("{what}: {}", named.join(", "));
+        if self == Self::Warn {
+            py.import("logging")?
+                .call_method1("getLogger", ("foundation",))?
+                .call_method1("warning", (text,))?;
+            return Ok(());
+        }
+        let seqs = PyDict::new(py);
+        for (name, lost) in lost {
+            seqs.set_item(name, range(py, lost)?)?;
+        }
+        let raised = DataLost::new_err(text);
+        raised.value(py).setattr("seqs", seqs)?;
+        raised.value(py).setattr("frame", frame)?;
+        Err(raised)
+    }
+
     /// The loss of the argument `on_loss`.
     fn parse(on_loss: &str) -> PyResult<Self> {
         match on_loss {
@@ -511,6 +551,11 @@ impl Loss {
             ))),
         }
     }
+}
+
+/// The Python `range` of `seqs`.
+fn range(py: Python<'_>, seqs: Range<u128>) -> PyResult<Bound<'_, PyAny>> {
+    py.get_type::<PyRange>().call1((seqs.start, seqs.end))
 }
 
 /// The name and the type of each of `places`, in order, the type as the spec writes it

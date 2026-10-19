@@ -23,7 +23,7 @@ use types::sample::{Scalar, Type, Value};
 use types::time::{Span, Stamp};
 use types::{frame, hash};
 
-use crate::{DataLost, Loss, Rejected, error, owned};
+use crate::{Loss, Rejected, error, owned};
 
 /// A writer of channels of one index at its home, which `Client.open_writer` opens. A
 /// `with` block closes it at its end. Its calls take turns to send: a call waits, with
@@ -220,35 +220,15 @@ impl Writer {
         range: frame::Range,
         mut places: Vec<usize>,
     ) -> PyResult<()> {
-        if self.loss == Loss::Ignore {
-            return Ok(());
-        }
         places.sort_unstable();
         places.dedup();
-        let names: Vec<_> = places
+        let seqs =
+            u128::from(range.seq)..u128::from(range.seq) + u128::from(range.count);
+        let lost = places
             .iter()
-            .map(|&place| format!("{} ({})", self.places[place].name, range.count))
-            .collect();
-        let text = format!("samples were lost: {}", names.join(", "));
-        if self.loss == Loss::Warn {
-            py.import("logging")?
-                .call_method1("getLogger", ("foundation",))?
-                .call_method1("warning", (text,))?;
-            return Ok(());
-        }
-        let end = u128::from(range.seq) + u128::from(range.count);
-        let seqs = py
-            .import("builtins")?
-            .getattr("range")?
-            .call1((range.seq, end))?;
-        let lost = PyDict::new(py);
-        for place in places {
-            lost.set_item(self.places[place].name.as_str(), &seqs)?;
-        }
-        let raised = DataLost::new_err(text);
-        raised.value(py).setattr("seqs", lost)?;
-        raised.value(py).setattr("frame", py.None())?;
-        Err(raised)
+            .map(|&place| (self.places[place].name.as_str(), seqs.clone()));
+        self.loss
+            .act(py, "samples were lost", lost, py.None().bind(py))
     }
 }
 

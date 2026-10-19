@@ -17,7 +17,7 @@ use sdk::Place;
 use sdk::read::Mode;
 use types::sample::{Scalar, Type};
 
-use crate::{DataLost, Loss, owned};
+use crate::{Loss, owned};
 
 /// The longest wait of `__next__` between two runs of the signal handlers.
 const TICK: Duration = Duration::from_millis(100);
@@ -154,7 +154,7 @@ impl Reader {
     fn copy(&self, frame: &sdk::read::Frame) -> Copied {
         #[cfg(feature = "sim")]
         let began = crate::sim::Part::start();
-        let mut series = Vec::new();
+        let mut series = Vec::with_capacity(self.firsts.len());
         let mut lost = Vec::new();
         for (place, scalar) in self.firsts.iter().enumerate() {
             let (Some(scalar), Some(bytes)) = (scalar, frame.series(place)) else {
@@ -176,7 +176,7 @@ impl Reader {
     }
 
     /// The Python frame of `copied`, after it does what [`Loss`] says with its loss.
-    fn frame(&self, py: Python<'_>, copied: Copied) -> PyResult<Frame> {
+    fn frame(&self, py: Python<'_>, copied: Copied) -> PyResult<Py<Frame>> {
         let series = PyDict::new(py);
         for (place, samples) in copied.series {
             series.set_item(self.names[place].bind(py), samples.array(py))?;
@@ -186,34 +186,29 @@ impl Reader {
             .into_iter()
             .map(|(place, seqs)| (self.names[place].clone_ref(py), seqs))
             .collect();
-        let frame = Frame {
-            count: copied.count,
-            series: series.unbind(),
-            lost,
-        };
-        if frame.lost.is_empty() || self.loss == Loss::Ignore {
+        let frame = Py::new(
+            py,
+            Frame {
+                count: copied.count,
+                series: series.unbind(),
+                lost,
+            },
+        )?;
+        let lost = &frame.get().lost;
+        if lost.is_empty() {
             #[cfg(feature = "sim")]
             self.part.mark(copied.began);
             return Ok(frame);
         }
-        let named: Vec<_> = frame
-            .lost
-            .iter()
-            .map(|(name, seqs)| format!("{name} ({})", seqs.end - seqs.start))
-            .collect();
-        let text = format!("the reader lost seqs: {}", named.join(", "));
-        if self.loss == Loss::Warn {
-            py.import("logging")?
-                .call_method1("getLogger", ("foundation",))?
-                .call_method1("warning", (text,))?;
-            return Ok(frame);
+        if self.loss == Loss::Raise {
+            self.close(py);
         }
-        self.close(py);
-        let seqs = frame.lost(py)?;
-        let raised = DataLost::new_err(text);
-        raised.value(py).setattr("seqs", seqs)?;
-        raised.value(py).setattr("frame", frame)?;
-        Err(raised)
+        let lost = lost.iter().map(|(name, seqs)| {
+            (name.bind(py), u128::from(seqs.start)..u128::from(seqs.end))
+        });
+        self.loss
+            .act(py, "the reader lost seqs", lost, frame.bind(py).as_any())?;
+        Ok(frame)
     }
 }
 
@@ -227,8 +222,8 @@ impl Reader {
     }
 
     /// The nanoseconds from the return of the frame of the last call of `__next__` that
-    /// gave one, with no loss to act on, to just before that call returned, or 0
-    /// before one. Only in a build with the feature `sim`, for the bench.
+    /// gave one with no loss, to just before that call returned, or 0 before one. Only
+    /// in a build with the feature `sim`, for the bench.
     #[cfg(feature = "sim")]
     #[getter]
     fn _part(&self) -> u64 {
@@ -239,8 +234,10 @@ impl Reader {
         this
     }
 
-    /// Blocks until the next frame comes, with other Python threads running, and runs
-    /// the signal handlers (Ctrl-C) at least each 100 ms.
+    /// Blocks until the next frame comes, with other Python threads running. It runs
+    /// the signal handlers (Ctrl-C) at least each 100 ms while it waits for a frame,
+    /// and none while a `__next__` of another thread holds the reader, so read a reader
+    /// on one thread.
     ///
     /// Raises `StopIteration` after a close; `DataLost` for a frame after a loss with
     /// `on_loss="raise"`, after which the reader is closed; `Stopped` with `unknown`
@@ -250,7 +247,7 @@ impl Reader {
     /// `PanicException` when the client's thread panicked. After `Stopped`,
     /// `ConnectionError`, or `RuntimeError` of a closed client, each later call raises
     /// it again.
-    fn __next__(&self, py: Python<'_>) -> PyResult<Option<Frame>> {
+    fn __next__(&self, py: Python<'_>) -> PyResult<Option<Py<Frame>>> {
         owned(self.process)?;
         self.copied(py)?
             .map(|copied| self.frame(py, copied))
@@ -342,10 +339,10 @@ impl Frame {
     /// latest reader.
     #[getter]
     fn lost<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let range = py.import("builtins")?.getattr("range")?;
         let lost = PyDict::new(py);
         for (name, seqs) in &self.lost {
-            lost.set_item(name, range.call1((seqs.start, seqs.end))?)?;
+            let seqs = u128::from(seqs.start)..u128::from(seqs.end);
+            lost.set_item(name, crate::range(py, seqs)?)?;
         }
         Ok(lost)
     }
@@ -467,10 +464,7 @@ impl Samples {
 
 /// Each sample of `bytes`, `N` bytes each, as `sample` of its bytes.
 fn decoded<T, const N: usize>(bytes: &[u8], sample: impl Fn([u8; N]) -> T) -> Vec<T> {
-    bytes
-        .as_chunks::<N>()
-        .0
-        .iter()
-        .map(|raw| sample(*raw))
-        .collect()
+    let (samples, rest) = bytes.as_chunks::<N>();
+    assert!(rest.is_empty(), "invariant: a series holds whole samples");
+    samples.iter().map(|raw| sample(*raw)).collect()
 }
