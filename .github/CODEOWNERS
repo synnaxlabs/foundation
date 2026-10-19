@@ -1,7 +1,7 @@
 /oracles/ @emilbon99
 # A fuzz input only adds a test, so it needs no approval.
 /oracles/fuzz/
-/oracles/fuzz/.gitattributes @emilbon99
+/oracles/fuzz/**/.gitattributes @emilbon99
 /.github/ @emilbon99
 /CLAUDE.md @emilbon99
 /.claude/ @emilbon99
