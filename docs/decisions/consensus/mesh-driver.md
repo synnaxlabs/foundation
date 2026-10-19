@@ -245,6 +245,11 @@
   refuses the `node::Key` of a member (decided by `laptop.architect`,
   2026-10-07T08:33:14Z:
   https://github.com/synnaxlabs/foundation/pull/1277#issuecomment-6034146773). `open`
+  gives `raft` the members of the applied state as learners, and the group gives them
+  again after each join applies, so a member that is not a voter gets the log
+  (`Raft::set_learners`, RAFT SURFACE). Decided by `laptop.architect`, the plan,
+  2026-10-19T13:53:13Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124). `open`
   starts the tasks that send: one for each member, from the first message for it
   (approved by the architect, 2026-10-07T13:40:50Z:
   https://github.com/synnaxlabs/foundation/pull/1410#issuecomment-6039206881, which
