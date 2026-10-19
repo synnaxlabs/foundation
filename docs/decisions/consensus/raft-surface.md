@@ -218,9 +218,9 @@
   that no configuration in force holds is released as a removed node is. A node never
   sends a learner of its set a PreVote or a Vote. Each node keeps the set, so a new
   leader has it. `mesh` is to set it from the members of its applied state, PR 2 of
-  #3140. Lost: learners in the configuration, which
-  puts them in each signed change; `Config::learners` at `Raft::new` with no setter,
-  because `mesh` learns of a member only at an apply. Decided by `laptop.architect`,
+  #3140. Lost: learners in the configuration, which puts them in each signed change;
+  `Config::learners` at `Raft::new` with no setter, because `mesh` learns of a member
+  only at an apply. Decided by `laptop.architect`,
   the plan, 2026-10-19T13:53:13Z
   (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6268881124), and
   the surface, 2026-10-19T14:40:23Z
