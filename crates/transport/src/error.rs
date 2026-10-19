@@ -19,7 +19,8 @@ use crate::code::Code;
 pub enum Error {
     /// No address reached the peer.
     Unreachable {
-        /// The peer that was dialed, or `None` for a dial that took any node.
+        /// The peer that was dialed, or `None` for
+        /// [`Client::dial_any`](crate::Client::dial_any).
         peer: Option<PublicKey>,
         /// Each address tried, with why it failed.
         attempts: Vec<(Address, Error)>,
