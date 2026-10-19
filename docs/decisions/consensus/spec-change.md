@@ -33,8 +33,9 @@
   majorities of two halves of 127 voters each (MESH WIRE), so the holders that SPEC
   APPLY counts always fit. Decided by `laptop.architect`, 2026-10-19T17:21:45Z
   (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273042572), which
-  supersedes `HOLDERS_MAX` = 64, the voter bound, and its check by a change of voters
-  of 6060034191, and the sum of 33 869 bytes of 6060184527. The holders and decode
+  supersedes the voter bound and its check by a change of voters of 6060034191,
+  `HOLDERS_MAX` = 64 of 6059278643, and the sum of 33 869 bytes of 6060184527.
+  The holders and decode
   decided by
   `laptop.architect`, 2026-10-08T12:38:01Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6060034191).
@@ -118,7 +119,7 @@
   holders, the refusal at apply, the quorum rule, and the trigger for `CHUNKS_MAX`,
   2026-10-08T11:03:36Z
   (https://github.com/synnaxlabs/foundation/issues/1741#issuecomment-6058455178).
-  `HOLDERS_MAX` and the move to `raft`, 2026-10-08T11:53:51Z
+  The move of `HOLDERS_MAX` to `raft`, 2026-10-08T11:53:51Z
   (https://github.com/synnaxlabs/foundation/pull/1872#issuecomment-6059278643). The
   panics of the hub and the check before them, agreed with `laptop.architect-2`,
   2026-10-08T20:08:50Z

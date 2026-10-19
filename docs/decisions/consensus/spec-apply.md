@@ -66,6 +66,8 @@
   (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273042572). The 16
   chunks of a call: `laptop.architect`, 2026-10-19T17:43:07Z
   (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273462159), which
+  supersedes the 32 chunks of question 2 of
+  https://github.com/synnaxlabs/foundation/issues/1231#issuecomment-6272668202, and
   defers the limit on links of more than about 300 ms round trip to #3405. `missed`:
   `laptop.architect`, 2026-10-19T17:48:57Z
   (https://github.com/synnaxlabs/foundation/pull/3399#issuecomment-6273571109), on the
