@@ -163,8 +163,8 @@ impl Variables {
         self.changed(quality, None);
     }
 
-    /// Changes the variables as [`Variables::change`] does, with `source` as the
-    /// source timestamp of each new value.
+    /// As [`Variables::change`], with `source` as the source timestamp of each new
+    /// value, on the clock of the server.
     pub fn change_at(&self, quality: Quality, source: Stamp) {
         self.changed(quality, Some(source));
     }
