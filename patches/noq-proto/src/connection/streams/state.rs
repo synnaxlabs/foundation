@@ -1176,38 +1176,66 @@ mod tests {
         let b = StreamId::new(Side::Client, Dir::Uni, 1);
         let data = Bytes::from(vec![0; usize::try_from(window - 1).unwrap()]);
         let len = data.len();
-        server
-            .received(
-                frame::Stream {
-                    id: a,
-                    offset: 0,
-                    fin: false,
-                    data,
-                },
-                len,
-            )
-            .unwrap();
+        assert_eq!(
+            server
+                .received(
+                    frame::Stream {
+                        id: a,
+                        offset: 0,
+                        fin: false,
+                        data,
+                    },
+                    len,
+                )
+                .unwrap(),
+            ShouldTransmit(false)
+        );
         let reset = frame::ResetStream {
             id: b,
             error_code: 0u32.into(),
             final_offset: 1u32.into(),
         };
-        server.received_reset(reset).unwrap();
+        assert_eq!(
+            server.received_reset(reset).unwrap(),
+            ShouldTransmit(false)
+        );
         let data = Bytes::from_static(&[0]);
-        server
-            .received(
-                frame::Stream {
-                    id: a,
-                    offset: window - 1,
-                    fin: false,
-                    data,
-                },
-                1,
-            )
-            .unwrap();
+        assert_eq!(
+            server
+                .received(
+                    frame::Stream {
+                        id: a,
+                        offset: window - 1,
+                        fin: false,
+                        data,
+                    },
+                    1,
+                )
+                .unwrap(),
+            ShouldTransmit(false)
+        );
         assert_eq!(
             server.received_reset(reset).map_err(|e| e.code),
             Ok(ShouldTransmit(false))
+        );
+    }
+
+    #[test]
+    fn duplicate_reset_with_another_final_size() {
+        let mut server = make(Side::Server);
+        let id = StreamId::new(Side::Client, Dir::Uni, 0);
+        let reset = |final_offset: u32| frame::ResetStream {
+            id,
+            error_code: 0u32.into(),
+            final_offset: final_offset.into(),
+        };
+        assert_eq!(
+            server.received_reset(reset(1)).map_err(|e| e.code),
+            Ok(ShouldTransmit(false))
+        );
+        assert_eq!(
+            server.received_reset(reset(2)).map_err(|e| e.code),
+            Err(TransportErrorCode::FINAL_SIZE_ERROR)
         );
     }
 
