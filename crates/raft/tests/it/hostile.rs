@@ -1,5 +1,7 @@
 //! What a message from a voter that does not lead does to another node.
 
+use std::collections::BTreeMap;
+
 use raft::{
     Body, Change, Claim, Entry, Error, Grant, Link, Message, Position, Proof, Raft,
     Role, Term, Voters,
@@ -197,11 +199,13 @@ fn a_voter_that_led_a_term_can_forge_a_link_to_itself_and_prove_any_term() {
         leader: from,
         at,
         voters: &alone,
+        public_keys: &BTreeMap::new(),
     });
     let link = Link {
         at,
         change: Change {
             voters: alone,
+            public_keys: BTreeMap::new(),
             votes,
             signature: Some(signature),
         },

@@ -268,7 +268,10 @@ impl<C> Context<C> {
     }
 
     /// Opens a writer session on `channels` as this connector: the session's subject
-    /// is the connector's name.
+    /// is the connector's name. Waits while the mesh names no home for the index of
+    /// `channels`, and gives `None` once [`Self::cancel`] is cancelled, also when it
+    /// was cancelled before the call. A kind writes
+    /// `let Some(writer) = ctx.writer(..).await? else { return Ok(()) };`.
     ///
     /// Return a failed write with `?`: KIND TABLE gives its class. After
     /// [`hub::writer::Failure::Removed`], the next run opens its writer by name, so a
@@ -292,14 +295,15 @@ impl<C> Context<C> {
         channels: Vec<Name>,
         authority: Authority,
         lease: Option<time::Span>,
-    ) -> Result<hub::writer::Writer, Error> {
+    ) -> Result<Option<hub::writer::Writer>, Error> {
         let config = hub::writer::Config {
             subject: self.name.clone(),
             authority,
             lease,
             channels,
         };
-        self.inputs.hub.writer(config).await.map_err(writer_error)
+        let opened = self.cancel.race(self.inputs.hub.writer(config)).await;
+        opened.transpose().map_err(writer_error)
     }
 
     /// Takes the reader that the supervisor opened for this run, under the connector's

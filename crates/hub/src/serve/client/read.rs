@@ -10,7 +10,7 @@ use transport::stream::{Receiver, Sender};
 use types::name::{Name, Selector};
 use wire::hub::client::{Mode, Open, PLACES_MAX, Place, Read, Refusal};
 
-use super::{Reserved, body, verify};
+use super::{Reserved, body};
 use crate::State;
 use crate::channel::Channel;
 use crate::link::Session;
@@ -73,7 +73,12 @@ async fn open(
     // A read takes no turn.
     let reserved = Reserved::new(&session.state, subject, read.length)?;
     let bytes = body(receiver, read.body()).await?;
-    verify(session, proof::Kind::Read, &bytes, &read.signature)?;
+    session.client.admission.verify(
+        &session.state,
+        proof::Kind::Read,
+        &bytes,
+        &read.signature,
+    )?;
     let (wanted, mode) = match Open::decode(&bytes)?.mode {
         Mode::Latest => (Class::Latest, reader::Mode::Latest),
         Mode::Complete => (Class::Complete, reader::Mode::Complete),

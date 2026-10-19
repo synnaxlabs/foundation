@@ -10,7 +10,7 @@ use raft::{
 };
 use types::node;
 
-use crate::network::change;
+use crate::network::{change, keyed};
 
 const ELECTION: u32 = 10;
 
@@ -152,7 +152,7 @@ fn a_removed_node_gets_the_leave_and_its_commit_then_stops_campaigning() {
     nodes
         .get_mut(&key(1))
         .unwrap()
-        .propose_voters(set(&[1, 2]))
+        .propose_voters(keyed(&[1, 2]))
         .unwrap();
     let (committed, _) = run(&mut nodes);
     let joint = Voters {
@@ -193,7 +193,7 @@ fn remove_node_3_while_held() -> (BTreeMap<node::Key, Raft>, Vec<Message>) {
     nodes
         .get_mut(&key(1))
         .unwrap()
-        .propose_voters(set(&[1, 2]))
+        .propose_voters(keyed(&[1, 2]))
         .unwrap();
     run_holding(&mut nodes, &mut held, |m| m.from == key(3));
     let new = Voters {
@@ -260,7 +260,7 @@ fn lose_the_release(count: u8) -> BTreeMap<node::Key, Raft> {
     nodes
         .get_mut(&key(1))
         .unwrap()
-        .propose_voters(set(kept))
+        .propose_voters(keyed(kept))
         .unwrap();
     run_holding(&mut nodes, &mut late, slow);
     let release = Body::Heartbeat { commit: 3 };
@@ -394,7 +394,7 @@ fn a_removed_leader_that_restarts_before_the_leave_commits_finishes_the_change()
     exchange(&mut a, &mut b, &mut disk_b);
     assert_eq!((a.role(), b.role()), (Role::Follower, Role::Leader));
 
-    let joint = b.propose_voters(set(&[1])).unwrap();
+    let joint = b.propose_voters(keyed(&[1])).unwrap();
     assert_eq!(joint.index, 2);
     let ready = b.ready();
     write(&mut disk_b, ready.entries);
@@ -469,7 +469,7 @@ fn removed_holds_once_a_leader_gives_the_commit_of_the_leave() {
     nodes
         .get_mut(&key(2))
         .unwrap()
-        .propose_voters(set(&[1, 2]))
+        .propose_voters(keyed(&[1, 2]))
         .unwrap();
     let (more, _) = run(&mut nodes);
     let removed = |raft: &Raft| [1, 3, 9].map(|id| raft.removed(key(id)));
@@ -523,7 +523,7 @@ fn removed_holds_for_a_node_that_only_a_committed_entry_held() {
         nodes
             .get_mut(&key(2))
             .unwrap()
-            .propose_voters(set(voters))
+            .propose_voters(keyed(voters))
             .unwrap();
         let (more, _) = run(nodes);
         committed
@@ -603,7 +603,7 @@ fn leased_voters_refuse_a_removed_node_that_missed_a_new_term() {
     nodes
         .get_mut(&key(1))
         .unwrap()
-        .propose_voters(set(&[1, 2, 3]))
+        .propose_voters(keyed(&[1, 2, 3]))
         .unwrap();
     // Nodes 2 and 3 take the leave, but their answers are lost, so the leave does
     // not commit. Node 4 takes the leave too.
@@ -685,7 +685,7 @@ fn a_released_node_with_a_stale_entry_past_the_leave_never_campaigns() {
 
     // Nodes 1 and 2 take the leave, but never its commit.
     let leader = nodes.get_mut(&key(4)).unwrap();
-    leader.propose_voters(set(&[1, 2, 4])).unwrap();
+    leader.propose_voters(keyed(&[1, 2, 4])).unwrap();
     let to_voter = |m: &Message| m.to == key(1) || m.to == key(2);
     run_holding(&mut nodes, &mut lost, |m| {
         to_voter(m)
@@ -704,7 +704,7 @@ fn a_released_node_with_a_stale_entry_past_the_leave_never_campaigns() {
 
     // Leader 4 adds node 3 again. Only node 3 gets the joint entry at index 4.
     let leader = nodes.get_mut(&key(4)).unwrap();
-    let joint = leader.propose_voters(set(&[1, 2, 3, 4])).unwrap();
+    let joint = leader.propose_voters(keyed(&[1, 2, 3, 4])).unwrap();
     assert_eq!(joint.index, 4);
     run_holding(&mut nodes, &mut lost, to_voter);
     let again = Voters {
@@ -803,6 +803,7 @@ fn link(index: u64, voters: Voters) -> Link {
         },
         change: Change {
             voters,
+            public_keys: BTreeMap::new(),
             votes: votes(1, &[1, 2, 3, 4]),
             signature: None,
         },

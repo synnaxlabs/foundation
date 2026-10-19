@@ -85,7 +85,8 @@ struct Fill {
 
 impl Writer {
     /// Opens the writer of `channels` as the connector of `ctx`, with an absolute
-    /// authority and no lease.
+    /// authority and no lease. `None` at the cancel of `ctx`, as [`Context::writer`]
+    /// gives.
     ///
     /// # Errors
     ///
@@ -97,16 +98,39 @@ impl Writer {
     ///
     /// When `check` of the kind did not name each of [`COUNTS`]. When `channels`
     /// names a channel again, which the parse of the kind refuses.
-    pub async fn open<C>(ctx: &Context<C>, channels: Vec<Name>) -> Result<Self, Error> {
-        let writer = ctx
+    pub async fn open<C>(
+        ctx: &Context<C>,
+        channels: Vec<Name>,
+    ) -> Result<Option<Self>, Error> {
+        let opened = ctx
             .writer(channels.clone(), Authority::ABSOLUTE, None)
             .await?;
+        let Some(writer) = opened else {
+            return Ok(None);
+        };
+        Self::new(ctx, writer, &channels).map(Some)
+    }
+
+    /// The writer of `channels` on `writer`, the hub's writer of them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open`], with no error of [`Context::writer`].
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::open`].
+    fn new<C>(
+        ctx: &Context<C>,
+        writer: hub::writer::Writer,
+        channels: &[Name],
+    ) -> Result<Self, Error> {
         let set = writer.set();
         let entries = set.entries();
         let mut channel_of = vec![None; entries.len()];
         let mut wrong = Vec::new();
         for ((channel, &entry), name) in
-            writer.entries().iter().enumerate().zip(&channels)
+            writer.entries().iter().enumerate().zip(channels)
         {
             if set.index(entry) == entry {
                 wrong.push(index(name));

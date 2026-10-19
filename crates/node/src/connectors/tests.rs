@@ -112,8 +112,10 @@ impl Kind for Tally {
 
 /// A kind whose run records its start, opens a writer of `plant.data.time` and
 /// `plant.data.value`, writes one frame at once, and holds the writer until the cancel.
+/// It records the cancel when the open gives no writer.
 struct Source {
     starts: Starts,
+    cancels: Starts,
 }
 
 impl Kind for Source {
@@ -132,7 +134,11 @@ impl Kind for Source {
         let start = (ctx.name().to_string(), ctx.clock().now(), 0);
         self.starts.lock().expect("no panic").push(start);
         let channels = vec![name("plant.data.time"), name("plant.data.value")];
-        let mut writer = ctx.writer(channels, Authority(1), None).await?;
+        let Some(mut writer) = ctx.writer(channels, Authority(1), None).await? else {
+            let cancel = (ctx.name().to_string(), ctx.clock().now(), 0);
+            self.cancels.lock().expect("no panic").push(cancel);
+            return Ok(());
+        };
         let entries = writer.set().entries();
         let entry = |key| {
             let key = types::channel::Key::from_u128(key);
@@ -390,6 +396,7 @@ fn kinds(
     };
     let source = Source {
         starts: Arc::clone(starts),
+        cancels: Arc::clone(cancels),
     };
     Table::new()
         .with("hold", hold(linger, false))
@@ -398,6 +405,8 @@ fn kinds(
         .with("source", source)
         .with("sink", sink("plant.data.*"))
         .with("void", sink("plant.none.*"))
+        .with("modbus", connector_modbus::Kind::default())
+        .with("opcua", connector_opcua::Kind::default())
         .with(
             "tally",
             Tally {
@@ -711,7 +720,9 @@ impl Kind for Write {
             clock.sleep(flush).await;
         });
         let channels = vec![name("plant.data.time"), name("plant.data.value")];
-        let writer = ctx.writer(channels, Authority(1), None).await?;
+        let Some(writer) = ctx.writer(channels, Authority(1), None).await? else {
+            return Ok(());
+        };
         ctx.cancel().wait().await;
         drop(writer);
         Ok(())
@@ -1373,67 +1384,107 @@ async fn regional(
     (opened.hub, opened.mesh)
 }
 
+/// What [`in_region`] saw until 10 s after `second` is in use.
+struct Seen {
+    /// Each start of a run, with its time from the instant `second` is in use.
+    starts: Events,
+    /// Each cancel that a kind records, with its time from that instant.
+    cancels: Events,
+    /// Each event of `connector::status`.
+    lines: Vec<String>,
+}
+
 /// Applies `first`, then `second` 1 s after `first` is in use, each with its channels,
 /// through the mesh of [`regional`], where the status index of each connector has its
-/// home at the node and `plant.data.time` has none. Gives each start of a run until
-/// 10 s after `second` is in use, with its time from that instant.
+/// home at the node and `plant.data.time` has none.
 fn in_region(
     seed: u64,
     first: (Vec<Placed>, Vec<(Name, Definition)>),
     second: (Vec<Placed>, Vec<(Name, Definition)>),
-) -> Events {
+) -> Seen {
     let mut sim = ::sim::Sim::new(::sim::Config {
         seed,
         ..::sim::Config::default()
     });
     let node = sim.node(::sim::node::Config::default());
-    let run = sim.run_on(&node, move |node, tasks| async move {
-        let (starts, cancels, got) =
-            (Starts::default(), Starts::default(), Starts::default());
-        let kinds = kinds(None, &starts, &cancels, &got);
-        let (hub, mesh) = regional(&node, &tasks, &[1, 101, 201, 902]).await;
-        let secrets = secret::Resolver::new(
-            Arc::default(),
-            node.files(),
-            &crate::directory::secrets(),
-        );
-        let config = connector::supervisor::Config {
-            kinds: Arc::new(kinds),
-            clock: node.clock(),
-            entropy: node.entropy(),
-            net: node.net(),
-            roots: connector::http::Roots::default(),
-            tasks: tasks.clone(),
-            hub,
-            secrets,
-        };
-        let clock = node.clock();
-        let mut runs = runs(config);
-        let mut apply = async |(spec, channels): (Vec<Placed>, Vec<_>)| {
-            let mut definitions = definitions(&spec);
-            definitions.extend(channels);
-            let applied =
-                mesh.apply(mesh.pointer(), definitions.clone(), BTreeMap::new());
-            let pointer = applied.await.expect("applies the spec");
-            let used = mesh.spec().await.expect("the mesh runs");
-            assert_eq!(used.pointer, Some(pointer));
-            runs.apply(&definitions);
-        };
-        apply(first).await;
-        clock.sleep(ms(1_000)).await;
-        apply(second).await;
-        let start = clock.now();
-        clock.sleep(ms(10_000)).await;
-        drop(runs);
-        let starts = starts.lock().expect("no panic");
-        let mut starts: Events = starts
+    let (capture, log) = testing::Capture::new("connector::status");
+    let out = Arc::new(Mutex::new(None));
+    let (slot, own) = (Arc::clone(&out), node.clone());
+    let shard = env::shards::Config {
+        name: "in_region".into(),
+        core: None,
+    };
+    let started = node
+        .shards()
+        .logged(log)
+        .start(shard, move |tasks| async move {
+            let events = apply_in_region(own, tasks, first, second).await;
+            *slot.lock().expect("no panic holds the lock") = Some(events);
+        });
+    drop(started.expect("a shard with no core starts"));
+    assert_eq!(sim.run(), Ok(()));
+    let events = out.lock().expect("no panic holds the lock").take();
+    let (starts, cancels) = events.expect("the run ends");
+    Seen {
+        starts,
+        cancels,
+        lines: capture.lines(),
+    }
+}
+
+/// The body of [`in_region`] on `node`: each start of a run, then each cancel.
+async fn apply_in_region(
+    node: ::sim::node::Node,
+    tasks: env::tasks::Tasks,
+    first: (Vec<Placed>, Vec<(Name, Definition)>),
+    second: (Vec<Placed>, Vec<(Name, Definition)>),
+) -> (Events, Events) {
+    let (starts, cancels, got) =
+        (Starts::default(), Starts::default(), Starts::default());
+    let kinds = kinds(None, &starts, &cancels, &got);
+    let (hub, mesh) = regional(&node, &tasks, &[1, 101, 201, 902]).await;
+    let secrets = secret::Resolver::new(
+        Arc::default(),
+        node.files(),
+        &crate::directory::secrets(),
+    );
+    let config = connector::supervisor::Config {
+        kinds: Arc::new(kinds),
+        clock: node.clock(),
+        entropy: node.entropy(),
+        net: node.net(),
+        roots: connector::http::Roots::default(),
+        tasks: tasks.clone(),
+        hub,
+        secrets,
+    };
+    let clock = node.clock();
+    let mut runs = runs(config);
+    let mut apply = async |(spec, channels): (Vec<Placed>, Vec<_>)| {
+        let mut definitions = definitions(&spec);
+        definitions.extend(channels);
+        let applied = mesh.apply(mesh.pointer(), definitions.clone(), BTreeMap::new());
+        let pointer = applied.await.expect("applies the spec");
+        let used = mesh.spec().await.expect("the mesh runs");
+        assert_eq!(used.pointer, Some(pointer));
+        runs.apply(&definitions);
+    };
+    apply(first).await;
+    clock.sleep(ms(1_000)).await;
+    apply(second).await;
+    let start = clock.now();
+    clock.sleep(ms(10_000)).await;
+    drop(runs);
+    let from = |events: &Starts| {
+        let events = events.lock().expect("no panic");
+        let mut events: Events = events
             .iter()
             .map(|(connector, at, version)| (connector.clone(), *at - start, *version))
             .collect();
-        starts.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
-        starts
-    });
-    run.expect("the run ends")
+        events.sort_by(|a, b| (a.1, &a.0).cmp(&(b.1, &b.0)));
+        events
+    };
+    (from(&starts), from(&cancels))
 }
 
 /// `plant.data.value` (key 901) on the index `plant.other` (key 902), whose home is the
@@ -1477,7 +1528,7 @@ fn a_move_of_the_channel_of_an_open_that_waits_for_a_home_frees_the_wait() {
                 vec![("plant.a", "sink", NODE, 0), ("plant.b", "quick", NODE, 0)],
                 moved(),
             );
-            (seed, in_region(seed, first, second))
+            (seed, in_region(seed, first, second).starts)
         })
         .filter(|(_, starts)| {
             *starts != [start("plant.a", 0, 0), start("plant.b", 0, 0)]
@@ -1498,9 +1549,132 @@ fn a_removal_of_the_channels_of_an_open_that_waits_for_a_home_frees_the_wait() {
                 vec![("plant.a", "sink", NODE, 0), ("plant.b", "quick", NODE, 0)],
                 Vec::new(),
             );
-            (seed, in_region(seed, first, second))
+            (seed, in_region(seed, first, second).starts)
         })
         .filter(|(_, starts)| *starts != [start("plant.b", 0, 0)])
         .collect();
     assert_eq!(held, []);
+}
+
+/// At 0, a `source` whose writer waits for the home of `plant.data.time`, which the
+/// mesh never names. At 1 s, the spec makes the connector a `quick`. The cancel ends
+/// the wait of the writer with no writer, so the run of the `source` returns and the
+/// `quick` starts.
+#[test]
+fn a_change_of_a_connector_whose_writer_waits_for_a_home_frees_the_wait() {
+    let held: Vec<(u64, Events, Events)> = (0..32)
+        .map(|seed| {
+            let first = (vec![("plant.a", "source", NODE, 0)], data().to_vec());
+            let second = (vec![("plant.a", "quick", NODE, 0)], data().to_vec());
+            let seen = in_region(seed, first, second);
+            (seed, seen.starts, seen.cancels)
+        })
+        .filter(|(_, starts, cancels)| {
+            let (before, after): (Events, Events) = starts
+                .iter()
+                .cloned()
+                .partition(|(_, at, _)| *at < Span::ZERO);
+            let waited =
+                matches!(before.as_slice(), [(name, _, 0)] if name == "plant.a");
+            !waited
+                || after != [start("plant.a", 0, 0)]
+                || *cancels != [start("plant.a", 0, 0)]
+        })
+        .collect();
+    assert_eq!(held, []);
+}
+
+/// At 0, a `sink` whose reader, which the supervisor opens before the run, waits for
+/// the home of `plant.data.time`. At 1 s, the spec makes the connector a `quick`. The
+/// cancel ends the open of the reader, so the `sink` never starts and the `quick` does.
+#[test]
+fn a_change_of_a_connector_whose_reader_waits_for_a_home_frees_the_wait() {
+    let held: Vec<(u64, Events)> = (0..32)
+        .map(|seed| {
+            let first = (vec![("plant.a", "sink", NODE, 0)], data().to_vec());
+            let second = (vec![("plant.a", "quick", NODE, 0)], data().to_vec());
+            (seed, in_region(seed, first, second).starts)
+        })
+        .filter(|(_, starts)| *starts != [start("plant.a", 0, 0)])
+        .collect();
+    assert_eq!(held, []);
+}
+
+/// The config of a `modbus` connector that reads `plant.data.value`.
+const MODBUS: &str = r#"address = "plc:502"
+rate = "10Hz"
+read "plant.data.value" {
+  table = "holding"
+  address = 0
+}
+"#;
+
+/// The config of an `opcua` connector that reads `plant.data.value`.
+const OPCUA: &str = r#"address = "opc.tcp://plc:4840"
+rate = "10Hz"
+read "plant.data.value" {
+  node_id = "ns=2;i=1"
+}
+"#;
+
+/// At 0, a `modbus` connector whose writer waits for the home of `plant.data.time`. At
+/// 1 s, the spec makes the connector a `quick`. The run of `modbus` ends with no error
+/// at the cancel, and the `quick` starts.
+#[test]
+fn a_change_of_a_modbus_connector_whose_writer_waits_ends_its_run_with_no_error() {
+    assert_eq!(
+        not_ended(&connector_modbus::Kind::default(), "modbus", MODBUS),
+        []
+    );
+}
+
+/// As above, for an `opcua` connector.
+#[test]
+fn a_change_of_an_opcua_connector_whose_writer_waits_ends_its_run_with_no_error() {
+    assert_eq!(
+        not_ended(&connector_opcua::Kind::default(), "opcua", OPCUA),
+        []
+    );
+}
+
+/// Each run of 32 of the simulator on which a connector `plant.a` of `kind`, whose
+/// config is the HCL `text`, does not end its run with no error when the spec makes it
+/// a `quick` 1 s after the start, with the starts and the lines of the status of
+/// `kind`.
+fn not_ended(
+    of: &impl Kind,
+    kind: &'static str,
+    text: &str,
+) -> Vec<(u64, Events, Vec<String>)> {
+    let config = config_hcl::read(document::Source(0), text).expect("valid HCL");
+    let parsed = of.parse(&config).expect("a valid config");
+    let counts = of.check(&parsed).expect("valid channels").counts;
+    let connector = name("plant.a");
+    let first = types::channel::Key::from_u128(1);
+    let mut definitions = testing::create_status(&connector, &counts, first);
+    let config = Checked::new(config).expect("a shallow document");
+    let placed = Connector::new(name(kind), name(NODE), config);
+    definitions.push((connector, Definition::Connector(placed)));
+    definitions.extend(data());
+    let of_kind = format!("kind={kind:?}");
+    let ended = [
+        format!("INFO running connector=plant.a {of_kind} restarts=0"),
+        format!("INFO ended connector=plant.a {of_kind}"),
+        format!("INFO stopped connector=plant.a {of_kind}"),
+    ];
+    (0..32)
+        .map(|seed| {
+            let first = (Vec::new(), definitions.clone());
+            let second = (vec![("plant.a", "quick", NODE, 0)], data().to_vec());
+            let seen = in_region(seed, first, second);
+            let lines = seen
+                .lines
+                .into_iter()
+                .filter(|line| line.contains(&of_kind));
+            (seed, seen.starts, lines.collect())
+        })
+        .filter(|(_, starts, lines)| {
+            *starts != [start("plant.a", 0, 0)] || *lines != ended
+        })
+        .collect()
 }

@@ -1317,6 +1317,69 @@ fn serves_a_request_whose_header_came_before_the_admission() {
     assert_eq!(got, Some(Ok(Got::Request(name(SUBJECT), b"ping".to_vec()))));
 }
 
+/// A request gives the last hello that the node admitted, a renewal, with its own
+/// signature, and the signature of the request.
+#[test]
+fn gives_a_request_the_renewed_hello_and_its_signature() {
+    let got = Arc::new(Mutex::new(None));
+    let kept = Arc::clone(&got);
+    let want = Arc::new(Mutex::new(None));
+    let wanted = Arc::clone(&want);
+    let home = move |node: sim::node::Node, tasks: env::tasks::Tasks| async move {
+        let test = home(&node, &tasks, POOL, true).await;
+        test.hub.set_rules(rules());
+        let transport = transport(&node, &tasks, &own_pool(), HOME, 1 << 16);
+        let session = transport.accept().await.expect("a session");
+        let link = test.hub.link(session.clone());
+        let mut first = session.accept().await.expect("a stream");
+        header(&mut first).await;
+        let hello = link.serve(first);
+        tasks.spawn(async move {
+            drop(hello.await);
+        });
+        let mut second = session.accept().await.expect("a stream");
+        header(&mut second).await;
+        let Ok(hub::Served::Request(request)) = link.serve(second).await else {
+            panic!("a request");
+        };
+        let hub::serve::Request {
+            admitted,
+            signature,
+            reply,
+            ..
+        } = *request;
+        *kept.lock().expect("not poisoned") = Some((admitted, signature));
+        reply.send(b"").await.expect("sends");
+        node.clock().sleep(QUIET).await;
+        drop((link, test));
+    };
+    run(110, home, move |mut agent| async move {
+        let first = agent.hello.challenge().await;
+        agent.send_hello(Agent::hello(first), &AGENT).await;
+        let second = agent.hello.challenge().await;
+        let renewal = Agent::hello(second);
+        let signature = Pair::new(&AGENT).sign(&access::proof::hello(&renewal));
+        agent.send_hello(renewal.clone(), &AGENT).await;
+        agent.hello.challenge().await;
+        let signed =
+            access::proof::signed(access::proof::Kind::Request, CONNECTION, b"ping");
+        let request = Pair::new(&AGENT).sign(&signed);
+        *wanted.lock().expect("not poisoned") = Some((
+            wire::hub::client::Signed {
+                hello: renewal,
+                signature,
+            },
+            request,
+        ));
+        let mut stream = agent.request(4, b"ping").await;
+        assert_eq!(stream.response().await, b"");
+    });
+    let got = got.lock().expect("not poisoned").take();
+    let want = want.lock().expect("not poisoned").take();
+    assert!(want.is_some());
+    assert_eq!(got, want);
+}
+
 /// Polls `hello` beside `other` until `other` resolves.
 async fn beside<T>(
     hello: &mut std::pin::Pin<
