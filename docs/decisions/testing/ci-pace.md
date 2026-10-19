@@ -52,3 +52,14 @@
   `laptop.monitor`:
   https://github.com/synnaxlabs/foundation/pull/3151#issuecomment-6251116435. The person
   approved `ci.yaml` on GitHub at `1697708a8`.
+  Amended (#3418; the person, 2026-10-19, through `laptop.monitor`: "Let's do it
+  ASAP"): the job `check` runs two parts on each OS at the same time, `lint` (Format,
+  Clippy, Layers, Globals, Skips, Oracles) and `test` (Test, Root tests). The job `os`
+  gives the required checks `check`, `macos`, and `windows`, each of which passes when
+  each part of `check` passed. The Test step runs `cargo nextest run` with the profile
+  `ci` of `.config/nextest.toml` (no retry, no fail-fast), `cargo test --doc`, and
+  `cargo test --test <name>` for each test target with no harness, which nextest runs to
+  list its tests and from which it gets none. Each skipped test of the lists of LINUX
+  CI is a `test(=<path>)` filter: nextest 0.9.146 skips no test with `--exact --skip`.
+  In queue run 39308250221, `check` took 32 min, `macos` 35 min, and `windows` 28 min,
+  and `cargo test` ran the 132 test binaries one after another.

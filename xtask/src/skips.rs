@@ -250,7 +250,7 @@ fn roots(root: &Path) -> Result<Vec<Module>, String> {
 
 /// Reports whether `item`, an item of the root file of a target, makes the target a
 /// program with no test harness.
-fn main(item: &Item) -> bool {
+pub(crate) fn main(item: &Item) -> bool {
     match item {
         Item::Fn(function) => function.sig.ident == "main",
         Item::Macro(call) => call

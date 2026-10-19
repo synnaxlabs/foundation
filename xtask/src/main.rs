@@ -751,14 +751,31 @@ mod tests {
         // expression, and none of the names of its entries. A step that its `if` skips
         // on an OS passes there.
         let check = check_job();
-        let step = "        if: \"!cancelled() && env.RUST != 'false'\"";
+        let step = |part| {
+            format!(
+                "        if: \"!cancelled() && env.RUST != 'false' && matrix.part == \
+                 '{part}'\""
+            )
+        };
+        let (lint, test) = (step("lint"), step("test"));
         assert_eq!(
             ifs_and_names(&check, &["Clippy", "Test"]),
             (
-                vec!["    if: \"!cancelled()\"", step, step],
+                vec!["    if: \"!cancelled()\"", &lint, &test],
                 vec!["check", "macos", "windows"]
             )
         );
+        // The checks of `os` hold the required names, and pass only when each part of
+        // `check` passed.
+        let os = os_job("os");
+        for line in [
+            "    needs: check",
+            "    if: \"!cancelled()\"",
+            "        name: [check, macos, windows]",
+            "          RESULT: ${{ needs.check.result }}",
+        ] {
+            assert!(os.iter().any(|found| found == line), "`os` lacks `{line}`");
+        }
         let features = os_job("features");
         assert_eq!(
             ifs_and_names(&features, &["Each feature alone"]),
@@ -840,6 +857,31 @@ mod tests {
                 "the exception `{item}` of ci.yaml names no issue as `# #<n>`"
             );
         }
+    }
+
+    #[test]
+    fn the_test_step_runs_each_target_with_no_harness_with_cargo_test() {
+        // nextest runs such a target to list its tests, and it lists none.
+        let metadata = metadata(&fixture().join("../..")).unwrap();
+        let mut alone = BTreeSet::new();
+        for package in metadata["packages"].as_array().unwrap() {
+            for target in package["targets"].as_array().unwrap() {
+                let kinds = target["kind"].as_array().unwrap();
+                if !kinds.iter().any(|kind| kind == "test") {
+                    continue;
+                }
+                let root = target["src_path"].as_str().unwrap();
+                let file = syn::parse_file(&std::fs::read_to_string(root).unwrap());
+                if file.unwrap().items.iter().any(skips::main) {
+                    alone.insert(target["name"].as_str().unwrap());
+                }
+            }
+        }
+        let check = check_job();
+        let listed = (check.iter())
+            .find_map(|line| line.strip_prefix("          ALONE: "))
+            .expect("the Test step of `check` has no `ALONE`");
+        assert_eq!(listed.split(' ').collect::<BTreeSet<_>>(), alone);
     }
 
     #[test]

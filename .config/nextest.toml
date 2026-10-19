@@ -1,0 +1,4 @@
+# The profile of the Test step of the job `check` in `.github/workflows/ci.yaml`.
+[profile.ci]
+retries = 0
+fail-fast = false

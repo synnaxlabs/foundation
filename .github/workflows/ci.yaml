@@ -104,23 +104,25 @@ jobs:
               - '.claude/skills/build/wait_test.sh'
               - '.github/workflows/**'
 
-  # The required checks `check`, `macos`, and `windows`, one for each OS of LINUX CI.
-  # A matrix job that skips reports one check named by the unexpanded expression, so
-  # this job always runs, and each step skips when the filter found no change.
+  # The lint and the tests of each OS of LINUX CI, at the same time. A matrix job that
+  # skips reports one check named by the unexpanded expression, so this job always
+  # runs, and each step skips when the filter found no change.
   check:
     needs: changes
     if: "!cancelled()"
-    name: ${{ matrix.name }}
+    name: ${{ matrix.part }} ${{ matrix.name }}
     strategy:
       fail-fast: false
       matrix:
+        name: [check, macos, windows]
+        part: [lint, test]
         # Each OS lists the flags that leave out what fails on it, each with the open
         # issue that removes it: `crates` do not build with all their targets, the tests
-        # of `untested` fail, and so do `tests`, each a full test path that `--exact`
-        # matches in its binary. Each item of `gates` names a file and the path in it of
-        # an item whose `cfg` leaves a test out of the OS, which `cargo xtask skips`
-        # reads. The lists only shrink, other than a new crate or gate with the open
-        # issues of the `os` items that it needs (LINUX CI).
+        # of `untested` fail, and so do `tests`, each a full test path that nextest
+        # matches with `test(=<path>)`. Each item of `gates` names a file and the path
+        # in it of an item whose `cfg` leaves a test out of the OS, which `cargo xtask
+        # skips` reads. The lists only shrink, other than a new crate or gate with the
+        # open issues of the `os` items that it needs (LINUX CI).
         include:
           - name: check
             runner: ubuntu-24.04
@@ -358,6 +360,12 @@ jobs:
         uses: actions/checkout@v4
       - if: env.RUST != 'false'
         uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.part }}
+      - if: env.RUST != 'false' && matrix.part == 'test'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
       # The tests of `sdk-python` embed CPython 3.11 or later, which needs its shared
       # library and NumPy, and start the node at `FOUNDATION_NODE`, which `Test` builds
       # for the tests of `node`. Windows builds no node (#2968, #682, #2955, #2956,
@@ -372,40 +380,81 @@ jobs:
           echo "PYO3_PYTHON=$(command -v python)" >> "$GITHUB_ENV"
           echo "FOUNDATION_NODE=$PWD/target/debug/foundation" >> "$GITHUB_ENV"
       - name: Format
-        if: env.RUST != 'false' && runner.os == 'Linux'
+        if: env.RUST != 'false' && matrix.part == 'lint' && runner.os == 'Linux'
         run: |
           cargo fmt --check
           cargo fmt --check --manifest-path fuzz/Cargo.toml
       - name: Clippy
-        if: "!cancelled() && env.RUST != 'false'"
+        if: "!cancelled() && env.RUST != 'false' && matrix.part == 'lint'"
         run: >-
           cargo clippy --workspace ${{ join(matrix.crates, ' ') }} --all-targets
           --all-features --keep-going -- -D warnings
       - name: Layers
-        if: "!cancelled() && env.RUST != 'false' && runner.os == 'Linux'"
+        if: >-
+          !cancelled() && env.RUST != 'false' && matrix.part == 'lint'
+          && runner.os == 'Linux'
         run: cargo xtask layers
       - name: Globals
-        if: "!cancelled() && env.RUST != 'false' && runner.os == 'Linux'"
+        if: >-
+          !cancelled() && env.RUST != 'false' && matrix.part == 'lint'
+          && runner.os == 'Linux'
         run: cargo xtask globals
       - name: Skips
-        if: "!cancelled() && env.RUST != 'false' && runner.os == 'Linux'"
+        if: >-
+          !cancelled() && env.RUST != 'false' && matrix.part == 'lint'
+          && runner.os == 'Linux'
         run: cargo xtask skips
       - name: Oracles
-        if: "!cancelled() && env.RUST != 'false' && runner.os == 'Linux'"
+        if: >-
+          !cancelled() && env.RUST != 'false' && matrix.part == 'lint'
+          && runner.os == 'Linux'
         run: cargo xtask oracles
+      # nextest runs a test binary with no harness to list its tests, and the binary
+      # lists none, so `cargo test` runs each target of `ALONE`.
       - name: Test
-        if: "!cancelled() && env.RUST != 'false'"
-        run: >-
-          cargo test --workspace ${{ join(matrix.crates, ' ') }}
-          ${{ join(matrix.untested, ' ') }} --all-features --no-fail-fast
-          -- --exact ${{ join(matrix.tests, ' ') }}
+        if: "!cancelled() && env.RUST != 'false' && matrix.part == 'test'"
+        env:
+          ALONE: alloc browse bytes erase global interrupt local memory peak roots
+          FLAGS: ${{ join(matrix.crates, ' ') }} ${{ join(matrix.untested, ' ') }}
+          SKIPPED: ${{ join(matrix.tests, ' ') }}
+        run: |
+          filter=""
+          for target in $ALONE; do filter+=" | (kind(test) & binary(=$target))"; done
+          for test in $SKIPPED; do filter+=" | test(=$test)"; done
+          failed=0
+          cargo nextest run --workspace $FLAGS --all-features --profile ci \
+            -E "not (${filter# | })" || failed=1
+          cargo test --workspace $FLAGS --all-features --no-fail-fast --doc || failed=1
+          cargo test --workspace $FLAGS --all-features --no-fail-fast \
+            $(printf -- '--test %s ' $ALONE) || failed=1
+          exit "$failed"
       # Root tests mount a filesystem. Only this runner, which is discarded after the
       # job, runs them.
       - name: Root tests
-        if: "!cancelled() && env.RUST != 'false' && runner.os == 'Linux'"
+        if: >-
+          !cancelled() && env.RUST != 'false' && matrix.part == 'test'
+          && runner.os == 'Linux'
         run: |
           cargo clippy -p os --all-features --test root -- -D warnings
           cargo test -p os --all-features --test root
+
+  # The required checks `check`, `macos`, and `windows`. Each passes when each part of
+  # `check` passed: the result of a matrix job covers all its entries.
+  os:
+    needs: check
+    if: "!cancelled()"
+    name: ${{ matrix.name }}
+    strategy:
+      matrix:
+        name: [check, macos, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: The result of the parts
+        env:
+          RESULT: ${{ needs.check.result }}
+        run: |
+          [ "$RESULT" = success ] ||
+            { echo "::error::The lint and test parts ended in $RESULT."; exit 1; }
 
   # The required checks `features`, `features-macos`, and `features-windows`. It runs
   # as `check` does, and each OS leaves out the `crates` of its entry of `check`.
