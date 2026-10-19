@@ -448,6 +448,50 @@ fn decode_write_replies(bencher: Bencher<'_, '_>) {
     });
 }
 
+/// Frames of one write in each run of [`count_write_replies`].
+const FRAMES: u64 = 64;
+
+/// Counts the client side of [`FRAMES`] frames of group 0 of a fresh write: for each,
+/// `Replies::sent`, then `Replies::decode` of its `Taken` and of its `Stored`.
+#[divan::bench]
+fn count_write_replies(bencher: Bencher<'_, '_>) {
+    let messages: Vec<[Vec<u8>; 2]> = (1..=FRAMES)
+        .map(|frame| {
+            let taken = write::Reply::Outcome {
+                frame,
+                group: 0,
+                outcome: Outcome::Taken {
+                    range: Range {
+                        seq: frame,
+                        count: 1,
+                    },
+                },
+            };
+            let stored = write::Reply::Stored {
+                group: 0,
+                frames: frame,
+            };
+            [taken, stored].map(|reply| {
+                let mut out = vec![0; reply.encoded_len()];
+                reply.encode(&mut out);
+                out
+            })
+        })
+        .collect();
+    bencher
+        .counter(divan::counter::ItemsCount::new(FRAMES))
+        .with_inputs(|| write::Replies::new(1))
+        .bench_local_values(|mut replies| {
+            for messages in divan::black_box(&messages) {
+                replies.sent([0]);
+                for message in messages {
+                    divan::black_box(replies.decode(message).expect("in order"));
+                }
+            }
+            replies
+        });
+}
+
 fn sum(ends: ends::Iter<'_>) -> u64 {
     ends.fold(0, |sum, (place, end)| {
         sum.wrapping_add(u64::from(place))
