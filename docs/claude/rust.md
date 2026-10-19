@@ -149,18 +149,22 @@ true`. CI denies warnings. r16 gives the reason for each lint.
   https://github.com/synnaxlabs/foundation/issues/1732#issuecomment-6086905545), the
   test module `tasks::tests::hooked` of `env` (laptop.architect-2, 2026-10-10 03:57
   UTC, #2218,
-  https://github.com/synnaxlabs/foundation/pull/2218#issuecomment-6093523974), and
-  later FFI connectors. Such a module uses `#[expect(unsafe_code, reason = "...")]`
-  and runs under Miri (r16 24). Those modules of `os` only call the OS, which Miri
-  cannot run, so tests on the real OS check them, and `cargo xtask miri` skips `os`
-  (BLOCK MEMORY). `connector-opcua` compiles C into its tests, which Miri cannot run
-  either, so `cargo xtask miri` skips it. In place of Miri, `cargo xtask sanitizers`
-  (the `sanitizers` job of `ci.yaml`) runs its tests with the Rust under ASan and the
-  C under ASan and UBSan, with no `function` check (`laptop.architect-2`, #435,
+  https://github.com/synnaxlabs/foundation/pull/2218#issuecomment-6093523974), the
+  function `write::raw` of `sdk-python` (laptop.architect-2, 2026-10-19T13:03:37Z,
+  #3325, https://github.com/synnaxlabs/foundation/pull/3325#issuecomment-6267870899),
+  and later FFI connectors. Such a module uses
+  `#[expect(unsafe_code, reason = "...")]` and runs under Miri (r16 24). Those modules
+  of `os` only call the OS, which Miri cannot run, so tests on the real OS check them,
+  and `cargo xtask miri` skips `os` (BLOCK MEMORY). `connector-opcua` compiles C into
+  its tests, which Miri cannot run either, so `cargo xtask miri` skips it. In place of
+  Miri, `cargo xtask sanitizers` (the `sanitizers` job of `ci.yaml`) runs its tests
+  with the Rust under ASan and the C under ASan and UBSan, with no `function` check
+  (`laptop.architect-2`, #435,
   https://github.com/synnaxlabs/foundation/issues/435#issuecomment-6050889018,
   2026-10-08 02:24 UTC, and #2165,
   https://github.com/synnaxlabs/foundation/pull/2165#issuecomment-6086019787,
-  2026-10-09 17:35 UTC).
+  2026-10-09 17:35 UTC). The tests of `sdk-python` call CPython, which Miri cannot run,
+  so `cargo xtask miri` skips it, and its tests on CPython check it.
 - Each `unsafe` block holds one unsafe operation and a `// SAFETY:` comment. The
   comment relies only on earlier checks, type invariants, and well-formed inputs
   (r16 25).
