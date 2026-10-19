@@ -1,24 +1,21 @@
-//! A forward: one hub stream on which a program's node carries the program's write or
-//! read to the home of its index. The node sends a [`Forward`], then the program's
-//! signed hello and signed first message as the program sent them, then the open body,
-//! then the run of the [`places`] of a write.
+//! A forward: one hub stream on which a program's node carries the program's write to
+//! the home of its index. The node sends a [`Forward`], then the program's signed hello
+//! and signed first message as the program sent them, then the open body, then the run
+//! of [`places`].
 //!
 //! Fields are little-endian.
 //!
-//! - [`Forward`]: kind 8 (write) or 9 (read), then the count of places (`u32`).
+//! - [`Forward`]: kind 8, then the count of places (`u32`).
 //! - [`places`]: each place (`u32`).
 
 use super::{Error, Fields};
 
-const WRITE: u8 = 8;
-const READ: u8 = 9;
+const KIND: u8 = 8;
 
 /// The first message of a forward. The program's signed hello, its signed first
 /// message, the open body, and the places follow it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Forward {
-    /// What the program opened.
-    pub kind: Kind,
     /// The count of places of the group, at least 1: the places of the run that follows
     /// the open body of a write.
     pub places: u32,
@@ -35,12 +32,8 @@ impl Forward {
     /// When `places` is 0.
     pub fn encode(&self, out: &mut [u8; Self::LEN]) {
         assert!(self.places > 0, "a forward names at least one place");
-        let kind = match self.kind {
-            Kind::Write => WRITE,
-            Kind::Read => READ,
-        };
         let [p0, p1, p2, p3] = self.places.to_le_bytes();
-        *out = [kind, p0, p1, p2, p3];
+        *out = [KIND, p0, p1, p2, p3];
     }
 
     /// The forward in `message`.
@@ -55,27 +48,16 @@ impl Forward {
         let Some(kind) = fields.kind() else {
             return Err(Error::Empty);
         };
-        let kind = match kind {
-            WRITE => Kind::Write,
-            READ => Kind::Read,
-            kind => return Err(Error::Kind { kind }),
-        };
+        if kind != KIND {
+            return Err(Error::Kind { kind });
+        }
         let places = u32::from_le_bytes(*fields.take()?);
         fields.end()?;
         if places == 0 {
             return Err(Error::Unplaced);
         }
-        Ok(Self { kind, places })
+        Ok(Self { places })
     }
-}
-
-/// What the program opened: a write (kind 8) or a read (kind 9).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Kind {
-    /// A write stream.
-    Write,
-    /// A read stream.
-    Read,
 }
 
 /// The places of a forwarded write: each a position (`u32`) in the channels of the
@@ -187,25 +169,15 @@ mod tests {
         })
     }
 
-    fn kind() -> impl Strategy<Value = Kind> {
-        prop_oneof![Just(Kind::Write), Just(Kind::Read)]
-    }
-
     mod forward {
         use super::*;
 
         #[test]
         fn pins_the_wire_values() {
-            let write = Forward {
-                kind: Kind::Write,
+            let forward = Forward {
                 places: 0x0102_0304,
             };
-            assert_eq!(encode(write), [8, 4, 3, 2, 1]);
-            let read = Forward {
-                kind: Kind::Read,
-                places: 1,
-            };
-            assert_eq!(encode(read), [9, 1, 0, 0, 0]);
+            assert_eq!(encode(forward), [8, 4, 3, 2, 1]);
         }
 
         #[test]
@@ -215,35 +187,30 @@ mod tests {
 
         #[test]
         fn refuses_unknown_kinds_before_the_length() {
-            check_kinds(Forward::decode, &[8, 9], &[1, 5, 6]);
+            check_kinds(Forward::decode, &[8], &[1, 5, 6]);
         }
 
         #[test]
         fn refuses_each_wrong_length() {
             check(Forward::decode, 8, &[1, 4, 6]);
-            check(Forward::decode, 9, &[1, 4, 6]);
         }
 
         #[test]
         fn refuses_a_forward_of_no_place() {
             assert_eq!(Forward::decode(&[8, 0, 0, 0, 0]), Err(Error::Unplaced));
-            assert_eq!(Forward::decode(&[9, 0, 0, 0, 0]), Err(Error::Unplaced));
         }
 
         #[test]
         #[should_panic(expected = "a forward names at least one place")]
         fn panics_on_a_forward_of_no_place() {
-            let forward = Forward {
-                kind: Kind::Write,
-                places: 0,
-            };
+            let forward = Forward { places: 0 };
             forward.encode(&mut [0; Forward::LEN]);
         }
 
         proptest! {
             #[test]
-            fn round_trips(kind in kind(), places in 1..=u32::MAX) {
-                let forward = Forward { kind, places };
+            fn round_trips(places in 1..=u32::MAX) {
+                let forward = Forward { places };
                 prop_assert_eq!(Forward::decode(&encode(forward)), Ok(forward));
             }
         }

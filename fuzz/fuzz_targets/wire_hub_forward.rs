@@ -19,12 +19,12 @@ use libfuzzer_sys::{
     fuzz_target,
 };
 use wire::hub::Error;
-use wire::hub::forward::{Forward, Kind, places};
+use wire::hub::forward::{Forward, places};
 
 fn forward(message: &[u8]) {
     let expected = match message {
         [] => Err(Error::Empty),
-        &[kind, ..] if kind != 8 && kind != 9 => Err(Error::Kind { kind }),
+        &[kind, ..] if kind != 8 => Err(Error::Kind { kind }),
         _ if message.len() != Forward::LEN => Err(Error::Length { len: message.len() }),
         [_, 0, 0, 0, 0] => Err(Error::Unplaced),
         _ => Ok(()),
@@ -90,11 +90,6 @@ fn read(bytes: &[u8]) {
 }
 
 fn write(input: &mut Unstructured<'_>) -> arbitrary::Result<()> {
-    let kind = if input.arbitrary()? {
-        Kind::Write
-    } else {
-        Kind::Read
-    };
     let written: BTreeSet<u32> = input.arbitrary()?;
     let Some(&last) = written.last() else {
         return Ok(());
@@ -103,7 +98,6 @@ fn write(input: &mut Unstructured<'_>) -> arbitrary::Result<()> {
         return Ok(());
     };
     let forward = Forward {
-        kind,
         places: u32::try_from(written.len()).expect("a set of u32 fits a u32"),
     };
     let mut out = [0; Forward::LEN];

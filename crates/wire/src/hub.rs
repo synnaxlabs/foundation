@@ -11,7 +11,7 @@
 //!
 //! The streams of a program's session are in [`client`], the frames of its write
 //! stream and their replies in [`write`](mod@write), and the stream on which its node
-//! carries its write or read to the home in [`forward`].
+//! carries its write to the home in [`forward`].
 //!
 //! [`Home`] decodes the messages from the reader's node, and [`Reader`] those from the
 //! home. Each checks the order and the runs of its side of the session.
