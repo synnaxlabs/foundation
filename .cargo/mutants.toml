@@ -243,6 +243,9 @@ exclude_re = [
   # The loop of the constant assertion of the status names: a mutant that skips it
   # still builds, and no test sees a check that runs at compile time.
   'crates/node/src/status\.rs:.*replace < with (==|>)$',
+  # Only the constant assertion and tests read `handoff::MAX_BYTES`. A bound that is
+  # too small or too large still builds, and no caller sees it.
+  'crates/home/src/handoff\.rs:.*replace \+ with (-|\*)$',
   # At the bound, both arms give the bound.
   'crates/codec/src/alp\.rs:.*replace (< with <=|> with >=) in Stats::of_f64$',
   # A stub that panics until PR B2 of #432 fills it; B2 removes this line.
