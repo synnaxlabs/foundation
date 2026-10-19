@@ -269,9 +269,11 @@ impl Homed {
         let set = borrowed.interner.intern(&groups);
         let entries = entries(&set, &keys);
         let writer = ::home::writer::Writer {
-            subject,
-            authority,
-            via: borrowed.node,
+            holder: control::Writer {
+                subject,
+                authority,
+                via: borrowed.node,
+            },
             lease,
             set: Arc::clone(&set),
         };

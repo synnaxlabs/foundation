@@ -728,6 +728,7 @@ dependencies = [
  "access",
  "block",
  "clock",
+ "control",
  "env",
  "home",
  "mesh",
