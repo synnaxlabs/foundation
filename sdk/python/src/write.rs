@@ -23,7 +23,7 @@ use types::sample::{Scalar, Type, Value};
 use types::time::{Span, Stamp};
 use types::{frame, hash};
 
-use crate::{DataLost, Rejected, error, owned};
+use crate::{DataLost, Rejected, error, owned, stop};
 
 /// What a write does with a frame that the node took no room for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -517,11 +517,7 @@ fn rejection(refusal: Refusal) -> (&'static str, &'static str) {
 /// The error of a writer whose one group ended with `end`: the error of a stream
 /// that the node stopped for the same cause.
 fn ended(end: End) -> sdk::Error {
-    let refusal = match end {
-        End::Removed => program::Refusal::Unknown,
-        End::Failed => program::Refusal::Failed,
-    };
-    sdk::Error::Stream(program::Error::Refused(refusal))
+    sdk::Error::Stream(program::Error::Refused(stop(end)))
 }
 
 /// The value of `object` for `place`.
