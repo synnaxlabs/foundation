@@ -486,7 +486,7 @@ mod tests {
                 pair.dial(pair::SERVER_KEY.public());
                 pair.run(Duration::from_millis(100));
                 let largest = u64::from(u32::MAX);
-                let mut streams = pair.client.connection().streams();
+                let streams = pair.client.connection().streams();
                 assert_eq!(streams.available(Dir::Bi), largest + 1);
                 // The hello took one.
                 assert_eq!(streams.available(Dir::Uni), largest + 1);
