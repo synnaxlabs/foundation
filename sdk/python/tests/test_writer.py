@@ -125,6 +125,18 @@ def end_group(group: int) -> None:
         pass
 
 
+def children(test: unittest.TestCase, parent: int) -> set:
+    """The children of the process `parent`, once it has one. Fails `test` when it
+    has none after `PATIENCE`."""
+    deadline = time.monotonic() + PATIENCE
+    while True:
+        listed = subprocess.run(["pgrep", "-P", str(parent)], capture_output=True)
+        if listed.returncode == 0:
+            return set(map(int, listed.stdout.split()))
+        test.assertLess(time.monotonic(), deadline)
+        time.sleep(0.01)
+
+
 def in_group(pids: set) -> set:
     """The processes of `pids` that are in the process group of this process."""
     listed = subprocess.run(
@@ -554,18 +566,16 @@ class WriterTest(unittest.TestCase):
     def test_a_backstop_leaves_no_process_in_the_group_of_this_process(self) -> None:
         self.node.pause()
         shell = backstop(self, self.node)
-        deadline = time.monotonic() + PATIENCE
-        while True:
-            children = subprocess.run(
-                ["pgrep", "-P", str(shell.pid)], capture_output=True
-            )
-            if children.returncode == 0:
-                break
-            self.assertLess(time.monotonic(), deadline)
-            time.sleep(0.01)
-        pids = {shell.pid, *map(int, children.stdout.split())}
+        pids = {shell.pid, *children(self, shell.pid)}
         self.node.resume()
         self.doCleanups()
+        # A process of this group whose parent is not this process, as a runner that
+        # shares its group with the test can start at any time.
+        other = subprocess.Popen(["sh", "-c", "sleep 30; :"])
+        self.addCleanup(other.wait)
+        self.addCleanup(other.kill)
+        self.addCleanup(subprocess.run, ["pkill", "-P", str(other.pid)])
+        children(self, other.pid)
         self.assertEqual(in_group(pids), set())
 
     def test_other_threads_run_while_a_write_waits(self) -> None:
