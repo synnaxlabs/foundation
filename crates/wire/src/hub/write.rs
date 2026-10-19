@@ -662,6 +662,7 @@ impl Replies {
     ///   the last [`Reply::Stored`] of its group.
     ///
     /// A reply that it refuses changes no count.
+    #[inline(always)]
     pub fn decode(&mut self, message: &[u8]) -> Result<Reply, Error> {
         let reply = Reply::decode(message)?;
         match reply {
