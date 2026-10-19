@@ -74,7 +74,11 @@ fn check(length: u64) {
 
 /// A decoder of the start of a write stream at the program: the places and their run.
 #[derive(Debug, Default)]
-pub struct Opening(Next);
+pub struct Opening {
+    next: Next,
+    /// Each place names the index of place 0, as on a read.
+    single: bool,
+}
 
 /// The message the stream expects next.
 #[derive(Debug, Default)]
@@ -96,6 +100,15 @@ pub struct Start {
 }
 
 impl Opening {
+    /// A decoder of the places of a read, where a place also breaks a rule when its
+    /// index is not that of place 0: [`Error::Indexes`].
+    pub(crate) fn read() -> Self {
+        Self {
+            next: Next::Places,
+            single: true,
+        }
+    }
+
     /// Decodes the next message from the node, up to the last place, or `None` when
     /// the node finished the stream. Gives the start with the last place, else
     /// `None`.
@@ -119,20 +132,20 @@ impl Opening {
     ///
     /// When it gave the start before.
     pub fn decode(&mut self, message: Option<&[u8]>) -> Result<Option<Start>, Error> {
-        match (&mut self.0, message) {
+        match (&mut self.next, message) {
             (Next::Given, _) => {
                 panic!("a stream is decoded after the decoder gave its start")
             }
             (_, None) => Err(Error::Finished),
             (Next::Places, Some(message)) => {
-                self.0 = Next::Run(Run::new(Places::decode(message)?));
+                self.next = Next::Run(Run::new(Places::decode(message)?));
                 Ok(None)
             }
             (Next::Run(run), Some(message)) => {
-                let Some((places, set)) = run.decode(message)? else {
+                let Some((places, set)) = run.decode(message, self.single)? else {
                     return Ok(None);
                 };
-                self.0 = Next::Given;
+                self.next = Next::Given;
                 Ok(Some(Start {
                     places,
                     set: Arc::new(set),
@@ -162,10 +175,11 @@ impl Run {
     /// Decodes the next message of the run. Gives the places and their key set, from
     /// [`KeySet::ordered`], with the last message, else `None`. Gives the errors of a
     /// message of the run that [`Opening::decode`] states, and a refused message
-    /// leaves the run as it was.
+    /// leaves the run as it was. With `single`, each place names the index of place 0.
     fn decode(
         &mut self,
         message: &[u8],
+        single: bool,
     ) -> Result<Option<(Vec<Place>, KeySet)>, Error> {
         let Self {
             places,
@@ -188,7 +202,7 @@ impl Run {
             *remain = rest;
             return Ok(None);
         }
-        let grouped = indexes(all).and_then(|()| {
+        let grouped = indexes(all, single).and_then(|()| {
             let channels = all
                 .iter()
                 .map(|place| (place.key, place.data_type, place.index));
@@ -206,8 +220,9 @@ impl Run {
 }
 
 /// Checks that the index of each of `places` is a place whose index is itself, of
-/// type `Stamp`, as [`Opening::decode`] states.
-fn indexes(places: &[Place]) -> Result<(), Error> {
+/// type `Stamp`, and with `single` that of place 0, as [`Opening::decode`] states.
+fn indexes(places: &[Place], single: bool) -> Result<(), Error> {
+    let lead = places.first().map(|place| place.index);
     for (at, place) in places.iter().enumerate() {
         let index = places
             .get(place.index)
@@ -222,6 +237,12 @@ fn indexes(places: &[Place]) -> Result<(), Error> {
             return Err(Error::Unstamped {
                 place: to_u32(at),
                 sample: index.data_type,
+            });
+        }
+        if single && Some(place.index) != lead {
+            return Err(Error::Indexes {
+                place: to_u32(at),
+                index: to_u32(place.index),
             });
         }
     }

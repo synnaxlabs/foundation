@@ -370,11 +370,15 @@
   (https://github.com/synnaxlabs/foundation/issues/3283#issuecomment-6268011114), and
   `Places` holds only `count`, from 1 to `PLACES_MAX`. A read has one index, so each of
   its places names it. `Opening` builds the key set with `KeySet::ordered`, and at the
-  last place gives `Error::Index` for the first place whose index is not a place whose
-  index is itself, then `Error::Unstamped` for an index that is not `Stamp`, then
-  `Error::Repeated`. This replaces the lost flag of #3266 above: the index is now a fact
-  of each group, not of the stream. Lost: a `Places` with a run of the index places,
-  whose length is not fixed and which can pass a message.
+  last place gives, for the first place in place order that breaks a rule,
+  `Error::Index` when its index is not a place whose index is itself, or
+  `Error::Unstamped` when it is an index that is not `Stamp`, or, on a read,
+  `Error::Indexes` when its index is not that of place 0, then `Error::Repeated`.
+  `Place::index` is a `usize`, as the other places of the crate are, not the `u32` of
+  the plan; the wire holds a `u32`. This replaces the lost flag of #3266 above: the
+  index is now a fact of each group, not of the stream. Lost: a `Places` with a run of
+  the index places, whose length is not fixed and which can pass a message. The format
+  is key choice (f), sent to `laptop.monitor` with the plan.
   PR 1b: a write frame is `Head { time, form, series }`, the run of its ends, a run of
   counts, and its body. The run of counts holds one `u32` of at least 1 for each group
   whose index entry is among the ends, in group order, in messages of whole counts. A

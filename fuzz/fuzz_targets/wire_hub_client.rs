@@ -6,7 +6,8 @@
 //! length and nowhere else, each refusal of a body is the one that its rest gives, a
 //! read stream gives with its last place the places of its run, their key set, and the
 //! decoder of a session of their count and the mode, a refused message of a read
-//! stream leaves its decoder as it was, an `Opening` gives what a `Reader` gives, and
+//! stream leaves its decoder as it was, a read of more than one index gives
+//! `Error::Indexes`, an `Opening` gives what a `Reader` gives other than that error, and
 //! each valid message made from the input reads back. A `Reader` holds an `Opening`,
 //! so the checks of the read stream are the checks of the run of both.
 //! `write::Replies` takes or refuses each reply as the order of the replies gives, and
@@ -168,7 +169,8 @@ fn unkinded(message: &[u8]) {
 }
 
 /// Drives an `Opening` and a `Reader` on `bytes`: each message gives what it gives
-/// the reader, and the start gives the reader's places and key set.
+/// the reader, and the start gives the reader's places and key set. Only the reader
+/// refuses places of more than one index, at the last place.
 fn open(bytes: &[u8]) {
     let mut opening = Opening::default();
     let mut reader = Reader::new(Mode::Latest);
@@ -186,6 +188,13 @@ fn open(bytes: &[u8]) {
                 );
                 return;
             }
+            (Ok(Some(opened)), Err(read @ Error::Indexes { .. })) => {
+                assert!(opened.set.groups().len() > 1, "{read:?} of one index");
+                assert_eq!(unindexed(&opened.places), Some(read), "{message:?}");
+                return;
+            }
+            // `drive` checks the error of the reader against the model.
+            (Err(_), Err(Error::Indexes { .. })) => {}
             (Err(opened), Err(read)) => assert_eq!(opened, read, "{message:?}"),
             (opened, read) => {
                 panic!("{opened:?} is not what the reader gave: {read:?}")
@@ -275,7 +284,8 @@ fn drive(bytes: &[u8], mode: Mode) {
 }
 
 /// The error of the first of `places` whose index is not a place whose index is
-/// itself, or that is such an index and not a stamp.
+/// itself, that is such an index and not a stamp, or whose index is not that of place
+/// 0, as a read has one index.
 fn unindexed(places: &[Place]) -> Option<Error> {
     let fit = "the places fit a u32";
     places.iter().enumerate().find_map(|(at, place)| {
@@ -297,6 +307,10 @@ fn unindexed(places: &[Place]) -> Option<Error> {
                     sample: own.data_type,
                 })
             }
+            Some(_) if place.index != places[0].index => Some(Error::Indexes {
+                place: at_place,
+                index: u32::try_from(place.index).expect(fit),
+            }),
             Some(_) => None,
         }
     })

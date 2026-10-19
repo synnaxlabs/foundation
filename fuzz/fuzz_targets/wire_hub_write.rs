@@ -51,7 +51,11 @@ enum Seen {
 fn set(places: u8) -> Arc<KeySet> {
     let channels = (1..=places).map(|n| {
         let data = if n == 1 { Scalar::Stamp } else { Scalar::I64 };
-        (channel::Key::from_u128(u128::from(n)), Type::Scalar(data), 0)
+        (
+            channel::Key::from_u128(u128::from(n)),
+            Type::Scalar(data),
+            0,
+        )
     });
     Arc::new(KeySet::ordered(channels).expect("no key repeats"))
 }
