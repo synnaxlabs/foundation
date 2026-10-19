@@ -172,9 +172,10 @@ pub enum Reply {
         /// What the home did with the group.
         outcome: Outcome,
     },
-    /// Each group among the first `frames` frames of the stream that a home took is on
-    /// disk. `frames` counts each frame whose groups each got an [`Outcome`], in their
-    /// order, and never goes back.
+    /// Each frame among the first `frames` of the stream whose group 0 its home took is
+    /// on disk. `frames` counts each frame whose groups each got an [`Outcome`], in
+    /// their order, and never goes back. A node takes a stream of one group, so it is
+    /// the `Stored` of group 0 alone.
     Stored {
         /// The count of frames that it covers.
         frames: u64,
@@ -488,7 +489,8 @@ impl Replies {
     }
 
     /// Whether each group of each frame sent got its outcome, and the last
-    /// [`Reply::Stored`] covers each frame that a home took a group of.
+    /// [`Reply::Stored`] covers each frame that a home took a group of: each frame
+    /// whose group 0 its home took is on disk.
     #[must_use]
     pub fn stored(&self) -> bool {
         self.answered() && self.stored >= self.taken
