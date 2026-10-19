@@ -559,6 +559,7 @@ impl Replies {
     /// group of that frame than the oldest due, and [`Error::Stored`] for a
     /// [`Reply::Stored`] past the frames answered or below the last
     /// [`Reply::Stored`]. A reply that it refuses changes no count.
+    #[inline(always)]
     pub fn decode(&mut self, message: &[u8]) -> Result<Reply, Error> {
         let reply = Reply::decode(message)?;
         match reply {
