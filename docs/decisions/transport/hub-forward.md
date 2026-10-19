@@ -11,7 +11,7 @@
   names that it verified. `places::decode(run, channels)` refuses a place that is not
   after the place before it or not below `channels` as `wire::hub::Error::Place { place
   }`, and the home gets it as `serve::Error::Message`, which stops the stream with
-  `MALFORMED`. A forward of no place is `Error::Channels`. Plan:
+  `MALFORMED`. A forward of no place is `Error::Unplaced`. Plan:
   https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6268770318, approved
   with changes by `laptop.architect` at 2026-10-19T14:00:04Z
   (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946, change

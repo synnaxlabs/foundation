@@ -26,7 +26,7 @@ fn forward(message: &[u8]) {
         [] => Err(Error::Empty),
         &[kind, ..] if kind != 8 && kind != 9 => Err(Error::Kind { kind }),
         _ if message.len() != Forward::LEN => Err(Error::Length { len: message.len() }),
-        [_, 0, 0, 0, 0] => Err(Error::Channels),
+        [_, 0, 0, 0, 0] => Err(Error::Unplaced),
         _ => Ok(()),
     };
     let decoded = Forward::decode(message);

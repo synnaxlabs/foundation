@@ -49,7 +49,7 @@ impl Forward {
     ///
     /// [`Error::Empty`] when `message` is empty, [`Error::Kind`] when the first byte
     /// names no forward, [`Error::Length`] when `message` is not [`Forward::LEN`]
-    /// bytes, and [`Error::Channels`] when the forward names no place.
+    /// bytes, and [`Error::Unplaced`] when the forward names no place.
     pub fn decode(message: &[u8]) -> Result<Self, Error> {
         let mut fields = Fields::new(message);
         let Some(kind) = fields.kind() else {
@@ -63,7 +63,7 @@ impl Forward {
         let places = u32::from_le_bytes(*fields.take()?);
         fields.end()?;
         if places == 0 {
-            return Err(Error::Channels);
+            return Err(Error::Unplaced);
         }
         Ok(Self { kind, places })
     }
@@ -226,8 +226,8 @@ mod tests {
 
         #[test]
         fn refuses_a_forward_of_no_place() {
-            assert_eq!(Forward::decode(&[8, 0, 0, 0, 0]), Err(Error::Channels));
-            assert_eq!(Forward::decode(&[9, 0, 0, 0, 0]), Err(Error::Channels));
+            assert_eq!(Forward::decode(&[8, 0, 0, 0, 0]), Err(Error::Unplaced));
+            assert_eq!(Forward::decode(&[9, 0, 0, 0, 0]), Err(Error::Unplaced));
         }
 
         #[test]

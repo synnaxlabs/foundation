@@ -524,8 +524,10 @@ pub enum Error {
         /// The bytes of the message.
         len: usize,
     },
-    /// An open names no channel, or a forward no place.
+    /// An open names no channel.
     Channels,
+    /// A forward names no place.
+    Unplaced,
     /// A head names no series.
     Series,
     /// The range of a head or of a write's reply ends past the highest seq.
@@ -683,9 +685,8 @@ impl fmt::Display for Error {
                 f,
                 "the hub message has {len} bytes, which no message of its kind has"
             ),
-            Self::Channels => {
-                f.write_str("the hub open names no channel, or the forward no place")
-            }
+            Self::Channels => f.write_str("the hub open names no channel"),
+            Self::Unplaced => f.write_str("the hub forward names no place"),
             Self::Series => f.write_str("the frame head names no series"),
             Self::Range { seq, count } => write!(
                 f,
@@ -1435,10 +1436,8 @@ mod tests {
                 Error::Length { len: 4 },
                 "the hub message has 4 bytes, which no message of its kind has",
             ),
-            (
-                Error::Channels,
-                "the hub open names no channel, or the forward no place",
-            ),
+            (Error::Channels, "the hub open names no channel"),
+            (Error::Unplaced, "the hub forward names no place"),
             (Error::Series, "the frame head names no series"),
             (
                 Error::Range { seq: 7, count: 2 },
