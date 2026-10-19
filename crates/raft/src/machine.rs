@@ -38,7 +38,7 @@ struct Peer {
     progress: Progress,
     active: bool,
     answered: bool,
-    // The highest commit index this leader sent the peer and that the peer takes
+    // The highest commit index this node sent the peer as leader, which the peer takes
     // when it holds the log the message names.
     commit: u64,
 }

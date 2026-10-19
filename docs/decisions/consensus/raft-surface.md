@@ -224,8 +224,9 @@
   `Raft::set_learners` sets the nodes that get the log and have no vote. `raft` keeps
   the set apart from the configuration: a key that the configuration in force holds as
   a voter is a voter. A leader sends each learner the log and the commit index, and
-  never counts its answer toward a commit, an election, or the quorum check. A learner stays until a later call leaves it out: neither the quorum check
-  nor a change of the configuration releases it. A node that a call leaves out and
+  never counts its answer toward a commit, an election, or the quorum check. A
+  learner stays until a later call leaves it out: neither the quorum check nor a
+  change of the configuration releases it. A node that a call leaves out and
   that no configuration in force holds is released as a removed node is. A node never
   sends a learner of its set a PreVote or a Vote. Each node keeps the set, so a new
   leader has it. `mesh` is to set it from the members of its applied state, PR 2 of
