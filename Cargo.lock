@@ -2005,6 +2005,7 @@ dependencies = [
 name = "sdk-python"
 version = "0.0.0"
 dependencies = [
+ "block",
  "numpy",
  "os",
  "program",

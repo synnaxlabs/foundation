@@ -13,12 +13,13 @@ use pyo3::exceptions::{
 };
 use pyo3::panic::PanicException;
 use pyo3::prelude::*;
-use pyo3::types::{PyInt, PyString};
+use pyo3::types::{PyInt, PyString, PyTuple};
 use types::authority::Authority;
 use types::ed25519::{PrivateKey, PublicKey};
 use types::name::Name;
 use types::time::Span;
 
+mod read;
 #[cfg(feature = "sim")]
 mod sim;
 #[cfg(test)]
@@ -61,9 +62,12 @@ pyo3::create_exception!(
     foundation,
     DataLost,
     PyException,
-    "The node found no room for a live frame, so its samples are a gap in the log. \
-     `seqs` is a `dict` from the name of each channel of the frame to the `range` of \
-     the seqs of its lost samples. The writer goes on, as a later frame can find room."
+    "Samples were lost. A writer raises it when the node found no room for a live \
+     frame, so its samples are a gap in the log, and goes on, as a later frame can \
+     find room: `seqs` is a `dict` from the name of each channel of the frame to the \
+     `range` of the seqs of its lost samples, and `frame` is `None`. A reader raises \
+     it for a frame after a loss, and closes: `seqs` is `Frame.lost` of that frame, \
+     and `frame` is the frame."
 );
 
 #[pymodule]
@@ -72,6 +76,11 @@ fn _native(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(connect, module)?)?;
     module.add_class::<Client>()?;
     module.add_class::<write::Writer>()?;
+    module.add_class::<read::Reader>()?;
+    module.add_class::<read::Frame>()?;
+    py.import("collections.abc")?
+        .getattr("Mapping")?
+        .call_method1("register", (py.get_type::<read::Frame>(),))?;
     module.add("Refused", py.get_type::<Refused>())?;
     module.add("Stopped", py.get_type::<Stopped>())?;
     module.add("Rejected", py.get_type::<Rejected>())?;
@@ -386,35 +395,50 @@ impl Client {
         lease: Option<f64>,
         on_loss: &str,
     ) -> PyResult<write::Writer> {
-        let loss = write::Loss::parse(on_loss)?;
+        let loss = Loss::parse(on_loss)?;
         let names = names(channels)?;
         let mut config = sdk::write::Config::new(names.clone());
         config.authority = authority.0;
         config.lease = lease.map(span).transpose()?;
-        owned(self.process)?;
-        // The lock is taken without the GIL, which a closing thread needs to return.
-        let writer = py
-            .detach(|| {
-                let client =
-                    self.session.lock().unwrap_or_else(PoisonError::into_inner);
-                client
-                    .as_ref()
-                    .ok_or(sdk::Error::Closed)?
-                    .open_writer(config)
-            })
-            .map_err(|e| {
-                if !matches!(
-                    e,
-                    sdk::Error::Stream(program::Error::Refused(
-                        program::Refusal::Unknown
-                    ))
-                ) {
-                    return error(py, &e);
-                }
-                let names: Vec<_> = names.iter().map(Name::as_str).collect();
-                exception(py, &e, format!("{e}: the open names {}", names.join(", ")))
-            })?;
+        let writer = self.open(py, &names, |client| client.open_writer(config))?;
         Ok(write::Writer::new(writer, self.process, loss))
+    }
+
+    /// Opens a reader of `channels` at the home of their index, and blocks until the
+    /// node opened it. The reader gives only the frames written after its open, so open
+    /// it before the writer writes. `channels` is one channel name or an iterable of
+    /// names, all of one index. Place `n` is `channels[n]`, and the index is place
+    /// `len(channels)` when `channels` does not name it. `mode` is `"complete"`: each
+    /// frame from the open on, in order, past a loss of the node's buffer; or
+    /// `"latest"`: the newest frame, which skips each frame that a newer one replaced
+    /// before the node sent it, and loses nothing. `on_loss` is what the reader does
+    /// with a frame after a loss: `"warn"` logs a warning on the `foundation` logger,
+    /// `"raise"` raises `DataLost` and closes the reader, and `"ignore"` does nothing.
+    /// `Frame.lost` holds the loss in each case. Other Python threads run while it
+    /// waits.
+    ///
+    /// Raises `TypeError` for an argument of a wrong type, or for a channel of `uuid`
+    /// or of a type that is not a scalar; `ValueError` for no channel, a name that does
+    /// not parse, or another `mode` or `on_loss`, with no reader opened; `Stopped` when
+    /// the node refused the open, with a text that names each channel of the open for
+    /// `unknown`; `ConnectionError` when the session failed; `RuntimeError` when the
+    /// client closed or in a process that the program forked; and `PanicException`
+    /// when the client's thread panicked.
+    #[pyo3(signature = (channels, *, mode="complete", on_loss="warn"))]
+    fn open_reader(
+        &self,
+        py: Python<'_>,
+        channels: &Bound<'_, PyAny>,
+        mode: &str,
+        on_loss: &str,
+    ) -> PyResult<read::Reader> {
+        let mode = read::mode(mode)?;
+        let loss = Loss::parse(on_loss)?;
+        let names = names(channels)?;
+        let mut config = sdk::read::Config::new(names.clone());
+        config.mode = mode;
+        let reader = self.open(py, &names, |client| client.open_reader(config))?;
+        read::Reader::new(py, reader, self.process, loss)
     }
 
     fn __enter__(this: Py<Self>) -> Py<Self> {
@@ -433,6 +457,72 @@ impl Client {
     ) -> PyResult<()> {
         exit(self.close(py), raised)
     }
+}
+
+impl Client {
+    /// Calls `open` on the client with the GIL released, and gives what it opened of
+    /// the channels `names`. Raises as `error` does, with a text that names each of
+    /// `names` for `unknown`, and `RuntimeError` in a process that the program forked.
+    fn open<T: Send>(
+        &self,
+        py: Python<'_>,
+        names: &[Name],
+        open: impl FnOnce(&sdk::Client) -> Result<T, sdk::Error> + Send,
+    ) -> PyResult<T> {
+        owned(self.process)?;
+        // The lock is taken without the GIL, which a closing thread needs to return.
+        py.detach(|| {
+            let client = self.session.lock().unwrap_or_else(PoisonError::into_inner);
+            open(client.as_ref().ok_or(sdk::Error::Closed)?)
+        })
+        .map_err(|e| {
+            if !matches!(
+                e,
+                sdk::Error::Stream(program::Error::Refused(program::Refusal::Unknown))
+            ) {
+                return error(py, &e);
+            }
+            let names: Vec<_> = names.iter().map(Name::as_str).collect();
+            exception(py, &e, format!("{e}: the open names {}", names.join(", ")))
+        })
+    }
+}
+
+/// What a writer or a reader does with a frame after a loss.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Loss {
+    /// Log a warning on the `foundation` logger.
+    Warn,
+    /// Raise `DataLost`.
+    Raise,
+    /// Do nothing.
+    Ignore,
+}
+
+impl Loss {
+    /// The loss of the argument `on_loss`.
+    fn parse(on_loss: &str) -> PyResult<Self> {
+        match on_loss {
+            "warn" => Ok(Self::Warn),
+            "raise" => Ok(Self::Raise),
+            "ignore" => Ok(Self::Ignore),
+            other => Err(PyValueError::new_err(format!(
+                "on_loss is {other:?}, not \"warn\", \"raise\", or \"ignore\""
+            ))),
+        }
+    }
+}
+
+/// The name and the type of each of `places`, in order, the type as the spec writes it
+/// (`f64`, `timestamp`).
+fn places<'py>(
+    py: Python<'py>,
+    places: &[sdk::Place],
+) -> PyResult<Bound<'py, PyTuple>> {
+    let places = places
+        .iter()
+        .map(|place| (place.name.as_str(), place.data_type.to_string()));
+    PyTuple::new(py, places)
 }
 
 /// The outcome of a `__exit__` whose close gave `closed`: when the block raised

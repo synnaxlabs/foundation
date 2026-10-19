@@ -23,32 +23,7 @@ use types::sample::{Scalar, Type, Value};
 use types::time::{Span, Stamp};
 use types::{frame, hash};
 
-use crate::{DataLost, Rejected, error, owned};
-
-/// What a write does with a frame that the node took no room for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Loss {
-    /// Log a warning on the `foundation` logger.
-    Warn,
-    /// Raise `DataLost`.
-    Raise,
-    /// Do nothing.
-    Ignore,
-}
-
-impl Loss {
-    /// The loss of the argument `on_loss`.
-    pub(crate) fn parse(on_loss: &str) -> PyResult<Self> {
-        match on_loss {
-            "warn" => Ok(Self::Warn),
-            "raise" => Ok(Self::Raise),
-            "ignore" => Ok(Self::Ignore),
-            other => Err(PyValueError::new_err(format!(
-                "on_loss is {other:?}, not \"warn\", \"raise\", or \"ignore\""
-            ))),
-        }
-    }
-}
+use crate::{DataLost, Loss, Rejected, error, owned};
 
 /// A writer of channels of one index at its home, which `Client.open_writer` opens. A
 /// `with` block closes it at its end. Its calls take turns to send: a call waits, with
@@ -272,6 +247,7 @@ impl Writer {
         }
         let raised = DataLost::new_err(text);
         raised.value(py).setattr("seqs", lost)?;
+        raised.value(py).setattr("frame", py.None())?;
         Err(raised)
     }
 }
@@ -282,11 +258,7 @@ impl Writer {
     /// writes it (`f64`, `timestamp`).
     #[getter]
     fn places<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyTuple>> {
-        let places = self
-            .places
-            .iter()
-            .map(|place| (place.name.as_str(), place.data_type.to_string()));
-        PyTuple::new(py, places)
+        crate::places(py, &self.places)
     }
 
     /// The place of the index, whose samples are the stamps of each frame.

@@ -69,11 +69,12 @@ UNKNOWN = (
 ORDER = "the node refused the frame: a stamp is not after the stamp before it"
 
 
-def planted(node: Node) -> foundation.Client:
-    """Plans and applies `CHANNELS` on `node`, and gives a client of it once the hub
-    of the node knows the channels, which it learns after the apply."""
+def planted(node: Node, channels: str = CHANNELS) -> foundation.Client:
+    """Plans and applies `channels`, which hold `CHANNELS`, on `node`, and gives a
+    client of it once the hub of the node knows the channels, which it learns after the
+    apply."""
     with open(os.path.join(node.dir.name, "plant.hcl"), "w") as file:
-        file.write(CHANNELS)
+        file.write(channels)
     for args in (["plan", "plant.hcl", "--out", "plant.plan"], ["apply", "plant.plan"]):
         done = subprocess.run(
             [os.environ["FOUNDATION_NODE"], *args],
@@ -634,6 +635,7 @@ class WriterTest(unittest.TestCase):
         self.assertEqual(list(seqs), ["plant.a", "plant.time"])
         self.assertEqual(len(seqs["plant.a"]), count)
         self.assertEqual(seqs["plant.a"], seqs["plant.time"])
+        self.assertIsNone(lost.frame)
         self.assertEqual(
             str(lost), f"samples were lost: plant.a ({count}), plant.time ({count})"
         )
