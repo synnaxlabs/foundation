@@ -1473,9 +1473,9 @@ fn gives_finished_to_a_finish_with_a_taken_frame_not_stored() {
     );
 }
 
-/// A group that ends with a taken frame not on disk makes `stored` give `Unstored`
-/// with the place of its index at once, the writer goes on, and `finish` gives it
-/// after the node finishes. Its message names each group.
+/// A group that ends with a taken frame whose `Stored` did not come makes `stored`
+/// give `Unstored` with the place of its index at once, the writer goes on, and
+/// `finish` gives it after the node finishes. Its message names each group.
 #[test]
 fn gives_unstored_for_a_group_that_ended_with_a_taken_frame_not_on_disk() {
     by_hand(
@@ -1514,8 +1514,8 @@ fn gives_unstored_for_a_group_that_ended_with_a_taken_frame_not_on_disk() {
     let two = Error::Unstored(vec![(0, End::Failed), (3, End::Removed)]);
     assert_eq!(
         two.to_string(),
-        "the write ended with a taken frame not on disk for the group of index place \
-         0 (Failed), the group of index place 3 (Removed)"
+        "the write ended with a taken frame that may not be on disk for the group of \
+         index place 0 (Failed), the group of index place 3 (Removed)"
     );
 }
 
@@ -1558,6 +1558,89 @@ fn gives_no_unstored_for_a_group_that_ended_with_each_taken_frame_on_disk() {
                     assert_eq!(outcome, Ok(Outcome::Ended(End::Removed)));
                     assert_eq!(writer.stored().await, Ok(()), "{taken_first}");
                     assert_eq!(writer.finish().await, Ok(()), "{taken_first}");
+                    node.clock().sleep(QUIET).await;
+                })
+            },
+        );
+    }
+}
+
+/// How the node answers a write of two groups whose group 1 ended with a taken frame:
+/// with no `Stored`, with the `Stored` of group 0, or with it after a wait.
+#[derive(Clone, Copy, Debug)]
+enum Store {
+    None,
+    Now,
+    Late,
+}
+
+/// A write of two groups whose group 1 ends with a taken frame not stored gives
+/// `Unstored` with the place of its index, not its group. `stored` waits for the
+/// `Stored` of group 0 first, and `finish` gives `Finished` first when the node
+/// finishes before it.
+#[test]
+fn gives_unstored_with_the_index_place_of_a_second_group_after_the_first_is_stored() {
+    for (seed, store) in [(771, Store::None), (772, Store::Now), (773, Store::Late)] {
+        by_hand(
+            seed,
+            move |session, node| async move {
+                let mut write = opened_with(&session, &two_groups()).await;
+                for _ in ["head", "ends and counts", "body"] {
+                    message(&mut write).await;
+                }
+                for group in [0, 1] {
+                    let outcome = taken(0, 1);
+                    let frame = 1;
+                    let answer = Reply::Outcome {
+                        frame,
+                        group,
+                        outcome,
+                    };
+                    reply(&mut write, answer).await;
+                }
+                let end = End::Failed;
+                reply(&mut write, Reply::Ended { group: 1, end }).await;
+                if let Store::Late = store {
+                    node.clock()
+                        .sleep(Span::from_nanos(2 * QUIET.nanos()))
+                        .await;
+                }
+                if !matches!(store, Store::None) {
+                    stored(&mut write, 1).await;
+                }
+                let got = write.receiver.recv().await.map(|got| got.is_some());
+                assert_eq!(got, Ok(false));
+                let sender = write.sender.as_mut().expect("two-way");
+                sender.finish().expect("finishes");
+                node.clock().sleep(QUIET).await;
+            },
+            move |session, node| {
+                Box::pin(async move {
+                    let clock = node.clock();
+                    let mut writer =
+                        session.writer(config(&["a", "b"], 1)).await.expect("opens");
+                    let series = [(0, 8), (1, 8), (2, 8), (3, 8)];
+                    let draft =
+                        writer.draft(Form::Raw, 1, &series).await.expect("a frame");
+                    draft.set_count(1, 1);
+                    let outcome = writer.write(Time::Frame(Path::Live)).await;
+                    assert!(
+                        matches!(outcome, Ok(Outcome::Taken { .. })),
+                        "{outcome:?}"
+                    );
+                    let unstored = Err(Error::Unstored(vec![(2, End::Failed)]));
+                    if let Store::Late = store {
+                        let before = clock.now();
+                        assert_eq!(writer.stored().await, unstored);
+                        assert!(clock.now() >= before + QUIET, "stored waits");
+                    }
+                    let finished = writer.finish().await;
+                    if let Store::None = store {
+                        let reply = Err(Error::Reply(wire::hub::Error::Finished));
+                        assert_eq!(finished, reply);
+                    } else {
+                        assert_eq!(finished, unstored, "{store:?}");
+                    }
                     node.clock().sleep(QUIET).await;
                 })
             },
