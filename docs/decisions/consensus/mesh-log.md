@@ -21,12 +21,12 @@
   its chain: an 8-byte count of links, always present, then each link's position (8
   bytes of term, 8 of index) and its change in the entry form below, from the
   incoming keys to the signature. A link of a joint entry with 3 incoming, 3
-  outgoing, and 3 signed votes is 457 bytes, and a chain of 2 such links is 922
-  bytes with its count (architect, #881,
+  outgoing, and 3 signed votes that adds no voter is 457 bytes, and a chain of 2 such
+  links is 922 bytes with its count (architect, #881,
   https://github.com/synnaxlabs/foundation/issues/881#issuecomment-6030969579,
   2026-10-07T04:31:40Z). When the joint entry adds one voter, its key makes the link
-  489 bytes and the chain 986 (architect, #1106, 2026-10-19T12:43:33Z:
-  https://github.com/synnaxlabs/foundation/issues/1106#issuecomment-6267490155). A
+  489 bytes and the chain 986 (architect, #3380,
+  https://github.com/synnaxlabs/foundation/pull/3380#issuecomment-6270172376). A
   granted `PreVoteReply` or `VoteReply` is the byte 1, then the signature; a refusal
   is the byte 0 alone. An entry is its term and index (8 bytes each), then a data
   byte: empty (0) alone; bytes (1), an 8-byte length, and the bytes; voters (2), the
@@ -35,8 +35,10 @@
   key order, the votes in the proof form, and the leader's signature (64 bytes). The
   public keys have no count: the decode takes one for each incoming key that the
   outgoing keys lack, and none when the outgoing keys are empty, so each change binds
-  exactly the voters it adds. It refuses a public key of small order. No
-  form holds a grant or a change with no signature: encode panics on one, because
+  exactly the voters it adds. It refuses a public key of small order. Encode panics
+  on a change whose public keys are not those of the voters that it adds (architect,
+  #3380, https://github.com/synnaxlabs/foundation/pull/3380#issuecomment-6270310245).
+  No form holds a grant or a change with no signature: encode panics on one, because
   the caller signs before each write and send. `mesh::claim` signs each claim with
   the node's Ed25519 key. A grant signs `foundation/grant/1`, the voter (16 bytes,
   little endian), the grant byte (pre-vote 0, vote 1), the term (8 bytes, little
@@ -49,6 +51,8 @@
   `foundation/voters/1`, because no node with the form before the keys shipped
   (architect, #1106,
   https://github.com/synnaxlabs/foundation/issues/1106#issuecomment-6267490155).
+  Supersedes the form with no public keys (architect, #881,
+  https://github.com/synnaxlabs/foundation/pull/1187#issuecomment-6032591908).
   The signer in the bytes keeps two members that share a key from sharing a
   signature. Grants name no region; a second region adds the region key under
   `foundation/grant/2`. The driver (#471) checks each

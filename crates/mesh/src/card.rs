@@ -65,8 +65,8 @@ impl Card {
 /// and the card's encoding. Only [`Signed::sign`] and a check of the signature, such
 /// as [`Signed::check`], make one, and each keeps the node key that the signature
 /// covers. It proves only that the public key in the card signed it. That the node
-/// owns the public key comes from its admission and, for a voter, from the
-/// configuration entry that added it, which binds the key under its leader's signature.
+/// owns the public key comes from its admission and, for a voter that a joint entry
+/// added, from that entry, which binds the key under its leader's signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Signed(Unchecked);
 
