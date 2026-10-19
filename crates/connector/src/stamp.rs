@@ -11,8 +11,8 @@ mod tests;
 pub use fit::{Fit, Fitted};
 
 /// The stamps of the frames of one writer. Each is the midpoint of the request that
-/// read its samples, or the nanosecond after the stamp before it when that is later,
-/// so no two are equal and none goes back.
+/// read its samples or of the mesh time of its sample, or the nanosecond after the
+/// stamp before it when that is later, so no two are equal and none goes back.
 #[derive(Debug, Default)]
 pub struct Stamps {
     last: Option<Stamp>,
@@ -37,11 +37,11 @@ impl Stamps {
         (output, self.next(midpoint(sent, answered)))
     }
 
-    /// Gives the stamp of a sample whose true mesh time is within `time` and whose
-    /// value holds until at least `held`, with the error of that stamp. The stamp is
+    /// Gives the stamp of a sample whose true mesh time is within `time`, with its ends
+    /// in either order, and whose value holds until at least `held`, with the error of that stamp. The stamp is
     /// the midpoint of `time`, or 1 ns after the last stamp when that is later. The
     /// error is half the width of `time`, rounded up, plus how far the stamp is past
-    /// the later of the midpoint and `held`.
+    /// the later of the midpoint and `held`, and stops at `i64::MAX` ns.
     ///
     /// # Panics
     ///

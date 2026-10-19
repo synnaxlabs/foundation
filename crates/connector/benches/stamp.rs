@@ -6,6 +6,8 @@
 //!   its two reads of mesh time and the rule of the stamp.
 //! - `before`: `Fit::before` of a fit that bounds the clock, one value later in device
 //!   time each call.
+//! - `old`: `Fit::before` of a fit whose newest reading is 1 s later in device time,
+//!   one value later in device time each call, up to that reading.
 //! - `mesh`: `Fit::mesh` of that fit.
 //! - `sample`: `Stamps::sample` of an interval 1 us later each call.
 //!
@@ -57,6 +59,7 @@ fn main() {
             }),
             request(&writer),
             before(),
+            old(),
             mesh(),
             sample(),
         ]
@@ -92,6 +95,25 @@ fn before() -> Line {
     let mut device = 0;
     time("before", || {
         device += 1_000;
+        let arrived = Stamp::from_nanos(i64::try_from(device).expect("small") + 500);
+        let fitted = black_box(fit.before(Monotonic(device), black_box(arrived)));
+        assert_eq!(fitted, Fitted::Kept, "a true reading fits");
+    })
+}
+
+/// The line `old`.
+fn old() -> Line {
+    const NEWEST: u64 = 1_000_000_000;
+    let mut fit = fit();
+    let newest = Stamp::from_nanos(i64::try_from(NEWEST).expect("small") + 500);
+    assert_eq!(
+        fit.before(Monotonic(NEWEST), newest),
+        Fitted::Kept,
+        "a true reading fits"
+    );
+    let mut device = 0;
+    time("old", || {
+        device = (device + 1_000) % NEWEST;
         let arrived = Stamp::from_nanos(i64::try_from(device).expect("small") + 500);
         let fitted = black_box(fit.before(Monotonic(device), black_box(arrived)));
         assert_eq!(fitted, Fitted::Kept, "a true reading fits");

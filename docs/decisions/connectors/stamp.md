@@ -39,21 +39,26 @@
   `hub::writer::Writer` (the hub then knows that a request has two ends); the
   nanosecond after the later of the two (it puts the refused frame after a frame from
   a later read); `now` as a closure (a caller can pass a clock that is not mesh time).
-- **STAMP FIT (#2622)** `connector::stamp::Fit` fits one device clock to mesh time,
-  and `Stamps::sample` stamps a sample from the mesh time that a fit gives
+- **STAMP FIT (#2622)** `connector::stamp::Fit` fits one device clock to mesh time, and
+  `Stamps::sample` stamps a sample from the mesh time that a fit gives
   (`laptop.architect-2`, 2026-10-14T01:37:20Z, PR 2:
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6158936229). `Fit`
   holds one `estimate::overlap::Overlap` of 200 ppm, over offsets of mesh time minus
-  device time. `between` gives both edges and `before` gives a high edge. An offset is
-  computed in `i128`. A low edge under the range of a `Span` is left out, and a high
-  edge under it becomes `i64::MIN` ns, so a reading never claims more than it knows
-  and no input panics (`laptop.architect-2`, 2026-10-19T14:55:55Z:
+  device time, each from `c`, the offset of the first reading of the fit. `mesh` adds
+  `c` back. Each sum is in `i128`. `between` gives both edges and `before` gives a high
+  edge, in any order of device time. An edge past the range of a `Span` on the side that
+  claims less becomes `i64::MIN` or `i64::MAX` ns, and on the side that claims more is
+  left out, so no input panics. A mesh bound past the range of a `Stamp` on the side
+  that claims less becomes `i64::MIN` or `i64::MAX` ns, and `mesh` gives `None` past it
+  on the side that claims more (`laptop.architect-2`, 2026-10-19T15:07:34Z, B:
+  https://github.com/synnaxlabs/foundation/pull/3386#issuecomment-6270475292, which
+  supersedes the absolute offsets of
   https://github.com/synnaxlabs/foundation/issues/2622#issuecomment-6270224530). A
-  property test over any `Monotonic` and mesh time pins it. A `before` older than the
-  newest reading is checked against the earliest mesh time that the fit gives at its
-  device time: one under it restarts the fit, and else it adds nothing. A refusal as
-  `Backwards` or `Disjoint` of a `between`, or as `Disjoint` of a new `before`, restarts
-  the fit from that reading. `sample` takes the floor of the midpoint, as `request`
-  does. Lost: `Fit` inside `Stamps` (a writer with the values of two devices then needs
-  two `Stamps` for one index, so a stamp can go back); a fit that keeps each reading and
-  solves a line (it allocates, and its bound is not hard).
+  property test over any `Monotonic` and mesh time pins it. A reading older than the
+  newest is widened by drift to the newest device time in `Overlap` (ESTIMATE FIT, A of
+  the same ruling). A `Disjoint` reading restarts the fit from that reading. `mesh`
+  gives `None` when drift makes the bound 36500 days or wider. `sample` takes the floor
+  of the midpoint, as `request` does. Lost: `c` of 0, which drops each server time past
+  the range of an offset; `Fit` inside `Stamps` (a writer with the values of two devices
+  then needs two `Stamps` for one index, so a stamp can go back); a fit that keeps each
+  reading and solves a line (it allocates, and its bound is not hard).

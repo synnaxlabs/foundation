@@ -1,8 +1,7 @@
 //! Polling a registered wait or race allocates nothing, and so do a tick from the third
 //! call on, a stamped request, each call of a fit and of a sample stamp, and a set of a
-//! status count. This binary has no test
-//! harness: the count covers each thread, and a harness allocates on its own thread at
-//! any time.
+//! status count. This binary has no test harness: the count covers each thread, and a
+//! harness allocates on its own thread at any time.
 
 #![expect(clippy::disallowed_macros, reason = "COUNTING ALLOCATOR")]
 
