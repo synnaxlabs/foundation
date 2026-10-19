@@ -1085,26 +1085,27 @@
   has none. A block runs from a piece that starts `-----BEGIN ` and whose kept bytes
   hold no NUL and end in `-----`, through the next piece whose kept bytes start
   `-----END ` (`laptop.architect-2`, 2026-10-19 18:24 UTC,
-  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216). So a
-  `BEGIN` or `END` line of a block with such a byte after its dashes makes the load
-  refuse the trust. A `BEGIN` line with a byte of 0x21 to 0x7F after such a byte is
-  read alike on each target, and the check passes it: when it ends in `-----`, it
-  starts a block of another label, whose label holds that byte; else it is text, and
-  its block drops (`laptop.monitor`, message 8b694c3c, recorded 2026-10-19 21:36 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216; for the
+  NUL test, https://github.com/synnaxlabs/foundation/pull/3423#issuecomment-6278366654).
+  So a `BEGIN` or `END` line of a block with such a byte after its dashes makes the load
+  refuse the trust. A `BEGIN` line with a byte of 0x21 to 0x7F after such a byte is read
+  alike on each target, and the check passes it: when it ends in `-----`, it starts a
+  block of another label, whose label holds that byte; else it is text, and its block
+  drops (`laptop.monitor`, message 8b694c3c, recorded 2026-10-19 21:36 UTC,
   https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6277920980, which
   supersedes the first item of
-  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868 for
-  such a line). Such an `END` line fails in aws-lc on each target as
-  `client::Refusal::Invalid`. Text outside the blocks
-  keeps any bytes. The check is in C, at the start of the PEM branch of
-  `openSSLLoadEachCertificate`, so both loads of a trust pass it. The client gives
-  `client::Refusal::Line { number }`, the line from 1 counted by `\n`, since the check
-  runs before aws-lc counts certificates. PR 2d of #2934, the caller that reads the
-  trust file, puts its path before that text (`laptop.architect-2`, 2026-10-19 18:24
-  UTC, https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216).
-  Lost: a check in Rust in `Client::connect`, which copies the DER rule; a check in the
-  kind, which other callers skip; and aws-lc patched to compare as unsigned, which gives
-  no refusal and no line.
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6272707868 for such
+  a line). Such an `END` line fails in aws-lc on each target as
+  `client::Refusal::Invalid`. Text outside the blocks keeps any bytes. The check is in
+  C, at the start of the PEM branch of `openSSLLoadEachCertificate`, so both loads of a
+  trust pass it. The client gives `client::Refusal::Line { number }`, the line from 1
+  counted by `\n`, since the check runs before aws-lc counts certificates. PR 2d of
+  #2934, the caller that reads the trust file, puts its path before that text
+  (`laptop.architect-2`, 2026-10-19 18:24 UTC,
+  https://github.com/synnaxlabs/foundation/issues/3395#issuecomment-6274242216). Lost: a
+  check in Rust in `Client::connect`, which copies the DER rule; a check in the kind,
+  which other callers skip; and aws-lc patched to compare as unsigned, which gives no
+  refusal and no line.
   The validity check of the own certificate and the map of each refusal in `kind.rs`
   move to PR 2b (`laptop.architect-2`, 2026-10-18 21:37 UTC,
   https://github.com/synnaxlabs/foundation/pull/3271#issuecomment-6255457069, items 1
