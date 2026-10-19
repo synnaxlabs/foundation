@@ -211,15 +211,19 @@
   (https://github.com/synnaxlabs/foundation/issues/1361#issuecomment-6130215772), with
   the deferral of #2471.
   `Message::replaces(&self, older)` tells the caller that `older`, a message that has
-  not gone yet, can drop when this one goes after it. Both have the same sender and
-  the same receiver, and one of these holds: `older` has a lower term, and this one is
-  not a `PreVote` or a `PreVoteReply`, whose term is not the sender's own; or both are a
-  `Heartbeat`, both a `PreVote`, or both a `Vote`, and `older` has the same term or a
-  lower one. `raft` owns the rule, and the caller's queue applies it, so the queue of a
-  node that does not answer holds one heartbeat, not one for each tick, and no message
-  of a term that its sender left. Lost: a receiver still at the lower term can apply
-  later, when the commit index that `older` named comes in an append of the new term.
-  Decided by `laptop.architect`, 2026-10-19T19:31:21Z
-  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916), and
-  for the lower term and the requests of a vote, 2026-10-19T19:53:12Z
-  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275950285).
+  not gone yet, can drop when this one goes after it. Both have the same sender and the
+  same receiver, and one of these holds: `older` has a lower term, and this one is not a
+  `PreVote` or a `PreVoteReply`, whose term can differ from the sender's own; or both
+  are a `Heartbeat`, both a `PreVote`, both a `Vote`, both a `HeartbeatReply`, or both a
+  `PreVoteReply` with the same answer, and `older` has the same term or a lower one.
+  `raft` owns the rule, and the caller's queue applies it, so the queue of a node that
+  does not read holds one heartbeat, not one for each tick, and a message of a term that
+  its sender left drops when the sender sends that node a message of a later term. Lost:
+  a receiver still at the lower term can apply later, when the commit index that `older`
+  named comes in an append of the new term. Decided by `laptop.architect`,
+  2026-10-19T19:31:21Z
+  (https://github.com/synnaxlabs/foundation/issues/3140#issuecomment-6275544916), for
+  the lower term and the requests of a vote, 2026-10-19T19:53:12Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6275950285), and for
+  the replies to a heartbeat and a pre-vote, 2026-10-19T20:33:44Z
+  (https://github.com/synnaxlabs/foundation/pull/3417#issuecomment-6276712034).

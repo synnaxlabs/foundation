@@ -168,7 +168,7 @@ impl Proof {
 
 impl Message {
     /// Whether `older`, a message that has not gone yet, can drop when this one goes
-    /// after it: the sender left the term of `older`, or this one is a request of the
+    /// after it: the sender left the term of `older`, or this one is a message of the
     /// same kind that brings all that `older` brings. False when they differ in sender
     /// or receiver.
     #[must_use]
@@ -176,15 +176,22 @@ impl Message {
         if older.from != self.from || older.to != self.to {
             return false;
         }
-        // The term of a pre-vote and its reply is not the sender's own.
+        // The term of a pre-vote and its reply can differ from the sender's own.
         let left = older.term < self.term
             && !matches!(self.body, Body::PreVote { .. } | Body::PreVoteReply { .. });
-        let again = matches!(
-            (&self.body, &older.body),
-            (Body::Heartbeat { .. }, Body::Heartbeat { .. })
+        let again = older.term <= self.term
+            && match (&self.body, &older.body) {
+                (Body::Heartbeat { .. }, Body::Heartbeat { .. })
                 | (Body::PreVote { .. }, Body::PreVote { .. })
                 | (Body::Vote { .. }, Body::Vote { .. })
-        ) && older.term <= self.term;
+                | (Body::HeartbeatReply, Body::HeartbeatReply) => true,
+                // A grant of a later term carries another signature.
+                (
+                    Body::PreVoteReply { answer },
+                    Body::PreVoteReply { answer: before },
+                ) => std::mem::discriminant(answer) == std::mem::discriminant(before),
+                _ => false,
+            };
         left || again
     }
 
@@ -449,6 +456,8 @@ mod tests {
             vote(1, 5),
             answer(1, 5, replies[1]),
             message(1, 5, Body::HeartbeatReply),
+            message(1, 5, Body::AppendReply { last: 1 }),
+            message(1, 5, Body::AppendReject { hint: 1 }),
         ];
         for newer in &newer {
             for older in &older {
@@ -473,8 +482,64 @@ mod tests {
         assert!(!append(1, 5).replaces(&heartbeat(1, 5)));
         assert!(!vote(1, 5).replaces(&pre_vote(1, 5)));
         assert!(!append(1, 5).replaces(&append(1, 5)));
-        let reply = message(1, 5, Body::HeartbeatReply);
-        assert!(!reply.replaces(&message(1, 5, Body::HeartbeatReply)));
+        for body in [
+            Body::VoteReply {
+                answer: Answer::Refused,
+            },
+            Body::AppendReply { last: 2 },
+            Body::AppendReject { hint: 2 },
+        ] {
+            let reply = message(1, 5, body);
+            assert!(!reply.replaces(&reply), "{reply:?}");
+        }
+    }
+
+    #[test]
+    fn a_heartbeat_reply_replaces_a_heartbeat_reply_of_its_term_or_a_lower_one() {
+        let reply = |term| message(1, term, Body::HeartbeatReply);
+        assert!(reply(5).replaces(&reply(5)));
+        assert!(reply(5).replaces(&reply(4)));
+        assert!(!reply(4).replaces(&reply(5)));
+    }
+
+    #[test]
+    fn a_pre_vote_reply_replaces_one_of_its_answer_at_its_term_or_a_lower_one() {
+        let refused = |term| {
+            message(
+                1,
+                term,
+                Body::PreVoteReply {
+                    answer: Answer::Refused,
+                },
+            )
+        };
+        let granted = |term, byte| {
+            let answer = Answer::Granted(Some(Signature([byte; 64])));
+            message(1, term, Body::PreVoteReply { answer })
+        };
+        assert!(refused(5).replaces(&refused(5)));
+        assert!(refused(5).replaces(&refused(4)));
+        assert!(!refused(4).replaces(&refused(5)));
+        assert!(granted(5, 1).replaces(&granted(5, 1)));
+        assert!(granted(5, 1).replaces(&granted(4, 2)));
+        assert!(!granted(4, 2).replaces(&granted(5, 1)));
+    }
+
+    #[test]
+    fn a_refused_and_a_granted_pre_vote_reply_keep_each_other() {
+        let refused = message(
+            1,
+            5,
+            Body::PreVoteReply {
+                answer: Answer::Refused,
+            },
+        );
+        let granted = answer(1, 5, |answer| Body::PreVoteReply { answer });
+        assert!(!refused.replaces(&granted));
+        assert!(!granted.replaces(&refused));
+        assert!(
+            !refused.replaces(&answer(1, 4, |answer| Body::PreVoteReply { answer }))
+        );
     }
 
     #[test]

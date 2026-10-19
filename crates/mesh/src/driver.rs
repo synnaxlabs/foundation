@@ -3973,14 +3973,14 @@ mod tests {
                 let mesh = open(&node, &tasks, 1, &[1, 2], &[1, 2]).await.unwrap();
                 let heartbeat = proven(2, 1, Body::Heartbeat { commit: 0 });
                 assert_eq!(mesh.receive(public(2), heartbeat), Ok(()));
+                let reply = message(1, 2, Body::HeartbeatReply);
+                assert_eq!(mesh.outgoing(key(2)).await, Ok(reply));
                 let mut stale = message(2, 1, Body::Heartbeat { commit: 0 });
                 stale.term = Term(common::TERM.0 - 1);
                 assert_eq!(mesh.receive(public(2), stale), Ok(()));
                 let voters = |proof: Option<Proof>| {
                     proof.map(|proof| proof.voters.into_keys().collect::<Vec<_>>())
                 };
-                let reply = message(1, 2, Body::HeartbeatReply);
-                assert_eq!(mesh.outgoing(key(2)).await, Ok(reply));
                 let answer = mesh.outgoing(key(2)).await.unwrap();
                 assert_eq!(answer.body, Body::HeartbeatReply);
                 assert_eq!(voters(answer.proof), Some(vec![key(1), key(2)]));
@@ -7056,10 +7056,32 @@ mod tests {
             });
         }
 
+        // Node 1 leads at term 2, and node 3 sends it a heartbeat of term 1 at each
+        // tick and reads nothing.
+        #[test]
+        fn holds_one_heartbeat_reply_for_a_member_that_does_not_read() {
+            solo(|node, tasks| async move {
+                let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
+                elect(&mesh).await;
+                let term = elect(&mesh).await.term;
+                assert_eq!(term, Term(2));
+                let clock = node.clock();
+                for _ in 0..ELECTION_TICKS {
+                    let heartbeat = Body::Heartbeat { commit: 0 };
+                    let heartbeat = common::proven_in(Term(1), 3, 1, heartbeat);
+                    assert_eq!(mesh.receive(public(3), heartbeat), Ok(()));
+                    clock.sleep(TICK).await;
+                }
+                let queued = drain(&mesh, 3).await;
+                let replies = queued.iter().filter(|&&(_, kind)| kind == "reply");
+                assert_eq!(replies.collect::<Vec<_>>(), [&(2, "reply")], "{queued:?}");
+            });
+        }
+
         // Node 3 answers nothing, and node 2 answers only the campaigns of node 1,
         // so node 1 loses its term and wins the next one 8 times.
         #[test]
-        fn holds_no_message_of_a_term_that_its_sender_left() {
+        fn drops_each_message_of_a_term_that_its_sender_left() {
             solo(|node, tasks| async move {
                 let mesh = open(&node, &tasks, 1, &IDS, &IDS).await.unwrap();
                 let mut term = elect(&mesh).await.term;
