@@ -130,25 +130,32 @@ struct Plant {
 impl Plant {
     /// A plant whose InfluxDB serves from the start.
     async fn new(node: ::sim::node::Node, tasks: Tasks) -> Self {
-        let plant = Self::unserved(node, tasks).await;
+        Self::on_port(node, tasks, PORT).await
+    }
+
+    /// A plant whose InfluxDB serves on `port` from the start.
+    async fn on_port(node: ::sim::node::Node, tasks: Tasks, port: u16) -> Self {
+        let plant =
+            Self::with(node, tasks, Scheme::Plain, Roots::default(), port).await;
         plant.serve();
         plant
     }
 
     /// A plant whose InfluxDB refuses each connection until [`Plant::serve`].
     async fn unserved(node: ::sim::node::Node, tasks: Tasks) -> Self {
-        Self::with(node, tasks, Scheme::Plain, Roots::default()).await
+        Self::with(node, tasks, Scheme::Plain, Roots::default(), PORT).await
     }
 
     /// A plant whose InfluxDB serves TLS with `certificate` from the start, at the
-    /// name `server` of [`run_tls`], and whose node trusts `roots`.
+    /// name `server` of [`run_at_server`], and whose node trusts `roots`.
     async fn tls(
         node: ::sim::node::Node,
         tasks: Tasks,
         certificate: Certificate,
         roots: Roots,
     ) -> Self {
-        let plant = Self::with(node, tasks, Scheme::Tls(certificate), roots).await;
+        let plant =
+            Self::with(node, tasks, Scheme::Tls(certificate), roots, PORT).await;
         plant.serve();
         plant
     }
@@ -158,8 +165,9 @@ impl Plant {
         tasks: Tasks,
         scheme: Scheme,
         roots: Roots,
+        port: u16,
     ) -> Self {
-        let address = SocketAddr::new(node.addresses()[0], PORT);
+        let address = SocketAddr::new(node.addresses()[0], port);
         let env = hub::testing::Env {
             files: node.files(),
             clock: node.clock(),
@@ -799,35 +807,28 @@ fn the_error_of_an_answer_other_than_204_names_the_address() {
     }
 }
 
-/// The error of an address with no port names its host alone, with no default port.
+/// The error of an address with no port names its host alone.
 #[test]
 fn the_error_of_an_answer_at_an_address_with_no_port_names_its_host() {
-    let mut sim = ::sim::Sim::new(::sim::Config::default());
-    let node = sim.node(::sim::node::Config::default());
-    let name = ::sim::name::Config {
-        answer: ::sim::name::Answer::Addresses(vec![node.addresses()[0]]),
-        ..::sim::name::Config::default()
-    };
-    sim.name("influx", name);
-    node.make_dir(std::path::Path::new("/run/secrets"));
-    let errors = sim.run_on(&node, |node, tasks| async move {
-        let mut plant = Plant::unserved(node, tasks).await;
-        plant.address.set_port(80);
-        plant.serve();
-        (plant.answers.borrow_mut())
-            .push_back((StatusCode::SERVICE_UNAVAILABLE, "starting"));
-        let (_, errors, end) = send_one(&plant, config(string("http://influx"))).await;
-        assert!(end.is_none(), "the run goes on");
-        errors
-    });
-    assert_eq!(
-        errors.expect("the run ends"),
-        [
-            "",
-            "InfluxDB at influx answered 503 Service Unavailable: starting",
-            ""
-        ]
-    );
+    for address in ["http://server"] {
+        let errors = run_at_server(move |node, tasks| async move {
+            let plant = Plant::on_port(node, tasks, 80).await;
+            (plant.answers.borrow_mut())
+                .push_back((StatusCode::SERVICE_UNAVAILABLE, "starting"));
+            let (_, errors, end) = send_one(&plant, config(string(address))).await;
+            assert!(end.is_none(), "the run goes on");
+            errors
+        });
+        assert_eq!(
+            errors,
+            [
+                "",
+                "InfluxDB at server answered 503 Service Unavailable: starting",
+                ""
+            ],
+            "{address}"
+        );
+    }
 }
 
 #[test]
@@ -2394,7 +2395,9 @@ fn loses_the_batch_in_flight_at_a_restart_with_no_hold() {
 
 /// As [`run`], on a node at the name `server` whose wall starts at [`JUNE_2026`], with
 /// a host directory `/etc/influx` too.
-fn run_tls<T, F>(main: impl FnOnce(::sim::node::Node, Tasks) -> F + Send + 'static) -> T
+fn run_at_server<T, F>(
+    main: impl FnOnce(::sim::node::Node, Tasks) -> F + Send + 'static,
+) -> T
 where
     T: Send + 'static,
     F: Future<Output = T> + 'static,
@@ -2429,7 +2432,7 @@ fn send_over_tls(
     roots: Roots,
     ca: &'static [u8],
 ) -> (Vec<String>, bool, usize, Vec<Option<Class>>, Vec<u64>) {
-    run_tls(move |node, tasks| async move {
+    run_at_server(move |node, tasks| async move {
         node.paths()
             .write(std::path::Path::new(CA_FILE), ca)
             .expect("writes");
@@ -2451,7 +2454,7 @@ fn send_over_tls(
 fn writes_over_https_with_the_ca_of_a_file_or_a_store() {
     let got = [("file", CA_FILE), ("secret", "plant.influx_ca")].map(
         |(function, argument)| {
-            run_tls(move |node, tasks| async move {
+            run_at_server(move |node, tasks| async move {
                 node.paths()
                     .write(std::path::Path::new(CA_FILE), CA)
                     .expect("writes");
@@ -2552,7 +2555,7 @@ fn retries_a_tls_failure_with_a_ca_in_the_run() {
 fn after_a_new_ca(
     texts: &'static [(i64, &'static [u8])],
 ) -> (usize, Vec<String>, Vec<Option<Class>>, Vec<u64>) {
-    run_tls(move |node, tasks| async move {
+    run_at_server(move |node, tasks| async move {
         let paths = node.paths();
         paths
             .write(std::path::Path::new(CA_FILE), CA)
@@ -2628,7 +2631,7 @@ fn keeps_the_batch_at_a_ca_that_gives_no_root_when_read_again() {
 /// With no `hold`, InfluxDB closes the first connection in the TLS handshake, then
 /// serves. Gives the points stored and each value of `restarts`.
 fn after_a_close_in_the_handshake(ca: bool) -> (usize, Vec<u64>) {
-    run_tls(move |node, tasks| async move {
+    run_at_server(move |node, tasks| async move {
         node.paths()
             .write(std::path::Path::new(CA_FILE), CA)
             .expect("writes");
@@ -2638,7 +2641,8 @@ fn after_a_close_in_the_handshake(ca: bool) -> (usize, Vec<u64>) {
             connector::http::sim::ca()
         };
         let plant =
-            Plant::with(node, tasks, Scheme::Tls(Certificate::Valid), roots).await;
+            Plant::with(node, tasks, Scheme::Tls(Certificate::Valid), roots, PORT)
+                .await;
         let listen = tcp::Listen {
             local: plant.address,
             backlog: 4,
@@ -2745,7 +2749,7 @@ fn ends_the_run_at_a_ca_that_gives_no_root() {
 
 #[test]
 fn retries_a_refused_connect_in_the_run_with_a_ca() {
-    let got = run_tls(|node, tasks| async move {
+    let got = run_at_server(|node, tasks| async move {
         let paths = node.paths();
         paths
             .write(std::path::Path::new(CA_FILE), CA)
@@ -2755,6 +2759,7 @@ fn retries_a_refused_connect_in_the_run_with_a_ca() {
             tasks,
             Scheme::Tls(Certificate::Valid),
             Roots::default(),
+            PORT,
         )
         .await;
         let run = plant.supervise(with_ca(&plant, "file", CA_FILE)).await;
