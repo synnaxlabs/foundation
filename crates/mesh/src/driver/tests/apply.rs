@@ -897,6 +897,25 @@ fn an_apply_whose_puts_wait_gives_stopped_as_soon_as_the_group_stops() {
     assert_eq!(specs(&entries), []);
 }
 
+// The puts on voters 2 and 3 wait in their dials until the deadline, so the apply
+// waits in the group before its `Quorum`.
+#[test]
+fn an_apply_that_ends_frees_its_waker_in_the_group() {
+    solo(|node, tasks| async move {
+        let mesh = Mesh::start(dialed_at(&node, &tasks, 1, PORT, &IDS, &IDS).await);
+        let mesh = mesh.await.unwrap();
+        let definitions = create_subjects(&["plant.a"], 1);
+        let applied = mesh.apply(base(), definitions, BTreeMap::new()).await;
+        let quorum = Error::Quorum {
+            held: 1,
+            voters: 3,
+            missed: vec![late(2), late(3)],
+        };
+        assert_eq!(applied, Err(quorum));
+        assert!(mesh.group.borrow().calls.is_empty());
+    });
+}
+
 // The store of voter 2 fails the put of the chunks, so the proposer is the one holder
 // of the two voters.
 #[test]
