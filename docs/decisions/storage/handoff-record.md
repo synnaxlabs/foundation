@@ -12,7 +12,7 @@
   subject's length. The node key went into the layout in place, with format version 1
   and the same tag, as no buffer has shipped (`laptop.architect`, #3104,
   2026-10-19T14:00:04Z, answer 5:
-  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946). A
+  https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946). Supersedes "`[authority: u8]` then the holder's subject as UTF-8" of https://github.com/synnaxlabs/foundation/blob/a1704faf5/docs/decisions/storage/handoff-record.md. A
   restart or a failover starts the gate from the last record (X18): `Gate::recover` with
   its holder, or `Gate::new` when it names none. `Shard::open` restores each gate, with
   `GRACE` (10 s) from the open, and the gate moves in at the first carry of its slot,
