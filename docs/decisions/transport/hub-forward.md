@@ -12,6 +12,6 @@
   https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6268770318, approved
   with changes by `laptop.architect` at 2026-10-19T14:00:04Z
   (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6269021946, change
-  1). Kind 8 is the forward of a write. #3356 states how a read is forwarded. The run decoder, kind 8 only, and `Error::Unplaced`: `laptop.architect` at 2026-10-19T22:35:34Z (https://github.com/synnaxlabs/foundation/pull/3444#issuecomment-6278872264). Lost: the keys of the group in place of positions, which the home would check
+  1), and the name `Error::Place` by `laptop.architect` at 2026-10-19T18:59:22Z (https://github.com/synnaxlabs/foundation/issues/3104#issuecomment-6274918681). Kind 8 is the forward of a write. #3356 states how a read is forwarded. The run decoder, kind 8 only, and `Error::Unplaced`: `laptop.architect` at 2026-10-19T22:35:34Z (https://github.com/synnaxlabs/foundation/pull/3444#issuecomment-6278872264). Lost: the keys of the group in place of positions, which the home would check
   against the names that it verified; and a new `serve::Error` variant
   (`serve::Error::Places` exists, for the places of a read selector); and a decode of the whole run, which leaves the join of its messages and their count to the home.
